@@ -16,46 +16,157 @@ enum ClaudeSessionHistory {
     private static let claudeDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/projects")
 
+    /// Maximum number of sessions to parse (sorted by most recent first).
+    private static let maxSessionsToParse = 50
+
     /// Encode a directory path to the Claude project folder name.
-    /// Claude CLI replaces both `/` and `.` with `-`.
-    /// `/Users/hiko/.config/foo` → `-Users-hiko--config-foo`
+    /// Matches Claude CLI encoding: path components joined by `-`,
+    /// leading `.` in component names becomes extra `-` (so `/.config` → `--config`).
     static func encodePath(_ path: String) -> String {
-        path.replacingOccurrences(of: "/", with: "-")
-            .replacingOccurrences(of: ".", with: "-")
+        let components = path.split(separator: "/", omittingEmptySubsequences: true)
+        var parts: [String] = []
+        for component in components {
+            let s = String(component)
+            if s.hasPrefix(".") {
+                // Leading dot → empty segment + name without dot
+                // /.config → --config (dash from join + empty + dash + config)
+                parts.append("")
+                parts.append(String(s.dropFirst()))
+            } else {
+                parts.append(s)
+            }
+        }
+        // Leading `-` from the root `/`, then components joined by `-`
+        return "-" + parts.joined(separator: "-")
+    }
+
+    /// Decode encoded project directory name back to path.
+    /// Uses greedy filesystem walk to resolve ambiguous `-` separators.
+    /// Matching Sessylph's approach.
+    static func decodePath(_ encoded: String) -> String {
+        guard encoded.count > 1 else { return "/" }
+
+        let parts = encoded.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        let tokens = Array(parts.dropFirst())
+
+        // Merge empty tokens with next token as dot-prefixed:
+        // ["Users", "hiko", "", "config"] → ["Users", "hiko", ".config"]
+        var segments: [String] = []
+        var i = 0
+        while i < tokens.count {
+            if tokens[i].isEmpty {
+                i += 1
+                if i < tokens.count {
+                    segments.append("." + tokens[i])
+                }
+            } else {
+                segments.append(tokens[i])
+            }
+            i += 1
+        }
+
+        // Greedy filesystem walk: try joining multiple segments with `-` to find longest match
+        let fm = FileManager.default
+        var resolved = ""
+        i = 0
+
+        while i < segments.count {
+            var bestLen = 1
+            let maxJ = min(segments.count, i + 6)
+            for j in stride(from: maxJ, through: i + 1, by: -1) {
+                let component = segments[i..<j].joined(separator: "-")
+                let candidate = resolved + "/" + component
+                if fm.fileExists(atPath: candidate) {
+                    bestLen = j - i
+                    break
+                }
+            }
+
+            if bestLen == 1, !fm.fileExists(atPath: resolved + "/" + segments[i]) {
+                let remaining = segments[i...].joined(separator: "-")
+                if let entries = try? fm.contentsOfDirectory(atPath: resolved) {
+                    let normalized = remaining.replacingOccurrences(of: ".", with: "-")
+                    if let match = entries.first(where: {
+                        $0.replacingOccurrences(of: ".", with: "-") == normalized
+                    }) {
+                        resolved += "/" + match
+                        break
+                    }
+                    resolved += "/" + segments[i]
+                    i += 1
+                    continue
+                }
+                resolved += "/" + remaining
+                break
+            }
+
+            let component = segments[i..<(i + bestLen)].joined(separator: "-")
+            resolved += "/" + component
+            i += bestLen
+        }
+
+        return resolved.isEmpty ? "/" : resolved
     }
 
     /// Load sessions for a specific working directory.
     static func loadSessions(for directory: URL) -> [SessionEntry] {
         let encoded = encodePath(directory.path)
         let projectDir = claudeDir.appendingPathComponent(encoded)
-
         return loadSessionsFromDir(projectDir, projectDirectory: directory)
     }
 
-    /// Load sessions across all projects by reading cwd from JSONL metadata.
+    /// Load sessions across all projects, sorted by most recent.
+    /// Collects file metadata first (no file reads), sorts by date,
+    /// then parses only the top N candidates for title extraction.
     static func loadAllSessions() -> [SessionEntry] {
         guard FileManager.default.fileExists(atPath: claudeDir.path) else { return [] }
 
-        do {
-            let projects = try FileManager.default.contentsOfDirectory(
-                at: claudeDir, includingPropertiesForKeys: nil
-            )
-            var all: [SessionEntry] = []
-            for projectDir in projects {
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: projectDir.path, isDirectory: &isDir),
-                      isDir.boolValue else { continue }
+        let fm = FileManager.default
+        guard let projectDirs = try? fm.contentsOfDirectory(atPath: claudeDir.path) else { return [] }
 
-                // Read cwd from the first JSONL file instead of decoding folder name
-                guard let realPath = extractCwd(from: projectDir) else { continue }
-                let dir = URL(fileURLWithPath: realPath)
-                all.append(contentsOf: loadSessionsFromDir(projectDir, projectDirectory: dir))
+        // Phase 1: collect all JSONL file metadata (no content reads)
+        var candidates: [(path: String, modDate: Date, sessionId: String, projectEncoded: String)] = []
+
+        for projectEncoded in projectDirs {
+            guard projectEncoded != "-" else { continue }
+
+            let projectPath = claudeDir.path + "/" + projectEncoded
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: projectPath, isDirectory: &isDir), isDir.boolValue else { continue }
+            guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { continue }
+
+            for file in files where file.hasSuffix(".jsonl") {
+                let sessionId = String(file.dropLast(6))
+                guard UUID(uuidString: sessionId) != nil else { continue }
+
+                let filePath = projectPath + "/" + file
+                guard let attrs = try? fm.attributesOfItem(atPath: filePath),
+                      let modDate = attrs[.modificationDate] as? Date
+                else { continue }
+
+                candidates.append((filePath, modDate, sessionId, projectEncoded))
             }
-            return all.sorted { $0.timestamp > $1.timestamp }
-        } catch {
-            logger.error("Failed to enumerate projects: \(error.localizedDescription, privacy: .public)")
-            return []
         }
+
+        // Phase 2: sort by date, take top N
+        candidates.sort { $0.modDate > $1.modDate }
+        let topCandidates = candidates.prefix(maxSessionsToParse)
+
+        // Phase 3: parse each for title
+        var entries: [SessionEntry] = []
+        for candidate in topCandidates {
+            let projectDirectory = URL(fileURLWithPath: decodePath(candidate.projectEncoded))
+            let title = extractTitle(fromPath: candidate.path)
+
+            entries.append(SessionEntry(
+                id: candidate.sessionId,
+                title: title,
+                timestamp: candidate.modDate,
+                projectDirectory: projectDirectory
+            ))
+        }
+
+        return entries
     }
 
     // MARK: - Internal
@@ -73,6 +184,7 @@ enum ClaudeSessionHistory {
             for file in jsonlFiles {
                 let sessionId = file.deletingPathExtension().lastPathComponent
                 if sessionId.hasPrefix("agent-") { continue }
+                guard UUID(uuidString: sessionId) != nil else { continue }
 
                 let title = extractTitle(from: file)
                 let mtime: Date
@@ -98,42 +210,18 @@ enum ClaudeSessionHistory {
         }
     }
 
-    /// Read the `cwd` field from the first message in any JSONL file in the project directory.
-    private static func extractCwd(from projectDir: URL) -> String? {
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: projectDir, includingPropertiesForKeys: nil
-        ) else { return nil }
-
-        let jsonlFile = contents.first { $0.pathExtension == "jsonl" }
-        guard let file = jsonlFile,
-              let handle = try? FileHandle(forReadingFrom: file)
-        else { return nil }
-        defer { try? handle.close() }
-
-        let data = handle.readData(ofLength: 4096)
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-
-        for line in text.components(separatedBy: "\n") {
-            guard !line.isEmpty,
-                  let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let cwd = json["cwd"] as? String
-            else { continue }
-            return cwd
-        }
-        return nil
+    /// Extract the first user message (up to 16KB) as the session title.
+    private static func extractTitle(from file: URL) -> String {
+        extractTitle(fromPath: file.path)
     }
 
-    /// Extract the first user message (up to 8KB) from a session JSONL file as the title,
-    /// truncated to 100 characters.
-    private static func extractTitle(from file: URL) -> String {
-        guard let handle = try? FileHandle(forReadingFrom: file) else {
-            logger.warning("Could not open session file for title: \(file.lastPathComponent, privacy: .public)")
+    private static func extractTitle(fromPath path: String) -> String {
+        guard let handle = FileHandle(forReadingAtPath: path) else {
             return "Untitled"
         }
         defer { try? handle.close() }
 
-        let data = handle.readData(ofLength: 8192)
+        let data = handle.readData(ofLength: 16384)
         guard let text = String(data: data, encoding: .utf8) else { return "Untitled" }
 
         for line in text.components(separatedBy: "\n") {
@@ -146,7 +234,7 @@ enum ClaudeSessionHistory {
             if type == "user",
                let message = json["message"] as? [String: Any]
             {
-                if let content = message["content"] as? String {
+                if let content = message["content"] as? String, !content.isEmpty {
                     return String(content.prefix(100))
                 }
                 if let contentArr = message["content"] as? [[String: Any]] {
