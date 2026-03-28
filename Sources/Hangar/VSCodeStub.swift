@@ -1,4 +1,7 @@
 import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "VSCodeStub")
 
 enum VSCodeStub {
     /// JavaScript stub injected before the webview loads.
@@ -24,9 +27,12 @@ enum VSCodeStub {
     /// Generated from VSCode's "Developer: Generate Color Theme From Current Settings"
     /// with Default Light+ theme active.
     static var themeCSSVariables: String {
-        guard let url = Bundle.main.url(forResource: "theme-light", withExtension: "css"),
-              let css = try? String(contentsOf: url, encoding: .utf8)
-        else {
+        guard let url = Bundle.main.url(forResource: "theme-light", withExtension: "css") else {
+            logger.error("theme-light.css not found in bundle")
+            return ":root { --vscode-editor-background: #ffffff; --vscode-editor-foreground: #000000; }"
+        }
+        guard let css = try? String(contentsOf: url, encoding: .utf8) else {
+            logger.error("Failed to read theme-light.css")
             return ":root { --vscode-editor-background: #ffffff; --vscode-editor-foreground: #000000; }"
         }
         return css

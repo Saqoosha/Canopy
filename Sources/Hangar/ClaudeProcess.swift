@@ -4,12 +4,7 @@ import os.log
 private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "ClaudeProcess")
 
 /// Manages a Claude CLI process for a single conversation channel.
-/// Spawns `claude -p --input-format stream-json --output-format stream-json --verbose`
-/// and bridges NDJSON events to/from the webview via WebViewMessageHandler.
-///
-/// CLI `assistant` events are converted to Anthropic SSE streaming events (stream_event)
-/// so the webview's React assembler builds the correct DOM structure (shared .message container
-/// with .timelineMessage children, rather than separate elements).
+/// All mutable state is accessed through `queue` (serial DispatchQueue) for thread safety.
 final class ClaudeProcess: @unchecked Sendable {
     let channelId: String
     let sessionId: String
@@ -22,13 +17,17 @@ final class ClaudeProcess: @unchecked Sendable {
     private var lineBuffer = Data()
     private let queue = DispatchQueue(label: "sh.saqoo.Hangar.ClaudeProcess")
 
+    init?(channelId: String, cwd: String, permissionMode: String, messageHandler: WebViewMessageHandler) {
+        guard let cliPath = CCExtension.cliBinaryPath() else {
+            logger.error("Cannot create ClaudeProcess: CLI binary not found")
+            return nil
+        }
 
-    init(channelId: String, cwd: String, permissionMode: String, messageHandler: WebViewMessageHandler) {
         self.channelId = channelId
         self.sessionId = UUID().uuidString
         self.messageHandler = messageHandler
 
-        process.executableURL = Self.claudePath
+        process.executableURL = cliPath
         process.arguments = [
             "-p",
             "--output-format", "stream-json",
@@ -45,12 +44,20 @@ final class ClaudeProcess: @unchecked Sendable {
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            if data.isEmpty {
+                // EOF — clean up handler to avoid repeated empty reads
+                handle.readabilityHandler = nil
+                return
+            }
             self?.queue.async { self?.appendData(data) }
         }
 
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 logger.error("[CLI stderr] \(str, privacy: .public)")
             }
@@ -59,9 +66,12 @@ final class ClaudeProcess: @unchecked Sendable {
         process.terminationHandler = { [weak self] proc in
             guard let self else { return }
             logger.info("[CLI] Process exited with status \(proc.terminationStatus, privacy: .public)")
-            self.queue.async { self.flushBuffer() }
-            DispatchQueue.main.async {
-                self.messageHandler?.handleCLIProcessExited(channelId: self.channelId)
+            // Flush remaining buffer FIRST, then notify handler
+            self.queue.async {
+                self.flushBuffer()
+                DispatchQueue.main.async {
+                    self.messageHandler?.handleCLIProcessExited(channelId: self.channelId)
+                }
             }
         }
     }
@@ -87,14 +97,23 @@ final class ClaudeProcess: @unchecked Sendable {
         writeJSON(json)
     }
 
+    /// Interrupt the CLI process. Thread-safe via queue.
     func interrupt() {
-        process.interrupt()
+        queue.async { [weak self] in
+            self?.process.interrupt()
+        }
     }
 
+    /// Terminate the CLI process. Thread-safe via queue.
     func terminate() {
-        stdinPipe.fileHandleForWriting.closeFile()
-        if process.isRunning {
-            process.terminate()
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            self.stderrPipe.fileHandleForReading.readabilityHandler = nil
+            self.stdinPipe.fileHandleForWriting.closeFile()
+            if self.process.isRunning {
+                self.process.terminate()
+            }
         }
     }
 
@@ -119,37 +138,37 @@ final class ClaudeProcess: @unchecked Sendable {
     }
 
     private func processLine(_ data: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = json["type"] as? String
-        else {
-            if let str = String(data: data, encoding: .utf8) {
-                let preview = String(str.prefix(200))
-                logger.warning("Failed to parse: \(preview, privacy: .public)")
+        do {
+            let parsed = try JSONSerialization.jsonObject(with: data)
+            guard let json = parsed as? [String: Any] else {
+                logger.warning("CLI output is valid JSON but not a dictionary: \(String(describing: Swift.type(of: parsed)), privacy: .public)")
+                return
             }
-            return
-        }
+            guard let type = json["type"] as? String else {
+                logger.warning("CLI JSON missing 'type' key")
+                return
+            }
 
-        let subtype = json["subtype"] as? String ?? ""
-        logger.info("CLI event: type=\(type, privacy: .public) subtype=\(subtype, privacy: .public)")
-
-        switch type {
-        case "system":
-            handleSystemEvent(json)
-        case "stream_event":
-            // Real Anthropic SSE streaming events — forward directly to webview!
-            // Contains message_start, content_block_start, content_block_delta, etc.
-            sendIOMessage(json, done: false)
-        case "assistant":
-            // Complete message (fallback when streaming events aren't available)
-            sendIOMessage(json, done: false)
-        case "user":
-            handleUserEvent(json)
-        case "result":
-            handleResultEvent(json)
-        case "rate_limit_event":
-            sendIOMessage(json, done: false)
-        default:
-            logger.warning("Unknown CLI event: \(type, privacy: .public)")
+            switch type {
+            case "system":
+                handleSystemEvent(json)
+            case "stream_event":
+                sendIOMessage(json, done: false)
+            case "assistant":
+                sendIOMessage(json, done: false)
+            case "user":
+                logger.info("User event (tool result)")
+                sendIOMessage(json, done: false)
+            case "result":
+                sendIOMessage(json, done: true)
+            case "rate_limit_event":
+                sendIOMessage(json, done: false)
+            default:
+                logger.warning("Unknown CLI event: \(type, privacy: .public)")
+            }
+        } catch {
+            let preview = String(data: data.prefix(200), encoding: .utf8) ?? "<binary>"
+            logger.warning("Failed to parse CLI NDJSON: \(error.localizedDescription, privacy: .public). Raw: \(preview, privacy: .public)")
         }
     }
 
@@ -163,15 +182,6 @@ final class ClaudeProcess: @unchecked Sendable {
         }
     }
 
-    private func handleUserEvent(_ json: [String: Any]) {
-        logger.info("User event (tool result)")
-        sendIOMessage(json, done: false)
-    }
-
-    private func handleResultEvent(_ json: [String: Any]) {
-        sendIOMessage(json, done: true)
-    }
-
     private func sendIOMessage(_ message: [String: Any], done: Bool) {
         let ioMessage: [String: Any] = [
             "type": "io_message",
@@ -183,42 +193,42 @@ final class ClaudeProcess: @unchecked Sendable {
             "type": "from-extension",
             "message": ioMessage,
         ]
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: wrapped),
-              let jsonString = String(data: jsonData, encoding: .utf8)
-        else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.messageHandler?.sendJSToWebview(jsonString)
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: wrapped)
+            guard let jsonString = String(data: jsonData, encoding: .utf8) else {
+                logger.error("Failed to encode JSON data as UTF-8 for channel \(self.channelId, privacy: .public)")
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.messageHandler?.sendJSToWebview(jsonString)
+            }
+        } catch {
+            logger.error("Failed to serialize IO message: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     // MARK: - Write to CLI stdin
 
     private func writeJSON(_ obj: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: obj),
-              var json = String(data: data, encoding: .utf8)
-        else { return }
-        let preview = String(json.prefix(300))
-        logger.info("Writing to CLI stdin: \(preview, privacy: .public)")
-        json += "\n"
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.stdinPipe.fileHandleForWriting.write(json.data(using: .utf8)!)
-        }
-    }
-
-    // MARK: - Claude binary path
-
-    private static var claudePath: URL {
-        let candidates = [
-            "/Users/hiko/.local/bin/claude",
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-        ]
-        for path in candidates {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return URL(fileURLWithPath: path)
+        do {
+            let data = try JSONSerialization.data(withJSONObject: obj)
+            guard var json = String(data: data, encoding: .utf8) else {
+                logger.error("Failed to encode JSON to UTF-8 string")
+                return
             }
+            let preview = String(json.prefix(300))
+            logger.info("Writing to CLI stdin: \(preview, privacy: .public)")
+            json += "\n"
+            queue.async { [weak self] in
+                guard let self, self.process.isRunning else {
+                    logger.warning("Attempted to write to stdin of terminated process")
+                    return
+                }
+                guard let data = json.data(using: .utf8) else { return }
+                self.stdinPipe.fileHandleForWriting.write(data)
+            }
+        } catch {
+            logger.error("Failed to serialize stdin JSON: \(error.localizedDescription, privacy: .public)")
         }
-        return URL(fileURLWithPath: "/Users/hiko/.local/bin/claude")
     }
 }

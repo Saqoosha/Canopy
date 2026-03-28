@@ -6,16 +6,19 @@ private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "WebView")
 
 struct WebViewContainer: NSViewRepresentable {
     class Coordinator: NSObject, WKNavigationDelegate {
+        var handler: WebViewMessageHandler?
+        var consoleHandler: ConsoleLogHandler?
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             logger.info("Page loaded successfully")
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            print("[Hangar] Navigation failed: \(error)")
+            logger.error("Navigation failed: \(error.localizedDescription, privacy: .public)")
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            print("[Hangar] Provisional navigation failed: \(error)")
+            logger.error("Provisional navigation failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -25,14 +28,12 @@ struct WebViewContainer: NSViewRepresentable {
         let config = WKWebViewConfiguration()
         let ucc = WKUserContentController()
 
-        // 1. Capture JS console output
         ucc.addUserScript(WKUserScript(
             source: Self.consoleCapture,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
 
-        // 2. Inject acquireVsCodeApi stub + globals
         ucc.addUserScript(WKUserScript(
             source: VSCodeStub.javascript,
             injectionTime: .atDocumentStart,
@@ -40,8 +41,13 @@ struct WebViewContainer: NSViewRepresentable {
         ))
 
         let handler = WebViewMessageHandler()
+        let consoleHandler = ConsoleLogHandler()
         ucc.add(handler, name: "vscodeHost")
-        ucc.add(ConsoleLogHandler(), name: "consoleLog")
+        ucc.add(consoleHandler, name: "consoleLog")
+
+        // Store in coordinator for cleanup
+        context.coordinator.handler = handler
+        context.coordinator.consoleHandler = consoleHandler
 
         config.userContentController = ucc
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
@@ -58,13 +64,24 @@ struct WebViewContainer: NSViewRepresentable {
 
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 
+    /// Clean up WKScriptMessageHandler references to prevent memory leak.
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        let ucc = nsView.configuration.userContentController
+        ucc.removeScriptMessageHandler(forName: "vscodeHost")
+        ucc.removeScriptMessageHandler(forName: "consoleLog")
+        ucc.removeAllUserScripts()
+        coordinator.handler = nil
+        coordinator.consoleHandler = nil
+        logger.info("WebView dismantled, handlers removed")
+    }
+
     // MARK: - Load CC webview
 
     private func loadCCWebview(_ webView: WKWebView) {
-        guard let extPath = Self.findCCExtensionPath() else {
+        guard let extPath = CCExtension.extensionPath() else {
             webView.loadHTMLString(
                 "<html><body style='background:#ffffff;color:#333;padding:40px;font-family:sans-serif'>"
-                + "<h1>Hangar</h1><p>Claude Code extension not found</p></body></html>",
+                + "<h1>Hangar</h1><p>Claude Code extension not found. Install it in VSCode first.</p></body></html>",
                 baseURL: nil
             )
             return
@@ -74,9 +91,9 @@ struct WebViewContainer: NSViewRepresentable {
         let cssFile = webviewDir.appendingPathComponent("index.css")
         let jsFile = webviewDir.appendingPathComponent("index.js")
 
-        print("[Hangar] Extension path: \(extPath.path)")
-        print("[Hangar] CSS exists: \(FileManager.default.fileExists(atPath: cssFile.path))")
-        print("[Hangar] JS exists: \(FileManager.default.fileExists(atPath: jsFile.path))")
+        logger.info("Extension path: \(extPath.path, privacy: .public)")
+        logger.info("CSS exists: \(FileManager.default.fileExists(atPath: cssFile.path), privacy: .public)")
+        logger.info("JS exists: \(FileManager.default.fileExists(atPath: jsFile.path), privacy: .public)")
 
         let html = """
         <!DOCTYPE html>
@@ -85,7 +102,7 @@ struct WebViewContainer: NSViewRepresentable {
           <meta charset="UTF-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <style>\(VSCodeStub.themeCSSVariables)</style>
-          <link href="index.css" rel="stylesheet">
+          <link href="\(cssFile.absoluteString)" rel="stylesheet">
           <style>
             :root {
               --vscode-editor-font-family: "SF Mono", Menlo, Monaco, monospace !important;
@@ -167,27 +184,30 @@ struct WebViewContainer: NSViewRepresentable {
         <body class="vscode-light">
           <pre id="claude-error"></pre>
           <div id="root"></div>
-          <script src="index.js" type="module"></script>
+          <script src="\(jsFile.absoluteString)" type="module"></script>
         </body>
         </html>
         """
 
-        // Use loadFileURL to allow local file access properly
-        let htmlFile = webviewDir.appendingPathComponent("_hangar.html")
-        try? html.write(to: htmlFile, atomically: true, encoding: .utf8)
-        webView.loadFileURL(htmlFile, allowingReadAccessTo: extPath)
-    }
-
-    static func findCCExtensionPath() -> URL? {
-        let extensionsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".vscode/extensions")
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: extensionsDir, includingPropertiesForKeys: nil
-        ) else { return nil }
-        return contents
-            .filter { $0.lastPathComponent.hasPrefix("anthropic.claude-code-") }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            .first
+        // Write HTML to Application Support (under home dir so allowingReadAccessTo works)
+        let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Hangar")
+        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+        let htmlFile = appSupportDir.appendingPathComponent("_hangar.html")
+        do {
+            try html.write(to: htmlFile, atomically: true, encoding: .utf8)
+        } catch {
+            logger.error("Failed to write _hangar.html: \(error.localizedDescription, privacy: .public)")
+            webView.loadHTMLString(
+                "<html><body style='background:#fff;color:#333;padding:40px;font-family:sans-serif'>"
+                + "<h1>Hangar Error</h1><p>Failed to write webview HTML: \(error.localizedDescription)</p></body></html>",
+                baseURL: nil
+            )
+            return
+        }
+        // Allow read access to both temp dir (for HTML) and extension dir (for JS/CSS/resources)
+        let commonParent = FileManager.default.homeDirectoryForCurrentUser
+        webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
     }
 
     // MARK: - Console capture JS
@@ -206,7 +226,9 @@ struct WebViewContainer: NSViewRepresentable {
                         catch(e) { return String(a); }
                     }).join(' ')
                 });
-            } catch(e) {}
+            } catch(e) {
+                origError.apply(console, ['[Hangar console bridge error]', e]);
+            }
         }
         console.log = function() { send('log', arguments); origLog.apply(console, arguments); };
         console.error = function() { send('error', arguments); origError.apply(console, arguments); };

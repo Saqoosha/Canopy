@@ -144,18 +144,35 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         // Clean up existing process for this channel
         channels[channelId]?.terminate()
 
-        let process = ClaudeProcess(
+        guard let process = ClaudeProcess(
             channelId: channelId,
             cwd: cwd,
             permissionMode: permissionMode,
             messageHandler: self
-        )
+        ) else {
+            logger.error("Failed to create ClaudeProcess: CLI binary not found")
+            sendToWebview([
+                "type": "from-extension",
+                "message": [
+                    "type": "io_message",
+                    "channelId": channelId,
+                    "message": [
+                        "type": "result",
+                        "subtype": "error",
+                        "is_error": true,
+                        "error": "Claude CLI not found. Install Claude Code first.",
+                    ] as [String: Any],
+                    "done": true,
+                ] as [String: Any],
+            ])
+            return
+        }
         channels[channelId] = process
 
         do {
             try process.start()
         } catch {
-            logger.info("[Hangar] Failed to start Claude process: \(error, privacy: .public)")
+            logger.error("Failed to start Claude process: \(error.localizedDescription, privacy: .public)")
             sendToWebview([
                 "type": "from-extension",
                 "message": [
@@ -238,27 +255,49 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
 
     private func fetchAuthStatus() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let cliPath = CCExtension.cliBinaryPath() else {
+                logger.error("Cannot fetch auth: CLI binary not found")
+                return
+            }
             let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/Users/hiko/.local/bin/claude")
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            process.executableURL = cliPath
             process.arguments = ["auth", "status"]
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
 
             do {
                 try process.run()
+                // Read BEFORE waitUntilExit to avoid pipe deadlock
+                let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    DispatchQueue.main.async {
-                        self?.cachedAuth = json
-                        let email = json["email"] as? String ?? "unknown"
-                        let sub = json["subscriptionType"] as? String ?? "?"
-                        logger.info("[Hangar] Auth: \(email) (\(sub, privacy: .public))")
+
+                if !stderrData.isEmpty, let errStr = String(data: stderrData, encoding: .utf8) {
+                    logger.warning("Auth stderr: \(errStr, privacy: .public)")
+                }
+                guard !data.isEmpty else {
+                    logger.error("Auth status returned empty data (exit code: \(process.terminationStatus, privacy: .public))")
+                    return
+                }
+                do {
+                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        DispatchQueue.main.async {
+                            self?.cachedAuth = json
+                            let email = json["email"] as? String ?? "unknown"
+                            let sub = json["subscriptionType"] as? String ?? "?"
+                            logger.info("[Hangar] Auth: \(email, privacy: .public) (\(sub, privacy: .public))")
+                        }
+                    } else {
+                        logger.error("Auth status returned non-dictionary JSON")
                     }
+                } catch {
+                    let preview = String(data: data.prefix(200), encoding: .utf8) ?? "<binary>"
+                    logger.error("Failed to parse auth JSON: \(error.localizedDescription, privacy: .public). Raw: \(preview, privacy: .public)")
                 }
             } catch {
-                logger.info("[Hangar] Failed to fetch auth status: \(error, privacy: .public)")
+                logger.error("Failed to run auth status command: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -339,7 +378,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         } else {
             account = [
                 "tokenSource": "claudeai",
-                "subscriptionType": "pro",
+                "subscriptionType": NSNull(),
             ]
         }
 
@@ -418,15 +457,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     }
 
     static func findCCExtensionPath() -> URL? {
-        let extensionsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".vscode/extensions")
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: extensionsDir, includingPropertiesForKeys: nil
-        ) else { return nil }
-        return contents
-            .filter { $0.lastPathComponent.hasPrefix("anthropic.claude-code-") }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            .first
+        CCExtension.extensionPath()
     }
 
     // MARK: - Send to Webview
@@ -444,10 +475,16 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     }
 
     func sendToWebview(_ message: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: message),
-              let json = String(data: data, encoding: .utf8)
-        else { return }
-        sendJSToWebview(json)
+        do {
+            let data = try JSONSerialization.data(withJSONObject: message)
+            guard let json = String(data: data, encoding: .utf8) else {
+                logger.error("Failed to encode webview message as UTF-8")
+                return
+            }
+            sendJSToWebview(json)
+        } catch {
+            logger.error("Failed to serialize webview message: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Send pre-serialized JSON string to the webview. Accepts String (Sendable)
