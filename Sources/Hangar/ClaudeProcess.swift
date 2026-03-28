@@ -8,6 +8,7 @@ private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "ClaudeProce
 final class ClaudeProcess: @unchecked Sendable {
     let channelId: String
     let sessionId: String
+    let cwd: String
 
     private let process = Process()
     private let stdinPipe = Pipe()
@@ -25,6 +26,7 @@ final class ClaudeProcess: @unchecked Sendable {
 
         self.channelId = channelId
         self.sessionId = resumeSessionId ?? UUID().uuidString
+        self.cwd = cwd
         self.messageHandler = messageHandler
 
         let skipAll = permissionMode == "bypassPermissions"

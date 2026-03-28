@@ -21,6 +21,19 @@ enum VSCodeStub {
             setState: function(state) { return state; }
         };
     };
+
+    // Fix Japanese IME: WebKit Bug 165004 — compositionend fires BEFORE keydown,
+    // so isComposing is always false for the IME-confirming Enter. The only reliable
+    // signal is keyCode === 229 (VK_PROCESS), which WebKit sets for all IME keydowns.
+    // We patch isComposing to true when keyCode is 229, so the CC extension's
+    // `if (e.nativeEvent.isComposing) return` check works correctly.
+    (function() {
+        document.addEventListener('keydown', function(e) {
+            if (e.keyCode === 229 && !e.isComposing) {
+                Object.defineProperty(e, 'isComposing', { get: function() { return true; } });
+            }
+        }, true);
+    })();
     """
 
     /// Load theme CSS from bundled resource file.

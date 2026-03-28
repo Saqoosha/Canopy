@@ -184,6 +184,13 @@ struct WebViewContainer: NSViewRepresentable {
               ::-webkit-scrollbar-thumb:active { background-color: var(--vscode-scrollbarSlider-activeBackground); }
             }
           </style>
+          <style>
+            /* Fix br not rendering in contenteditable input fields in WKWebView */
+            [contenteditable] {
+              white-space: pre-wrap !important;
+              word-wrap: break-word !important;
+            }
+          </style>
         </head>
         <body class="vscode-light">
           <pre id="claude-error"></pre>

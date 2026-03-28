@@ -126,6 +126,23 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             {
                 permissionMode = mode
                 logger.info("[Hangar] Permission mode set to: \(modeStr, privacy: .public)")
+                // Restart active CLI processes with the new permission mode
+                for (channelId, oldProcess) in channels {
+                    let cwd = oldProcess.cwd
+                    let sessionId = oldProcess.sessionId
+                    oldProcess.terminate()
+                    if let newProcess = ClaudeProcess(
+                        channelId: channelId,
+                        cwd: cwd,
+                        permissionMode: modeStr,
+                        resumeSessionId: sessionId,
+                        messageHandler: self
+                    ) {
+                        channels[channelId] = newProcess
+                        try? newProcess.start()
+                        logger.info("[Hangar] Restarted CLI for channel \(channelId, privacy: .public) with mode \(modeStr, privacy: .public)")
+                    }
+                }
             } else {
                 logger.warning("[Hangar] Invalid permission mode: \(String(describing: request["mode"]), privacy: .public)")
             }
