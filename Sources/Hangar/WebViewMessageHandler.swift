@@ -13,7 +13,19 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     /// Cached auth status from `claude auth status`
     private var cachedAuth: [String: Any]?
 
-    override init() {
+    /// Working directory for Claude sessions
+    let workingDirectory: URL
+
+    /// Permission mode for CLI launches (updated by webview set_permission_mode)
+    var permissionMode: PermissionMode = .acceptEdits
+
+    /// Session ID to resume (nil = new session)
+    var resumeSessionId: String?
+
+    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits) {
+        self.workingDirectory = workingDirectory
+        self.resumeSessionId = resumeSessionId
+        self.permissionMode = permissionMode
         super.init()
         fetchAuthStatus()
     }
@@ -68,9 +80,18 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 "selection": NSNull(),
             ])
         case "list_sessions_request":
+            let sessions = ClaudeSessionHistory.loadSessions(for: workingDirectory)
+            let sessionDicts = sessions.map { session -> [String: Any] in
+                [
+                    "id": session.id,
+                    "title": session.title,
+                    "timestamp": Int(session.timestamp.timeIntervalSince1970 * 1000),
+                    "projectPath": session.projectDirectory.path,
+                ]
+            }
             sendResponse(requestId: requestId, response: [
                 "type": "list_sessions_response",
-                "sessions": [] as [Any],
+                "sessions": sessionDicts,
             ])
         case "request_usage_update":
             sendResponse(requestId: requestId, response: [
@@ -98,6 +119,14 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         case "set_thinking_level":
             sendResponse(requestId: requestId, response: ["type": "set_thinking_level_response"])
         case "set_permission_mode":
+            if let modeStr = request["mode"] as? String,
+               let mode = PermissionMode(rawValue: modeStr)
+            {
+                permissionMode = mode
+                logger.info("[Hangar] Permission mode set to: \(modeStr, privacy: .public)")
+            } else {
+                logger.warning("[Hangar] Invalid permission mode: \(String(describing: request["mode"]), privacy: .public)")
+            }
             sendResponse(requestId: requestId, response: ["type": "set_permission_mode_response"])
         case "log_event":
             sendResponse(requestId: requestId, response: ["type": "log_event_response"])
@@ -136,18 +165,29 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
 
     private func handleLaunchClaude(_ message: [String: Any]) {
         let channelId = message["channelId"] as? String ?? UUID().uuidString
-        let cwd = message["cwd"] as? String ?? FileManager.default.homeDirectoryForCurrentUser.path
-        let permissionMode = message["permissionMode"] as? String ?? "default"
+        let cwd = message["cwd"] as? String ?? workingDirectory.path
+        let permissionModeStr = message["permissionMode"] as? String ?? self.permissionMode.rawValue
+        // Check webview message first, then fall back to stored resume ID
+        let sessionToResume = message["sessionId"] as? String ?? resumeSessionId
 
-        logger.info("[Hangar] launch_claude: channel=\(channelId) cwd=\(cwd) mode=\(permissionMode, privacy: .public)")
+        logger.info("[Hangar] launch_claude: channel=\(channelId) cwd=\(cwd) mode=\(permissionModeStr, privacy: .public) resume=\(sessionToResume ?? "new", privacy: .public)")
 
         // Clean up existing process for this channel
         channels[channelId]?.terminate()
 
+        // Clear resume ID after first use
+        resumeSessionId = nil
+
+        // Replay session history to webview before starting CLI
+        if let resumeId = sessionToResume {
+            replaySessionHistory(channelId: channelId, sessionId: resumeId, cwd: cwd)
+        }
+
         guard let process = ClaudeProcess(
             channelId: channelId,
             cwd: cwd,
-            permissionMode: permissionMode,
+            permissionMode: permissionModeStr,
+            resumeSessionId: sessionToResume,
             messageHandler: self
         ) else {
             logger.error("Failed to create ClaudeProcess: CLI binary not found")
@@ -230,19 +270,189 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         }
     }
 
+    // MARK: - Session History Replay
+
+    /// Read session JSONL, walk the parentUuid chain from the leaf, and replay
+    /// messages to the webview — matching the VSCode CC extension behavior.
+    ///
+    /// The chain naturally stops at a `compact_boundary` system message
+    /// (parentUuid == nil), so only post-compaction messages are sent.
+    private func replaySessionHistory(channelId: String, sessionId: String, cwd: String) {
+        let encoded = ClaudeSessionHistory.encodePath(cwd)
+        let claudeDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects")
+        let sessionFile = claudeDir.appendingPathComponent("\(encoded)/\(sessionId).jsonl")
+
+        let text: String
+        do {
+            text = try String(contentsOf: sessionFile, encoding: .utf8)
+        } catch {
+            logger.error("[Hangar] Failed to read session file \(sessionFile.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        // Parse messages into UUID-keyed map for chain walking
+        var messagesByUuid: [String: [String: Any]] = [:]
+        var lastUuid: String?
+        var parseFailures = 0
+
+        for line in text.components(separatedBy: "\n") {
+            guard !line.isEmpty else { continue }
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let type = json["type"] as? String,
+                  let uuid = json["uuid"] as? String
+            else { parseFailures += 1; continue }
+
+            switch type {
+            case "user", "assistant", "system", "attachment", "progress":
+                messagesByUuid[uuid] = json
+                // Track last non-sidechain, non-meta leaf for chain start
+                if json["isSidechain"] as? Bool != true,
+                   json["isMeta"] as? Bool != true,
+                   json["teamName"] == nil,
+                   (type == "user" || type == "assistant")
+                {
+                    lastUuid = uuid
+                }
+            default:
+                break
+            }
+        }
+
+        // Walk chain from leaf backwards (stops naturally at compact_boundary where parentUuid=nil)
+        guard let leafUuid = lastUuid else { return }
+
+        var chain: [[String: Any]] = []
+        var visited = Set<String>()
+        var current: String? = leafUuid
+
+        while let uuid = current, let msg = messagesByUuid[uuid] {
+            if visited.contains(uuid) { break }
+            visited.insert(uuid)
+
+            let type = msg["type"] as? String
+            let isSidechain = msg["isSidechain"] as? Bool == true
+            let isMeta = msg["isMeta"] as? Bool == true
+            let hasTeam = msg["teamName"] != nil
+
+            // Include non-sidechain user/assistant/system messages
+            if !isSidechain && !isMeta && !hasTeam {
+                if type == "user" || type == "assistant" || type == "system" {
+                    chain.append(msg)
+                }
+            }
+
+            current = msg["parentUuid"] as? String
+        }
+
+        chain.reverse()
+
+        // Filter to user/assistant only (system messages like compact_boundary
+        // are used for chain structure but not displayed via io_message)
+        let displayMessages = chain.filter {
+            let type = $0["type"] as? String
+            return type == "user" || type == "assistant"
+        }
+
+        if parseFailures > 0 {
+            logger.warning("[Hangar] Session \(sessionId, privacy: .public): \(parseFailures, privacy: .public) lines failed to parse")
+        }
+
+        guard !displayMessages.isEmpty else { return }
+
+        // Serialize all messages into a JSON array for batch dispatch.
+        var allWrapped: [[String: Any]] = displayMessages.map { msg in
+            [
+                "type": "from-extension",
+                "message": [
+                    "type": "io_message",
+                    "channelId": channelId,
+                    "message": msg,
+                    "done": false,
+                ] as [String: Any],
+            ]
+        }
+
+        // Append result message to signal replay complete
+        allWrapped.append([
+            "type": "from-extension",
+            "message": [
+                "type": "io_message",
+                "channelId": channelId,
+                "message": [
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "session_id": sessionId,
+                ] as [String: Any],
+                "done": true,
+            ] as [String: Any],
+        ])
+
+        let batchJSON: String
+        do {
+            let batchData = try JSONSerialization.data(withJSONObject: allWrapped)
+            guard let json = String(data: batchData, encoding: .utf8) else {
+                logger.error("[Hangar] Failed to encode history batch as UTF-8")
+                return
+            }
+            batchJSON = json
+        } catch {
+            logger.error("[Hangar] Failed to serialize history batch: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        // Use dispatchEvent(MessageEvent) instead of postMessage.
+        // postMessage is ASYNC (each handler fires in a separate microtask → N renders).
+        // dispatchEvent is SYNC (all handlers fire inline → React batches → 1 render).
+        let batchJS = """
+        (function(){
+            var msgs = \(batchJSON);
+            for (var i = 0; i < msgs.length; i++) {
+                window.dispatchEvent(new MessageEvent('message', { data: msgs[i] }));
+            }
+        })();
+        """
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript(batchJS) { _, error in
+                if let error {
+                    logger.error("History replay JS error: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+
+        logger.info("[Hangar] Replayed \(displayMessages.count, privacy: .public) messages (\(messagesByUuid.count, privacy: .public) parsed) from session \(sessionId, privacy: .public)")
+    }
+
     // MARK: - Interrupt / Close
 
     private func handleInterrupt(_ message: [String: Any]) {
-        guard let channelId = message["channelId"] as? String else { return }
+        guard let channelId = message["channelId"] as? String else {
+            logger.warning("[Hangar] interrupt_claude missing channelId")
+            return
+        }
         logger.info("[Hangar] interrupt_claude: channel=\(channelId, privacy: .public)")
         channels[channelId]?.interrupt()
     }
 
     private func handleCloseChannel(_ message: [String: Any]) {
-        guard let channelId = message["channelId"] as? String else { return }
+        guard let channelId = message["channelId"] as? String else {
+            logger.warning("[Hangar] close_channel missing channelId")
+            return
+        }
         logger.info("[Hangar] close_channel: channel=\(channelId, privacy: .public)")
         channels[channelId]?.terminate()
         channels.removeValue(forKey: channelId)
+    }
+
+    /// Terminate all running CLI processes (called during webview teardown).
+    func terminateAll() {
+        for (channelId, process) in channels {
+            logger.info("[Hangar] Terminating process for channel \(channelId, privacy: .public)")
+            process.terminate()
+        }
+        channels.removeAll()
     }
 
     /// Called by ClaudeProcess when the CLI process exits
@@ -317,7 +527,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     // MARK: - Protocol Responses
 
     private func initResponse() -> [String: Any] {
-        let cwd = FileManager.default.homeDirectoryForCurrentUser.path
+        let cwd = workingDirectory.path
 
         // Use real auth if available
         let authStatus: [String: Any]
@@ -347,7 +557,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 "authStatus": authStatus,
                 "modelSetting": "default",
                 "thinkingLevel": "default_on",
-                "initialPermissionMode": "default",
+                "initialPermissionMode": permissionMode.rawValue,
                 "allowDangerouslySkipPermissions": false,
                 "platform": "macos",
                 "speechToTextEnabled": false,

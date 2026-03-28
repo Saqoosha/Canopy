@@ -59,7 +59,7 @@ Claude CLI (user's installed claude binary)
 - Location: `~/.vscode/extensions/anthropic.claude-code-*/webview/`
 - Framework: React 18 + Preact Signals
 - Must use `loadFileURL` (NOT `loadHTMLString`) for local file access
-- Writes `_hangar.html` to webview dir as entry point
+- Writes `_hangar.html` to `~/Library/Application Support/Hangar/` as entry point
 
 ## Protocol Quick Reference
 ```

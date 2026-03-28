@@ -5,6 +5,10 @@ import os.log
 private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "WebView")
 
 struct WebViewContainer: NSViewRepresentable {
+    let workingDirectory: URL
+    var resumeSessionId: String?
+    var permissionMode: PermissionMode = .acceptEdits
+
     class Coordinator: NSObject, WKNavigationDelegate {
         var handler: WebViewMessageHandler?
         var consoleHandler: ConsoleLogHandler?
@@ -40,7 +44,7 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
-        let handler = WebViewMessageHandler()
+        let handler = WebViewMessageHandler(workingDirectory: workingDirectory, resumeSessionId: resumeSessionId, permissionMode: permissionMode)
         let consoleHandler = ConsoleLogHandler()
         ucc.add(handler, name: "vscodeHost")
         ucc.add(consoleHandler, name: "consoleLog")
@@ -69,6 +73,7 @@ struct WebViewContainer: NSViewRepresentable {
         ucc.removeScriptMessageHandler(forName: "vscodeHost")
         ucc.removeScriptMessageHandler(forName: "consoleLog")
         ucc.removeAllUserScripts()
+        coordinator.handler?.terminateAll()
         coordinator.handler = nil
         coordinator.consoleHandler = nil
         logger.info("WebView dismantled, handlers removed")

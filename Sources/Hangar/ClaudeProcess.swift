@@ -17,26 +17,33 @@ final class ClaudeProcess: @unchecked Sendable {
     private var lineBuffer = Data()
     private let queue = DispatchQueue(label: "sh.saqoo.Hangar.ClaudeProcess")
 
-    init?(channelId: String, cwd: String, permissionMode: String, messageHandler: WebViewMessageHandler) {
+    init?(channelId: String, cwd: String, permissionMode: String, resumeSessionId: String? = nil, messageHandler: WebViewMessageHandler) {
         guard let cliPath = CCExtension.cliBinaryPath() else {
             logger.error("Cannot create ClaudeProcess: CLI binary not found")
             return nil
         }
 
         self.channelId = channelId
-        self.sessionId = UUID().uuidString
+        self.sessionId = resumeSessionId ?? UUID().uuidString
         self.messageHandler = messageHandler
 
-        process.executableURL = cliPath
-        process.arguments = [
+        var args = [
             "-p",
             "--output-format", "stream-json",
             "--verbose",
             "--input-format", "stream-json",
             "--include-partial-messages",
             "--permission-mode", permissionMode,
-            "--session-id", sessionId,
         ]
+
+        if let resumeId = resumeSessionId {
+            args += ["--resume", resumeId]
+        } else {
+            args += ["--session-id", sessionId]
+        }
+
+        process.executableURL = cliPath
+        process.arguments = args
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
@@ -225,7 +232,11 @@ final class ClaudeProcess: @unchecked Sendable {
                     return
                 }
                 guard let data = json.data(using: .utf8) else { return }
-                self.stdinPipe.fileHandleForWriting.write(data)
+                do {
+                    try self.stdinPipe.fileHandleForWriting.write(contentsOf: data)
+                } catch {
+                    logger.error("Failed to write to CLI stdin: \(error.localizedDescription, privacy: .public)")
+                }
             }
         } catch {
             logger.error("Failed to serialize stdin JSON: \(error.localizedDescription, privacy: .public)")
