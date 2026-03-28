@@ -7,7 +7,9 @@ Detailed technical architecture of Hangar, a macOS app that hosts the Claude Cod
 ```
 +------------------------------------------------------------------+
 |  HangarApp (SwiftUI)                                             |
-|  WindowGroup > WebViewContainer (NSViewRepresentable)            |
+|  WindowGroup > AppState (@Observable)                            |
+|    ├─ .launcher → LauncherView (dir picker, sessions, perms)     |
+|    └─ .session  → WebViewContainer (NSViewRepresentable)         |
 |                                                                  |
 |  +------------------------------------------------------------+  |
 |  |  WKWebView                                                 |  |
@@ -53,7 +55,7 @@ Detailed technical architecture of Hangar, a macOS app that hosts the Claude Cod
 |  |              --output-format stream-json --verbose           |  |
 |  |              --include-partial-messages                      |  |
 |  |              --permission-mode <mode>                        |  |
-|  |              --session-id <uuid>                             |  |
+|  |              --session-id <uuid> | --resume <session-id>     |  |
 |  |                                                             |  |
 |  |  NDJSON parser: line buffer -> JSON -> event routing        |  |
 |  |  Thread safety: serial DispatchQueue                        |  |
@@ -71,7 +73,42 @@ Detailed technical architecture of Hangar, a macOS app that hosts the Claude Cod
 
 ### HangarApp.swift
 
-SwiftUI `@main` entry point. Creates a single `WindowGroup` containing a `WebViewContainer`. Sets minimum window size (400x600) and default size (500x800). Uses standard titlebar window style.
+SwiftUI `@main` entry point. Creates a `WindowGroup` that switches between `LauncherView` (directory picker) and `WebViewContainer` (chat) based on `AppState.screen`. Menu commands: Cmd+N (new session → launcher), Cmd+O (open folder → launch directly). Window title shows the current directory name via `WindowTitleSetter` (NSViewRepresentable helper).
+
+### AppState.swift
+
+`@Observable` class managing app-wide state:
+- `screen` (`.launcher` | `.session`) — `private(set)`, transitions via `launchSession`/`backToLauncher`
+- `workingDirectory` — selected project directory
+- `permissionMode` — `PermissionMode` enum (`.default`, `.acceptEdits`, `.plan`, `.bypassPermissions`)
+- `resumeSessionId` — session ID to resume (cleared after first use)
+- `webviewReloadToken` — `private(set)`, incremented to force WebViewContainer recreation via `.id()`
+
+### LauncherView.swift
+
+SwiftUI welcome screen shown on app launch. Features:
+- Directory selection via `NSOpenPanel` or drag-and-drop
+- Permission mode picker bound to `AppState.permissionMode`
+- Start button (Cmd+Enter) launches session
+- Recent directories list (MRU, managed by `RecentDirectories`)
+- Recent sessions list (loaded from `ClaudeSessionHistory.loadAllSessions()`)
+- Search filter across directories and sessions
+- Click on recent directory → immediate launch; click on session → resume with history
+
+### ClaudeSessionHistory.swift
+
+Reads Claude Code session data from `~/.claude/projects/`:
+- `encodePath` — converts filesystem path to CLI's folder naming (replaces `/` and `.` with `-`)
+- `loadSessions(for:)` — lists JSONL files in a project folder, extracts title (first user message, up to 8KB) and modification date
+- `loadAllSessions()` — scans all project folders, reads `cwd` from JSONL metadata to get real paths (avoids lossy path decoding)
+- `extractCwd` — reads first 4KB of a JSONL file to find the `cwd` field
+- Filters out subagent files (`agent-*` prefix)
+
+### RecentDirectories.swift
+
+Caseless enum managing an MRU list of project directories in `UserDefaults`:
+- Max 20 entries, deduplication on add, existence check on load
+- API: `load()`, `add(_:)`, `remove(_:)`
 
 ### CCExtension.swift
 
@@ -112,7 +149,7 @@ Receives JS console output bridged from the webview. Routes to `os_log` at appro
 
 **Cleanup:**
 
-`dismantleNSView` removes all script message handlers and user scripts to prevent retain cycles between WKWebView and the handler objects.
+`dismantleNSView` calls `terminateAll()` on the handler (killing any running CLI processes), then removes all script message handlers and user scripts to prevent retain cycles between WKWebView and the handler objects.
 
 ### VSCodeStub.swift
 
@@ -152,14 +189,14 @@ Central protocol handler. Implements `WKScriptMessageHandler` to receive message
 | `get_claude_state` | `get_claude_state_response` | Model list, account info, PID |
 | `get_asset_uris` | `asset_uris_response` | SVG/PNG paths for UI assets (clawd, welcome art) |
 | `get_current_selection` | Selection response | Always null (no editor) |
-| `list_sessions_request` | `list_sessions_response` | Always empty (no persistence) |
+| `list_sessions_request` | `list_sessions_response` | Real sessions from `~/.claude/projects/` |
 | `request_usage_update` | `usage_update` | Always null |
 | `login` | `login_response` | Opens claude.ai/login in browser, re-fetches auth |
 | `open_url` | `open_url_response` | Opens URL in default browser via NSWorkspace |
 | `open_help` | `open_help_response` | Opens Claude Code docs |
 | `set_model` | Ack | No-op (not persisted) |
 | `set_thinking_level` | Ack | No-op (not persisted) |
-| `set_permission_mode` | Ack | No-op (not persisted) |
+| `set_permission_mode` | Ack | Updates stored `PermissionMode` for subsequent launches |
 | `get_mcp_servers` | Empty list | MCP not implemented |
 | `list_plugins` | Empty list | Plugins not implemented |
 | `generate_session_title` | Static "Chat" | Title generation not implemented |
@@ -174,6 +211,15 @@ Central protocol handler. Implements `WKScriptMessageHandler` to receive message
 - Maintains a dictionary of active `ClaudeProcess` instances keyed by `channelId`
 - Cleans up old process before creating a new one for the same channel
 - Receives exit notifications from `ClaudeProcess` via `handleCLIProcessExited`
+- `terminateAll()` called during webview teardown to clean up all processes
+
+**Session history replay:**
+- When `launch_claude` is received with a resume session ID, `replaySessionHistory` runs before CLI launch
+- Reads the session JSONL file, parses all `user`/`assistant`/`system` messages into a UUID-keyed map
+- Walks the `parentUuid` chain backwards from the leaf node (naturally stops at `compact_boundary` where `parentUuid=nil`)
+- Filters out sidechains, meta messages, and team messages
+- Sends only `user`/`assistant` messages (system messages like `compact_boundary` are for chain structure only)
+- All messages are serialized into a single JSON array and dispatched via synchronous `dispatchEvent(new MessageEvent(...))` — not `postMessage` — so React batches all state updates into a single render (instant display)
 
 ### ClaudeProcess.swift
 
@@ -193,7 +239,8 @@ claude -p
 Key flags:
 - `-p` -- Non-interactive / piped mode
 - `--include-partial-messages` -- Makes CLI output real Anthropic SSE events as `stream_event` NDJSON lines (without this flag, you only get batched `assistant` events)
-- `--session-id` -- Generated UUID for each channel
+- `--session-id` -- Generated UUID for new sessions
+- `--resume` -- Resume an existing session by ID (used when replaying history)
 
 **Thread safety:**
 - All mutable state access (line buffer, process writes) goes through a serial `DispatchQueue`
@@ -241,8 +288,13 @@ Events are serialized to JSON and sent to the webview via `window.postMessage()`
 ### Startup Sequence
 
 ```
-1. HangarApp creates WindowGroup
-2. WebViewContainer.makeNSView:
+1. HangarApp creates WindowGroup with AppState
+2. LauncherView shown (AppState.screen == .launcher)
+   a. Load recent directories from UserDefaults
+   b. Load session history from ~/.claude/projects/ (background Task)
+   c. User picks directory, permission mode, and optionally a session to resume
+   d. launchSession() → AppState.screen = .session → SwiftUI recreates view
+3. WebViewContainer.makeNSView:
    a. Create WKWebViewConfiguration
    b. Inject console capture script (atDocumentStart)
    c. Inject VSCode API stub (atDocumentStart)
@@ -261,7 +313,12 @@ Events are serialized to JSON and sent to the webview via `window.postMessage()`
    b. acquireVsCodeApi() returns stub with postMessage bridge
    c. Extension sends: init -> get_claude_state -> get_asset_uris -> list_sessions
    d. Extension auto-launches claude (launch_claude message)
-6. ClaudeProcess spawned:
+6. Session history replay (if resuming):
+   a. Read JSONL file from ~/.claude/projects/{encoded-path}/
+   b. Parse messages, build UUID map
+   c. Walk parentUuid chain from leaf node
+   d. Batch dispatch via dispatchEvent (single render)
+7. ClaudeProcess spawned:
    a. CLI binary found via CCExtension.cliBinaryPath()
    b. Process started with stream-json flags
    c. stdout/stderr readability handlers attached
@@ -412,6 +469,14 @@ The webview sends user messages with content as an array of blocks (`[{type:"tex
 ### Auth Timing
 
 Auth status is fetched asynchronously on init. If the webview's `init` request arrives before auth completes, the response will show unauthenticated state. The cached auth is available for subsequent `get_claude_state` requests.
+
+### Session Resume Does Not Replay CLI History
+
+The `--resume` CLI flag reconnects to a session but does not replay history to stdout. Hangar reads the JSONL file directly and replays messages to the webview via `dispatchEvent`. This is the same approach as the VSCode extension (which also reads JSONL directly rather than relying on CLI output).
+
+### dispatchEvent vs postMessage for History Replay
+
+`window.postMessage()` is asynchronous — each call creates a separate microtask, causing React to re-render after each message (progressive rendering). `window.dispatchEvent(new MessageEvent('message', {data}))` is synchronous — all handlers fire inline within the same JS task, allowing React to batch all state updates into a single render. This makes history replay appear instant.
 
 ### No Dark Mode
 

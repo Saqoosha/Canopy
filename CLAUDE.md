@@ -4,9 +4,9 @@
 
 macOS native app that hosts the Claude Code VSCode extension's webview (React UI) in a WKWebView. No VSCode required. The CC extension's bundled JS/CSS renders directly in a native macOS window with real-time streaming.
 
-## Project Status: Working Chat with Streaming (2026-03-28)
+## Project Status: Working Chat with Session Management (2026-03-28)
 
-Full chat with Claude works. Real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode.
+Full chat with Claude works. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode.
 
 ## Tech Stack
 - macOS 15.0+, Swift 6
@@ -48,11 +48,16 @@ Claude CLI (user's installed claude binary)
 ```
 
 ## Key Source Files
-- `HangarApp.swift` — SwiftUI app entry point
+- `HangarApp.swift` — SwiftUI app entry, launcher ↔ session switching, window title, menu commands
+- `AppState.swift` — Observable app state, PermissionMode enum, screen transitions
+- `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop
 - `WebViewContainer.swift` — WKWebView setup, CC webview loading, VSCode default CSS injection
-- `WebViewMessageHandler.swift` — Protocol message handler, auth, CLI launch, IO bridge
-- `ClaudeProcess.swift` — Claude CLI process lifecycle, NDJSON line parsing, event forwarding
+- `WebViewMessageHandler.swift` — Protocol handler, auth, CLI launch, IO bridge, session history replay
+- `ClaudeProcess.swift` — Claude CLI process lifecycle, NDJSON parsing, --resume support
+- `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction
+- `RecentDirectories.swift` — MRU directory list in UserDefaults
 - `VSCodeStub.swift` — acquireVsCodeApi() JS stub, loads theme CSS from bundled resource
+- `CCExtension.swift` — Extension/CLI path discovery
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
 
 ## CC Extension Webview Details
@@ -98,11 +103,16 @@ To update theme CSS:
 3. Save as JSON, clean JSONC comments, convert to CSS with the node script
 4. Replace `Sources/Hangar/theme-light.css`
 
+## Session Management
+- Launcher screen: Cmd+N returns to launcher, Cmd+O opens folder picker
+- `list_sessions_request` returns real sessions from `~/.claude/projects/`
+- Session resume: `--resume SESSION_ID` flag passed to CLI
+- History replay: reads JSONL, walks parentUuid chain from leaf, sends via sync `dispatchEvent` (not async `postMessage`) for instant single-render display
+- Path encoding: `encodePath` replaces `/` and `.` with `-` (matching CLI behavior)
+- `loadAllSessions` reads `cwd` from JSONL metadata (avoids lossy path decoding)
+- PermissionMode: type-safe enum (default, acceptEdits, plan, bypassPermissions)
+
 ## Next Steps
 1. Dark mode — support system appearance switching (theme-dark.css)
-2. Session management — persist/resume sessions
-3. Window chrome — app icon, titlebar, tabs
-4. Direct API streaming — bypass CLI for true character-level streaming (CLI already provides this via stream_event!)
-
-## Also In This Repo (Legacy)
-VSCode extension files (src/, media/, package.json, etc.) from earlier approach. Can be cleaned up.
+2. Window chrome — app icon, titlebar, tabs
+3. Direct API streaming — bypass CLI for true character-level streaming (CLI already provides this via stream_event!)

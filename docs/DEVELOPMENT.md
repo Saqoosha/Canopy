@@ -94,9 +94,11 @@ All Swift-side logging uses `os.log.Logger` with subsystem `sh.saqoo.Hangar`. Ea
 
 | Category | Source |
 |----------|--------|
+| `AppState` | Screen transitions, session launch |
 | `CCExtension` | Extension/CLI path discovery |
 | `ClaudeProcess` | CLI process lifecycle, NDJSON parsing |
-| `MessageHandler` | Protocol messages, auth, IO routing |
+| `MessageHandler` | Protocol messages, auth, IO routing, history replay |
+| `SessionHistory` | JSONL parsing, session listing |
 | `VSCodeStub` | Theme CSS loading |
 | `WebView` | WKWebView navigation events |
 

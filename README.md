@@ -7,6 +7,9 @@ A standalone macOS application that hosts the Claude Code VSCode extension's web
 
 ## Features
 
+- **Launcher screen** with directory picker, recent directories, and session history
+- **Session management** — resume past sessions with instant history replay
+- **Permission mode selection** — Default, Accept Edits, Plan, or Bypass All
 - Native macOS window running the Claude Code extension UI (React 18 + Preact Signals)
 - Real authentication via the installed Claude CLI (`claude auth status`)
 - Full streaming chat powered by `claude` CLI in `stream-json` mode
@@ -14,6 +17,7 @@ A standalone macOS application that hosts the Claude Code VSCode extension's web
 - VSCode Light+ theme with 456 CSS variables exported from a real VSCode instance
 - Console log bridging from WKWebView JS to macOS unified logging (`os_log`)
 - Safari Web Inspector support for debugging the webview
+- **Keyboard shortcuts** — Cmd+N (new session), Cmd+O (open folder), Cmd+Enter (start)
 
 ## Requirements
 
@@ -72,12 +76,13 @@ Or open `Hangar.xcodeproj` in Xcode and build/run from there.
 +------------------------------------------+
 ```
 
-1. On launch, Hangar finds the installed CC extension under `~/.vscode/extensions/`
-2. It writes an HTML entry point that loads the extension's JS/CSS with injected VSCode theme variables and API stubs
+1. On launch, Hangar shows a **launcher screen** where you pick a working directory and permission mode
+2. Hangar finds the installed CC extension under `~/.vscode/extensions/` and writes an HTML entry point with injected VSCode theme variables and API stubs
 3. The webview's `acquireVsCodeApi()` is stubbed to bridge `postMessage` calls to Swift via `WKScriptMessageHandler`
-4. When the user sends a message, Hangar spawns a `claude` CLI process in streaming JSON mode
-5. CLI output (NDJSON lines containing Anthropic SSE events) is parsed and forwarded directly to the webview as `io_message` events
-6. The webview renders streaming responses, tool use, thinking indicators, and all other Claude Code UI features
+4. When resuming a session, Hangar reads the JSONL history, walks the parentUuid chain, and replays messages to the webview via synchronous `dispatchEvent` for instant rendering
+5. Hangar spawns a `claude` CLI process in streaming JSON mode (with `--resume` for resumed sessions)
+6. CLI output (NDJSON lines containing Anthropic SSE events) is parsed and forwarded directly to the webview as `io_message` events
+7. The webview renders streaming responses, tool use, thinking indicators, and all other Claude Code UI features
 
 ## Current Status
 
@@ -90,7 +95,6 @@ Or open `Hangar.xcodeproj` in Xcode and build/run from there.
 
 **Limitations:**
 - Light theme only (no dark mode or system appearance switching)
-- No session persistence or resume
 - No MCP server integration
 - No tab support or multi-window
 - Model/thinking level selection UI present but changes not persisted to CLI
@@ -100,10 +104,14 @@ Or open `Hangar.xcodeproj` in Xcode and build/run from there.
 
 ```
 Sources/Hangar/
-  HangarApp.swift              SwiftUI app entry point
+  HangarApp.swift              SwiftUI app entry, launcher/session switching, menu commands
+  AppState.swift               Observable state, PermissionMode enum, screen transitions
+  LauncherView.swift           Welcome screen: directory picker, recent dirs, session history
   WebViewContainer.swift       WKWebView setup, HTML generation, console capture
-  WebViewMessageHandler.swift  Protocol handler (auth, launch, IO bridge)
-  ClaudeProcess.swift          Claude CLI lifecycle, NDJSON parsing, event forwarding
+  WebViewMessageHandler.swift  Protocol handler, auth, CLI launch, IO bridge, history replay
+  ClaudeProcess.swift          Claude CLI lifecycle, NDJSON parsing, --resume support
+  ClaudeSessionHistory.swift   Session JSONL parser, chain walking, cwd extraction
+  RecentDirectories.swift      MRU directory list (UserDefaults)
   VSCodeStub.swift             acquireVsCodeApi() JS stub, theme CSS loader
   CCExtension.swift            Extension/CLI path discovery
   theme-light.css              456 VSCode CSS variables (Default Light+)
