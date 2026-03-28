@@ -558,7 +558,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 "modelSetting": "default",
                 "thinkingLevel": "default_on",
                 "initialPermissionMode": permissionMode.rawValue,
-                "allowDangerouslySkipPermissions": false,
+                "allowDangerouslySkipPermissions": true,
                 "platform": "macos",
                 "speechToTextEnabled": false,
                 "marketplaceType": "vscode",

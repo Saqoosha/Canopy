@@ -27,14 +27,21 @@ final class ClaudeProcess: @unchecked Sendable {
         self.sessionId = resumeSessionId ?? UUID().uuidString
         self.messageHandler = messageHandler
 
+        let skipAll = permissionMode == "bypassPermissions"
+
         var args = [
             "-p",
             "--output-format", "stream-json",
             "--verbose",
             "--input-format", "stream-json",
             "--include-partial-messages",
-            "--permission-mode", permissionMode,
         ]
+
+        if skipAll {
+            args += ["--dangerously-skip-permissions"]
+        } else {
+            args += ["--permission-mode", permissionMode]
+        }
 
         if let resumeId = resumeSessionId {
             args += ["--resume", resumeId]
