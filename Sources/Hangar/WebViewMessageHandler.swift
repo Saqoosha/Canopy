@@ -93,6 +93,8 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 "type": "list_sessions_response",
                 "sessions": sessionDicts,
             ])
+        case "get_session_request":
+            handleGetSession(requestId: requestId, sessionId: request["sessionId"] as? String)
         case "request_usage_update":
             sendResponse(requestId: requestId, response: [
                 "type": "usage_update",
@@ -177,11 +179,6 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
 
         // Clear resume ID after first use
         resumeSessionId = nil
-
-        // Replay session history to webview before starting CLI
-        if let resumeId = sessionToResume {
-            replaySessionHistory(channelId: channelId, sessionId: resumeId, cwd: cwd)
-        }
 
         guard let process = ClaudeProcess(
             channelId: channelId,
@@ -270,44 +267,78 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         }
     }
 
-    // MARK: - Session History Replay
+    // MARK: - Session Loading (get_session_request)
 
-    /// Read session JSONL, walk the parentUuid chain from the leaf, and replay
-    /// messages to the webview — matching the VSCode CC extension behavior.
-    ///
-    /// The chain naturally stops at a `compact_boundary` system message
-    /// (parentUuid == nil), so only post-compaction messages are sent.
-    private func replaySessionHistory(channelId: String, sessionId: String, cwd: String) {
+    /// Handle `get_session_request` from the webview — the proper protocol for session restore.
+    /// The webview sets `isLoading=true`, sends this request, we return messages,
+    /// and the webview calls `loadFromMessages` then sets `isLoading=false`.
+    /// All heavy work runs on a background thread.
+    private func handleGetSession(requestId: String, sessionId: String?) {
+        guard let sessionId else {
+            sendResponse(requestId: requestId, response: [
+                "type": "get_session_response",
+                "messages": [] as [Any],
+                "sessionDiffs": [] as [Any],
+            ])
+            return
+        }
+
+        let cwd = workingDirectory.path
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let messages = Self.loadSessionMessages(sessionId: sessionId, cwd: cwd)
+            // Serialize to JSON string (Sendable) on background thread
+            guard let data = try? JSONSerialization.data(withJSONObject: messages),
+                  let messagesJSON = String(data: data, encoding: .utf8)
+            else {
+                logger.error("[Hangar] Failed to serialize session messages")
+                return
+            }
+            let count = messages.count
+            DispatchQueue.main.async { [weak self] in
+                // Re-parse on main thread to satisfy Sendable boundary
+                guard let messagesData = messagesJSON.data(using: .utf8),
+                      let parsed = try? JSONSerialization.jsonObject(with: messagesData)
+                else { return }
+                self?.sendResponse(requestId: requestId, response: [
+                    "type": "get_session_response",
+                    "messages": parsed,
+                    "sessionDiffs": [] as [Any],
+                ])
+                logger.info("[Hangar] get_session_response: \(count, privacy: .public) messages for \(sessionId, privacy: .public)")
+            }
+        }
+    }
+
+    /// Parse session JSONL file, walk the parentUuid chain from leaf,
+    /// and return formatted messages matching the VSCode extension format:
+    /// `{ type, uuid, session_id, message, parent_tool_use_id, timestamp }`
+    private nonisolated static func loadSessionMessages(sessionId: String, cwd: String) -> [[String: Any]] {
         let encoded = ClaudeSessionHistory.encodePath(cwd)
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/projects")
         let sessionFile = claudeDir.appendingPathComponent("\(encoded)/\(sessionId).jsonl")
 
-        let text: String
-        do {
-            text = try String(contentsOf: sessionFile, encoding: .utf8)
-        } catch {
-            logger.error("[Hangar] Failed to read session file \(sessionFile.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return
+        guard let text = try? String(contentsOf: sessionFile, encoding: .utf8) else {
+            logger.error("[Hangar] Failed to read session file: \(sessionFile.path, privacy: .public)")
+            return []
         }
 
-        // Parse messages into UUID-keyed map for chain walking
+        // Parse messages into UUID-keyed map
         var messagesByUuid: [String: [String: Any]] = [:]
         var lastUuid: String?
-        var parseFailures = 0
 
         for line in text.components(separatedBy: "\n") {
-            guard !line.isEmpty else { continue }
-            guard let lineData = line.data(using: .utf8),
+            guard !line.isEmpty,
+                  let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                   let type = json["type"] as? String,
                   let uuid = json["uuid"] as? String
-            else { parseFailures += 1; continue }
+            else { continue }
 
             switch type {
             case "user", "assistant", "system", "attachment", "progress":
                 messagesByUuid[uuid] = json
-                // Track last non-sidechain, non-meta leaf for chain start
                 if json["isSidechain"] as? Bool != true,
                    json["isMeta"] as? Bool != true,
                    json["teamName"] == nil,
@@ -320,9 +351,9 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             }
         }
 
-        // Walk chain from leaf backwards (stops naturally at compact_boundary where parentUuid=nil)
-        guard let leafUuid = lastUuid else { return }
+        guard let leafUuid = lastUuid else { return [] }
 
+        // Walk chain from leaf backwards
         var chain: [[String: Any]] = []
         var visited = Set<String>()
         var current: String? = leafUuid
@@ -336,93 +367,29 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             let isMeta = msg["isMeta"] as? Bool == true
             let hasTeam = msg["teamName"] != nil
 
-            // Include non-sidechain user/assistant/system messages
             if !isSidechain && !isMeta && !hasTeam {
                 if type == "user" || type == "assistant" || type == "system" {
                     chain.append(msg)
                 }
             }
-
             current = msg["parentUuid"] as? String
         }
 
         chain.reverse()
 
-        // Filter to user/assistant only (system messages like compact_boundary
-        // are used for chain structure but not displayed via io_message)
-        let displayMessages = chain.filter {
-            let type = $0["type"] as? String
-            return type == "user" || type == "assistant"
+        // Filter and format matching VSCode extension's wN6() format
+        return chain.compactMap { msg in
+            let type = msg["type"] as? String
+            guard type == "user" || type == "assistant" else { return nil }
+            return [
+                "type": type as Any,
+                "uuid": msg["uuid"] as Any,
+                "session_id": msg["sessionId"] as Any,
+                "message": msg["message"] as Any,
+                "parent_tool_use_id": NSNull(),
+                "timestamp": msg["timestamp"] as Any,
+            ] as [String: Any]
         }
-
-        if parseFailures > 0 {
-            logger.warning("[Hangar] Session \(sessionId, privacy: .public): \(parseFailures, privacy: .public) lines failed to parse")
-        }
-
-        guard !displayMessages.isEmpty else { return }
-
-        // Serialize all messages into a JSON array for batch dispatch.
-        var allWrapped: [[String: Any]] = displayMessages.map { msg in
-            [
-                "type": "from-extension",
-                "message": [
-                    "type": "io_message",
-                    "channelId": channelId,
-                    "message": msg,
-                    "done": false,
-                ] as [String: Any],
-            ]
-        }
-
-        // Append result message to signal replay complete
-        allWrapped.append([
-            "type": "from-extension",
-            "message": [
-                "type": "io_message",
-                "channelId": channelId,
-                "message": [
-                    "type": "result",
-                    "subtype": "success",
-                    "is_error": false,
-                    "session_id": sessionId,
-                ] as [String: Any],
-                "done": true,
-            ] as [String: Any],
-        ])
-
-        let batchJSON: String
-        do {
-            let batchData = try JSONSerialization.data(withJSONObject: allWrapped)
-            guard let json = String(data: batchData, encoding: .utf8) else {
-                logger.error("[Hangar] Failed to encode history batch as UTF-8")
-                return
-            }
-            batchJSON = json
-        } catch {
-            logger.error("[Hangar] Failed to serialize history batch: \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        // Use dispatchEvent(MessageEvent) instead of postMessage.
-        // postMessage is ASYNC (each handler fires in a separate microtask → N renders).
-        // dispatchEvent is SYNC (all handlers fire inline → React batches → 1 render).
-        let batchJS = """
-        (function(){
-            var msgs = \(batchJSON);
-            for (var i = 0; i < msgs.length; i++) {
-                window.dispatchEvent(new MessageEvent('message', { data: msgs[i] }));
-            }
-        })();
-        """
-        DispatchQueue.main.async { [weak self] in
-            self?.webView?.evaluateJavaScript(batchJS) { _, error in
-                if let error {
-                    logger.error("History replay JS error: \(error.localizedDescription, privacy: .public)")
-                }
-            }
-        }
-
-        logger.info("[Hangar] Replayed \(displayMessages.count, privacy: .public) messages (\(messagesByUuid.count, privacy: .public) parsed) from session \(sessionId, privacy: .public)")
     }
 
     // MARK: - Interrupt / Close

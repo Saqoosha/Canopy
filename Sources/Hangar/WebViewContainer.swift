@@ -187,7 +187,7 @@ struct WebViewContainer: NSViewRepresentable {
         </head>
         <body class="vscode-light">
           <pre id="claude-error"></pre>
-          <div id="root"></div>
+          <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")></div>
           <script src="\(jsFile.absoluteString)" type="module"></script>
         </body>
         </html>
