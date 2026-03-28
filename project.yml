@@ -1,0 +1,24 @@
+name: Hangar
+options:
+  bundleIdPrefix: sh.saqoo
+  deploymentTarget:
+    macOS: "15.0"
+  minimumXcodeGenVersion: "2.42.0"
+settings:
+  SWIFT_VERSION: "6.0"
+  DEVELOPMENT_TEAM: G5G54TCH8W
+targets:
+  Hangar:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/Hangar
+    resources:
+      - path: Sources/Hangar/theme-light.css
+        buildPhase: resources
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: sh.saqoo.Hangar
+      INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+      INFOPLIST_KEY_CFBundleDisplayName: Hangar
+      GENERATE_INFOPLIST_FILE: YES
+      SWIFT_STRICT_CONCURRENCY: complete

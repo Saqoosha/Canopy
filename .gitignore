@@ -1,0 +1,7 @@
+out/
+node_modules/
+*.vsix
+build/
+Hangar.xcodeproj/
+Hangar.app/
+.DS_Store
