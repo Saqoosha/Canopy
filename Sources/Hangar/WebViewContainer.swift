@@ -53,7 +53,6 @@ struct WebViewContainer: NSViewRepresentable {
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.setValue(true, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
         webView.isInspectable = true
 
