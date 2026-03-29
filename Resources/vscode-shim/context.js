@@ -1,0 +1,102 @@
+"use strict";
+
+const fs = require("node:fs");
+const path = require("node:path");
+const { Uri, Disposable } = require("./types.js");
+
+// ---------------------------------------------------------------------------
+// Memento (globalState implementation)
+// ---------------------------------------------------------------------------
+class Memento {
+  constructor(filePath) {
+    this._filePath = filePath;
+    this._data = {};
+    try {
+      const raw = fs.readFileSync(filePath, "utf-8");
+      this._data = JSON.parse(raw);
+    } catch {
+      // File doesn't exist or invalid JSON — start empty
+    }
+  }
+
+  get(key, defaultValue) {
+    if (Object.prototype.hasOwnProperty.call(this._data, key)) {
+      return this._data[key];
+    }
+    return defaultValue;
+  }
+
+  update(key, value) {
+    if (value === undefined) {
+      delete this._data[key];
+    } else {
+      this._data[key] = value;
+    }
+    const dir = path.dirname(this._filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(this._filePath, JSON.stringify(this._data, null, 2), "utf-8");
+  }
+
+  keys() {
+    return Object.keys(this._data);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// createExtensionContext
+// ---------------------------------------------------------------------------
+function createExtensionContext({ extensionPath, storagePath }) {
+  const extensionUri = Uri.file(extensionPath);
+  const globalStateFile = path.join(storagePath, "globalState.json");
+  const globalState = new Memento(globalStateFile);
+
+  let packageJSON = {};
+  try {
+    const raw = fs.readFileSync(path.join(extensionPath, "package.json"), "utf-8");
+    packageJSON = JSON.parse(raw);
+  } catch {
+    // Extension path may not have package.json
+  }
+
+  const noopDisposable = () => new Disposable(() => {});
+
+  return {
+    subscriptions: [],
+    extensionPath,
+    extensionUri,
+    globalState,
+    logUri: Uri.file(path.join(storagePath, "logs")),
+    logPath: path.join(storagePath, "logs"),
+    extension: {
+      id: "anthropic.claude-code",
+      extensionUri,
+      extensionPath,
+      packageJSON,
+    },
+    storageUri: Uri.file(storagePath),
+    globalStorageUri: Uri.file(storagePath),
+    storagePath,
+    globalStoragePath: storagePath,
+    extensionMode: 1, // Production
+    environmentVariableCollection: {
+      persistent: false,
+      description: "",
+      replace() {},
+      append() {},
+      prepend() {},
+      get() { return undefined; },
+      forEach() {},
+      delete() {},
+      clear() {},
+      [Symbol.iterator]() { return [][Symbol.iterator](); },
+    },
+    secrets: {
+      get: async () => undefined,
+      store: async () => {},
+      delete: async () => {},
+      onDidChange: noopDisposable,
+    },
+  };
+}
+
+module.exports = { createExtensionContext, Memento };
