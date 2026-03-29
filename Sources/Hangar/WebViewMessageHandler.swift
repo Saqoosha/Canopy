@@ -127,8 +127,13 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             sendResponse(requestId: requestId, response: ["type": "open_url_response"])
         case "open_file":
             if let filePath = request["filePath"] as? String {
-                let fileURL = URL(fileURLWithPath: filePath)
-                NSWorkspace.shared.open(fileURL)
+                if let content = try? String(contentsOfFile: filePath, encoding: .utf8) {
+                    let fileName = URL(fileURLWithPath: filePath).lastPathComponent
+                    ContentViewer.show(content: content, title: fileName, in: webView)
+                } else {
+                    // Binary or unreadable file — open externally
+                    NSWorkspace.shared.open(URL(fileURLWithPath: filePath))
+                }
             }
             sendResponse(requestId: requestId, response: ["type": "open_file_response"])
         case "open_content":
