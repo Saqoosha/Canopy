@@ -31,7 +31,23 @@ struct HangarApp: App {
                 }
                 .keyboardShortcut("o")
             }
+            CommandGroup(after: .toolbar) {
+                ForEach(1...9, id: \.self) { index in
+                    Button("Select Tab \(index)") {
+                        selectTab(at: index - 1)
+                    }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
+                }
+            }
         }
+    }
+
+    private func selectTab(at index: Int) {
+        guard let window = NSApp.keyWindow,
+              let tabs = window.tabbedWindows,
+              index < tabs.count
+        else { return }
+        tabs[index].makeKeyAndOrderFront(nil)
     }
 
     private func newTab() {
