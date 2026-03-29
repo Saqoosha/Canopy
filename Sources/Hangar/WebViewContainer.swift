@@ -10,7 +10,7 @@ struct WebViewContainer: NSViewRepresentable {
     var permissionMode: PermissionMode = .acceptEdits
     var sessionTitle: String?
 
-    class Coordinator: NSObject, WKNavigationDelegate {
+    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var handler: WebViewMessageHandler?
         var consoleHandler: ConsoleLogHandler?
 
@@ -36,6 +36,21 @@ struct WebViewContainer: NSViewRepresentable {
                 return
             }
             decisionHandler(.allow)
+        }
+
+        // Handle target="_blank" links (markdown links use this)
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if let url = navigationAction.request.url,
+               url.scheme == "http" || url.scheme == "https"
+            {
+                NSWorkspace.shared.open(url)
+            }
+            return nil
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -75,6 +90,7 @@ struct WebViewContainer: NSViewRepresentable {
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.isInspectable = true
 
         handler.webView = webView
