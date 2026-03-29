@@ -148,8 +148,11 @@ function createWindow() {
       return { text: "", show() {}, hide() {}, dispose() {} };
     },
 
-    createOutputChannel(name) {
-      return {
+    createOutputChannel(name, optionsOrLangId) {
+      const isLog =
+        typeof optionsOrLangId === "object" && optionsOrLangId !== null && optionsOrLangId.log === true;
+
+      const base = {
         name,
         append(value) {
           process.stderr.write(value);
@@ -165,6 +168,29 @@ function createWindow() {
           process.stderr.write(value);
         },
       };
+
+      if (isLog) {
+        // LogOutputChannel — adds info/warn/error/debug/trace methods
+        base.logLevel = 2; // Info
+        base.onDidChangeLogLevel = noopEvent;
+        base.trace = (...args) => {
+          process.stderr.write(`[${name}] TRACE: ${args.map(String).join(" ")}\n`);
+        };
+        base.debug = (...args) => {
+          process.stderr.write(`[${name}] DEBUG: ${args.map(String).join(" ")}\n`);
+        };
+        base.info = (...args) => {
+          process.stderr.write(`[${name}] INFO: ${args.map(String).join(" ")}\n`);
+        };
+        base.warn = (...args) => {
+          process.stderr.write(`[${name}] WARN: ${args.map(String).join(" ")}\n`);
+        };
+        base.error = (...args) => {
+          process.stderr.write(`[${name}] ERROR: ${args.map(String).join(" ")}\n`);
+        };
+      }
+
+      return base;
     },
 
     createTerminal(opts) {

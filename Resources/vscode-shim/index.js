@@ -73,10 +73,15 @@ async function main() {
 
   // Resolve extension path (supports glob)
   const extensionPath = resolveExtensionPath(args.extensionPath);
-  const extensionJsPath = path.join(extensionPath, "dist", "extension.js");
+
+  // extension.js can be at root (newer CC builds) or in dist/ (older)
+  let extensionJsPath = path.join(extensionPath, "extension.js");
+  if (!fs.existsSync(extensionJsPath)) {
+    extensionJsPath = path.join(extensionPath, "dist", "extension.js");
+  }
 
   if (!fs.existsSync(extensionJsPath)) {
-    writeStdout({ type: "error", message: `extension.js not found at ${extensionJsPath}` });
+    writeStdout({ type: "error", message: `extension.js not found in ${extensionPath} (checked root and dist/)` });
     process.exit(1);
   }
 
@@ -154,6 +159,7 @@ async function main() {
     const ext = require(extensionJsPath);
     await ext.activate(context);
   } catch (err) {
+    process.stderr.write(`[vscode-shim] Activation error: ${err.stack}\n`);
     writeStdout({ type: "error", message: `Extension activation failed: ${err.message}` });
     process.exit(1);
   } finally {
