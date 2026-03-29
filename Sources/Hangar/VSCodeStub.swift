@@ -12,6 +12,7 @@ enum VSCodeStub {
     window.IS_FULL_EDITOR = true;
     window.IS_SESSION_LIST_ONLY = false;
 
+
     window.acquireVsCodeApi = function() {
         return {
             postMessage: function(msg) {

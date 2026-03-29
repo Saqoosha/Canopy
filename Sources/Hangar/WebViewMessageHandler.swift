@@ -29,6 +29,9 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     /// Cached CLI config from system/init event (slash_commands, agents, tools, etc.)
     private var cachedCliConfig: [String: Any]?
 
+    /// Saved requestId from get_claude_state to re-send when CLI config arrives
+    private var pendingClaudeStateRequestId: String?
+
 
     /// Working directory for Claude sessions
     let workingDirectory: URL
@@ -97,7 +100,19 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         case "init":
             sendResponse(requestId: requestId, response: initResponse())
         case "get_claude_state":
-            sendResponse(requestId: requestId, response: claudeStateResponse())
+            if cachedCliConfig != nil {
+                sendResponse(requestId: requestId, response: claudeStateResponse())
+            } else {
+                // Defer until CLI config arrives, with 60s timeout (hooks can take 30s+)
+                pendingClaudeStateRequestId = requestId
+                logger.info("[Hangar] Deferring get_claude_state (waiting for CLI config)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+                    guard let self, let reqId = self.pendingClaudeStateRequestId else { return }
+                    self.pendingClaudeStateRequestId = nil
+                    self.sendResponse(requestId: reqId, response: self.claudeStateResponse())
+                    logger.info("[Hangar] get_claude_state timeout — sent with defaults")
+                }
+            }
         case "get_asset_uris":
             sendResponse(requestId: requestId, response: assetUrisResponse())
         case "get_current_selection":
@@ -1078,35 +1093,13 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     func cacheCliConfig(_ config: [String: Any]) {
         cachedCliConfig = config
         let commandCount = (config["slash_commands"] as? [Any])?.count ?? 0
-        let agentCount = (config["agents"] as? [Any])?.count ?? 0
-        logger.info("[Hangar] Cached CLI config: \(commandCount, privacy: .public) commands, \(agentCount, privacy: .public) agents")
+        logger.info("[Hangar] Cached CLI config: \(commandCount, privacy: .public) commands")
 
-        // Push updated config to webview via update_state request.
-        // Webview sets this.claudeConfig.value = $.request.config on update_state.
-        let channelId = channels.keys.first ?? ""
-        let config = claudeStateResponse()["config"] as? [String: Any] ?? [:]
-        let state = initResponse()["state"] as? [String: Any] ?? [:]
-        let updateMsg: [String: Any] = [
-            "type": "from-extension",
-            "message": [
-                "type": "request",
-                "channelId": channelId,
-                "requestId": UUID().uuidString,
-                "request": [
-                    "type": "update_state",
-                    "state": state,
-                    "config": config,
-                ] as [String: Any],
-            ] as [String: Any],
-        ]
-        // Debug: verify the message can be serialized
-        if let data = try? JSONSerialization.data(withJSONObject: updateMsg),
-           let _ = String(data: data, encoding: .utf8)
-        {
-            sendToWebview(updateMsg)
-            logger.info("[Hangar] Sent update_state with \((config["commands"] as? [Any])?.count ?? 0, privacy: .public) commands")
-        } else {
-            logger.error("[Hangar] Failed to serialize update_state message")
+        // Fulfill deferred get_claude_state if waiting
+        if let reqId = pendingClaudeStateRequestId {
+            pendingClaudeStateRequestId = nil
+            sendResponse(requestId: reqId, response: claudeStateResponse())
+            logger.info("[Hangar] Fulfilled deferred get_claude_state")
         }
     }
 
@@ -1294,7 +1287,9 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         return [
             "type": "get_claude_state_response",
             "config": [
-                "commands": cli?["slash_commands"] ?? [] as [Any],
+                "commands": (cli?["slash_commands"] as? [String])?.map {
+                    ["name": $0, "description": "", "argumentHint": ""] as [String: Any]
+                } ?? [] as [Any],
                 "models": cli?["tools"] != nil ? (cli?["models"] ?? [] as [Any]) : [
                     [
                         "value": "claude-sonnet-4-6",
