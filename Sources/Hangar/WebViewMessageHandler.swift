@@ -133,12 +133,8 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             sendResponse(requestId: requestId, response: ["type": "open_file_response"])
         case "open_content":
             let content = request["content"] as? String ?? ""
-            let fileName = request["fileName"] as? String ?? "output.txt"
-            let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("Hangar")
-            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-            let tempFile = tempDir.appendingPathComponent(fileName)
-            try? content.write(to: tempFile, atomically: true, encoding: .utf8)
-            NSWorkspace.shared.open(tempFile)
+            let fileName = request["fileName"] as? String ?? "output"
+            ContentViewer.show(content: content, title: fileName)
             sendResponse(requestId: requestId, response: [
                 "type": "open_content_response",
                 "updatedContent": content,
