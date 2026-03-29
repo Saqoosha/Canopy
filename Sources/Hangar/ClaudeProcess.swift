@@ -184,6 +184,8 @@ final class ClaudeProcess: @unchecked Sendable {
                 handleControlRequest(json)
             case "control_cancel_request":
                 handleControlCancelRequest(json)
+            case "control_response":
+                handleControlResponse(json)
             default:
                 logger.warning("Unknown CLI event: \(type, privacy: .public)")
             }
@@ -240,6 +242,27 @@ final class ClaudeProcess: @unchecked Sendable {
                 return
             }
             handler.handleCLIControlRequest(channelId: ch, json: parsed)
+        }
+    }
+
+    /// Forward control_response from CLI (response to outbound control_requests we sent).
+    private func handleControlResponse(_ json: [String: Any]) {
+        guard let jsonString = serializeForMainThread(json) else { return }
+        let ch = channelId
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                logger.warning("ClaudeProcess deallocated before control_response could be forwarded")
+                return
+            }
+            guard let handler = self.messageHandler else {
+                logger.warning("messageHandler is nil for control_response on channel \(ch, privacy: .public)")
+                return
+            }
+            guard let parsed = Self.reparse(jsonString) else {
+                logger.error("Failed to re-parse control_response JSON on main thread")
+                return
+            }
+            handler.handleCLIControlResponse(channelId: ch, json: parsed)
         }
     }
 

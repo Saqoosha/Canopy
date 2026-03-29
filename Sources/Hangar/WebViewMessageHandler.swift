@@ -10,9 +10,13 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     /// Active Claude CLI processes keyed by channelId
     private var channels: [String: ClaudeProcess] = [:]
 
-    /// Pending control requests from CLI awaiting webview response.
+    /// Pending inbound control requests from CLI awaiting webview response (e.g. permission prompts).
     /// Key: webview requestId, Value: (channelId, CLI request_id, tool_use_id)
     private var pendingControlRequests: [String: (channelId: String, cliRequestId: String, toolUseId: String)] = [:]
+
+    /// Pending outbound control requests sent TO the CLI awaiting control_response.
+    /// Key: CLI request_id, Value: (channelId, webview requestId, response transform function)
+    private var pendingOutboundRequests: [String: (channelId: String, webviewRequestId: String, transform: ([String: Any]) -> [String: Any])] = [:]
 
     /// Cached auth status from `claude auth status`
     private var cachedAuth: [String: Any]?
@@ -123,8 +127,23 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             }
             sendResponse(requestId: requestId, response: ["type": "open_help_response"])
         case "set_model":
-            sendResponse(requestId: requestId, response: ["type": "set_model_response"])
+            if let model = request["model"] as? [String: Any],
+               let modelValue = model["value"] as? String
+            {
+                forwardToCLI(
+                    channelId: message["channelId"] as? String,
+                    webviewRequestId: requestId,
+                    subtype: "set_model",
+                    fields: ["model": modelValue],
+                    responseType: "set_model_response"
+                )
+            } else {
+                logger.warning("[Hangar] set_model: malformed request, missing model.value")
+                sendResponse(requestId: requestId, response: ["type": "set_model_response"])
+            }
         case "set_thinking_level":
+            // Thinking level is handled via CLI settings, not a direct control_request.
+            // The CLI reads this from its own config. Just acknowledge.
             sendResponse(requestId: requestId, response: ["type": "set_thinking_level_response"])
         case "set_permission_mode":
             if let modeStr = request["mode"] as? String,
@@ -157,20 +176,105 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         case "log_event":
             sendResponse(requestId: requestId, response: ["type": "log_event_response"])
         case "get_mcp_servers":
-            sendResponse(requestId: requestId, response: [
-                "type": "get_mcp_servers_response",
-                "servers": [] as [Any],
-            ])
+            forwardToCLI(
+                channelId: message["channelId"] as? String,
+                webviewRequestId: requestId,
+                subtype: "mcp_status",
+                responseType: "get_mcp_servers_response",
+                transform: { response in
+                    ["type": "get_mcp_servers_response", "mcpServers": response["mcpServers"] ?? [] as [Any]]
+                },
+                fallback: ["type": "get_mcp_servers_response", "mcpServers": [] as [Any]]
+            )
+        case "set_mcp_server_enabled":
+            guard let serverName = request["serverName"] as? String else {
+                sendResponse(requestId: requestId, response: ["type": "set_mcp_server_enabled_response"])
+                break
+            }
+            forwardToCLI(
+                channelId: message["channelId"] as? String,
+                webviewRequestId: requestId,
+                subtype: "mcp_toggle",
+                fields: ["serverName": serverName, "enabled": request["enabled"] as? Bool ?? true],
+                responseType: "set_mcp_server_enabled_response"
+            )
+        case "reconnect_mcp_server":
+            guard let serverName = request["serverName"] as? String else {
+                sendResponse(requestId: requestId, response: ["type": "reconnect_mcp_server_response"])
+                break
+            }
+            forwardToCLI(
+                channelId: message["channelId"] as? String,
+                webviewRequestId: requestId,
+                subtype: "mcp_reconnect",
+                fields: ["serverName": serverName],
+                responseType: "reconnect_mcp_server_response"
+            )
+        case "authenticate_mcp_server":
+            guard let serverName = request["serverName"] as? String else {
+                sendResponse(requestId: requestId, response: ["type": "authenticate_mcp_server_response"])
+                break
+            }
+            forwardToCLI(
+                channelId: message["channelId"] as? String,
+                webviewRequestId: requestId,
+                subtype: "mcp_authenticate",
+                fields: ["serverName": serverName],
+                responseType: "authenticate_mcp_server_response"
+            )
+        case "clear_mcp_server_auth":
+            guard let serverName = request["serverName"] as? String else {
+                sendResponse(requestId: requestId, response: ["type": "clear_mcp_server_auth_response"])
+                break
+            }
+            forwardToCLI(
+                channelId: message["channelId"] as? String,
+                webviewRequestId: requestId,
+                subtype: "mcp_clear_auth",
+                fields: ["serverName": serverName],
+                responseType: "clear_mcp_server_auth_response"
+            )
+        case "submit_mcp_oauth_callback_url":
+            guard let serverName = request["serverName"] as? String,
+                  let callbackUrl = request["callbackUrl"] as? String
+            else {
+                sendResponse(requestId: requestId, response: ["type": "submit_mcp_oauth_callback_url_response"])
+                break
+            }
+            forwardToCLI(
+                channelId: message["channelId"] as? String,
+                webviewRequestId: requestId,
+                subtype: "mcp_oauth_callback_url",
+                fields: ["serverName": serverName, "callbackUrl": callbackUrl],
+                responseType: "submit_mcp_oauth_callback_url_response"
+            )
         case "list_plugins":
-            sendResponse(requestId: requestId, response: [
-                "type": "list_plugins_response",
-                "plugins": [] as [Any],
-            ])
+            forwardToCLI(
+                channelId: message["channelId"] as? String,
+                webviewRequestId: requestId,
+                subtype: "reload_plugins",
+                responseType: "list_plugins_response",
+                transform: { response in
+                    [
+                        "type": "list_plugins_response",
+                        "installed": response["installed"] ?? [] as [Any],
+                        "available": response["available"] ?? [] as [Any],
+                    ]
+                },
+                fallback: ["type": "list_plugins_response", "installed": [] as [Any], "available": [] as [Any]]
+            )
         case "generate_session_title":
-            sendResponse(requestId: requestId, response: [
-                "type": "generate_session_title_response",
-                "title": "Chat",
-            ])
+            forwardToCLI(
+                channelId: message["channelId"] as? String ?? request["channelId"] as? String,
+                webviewRequestId: requestId,
+                subtype: "generate_session_title",
+                fields: ["description": request["description"] as Any, "persist": false],
+                responseType: "generate_session_title_response",
+                transform: { response in
+                    ["type": "generate_session_title_response", "title": response["title"] ?? "Chat"]
+                },
+                fallback: ["type": "generate_session_title_response", "title": "Chat"]
+            )
         case "rename_session", "rename_tab", "update_session_state",
              "dismiss_terminal_banner", "dismiss_review_upsell_banner",
              "dismiss_onboarding", "apply_settings", "fork_conversation":
@@ -203,6 +307,8 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         switch responseType {
         case "tool_permission_response":
             handlePermissionResponse(requestId: requestId, response: response)
+        case "elicitation_response":
+            handleElicitationResponse(requestId: requestId, response: response)
         default:
             logger.info("[Hangar] Unhandled response type: \(responseType, privacy: .public)")
         }
@@ -292,6 +398,29 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             logger.info("[Hangar] Forwarding permission request: \(toolName) (id: \(requestId, privacy: .public))")
             sendToWebview(webviewRequest)
 
+        case "elicitation":
+            // Forward elicitation to webview for user input
+            pendingControlRequests[requestId] = (channelId: channelId, cliRequestId: requestId, toolUseId: "")
+
+            sendToWebview([
+                "type": "from-extension",
+                "message": [
+                    "type": "request",
+                    "channelId": channelId,
+                    "requestId": requestId,
+                    "request": [
+                        "type": "elicitation_request",
+                        "serverName": request["mcp_server_name"] as Any,
+                        "message": request["message"] as Any,
+                        "mode": request["mode"] as Any,
+                        "url": request["url"] as Any,
+                        "elicitationId": request["elicitation_id"] as Any,
+                        "requestedSchema": request["requested_schema"] as Any,
+                    ] as [String: Any],
+                ] as [String: Any],
+            ])
+            logger.info("[Hangar] Forwarding elicitation request (id: \(requestId, privacy: .public))")
+
         default:
             logger.info("[Hangar] Unhandled control_request subtype: \(subtype, privacy: .public)")
             // Send error response back to CLI so it doesn't hang
@@ -328,14 +457,160 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         }
     }
 
-    /// Remove all pending control requests for a given channel.
+    /// Handle the webview's elicitation response and send control_response back to CLI.
+    private func handleElicitationResponse(requestId: String, response: [String: Any]) {
+        guard let pending = pendingControlRequests.removeValue(forKey: requestId) else {
+            logger.warning("[Hangar] No pending elicitation for id: \(requestId, privacy: .public)")
+            return
+        }
+        guard let process = channels[pending.channelId] else {
+            logger.warning("[Hangar] No process for elicitation channel: \(pending.channelId, privacy: .public)")
+            return
+        }
+
+        let result = response["result"] ?? [String: Any]()
+        process.sendControlResponse([
+            "type": "control_response",
+            "response": [
+                "subtype": "success",
+                "request_id": pending.cliRequestId,
+                "response": result,
+            ] as [String: Any],
+        ])
+        logger.info("[Hangar] Elicitation response sent for \(pending.cliRequestId, privacy: .public)")
+    }
+
+    // MARK: - Outbound Control Requests (Hangar → CLI)
+
+    /// Send a control_request to the CLI and route the response back to webview.
+    /// - Parameters:
+    ///   - channelId: Optional channelId; uses first active channel if nil
+    ///   - webviewRequestId: The webview request to respond to when CLI answers
+    ///   - subtype: CLI control_request subtype
+    ///   - fields: Additional fields for the request
+    ///   - responseType: Default response type name
+    ///   - transform: Optional transform for CLI response → webview response
+    ///   - fallback: Response to send if no active channel exists
+    ///   - onResponse: Optional callback instead of webview response
+    private func forwardToCLI(
+        channelId: String? = nil,
+        webviewRequestId: String? = nil,
+        subtype: String,
+        fields: [String: Any] = [:],
+        responseType: String = "",
+        transform: (([String: Any]) -> [String: Any])? = nil,
+        fallback: [String: Any]? = nil,
+        onResponse: (([String: Any]) -> Void)? = nil
+    ) {
+        // Find the target channel
+        let targetChannelId = channelId ?? channels.keys.first
+        guard let chId = targetChannelId, let process = channels[chId] else {
+            logger.warning("[Hangar] No active channel for outbound \(subtype, privacy: .public)")
+            if let reqId = webviewRequestId {
+                sendResponse(requestId: reqId, response: fallback ?? ["type": responseType])
+            }
+            return
+        }
+
+        // Generate a unique request_id for the CLI
+        let cliRequestId = UUID().uuidString
+
+        // Store pending outbound request
+        if let reqId = webviewRequestId {
+            pendingOutboundRequests[cliRequestId] = (
+                channelId: chId,
+                webviewRequestId: reqId,
+                transform: transform ?? { response in
+                    var resp = response
+                    resp["type"] = responseType
+                    return resp
+                }
+            )
+        } else if let callback = onResponse {
+            pendingOutboundRequests[cliRequestId] = (
+                channelId: chId,
+                webviewRequestId: "",
+                transform: { response in
+                    callback(response)
+                    return [:]  // no webview response needed
+                }
+            )
+        }
+
+        // Build and send control_request to CLI
+        var request: [String: Any] = ["subtype": subtype]
+        for (key, value) in fields {
+            request[key] = value
+        }
+
+        let controlRequest: [String: Any] = [
+            "type": "control_request",
+            "request_id": cliRequestId,
+            "request": request,
+        ]
+
+        logger.info("[Hangar] Sending outbound control_request: \(subtype) (id: \(cliRequestId, privacy: .public))")
+        process.sendControlResponse(controlRequest)  // reuse writeJSON via sendControlResponse
+    }
+
+    /// Handle a control_response from the CLI (response to our outbound requests).
+    func handleCLIControlResponse(channelId: String, json: [String: Any]) {
+        guard let response = json["response"] as? [String: Any],
+              let requestId = response["request_id"] as? String
+        else {
+            logger.warning("[Hangar] Invalid control_response: missing response or request_id")
+            return
+        }
+
+        guard let pending = pendingOutboundRequests.removeValue(forKey: requestId) else {
+            logger.info("[Hangar] No pending outbound request for: \(requestId, privacy: .public)")
+            return
+        }
+
+        let subtype = response["subtype"] as? String ?? "unknown"
+
+        if subtype == "success" {
+            let innerResponse = response["response"] as? [String: Any] ?? [:]
+            let transformed = pending.transform(innerResponse)
+            if !pending.webviewRequestId.isEmpty && !transformed.isEmpty {
+                sendResponse(requestId: pending.webviewRequestId, response: transformed)
+            }
+            logger.info("[Hangar] Outbound control_response success for \(requestId, privacy: .public)")
+        } else {
+            let error = response["error"] as? String ?? "Unknown error"
+            logger.error("[Hangar] Outbound control_response error: \(error, privacy: .public)")
+            if !pending.webviewRequestId.isEmpty {
+                sendResponse(requestId: pending.webviewRequestId, response: [
+                    "type": "error",
+                    "error": error,
+                ])
+            }
+        }
+    }
+
+    /// Remove all pending control requests (inbound and outbound) for a given channel.
     private func clearPendingRequests(for channelId: String) {
-        let stale = pendingControlRequests.filter { $0.value.channelId == channelId }
-        for (requestId, _) in stale {
+        // Clear inbound requests (CLI → webview)
+        let staleInbound = pendingControlRequests.filter { $0.value.channelId == channelId }
+        for (requestId, _) in staleInbound {
             pendingControlRequests.removeValue(forKey: requestId)
         }
-        if !stale.isEmpty {
-            logger.info("[Hangar] Cleared \(stale.count, privacy: .public) pending control requests for channel \(channelId, privacy: .public)")
+
+        // Clear outbound requests (webview → CLI) — send fallback responses so webview doesn't hang
+        let staleOutbound = pendingOutboundRequests.filter { $0.value.channelId == channelId }
+        for (cliRequestId, pending) in staleOutbound {
+            pendingOutboundRequests.removeValue(forKey: cliRequestId)
+            if !pending.webviewRequestId.isEmpty {
+                sendResponse(requestId: pending.webviewRequestId, response: [
+                    "type": "error",
+                    "error": "CLI process exited",
+                ])
+            }
+        }
+
+        let total = staleInbound.count + staleOutbound.count
+        if total > 0 {
+            logger.info("[Hangar] Cleared \(total, privacy: .public) pending requests for channel \(channelId, privacy: .public)")
         }
     }
 
