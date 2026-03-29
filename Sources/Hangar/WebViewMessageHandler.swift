@@ -134,7 +134,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         case "open_content":
             let content = request["content"] as? String ?? ""
             let fileName = request["fileName"] as? String ?? "output"
-            ContentViewer.show(content: content, title: fileName)
+            ContentViewer.show(content: content, title: fileName, in: webView)
             sendResponse(requestId: requestId, response: [
                 "type": "open_content_response",
                 "updatedContent": content,
