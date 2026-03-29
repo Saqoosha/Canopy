@@ -10,6 +10,10 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     /// Active Claude CLI processes keyed by channelId
     private var channels: [String: ClaudeProcess] = [:]
 
+    /// Pending control requests from CLI awaiting webview response.
+    /// Key: webview requestId, Value: (channelId, CLI request_id, tool_use_id)
+    private var pendingControlRequests: [String: (channelId: String, cliRequestId: String, toolUseId: String)] = [:]
+
     /// Cached auth status from `claude auth status`
     private var cachedAuth: [String: Any]?
 
@@ -44,6 +48,8 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         switch type {
         case "request":
             handleRequest(message)
+        case "response":
+            handleResponse(message)
         case "launch_claude":
             handleLaunchClaude(message)
         case "io_message":
@@ -128,6 +134,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 logger.info("[Hangar] Permission mode set to: \(modeStr, privacy: .public)")
                 // Restart active CLI processes with the new permission mode
                 for (channelId, oldProcess) in channels {
+                    clearPendingRequests(for: channelId)
                     let cwd = oldProcess.cwd
                     let sessionId = oldProcess.sessionId
                     oldProcess.terminate()
@@ -177,6 +184,158 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 "type": "error",
                 "error": "Not implemented: \(requestType)",
             ])
+        }
+    }
+
+    // MARK: - Response (from webview → host, e.g. permission decisions)
+
+    private func handleResponse(_ message: [String: Any]) {
+        guard let requestId = message["requestId"] as? String,
+              let response = message["response"] as? [String: Any],
+              let responseType = response["type"] as? String
+        else {
+            logger.warning("[Hangar] Malformed response from webview: missing requestId, response, or type")
+            return
+        }
+
+        logger.info("[Hangar] Response: \(responseType) (id: \(requestId, privacy: .public))")
+
+        switch responseType {
+        case "tool_permission_response":
+            handlePermissionResponse(requestId: requestId, response: response)
+        default:
+            logger.info("[Hangar] Unhandled response type: \(responseType, privacy: .public)")
+        }
+    }
+
+    /// Handle the webview's permission decision and send control_response back to CLI.
+    private func handlePermissionResponse(requestId: String, response: [String: Any]) {
+        guard let pending = pendingControlRequests.removeValue(forKey: requestId) else {
+            logger.warning("[Hangar] No pending control request for id: \(requestId, privacy: .public)")
+            return
+        }
+        guard let process = channels[pending.channelId] else {
+            logger.warning("[Hangar] No process for channel: \(pending.channelId, privacy: .public)")
+            return
+        }
+
+        // Extract the result from webview response
+        var result = response["result"] as? [String: Any] ?? [:]
+        result["toolUseID"] = pending.toolUseId
+
+        let controlResponse: [String: Any] = [
+            "type": "control_response",
+            "response": [
+                "subtype": "success",
+                "request_id": pending.cliRequestId,
+                "response": result,
+            ] as [String: Any],
+        ]
+
+        let behavior = result["behavior"] as? String ?? "unknown"
+        logger.info("[Hangar] Permission response: \(behavior) for \(pending.cliRequestId, privacy: .public)")
+
+        process.sendControlResponse(controlResponse)
+    }
+
+    // MARK: - Control Request (from CLI → webview, e.g. permission prompts)
+
+    /// Handle a control_request from the CLI process and forward to webview.
+    func handleCLIControlRequest(channelId: String, json: [String: Any]) {
+        guard let requestId = json["request_id"] as? String,
+              let request = json["request"] as? [String: Any],
+              let subtype = request["subtype"] as? String
+        else {
+            logger.warning("[Hangar] Invalid control_request: missing fields")
+            // Try to send error response to prevent CLI hang
+            if let reqId = json["request_id"] as? String,
+               let process = channels[channelId]
+            {
+                process.sendControlResponse([
+                    "type": "control_response",
+                    "response": [
+                        "subtype": "error",
+                        "request_id": reqId,
+                        "error": "Invalid control_request: missing fields",
+                    ] as [String: Any],
+                ])
+            }
+            return
+        }
+
+        switch subtype {
+        case "can_use_tool":
+            let toolName = request["tool_name"] as? String ?? ""
+            let inputs = request["input"] ?? [String: Any]()
+            let suggestions = request["permission_suggestions"]
+            let toolUseId = request["tool_use_id"] as? String ?? ""
+
+            // Store pending request for routing response back to CLI
+            pendingControlRequests[requestId] = (channelId: channelId, cliRequestId: requestId, toolUseId: toolUseId)
+
+            // Forward to webview as tool_permission_request
+            let webviewRequest: [String: Any] = [
+                "type": "from-extension",
+                "message": [
+                    "type": "request",
+                    "channelId": channelId,
+                    "requestId": requestId,
+                    "request": [
+                        "type": "tool_permission_request",
+                        "toolName": toolName,
+                        "inputs": inputs,
+                        "suggestions": suggestions ?? NSNull(),
+                    ] as [String: Any],
+                ] as [String: Any],
+            ]
+
+            logger.info("[Hangar] Forwarding permission request: \(toolName) (id: \(requestId, privacy: .public))")
+            sendToWebview(webviewRequest)
+
+        default:
+            logger.info("[Hangar] Unhandled control_request subtype: \(subtype, privacy: .public)")
+            // Send error response back to CLI so it doesn't hang
+            if let process = channels[channelId] {
+                process.sendControlResponse([
+                    "type": "control_response",
+                    "response": [
+                        "subtype": "error",
+                        "request_id": requestId,
+                        "error": "Unsupported control request: \(subtype)",
+                    ] as [String: Any],
+                ])
+            }
+        }
+    }
+
+    /// Handle a control_cancel_request from the CLI — dismiss the pending permission dialog.
+    func handleCLIControlCancel(channelId: String, json: [String: Any]) {
+        guard let requestId = json["request_id"] as? String else {
+            logger.warning("[Hangar] control_cancel_request missing request_id")
+            return
+        }
+
+        if pendingControlRequests.removeValue(forKey: requestId) != nil {
+            // Tell webview to dismiss the permission dialog
+            sendToWebview([
+                "type": "from-extension",
+                "message": [
+                    "type": "cancel_request",
+                    "targetRequestId": requestId,
+                ] as [String: Any],
+            ])
+            logger.info("[Hangar] Cancelled permission request: \(requestId, privacy: .public)")
+        }
+    }
+
+    /// Remove all pending control requests for a given channel.
+    private func clearPendingRequests(for channelId: String) {
+        let stale = pendingControlRequests.filter { $0.value.channelId == channelId }
+        for (requestId, _) in stale {
+            pendingControlRequests.removeValue(forKey: requestId)
+        }
+        if !stale.isEmpty {
+            logger.info("[Hangar] Cleared \(stale.count, privacy: .public) pending control requests for channel \(channelId, privacy: .public)")
         }
     }
 
@@ -428,6 +587,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         logger.info("[Hangar] close_channel: channel=\(channelId, privacy: .public)")
         channels[channelId]?.terminate()
         channels.removeValue(forKey: channelId)
+        clearPendingRequests(for: channelId)
     }
 
     /// Terminate all running CLI processes (called during webview teardown).
@@ -443,6 +603,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     func handleCLIProcessExited(channelId: String) {
         logger.info("[Hangar] CLI process exited for channel \(channelId, privacy: .public)")
         channels.removeValue(forKey: channelId)
+        clearPendingRequests(for: channelId)
     }
 
     // MARK: - Auth

@@ -43,6 +43,7 @@ final class ClaudeProcess: @unchecked Sendable {
             args += ["--dangerously-skip-permissions"]
         } else {
             args += ["--permission-mode", permissionMode]
+            args += ["--permission-prompt-tool", "stdio"]
         }
 
         if let resumeId = resumeSessionId {
@@ -179,6 +180,10 @@ final class ClaudeProcess: @unchecked Sendable {
                 sendIOMessage(json, done: true)
             case "rate_limit_event":
                 sendIOMessage(json, done: false)
+            case "control_request":
+                handleControlRequest(json)
+            case "control_cancel_request":
+                handleControlCancelRequest(json)
             default:
                 logger.warning("Unknown CLI event: \(type, privacy: .public)")
             }
@@ -196,6 +201,63 @@ final class ClaudeProcess: @unchecked Sendable {
             let model = json["model"] as? String ?? "?"
             logger.info("[CLI] Init: model=\(model, privacy: .public)")
         }
+    }
+
+    /// Serialize JSON to a Sendable String for crossing thread boundaries.
+    private func serializeForMainThread(_ json: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: json),
+              let jsonString = String(data: data, encoding: .utf8)
+        else {
+            logger.error("Failed to serialize control message for channel \(self.channelId, privacy: .public)")
+            return nil
+        }
+        return jsonString
+    }
+
+    /// Re-parse serialized JSON on the main thread.
+    private static func reparse(_ jsonString: String) -> [String: Any]? {
+        guard let data = jsonString.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return parsed
+    }
+
+    /// Forward control_request from CLI to WebViewMessageHandler for permission dialogs.
+    private func handleControlRequest(_ json: [String: Any]) {
+        guard let jsonString = serializeForMainThread(json) else { return }
+        let ch = channelId
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                logger.warning("ClaudeProcess deallocated before control_request could be forwarded")
+                return
+            }
+            guard let handler = self.messageHandler else {
+                logger.warning("messageHandler is nil for control_request on channel \(ch, privacy: .public)")
+                return
+            }
+            guard let parsed = Self.reparse(jsonString) else {
+                logger.error("Failed to re-parse control_request JSON on main thread")
+                return
+            }
+            handler.handleCLIControlRequest(channelId: ch, json: parsed)
+        }
+    }
+
+    /// Forward control_cancel_request to dismiss pending permission dialogs.
+    private func handleControlCancelRequest(_ json: [String: Any]) {
+        guard let jsonString = serializeForMainThread(json) else { return }
+        let ch = channelId
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard let handler = self.messageHandler else { return }
+            guard let parsed = Self.reparse(jsonString) else { return }
+            handler.handleCLIControlCancel(channelId: ch, json: parsed)
+        }
+    }
+
+    /// Send a control_response back to the CLI via stdin.
+    func sendControlResponse(_ response: [String: Any]) {
+        writeJSON(response)
     }
 
     private func sendIOMessage(_ message: [String: Any], done: Bool) {
