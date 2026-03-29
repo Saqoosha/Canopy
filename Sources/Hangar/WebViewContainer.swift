@@ -194,6 +194,10 @@ struct WebViewContainer: NSViewRepresentable {
             [class*="toolNameTextSecondary_"] {
               color: var(--app-secondary-foreground) !important;
             }
+            /* Fix diff truncation gradient: hardcoded dark #1e1e1e → light */
+            [class*="truncationGradient_"] {
+              background: linear-gradient(transparent 0%, var(--vscode-editor-background, #ffffff) 100%) !important;
+            }
           </style>
         </head>
         <body class="vscode-light">

@@ -26,13 +26,30 @@ enum PermissionMode: String, CaseIterable {
 
 @Observable
 final class AppState {
+    private static let permissionModeKey = "lastPermissionMode"
+
     private(set) var screen: AppScreen = .launcher
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
-    var permissionMode: PermissionMode = .acceptEdits
+    var permissionMode: PermissionMode {
+        get { _permissionMode }
+        set {
+            _permissionMode = newValue
+            UserDefaults.standard.set(newValue.rawValue, forKey: Self.permissionModeKey)
+        }
+    }
+    private var _permissionMode: PermissionMode = .acceptEdits
     var resumeSessionId: String?
     /// Incremented to force SwiftUI to recreate the WebViewContainer (via .id() modifier),
     /// ensuring a fresh WKWebView for each session.
     private(set) var webviewReloadToken = 0
+
+    init() {
+        if let saved = UserDefaults.standard.string(forKey: Self.permissionModeKey),
+           let mode = PermissionMode(rawValue: saved)
+        {
+            _permissionMode = mode
+        }
+    }
 
     func launchSession(directory: URL, resumeSessionId: String? = nil) {
         RecentDirectories.add(directory)

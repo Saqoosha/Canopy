@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 import WebKit
 import os.log
 
@@ -165,8 +166,13 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                         messageHandler: self
                     ) {
                         channels[channelId] = newProcess
-                        try? newProcess.start()
-                        logger.info("[Hangar] Restarted CLI for channel \(channelId, privacy: .public) with mode \(modeStr, privacy: .public)")
+                        do {
+                            try newProcess.start()
+                            logger.info("[Hangar] Restarted CLI for channel \(channelId, privacy: .public) with mode \(modeStr, privacy: .public)")
+                        } catch {
+                            logger.error("[Hangar] Failed to restart CLI: \(error.localizedDescription, privacy: .public)")
+                            channels.removeValue(forKey: channelId)
+                        }
                     }
                 }
             } else {
@@ -275,10 +281,19 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 },
                 fallback: ["type": "generate_session_title_response", "title": "Chat"]
             )
-        case "rename_session", "rename_tab", "update_session_state",
+        case "rename_tab":
+            if let title = request["title"] as? String, !title.isEmpty {
+                updateWindowTitle(title)
+            }
+            sendResponse(requestId: requestId, response: ["type": "rename_tab_response"])
+        case "update_session_state":
+            if let title = request["title"] as? String, !title.isEmpty {
+                updateWindowTitle(title)
+            }
+            sendResponse(requestId: requestId, response: ["type": "update_session_state_response"])
+        case "rename_session",
              "dismiss_terminal_banner", "dismiss_review_upsell_banner",
              "dismiss_onboarding", "apply_settings", "fork_conversation":
-            // Acknowledge but no-op
             sendResponse(requestId: requestId, response: [
                 "type": "\(requestType)_response",
             ])
@@ -397,6 +412,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
 
             logger.info("[Hangar] Forwarding permission request: \(toolName) (id: \(requestId, privacy: .public))")
             sendToWebview(webviewRequest)
+            postPermissionNotification(toolName: toolName, request: request)
 
         case "elicitation":
             // Forward elicitation to webview for user input
@@ -867,6 +883,8 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
 
     /// Terminate all running CLI processes (called during webview teardown).
     func terminateAll() {
+        stopSpinner()
+        updateWorkingStatus(nil)
         for (channelId, process) in channels {
             logger.info("[Hangar] Terminating process for channel \(channelId, privacy: .public)")
             process.terminate()
@@ -879,6 +897,117 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         logger.info("[Hangar] CLI process exited for channel \(channelId, privacy: .public)")
         channels.removeValue(forKey: channelId)
         clearPendingRequests(for: channelId)
+        updateWorkingStatus(nil)
+    }
+
+    // MARK: - Window Title & Spinner
+
+    private var sessionTitle: String = ""
+    private var isWorking = false
+    private var spinnerTimer: Timer?
+    private var spinnerIndex = 0
+    private static let spinnerFrames = ["·", "✻", "✽", "✶", "✳", "✢"]
+    private static let idleIcon = "✳"
+
+    private func updateWindowTitle(_ title: String) {
+        sessionTitle = title
+        refreshWindowTitle()
+    }
+
+    /// Called by ClaudeProcess when working state changes.
+    func updateWorkingStatus(_ status: String?) {
+        let wasWorking = isWorking
+        isWorking = status != nil
+        webView?.window?.subtitle = status ?? ""
+
+        if isWorking && !wasWorking {
+            startSpinner()
+        } else if !isWorking && wasWorking {
+            stopSpinner()
+            postTaskCompletedNotification()
+        }
+        refreshWindowTitle()
+    }
+
+    private static let spinnerColor = NSColor(red: 0.851, green: 0.471, blue: 0.345, alpha: 1.0) // #D97858
+
+    private func refreshWindowTitle() {
+        guard let window = webView?.window else { return }
+        let dirName = workingDirectory.lastPathComponent
+        let icon = isWorking ? Self.spinnerFrames[spinnerIndex] : Self.idleIcon
+        let rest = sessionTitle.isEmpty ? dirName : "\(dirName) — \(sessionTitle)"
+        let plainTitle = "\(icon) \(rest)"
+        window.title = plainTitle
+
+        // Colored icon in tab title
+        let attributed = NSMutableAttributedString()
+        let iconAttrs: [NSAttributedString.Key: Any] = isWorking
+            ? [.foregroundColor: Self.spinnerColor]
+            : [.foregroundColor: NSColor.secondaryLabelColor]
+        attributed.append(NSAttributedString(string: "\(icon) ", attributes: iconAttrs))
+        attributed.append(NSAttributedString(string: rest))
+        window.tab.attributedTitle = attributed
+    }
+
+    private func startSpinner() {
+        spinnerTimer?.invalidate()
+        spinnerIndex = 0
+        spinnerTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.spinnerIndex = (self.spinnerIndex + 1) % Self.spinnerFrames.count
+            self.refreshWindowTitle()
+        }
+    }
+
+    private func stopSpinner() {
+        spinnerTimer?.invalidate()
+        spinnerTimer = nil
+        spinnerIndex = 0
+    }
+
+    // MARK: - Notifications
+
+    /// Post a macOS notification when a task completes and the app is not active.
+    private func postTaskCompletedNotification() {
+        guard !NSApp.isActive else { return }
+
+        let dirName = workingDirectory.lastPathComponent
+        let content = UNMutableNotificationContent()
+        content.title = "✅ Task Completed"
+        content.body = sessionTitle.isEmpty ? dirName : "\(dirName) — \(sessionTitle)"
+        content.sound = .default
+
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req) { error in
+            if let error { logger.error("Notification error: \(error.localizedDescription, privacy: .public)") }
+        }
+    }
+
+    /// Post a macOS notification when a permission prompt arrives and the app is not active.
+    private func postPermissionNotification(toolName: String, request: [String: Any]) {
+        guard !NSApp.isActive else { return }
+
+        let title = request["title"] as? String ?? "Permission requested"
+        let displayName = request["display_name"] as? String ?? toolName
+
+        let content = UNMutableNotificationContent()
+        content.title = "Hangar"
+        content.body = "\(displayName): \(title)"
+        content.sound = .default
+
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req) { error in
+            if let error { logger.error("Notification error: \(error.localizedDescription, privacy: .public)") }
+        }
+    }
+
+    /// Request notification permission (call once at startup).
+    static func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error {
+                logger.error("Notification permission error: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     // MARK: - Auth

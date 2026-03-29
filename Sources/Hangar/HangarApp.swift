@@ -85,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
+        WebViewMessageHandler.requestNotificationPermission()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(windowDidBecomeMain(_:)),
@@ -132,9 +133,8 @@ struct TabContentView: View {
                 .id(appState.webviewReloadToken)
             }
         }
-        .windowTitle(appState.screen == .session
-            ? appState.workingDirectory.lastPathComponent
-            : "Hangar")
+        // Only set title for launcher; session title is managed by WebViewMessageHandler
+        .windowTitle(appState.screen == .launcher ? "Hangar" : "")
         .onAppear { ActiveTabState.shared.current = appState }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)) { _ in
             ActiveTabState.shared.current = appState

@@ -101,6 +101,7 @@ final class ClaudeProcess: @unchecked Sendable {
     }
 
     func sendUserMessage(_ text: String) {
+        setWorkingStatus("Thinking...")
         writeJSON([
             "type": "user",
             "message": [
@@ -171,6 +172,7 @@ final class ClaudeProcess: @unchecked Sendable {
                 handleSystemEvent(json)
             case "stream_event":
                 sendIOMessage(json, done: false)
+                updateStatus(from: json)
             case "assistant":
                 sendIOMessage(json, done: false)
             case "user":
@@ -178,6 +180,7 @@ final class ClaudeProcess: @unchecked Sendable {
                 sendIOMessage(json, done: false)
             case "result":
                 sendIOMessage(json, done: true)
+                setWorkingStatus(nil)
             case "rate_limit_event":
                 sendIOMessage(json, done: false)
             case "control_request":
@@ -202,6 +205,39 @@ final class ClaudeProcess: @unchecked Sendable {
         if subtype == "init" {
             let model = json["model"] as? String ?? "?"
             logger.info("[CLI] Init: model=\(model, privacy: .public)")
+        }
+    }
+
+    /// Extract working status from stream_event (thinking, writing, tool use).
+    private func updateStatus(from json: [String: Any]) {
+        guard let event = json["event"] as? [String: Any],
+              let eventType = event["type"] as? String
+        else { return }
+
+        switch eventType {
+        case "content_block_start":
+            if let block = event["content_block"] as? [String: Any],
+               let blockType = block["type"] as? String
+            {
+                switch blockType {
+                case "thinking": setWorkingStatus("Thinking...")
+                case "text": setWorkingStatus("Writing...")
+                case "tool_use":
+                    let toolName = block["name"] as? String ?? "tool"
+                    setWorkingStatus("Using \(toolName)...")
+                default: break
+                }
+            }
+        // message_stop: don't clear here — wait for "result" event (definitive end-of-turn)
+        default:
+            break
+        }
+    }
+
+    private func setWorkingStatus(_ status: String?) {
+        let s = status
+        DispatchQueue.main.async { [weak self] in
+            self?.messageHandler?.updateWorkingStatus(s)
         }
     }
 

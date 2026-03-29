@@ -22,6 +22,36 @@ enum VSCodeStub {
         };
     };
 
+    // Fix Monaco diff editor: CC extension hardcodes theme:"vs-dark" in createDiffEditor.
+    // Monaco only exports to globalThis.monaco when MonacoEnvironment.globalAPI is true.
+    // We set that flag, then redefine "vs-dark" as a light theme.
+    globalThis.MonacoEnvironment = Object.assign(globalThis.MonacoEnvironment || {}, {
+        globalAPI: true
+    });
+    (function() {
+        var patched = false;
+        function patchMonaco() {
+            if (patched) return;
+            var m = globalThis.monaco;
+            if (!m || !m.editor || !m.editor.defineTheme) return;
+            patched = true;
+            m.editor.defineTheme('vs-dark', {
+                base: 'vs',
+                inherit: true,
+                rules: [],
+                colors: {}
+            });
+            console.log('[Hangar] Redefined vs-dark as light theme');
+        }
+        var poll = setInterval(function() {
+            if (globalThis.monaco && globalThis.monaco.editor) {
+                patchMonaco();
+                clearInterval(poll);
+            }
+        }, 50);
+        setTimeout(function() { clearInterval(poll); }, 30000);
+    })();
+
     // Fix Japanese IME: WebKit Bug 165004 — compositionend fires BEFORE keydown,
     // so isComposing is always false for the IME-confirming Enter. The only reliable
     // signal is keyCode === 229 (VK_PROCESS), which WebKit sets for all IME keydowns.
