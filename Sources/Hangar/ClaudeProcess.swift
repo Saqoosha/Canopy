@@ -15,6 +15,8 @@ final class ClaudeProcess: @unchecked Sendable {
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
     private weak var messageHandler: WebViewMessageHandler?
+    /// Permission mode this process was launched with (thread-safe, immutable after init).
+    let hostPermissionMode: String
     private var lineBuffer = Data()
     private let queue = DispatchQueue(label: "sh.saqoo.Hangar.ClaudeProcess")
 
@@ -27,6 +29,7 @@ final class ClaudeProcess: @unchecked Sendable {
         self.channelId = channelId
         self.sessionId = resumeSessionId ?? UUID().uuidString
         self.cwd = cwd
+        self.hostPermissionMode = permissionMode
         self.messageHandler = messageHandler
 
         let skipAll = permissionMode == "bypassPermissions"
@@ -173,10 +176,9 @@ final class ClaudeProcess: @unchecked Sendable {
                 // Override CLI's permissionMode in status events with host's mode
                 var patched = json
                 if json["subtype"] as? String == "status",
-                   json["permissionMode"] != nil,
-                   let hostMode = messageHandler?.permissionMode.rawValue
+                   json["permissionMode"] != nil
                 {
-                    patched["permissionMode"] = hostMode
+                    patched["permissionMode"] = hostPermissionMode
                 }
                 sendIOMessage(patched, done: false)
             case "stream_event":
