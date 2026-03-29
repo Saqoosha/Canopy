@@ -30,6 +30,10 @@ class Memento {
     if (value === undefined) {
       delete this._data[key];
     } else {
+      // Force-disable CC auth gate — Hangar uses keychain auth, not secrets API
+      if (key === "experimentGates" && value && typeof value === "object") {
+        value = { ...value, tengu_vscode_cc_auth: false };
+      }
       this._data[key] = value;
     }
     const dir = path.dirname(this._filePath);
@@ -60,11 +64,28 @@ function createExtensionContext({ extensionPath, storagePath }) {
 
   const noopDisposable = () => new Disposable(() => {});
 
+  // File-backed secrets store (production would use macOS keychain)
+  const secretsFile = path.join(storagePath, "secrets.json");
+  let secretsData = {};
+  try {
+    secretsData = JSON.parse(fs.readFileSync(secretsFile, "utf-8"));
+  } catch { /* start empty */ }
+
+  function saveSecrets() {
+    fs.mkdirSync(path.dirname(secretsFile), { recursive: true });
+    fs.writeFileSync(secretsFile, JSON.stringify(secretsData, null, 2), "utf-8");
+  }
+
+  const secretsOnDidChange = new (require("./types.js").EventEmitter)();
+
   return {
     subscriptions: [],
     extensionPath,
     extensionUri,
     globalState,
+    asAbsolutePath(relativePath) {
+      return path.join(extensionPath, relativePath);
+    },
     logUri: Uri.file(path.join(storagePath, "logs")),
     logPath: path.join(storagePath, "logs"),
     extension: {
@@ -91,10 +112,18 @@ function createExtensionContext({ extensionPath, storagePath }) {
       [Symbol.iterator]() { return [][Symbol.iterator](); },
     },
     secrets: {
-      get: async () => undefined,
-      store: async () => {},
-      delete: async () => {},
-      onDidChange: noopDisposable,
+      async get(key) { return secretsData[key]; },
+      async store(key, value) {
+        secretsData[key] = value;
+        saveSecrets();
+        secretsOnDidChange.fire({ key });
+      },
+      async delete(key) {
+        delete secretsData[key];
+        saveSecrets();
+        secretsOnDidChange.fire({ key });
+      },
+      onDidChange: secretsOnDidChange.event,
     },
   };
 }

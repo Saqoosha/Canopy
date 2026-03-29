@@ -39,6 +39,12 @@ struct HangarApp: App {
                     .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
                 }
             }
+            CommandMenu("Debug") {
+                Toggle("Use VSCode Shim", isOn: Binding(
+                    get: { ActiveTabState.shared.current?.useShim ?? true },
+                    set: { ActiveTabState.shared.current?.useShim = $0 }
+                ))
+            }
         }
     }
 
@@ -145,14 +151,22 @@ struct TabContentView: View {
                     workingDirectory: appState.workingDirectory,
                     resumeSessionId: appState.resumeSessionId,
                     permissionMode: appState.permissionMode,
-                    sessionTitle: appState.resumeSessionTitle
+                    sessionTitle: appState.resumeSessionTitle,
+                    useShim: appState.useShim
                 )
                 .id(appState.webviewReloadToken)
             }
         }
         // Only set title for launcher; session title is managed by WebViewMessageHandler
         .windowTitle(appState.screen == .launcher ? "Hangar" : "")
-        .onAppear { ActiveTabState.shared.current = appState }
+        .onAppear {
+            ActiveTabState.shared.current = appState
+            // Debug: auto-launch session (defaults write sh.saqoo.Hangar debugAutoLaunchDir /tmp)
+            if let dir = appState.debugAutoLaunchDir, appState.screen == .launcher {
+                appState.debugAutoLaunchDir = nil
+                appState.launchSession(directory: URL(fileURLWithPath: dir))
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)) { _ in
             ActiveTabState.shared.current = appState
         }

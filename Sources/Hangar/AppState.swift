@@ -27,14 +27,19 @@ enum PermissionMode: String, CaseIterable {
 @Observable
 final class AppState {
     private static let permissionModeKey = "lastPermissionMode"
+    private static let useShimKey = "useShim"
 
     private(set) var screen: AppScreen = .launcher
+    var useShim: Bool = true {
+        didSet { UserDefaults.standard.set(useShim, forKey: Self.useShimKey) }
+    }
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     var permissionMode: PermissionMode = .acceptEdits {
         didSet { UserDefaults.standard.set(permissionMode.rawValue, forKey: Self.permissionModeKey) }
     }
     var resumeSessionId: String?
     var resumeSessionTitle: String?
+    var debugAutoLaunchDir: String?
     /// Incremented to force SwiftUI to recreate the WebViewContainer (via .id() modifier),
     /// ensuring a fresh WKWebView for each session.
     private(set) var webviewReloadToken = 0
@@ -45,6 +50,11 @@ final class AppState {
         {
             permissionMode = mode
         }
+        if UserDefaults.standard.object(forKey: Self.useShimKey) != nil {
+            useShim = UserDefaults.standard.bool(forKey: Self.useShimKey)
+        }
+        // Debug: auto-launch session via defaults write sh.saqoo.Hangar debugAutoLaunchDir /tmp
+        debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")
     }
 
     func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil) {

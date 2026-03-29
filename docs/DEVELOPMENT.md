@@ -36,7 +36,7 @@ The project is defined in `project.yml` (XcodeGen format):
 - **Deployment target:** macOS 15.0
 - **Swift version:** 6.0
 - **Concurrency:** Strict concurrency checking enabled (`SWIFT_STRICT_CONCURRENCY: complete`)
-- **Resources:** `theme-light.css` is included as a bundle resource
+- **Resources:** `theme-light.css` and `Resources/vscode-shim/` (folder reference) are included as bundle resources
 
 ## How to Update Theme CSS
 
@@ -97,8 +97,10 @@ All Swift-side logging uses `os.log.Logger` with subsystem `sh.saqoo.Hangar`. Ea
 |----------|--------|
 | `AppState` | Screen transitions, session launch |
 | `CCExtension` | Extension/CLI path discovery |
-| `ClaudeProcess` | CLI process lifecycle, NDJSON parsing |
-| `MessageHandler` | Protocol messages, auth, IO routing, history replay |
+| `ShimProcess` | Node.js subprocess, NDJSON bridge, auth/permission patching |
+| `NodeDiscovery` | Node.js binary discovery and validation |
+| `ClaudeProcess` | **LEGACY** CLI process lifecycle |
+| `MessageHandler` | **LEGACY** Protocol messages, auth, IO routing |
 | `SessionHistory` | JSONL parsing, session listing |
 | `VSCodeStub` | Theme CSS loading |
 | `WebView` | WKWebView navigation events |
@@ -142,26 +144,31 @@ JavaScript `console.log`, `console.error`, and `console.warn` are bridged to Swi
 
 Uncaught errors and unhandled promise rejections are also captured.
 
-### Inspecting CLI Communication
-
-To see what is being sent to/from the Claude CLI:
+### Inspecting Shim Communication
 
 ```bash
-# Watch CLI-related logs
+# Watch shim subprocess logs (Node.js stderr + message routing)
+log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ShimProcess"' --info
+
+# Watch Node.js discovery
+log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "NodeDiscovery"' --info
+```
+
+### Inspecting CLI Communication (Legacy)
+
+```bash
+# Watch CLI-related logs (only when useShim=false)
 log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ClaudeProcess"' --info
 ```
 
-This shows:
-- CLI process start (PID, session ID)
-- Parsed NDJSON event types
-- System events (model name)
-- Any stderr output from the CLI
-- Process exit status
+### Debug Auto-Launch
 
-For stdin writes:
+Skip the launcher and start a session automatically (useful for testing):
 
 ```bash
-log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ClaudeProcess" AND composedMessage CONTAINS "Writing to CLI stdin"' --info
+defaults write sh.saqoo.Hangar debugAutoLaunchDir /path/to/dir
+open build/Build/Products/Debug/Hangar.app
+# Clears automatically after one use
 ```
 
 ## Key Design Decisions

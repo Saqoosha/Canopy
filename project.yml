@@ -13,6 +13,9 @@ targets:
     platform: macOS
     sources:
       - Sources/Hangar
+      - path: Resources/vscode-shim
+        type: folder
+        buildPhase: resources
     resources:
       - path: Sources/Hangar/theme-light.css
         buildPhase: resources

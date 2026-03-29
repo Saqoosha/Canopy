@@ -32,11 +32,9 @@ function globToRegExp(pattern) {
       // ? matches single char except /
       re += "[^/]";
       i++;
-    } else if (ch === ".") {
-      re += "\\.";
-      i++;
     } else {
-      re += ch;
+      // Escape any RegExp metacharacter
+      re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
       i++;
     }
   }

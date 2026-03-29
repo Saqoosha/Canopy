@@ -4,11 +4,11 @@
 
 macOS native app that hosts the Claude Code VSCode extension's webview (React UI) in a WKWebView. No VSCode required. The CC extension's bundled JS/CSS renders directly in a native macOS window with real-time streaming.
 
-## Project Status: VSCode Shim in Progress (2026-03-29)
+## Project Status: VSCode Shim Working (2026-03-30)
 
-Full chat with Claude works. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode.
+Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands.
 
-**Active work: vscode-shim** — replacing the 1409-line Swift protocol handler with a Node.js subprocess that runs `extension.js` unmodified. JS modules complete (10 files, 104 tests passing). Swift integration (Tasks 11-15) pending.
+**vscode-shim complete (Tasks 1-14)** — Node.js subprocess runs `extension.js` unmodified. 10 JS modules + Swift integration (ShimProcess, NodeDiscovery, feature flag, Xcode bundling). Default enabled with legacy fallback. Task 15 (cleanup: remove old 1409-line handler) pending — waiting for stability confirmation.
 
 ## Tech Stack
 - macOS 15.0+, Swift 6
@@ -26,15 +26,9 @@ open build/Build/Products/Debug/Hangar.app
 
 ## Architecture
 
-### Current (Swift protocol handler)
+### Active (vscode-shim — default)
 ```
-WKWebView ─── postMessage ──→ WebViewMessageHandler.swift (1409 lines)
-                                  └─→ ClaudeProcess.swift ─→ Claude CLI
-```
-
-### Target (vscode-shim — in progress)
-```
-WKWebView ─── postMessage ──→ ShimProcess.swift (~150 lines)
+WKWebView ─── postMessage ──→ ShimProcess.swift (~600 lines)
                                   │ stdin/stdout NDJSON
                                   ▼
                               Node.js subprocess
@@ -44,13 +38,21 @@ WKWebView ─── postMessage ──→ ShimProcess.swift (~150 lines)
                                        └─ spawns Claude CLI via child_process
 ```
 
-The vscode-shim approach runs extension.js as-is — no protocol reimplementation needed. Extension updates require zero Hangar code changes. See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for full spec.
+### Legacy (Swift protocol handler — fallback)
+```
+WKWebView ─── postMessage ──→ WebViewMessageHandler.swift (1409 lines)
+                                  └─→ ClaudeProcess.swift ─→ Claude CLI
+```
+
+The vscode-shim approach runs extension.js as-is — no protocol reimplementation needed. Extension updates require zero Hangar code changes. Falls back to legacy handler if Node.js not found. Toggle via Debug menu → "Use VSCode Shim". See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for full spec.
 
 ## Key Source Files
 
 ### Swift (Sources/Hangar/)
 - `HangarApp.swift` — SwiftUI app entry, launcher ↔ session switching, window title, menu commands
-- `AppState.swift` — Observable app state, PermissionMode enum, screen transitions
+- `AppState.swift` — Observable app state, PermissionMode enum, useShim flag, screen transitions
+- `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching
+- `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell)
 - `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop
 - `WebViewContainer.swift` — WKWebView setup, CC webview loading, VSCode default CSS injection
 - `WebViewMessageHandler.swift` — **LEGACY** protocol handler (to be replaced by ShimProcess)
@@ -66,7 +68,7 @@ The vscode-shim approach runs extension.js as-is — no protocol reimplementatio
 - `index.js` — Entry point: console redirect, Module hook, arg parsing, activate, stdin routing
 - `protocol.js` — NDJSON stdin/stdout read/write
 - `types.js` — Uri, EventEmitter, Disposable, Range, Position, Selection, enums
-- `context.js` — ExtensionContext with JSON-backed globalState
+- `context.js` — ExtensionContext with JSON-backed globalState, file-backed secrets, asAbsolutePath, CC auth gate override
 - `commands.js` — registerCommand, executeCommand, setContext
 - `workspace.js` — getConfiguration (3-layer), workspaceFolders, findFiles, openTextDocument
 - `window.js` — Webview bridge (postMessage ↔ stdin/stdout), stubs, showTextDocument
@@ -104,7 +106,17 @@ Chat:    io_message(user) → CLI stdin
 - Webview io_message format: `{ type: "user", message: { role: "user", content: [{type:"text",text:"..."}] } }`
 - Convert content array to plain string before sending to CLI stdin
 
-## Key Learnings
+## Key Learnings (Shim-specific)
+- Extension sends two message formats: unsolicited wrapped in `{type:"from-extension"}`, responses NOT wrapped — ShimProcess must detect and wrap responses
+- `tengu_vscode_cc_auth` experiment gate: when true, webview uses Secrets API for auth (broken in Hangar). Must be forced to false in globalState + Memento.update
+- Webview reads `data-initial-auth-status` HTML attribute for instant auth — inject cached authStatus here
+- `update_state` handler: `this.authStatus.value = state.authStatus ?? null` — any update_state without authStatus resets auth to null
+- `isAuthenticated` checks: (1) `forceLogin` not true, (2) `authStatus !== null`, (3) fallback: `claudeConfig.account`
+- Permission mode UI: controlled by synthetic `system/status` io_message (same as legacy handler), NOT by `initialPermissionMode`
+- `init_response` lacks `authStatus` — injected from auth cache. `isOnboardingDismissed` must be patched to `true`
+- ShimProcess patches both `init_response` and `update_state`: authStatus, permissionMode, experimentGates, isOnboardingDismissed
+
+## Key Learnings (General)
 - `--bare` flag skips keychain/OAuth auth — do NOT use
 - `--include-partial-messages` makes CLI output `stream_event` (real SSE) not just `assistant` (batch)
 - VSCode injects default CSS (`@layer vscode-default`) into webviews — includes `code { background-color }`, link colors, scrollbar styles
@@ -132,10 +144,11 @@ To update theme CSS:
 - PermissionMode: type-safe enum (default, acceptEdits, plan, bypassPermissions)
 
 ## Next Steps
-1. **Complete vscode-shim Swift integration** — Tasks 11-15: ShimProcess.swift, NodeDiscovery.swift, Xcode bundling, feature flag, smoke test, cleanup
-2. Dark mode — support system appearance switching (theme-dark.css)
-3. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
-4. Window chrome — app icon, titlebar, tabs
+1. **Task 15: Cleanup** — Remove WebViewMessageHandler.swift (1409 lines) + ClaudeProcess.swift (387 lines), make shim the only code path
+2. **Auth improvement** — Move secrets from file-based JSON to macOS Keychain; set file permissions on secrets.json
+3. Dark mode — support system appearance switching (theme-dark.css)
+4. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
+5. Window chrome — app icon, titlebar, tabs
 
 ## Design & Plan Docs
 - `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` — Full design spec (500 lines)

@@ -9,13 +9,16 @@ struct WebViewContainer: NSViewRepresentable {
     var resumeSessionId: String?
     var permissionMode: PermissionMode = .acceptEdits
     var sessionTitle: String?
+    var useShim: Bool = true
 
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var handler: WebViewMessageHandler?
+        var shimProcess: ShimProcess?
         var consoleHandler: ConsoleLogHandler?
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             logger.info("Page loaded successfully")
+            shimProcess?.webViewDidFinishLoad()
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -76,13 +79,20 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
-        let handler = WebViewMessageHandler(workingDirectory: workingDirectory, resumeSessionId: resumeSessionId, permissionMode: permissionMode, sessionTitle: sessionTitle)
         let consoleHandler = ConsoleLogHandler()
-        ucc.add(handler, name: "vscodeHost")
         ucc.add(consoleHandler, name: "consoleLog")
 
-        // Store in coordinator for cleanup
-        context.coordinator.handler = handler
+        if useShim {
+            let shim = ShimProcess(
+                workingDirectory: workingDirectory,
+                resumeSessionId: resumeSessionId,
+                permissionMode: permissionMode
+            )
+            ucc.add(shim, name: "vscodeHost")
+            context.coordinator.shimProcess = shim
+        } else {
+            addLegacyHandler(ucc: ucc, coordinator: context.coordinator)
+        }
         context.coordinator.consoleHandler = consoleHandler
 
         config.userContentController = ucc
@@ -93,7 +103,19 @@ struct WebViewContainer: NSViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.isInspectable = true
 
-        handler.webView = webView
+        if useShim {
+            context.coordinator.shimProcess?.webView = webView
+            if context.coordinator.shimProcess?.start() != true {
+                // Shim failed — fall back to legacy handler
+                logger.warning("Shim start failed, falling back to legacy handler")
+                ucc.removeScriptMessageHandler(forName: "vscodeHost")
+                context.coordinator.shimProcess = nil
+                addLegacyHandler(ucc: ucc, coordinator: context.coordinator)
+                context.coordinator.handler?.webView = webView
+            }
+        } else {
+            context.coordinator.handler?.webView = webView
+        }
         loadCCWebview(webView)
         return webView
     }
@@ -106,8 +128,13 @@ struct WebViewContainer: NSViewRepresentable {
         ucc.removeScriptMessageHandler(forName: "vscodeHost")
         ucc.removeScriptMessageHandler(forName: "consoleLog")
         ucc.removeAllUserScripts()
-        coordinator.handler?.terminateAll()
-        coordinator.handler = nil
+        if let shim = coordinator.shimProcess {
+            shim.stop()
+            coordinator.shimProcess = nil
+        } else {
+            coordinator.handler?.terminateAll()
+            coordinator.handler = nil
+        }
         coordinator.consoleHandler = nil
         logger.info("WebView dismantled, handlers removed")
     }
@@ -235,7 +262,7 @@ struct WebViewContainer: NSViewRepresentable {
         </head>
         <body class="vscode-light">
           <pre id="claude-error"></pre>
-          <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")></div>
+          <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")\(Self.initialAuthStatusAttr())></div>
           <script src="\(jsFile.absoluteString)" type="module"></script>
         </body>
         </html>
@@ -260,6 +287,31 @@ struct WebViewContainer: NSViewRepresentable {
         // Allow read access to both temp dir (for HTML) and extension dir (for JS/CSS/resources)
         let commonParent = FileManager.default.homeDirectoryForCurrentUser
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
+    }
+
+    private func addLegacyHandler(ucc: WKUserContentController, coordinator: Coordinator) {
+        let handler = WebViewMessageHandler(
+            workingDirectory: workingDirectory,
+            resumeSessionId: resumeSessionId,
+            permissionMode: permissionMode,
+            sessionTitle: sessionTitle
+        )
+        ucc.add(handler, name: "vscodeHost")
+        coordinator.handler = handler
+    }
+
+    // MARK: - Auth Status for HTML injection
+
+    /// Read cached auth status and generate HTML attribute for instant auth display.
+    /// The CC webview reads `data-initial-auth-status` from `<div id="root">` on startup.
+    private static func initialAuthStatusAttr() -> String {
+        let cachePath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Hangar/authCache.json")
+        guard let data = try? Data(contentsOf: cachePath),
+              let jsonStr = String(data: data, encoding: .utf8)?
+                .replacingOccurrences(of: "\"", with: "&quot;")
+        else { return "" }
+        return " data-initial-auth-status=\"\(jsonStr)\""
     }
 
     // MARK: - Console capture JS
