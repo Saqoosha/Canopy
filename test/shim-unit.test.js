@@ -694,3 +694,143 @@ describe("workspace", () => {
     assert.equal(content, "written");
   });
 });
+
+// ===========================================================================
+// window.js + notifications.js tests
+// ===========================================================================
+const { createWindow } = require("../Resources/vscode-shim/window.js");
+const { createNotificationHandler } = require("../Resources/vscode-shim/notifications.js");
+
+describe("window webview bridge", () => {
+  let win, stdout;
+
+  beforeEach(() => {
+    stdout = [];
+    _setWriter((data) => { stdout.push(data); });
+    win = createWindow();
+  });
+
+  it("registerWebviewViewProvider stores provider", () => {
+    const provider = { resolveWebviewView() {} };
+    const disposable = win.registerWebviewViewProvider("test.view", provider);
+    assert.equal(typeof disposable.dispose, "function");
+  });
+
+  it("webview.postMessage writes to stdout", async () => {
+    // Activate a provider so we have an active webview
+    const provider = {
+      resolveWebviewView(view, _ctx, _token) {
+        // provider receives the view
+      },
+    };
+    win.registerWebviewViewProvider("test.view", provider);
+    win._activateFirstProvider();
+
+    const webview = win._getActiveWebview();
+    assert.ok(webview);
+
+    await webview.postMessage({ type: "hello", data: 42 });
+
+    const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+    assert.equal(parsed.type, "webview_message");
+    assert.deepEqual(parsed.message, { type: "hello", data: 42 });
+  });
+
+  it("webview.onDidReceiveMessage fires from _handleWebviewMessage", () => {
+    const provider = {
+      resolveWebviewView(_view, _ctx, _token) {},
+    };
+    win.registerWebviewViewProvider("test.view", provider);
+    win._activateFirstProvider();
+
+    const received = [];
+    const webview = win._getActiveWebview();
+    webview.onDidReceiveMessage((msg) => received.push(msg));
+
+    win._handleWebviewMessage({ action: "click" });
+    win._handleWebviewMessage({ action: "type" });
+
+    assert.equal(received.length, 2);
+    assert.deepEqual(received[0], { action: "click" });
+    assert.deepEqual(received[1], { action: "type" });
+  });
+
+  it("webview.asWebviewUri returns uri unchanged", () => {
+    win.registerWebviewViewProvider("test.view", { resolveWebviewView() {} });
+    win._activateFirstProvider();
+
+    const webview = win._getActiveWebview();
+    const uri = Uri.file("/some/path");
+    assert.equal(webview.asWebviewUri(uri), uri);
+  });
+
+  it("showTextDocument writes show_document to stdout", async () => {
+    const doc = {
+      getText() { return "console.log('hello');"; },
+      fileName: "/test/file.js",
+      languageId: "javascript",
+    };
+
+    await win.showTextDocument(doc);
+
+    const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+    assert.equal(parsed.type, "show_document");
+    assert.equal(parsed.content, "console.log('hello');");
+    assert.equal(parsed.fileName, "/test/file.js");
+    assert.equal(parsed.languageId, "javascript");
+  });
+
+  it("createTerminal writes open_terminal to stdout", () => {
+    const term = win.createTerminal({ name: "my-term" });
+
+    const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+    assert.equal(parsed.type, "open_terminal");
+    assert.equal(parsed.name, "my-term");
+    assert.equal(term.name, "my-term");
+    assert.equal(typeof term.dispose, "function");
+  });
+});
+
+describe("notifications", () => {
+  let handler, stdout;
+
+  beforeEach(() => {
+    stdout = [];
+    _setWriter((data) => { stdout.push(data); });
+    handler = createNotificationHandler();
+  });
+
+  it("show writes show_notification to stdout", () => {
+    handler.show("info", "Hello world", "OK", "Cancel");
+
+    assert.equal(stdout.length, 1);
+    const parsed = JSON.parse(stdout[0].replace(/\n$/, ""));
+    assert.equal(parsed.type, "show_notification");
+    assert.equal(parsed.severity, "info");
+    assert.equal(parsed.message, "Hello world");
+    assert.deepEqual(parsed.buttons, ["OK", "Cancel"]);
+    assert.ok(parsed.requestId);
+  });
+
+  it("handleResponse resolves the promise", async () => {
+    // Grab the requestId from stdout
+    const promise = handler.show("error", "Fail?", "Retry", "Abort");
+    const parsed = JSON.parse(stdout[0].replace(/\n$/, ""));
+
+    handler.handleResponse(parsed.requestId, "Retry");
+
+    const result = await promise;
+    assert.equal(result, "Retry");
+  });
+
+  it("rejectAll resolves all pending as undefined", async () => {
+    const p1 = handler.show("info", "msg1", "OK");
+    const p2 = handler.show("warning", "msg2", "Yes");
+
+    handler.rejectAll();
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    assert.equal(r1, undefined);
+    assert.equal(r2, undefined);
+  });
+});
