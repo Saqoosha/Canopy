@@ -66,6 +66,12 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             handleCloseChannel(message)
         default:
             logger.info("[Hangar] Unknown message type: \(type, privacy: .public)")
+            // Log the full message for debugging unknown types
+            if let data = try? JSONSerialization.data(withJSONObject: message),
+               let str = String(data: data, encoding: .utf8)
+            {
+                logger.info("[Hangar] Full message: \(String(str.prefix(300)), privacy: .public)")
+            }
         }
     }
 
@@ -153,29 +159,12 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             {
                 permissionMode = mode
                 logger.info("[Hangar] Permission mode set to: \(modeStr, privacy: .public)")
-                // Restart active CLI processes with the new permission mode
-                for (channelId, oldProcess) in channels {
-                    clearPendingRequests(for: channelId)
-                    let cwd = oldProcess.cwd
-                    let sessionId = oldProcess.sessionId
-                    oldProcess.terminate()
-                    if let newProcess = ClaudeProcess(
-                        channelId: channelId,
-                        cwd: cwd,
-                        permissionMode: modeStr,
-                        resumeSessionId: sessionId,
-                        messageHandler: self
-                    ) {
-                        channels[channelId] = newProcess
-                        do {
-                            try newProcess.start()
-                            logger.info("[Hangar] Restarted CLI for channel \(channelId, privacy: .public) with mode \(modeStr, privacy: .public)")
-                        } catch {
-                            logger.error("[Hangar] Failed to restart CLI: \(error.localizedDescription, privacy: .public)")
-                            channels.removeValue(forKey: channelId)
-                        }
-                    }
-                }
+                // Send control_request to CLI to change mode without restarting
+                // (matches VSCode extension behavior — no process restart needed)
+                forwardToCLI(
+                    subtype: "set_permission_mode",
+                    fields: ["mode": modeStr]
+                )
             } else {
                 logger.warning("[Hangar] Invalid permission mode: \(String(describing: request["mode"]), privacy: .public)")
             }
@@ -292,6 +281,17 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 updateWindowTitle(title)
             }
             sendResponse(requestId: requestId, response: ["type": "update_session_state_response"])
+        case "show_notification":
+            // Show macOS notification for webview notification requests
+            if let msg = request["message"] as? String {
+                let content = UNMutableNotificationContent()
+                content.title = "Hangar"
+                content.body = msg
+                content.sound = .default
+                let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+                UNUserNotificationCenter.current().add(req)
+            }
+            sendResponse(requestId: requestId, response: ["type": "show_notification_response"])
         case "rename_session",
              "dismiss_terminal_banner", "dismiss_review_upsell_banner",
              "dismiss_onboarding", "apply_settings", "fork_conversation":
@@ -725,7 +725,28 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         let msgType = ioMsg["type"] as? String ?? "unknown"
         logger.info("[Hangar] io_message from webview: channel=\(channelId, privacy: .public) type=\(msgType, privacy: .public)")
 
-        guard let process = channels[channelId] else {
+        var process = channels[channelId]
+        // Auto-restart CLI if it exited (e.g., after interrupt or permission mode change)
+        if process == nil, msgType == "user" {
+            logger.info("[Hangar] Auto-restarting CLI for channel \(channelId, privacy: .public)")
+            let cwd = message["cwd"] as? String ?? workingDirectory.path
+            if let newProcess = ClaudeProcess(
+                channelId: channelId,
+                cwd: cwd,
+                permissionMode: permissionMode.rawValue,
+                resumeSessionId: nil,
+                messageHandler: self
+            ) {
+                channels[channelId] = newProcess
+                do {
+                    try newProcess.start()
+                    process = newProcess
+                } catch {
+                    logger.error("[Hangar] Failed to auto-restart CLI: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+        guard let process else {
             logger.info("[Hangar] No process for channel \(channelId, privacy: .public)")
             return
         }
@@ -888,7 +909,12 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             return
         }
         logger.info("[Hangar] interrupt_claude: channel=\(channelId, privacy: .public)")
-        channels[channelId]?.interrupt()
+        // Send control_request to CLI (like the extension does) instead of SIGINT.
+        // This cancels the current task without killing the CLI process.
+        forwardToCLI(
+            channelId: channelId,
+            subtype: "interrupt"
+        )
     }
 
     private func handleCloseChannel(_ message: [String: Any]) {
@@ -919,6 +945,20 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         channels.removeValue(forKey: channelId)
         clearPendingRequests(for: channelId)
         updateWorkingStatus(nil)
+        // Send result event to unblock webview if it was waiting for a response
+        sendToWebview([
+            "type": "from-extension",
+            "message": [
+                "type": "io_message",
+                "channelId": channelId,
+                "message": [
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                ] as [String: Any],
+                "done": true,
+            ] as [String: Any],
+        ])
     }
 
     // MARK: - Window Title & Spinner

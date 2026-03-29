@@ -32,22 +32,15 @@ final class ClaudeProcess: @unchecked Sendable {
         self.hostPermissionMode = permissionMode
         self.messageHandler = messageHandler
 
-        let skipAll = permissionMode == "bypassPermissions"
-
         var args = [
             "-p",
             "--output-format", "stream-json",
             "--verbose",
             "--input-format", "stream-json",
             "--include-partial-messages",
+            "--permission-mode", permissionMode,
+            "--permission-prompt-tool", "stdio",
         ]
-
-        if skipAll {
-            args += ["--dangerously-skip-permissions"]
-        } else {
-            args += ["--permission-mode", permissionMode]
-            args += ["--permission-prompt-tool", "stdio"]
-        }
 
         if let resumeId = resumeSessionId {
             args += ["--resume", resumeId]
@@ -173,14 +166,11 @@ final class ClaudeProcess: @unchecked Sendable {
             switch type {
             case "system":
                 handleSystemEvent(json)
-                // Override CLI's permissionMode in status events with host's mode
-                var patched = json
-                if json["subtype"] as? String == "status",
-                   json["permissionMode"] != nil
-                {
-                    patched["permissionMode"] = hostPermissionMode
+                // Only forward status events to webview (for permissionMode sync).
+                // Do NOT forward init events — webview sets busy=true on system/init.
+                if json["subtype"] as? String == "status" {
+                    sendIOMessage(json, done: false)
                 }
-                sendIOMessage(patched, done: false)
             case "stream_event":
                 sendIOMessage(json, done: false)
                 updateStatus(from: json)
