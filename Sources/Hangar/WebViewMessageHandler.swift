@@ -105,11 +105,12 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             } else {
                 // Defer until CLI config arrives, with 60s timeout (hooks can take 30s+)
                 pendingClaudeStateRequestId = requestId
+                let capturedRequestId = requestId
                 logger.info("[Hangar] Deferring get_claude_state (waiting for CLI config)")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
-                    guard let self, let reqId = self.pendingClaudeStateRequestId else { return }
+                    guard let self, self.pendingClaudeStateRequestId == capturedRequestId else { return }
                     self.pendingClaudeStateRequestId = nil
-                    self.sendResponse(requestId: reqId, response: self.claudeStateResponse())
+                    self.sendResponse(requestId: capturedRequestId, response: self.claudeStateResponse())
                     logger.info("[Hangar] get_claude_state timeout — sent with defaults")
                 }
             }
