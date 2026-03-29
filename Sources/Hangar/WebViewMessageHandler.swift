@@ -308,14 +308,15 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             }
             sendResponse(requestId: requestId, response: ["type": "update_session_state_response"])
         case "show_notification":
-            // Show macOS notification for webview notification requests
             if let msg = request["message"] as? String {
                 let content = UNMutableNotificationContent()
                 content.title = "Hangar"
                 content.body = msg
                 content.sound = .default
                 let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-                UNUserNotificationCenter.current().add(req)
+                UNUserNotificationCenter.current().add(req) { error in
+                    if let error { logger.error("Notification error: \(error.localizedDescription, privacy: .public)") }
+                }
             }
             sendResponse(requestId: requestId, response: ["type": "show_notification_response"])
         case "rename_session",
@@ -823,10 +824,18 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         DispatchQueue.global(qos: .userInitiated).async {
             let messages = Self.loadSessionMessages(sessionId: sessionId, cwd: cwd)
             // Serialize to JSON string (Sendable) on background thread
+            let emptyResponse: [String: Any] = [
+                "type": "get_session_response",
+                "messages": [] as [Any],
+                "sessionDiffs": [] as [Any],
+            ]
             guard let data = try? JSONSerialization.data(withJSONObject: messages),
                   let messagesJSON = String(data: data, encoding: .utf8)
             else {
                 logger.error("[Hangar] Failed to serialize session messages")
+                DispatchQueue.main.async { [weak self] in
+                    self?.sendResponse(requestId: requestId, response: emptyResponse)
+                }
                 return
             }
             let count = messages.count
@@ -834,7 +843,10 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 // Re-parse on main thread to satisfy Sendable boundary
                 guard let messagesData = messagesJSON.data(using: .utf8),
                       let parsed = try? JSONSerialization.jsonObject(with: messagesData)
-                else { return }
+                else {
+                    self?.sendResponse(requestId: requestId, response: emptyResponse)
+                    return
+                }
                 self?.sendResponse(requestId: requestId, response: [
                     "type": "get_session_response",
                     "messages": parsed,
@@ -1097,6 +1109,8 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error {
                 logger.error("Notification permission error: \(error.localizedDescription, privacy: .public)")
+            } else if !granted {
+                logger.warning("Notification permission denied — background alerts disabled")
             }
         }
     }
