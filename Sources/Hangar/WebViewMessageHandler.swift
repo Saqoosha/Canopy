@@ -635,7 +635,8 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     private func handleLaunchClaude(_ message: [String: Any]) {
         let channelId = message["channelId"] as? String ?? UUID().uuidString
         let cwd = message["cwd"] as? String ?? workingDirectory.path
-        let permissionModeStr = message["permissionMode"] as? String ?? self.permissionMode.rawValue
+        // Always use host's permission mode — webview may send its own default
+        let permissionModeStr = self.permissionMode.rawValue
         // Check webview message first, then fall back to stored resume ID
         let sessionToResume = message["sessionId"] as? String ?? resumeSessionId
 
@@ -675,6 +676,22 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
 
         do {
             try process.start()
+            // Send synthetic system/status event to force webview to use host's permission mode.
+            // The webview creates sessions from data-initial-session before init_response arrives,
+            // so initialPermissionMode is missed. This status event overrides the default.
+            sendToWebview([
+                "type": "from-extension",
+                "message": [
+                    "type": "io_message",
+                    "channelId": channelId,
+                    "message": [
+                        "type": "system",
+                        "subtype": "status",
+                        "permissionMode": permissionModeStr,
+                    ] as [String: Any],
+                    "done": false,
+                ] as [String: Any],
+            ])
         } catch {
             logger.error("Failed to start Claude process: \(error.localizedDescription, privacy: .public)")
             sendToWebview([

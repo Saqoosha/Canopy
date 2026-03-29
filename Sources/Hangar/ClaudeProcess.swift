@@ -170,6 +170,15 @@ final class ClaudeProcess: @unchecked Sendable {
             switch type {
             case "system":
                 handleSystemEvent(json)
+                // Override CLI's permissionMode in status events with host's mode
+                var patched = json
+                if json["subtype"] as? String == "status",
+                   json["permissionMode"] != nil,
+                   let hostMode = messageHandler?.permissionMode.rawValue
+                {
+                    patched["permissionMode"] = hostMode
+                }
+                sendIOMessage(patched, done: false)
             case "stream_event":
                 sendIOMessage(json, done: false)
                 updateStatus(from: json)
