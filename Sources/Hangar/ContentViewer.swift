@@ -13,15 +13,15 @@ enum ContentViewer {
             return
         }
 
-        // Escape content for JavaScript string literal
-        let escaped = content
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "`", with: "\\`")
-            .replacingOccurrences(of: "$", with: "\\$")
-
-        let titleEscaped = title
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "`", with: "\\`")
+        // Safely encode content and title as JSON strings to prevent JS injection
+        guard let contentData = try? JSONSerialization.data(withJSONObject: content),
+              let contentJSON = String(data: contentData, encoding: .utf8),
+              let titleData = try? JSONSerialization.data(withJSONObject: title),
+              let titleJSON = String(data: titleData, encoding: .utf8)
+        else {
+            logger.error("ContentViewer: failed to encode content as JSON")
+            return
+        }
 
         // Guess language from file name
         let js = """
@@ -30,8 +30,8 @@ enum ContentViewer {
             var existing = document.getElementById('hangar-content-viewer');
             if (existing) existing.remove();
 
-            var content = `\(escaped)`;
-            var title = `\(titleEscaped)`;
+            var content = \(contentJSON);
+            var title = \(titleJSON);
 
             // Guess language from title
             var lang = 'plaintext';

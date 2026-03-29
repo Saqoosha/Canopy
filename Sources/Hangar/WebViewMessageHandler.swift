@@ -8,12 +8,16 @@ private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "MessageHand
 final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
 
+
     /// Active Claude CLI processes keyed by channelId
     private var channels: [String: ClaudeProcess] = [:]
 
     /// Pending inbound control requests from CLI awaiting webview response (e.g. permission prompts).
     /// Key: webview requestId, Value: (channelId, CLI request_id, tool_use_id)
     private var pendingControlRequests: [String: (channelId: String, cliRequestId: String, toolUseId: String)] = [:]
+
+    /// Last known session ID per channel (for auto-restart after CLI exit).
+    private var lastSessionIds: [String: String] = [:]
 
     /// Pending outbound control requests sent TO the CLI awaiting control_response.
     /// Key: CLI request_id, Value: (channelId, webview requestId, response transform function)
@@ -756,7 +760,7 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                 channelId: channelId,
                 cwd: cwd,
                 permissionMode: permissionMode.rawValue,
-                resumeSessionId: nil,
+                resumeSessionId: lastSessionIds.removeValue(forKey: channelId),
                 messageHandler: self
             ) {
                 channels[channelId] = newProcess
@@ -964,6 +968,10 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     /// Called by ClaudeProcess when the CLI process exits
     func handleCLIProcessExited(channelId: String) {
         logger.info("[Hangar] CLI process exited for channel \(channelId, privacy: .public)")
+        // Save session ID for potential auto-restart
+        if let process = channels[channelId] {
+            lastSessionIds[channelId] = process.sessionId
+        }
         channels.removeValue(forKey: channelId)
         clearPendingRequests(for: channelId)
         updateWorkingStatus(nil)
