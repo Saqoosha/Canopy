@@ -22,6 +22,22 @@ struct WebViewContainer: NSViewRepresentable {
             logger.error("Navigation failed: \(error.localizedDescription, privacy: .public)")
         }
 
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            if let url = navigationAction.request.url,
+               (url.scheme == "http" || url.scheme == "https"),
+               navigationAction.navigationType == .linkActivated
+            {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             logger.error("Provisional navigation failed: \(error.localizedDescription, privacy: .public)")
         }
