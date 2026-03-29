@@ -532,3 +532,165 @@ describe("commands", () => {
     assert.equal(result, undefined);
   });
 });
+
+// ===========================================================================
+// workspace.js tests
+// ===========================================================================
+const { createWorkspace } = require("../Resources/vscode-shim/workspace.js");
+
+describe("workspace", () => {
+  let tmpDir, ws;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hangar-ws-test-"));
+    const settingsPath = path.join(tmpDir, "settings.json");
+    const extensionPackageJson = {
+      contributes: {
+        configuration: {
+          properties: {
+            "myExt.fontSize": { default: 14, type: "number" },
+            "myExt.theme": { default: "dark", type: "string" },
+          },
+        },
+      },
+    };
+    ws = createWorkspace({ cwd: tmpDir, settingsPath, extensionPackageJson });
+  });
+
+  it("workspaceFolders returns cwd-based folder", () => {
+    assert.equal(ws.workspaceFolders.length, 1);
+    const folder = ws.workspaceFolders[0];
+    assert.equal(folder.uri.fsPath, tmpDir);
+    assert.equal(folder.name, path.basename(tmpDir));
+    assert.equal(folder.index, 0);
+  });
+
+  it("getConfiguration returns default from package.json", () => {
+    const config = ws.getConfiguration("myExt");
+    assert.equal(config.get("fontSize"), 14);
+    assert.equal(config.get("theme"), "dark");
+  });
+
+  it("getConfiguration.get returns arg default for unknown key", () => {
+    const config = ws.getConfiguration("myExt");
+    assert.equal(config.get("unknown", 99), 99);
+    assert.equal(config.get("unknown"), undefined);
+  });
+
+  it("getConfiguration.has checks existence", () => {
+    const config = ws.getConfiguration("myExt");
+    assert.equal(config.has("fontSize"), true);
+    assert.equal(config.has("nonexistent"), false);
+  });
+
+  it("getConfiguration.update persists", () => {
+    const config = ws.getConfiguration("myExt");
+    config.update("fontSize", 20);
+
+    // Re-read to confirm persistence
+    const config2 = ws.getConfiguration("myExt");
+    assert.equal(config2.get("fontSize"), 20);
+  });
+
+  it("getConfiguration.inspect returns layers", () => {
+    const config = ws.getConfiguration("myExt");
+    config.update("fontSize", 20);
+
+    const info = ws.getConfiguration("myExt").inspect("fontSize");
+    assert.equal(info.key, "myExt.fontSize");
+    assert.equal(info.defaultValue, 14);
+    assert.equal(info.globalValue, 20);
+    assert.equal(info.workspaceValue, undefined);
+    assert.equal(info.workspaceFolderValue, undefined);
+  });
+
+  it("asRelativePath works", () => {
+    const abs = path.join(tmpDir, "src", "index.ts");
+    assert.equal(ws.asRelativePath(abs), path.join("src", "index.ts"));
+
+    // Also works with Uri
+    const uri = Uri.file(abs);
+    assert.equal(ws.asRelativePath(uri), path.join("src", "index.ts"));
+  });
+
+  it("findFiles finds matching files", async () => {
+    // Create test files
+    fs.writeFileSync(path.join(tmpDir, "foo.ts"), "");
+    fs.writeFileSync(path.join(tmpDir, "bar.js"), "");
+    fs.mkdirSync(path.join(tmpDir, "sub"));
+    fs.writeFileSync(path.join(tmpDir, "sub", "baz.ts"), "");
+
+    const results = await ws.findFiles("**/*.ts");
+    const fsPaths = results.map((u) => u.fsPath).sort();
+
+    assert.equal(results.length, 2);
+    assert.ok(fsPaths.includes(path.join(tmpDir, "foo.ts")));
+    assert.ok(fsPaths.includes(path.join(tmpDir, "sub", "baz.ts")));
+  });
+
+  it("openTextDocument with content returns virtual doc", async () => {
+    const doc = await ws.openTextDocument({ content: "hello world", language: "markdown" });
+    assert.equal(doc.getText(), "hello world");
+    assert.equal(doc.languageId, "markdown");
+    assert.equal(doc.isUntitled, true);
+  });
+
+  it("applyEdit returns false", async () => {
+    const result = await ws.applyEdit({});
+    assert.equal(result, false);
+  });
+
+  it("rootPath returns cwd", () => {
+    assert.equal(ws.rootPath, tmpDir);
+  });
+
+  it("getWorkspaceFolder returns the single folder", () => {
+    const folder = ws.getWorkspaceFolder(Uri.file(path.join(tmpDir, "any.txt")));
+    assert.equal(folder.uri.fsPath, tmpDir);
+  });
+
+  it("textDocuments is empty array", () => {
+    assert.deepEqual(ws.textDocuments, []);
+  });
+
+  it("workspaceFile is undefined", () => {
+    assert.equal(ws.workspaceFile, undefined);
+  });
+
+  it("registerFileSystemProvider returns Disposable", () => {
+    const d = ws.registerFileSystemProvider("scheme", {});
+    assert.equal(typeof d.dispose, "function");
+  });
+
+  it("registerTextDocumentContentProvider returns Disposable", () => {
+    const d = ws.registerTextDocumentContentProvider("scheme", {});
+    assert.equal(typeof d.dispose, "function");
+  });
+
+  it("onDidChangeConfiguration returns Disposable", () => {
+    const d = ws.onDidChangeConfiguration(() => {});
+    assert.equal(typeof d.dispose, "function");
+  });
+
+  it("fs.stat wraps node stat", async () => {
+    const testFile = path.join(tmpDir, "stattest.txt");
+    fs.writeFileSync(testFile, "data");
+    const stat = await ws.fs.stat(Uri.file(testFile));
+    assert.ok(stat.size > 0);
+  });
+
+  it("fs.readFile returns Uint8Array", async () => {
+    const testFile = path.join(tmpDir, "readtest.txt");
+    fs.writeFileSync(testFile, "content");
+    const data = await ws.fs.readFile(Uri.file(testFile));
+    assert.ok(data instanceof Uint8Array);
+    assert.equal(Buffer.from(data).toString(), "content");
+  });
+
+  it("fs.writeFile writes data", async () => {
+    const testFile = path.join(tmpDir, "writetest.txt");
+    await ws.fs.writeFile(Uri.file(testFile), Buffer.from("written"));
+    const content = fs.readFileSync(testFile, "utf-8");
+    assert.equal(content, "written");
+  });
+});
