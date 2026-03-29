@@ -9,6 +9,7 @@ Guide for developing and contributing to Hangar.
 - macOS 15.0+
 - Xcode with macOS 15+ SDK
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
+- Node.js >= 18 (for vscode-shim; `mise`, `nvm`, or `nodejs.org`)
 - Claude Code VSCode extension installed (for webview assets)
 - Claude CLI installed and authenticated
 
@@ -254,3 +255,78 @@ The CLI may be waiting for authentication or hitting rate limits. Check `log str
 ### Build fails after extension update
 
 If the CC extension updates its webview protocol (new message types, changed response formats), the `WebViewMessageHandler` may need updates. Check Safari Web Inspector console for unhandled request types, which are logged as warnings.
+
+**With vscode-shim:** Extension updates should require zero code changes. The shim runs extension.js directly. If a new vscode API is used, the Proxy will log warnings to stderr — check with:
+```bash
+node --test --test-timeout 120000 test/shim-integration.test.js
+```
+
+## VSCode Shim Development
+
+### Architecture
+
+The vscode-shim (`Resources/vscode-shim/`) runs the CC extension's `extension.js` in a Node.js subprocess. It intercepts `require("vscode")` and provides a compatibility shim that bridges the extension's webview I/O to Hangar's WKWebView via stdin/stdout NDJSON.
+
+See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for the full design spec.
+
+### Running the shim standalone
+
+```bash
+# Run shim directly (for debugging)
+node Resources/vscode-shim/index.js \
+  --extension-path ~/.vscode/extensions/anthropic.claude-code-* \
+  --cwd /tmp
+
+# Sends {"type":"ready"} to stdout when initialized
+# Reads NDJSON from stdin, writes NDJSON to stdout
+# Extension logs go to stderr
+```
+
+### Running tests
+
+```bash
+# Unit tests — fast, no external deps
+node --test test/shim-unit.test.js
+
+# Integration tests — spawns real extension.js, needs CC extension installed
+node --test --test-timeout 120000 test/shim-integration.test.js
+```
+
+### Shim module structure
+
+| Module | Responsibility |
+|--------|---------------|
+| `index.js` | Entry: console redirect, Module hook, activate, stdin routing |
+| `protocol.js` | NDJSON stdin reader + stdout writer |
+| `types.js` | Uri, EventEmitter, Disposable, enums (all vscode types) |
+| `context.js` | ExtensionContext with JSON-backed globalState |
+| `commands.js` | registerCommand / executeCommand / setContext |
+| `workspace.js` | getConfiguration (3-layer), workspaceFolders, findFiles |
+| `window.js` | Webview bridge (postMessage ↔ stdio), Tier 2 stubs |
+| `notifications.js` | show*Message with 60s timeout + response routing |
+| `env.js` | appName, machineId, clipboard, openExternal |
+| `stubs.js` | Proxy-based unknown API detection, module assembly |
+
+### Debugging the shim
+
+```bash
+# Watch shim stderr (extension logs, warnings, errors)
+node Resources/vscode-shim/index.js --extension-path ... --cwd /tmp 2>&1 >/dev/null
+
+# Send test messages via stdin
+echo '{"type":"webview_message","message":{"type":"request","requestId":"1","request":{"type":"init"}}}' \
+  | node Resources/vscode-shim/index.js --extension-path ... --cwd /tmp
+```
+
+### Adding support for new vscode APIs
+
+When the CC extension starts using a new vscode API, the Proxy will log:
+```
+[vscode-shim] WARN: Unknown vscode API accessed: vscode.newApi
+```
+
+To add support:
+1. Check extension.js to understand how the API is used
+2. Add implementation to the appropriate module (window.js, workspace.js, etc.)
+3. Add unit test to `test/shim-unit.test.js`
+4. Run integration tests to verify

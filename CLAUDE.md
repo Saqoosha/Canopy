@@ -4,13 +4,16 @@
 
 macOS native app that hosts the Claude Code VSCode extension's webview (React UI) in a WKWebView. No VSCode required. The CC extension's bundled JS/CSS renders directly in a native macOS window with real-time streaming.
 
-## Project Status: Working Chat with Session Management (2026-03-28)
+## Project Status: VSCode Shim in Progress (2026-03-29)
 
 Full chat with Claude works. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode.
+
+**Active work: vscode-shim** — replacing the 1409-line Swift protocol handler with a Node.js subprocess that runs `extension.js` unmodified. JS modules complete (10 files, 104 tests passing). Swift integration (Tasks 11-15) pending.
 
 ## Tech Stack
 - macOS 15.0+, Swift 6
 - WKWebView hosting CC extension's React webview
+- Node.js >= 18 (for vscode-shim, runs extension.js natively)
 - xcodegen for project generation from `project.yml`
 - Bundle ID: `sh.saqoo.Hangar`
 
@@ -23,42 +26,58 @@ open build/Build/Products/Debug/Hangar.app
 
 ## Architecture
 
+### Current (Swift protocol handler)
 ```
-WKWebView
-  │  loads ~/.vscode/extensions/anthropic.claude-code-*/webview/index.{js,css}
-  │
-  ├─ acquireVsCodeApi() stub → bridges postMessage to Swift via WKScriptMessageHandler
-  ├─ VSCode Light+ theme (456 vars from real VSCode export) + VSCode default webview CSS
-  ├─ <body class="vscode-light">
-  ├─ window.IS_FULL_EDITOR = true
-  │
-  ▼
-WebViewMessageHandler (Swift)
-  │  handles protocol: init, get_claude_state, get_asset_uris, launch_claude, io_message
-  │  real auth via `claude auth status`
-  │
-  ▼
-ClaudeProcess (Swift)
-  │  spawns `claude -p --input-format stream-json --output-format stream-json
-  │         --verbose --include-partial-messages`
-  │  CLI outputs real SSE `stream_event` lines → forwarded directly to webview
-  │
-  ▼
-Claude CLI (user's installed claude binary)
+WKWebView ─── postMessage ──→ WebViewMessageHandler.swift (1409 lines)
+                                  └─→ ClaudeProcess.swift ─→ Claude CLI
 ```
 
+### Target (vscode-shim — in progress)
+```
+WKWebView ─── postMessage ──→ ShimProcess.swift (~150 lines)
+                                  │ stdin/stdout NDJSON
+                                  ▼
+                              Node.js subprocess
+                                  ├─ vscode-shim/ (10 JS modules, ~800 lines)
+                                  │    └─ intercepts require("vscode")
+                                  └─ extension.js (CC extension, unmodified)
+                                       └─ spawns Claude CLI via child_process
+```
+
+The vscode-shim approach runs extension.js as-is — no protocol reimplementation needed. Extension updates require zero Hangar code changes. See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for full spec.
+
 ## Key Source Files
+
+### Swift (Sources/Hangar/)
 - `HangarApp.swift` — SwiftUI app entry, launcher ↔ session switching, window title, menu commands
 - `AppState.swift` — Observable app state, PermissionMode enum, screen transitions
 - `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop
 - `WebViewContainer.swift` — WKWebView setup, CC webview loading, VSCode default CSS injection
-- `WebViewMessageHandler.swift` — Protocol handler, auth, CLI launch, IO bridge, session history replay
-- `ClaudeProcess.swift` — Claude CLI process lifecycle, NDJSON parsing, --resume support
+- `WebViewMessageHandler.swift` — **LEGACY** protocol handler (to be replaced by ShimProcess)
+- `ClaudeProcess.swift` — **LEGACY** CLI process lifecycle (to be replaced by vscode-shim)
 - `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction
 - `RecentDirectories.swift` — MRU directory list in UserDefaults
 - `VSCodeStub.swift` — acquireVsCodeApi() JS stub, loads theme CSS from bundled resource
 - `CCExtension.swift` — Extension/CLI path discovery
+- `ContentViewer.swift` — Monaco editor overlay for viewing file contents
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
+
+### VSCode Shim (Resources/vscode-shim/)
+- `index.js` — Entry point: console redirect, Module hook, arg parsing, activate, stdin routing
+- `protocol.js` — NDJSON stdin/stdout read/write
+- `types.js` — Uri, EventEmitter, Disposable, Range, Position, Selection, enums
+- `context.js` — ExtensionContext with JSON-backed globalState
+- `commands.js` — registerCommand, executeCommand, setContext
+- `workspace.js` — getConfiguration (3-layer), workspaceFolders, findFiles, openTextDocument
+- `window.js` — Webview bridge (postMessage ↔ stdin/stdout), stubs, showTextDocument
+- `notifications.js` — showInformationMessage/Error/Warning with 60s timeout
+- `env.js` — appName, machineId (persisted), clipboard, openExternal
+- `stubs.js` — Proxy-based unknown API detection, module assembly
+
+### Tests (test/)
+- `shim-unit.test.js` — 97 unit tests for all shim modules
+- `shim-integration.test.js` — 7 integration tests with real extension.js via stdio
+- `helpers.js` — Test harness (spawnShim, waitFor, sendRequest)
 
 ## CC Extension Webview Details
 - Location: `~/.vscode/extensions/anthropic.claude-code-*/webview/`
@@ -113,6 +132,20 @@ To update theme CSS:
 - PermissionMode: type-safe enum (default, acceptEdits, plan, bypassPermissions)
 
 ## Next Steps
-1. Dark mode — support system appearance switching (theme-dark.css)
-2. Window chrome — app icon, titlebar, tabs
-3. Direct API streaming — bypass CLI for true character-level streaming (CLI already provides this via stream_event!)
+1. **Complete vscode-shim Swift integration** — Tasks 11-15: ShimProcess.swift, NodeDiscovery.swift, Xcode bundling, feature flag, smoke test, cleanup
+2. Dark mode — support system appearance switching (theme-dark.css)
+3. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
+4. Window chrome — app icon, titlebar, tabs
+
+## Design & Plan Docs
+- `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` — Full design spec (500 lines)
+- `docs/superpowers/plans/2026-03-29-vscode-shim.md` — Implementation plan (15 tasks)
+
+## Running Tests
+```bash
+# Unit tests (no external deps, fast)
+node --test test/shim-unit.test.js
+
+# Integration tests (needs CC extension installed, slow ~60s)
+node --test --test-timeout 120000 test/shim-integration.test.js
+```
