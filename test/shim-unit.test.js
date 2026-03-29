@@ -484,3 +484,51 @@ describe("ExtensionContext", () => {
     assert.ok(ctx.logPath.endsWith("/logs"));
   });
 });
+
+// ===========================================================================
+// commands.js tests
+// ===========================================================================
+const { createCommands } = require("../Resources/vscode-shim/commands.js");
+
+describe("commands", () => {
+  it("registerCommand stores and executes handler", async () => {
+    const cmds = createCommands();
+    let called = false;
+    cmds.registerCommand("myCmd", () => { called = true; });
+    await cmds.executeCommand("myCmd");
+    assert.equal(called, true);
+  });
+
+  it("executeCommand passes args", async () => {
+    const cmds = createCommands();
+    let received;
+    cmds.registerCommand("sum", (a, b) => { received = a + b; return received; });
+    const result = await cmds.executeCommand("sum", 3, 7);
+    assert.equal(received, 10);
+    assert.equal(result, 10);
+  });
+
+  it("setContext stores in context map", async () => {
+    const cmds = createCommands();
+    await cmds.executeCommand("setContext", "myKey", "myValue");
+    assert.equal(cmds.getContext("myKey"), "myValue");
+  });
+
+  it("registerCommand returns disposable that unregisters", async () => {
+    const cmds = createCommands();
+    let count = 0;
+    const disposable = cmds.registerCommand("counter", () => { count++; });
+    await cmds.executeCommand("counter");
+    assert.equal(count, 1);
+
+    disposable.dispose();
+    await cmds.executeCommand("counter");
+    assert.equal(count, 1); // handler was removed, count stays at 1
+  });
+
+  it("executeCommand with unknown id does not throw", async () => {
+    const cmds = createCommands();
+    const result = await cmds.executeCommand("nonexistent.command", 1, 2, 3);
+    assert.equal(result, undefined);
+  });
+});
