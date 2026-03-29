@@ -8,6 +8,7 @@ struct WebViewContainer: NSViewRepresentable {
     let workingDirectory: URL
     var resumeSessionId: String?
     var permissionMode: PermissionMode = .acceptEdits
+    var sessionTitle: String?
 
     class Coordinator: NSObject, WKNavigationDelegate {
         var handler: WebViewMessageHandler?
@@ -44,7 +45,7 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
-        let handler = WebViewMessageHandler(workingDirectory: workingDirectory, resumeSessionId: resumeSessionId, permissionMode: permissionMode)
+        let handler = WebViewMessageHandler(workingDirectory: workingDirectory, resumeSessionId: resumeSessionId, permissionMode: permissionMode, sessionTitle: sessionTitle)
         let consoleHandler = ConsoleLogHandler()
         ucc.add(handler, name: "vscodeHost")
         ucc.add(consoleHandler, name: "consoleLog")

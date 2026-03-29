@@ -31,10 +31,11 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     /// Session ID to resume (nil = new session)
     var resumeSessionId: String?
 
-    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits) {
+    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil) {
         self.workingDirectory = workingDirectory
         self.resumeSessionId = resumeSessionId
         self.permissionMode = permissionMode
+        self.sessionTitle = sessionTitle ?? ""
         super.init()
         fetchAuthStatus()
     }
@@ -676,6 +677,9 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
 
         do {
             try process.start()
+            // Set initial window title (from session history or directory name)
+            refreshWindowTitle()
+
             // Send synthetic system/status event to force webview to use host's permission mode.
             // The webview creates sessions from data-initial-session before init_response arrives,
             // so initialPermissionMode is missed. This status event overrides the default.

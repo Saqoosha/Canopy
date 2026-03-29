@@ -238,7 +238,7 @@ struct LauncherView: View {
         let isHovered = hoveredSessionId == session.id
         Button {
             selectedDirectory = session.projectDirectory
-            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id)
+            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id, sessionTitle: session.title)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "text.bubble.fill")

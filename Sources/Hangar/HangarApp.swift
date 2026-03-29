@@ -144,7 +144,8 @@ struct TabContentView: View {
                 WebViewContainer(
                     workingDirectory: appState.workingDirectory,
                     resumeSessionId: appState.resumeSessionId,
-                    permissionMode: appState.permissionMode
+                    permissionMode: appState.permissionMode,
+                    sessionTitle: appState.resumeSessionTitle
                 )
                 .id(appState.webviewReloadToken)
             }

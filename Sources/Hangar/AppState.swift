@@ -34,6 +34,7 @@ final class AppState {
         didSet { UserDefaults.standard.set(permissionMode.rawValue, forKey: Self.permissionModeKey) }
     }
     var resumeSessionId: String?
+    var resumeSessionTitle: String?
     /// Incremented to force SwiftUI to recreate the WebViewContainer (via .id() modifier),
     /// ensuring a fresh WKWebView for each session.
     private(set) var webviewReloadToken = 0
@@ -46,10 +47,11 @@ final class AppState {
         }
     }
 
-    func launchSession(directory: URL, resumeSessionId: String? = nil) {
+    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil) {
         RecentDirectories.add(directory)
         workingDirectory = directory
         self.resumeSessionId = resumeSessionId
+        self.resumeSessionTitle = sessionTitle
         webviewReloadToken += 1
         screen = .session
         logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) mode=\(self.permissionMode.rawValue, privacy: .public)")
