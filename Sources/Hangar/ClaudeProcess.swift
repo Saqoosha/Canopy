@@ -166,8 +166,6 @@ final class ClaudeProcess: @unchecked Sendable {
             switch type {
             case "system":
                 handleSystemEvent(json)
-                // Only forward status events to webview (for permissionMode sync).
-                // Do NOT forward init events — webview sets busy=true on system/init.
                 if json["subtype"] as? String == "status" {
                     sendIOMessage(json, done: false)
                 }
@@ -206,6 +204,19 @@ final class ClaudeProcess: @unchecked Sendable {
         if subtype == "init" {
             let model = json["model"] as? String ?? "?"
             logger.info("[CLI] Init: model=\(model, privacy: .public)")
+
+            // Cache CLI config for webview (slash commands, agents, etc.)
+            if let data = try? JSONSerialization.data(withJSONObject: json),
+               let jsonStr = String(data: data, encoding: .utf8)
+            {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          let d = jsonStr.data(using: .utf8),
+                          let parsed = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+                    else { return }
+                    self.messageHandler?.cacheCliConfig(parsed)
+                }
+            }
         }
     }
 

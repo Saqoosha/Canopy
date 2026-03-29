@@ -26,6 +26,10 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
     /// Cached auth status from `claude auth status`
     private var cachedAuth: [String: Any]?
 
+    /// Cached CLI config from system/init event (slash_commands, agents, tools, etc.)
+    private var cachedCliConfig: [String: Any]?
+
+
     /// Working directory for Claude sessions
     let workingDirectory: URL
 
@@ -1068,6 +1072,44 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
         spinnerIndex = 0
     }
 
+    // MARK: - CLI Config Cache
+
+    /// Called by ClaudeProcess when system/init event arrives with CLI config.
+    func cacheCliConfig(_ config: [String: Any]) {
+        cachedCliConfig = config
+        let commandCount = (config["slash_commands"] as? [Any])?.count ?? 0
+        let agentCount = (config["agents"] as? [Any])?.count ?? 0
+        logger.info("[Hangar] Cached CLI config: \(commandCount, privacy: .public) commands, \(agentCount, privacy: .public) agents")
+
+        // Push updated config to webview via update_state request.
+        // Webview sets this.claudeConfig.value = $.request.config on update_state.
+        let channelId = channels.keys.first ?? ""
+        let config = claudeStateResponse()["config"] as? [String: Any] ?? [:]
+        let state = initResponse()["state"] as? [String: Any] ?? [:]
+        let updateMsg: [String: Any] = [
+            "type": "from-extension",
+            "message": [
+                "type": "request",
+                "channelId": channelId,
+                "requestId": UUID().uuidString,
+                "request": [
+                    "type": "update_state",
+                    "state": state,
+                    "config": config,
+                ] as [String: Any],
+            ] as [String: Any],
+        ]
+        // Debug: verify the message can be serialized
+        if let data = try? JSONSerialization.data(withJSONObject: updateMsg),
+           let _ = String(data: data, encoding: .utf8)
+        {
+            sendToWebview(updateMsg)
+            logger.info("[Hangar] Sent update_state with \((config["commands"] as? [Any])?.count ?? 0, privacy: .public) commands")
+        } else {
+            logger.error("[Hangar] Failed to serialize update_state message")
+        }
+    }
+
     // MARK: - Notifications
 
     /// Post a macOS notification when a task completes and the app is not active.
@@ -1246,11 +1288,14 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
             ]
         }
 
+        // Use CLI config if available, otherwise use defaults
+        let cli = cachedCliConfig
+
         return [
             "type": "get_claude_state_response",
             "config": [
-                "commands": [] as [Any],
-                "models": [
+                "commands": cli?["slash_commands"] ?? [] as [Any],
+                "models": cli?["tools"] != nil ? (cli?["models"] ?? [] as [Any]) : [
                     [
                         "value": "claude-sonnet-4-6",
                         "displayName": "Claude Sonnet 4.6",
@@ -1276,10 +1321,10 @@ final class WebViewMessageHandler: NSObject, WKScriptMessageHandler {
                         "description": "Fast and efficient",
                     ],
                 ] as [[String: Any]],
-                "agents": [] as [Any],
+                "agents": cli?["agents"] ?? [] as [Any],
                 "pid": ProcessInfo.processInfo.processIdentifier,
                 "account": account,
-                "fast_mode_state": "off",
+                "fast_mode_state": cli?["fast_mode_state"] ?? "off",
             ] as [String: Any],
         ]
     }
