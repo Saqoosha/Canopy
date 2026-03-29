@@ -66,7 +66,7 @@ enum ContentViewer {
             var closeBtn = document.createElement('button');
             closeBtn.textContent = '✕';
             closeBtn.style.cssText = 'border:none;background:none;font-size:18px;cursor:pointer;color:#666;padding:0 4px;';
-            closeBtn.onclick = function() { overlay.remove(); };
+            closeBtn.onclick = function() { closeViewer(); };
             header.appendChild(titleEl);
             header.appendChild(closeBtn);
             modal.appendChild(header);
@@ -78,20 +78,27 @@ enum ContentViewer {
             overlay.appendChild(modal);
             document.body.appendChild(overlay);
 
+            var editorInstance = null;
+            function closeViewer() {
+                if (editorInstance) { editorInstance.dispose(); editorInstance = null; }
+                overlay.remove();
+                document.removeEventListener('keydown', onKey);
+            }
+
             // Close on backdrop click
             overlay.addEventListener('click', function(e) {
-                if (e.target === overlay) overlay.remove();
+                if (e.target === overlay) closeViewer();
             });
 
             // Close on Escape
             function onKey(e) {
-                if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); }
+                if (e.key === 'Escape') closeViewer();
             }
             document.addEventListener('keydown', onKey);
 
             // Create Monaco editor
             if (globalThis.monaco && globalThis.monaco.editor) {
-                globalThis.monaco.editor.create(editorDiv, {
+                editorInstance = globalThis.monaco.editor.create(editorDiv, {
                     value: content,
                     language: lang,
                     theme: 'vs',
