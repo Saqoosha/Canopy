@@ -834,3 +834,167 @@ describe("notifications", () => {
     assert.equal(r2, undefined);
   });
 });
+
+// ===========================================================================
+// env.js tests
+// ===========================================================================
+const { createEnv } = require("../Resources/vscode-shim/env.js");
+
+describe("env", () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hangar-env-test-"));
+  });
+
+  it("has appName as Visual Studio Code", () => {
+    const env = createEnv({ machineIdPath: path.join(tmpDir, "machineId") });
+    assert.equal(env.appName, "Visual Studio Code");
+  });
+
+  it("machineId persists to file", () => {
+    const machineIdPath = path.join(tmpDir, "machineId");
+    const env1 = createEnv({ machineIdPath });
+    assert.ok(env1.machineId);
+    assert.ok(fs.existsSync(machineIdPath));
+
+    // Second call reads from file — same machineId
+    const env2 = createEnv({ machineIdPath });
+    assert.equal(env2.machineId, env1.machineId);
+  });
+
+  it("sessionId is a UUID", () => {
+    const env = createEnv({ machineIdPath: path.join(tmpDir, "machineId") });
+    // UUID v4 format: 8-4-4-4-12 hex chars
+    assert.match(env.sessionId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  });
+
+  it("openExternal writes open_url to stdout", async () => {
+    const stdout = [];
+    _setWriter((data) => { stdout.push(data); });
+
+    const env = createEnv({ machineIdPath: path.join(tmpDir, "machineId") });
+    const result = await env.openExternal("https://example.com");
+
+    assert.equal(result, true);
+    const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+    assert.equal(parsed.type, "open_url");
+    assert.equal(parsed.url, "https://example.com");
+  });
+
+  it("openExternal handles Uri objects", async () => {
+    const stdout = [];
+    _setWriter((data) => { stdout.push(data); });
+
+    const env = createEnv({ machineIdPath: path.join(tmpDir, "machineId") });
+    const uri = Uri.parse("https://example.com/path");
+    await env.openExternal(uri);
+
+    const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+    assert.equal(parsed.url, "https://example.com/path");
+  });
+
+  it("machineId creates parent directory if needed", () => {
+    const machineIdPath = path.join(tmpDir, "sub", "dir", "machineId");
+    const env = createEnv({ machineIdPath });
+    assert.ok(env.machineId);
+    assert.ok(fs.existsSync(machineIdPath));
+  });
+
+  it("clipboard readText returns empty string", async () => {
+    const env = createEnv({ machineIdPath: path.join(tmpDir, "machineId") });
+    const text = await env.clipboard.readText();
+    assert.equal(text, "");
+  });
+
+  it("has expected properties", () => {
+    const env = createEnv({ machineIdPath: path.join(tmpDir, "machineId") });
+    assert.equal(env.uiKind, 1);
+    assert.equal(env.language, "en");
+    assert.equal(env.appRoot, "");
+    assert.equal(typeof env.shell, "string");
+  });
+});
+
+// ===========================================================================
+// stubs.js tests
+// ===========================================================================
+const { assembleVscodeModule } = require("../Resources/vscode-shim/stubs.js");
+
+describe("assembleVscodeModule", () => {
+  it("contains all expected namespaces", () => {
+    const mockWindow = { name: "window" };
+    const mockWorkspace = { name: "workspace" };
+    const mockCommands = { name: "commands" };
+    const mockEnv = { name: "env" };
+
+    const vscode = assembleVscodeModule({
+      window: mockWindow,
+      workspace: mockWorkspace,
+      commands: mockCommands,
+      env: mockEnv,
+    });
+
+    assert.equal(vscode.window, mockWindow);
+    assert.equal(vscode.workspace, mockWorkspace);
+    assert.equal(vscode.commands, mockCommands);
+    assert.equal(vscode.env, mockEnv);
+    assert.equal(vscode.version, "1.100.0");
+    // Types should be spread in
+    assert.equal(vscode.Uri, Uri);
+    assert.equal(typeof vscode.EventEmitter, "function");
+    assert.equal(typeof vscode.Disposable, "function");
+    // Languages and extensions stubs
+    assert.ok(vscode.languages);
+    assert.deepEqual(vscode.languages.getDiagnostics(), []);
+    assert.ok(vscode.extensions);
+    assert.equal(vscode.extensions.getExtension(), undefined);
+    assert.deepEqual(vscode.extensions.all, []);
+  });
+
+  it("Proxy warns on unknown API access", () => {
+    const stderrChunks = [];
+    const origStderrWrite = process.stderr.write;
+    process.stderr.write = (chunk) => { stderrChunks.push(chunk); return true; };
+
+    const stdout = [];
+    _setWriter((data) => { stdout.push(data); });
+
+    const vscode = assembleVscodeModule({
+      window: {},
+      workspace: {},
+      commands: {},
+      env: {},
+    });
+
+    const result = vscode.nonExistentApi;
+    process.stderr.write = origStderrWrite;
+
+    assert.equal(result, undefined);
+    assert.ok(stderrChunks.some((c) => c.includes("nonExistentApi")));
+    const logMsg = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+    assert.equal(logMsg.type, "log");
+    assert.equal(logMsg.level, "warn");
+    assert.ok(logMsg.msg.includes("nonExistentApi"));
+  });
+
+  it("Proxy returns undefined for symbol properties without warning", () => {
+    const stderrChunks = [];
+    const origStderrWrite = process.stderr.write;
+    process.stderr.write = (chunk) => { stderrChunks.push(chunk); return true; };
+
+    const vscode = assembleVscodeModule({
+      window: {},
+      workspace: {},
+      commands: {},
+      env: {},
+    });
+
+    const result = vscode[Symbol.iterator];
+    process.stderr.write = origStderrWrite;
+
+    assert.equal(result, undefined);
+    // No warning for symbol access
+    assert.equal(stderrChunks.length, 0);
+  });
+});
