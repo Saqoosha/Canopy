@@ -473,6 +473,143 @@ Resources/
 5. WebViewMessageHandler.swift (1409 lines) + ClaudeProcess.swift (387 lines) are deleted
 6. App binary size unchanged (no Node.js bundled)
 
+## Testing Plan
+
+The stdio/NDJSON architecture makes the shim highly testable without GUI interaction. Tests spawn `node vscode-shim.js` as a subprocess, write JSON to stdin, and assert on stdout JSON responses.
+
+### Test Harness
+
+A simple Node.js test runner that:
+
+```js
+const { spawn } = require("child_process");
+const readline = require("readline");
+
+function spawnShim(args = {}) {
+  const proc = spawn("node", [
+    "vscode-shim.js",
+    "--extension-path", args.extensionPath || findExtensionPath(),
+    "--cwd", args.cwd || "/tmp/hangar-test",
+  ]);
+
+  const stdout = readline.createInterface({ input: proc.stdout });
+  const messages = [];
+  stdout.on("line", (line) => messages.push(JSON.parse(line)));
+
+  return {
+    proc,
+    messages,
+    send(msg) { proc.stdin.write(JSON.stringify(msg) + "\n"); },
+    waitFor(type, timeout = 10000) {
+      return new Promise((resolve, reject) => {
+        const check = () => {
+          const found = messages.find(m => m.type === type);
+          if (found) return resolve(found);
+          setTimeout(check, 50);
+        };
+        check();
+        setTimeout(() => reject(new Error(`Timeout waiting for ${type}`)), timeout);
+      });
+    },
+    kill() { proc.kill(); },
+  };
+}
+```
+
+### Level 1: Shim Unit Tests (no extension.js)
+
+Test the vscode API implementations in isolation, without loading extension.js. Import the shim module directly.
+
+| Test | What it verifies |
+|------|-----------------|
+| `Uri.file("/foo/bar")` | Returns object with `fsPath`, `scheme: "file"` |
+| `Uri.joinPath(base, "sub")` | Path concatenation |
+| `Uri.parse("file:///foo")` | URI parsing |
+| `EventEmitter.fire(data)` | Listeners receive data, dispose works |
+| `globalState.get/update` | Persistence to JSON file, default values |
+| `getConfiguration("claudeCode").get("key", default)` | Returns default when key missing |
+| `getConfiguration().update("key", "val")` | Persists to settings.json |
+| `getConfiguration().inspect("key")` | Returns `{defaultValue, globalValue}` |
+| `commands.registerCommand` + `executeCommand` | Handler is called with args |
+| `workspace.workspaceFolders` | Reflects `--cwd` argument |
+| `workspace.asRelativePath` | Correct relative path calculation |
+| `workspace.findFiles("*.ts")` | Returns matching files from `--cwd` |
+| Proxy unknown API detection | Accessing `vscode.nonExistent` logs warning |
+| Console redirect | `console.log("x")` goes to stderr, not stdout |
+| `Disposable`, `Range`, `Position`, `Selection` | Basic data class behavior |
+| Numeric enums | `ViewColumn.One === 1`, `StatusBarAlignment.Right === 2`, etc. |
+
+### Level 2: Integration Tests (with extension.js, via stdio)
+
+Spawn the full shim + extension.js, communicate via stdin/stdout. These test the actual CC extension behavior.
+
+| Test | stdin → | Expected stdout ← | Timeout |
+|------|---------|-------------------|---------|
+| **Startup** | (nothing) | `{"type":"ready"}` | 30s |
+| **Init request** | `{"type":"webview_message","message":{"type":"request","requestId":"1","request":{"type":"init"}}}` | `{"type":"webview_message","message":{"type":"response","requestId":"1","response":{...}}}` with `authStatus`, `defaultCwd` | 10s |
+| **get_claude_state** | `{"type":"webview_message","message":{"type":"request","requestId":"2","request":{"type":"get_claude_state"}}}` | Response with `account`, `models`, `commands` | 60s (CLI hooks) |
+| **get_asset_uris** | Request type `get_asset_uris` | Response with `assetUris` containing welcome art paths | 5s |
+| **list_sessions** | Request type `list_sessions_request` | Response with `sessions` array | 10s |
+| **open_url** | Request type `open_url` with `url` | `{"type":"open_url","url":"https://..."}` on stdout | 5s |
+| **show_notification** | Call an API that triggers `showErrorMessage` | `{"type":"show_notification",...}` on stdout | 10s |
+| **Notification response** | Send `{"type":"notification_response","requestId":"n1","buttonValue":"OK"}` | Shim resolves internal Promise (verify no error) | 5s |
+| **Notification timeout** | Send notification, don't respond | After 60s, no hang — shim continues processing | 65s |
+| **Webview ready** | Send `{"type":"webview_ready"}` after ready | Buffered messages flush to stdout | 5s |
+| **Unknown message type** | `{"type":"webview_message","message":{"type":"totally_unknown"}}` | No crash. May log warning | 5s |
+| **Invalid JSON on stdin** | Write `not json\n` | No crash. Warning on stderr | 5s |
+| **Process exit cleanup** | Send SIGTERM | Process exits cleanly, no orphan children | 5s |
+
+### Level 3: Chat Flow Tests (end-to-end via stdio)
+
+Full conversation flows. Requires valid auth (`claude auth status` must pass).
+
+| Test | Flow | Validates |
+|------|------|----------|
+| **Send message** | init → launch_claude → io_message (user text) | Receive stream_event messages on stdout, then result |
+| **Tool permission** | Send message that triggers tool use → receive tool_permission_request → respond with allow | Tool executes, response continues |
+| **Permission deny** | Same but respond with deny | Claude acknowledges denial, continues |
+| **Interrupt** | Send message → send interrupt_claude mid-stream | Stream stops, no crash |
+| **Session resume** | Start with `--resume SESSION_ID` | Receives session history replay |
+| **@file mention** | Send list_files_request | Receive file list from cwd (ripgrep or readdir) |
+| **Multiple channels** | Open two channels via launch_claude | Both channels independently functional |
+
+### Level 4: Resilience Tests
+
+| Test | Scenario | Expected |
+|------|----------|----------|
+| **Orphan cleanup** | Kill shim with SIGKILL, check for zombie CLI processes | No orphans after Swift cleanup |
+| **Rapid messages** | Send 100 messages in 1 second | All processed, no corruption |
+| **Large payload** | Send 1MB io_message | Delivered intact via NDJSON |
+| **Concurrent notifications** | Trigger 3 notifications without responding | All 3 appear on stdout, all timeout after 60s |
+| **Extension crash** | Inject error into extension.js flow | `{"type":"error",...}` on stdout, process exits |
+| **Node.js version** | Run with Node 18, 20, 22 | All pass Level 2 tests |
+
+### Running Tests
+
+```bash
+# Level 1: Unit tests (fast, no extension needed)
+node test/shim-unit.test.js
+
+# Level 2: Integration tests (needs CC extension installed)
+node test/shim-integration.test.js
+
+# Level 3: Chat flow tests (needs valid auth)
+HANGAR_TEST_AUTH=1 node test/shim-chat.test.js
+
+# Level 4: Resilience tests
+node test/shim-resilience.test.js
+
+# All levels
+node test/run-all.js
+```
+
+### CI Considerations
+
+- Level 1 runs in CI with no external dependencies
+- Level 2 requires CC extension to be installed (can be cached in CI)
+- Level 3 requires auth — run only in local development or with CI secrets
+- Level 4 is partially CI-able (no auth needed for crash/load tests)
+
 ## Future: SSH Remote
 
 With stdio transport, SSH remote shares the same NDJSON protocol. However, SSH remote requires additional design work beyond just changing the Process spawn command:
