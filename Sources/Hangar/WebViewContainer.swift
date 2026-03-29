@@ -115,7 +115,7 @@ struct WebViewContainer: NSViewRepresentable {
               --vscode-chat-font-size: 13px;
               --vscode-chat-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
               /* Variables injected by VSCode host, not defined in CC extension CSS */
-              --app-code-background: var(--vscode-textCodeBlock-background);
+              --app-code-background: var(--vscode-editor-background);
               --app-link-color: var(--vscode-textLink-foreground);
               --app-link-foreground: var(--vscode-textLink-foreground);
               --app-link: var(--vscode-textLink-foreground);
@@ -189,6 +189,10 @@ struct WebViewContainer: NSViewRepresentable {
             [contenteditable] {
               white-space: pre-wrap !important;
               word-wrap: break-word !important;
+            }
+            /* Tool name secondary text: use description color instead of link color */
+            [class*="toolNameTextSecondary_"] {
+              color: var(--app-secondary-foreground) !important;
             }
           </style>
         </head>
