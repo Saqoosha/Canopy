@@ -9,12 +9,18 @@ final class StatusBarData {
     var contextMax: Int = 0
     var messageCount: Int = 0
     var gitBranch: String = ""
+    var vcsType: VCSType = .unknown
 
     // Rate limits from usage_update (extension → webview, intercepted by ShimProcess)
-    var sessionPct: Int = 0       // 5hr utilization 0-100
-    var sessionReset: String = "" // "18m", "2h05m"
-    var weeklyPct: Int = 0        // 7-day utilization 0-100
-    var weeklyReset: String = ""  // "4d"
+    var sessionPct: Int = 0        // 5hr utilization 0-100
+    var sessionResetDate: Date?    // actual reset time (re-formatted on each render)
+    var weeklyPct: Int = 0         // 7-day utilization 0-100
+    var weeklyResetDate: Date?     // actual reset time
+
+    // Compact boundary indicator
+    var didCompact: Bool = false
+
+    enum VCSType { case unknown, git, jj }
 
     var contextPct: Int {
         guard contextMax > 0 else { return 0 }
@@ -27,7 +33,14 @@ final class StatusBarData {
         return "\(n)"
     }
 
-    func resetContext() { contextUsed = 0 }
+    func resetContext() {
+        contextUsed = 0
+        didCompact = true
+    }
+
+    func clearCompactIndicator() {
+        didCompact = false
+    }
 
     /// Parse usage_update utilization from extension
     func updateRateLimits(_ utilization: [String: Any]) {
@@ -36,7 +49,7 @@ final class StatusBarData {
                 sessionPct = StatusBarData.parseUtilization(u)
             }
             if let r = fiveHour["resetsAt"] as? String {
-                sessionReset = formatResetTime(r)
+                sessionResetDate = StatusBarData.parseISO8601(r)
             }
         }
         if let sevenDay = utilization["sevenDay"] as? [String: Any] {
@@ -44,7 +57,7 @@ final class StatusBarData {
                 weeklyPct = StatusBarData.parseUtilization(u)
             }
             if let r = sevenDay["resetsAt"] as? String {
-                weeklyReset = formatResetTime(r)
+                weeklyResetDate = StatusBarData.parseISO8601(r)
             }
         }
     }
@@ -53,28 +66,30 @@ final class StatusBarData {
     /// Int values are treated as percentages. Double <= 1.0 as fractions.
     private static func parseUtilization(_ value: Any) -> Int {
         if let intVal = value as? Int {
-            // Int: already a percentage (0-100)
             return min(100, max(0, intVal))
         } else if let doubleVal = value as? Double {
-            // Double <= 1.0: 0-1 fraction; otherwise percentage
             let pct = doubleVal <= 1.0 ? doubleVal * 100 : doubleVal
             return Int(min(100, max(0, pct)))
         }
         return 0
     }
 
-    /// Format ISO8601 reset time as relative string: "18m", "2h05m", "4d"
-    private func formatResetTime(_ isoString: String) -> String {
+    /// Parse ISO8601 date string (with or without fractional seconds).
+    private static func parseISO8601(_ isoString: String) -> Date? {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: isoString)
-                ?? ISO8601DateFormatter().date(from: isoString)
-        else { return "" }
+        if let date = formatter.date(from: isoString) { return date }
+        return ISO8601DateFormatter().date(from: isoString)
+    }
 
+    /// Format reset Date as relative string: "18m", "2h05m", "4d", "soon"
+    static func formatResetTime(_ date: Date?) -> String {
+        guard let date else { return "" }
         let seconds = Int(date.timeIntervalSinceNow)
         guard seconds > 0 else { return "soon" }
 
         let minutes = seconds / 60
+        if minutes == 0 { return "<1m" }
         if minutes < 60 { return "\(minutes)m" }
         let hours = minutes / 60
         let remainMinutes = minutes % 60

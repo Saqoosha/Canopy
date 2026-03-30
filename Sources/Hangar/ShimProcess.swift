@@ -57,9 +57,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         self.sessionTitle = sessionTitle ?? ""
         self.statusBarData = statusBarData
         super.init()
-        // Set CLI version, git branch, and initial message count
+        // Set CLI version, VCS branch, and initial message count
         statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
-        statusBarData?.gitBranch = Self.detectGitBranch(at: workingDirectory) ?? ""
+        let dir = workingDirectory
+        let barData = statusBarData
+        DispatchQueue.global(qos: .utility).async {
+            guard let vcsInfo = Self.detectVCSInfo(at: dir) else { return }
+            DispatchQueue.main.async {
+                barData?.vcsType = vcsInfo.type
+                barData?.gitBranch = vcsInfo.branch
+            }
+        }
+        // Restore cached contextMax for immediate display on session resume
+        let cachedMax = UserDefaults.standard.integer(forKey: "statusBar.contextMax.\(workingDirectory.path)")
+        if cachedMax > 0 { statusBarData?.contextMax = cachedMax }
         if let sessionId = resumeSessionId {
             statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
                 sessionId: sessionId, directory: workingDirectory
@@ -731,6 +742,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                   let eventType = event["type"] as? String
             else { return }
 
+            if eventType == "message_start" {
+                // Clear compact indicator on next API call (fresh context reported)
+                data.clearCompactIndicator()
+            }
+
             if eventType == "message_start",
                let msg = event["message"] as? [String: Any]
             {
@@ -758,7 +774,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         largest = max(largest, cw)
                     }
                 }
-                if largest > 0 { data.contextMax = largest }
+                if largest > 0 {
+                    data.contextMax = largest
+                    UserDefaults.standard.set(largest, forKey: "statusBar.contextMax.\(workingDirectory.path)")
+                }
+            }
+            // Refresh VCS branch (user may have switched branches during session)
+            // Dispatch to background to avoid blocking main thread with subprocess calls
+            let dir = workingDirectory
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let vcsInfo = Self.detectVCSInfo(at: dir) else { return }
+                DispatchQueue.main.async {
+                    self?.statusBarData?.vcsType = vcsInfo.type
+                    self?.statusBarData?.gitBranch = vcsInfo.branch
+                }
             }
             // Refresh rate limits after each turn
             requestUsageUpdate()
@@ -871,24 +900,93 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    // MARK: - Git Branch Detection
+    // MARK: - VCS Branch Detection
 
-    /// Detect current git branch for status bar display.
-    private static func detectGitBranch(at directory: URL) -> String? {
+    /// Detect VCS type and current branch/bookmark for status bar display.
+    /// Checks for jj first (`.jj/` directory), falls back to git.
+    private static func detectVCSInfo(at directory: URL) -> (type: StatusBarData.VCSType, branch: String)? {
+        let fm = FileManager.default
+
+        // Check for jj repo
+        let jjDir = directory.appendingPathComponent(".jj")
+        if fm.fileExists(atPath: jjDir.path), let jjPath = findExecutable("jj") {
+            let status = runCommand(jjPath, args: ["log", "-r", "@", "--no-graph", "-T",
+                "if(empty, \"(empty)\", \"(modified)\")"], at: directory)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            // 1. If @ has its own bookmarks, show them
+            if let bookmarks = runCommand(jjPath, args: ["log", "-r", "@", "--no-graph", "-T", "bookmarks"], at: directory) {
+                let trimmed = bookmarks.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "*", with: "")
+                if !trimmed.isEmpty {
+                    let first = trimmed.components(separatedBy: " ").first ?? trimmed
+                    return (.jj, "\(first) \(status)".trimmingCharacters(in: .whitespaces))
+                }
+            }
+
+            // 2. No bookmarks on @ — check parent for context ("working on top of main")
+            if let parentBookmarks = runCommand(jjPath, args: ["log", "-r", "@-", "--no-graph", "-T", "bookmarks"], at: directory) {
+                let trimmed = parentBookmarks.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "*", with: "")
+                if !trimmed.isEmpty {
+                    let first = trimmed.components(separatedBy: " ").first ?? trimmed
+                    return (.jj, "\(first) \(status)".trimmingCharacters(in: .whitespaces))
+                }
+            }
+
+            // 3. Fallback: short change ID + status
+            if let changeId = runCommand(jjPath, args: ["log", "-r", "@", "--no-graph", "-T", "change_id.shortest(8)"], at: directory) {
+                let trimmed = changeId.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return (.jj, "\(trimmed) \(status)".trimmingCharacters(in: .whitespaces)) }
+            }
+            return (.jj, "")
+        }
+
+        // Fall back to git
+        if let branch = runCommand("/usr/bin/git", args: ["rev-parse", "--abbrev-ref", "HEAD"], at: directory) {
+            let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return (.git, trimmed) }
+        }
+
+        return nil
+    }
+
+    /// Find an executable by name, checking common locations that GUI apps miss from PATH.
+    private static func findExecutable(_ name: String) -> String? {
+        let searchPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            NSHomeDirectory() + "/.local/bin",
+            NSHomeDirectory() + "/.cargo/bin",
+            NSHomeDirectory() + "/.local/share/mise/shims",
+        ]
+        for dir in searchPaths {
+            let path = "\(dir)/\(name)"
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
+    }
+
+    /// Run a command and return stdout as String, or nil on failure.
+    private static func runCommand(_ executable: String, args: [String], at directory: URL) -> String? {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        proc.arguments = ["rev-parse", "--abbrev-ref", "HEAD"]
+        proc.executableURL = URL(fileURLWithPath: executable)
+        proc.arguments = args
         proc.currentDirectoryURL = directory
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
-        } catch { return nil }
+        } catch {
+            logger.debug("runCommand failed: \(executable) \(args.joined(separator: " ")): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
         let output = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else { return nil }
-        return String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(data: output, encoding: .utf8)
     }
 
     // MARK: - Process Tree Cleanup
@@ -917,7 +1015,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         do {
             try task.run()
             task.waitUntilExit()
-        } catch { return [] }
+        } catch {
+            logger.warning("pgrep -P \(pid) failed: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
 
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         return output.split(separator: "\n").compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }

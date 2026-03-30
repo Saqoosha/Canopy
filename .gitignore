@@ -5,3 +5,4 @@ build/
 Hangar.xcodeproj/
 Hangar.app/
 .DS_Store
+firebase-debug.log

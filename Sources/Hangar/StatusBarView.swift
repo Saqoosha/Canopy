@@ -4,6 +4,13 @@ struct StatusBarView: View {
     let data: StatusBarData
 
     var body: some View {
+        // TimelineView ticks every 60s so rate-limit reset countdowns stay fresh.
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            statusBar(now: context.date)
+        }
+    }
+
+    private func statusBar(now: Date) -> some View {
         HStack(spacing: 0) {
             // CLI version + Model
             segment {
@@ -15,11 +22,16 @@ struct StatusBarView: View {
                 }
             }
 
-            // Git branch
+            // VCS branch (git or jj)
             if !data.gitBranch.isEmpty {
                 dot
                 segment {
-                    Text("🌿").font(.system(size: 9))
+                    switch data.vcsType {
+                    case .jj:
+                        Text("🥋").font(.system(size: 9))
+                    default:
+                        Text("🌿").font(.system(size: 9))
+                    }
                     Text(data.gitBranch)
                         .foregroundStyle(.green)
                 }
@@ -35,6 +47,11 @@ struct StatusBarView: View {
                         .tint(pctColor(data.contextPct))
                     Text("\(data.contextPct)%")
                         .foregroundStyle(pctColor(data.contextPct))
+                    if data.didCompact {
+                        Text("↻")
+                            .foregroundStyle(.blue)
+                            .help("Context was compacted")
+                    }
                 }
             }
 
@@ -44,8 +61,9 @@ struct StatusBarView: View {
                 segment {
                     Text("5hr:\(data.sessionPct)%")
                         .foregroundStyle(pctColor(data.sessionPct))
-                    if !data.sessionReset.isEmpty {
-                        Text("⏳\(data.sessionReset)")
+                    let reset = StatusBarData.formatResetTime(data.sessionResetDate)
+                    if !reset.isEmpty {
+                        Text("⏳\(reset)")
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -57,8 +75,9 @@ struct StatusBarView: View {
                 segment {
                     Text("Wk:\(data.weeklyPct)%")
                         .foregroundStyle(pctColor(data.weeklyPct))
-                    if !data.weeklyReset.isEmpty {
-                        Text("⏳\(data.weeklyReset)")
+                    let reset = StatusBarData.formatResetTime(data.weeklyResetDate)
+                    if !reset.isEmpty {
+                        Text("⏳\(reset)")
                             .foregroundStyle(.tertiary)
                     }
                 }
