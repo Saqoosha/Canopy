@@ -4,16 +4,19 @@
 
 macOS native app that hosts the Claude Code VSCode extension's webview (React UI) in a WKWebView. No VSCode required. The CC extension's bundled JS/CSS renders directly in a native macOS window with real-time streaming.
 
-## Project Status: VSCode Shim Working (2026-03-30)
+## Project Status: Fully Working (2026-03-30)
 
-Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands.
+Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands, tabbed windows, Sparkle auto-update.
 
 **vscode-shim complete (Tasks 1-15)** — Node.js subprocess runs `extension.js` unmodified. 10 JS modules + Swift integration (ShimProcess, NodeDiscovery, Xcode bundling). Legacy handler removed.
+
+**Sparkle auto-update** — SPM dependency, EdDSA-signed appcast on GitHub Pages, delta updates, embedded release notes from GitHub Releases.
 
 ## Tech Stack
 - macOS 15.0+, Swift 6
 - WKWebView hosting CC extension's React webview
 - Node.js >= 18 (for vscode-shim, runs extension.js natively)
+- Sparkle 2.9+ for auto-update
 - xcodegen for project generation from `project.yml`
 - Bundle ID: `sh.saqoo.Canopy`
 
@@ -42,7 +45,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 ## Key Source Files
 
 ### Swift (Sources/Canopy/)
-- `CanopyApp.swift` — SwiftUI app entry, launcher ↔ session switching, window title, menu commands
+- `CanopyApp.swift` — SwiftUI app entry, tabs, menu commands, Sparkle updater
 - `AppState.swift` — Observable app state, PermissionMode enum, screen transitions
 - `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching, process tree cleanup
 - `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell), result cached
@@ -135,10 +138,18 @@ To update theme CSS:
 - `loadAllSessions` reads `cwd` from JSONL metadata (avoids lossy path decoding)
 - PermissionMode: type-safe enum (default, acceptEdits, plan, bypassPermissions)
 
+## Release Scripts
+```bash
+./scripts/release.sh 1.0.2      # Full release: build, sign, notarize, DMG, GitHub release, appcast
+./scripts/update_appcast.sh 1.0.2  # Update appcast only (after editing GitHub Release notes)
+```
+- `release.sh` — Bumps version, builds Release, creates signed/notarized DMG, creates GitHub Release, updates appcast
+- `update_appcast.sh` — Fetches release notes from GitHub, generates appcast with Sparkle's `generate_appcast`, pushes to gh-pages
+- Appcast URL: `https://saqoosha.github.io/Canopy/appcast.xml`
+- EdDSA signing key stored in macOS Keychain (shared with Sessylph)
+
 ## Next Steps
-1. Dark mode — support system appearance switching (theme-dark.css)
-2. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
-3. Window chrome — app icon, titlebar, tabs
+1. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
 
 ## Design & Plan Docs
 - `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` — Full design spec (500 lines)
