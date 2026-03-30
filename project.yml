@@ -17,6 +17,7 @@ targets:
         type: folder
         buildPhase: resources
     resources:
+      - path: Sources/Hangar/Resources/Assets.xcassets
       - path: Sources/Hangar/theme-light.css
         buildPhase: resources
     settings:

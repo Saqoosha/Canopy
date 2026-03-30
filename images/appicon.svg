@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" fill="#F8F6F3"/>
+  <g font-family="JetBrains Mono, SF Mono, monospace">
+    <!-- { -->
+    <text x="195" y="580" font-size="500" font-weight="300" fill="#BABABA">{</text>
+    <!-- } -->
+    <text x="680" y="580" font-size="500" font-weight="300" fill="#BABABA">}</text>
+    <!-- > -->
+    <text x="340" y="560" font-size="360" font-weight="700" fill="#DA7756">&gt;</text>
+    <!-- _ -->
+    <text x="530" y="560" font-size="360" font-weight="700" fill="#DA7756">_</text>
+  </g>
+</svg>

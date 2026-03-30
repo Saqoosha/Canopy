@@ -49,10 +49,10 @@ struct LauncherView: View {
 
     private var header: some View {
         VStack(spacing: 8) {
-            Image(systemName: "airplane.departure")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("Hangar")
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 96, height: 96)
+            Text("Canopy")
                 .font(.largeTitle.bold())
             Text("Claude Code Desktop")
                 .font(.subheadline)
