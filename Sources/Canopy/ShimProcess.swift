@@ -116,6 +116,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             args.append(contentsOf: ["--resume", sessionId])
         }
         args.append(contentsOf: ["--permission-mode", permissionMode.rawValue])
+        args.append(contentsOf: ["--settings-path", CanopySettings.shared.filePath.path])
         proc.arguments = args
 
         var env = ProcessInfo.processInfo.environment
@@ -528,7 +529,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
             }
             state["initialPermissionMode"] = permissionMode.rawValue
-            state["allowDangerouslySkipPermissions"] = true
+            state["allowDangerouslySkipPermissions"] = CanopySettings.shared.allowDangerouslySkipPermissions
             state["isOnboardingDismissed"] = true
             if var gates = state["experimentGates"] as? [String: Any] {
                 gates["tengu_vscode_cc_auth"] = false
@@ -546,6 +547,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            response["type"] as? String == "init_response",
            var state = response["state"] as? [String: Any]
         {
+            logger.info("init_response state from extension: initialPermissionMode=\(state["initialPermissionMode"] as? String ?? "nil", privacy: .public) allowSkip=\(state["allowDangerouslySkipPermissions"] as? Bool ?? false, privacy: .public)")
             if state["authStatus"] == nil || state["authStatus"] is NSNull {
                 if let keychainAuth = KeychainAuth.readAuthStatus() {
                     state["authStatus"] = keychainAuth
@@ -553,7 +555,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
             }
             state["initialPermissionMode"] = permissionMode.rawValue
-            state["allowDangerouslySkipPermissions"] = true
+            state["allowDangerouslySkipPermissions"] = CanopySettings.shared.allowDangerouslySkipPermissions
             state["isOnboardingDismissed"] = true
             if var gates = state["experimentGates"] as? [String: Any] {
                 gates["tengu_vscode_cc_auth"] = false

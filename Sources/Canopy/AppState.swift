@@ -28,12 +28,11 @@ enum PermissionMode: String, CaseIterable {
 
 @Observable
 final class AppState {
-    private static let permissionModeKey = "lastPermissionMode"
-
     private(set) var screen: AppScreen = .launcher
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
-    var permissionMode: PermissionMode = .acceptEdits {
-        didSet { UserDefaults.standard.set(permissionMode.rawValue, forKey: Self.permissionModeKey) }
+    var permissionMode: PermissionMode {
+        get { CanopySettings.shared.initialPermissionMode }
+        set { CanopySettings.shared.initialPermissionMode = newValue }
     }
     var resumeSessionId: String?
     var resumeSessionTitle: String?
@@ -43,12 +42,6 @@ final class AppState {
     private(set) var webviewReloadToken = 0
 
     init() {
-        if let saved = UserDefaults.standard.string(forKey: Self.permissionModeKey),
-           let mode = PermissionMode(rawValue: saved)
-        {
-            permissionMode = mode
-        }
-        // Debug: auto-launch session via defaults write sh.saqoo.Canopy debugAutoLaunchDir /tmp
         debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")
     }
 

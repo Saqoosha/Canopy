@@ -16,7 +16,6 @@ struct LauncherView: View {
             VStack(spacing: 24) {
                 header
                 directoryCard
-                permissionPicker
                 startButton
 
                 if !recentDirectories.isEmpty || !sessions.isEmpty {
@@ -91,23 +90,6 @@ struct LauncherView: View {
                         lineWidth: isDropTargeted ? 2 : 1
                     )
             )
-        }
-    }
-
-    // MARK: - Permission Picker
-
-    private var permissionPicker: some View {
-        HStack {
-            Text("Permission Mode")
-                .font(.subheadline)
-            Spacer()
-            Picker("", selection: $appState.permissionMode) {
-                ForEach(PermissionMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 200)
         }
     }
 
