@@ -272,16 +272,11 @@ struct WebViewContainer: NSViewRepresentable {
 
     // MARK: - Auth Status for HTML injection
 
-    /// Read cached auth status and generate HTML attribute for instant auth display.
-    /// The CC webview reads `data-initial-auth-status` from `<div id="root">` on startup.
+    /// Build data-initial-auth-status attribute from macOS Keychain.
+    /// The CC webview reads this from `<div id="root">` on startup for instant auth display.
     private static func initialAuthStatusAttr() -> String {
-        let cachePath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Hangar/authCache.json")
-        guard let data = try? Data(contentsOf: cachePath),
-              let jsonStr = String(data: data, encoding: .utf8)?
-                .replacingOccurrences(of: "\"", with: "&quot;")
-        else { return "" }
-        return " data-initial-auth-status=\"\(jsonStr)\""
+        guard let jsonStr = KeychainAuth.readAuthStatusJSON() else { return "" }
+        return " data-initial-auth-status=\"\(jsonStr.replacingOccurrences(of: "\"", with: "&quot;"))\""
     }
 
     // MARK: - Console capture JS

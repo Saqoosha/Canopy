@@ -99,6 +99,7 @@ Chat:    io_message(user) → CLI stdin
 
 ## Key Learnings (Shim-specific)
 - Extension sends two message formats: unsolicited wrapped in `{type:"from-extension"}`, responses NOT wrapped — ShimProcess must detect and wrap responses
+- **Auth architecture**: VSCode extension reads OAuth tokens from macOS Keychain (`security find-generic-password -a "$USER" -w -s "Claude Code-credentials"`), not `~/.claude.json`. Keychain stores JSON with `claudeAiOauth` (accessToken, refreshToken, expiresAt, scopes, subscriptionType). Extension calls `authManager.getAuthStatus()` synchronously during HTML generation to inject `data-initial-auth-status`. Hangar reads Keychain directly via `KeychainAuth.swift` — same source as the extension, works even on first launch. Result is cached after first read to avoid spawning `security` on every message.
 - `tengu_vscode_cc_auth` experiment gate: when true, webview uses Secrets API for auth (broken in Hangar). Must be forced to false in globalState + Memento.update
 - Webview reads `data-initial-auth-status` HTML attribute for instant auth — inject cached authStatus here
 - `update_state` handler: `this.authStatus.value = state.authStatus ?? null` — any update_state without authStatus resets auth to null
@@ -135,10 +136,9 @@ To update theme CSS:
 - PermissionMode: type-safe enum (default, acceptEdits, plan, bypassPermissions)
 
 ## Next Steps
-1. **Auth improvement** — Move secrets from file-based JSON to macOS Keychain (currently chmod 0o600)
-2. Dark mode — support system appearance switching (theme-dark.css)
-3. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
-4. Window chrome — app icon, titlebar, tabs
+1. Dark mode — support system appearance switching (theme-dark.css)
+2. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
+3. Window chrome — app icon, titlebar, tabs
 
 ## Design & Plan Docs
 - `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` — Full design spec (500 lines)

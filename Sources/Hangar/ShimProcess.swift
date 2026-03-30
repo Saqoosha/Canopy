@@ -24,9 +24,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Messages queued before the shim is ready (flushed on "ready").
     private var pendingMessages: [[String: Any]] = []
 
-    /// Cached authStatus from update_state, persisted for instant auth on next session.
-    private static let authCachePath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Hangar/authCache.json").path
     /// Accumulates partial lines from stdout (only accessed from readabilityHandler thread).
     private var stdoutBuffer = Data()
     /// Descendant PIDs collected before termination, used for cleanup on unexpected exit.
@@ -377,7 +374,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func handleNotification(_ msg: [String: Any]) {
         guard let message = msg["message"] as? String,
               let requestId = msg["requestId"] as? String
-        else { return }
+        else {
+            logger.warning("Malformed notification from shim: missing message or requestId")
+            return
+        }
 
         let severity = msg["severity"] as? String ?? "info"
         let buttons = msg["buttons"] as? [String] ?? []
@@ -436,7 +436,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         proc.arguments = ["-e", appleScript]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        do {
+            try proc.run()
+        } catch {
+            logger.error("Failed to open terminal: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func shellQuote(_ s: String) -> String {
@@ -450,24 +454,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Auth State Cache
 
-    /// Intercept messages to cache authStatus from update_state and inject it into init_response.
-    /// This prevents the login screen flash: init_response arrives without auth, but we inject cached auth.
+    /// Intercept messages to inject authStatus from Keychain and override permission/experiment settings.
     private func patchAuthIfNeeded(_ message: [String: Any]) -> [String: Any] {
         guard message["type"] as? String == "from-extension",
               var nested = message["message"] as? [String: Any]
         else { return message }
 
-        // Patch update_state: cache authStatus + inject if missing + override permission settings
+        // Patch update_state: inject authStatus from Keychain if missing + override permission settings
         if var request = nested["request"] as? [String: Any],
            request["type"] as? String == "update_state",
            var state = request["state"] as? [String: Any]
         {
-            if let authStatus = state["authStatus"] as? [String: Any] {
-                cacheAuthStatus(authStatus)
-            } else if let cached = loadCachedAuthStatus() {
-                // Inject cached authStatus into update_state that lacks it
-                // (first update_state arrives before CLI resolves auth)
-                state["authStatus"] = cached
+            if state["authStatus"] == nil || state["authStatus"] is NSNull {
+                if let keychainAuth = KeychainAuth.readAuthStatus() {
+                    state["authStatus"] = keychainAuth
+                }
             }
             state["initialPermissionMode"] = permissionMode.rawValue
             state["allowDangerouslySkipPermissions"] = true
@@ -483,68 +484,33 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return patchedMessage
         }
 
-        // Patch init_response: inject cached authStatus, permission mode, skipPermissions
-        if let response = nested["response"] as? [String: Any],
+        // Patch init_response: inject authStatus from Keychain if missing, permission mode, skipPermissions
+        if var response = nested["response"] as? [String: Any],
            response["type"] as? String == "init_response",
            var state = response["state"] as? [String: Any]
         {
-            var patched = false
-
-            // Log and inject cached authStatus if missing
             if state["authStatus"] == nil || state["authStatus"] is NSNull {
-                if let cached = loadCachedAuthStatus() {
-                    state["authStatus"] = cached
-                    logger.info("Injected cached authStatus into init_response")
-                    patched = true
+                if let keychainAuth = KeychainAuth.readAuthStatus() {
+                    state["authStatus"] = keychainAuth
+                    logger.info("Injected Keychain authStatus into init_response")
                 }
             }
-
-            // Override fields to match old handler behavior
             state["initialPermissionMode"] = permissionMode.rawValue
             state["allowDangerouslySkipPermissions"] = true
             state["isOnboardingDismissed"] = true
-            // Disable CC auth gate — forces classic auth flow using authStatus field.
-            // With tengu_vscode_cc_auth=true, webview checks secrets API (empty) → login screen.
             if var gates = state["experimentGates"] as? [String: Any] {
                 gates["tengu_vscode_cc_auth"] = false
                 state["experimentGates"] = gates
             }
             logger.info("Patched init_response: initialPermissionMode=\(self.permissionMode.rawValue, privacy: .public) allowSkip=true")
-            patched = true
-
-            if patched {
-                var patchedResponse = response
-                patchedResponse["state"] = state
-                nested["response"] = patchedResponse
-                var patchedMessage = message
-                patchedMessage["message"] = nested
-                return patchedMessage
-            }
+            response["state"] = state
+            nested["response"] = response
+            var patchedMessage = message
+            patchedMessage["message"] = nested
+            return patchedMessage
         }
 
         return message
-    }
-
-    private func cacheAuthStatus(_ authStatus: [String: Any]) {
-        do {
-            let data = try JSONSerialization.data(withJSONObject: authStatus)
-            let dir = (Self.authCachePath as NSString).deletingLastPathComponent
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            let url = URL(fileURLWithPath: Self.authCachePath)
-            try data.write(to: url)
-            // Restrict file permissions to owner-only (contains auth tokens)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.authCachePath)
-            logger.info("Cached authStatus")
-        } catch {
-            logger.error("Failed to cache authStatus: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func loadCachedAuthStatus() -> [String: Any]? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: Self.authCachePath)),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        return obj
     }
 
     // MARK: - Shim Communication
@@ -593,19 +559,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         //   Responses:   {type:"response", requestId:"...", ...} — needs wrapping
         // VSCode internally wraps ALL extension→webview messages in {type:"from-extension"}.
         let jsPayload: String
-        if dict["type"] as? String == "from-extension" {
-            // Already wrapped — forward as-is
-            guard let data = try? JSONSerialization.data(withJSONObject: dict),
-                  let jsonStr = String(data: data, encoding: .utf8)
-            else { return }
+        let payload: Any = dict["type"] as? String == "from-extension"
+            ? dict
+            : ["type": "from-extension", "message": dict] as [String: Any]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            guard let jsonStr = String(data: data, encoding: .utf8) else {
+                logger.error("sendToWebView: UTF-8 encode failed")
+                return
+            }
             jsPayload = jsonStr
-        } else {
-            // Needs from-extension wrapper (responses, etc.)
-            let wrapped: [String: Any] = ["type": "from-extension", "message": dict]
-            guard let data = try? JSONSerialization.data(withJSONObject: wrapped),
-                  let jsonStr = String(data: data, encoding: .utf8)
-            else { return }
-            jsPayload = jsonStr
+        } catch {
+            logger.error("sendToWebView: JSON serialization failed: \(error.localizedDescription, privacy: .public)")
+            return
         }
 
         let js = "window.postMessage(\(jsPayload),'*')"
