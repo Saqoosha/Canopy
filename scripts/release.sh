@@ -83,9 +83,6 @@ EOF
 )"
 fi
 
-echo "=== Updating Sparkle appcast ==="
-"${ROOT_DIR}/scripts/update_appcast.sh" "$VERSION"
-
 echo "=== Cleaning up dev builds ==="
 find "${BUILD_DIR}" -name "Canopy.app" -type d -exec rm -rf {} + 2>/dev/null || true
 echo "Removed all .app bundles from ${BUILD_DIR}"
@@ -95,4 +92,6 @@ echo "Version: ${VERSION}"
 echo "Tag: ${TAG}"
 echo "DMG: ${DMG_PATH}"
 echo ""
-echo "Don't forget to update the release notes on GitHub!"
+echo "Next steps:"
+echo "  1. Update release notes:  gh release edit ${TAG} --notes '...'"
+echo "  2. Update appcast:        ./scripts/update_appcast.sh ${VERSION}"

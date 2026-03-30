@@ -68,7 +68,15 @@ Analyze the actual code changes and write user-friendly release notes:
 gh release edit v<new_version> --notes "<generated notes>"
 ```
 
-### 6. Show result
+### 6. Update Sparkle appcast
+
+After release notes are finalized, update the appcast so Sparkle shows the correct notes:
+
+```bash
+./scripts/update_appcast.sh <new_version>
+```
+
+### 7. Show result
 
 Display:
 - New version number

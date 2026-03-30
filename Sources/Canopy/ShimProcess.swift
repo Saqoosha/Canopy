@@ -156,7 +156,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty {
-                handle.readabilityHandler = nil
+                // Only disable on true EOF (process exited). Spurious empty reads
+                // from a still-running process would permanently kill the handler.
+                if self?.process?.isRunning != true {
+                    handle.readabilityHandler = nil
+                }
                 return
             }
             self?.handleStdoutData(data)
@@ -355,6 +359,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 continue
             }
 
+            let preview = String(line.prefix(120))
+            logger.debug("[stdout] type=\(type, privacy: .public) preview=\(preview, privacy: .public)")
+
             DispatchQueue.main.async { [weak self] in
                 self?.handleShimMessage(type: type, msg: msg)
             }
@@ -378,6 +385,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 logger.warning("webview_message with no 'message' field")
                 return
             }
+            let innerType = (innerMessage["type"] as? String) ?? "?"
+            logger.debug("[stdout→webview] type=\(innerType, privacy: .public)")
             innerMessage = patchAuthIfNeeded(innerMessage)
             trackWorkingState(innerMessage)
             extractStatusData(innerMessage)
