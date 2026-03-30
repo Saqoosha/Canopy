@@ -210,7 +210,6 @@ enum ClaudeSessionHistory {
         }
     }
 
-    /// Extract the first user message (up to 16KB) as the session title.
     /// Count user + assistant messages in a session transcript file.
     static func countMessages(sessionId: String, directory: URL) -> Int {
         let encoded = encodePath(directory.path)
@@ -233,6 +232,7 @@ enum ClaudeSessionHistory {
         return count
     }
 
+    /// Extract the first user message (up to 16KB) as the session title.
     private static func extractTitle(from file: URL) -> String {
         extractTitle(fromPath: file.path)
     }

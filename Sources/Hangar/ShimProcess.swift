@@ -748,16 +748,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
 
         case "result":
-            // Context window size from modelUsage
+            // Context window size from modelUsage — use largest (main model has the biggest window)
             if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
+                var largest = 0
                 for (_, value) in modelUsage {
                     if let info = value as? [String: Any],
                        let cw = info["contextWindow"] as? Int
                     {
-                        data.contextMax = cw
-                        break
+                        largest = max(largest, cw)
                     }
                 }
+                if largest > 0 { data.contextMax = largest }
             }
             // Refresh rate limits after each turn
             requestUsageUpdate()
@@ -855,9 +856,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     private func showErrorInWebView(_ message: String) {
-        guard let escaped = message.replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\\", with: "\\\\") as String?
-        else { return }
+        // Escape backslash FIRST, then single quotes
+        let escaped = message
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
         let js = """
         (function(){
             var el = document.getElementById('claude-error');

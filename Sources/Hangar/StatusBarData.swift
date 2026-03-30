@@ -49,20 +49,18 @@ final class StatusBarData {
         }
     }
 
-    /// Parse utilization value: API sends 0-1 (e.g., 0.55), but JSONSerialization
-    /// may deliver as Int (55) or Double. Handle both formats robustly.
+    /// Parse utilization value: API may send as 0-1 fraction (Double) or 0-100 percentage (Int).
+    /// Int values are treated as percentages. Double <= 1.0 as fractions.
     private static func parseUtilization(_ value: Any) -> Int {
-        let d: Double
         if let intVal = value as? Int {
-            d = Double(intVal)
+            // Int: already a percentage (0-100)
+            return min(100, max(0, intVal))
         } else if let doubleVal = value as? Double {
-            d = doubleVal
-        } else {
-            return 0
+            // Double <= 1.0: 0-1 fraction; otherwise percentage
+            let pct = doubleVal <= 1.0 ? doubleVal * 100 : doubleVal
+            return Int(min(100, max(0, pct)))
         }
-        // If <= 1.0, it's a 0-1 fraction; multiply by 100. Otherwise it's already a percentage.
-        let pct = d <= 1.0 ? d * 100 : d
-        return Int(min(100, max(0, pct)))
+        return 0
     }
 
     /// Format ISO8601 reset time as relative string: "18m", "2h05m", "4d"
