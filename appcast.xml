@@ -1,6 +1,10 @@
 <?xml version="1.0" standalone="yes"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
+        <title>Canopy Changelog</title>
+        <link>https://github.com/Saqoosha/Canopy</link>
+        <description>Most recent changes with links to updates.</description>
+        <language>en</language>
         <title>Canopy</title>
         <item>
             <title>1.0.1</title>
@@ -13,6 +17,10 @@
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.1/Canopy3-2.delta" sparkle:deltaFrom="2" length="11018" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="oYkaAYs/PvkfgFdo4MpzOT+XMW6cNrwCYAx6O7qI3GkhVz7ewUucd6cIeD8KqP/GnNYd98HGMKpSIdaqAvTgAw=="/>
             </sparkle:deltas>
+            <description sparkle:format="markdown"><![CDATA[### Changes
+
+- Updated launcher subtitle to "Claude Code for macOS"
+]]></description>
         </item>
         <item>
             <title>1.0.0</title>
@@ -22,6 +30,16 @@
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.1/Canopy-1.0.0.dmg" length="1880065" type="application/octet-stream" sparkle:edSignature="FcPqwWiVoRNpOLvFi8r9qwx3pAjoL5uVjvnKwvgeGYsog0RVq66NcNLhKIeVgedOStqvlIOSrWuHaDhSGd9PBA=="/>
+            <description sparkle:format="markdown"><![CDATA[### Changes
+
+- Initial release of Canopy — standalone macOS app hosting Claude Code extension webview
+- Full chat with Claude via vscode-shim (Node.js subprocess running extension.js unmodified)
+- Session history with instant replay
+- Directory picker and recent directories
+- Real-time streaming with SSE events
+- Permission mode sync (default, acceptEdits, plan, bypassPermissions)
+- Sparkle auto-update support
+]]></description>
         </item>
     </channel>
 </rss>
