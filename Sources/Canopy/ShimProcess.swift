@@ -120,6 +120,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         var env = ProcessInfo.processInfo.environment
         env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+
+        // Ensure PATH includes directories where tools like rg (ripgrep) live.
+        // macOS GUI apps inherit a minimal PATH that lacks Homebrew, mise, nvm paths.
+        // The CC extension uses system rg for @-mention file listing with gitignore support.
+        let nodeBinDir = (nodeInfo.path as NSString).deletingLastPathComponent
+        var extraPaths = [nodeBinDir]
+        // Homebrew (Apple Silicon and Intel)
+        for p in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            if !extraPaths.contains(p) { extraPaths.append(p) }
+        }
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let newPaths = extraPaths.filter { !currentPath.contains($0) }
+        if !newPaths.isEmpty {
+            env["PATH"] = (newPaths + [currentPath]).joined(separator: ":")
+        }
+
         proc.environment = env
 
         let stdin = Pipe()

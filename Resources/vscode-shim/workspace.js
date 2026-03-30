@@ -32,6 +32,39 @@ function globToRegExp(pattern) {
       // ? matches single char except /
       re += "[^/]";
       i++;
+    } else if (ch === "[") {
+      // Character class — pass through to regex as-is
+      const start = i;
+      i++; // skip [
+      if (i < pattern.length && pattern[i] === "!") {
+        re += "[^";
+        i++;
+      } else {
+        re += "[";
+      }
+      while (i < pattern.length && pattern[i] !== "]") {
+        re += pattern[i];
+        i++;
+      }
+      if (i < pattern.length) {
+        re += "]";
+        i++; // skip ]
+      }
+    } else if (ch === "{") {
+      // Brace expansion {a,b} → (a|b)
+      const start = i;
+      i++; // skip {
+      let alternatives = "";
+      while (i < pattern.length && pattern[i] !== "}") {
+        if (pattern[i] === ",") {
+          alternatives += "|";
+        } else {
+          alternatives += pattern[i].replace(/[.+^$()[\]\\]/g, "\\$&");
+        }
+        i++;
+      }
+      if (i < pattern.length) i++; // skip }
+      re += "(" + alternatives + ")";
     } else {
       // Escape any RegExp metacharacter
       re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -45,10 +78,87 @@ function globToRegExp(pattern) {
 // findFiles — recursive directory walk with glob matching
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse a .gitignore file and return an array of {pattern, negated} rules.
+ * Only handles the most common patterns (no ** mid-path rewriting).
+ */
+function parseGitignore(filePath) {
+  let content;
+  try {
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return [];
+  }
+  const rules = [];
+  for (let line of content.split("\n")) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+    let negated = false;
+    if (line.startsWith("!")) {
+      negated = true;
+      line = line.slice(1);
+    }
+    // Remove trailing spaces (unless escaped)
+    line = line.replace(/(?<!\\)\s+$/, "");
+    if (!line) continue;
+    rules.push({ pattern: line, negated });
+  }
+  return rules;
+}
+
+/**
+ * Test whether a relative path is ignored by a list of gitignore rules.
+ * @param {string} relPath - relative path (forward slashes)
+ * @param {boolean} isDir - true if the entry is a directory
+ * @param {Array<{pattern:string, negated:boolean}>} rules
+ */
+function isGitignored(relPath, isDir, rules) {
+  let ignored = false;
+  for (const { pattern, negated } of rules) {
+    let p = pattern;
+    let dirOnly = false;
+    if (p.endsWith("/")) {
+      dirOnly = true;
+      p = p.slice(0, -1);
+    }
+    if (dirOnly && !isDir) continue;
+
+    // If pattern contains /, match against full relative path; otherwise match basename
+    const matchAgainst = p.includes("/") ? relPath : path.basename(relPath);
+    const target = p.startsWith("/") ? p.slice(1) : p;
+
+    try {
+      const re = globToRegExp(
+        target.includes("/") || target.includes("*") ? target : "**/" + target,
+      );
+      if (re.test(matchAgainst) || re.test(relPath)) {
+        ignored = !negated;
+      }
+    } catch {
+      // Skip malformed patterns
+    }
+  }
+  return ignored;
+}
+
+/**
+ * Collect gitignore rules for a directory tree.
+ * Reads .gitignore at baseDir and returns a flat rule list.
+ */
+function loadGitignoreRules(baseDir) {
+  const rules = [];
+  // Root .gitignore
+  rules.push(...parseGitignore(path.join(baseDir, ".gitignore")));
+  return rules;
+}
+
 async function findFilesImpl(baseDir, pattern, exclude, maxResults, maxDepth) {
   const regex = globToRegExp(pattern);
   const excludeRegex = exclude ? globToRegExp(exclude) : null;
   const results = [];
+
+  // Load gitignore rules from workspace root
+  const gitignoreRules = loadGitignoreRules(baseDir);
 
   async function walk(dir, depth) {
     if (depth > maxDepth) return;
@@ -71,6 +181,11 @@ async function findFilesImpl(baseDir, pattern, exclude, maxResults, maxDepth) {
 
       const fullPath = path.join(dir, entry.name);
       const relativePath = path.relative(baseDir, fullPath);
+
+      // Check gitignore
+      if (gitignoreRules.length > 0 && isGitignored(relativePath, entry.isDirectory(), gitignoreRules)) {
+        continue;
+      }
 
       if (entry.isDirectory()) {
         await walk(fullPath, depth + 1);
@@ -104,6 +219,25 @@ function saveJson(filePath, data) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
+
+// VSCode built-in defaults that aren't in any extension's package.json.
+// The CC extension reads these to build ripgrep exclude globs for @-mention file listing.
+const VSCODE_BUILTIN_DEFAULTS = {
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/CVS": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/bower_components": true,
+    "**/*.code-search": true,
+  },
+  "search.useIgnoreFiles": true,
+};
 
 function createConfiguration(settingsPath, extensionPackageJson) {
   // Extract extension defaults from package.json contributes.configuration.properties
@@ -139,7 +273,11 @@ function createConfiguration(settingsPath, extensionPackageJson) {
         if (Object.prototype.hasOwnProperty.call(extDefaults, fullKey)) {
           return extDefaults[fullKey];
         }
-        // 3. Provided default
+        // 3. VSCode built-in defaults (files.exclude, search.exclude, etc.)
+        if (Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)) {
+          return VSCODE_BUILTIN_DEFAULTS[fullKey];
+        }
+        // 4. Provided default
         return defaultValue;
       },
 
