@@ -71,6 +71,7 @@ struct CanopyApp: App {
             defer: true
         )
         newWindow.contentView = contentView
+        newWindow.identifier = NSUserInterfaceItemIdentifier("main-tab")
         newWindow.isReleasedWhenClosed = false
         existingWindow.addTabbedWindow(newWindow, ordered: .above)
         newWindow.makeKeyAndOrderFront(nil)
@@ -135,7 +136,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               !configuredWindows.contains(window),
               window.styleMask.contains(.titled),
               // Exclude panels (NSOpenPanel, NSSavePanel, etc.)
-              !window.isKind(of: NSPanel.self)
+              !window.isKind(of: NSPanel.self),
+              // Only size-match app windows (WindowGroup id: "main" and newTab windows)
+              window.identifier?.rawValue.contains("main") == true
         else { return }
         configuredWindows.add(window)
 
