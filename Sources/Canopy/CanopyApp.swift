@@ -1,3 +1,4 @@
+import Sparkle
 import SwiftUI
 import UserNotifications
 
@@ -14,6 +15,11 @@ struct CanopyApp: App {
         .windowStyle(.titleBar)
         .defaultSize(width: 500, height: 800)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates...") {
+                    appDelegate.updaterController.updater.checkForUpdates()
+                }
+            }
             CommandGroup(after: .newItem) {
                 Button("New Tab") {
                     newTab()
@@ -97,7 +103,13 @@ final class ActiveTabState {
 
 // MARK: - AppDelegate
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
     private var configuredWindows = NSHashTable<NSWindow>.weakObjects()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
