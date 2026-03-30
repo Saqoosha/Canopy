@@ -13,8 +13,15 @@
             <sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Changes
-- (Add release notes here)
+            <description sparkle:format="markdown"><![CDATA[### Bug Fixes
+- Fixed @-mention file list showing all files instead of respecting .gitignore
+- Fixed @-mention filtering not working (e.g. typing `@cl` now correctly narrows results to `CLAUDE.md`)
+- Fixed .git directory and other VCS directories appearing in @-mention file list
+- Added Homebrew and Node.js tool paths to subprocess environment so ripgrep works correctly
+
+### Changes
+- Improved Sparkle appcast with embedded release notes and delta updates
+- Updated documentation
 ]]></description>
             <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.2/Canopy-1.0.2.dmg" length="1618999" type="application/octet-stream" sparkle:edSignature="EcXEzHwXjkWoUVzHuGhoBPUm2Z1+DCBf1g+gmgszaeqFt6nak4FrFGG08UGDFQYlpdV/8RFPPMsTOq+sS9MvBA=="/>
             <sparkle:deltas>
