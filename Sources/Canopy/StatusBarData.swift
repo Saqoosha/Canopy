@@ -52,6 +52,23 @@ final class StatusBarData {
         didCompact = false
     }
 
+    /// Reset all data for a new session.
+    func resetAll() {
+        cliVersion = ""
+        model = ""
+        contextUsed = 0
+        contextMax = 0
+        contextMaxOutputTokens = 0
+        messageCount = 0
+        gitBranch = ""
+        vcsType = .unknown
+        sessionPct = 0
+        sessionResetDate = nil
+        weeklyPct = 0
+        weeklyResetDate = nil
+        didCompact = false
+    }
+
     /// Parse usage_update utilization from extension
     func updateRateLimits(_ utilization: [String: Any]) {
         if let fiveHour = utilization["fiveHour"] as? [String: Any] {

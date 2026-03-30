@@ -45,11 +45,15 @@ final class AppState {
         debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")
     }
 
+    /// Optional reference to the status bar data, set by TabContentView.
+    weak var statusBarData: StatusBarData?
+
     func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil) {
         RecentDirectories.add(directory)
         workingDirectory = directory
         self.resumeSessionId = resumeSessionId
         self.resumeSessionTitle = sessionTitle
+        statusBarData?.resetAll()
         webviewReloadToken += 1
         screen = .session
         logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) mode=\(self.permissionMode.rawValue, privacy: .public)")

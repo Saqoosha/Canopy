@@ -186,6 +186,7 @@ struct TabContentView: View {
         // Only set title for launcher; session title is managed by ShimProcess
         .windowTitle(appState.screen == .launcher ? "Canopy" : nil)
         .onAppear {
+            appState.statusBarData = statusBarData
             ActiveTabState.shared.current = appState
             // Debug: auto-launch session (defaults write sh.saqoo.Canopy debugAutoLaunchDir /tmp)
             if let dir = appState.debugAutoLaunchDir, appState.screen == .launcher {
