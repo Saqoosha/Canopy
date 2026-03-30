@@ -11,6 +11,7 @@ enum AppScreen {
 enum PermissionMode: String, CaseIterable {
     case `default` = "default"
     case acceptEdits = "acceptEdits"
+    case auto = "auto"
     case plan = "plan"
     case bypassPermissions = "bypassPermissions"
 
@@ -18,6 +19,7 @@ enum PermissionMode: String, CaseIterable {
         switch self {
         case .default: "Default (ask each time)"
         case .acceptEdits: "Accept Edits"
+        case .auto: "Auto"
         case .plan: "Plan Mode"
         case .bypassPermissions: "Bypass All"
         }

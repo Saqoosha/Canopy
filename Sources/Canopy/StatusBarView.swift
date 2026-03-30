@@ -41,7 +41,7 @@ struct StatusBarView: View {
             if data.contextMax > 0 {
                 dot
                 segment {
-                    Text("\(data.formatTokens(data.contextUsed))/\(data.formatTokens(data.contextMax))")
+                    Text("\(data.formatTokens(data.contextUsed))/\(data.formatTokens(data.compactionWindow))")
                     ProgressView(value: Double(data.contextPct), total: 100)
                         .frame(width: 36)
                         .tint(pctColor(data.contextPct))

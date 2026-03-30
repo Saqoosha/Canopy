@@ -68,9 +68,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 barData?.gitBranch = vcsInfo.branch
             }
         }
-        // Restore cached contextMax for immediate display on session resume
+        // Restore cached contextMax/maxOutputTokens for immediate display on session resume
         let cachedMax = UserDefaults.standard.integer(forKey: "statusBar.contextMax.\(workingDirectory.path)")
         if cachedMax > 0 { statusBarData?.contextMax = cachedMax }
+        let cachedMaxOut = UserDefaults.standard.integer(forKey: "statusBar.contextMaxOutputTokens.\(workingDirectory.path)")
+        statusBarData?.contextMaxOutputTokens = cachedMaxOut > 0 ? cachedMaxOut : 0
         if let sessionId = resumeSessionId {
             statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
                 sessionId: sessionId, directory: workingDirectory
@@ -766,17 +768,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "result":
             // Context window size from modelUsage — use largest (main model has the biggest window)
             if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
-                var largest = 0
+                var largestCW = 0
+                var largestMaxOut = 0
                 for (_, value) in modelUsage {
                     if let info = value as? [String: Any],
                        let cw = info["contextWindow"] as? Int
                     {
-                        largest = max(largest, cw)
+                        if cw > largestCW {
+                            largestCW = cw
+                            largestMaxOut = info["maxOutputTokens"] as? Int ?? 0
+                        }
                     }
                 }
-                if largest > 0 {
-                    data.contextMax = largest
-                    UserDefaults.standard.set(largest, forKey: "statusBar.contextMax.\(workingDirectory.path)")
+                if largestCW > 0 {
+                    data.contextMax = largestCW
+                    data.contextMaxOutputTokens = largestMaxOut
+                    UserDefaults.standard.set(largestCW, forKey: "statusBar.contextMax.\(workingDirectory.path)")
+                    UserDefaults.standard.set(largestMaxOut, forKey: "statusBar.contextMaxOutputTokens.\(workingDirectory.path)")
                 }
             }
             // Refresh VCS branch (user may have switched branches during session)
@@ -797,6 +805,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         case "assistant":
             data.messageCount += 1
+            // Update contextUsed to include output_tokens (matches CC popup: input + cache_creation + cache_read + output)
+            let parentToolUseId = ioMsg["parent_tool_use_id"]
+            if let msg = ioMsg["message"] as? [String: Any],
+               let usage = msg["usage"] as? [String: Any],
+               parentToolUseId == nil || parentToolUseId is NSNull
+            {
+                let input = usage["input_tokens"] as? Int ?? 0
+                let cacheCreate = usage["cache_creation_input_tokens"] as? Int ?? 0
+                let cacheRead = usage["cache_read_input_tokens"] as? Int ?? 0
+                let output = usage["output_tokens"] as? Int ?? 0
+                data.contextUsed = input + cacheCreate + cacheRead + output
+            }
 
         case "compact_boundary":
             data.resetContext()
