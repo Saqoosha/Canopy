@@ -33,26 +33,32 @@ function globToRegExp(pattern) {
       re += "[^/]";
       i++;
     } else if (ch === "[") {
-      // Character class — pass through to regex as-is
-      const start = i;
-      i++; // skip [
-      if (i < pattern.length && pattern[i] === "!") {
-        re += "[^";
+      // Character class — convert to regex (! becomes ^ for negation)
+      // Find closing ] first; if missing, treat [ as literal
+      let j = i + 1;
+      if (j < pattern.length && pattern[j] === "!") j++;
+      while (j < pattern.length && pattern[j] !== "]") j++;
+      if (j >= pattern.length) {
+        // No closing ] — treat [ as literal
+        re += "\\[";
         i++;
       } else {
-        re += "[";
-      }
-      while (i < pattern.length && pattern[i] !== "]") {
-        re += pattern[i];
-        i++;
-      }
-      if (i < pattern.length) {
+        i++; // skip [
+        if (i < pattern.length && pattern[i] === "!") {
+          re += "[^";
+          i++;
+        } else {
+          re += "[";
+        }
+        while (i < pattern.length && pattern[i] !== "]") {
+          re += pattern[i];
+          i++;
+        }
         re += "]";
         i++; // skip ]
       }
     } else if (ch === "{") {
       // Brace expansion {a,b} → (a|b)
-      const start = i;
       i++; // skip {
       let alternatives = "";
       while (i < pattern.length && pattern[i] !== "}") {
@@ -80,7 +86,8 @@ function globToRegExp(pattern) {
 
 /**
  * Parse a .gitignore file and return an array of {pattern, negated} rules.
- * Only handles the most common patterns (no ** mid-path rewriting).
+ * Handles common patterns including **, *, ?, character classes, and negation.
+ * Does not handle nested .gitignore files or complex anchoring edge cases.
  */
 function parseGitignore(filePath) {
   let content;
@@ -123,16 +130,22 @@ function isGitignored(relPath, isDir, rules) {
     }
     if (dirOnly && !isDir) continue;
 
-    // If pattern contains /, match against full relative path; otherwise match basename
+    // If pattern contains /, prefer full relative path; otherwise prefer basename.
+    // Both basename and full path are tested as fallback.
     const matchAgainst = p.includes("/") ? relPath : path.basename(relPath);
     const target = p.startsWith("/") ? p.slice(1) : p;
 
     try {
-      const re = globToRegExp(
-        target.includes("/") || target.includes("*") ? target : "**/" + target,
-      );
-      if (re.test(matchAgainst) || re.test(relPath)) {
-        ignored = !negated;
+      if (!target.includes("/") && !target.includes("*")) {
+        // Simple name pattern (e.g. "dist", "build") — match against basename exactly
+        if (path.basename(relPath) === target) {
+          ignored = !negated;
+        }
+      } else {
+        const re = globToRegExp(target);
+        if (re.test(matchAgainst) || re.test(relPath)) {
+          ignored = !negated;
+        }
       }
     } catch {
       // Skip malformed patterns
@@ -142,8 +155,8 @@ function isGitignored(relPath, isDir, rules) {
 }
 
 /**
- * Collect gitignore rules for a directory tree.
- * Reads .gitignore at baseDir and returns a flat rule list.
+ * Load gitignore rules from the workspace root.
+ * Only reads the top-level .gitignore (subdirectory .gitignore files are not loaded).
  */
 function loadGitignoreRules(baseDir) {
   const rules = [];
@@ -285,7 +298,8 @@ function createConfiguration(settingsPath, extensionPackageJson) {
         const fullKey = section ? `${section}.${key}` : key;
         return (
           Object.prototype.hasOwnProperty.call(userSettings, fullKey) ||
-          Object.prototype.hasOwnProperty.call(extDefaults, fullKey)
+          Object.prototype.hasOwnProperty.call(extDefaults, fullKey) ||
+          Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)
         );
       },
 
@@ -303,11 +317,14 @@ function createConfiguration(settingsPath, extensionPackageJson) {
       inspect(key) {
         const fullKey = section ? `${section}.${key}` : key;
         const currentSettings = loadJson(settingsPath);
+        const defVal = Object.prototype.hasOwnProperty.call(extDefaults, fullKey)
+          ? extDefaults[fullKey]
+          : Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)
+            ? VSCODE_BUILTIN_DEFAULTS[fullKey]
+            : undefined;
         return {
           key: fullKey,
-          defaultValue: Object.prototype.hasOwnProperty.call(extDefaults, fullKey)
-            ? extDefaults[fullKey]
-            : undefined,
+          defaultValue: defVal,
           globalValue: Object.prototype.hasOwnProperty.call(currentSettings, fullKey)
             ? currentSettings[fullKey]
             : undefined,

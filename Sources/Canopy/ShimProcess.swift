@@ -122,7 +122,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
 
         // Ensure PATH includes directories where tools like rg (ripgrep) live.
-        // macOS GUI apps inherit a minimal PATH that lacks Homebrew, mise, nvm paths.
+        // macOS GUI apps inherit a minimal PATH (/usr/bin:/bin:...). We prepend the
+        // Node.js binary's directory (which may come from mise/nvm) and Homebrew paths.
         // The CC extension uses system rg for @-mention file listing with gitignore support.
         let nodeBinDir = (nodeInfo.path as NSString).deletingLastPathComponent
         var extraPaths = [nodeBinDir]
@@ -131,7 +132,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if !extraPaths.contains(p) { extraPaths.append(p) }
         }
         let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        let newPaths = extraPaths.filter { !currentPath.contains($0) }
+        let existingPaths = Set(currentPath.split(separator: ":").map(String.init))
+        let newPaths = extraPaths.filter { !existingPaths.contains($0) }
         if !newPaths.isEmpty {
             env["PATH"] = (newPaths + [currentPath]).joined(separator: ":")
         }
