@@ -1,4 +1,4 @@
-# Hangar — Claude Code Extension Webview Host
+# Canopy — Claude Code Extension Webview Host
 
 ## What Is This
 
@@ -15,13 +15,13 @@ Full chat with Claude works via vscode-shim. Launcher screen with directory pick
 - WKWebView hosting CC extension's React webview
 - Node.js >= 18 (for vscode-shim, runs extension.js natively)
 - xcodegen for project generation from `project.yml`
-- Bundle ID: `sh.saqoo.Hangar`
+- Bundle ID: `sh.saqoo.Canopy`
 
 ## Build Commands
 ```bash
 xcodegen generate
-xcodebuild -scheme Hangar -configuration Debug -derivedDataPath build build
-open build/Build/Products/Debug/Hangar.app
+xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
+open build/Build/Products/Debug/Canopy.app
 ```
 
 ## Architecture
@@ -37,12 +37,12 @@ WKWebView ─── postMessage ──→ ShimProcess.swift (~600 lines)
                                        └─ spawns Claude CLI via child_process
 ```
 
-Runs extension.js as-is — no protocol reimplementation needed. Extension updates require zero Hangar code changes. See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for full spec.
+Runs extension.js as-is — no protocol reimplementation needed. Extension updates require zero Canopy code changes. See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for full spec.
 
 ## Key Source Files
 
-### Swift (Sources/Hangar/)
-- `HangarApp.swift` — SwiftUI app entry, launcher ↔ session switching, window title, menu commands
+### Swift (Sources/Canopy/)
+- `CanopyApp.swift` — SwiftUI app entry, launcher ↔ session switching, window title, menu commands
 - `AppState.swift` — Observable app state, PermissionMode enum, screen transitions
 - `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching, process tree cleanup
 - `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell), result cached
@@ -76,7 +76,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - Location: `~/.vscode/extensions/anthropic.claude-code-*/webview/`
 - Framework: React 18 + Preact Signals
 - Must use `loadFileURL` (NOT `loadHTMLString`) for local file access
-- Writes `_hangar.html` to `~/Library/Application Support/Hangar/` as entry point
+- Writes `_canopy.html` to `~/Library/Application Support/Canopy/` as entry point
 
 ## Protocol Quick Reference
 ```
@@ -99,8 +99,8 @@ Chat:    io_message(user) → CLI stdin
 
 ## Key Learnings (Shim-specific)
 - Extension sends two message formats: unsolicited wrapped in `{type:"from-extension"}`, responses NOT wrapped — ShimProcess must detect and wrap responses
-- **Auth architecture**: VSCode extension reads OAuth tokens from macOS Keychain (`security find-generic-password -a "$USER" -w -s "Claude Code-credentials"`), not `~/.claude.json`. Keychain stores JSON with `claudeAiOauth` (accessToken, refreshToken, expiresAt, scopes, subscriptionType). Extension calls `authManager.getAuthStatus()` synchronously during HTML generation to inject `data-initial-auth-status`. Hangar reads Keychain directly via `KeychainAuth.swift` — same source as the extension, works even on first launch. Result is cached after first read to avoid spawning `security` on every message.
-- `tengu_vscode_cc_auth` experiment gate: when true, webview uses Secrets API for auth (broken in Hangar). Must be forced to false in globalState + Memento.update
+- **Auth architecture**: VSCode extension reads OAuth tokens from macOS Keychain (`security find-generic-password -a "$USER" -w -s "Claude Code-credentials"`), not `~/.claude.json`. Keychain stores JSON with `claudeAiOauth` (accessToken, refreshToken, expiresAt, scopes, subscriptionType). Extension calls `authManager.getAuthStatus()` synchronously during HTML generation to inject `data-initial-auth-status`. Canopy reads Keychain directly via `KeychainAuth.swift` — same source as the extension, works even on first launch. Result is cached after first read to avoid spawning `security` on every message.
+- `tengu_vscode_cc_auth` experiment gate: when true, webview uses Secrets API for auth (broken in Canopy). Must be forced to false in globalState + Memento.update
 - Webview reads `data-initial-auth-status` HTML attribute for instant auth — inject cached authStatus here
 - `update_state` handler: `this.authStatus.value = state.authStatus ?? null` — any update_state without authStatus resets auth to null
 - `isAuthenticated` checks: (1) `forceLogin` not true, (2) `authStatus !== null`, (3) fallback: `claudeConfig.account`
@@ -124,7 +124,7 @@ To update theme CSS:
 1. Open VSCode with desired theme active
 2. Cmd+Shift+P → "Developer: Generate Color Theme From Current Settings"
 3. Save as JSON, clean JSONC comments, convert to CSS with the node script
-4. Replace `Sources/Hangar/theme-light.css`
+4. Replace `Sources/Canopy/theme-light.css`
 
 ## Session Management
 - Launcher screen: Cmd+N returns to launcher, Cmd+O opens folder picker

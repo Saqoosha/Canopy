@@ -1,7 +1,7 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "KeychainAuth")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeychainAuth")
 
 /// Reads CC OAuth tokens from macOS Keychain and builds an authStatus object.
 /// CC CLI stores tokens under service "Claude Code-credentials", account = $USER.

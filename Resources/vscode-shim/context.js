@@ -30,7 +30,7 @@ class Memento {
     if (value === undefined) {
       delete this._data[key];
     } else {
-      // Force-disable CC auth gate — Hangar uses keychain auth, not secrets API
+      // Force-disable CC auth gate — Canopy uses keychain auth, not secrets API
       if (key === "experimentGates" && value && typeof value === "object") {
         value = { ...value, tengu_vscode_cc_auth: false };
       }

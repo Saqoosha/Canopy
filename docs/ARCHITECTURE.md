@@ -1,12 +1,12 @@
 # Architecture
 
-Detailed technical architecture of Hangar, a macOS app that hosts the Claude Code VSCode extension's webview in a native WKWebView and bridges it to a real Claude CLI process.
+Detailed technical architecture of Canopy, a macOS app that hosts the Claude Code VSCode extension's webview in a native WKWebView and bridges it to a real Claude CLI process.
 
 ## System Overview
 
 ```
 +------------------------------------------------------------------+
-|  HangarApp (SwiftUI)                                             |
+|  CanopyApp (SwiftUI)                                             |
 |  WindowGroup > AppState (@Observable)                            |
 |    ├─ .launcher → LauncherView (dir picker, sessions, perms)     |
 |    └─ .session  → WebViewContainer (NSViewRepresentable)         |
@@ -18,7 +18,7 @@ Detailed technical architecture of Hangar, a macOS app that hosts the Claude Cod
 |  |    1. Console capture (log/error/warn -> consoleLog)       |  |
 |  |    2. VSCodeStub (acquireVsCodeApi, IS_FULL_EDITOR, etc.)  |  |
 |  |                                                            |  |
-|  |  Loaded via loadFileURL(_hangar.html):                     |  |
+|  |  Loaded via loadFileURL(_canopy.html):                     |  |
 |  |    - theme-light.css (456 --vscode-* CSS variables)        |  |
 |  |    - VSCode default webview CSS (@layer vscode-default)    |  |
 |  |    - --app-* bridge variables                              |  |
@@ -71,7 +71,7 @@ Detailed technical architecture of Hangar, a macOS app that hosts the Claude Cod
 
 ## Component Descriptions
 
-### HangarApp.swift
+### CanopyApp.swift
 
 SwiftUI `@main` entry point. Creates a `WindowGroup` that switches between `LauncherView` (directory picker) and `WebViewContainer` (chat) based on `AppState.screen`. Menu commands: Cmd+N (new session → launcher), Cmd+O (open folder → launch directly). Window title shows the current directory name via `WindowTitleSetter` (NSViewRepresentable helper).
 
@@ -133,7 +133,7 @@ Static utility enum for finding Claude Code paths on disk:
 
 **HTML generation (`loadCCWebview`):**
 
-Writes `_hangar.html` to `~/Library/Application Support/Hangar/` containing:
+Writes `_canopy.html` to `~/Library/Application Support/Canopy/` containing:
 1. Theme CSS variables (loaded from bundled `theme-light.css`)
 2. CC extension's `index.css` (linked via file URL)
 3. Custom CSS overrides: font families, `--app-*` bridge variables, timeline fix
@@ -288,7 +288,7 @@ Events are serialized to JSON and sent to the webview via `window.postMessage()`
 ### Startup Sequence
 
 ```
-1. HangarApp creates WindowGroup with AppState
+1. CanopyApp creates WindowGroup with AppState
 2. LauncherView shown (AppState.screen == .launcher)
    a. Load recent directories from UserDefaults
    b. Load session history from ~/.claude/projects/ (background Task)
@@ -306,7 +306,7 @@ Events are serialized to JSON and sent to the webview via `window.postMessage()`
 4. loadCCWebview:
    a. Find CC extension path
    b. Generate HTML with theme CSS + extension JS/CSS
-   c. Write _hangar.html to ~/Library/Application Support/Hangar/
+   c. Write _canopy.html to ~/Library/Application Support/Canopy/
    d. loadFileURL with read access to home directory
 5. Webview boots:
    a. React app mounts in <div id="root">
@@ -375,7 +375,7 @@ Tool results come back as `user` type events from the CLI (the CLI handles tool 
 
 ## CSS/Theme System
 
-The CC extension UI relies on hundreds of VSCode CSS custom properties for theming. Hangar replicates this with three layers:
+The CC extension UI relies on hundreds of VSCode CSS custom properties for theming. Canopy replicates this with three layers:
 
 ### 1. VSCode Theme Variables (theme-light.css)
 
@@ -413,7 +413,7 @@ VSCode injects a set of default styles into all webviews via a `@layer vscode-de
 
 ### 4. Timeline CSS Fix
 
-The CC extension's timeline view uses `::after` pseudo-elements with `position: absolute` for connecting lines between messages. Because Hangar's DOM structure differs slightly from VSCode's (each `timelineMessage` is also a `.message` with `position: relative`), the lines need a CSS fix:
+The CC extension's timeline view uses `::after` pseudo-elements with `position: absolute` for connecting lines between messages. Because Canopy's DOM structure differs slightly from VSCode's (each `timelineMessage` is also a `.message` with `position: relative`), the lines need a CSS fix:
 
 ```css
 [class*="message_"][class*="timelineMessage_"]::after {
@@ -431,7 +431,7 @@ The `<body>` element must have `class="vscode-light"` (or `vscode-dark` for dark
 
 `WKWebView.loadHTMLString` does not allow the webview to load local file resources (JS, CSS, images) via relative or absolute file URLs. The CC extension's `index.js` imports other modules and references assets using file paths, so `loadFileURL` is required.
 
-The HTML is written to `~/Library/Application Support/Hangar/_hangar.html` and loaded with `allowingReadAccessTo` set to the user's home directory. This grants the webview read access to both the HTML file and the extension directory under `~/.vscode/extensions/`.
+The HTML is written to `~/Library/Application Support/Canopy/_canopy.html` and loaded with `allowingReadAccessTo` set to the user's home directory. This grants the webview read access to both the HTML file and the extension directory under `~/.vscode/extensions/`.
 
 ### Injected Scripts (atDocumentStart)
 
@@ -472,7 +472,7 @@ Auth status is fetched asynchronously on init. If the webview's `init` request a
 
 ### Session Resume Does Not Replay CLI History
 
-The `--resume` CLI flag reconnects to a session but does not replay history to stdout. Hangar reads the JSONL file directly and replays messages to the webview via `dispatchEvent`. This is the same approach as the VSCode extension (which also reads JSONL directly rather than relying on CLI output).
+The `--resume` CLI flag reconnects to a session but does not replay history to stdout. Canopy reads the JSONL file directly and replays messages to the webview via `dispatchEvent`. This is the same approach as the VSCode extension (which also reads JSONL directly rather than relying on CLI output).
 
 ### dispatchEvent vs postMessage for History Replay
 

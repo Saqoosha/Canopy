@@ -99,7 +99,7 @@ async function main() {
     process.env.HOME || process.env.USERPROFILE || "/tmp",
     "Library",
     "Application Support",
-    "Hangar",
+    "Canopy",
   );
 
   // Create all modules
@@ -129,7 +129,7 @@ async function main() {
   // Create ExtensionContext
   const context = createExtensionContext({ extensionPath, storagePath });
 
-  // Start stdin reader. When stdin closes (Hangar exits/crashes), exit gracefully.
+  // Start stdin reader. When stdin closes (Canopy exits/crashes), exit gracefully.
   let webviewReady = false;
   const stdinRl = startStdinReader((msg) => {
     if (msg.type === "webview_message") {
@@ -147,7 +147,7 @@ async function main() {
 
   // Process cleanup: kill all children on exit.
   // Cannot use process.kill(-pid) — we share the parent's process group,
-  // so that would kill Hangar itself. Instead, find and kill children individually.
+  // so that would kill Canopy itself. Instead, find and kill children individually.
   function killChildren() {
     try {
       const { execSync } = require("node:child_process");

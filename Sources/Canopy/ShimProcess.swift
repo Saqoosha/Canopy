@@ -3,10 +3,10 @@ import UserNotifications
 import WebKit
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "ShimProcess")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ShimProcess")
 
 /// Manages a Node.js subprocess running the vscode-shim that bridges the CC extension
-/// to Hangar's WKWebView via stdin/stdout NDJSON.
+/// to Canopy's WKWebView via stdin/stdout NDJSON.
 ///
 /// Thread safety: `stdoutBuffer` is only accessed from the stdout readabilityHandler
 /// (serialized by the system). All other mutable state (`isReady`, `pendingMessages`, etc.)
@@ -33,7 +33,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Whether we've already requested an AI-generated title for this session.
     private var titleRequested = false
 
-    private let writeQueue = DispatchQueue(label: "sh.saqoo.Hangar.shimWrite")
+    private let writeQueue = DispatchQueue(label: "sh.saqoo.Canopy.shimWrite")
 
     let workingDirectory: URL
     var resumeSessionId: String?
@@ -203,7 +203,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ) {
         guard var dict = message.body as? [String: Any] else { return }
 
-        // Override permission mode in launch_claude from Hangar app settings
+        // Override permission mode in launch_claude from Canopy app settings
         if dict["type"] as? String == "launch_claude" {
             dict["permissionMode"] = permissionMode.rawValue
 
@@ -298,7 +298,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // 2. Development fallback: navigate from this source file to Resources/vscode-shim/
         let sourceFile = URL(fileURLWithPath: #filePath)
         let projectRoot = sourceFile
-            .deletingLastPathComponent()   // Sources/Hangar/
+            .deletingLastPathComponent()   // Sources/Canopy/
             .deletingLastPathComponent()   // Sources/
             .deletingLastPathComponent()   // project root
         let devPath = projectRoot.appendingPathComponent("Resources/vscode-shim/index.js").path
@@ -612,7 +612,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Request rate limit data from extension (triggers /api/oauth/usage fetch).
     private func requestUsageUpdate() {
-        let requestId = "hangar-usage-\(UUID().uuidString.prefix(8))"
+        let requestId = "canopy-usage-\(UUID().uuidString.prefix(8))"
         sendToShim([
             "type": "webview_message",
             "message": [
@@ -630,7 +630,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func requestSessionTitle(description: String) {
         guard !description.isEmpty, let channelId else { return }
         titleRequested = true
-        let requestId = "hangar-title-\(UUID().uuidString.prefix(8))"
+        let requestId = "canopy-title-\(UUID().uuidString.prefix(8))"
         sendToShim([
             "type": "webview_message",
             "message": [
@@ -856,7 +856,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func postTaskCompletedNotification() {
         guard !NSApp.isActive else { return }
         let content = UNMutableNotificationContent()
-        content.title = "Hangar"
+        content.title = "Canopy"
         content.body = sessionTitle.isEmpty ? "Task completed" : "\(sessionTitle) — completed"
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)

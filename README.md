@@ -1,9 +1,9 @@
-# Hangar
+# Canopy
 
-A standalone macOS application that hosts the Claude Code VSCode extension's webview UI in a native WKWebView window. Chat with Claude using the full Claude Code interface without running VSCode. Hangar loads the extension's bundled React UI directly, bridges the VSCode messaging protocol to a real Claude CLI process, and streams responses in real time.
+A standalone macOS application that hosts the Claude Code VSCode extension's webview UI in a native WKWebView window. Chat with Claude using the full Claude Code interface without running VSCode. Canopy loads the extension's bundled React UI directly, bridges the VSCode messaging protocol to a real Claude CLI process, and streams responses in real time.
 
 <!-- TODO: Add screenshot -->
-<!-- ![Hangar Screenshot](docs/screenshot.png) -->
+<!-- ![Canopy Screenshot](docs/screenshot.png) -->
 
 ## Features
 
@@ -34,19 +34,19 @@ A standalone macOS application that hosts the Claude Code VSCode extension's web
 xcodegen generate
 
 # Build
-xcodebuild -scheme Hangar -configuration Debug -derivedDataPath build build
+xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
 
 # Run
-open build/Build/Products/Debug/Hangar.app
+open build/Build/Products/Debug/Canopy.app
 ```
 
-Or open `Hangar.xcodeproj` in Xcode and build/run from there.
+Or open `Canopy.xcodeproj` in Xcode and build/run from there.
 
 ## How It Works
 
 ```
 +------------------------------------------+
-|  Hangar.app (macOS native window)        |
+|  Canopy.app (macOS native window)        |
 |                                          |
 |  +------------------------------------+  |
 |  |  WKWebView                         |  |
@@ -76,11 +76,11 @@ Or open `Hangar.xcodeproj` in Xcode and build/run from there.
 +------------------------------------------+
 ```
 
-1. On launch, Hangar shows a **launcher screen** where you pick a working directory and permission mode
-2. Hangar finds the installed CC extension under `~/.vscode/extensions/` and writes an HTML entry point with injected VSCode theme variables and API stubs
+1. On launch, Canopy shows a **launcher screen** where you pick a working directory and permission mode
+2. Canopy finds the installed CC extension under `~/.vscode/extensions/` and writes an HTML entry point with injected VSCode theme variables and API stubs
 3. The webview's `acquireVsCodeApi()` is stubbed to bridge `postMessage` calls to Swift via `WKScriptMessageHandler`
-4. When resuming a session, Hangar reads the JSONL history, walks the parentUuid chain, and replays messages to the webview via synchronous `dispatchEvent` for instant rendering
-5. Hangar spawns a `claude` CLI process in streaming JSON mode (with `--resume` for resumed sessions)
+4. When resuming a session, Canopy reads the JSONL history, walks the parentUuid chain, and replays messages to the webview via synchronous `dispatchEvent` for instant rendering
+5. Canopy spawns a `claude` CLI process in streaming JSON mode (with `--resume` for resumed sessions)
 6. CLI output (NDJSON lines containing Anthropic SSE events) is parsed and forwarded directly to the webview as `io_message` events
 7. The webview renders streaming responses, tool use, thinking indicators, and all other Claude Code UI features
 
@@ -103,8 +103,8 @@ Or open `Hangar.xcodeproj` in Xcode and build/run from there.
 ## Project Structure
 
 ```
-Sources/Hangar/
-  HangarApp.swift              SwiftUI app entry, launcher/session switching, menu commands
+Sources/Canopy/
+  CanopyApp.swift              SwiftUI app entry, launcher/session switching, menu commands
   AppState.swift               Observable state, PermissionMode enum, screen transitions
   LauncherView.swift           Welcome screen: directory picker, recent dirs, session history
   WebViewContainer.swift       WKWebView setup, HTML generation, console capture

@@ -56,12 +56,12 @@ v2.1.87 [Opus 4.6] · 171K/800K ██▒▒▒▒ 21% · $1.23 · 5hr: 55% ⏳1
 
 | File | Action | Responsibility |
 |------|--------|---------------|
-| `Sources/Hangar/StatusBarData.swift` | Create | `@Observable` data model |
-| `Sources/Hangar/StatusBarView.swift` | Create | SwiftUI compact bar view |
-| `Sources/Hangar/ShimProcess.swift` | Modify | Extract data from CLI events + intercept usage_update |
-| `Sources/Hangar/HangarApp.swift` | Modify | Add StatusBarView to session layout |
-| `Sources/Hangar/WebViewContainer.swift` | Modify | Pass StatusBarData to ShimProcess |
-| `Sources/Hangar/CCExtension.swift` | Modify | Add version reading from package.json |
+| `Sources/Canopy/StatusBarData.swift` | Create | `@Observable` data model |
+| `Sources/Canopy/StatusBarView.swift` | Create | SwiftUI compact bar view |
+| `Sources/Canopy/ShimProcess.swift` | Modify | Extract data from CLI events + intercept usage_update |
+| `Sources/Canopy/CanopyApp.swift` | Modify | Add StatusBarView to session layout |
+| `Sources/Canopy/WebViewContainer.swift` | Modify | Pass StatusBarData to ShimProcess |
+| `Sources/Canopy/CCExtension.swift` | Modify | Add version reading from package.json |
 
 ---
 
@@ -69,7 +69,7 @@ v2.1.87 [Opus 4.6] · 171K/800K ██▒▒▒▒ 21% · $1.23 · 5hr: 55% ⏳1
 
 ### Task 1: StatusBarData + StatusBarView + CCExtension version
 
-### Task 2: Wire into app layout (HangarApp + WebViewContainer)
+### Task 2: Wire into app layout (CanopyApp + WebViewContainer)
 
 ### Task 3: ShimProcess data extraction (context, model, cost, messages)
 

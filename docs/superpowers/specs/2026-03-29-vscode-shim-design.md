@@ -5,13 +5,13 @@
 
 ## Problem
 
-Hangar currently reimplements the CC extension's host-side protocol in Swift (`WebViewMessageHandler.swift`, 1409 lines). Every time the CC extension updates — new message types, changed payload formats, new features (MCP, plugins, etc.) — the Swift code must be manually updated to match.
+Canopy currently reimplements the CC extension's host-side protocol in Swift (`WebViewMessageHandler.swift`, 1409 lines). Every time the CC extension updates — new message types, changed payload formats, new features (MCP, plugins, etc.) — the Swift code must be manually updated to match.
 
 The extension (v2.1.87 at time of analysis) handles ~78 message types. The current Swift implementation covers ~42. This gap grows with each release.
 
 ## Solution
 
-Run the CC extension's `extension.js` as-is in a Node.js subprocess, with a thin `vscode` module shim that bridges the extension's webview I/O to Hangar's WKWebView via stdio.
+Run the CC extension's `extension.js` as-is in a Node.js subprocess, with a thin `vscode` module shim that bridges the extension's webview I/O to Canopy's WKWebView via stdio.
 
 **Key insight:** `extension.js` uses 33 Node.js built-in modules (child_process, fs, path, os, http, crypto, stream, etc.) which all work natively in Node.js. Only the `vscode` module needs to be shimmed.
 
@@ -97,7 +97,7 @@ When stdout is a pipe (not a terminal), Node.js uses 16KB block buffering. This 
 
 ### Launcher stays in Swift
 
-The launcher screen (directory picker, session history, recent dirs, drag & drop) remains SwiftUI. It's stable, fast, and a core Hangar differentiator. Node.js process is spawned only after session selection, keeping app startup instant.
+The launcher screen (directory picker, session history, recent dirs, drag & drop) remains SwiftUI. It's stable, fast, and a core Canopy differentiator. Node.js process is spawned only after session selection, keeping app startup instant.
 
 ### Module interception via Module._resolveFilename
 
@@ -167,17 +167,17 @@ Swift wraps `webview_message` payloads in `{type: "from-extension", message: ...
 | `window.createWebviewPanel` | Same bridge. Plan preview panel (`claudePlanPreview`) is a secondary webview — stubbed in Phase 1, routed to same bridge later |
 | `webview.postMessage(msg)` | Writes `{"type":"webview_message","message":msg}` to stdout |
 | `webview.onDidReceiveMessage` | Fires when `{"type":"webview_message",...}` arrives on stdin |
-| `webview.html` setter | Ignored — Hangar independently loads the webview's `index.js`/`index.css` via `_hangar.html` in WKWebView. The extension's HTML assignment is redundant because the native webview is already rendering the same React app |
+| `webview.html` setter | Ignored — Canopy independently loads the webview's `index.js`/`index.css` via `_canopy.html` in WKWebView. The extension's HTML assignment is redundant because the native webview is already rendering the same React app |
 | `webview.asWebviewUri(uri)` | Returns file URI unchanged |
 | `webview.cspSource` | Returns `""` |
 | `webview.visible` | `true` |
 | `webview.onDidChangeVisibility` | No-op event (always visible) |
 | `commands.registerCommand(id, fn)` | Stores in Map |
 | `commands.executeCommand(id, ...args)` | `setContext` → stores in Map; others → calls registered handler or no-op |
-| `workspace.getConfiguration(section)` | Returns config object with `get(key, default)`, `has(key)`, `update(key, value, target)`, `inspect(key)`. Values from: (1) `~/Library/Application Support/Hangar/settings.json`, (2) extension's `package.json` `contributes.configuration` defaults, (3) fallback to undefined. `update()` persists to settings.json |
+| `workspace.getConfiguration(section)` | Returns config object with `get(key, default)`, `has(key)`, `update(key, value, target)`, `inspect(key)`. Values from: (1) `~/Library/Application Support/Canopy/settings.json`, (2) extension's `package.json` `contributes.configuration` defaults, (3) fallback to undefined. `update()` persists to settings.json |
 | `workspace.workspaceFolders` | Generated from `--cwd` argument |
 | `workspace.findFiles(pattern, exclude, limit)` | Uses recursive `fs.readdir` with pattern matching (not `fs.glob` which requires Node 22+). Fallback for ripgrep-based @mention file search |
-| `ExtensionContext.globalState` | `get()`/`update()` backed by JSON file in `~/Library/Application Support/Hangar/` |
+| `ExtensionContext.globalState` | `get()`/`update()` backed by JSON file in `~/Library/Application Support/Canopy/` |
 | `ExtensionContext.subscriptions` | Array of disposables |
 | `ExtensionContext.extensionPath` / `extensionUri` | From `--extension-path` argument |
 | `ExtensionContext.extension.id` | `"anthropic.claude-code"` |
@@ -216,7 +216,7 @@ Swift → stdin: {"type":"notification_response","requestId":"n1","buttonValue":
 
 | API | Stub behavior | Reason safe to stub |
 |-----|--------------|-------------------|
-| `window.activeTextEditor` | `undefined` | No editor in Hangar |
+| `window.activeTextEditor` | `undefined` | No editor in Canopy |
 | `window.visibleTextEditors` | `[]` | No editor |
 | `window.terminals` | `[]` | No embedded terminal |
 | `window.tabGroups` | `{all: []}` | No tabs |
@@ -242,7 +242,7 @@ Swift → stdin: {"type":"notification_response","requestId":"n1","buttonValue":
 | `workspace.onDidChangeTextDocument` | No-op event | Diff tracking (VSCode-specific) |
 | `workspace.onDidSaveTextDocument` | No-op event | Diff save (VSCode-specific) |
 | `workspace.onWillSaveTextDocument` | No-op event | Pre-save hook |
-| `workspace.onDidChangeConfiguration` | No-op event | Hangar manages config independently |
+| `workspace.onDidChangeConfiguration` | No-op event | Canopy manages config independently |
 | `workspace.onDidChangeWorkspaceFolders` | No-op event | Static workspace |
 | `workspace.asRelativePath(path)` | `path.relative(cwd, path)` | Simple path math |
 | `workspace.getWorkspaceFolder(uri)` | Returns first workspace folder | Single-folder workspace |
@@ -269,7 +269,7 @@ Swift → stdin: {"type":"notification_response","requestId":"n1","buttonValue":
 | `DiagnosticSeverity` | Numeric enum | No diagnostics |
 | `NotebookCellOutputItem`, `NotebookCellData`, `NotebookCellKind`, `NotebookEdit`, `NotebookEditorRevealType`, `NotebookRange` | Minimal stubs | Jupyter only |
 | `WorkspaceEdit` | `{set(){}}` | Jupyter only |
-| `ExtensionContext.logUri` / `logPath` | Path under `~/Library/Application Support/Hangar/logs/` | Activation may reference it |
+| `ExtensionContext.logUri` / `logPath` | Path under `~/Library/Application Support/Canopy/logs/` | Activation may reference it |
 
 ### Unknown API Detection
 
@@ -296,7 +296,7 @@ This makes it easy to discover which new APIs a CC extension update requires.
 | `workspace.findFiles` (enhanced) | Improved @mention with glob, gitignore awareness |
 | `workspace.fs.readFile/writeFile/stat` | Remote file operations over SSH |
 | `languages.getDiagnostics` (real) | Remote LSP integration |
-| `window.createTerminal` (real) | Embedded terminal in Hangar |
+| `window.createTerminal` (real) | Embedded terminal in Canopy |
 | `window.showQuickPick` (real) | Native picker bridge for MCP/model selection |
 | `window.showInputBox` (real) | Native input bridge |
 | `registerFileSystemProvider` (real) | In-app diff viewer |
@@ -329,9 +329,9 @@ When the Node.js process exits (especially on SIGKILL), its CLI child process ma
 
 | File | Status | Notes |
 |------|--------|-------|
-| `HangarApp.swift` | Keep | App entry, launcher ↔ session switching |
+| `CanopyApp.swift` | Keep | App entry, launcher ↔ session switching |
 | `AppState.swift` | Keep | Observable state, screen transitions |
-| `LauncherView.swift` | Keep | Launcher UI (core Hangar feature) |
+| `LauncherView.swift` | Keep | Launcher UI (core Canopy feature) |
 | `WebViewContainer.swift` | Modify | Remove direct message handler setup, connect to ShimProcess |
 | `VSCodeStub.swift` | Keep | acquireVsCodeApi() JS stub, theme CSS |
 | `CCExtension.swift` | Keep | Extension/CLI path discovery |
@@ -450,7 +450,7 @@ try {
 ## File Layout
 
 ```
-Sources/Hangar/
+Sources/Canopy/
   ShimProcess.swift          (NEW — replaces WebViewMessageHandler + ClaudeProcess)
   WebViewContainer.swift     (MODIFIED — connect to ShimProcess)
   ... (other files unchanged)
@@ -466,10 +466,10 @@ Resources/
 
 ## Success Criteria
 
-1. All current Hangar chat features work (send message, streaming, tool use, permission prompts)
+1. All current Canopy chat features work (send message, streaming, tool use, permission prompts)
 2. @file mention works (ripgrep-based file search via extension.js)
 3. Session resume works
-4. Extension updates require zero Hangar code changes (unless new vscode APIs are used — detected via Proxy warnings)
+4. Extension updates require zero Canopy code changes (unless new vscode APIs are used — detected via Proxy warnings)
 5. WebViewMessageHandler.swift (1409 lines) + ClaudeProcess.swift (387 lines) are deleted
 6. App binary size unchanged (no Node.js bundled)
 
@@ -489,7 +489,7 @@ function spawnShim(args = {}) {
   const proc = spawn("node", [
     "vscode-shim.js",
     "--extension-path", args.extensionPath || findExtensionPath(),
-    "--cwd", args.cwd || "/tmp/hangar-test",
+    "--cwd", args.cwd || "/tmp/canopy-test",
   ]);
 
   const stdout = readline.createInterface({ input: proc.stdout });
@@ -594,7 +594,7 @@ node test/shim-unit.test.js
 node test/shim-integration.test.js
 
 # Level 3: Chat flow tests (needs valid auth)
-HANGAR_TEST_AUTH=1 node test/shim-chat.test.js
+CANOPY_TEST_AUTH=1 node test/shim-chat.test.js
 
 # Level 4: Resilience tests
 node test/shim-resilience.test.js
@@ -631,7 +631,7 @@ process.arguments = ["-T", "\(user)@\(host)", "node", "vscode-shim.js",
 
 1. **Extension deployment:** CC extension must be installed on the remote host. Mechanism TBD (scp, auto-install via CLI, etc.)
 2. **Shim deployment:** `vscode-shim.js` must be transferred to the remote machine
-3. **globalState path:** `~/Library/Application Support/Hangar/` doesn't exist on Linux remotes. Use XDG paths or `~/.config/hangar/`
+3. **globalState path:** `~/Library/Application Support/Canopy/` doesn't exist on Linux remotes. Use XDG paths or `~/.config/canopy/`
 4. **Connection drop detection:** SSH stdio has no TCP keepalive. Require `ServerAliveInterval` SSH config or implement application-level heartbeat
 5. **stderr mixing:** Remote Node.js stderr and SSH transport errors arrive on the same fd. Need prefix-based separation
 6. **SSH banners/MOTD:** Can corrupt stdout. Require `-T` flag (no pseudo-terminal) and consider `-o LogLevel=ERROR`

@@ -1,4 +1,4 @@
-name: Hangar
+name: Canopy
 options:
   bundleIdPrefix: sh.saqoo
   deploymentTarget:
@@ -8,21 +8,21 @@ settings:
   SWIFT_VERSION: "6.0"
   DEVELOPMENT_TEAM: G5G54TCH8W
 targets:
-  Hangar:
+  Canopy:
     type: application
     platform: macOS
     sources:
-      - Sources/Hangar
+      - Sources/Canopy
       - path: Resources/vscode-shim
         type: folder
         buildPhase: resources
     resources:
-      - path: Sources/Hangar/Resources/Assets.xcassets
-      - path: Sources/Hangar/theme-light.css
+      - path: Sources/Canopy/Resources/Assets.xcassets
+      - path: Sources/Canopy/theme-light.css
         buildPhase: resources
     settings:
-      PRODUCT_BUNDLE_IDENTIFIER: sh.saqoo.Hangar
+      PRODUCT_BUNDLE_IDENTIFIER: sh.saqoo.Canopy
       INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
-      INFOPLIST_KEY_CFBundleDisplayName: Hangar
+      INFOPLIST_KEY_CFBundleDisplayName: Canopy
       GENERATE_INFOPLIST_FILE: YES
       SWIFT_STRICT_CONCURRENCY: complete

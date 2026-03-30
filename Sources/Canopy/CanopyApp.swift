@@ -2,7 +2,7 @@ import SwiftUI
 import UserNotifications
 
 @main
-struct HangarApp: App {
+struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
 
@@ -165,10 +165,10 @@ struct TabContentView: View {
             }
         }
         // Only set title for launcher; session title is managed by ShimProcess
-        .windowTitle(appState.screen == .launcher ? "Hangar" : nil)
+        .windowTitle(appState.screen == .launcher ? "Canopy" : nil)
         .onAppear {
             ActiveTabState.shared.current = appState
-            // Debug: auto-launch session (defaults write sh.saqoo.Hangar debugAutoLaunchDir /tmp)
+            // Debug: auto-launch session (defaults write sh.saqoo.Canopy debugAutoLaunchDir /tmp)
             if let dir = appState.debugAutoLaunchDir, appState.screen == .launcher {
                 appState.debugAutoLaunchDir = nil
                 appState.launchSession(directory: URL(fileURLWithPath: dir))

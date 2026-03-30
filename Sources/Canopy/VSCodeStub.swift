@@ -1,13 +1,13 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "VSCodeStub")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "VSCodeStub")
 
 enum VSCodeStub {
     /// JavaScript stub injected before the webview loads.
     /// Replaces acquireVsCodeApi() and sets up the postMessage bridge to Swift.
     static let javascript = """
-    // VSCode API stub for Hangar
+    // VSCode API stub for Canopy
     window.IS_SIDEBAR = false;
     window.IS_FULL_EDITOR = true;
     window.IS_SESSION_LIST_ONLY = false;
@@ -42,7 +42,7 @@ enum VSCodeStub {
                 rules: [],
                 colors: {}
             });
-            console.log('[Hangar] Redefined vs-dark as light theme');
+            console.log('[Canopy] Redefined vs-dark as light theme');
         }
         var poll = setInterval(function() {
             if (globalThis.monaco && globalThis.monaco.editor) {

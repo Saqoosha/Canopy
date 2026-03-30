@@ -423,7 +423,7 @@ const path = require("node:path");
 describe("ExtensionContext", () => {
   let ctx, tmpDir;
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hangar-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-test-"));
     ctx = createExtensionContext({ extensionPath: "/fake/ext", storagePath: tmpDir });
   });
 
@@ -542,7 +542,7 @@ describe("workspace", () => {
   let tmpDir, ws;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hangar-ws-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-ws-test-"));
     const settingsPath = path.join(tmpDir, "settings.json");
     const extensionPackageJson = {
       contributes: {
@@ -844,7 +844,7 @@ describe("env", () => {
   let tmpDir;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hangar-env-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-env-test-"));
   });
 
   it("has appName as Visual Studio Code", () => {

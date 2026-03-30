@@ -1,7 +1,7 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "SessionHistory")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SessionHistory")
 
 struct SessionEntry: Identifiable {
     let id: String

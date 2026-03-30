@@ -1,7 +1,7 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "NodeDiscovery")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "NodeDiscovery")
 
 /// Discovers a suitable Node.js installation on the system (>= 18).
 /// Checks Homebrew, mise, nvm, and login shell PATH.

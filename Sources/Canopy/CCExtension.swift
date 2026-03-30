@@ -1,7 +1,7 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "CCExtension")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "CCExtension")
 
 /// Shared utilities for finding Claude Code extension and CLI binary.
 enum CCExtension {

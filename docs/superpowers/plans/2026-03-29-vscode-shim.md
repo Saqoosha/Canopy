@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace Hangar's 1409-line Swift protocol handler with a Node.js vscode shim that runs the CC extension's `extension.js` unmodified.
+**Goal:** Replace Canopy's 1409-line Swift protocol handler with a Node.js vscode shim that runs the CC extension's `extension.js` unmodified.
 
-**Architecture:** A Node.js subprocess (`vscode-shim/`) intercepts `require("vscode")` and bridges the extension's webview I/O to Hangar's WKWebView via stdin/stdout NDJSON. Swift side (`ShimProcess.swift`) manages the subprocess lifecycle and message forwarding.
+**Architecture:** A Node.js subprocess (`vscode-shim/`) intercepts `require("vscode")` and bridges the extension's webview I/O to Canopy's WKWebView via stdin/stdout NDJSON. Swift side (`ShimProcess.swift`) manages the subprocess lifecycle and message forwarding.
 
 **Tech Stack:** Node.js >= 18 (user-installed), Swift 6 / macOS 15, WKWebView, NDJSON over stdio
 
@@ -27,11 +27,11 @@ Resources/vscode-shim/
   env.js              — appName, uiKind, shell, remoteName, openExternal, clipboard
   stubs.js            — All Tier 2 stubs with warn-once logging
 
-Sources/Hangar/
+Sources/Canopy/
   ShimProcess.swift   — NEW: Node.js subprocess manager + stdio bridge
   NodeDiscovery.swift — NEW: Find and validate node binary
   WebViewContainer.swift — MODIFY: add ShimProcess integration alongside existing handler
-  HangarApp.swift     — MODIFY: feature flag for shim mode
+  CanopyApp.swift     — MODIFY: feature flag for shim mode
   AppState.swift      — MODIFY: add useShim flag
 
 test/
@@ -476,7 +476,7 @@ describe("ExtensionContext", () => {
   let tmpDir;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hangar-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-test-"));
     ctx = createExtensionContext({
       extensionPath: "/fake/extension",
       storagePath: tmpDir,
@@ -731,7 +731,7 @@ describe("workspace", () => {
   let tmpDir;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hangar-ws-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-ws-"));
     // Create some test files
     fs.writeFileSync(path.join(tmpDir, "foo.ts"), "");
     fs.writeFileSync(path.join(tmpDir, "bar.js"), "");
@@ -928,7 +928,7 @@ function createWorkspace({ cwd, settingsPath, extensionPackageJson }) {
           version: 1,
         });
       }
-      return Promise.reject(new Error("openTextDocument(uri) not implemented in Hangar"));
+      return Promise.reject(new Error("openTextDocument(uri) not implemented in Canopy"));
     },
     applyEdit: () => Promise.resolve(false),
     textDocuments: [],
@@ -1515,7 +1515,7 @@ async function main() {
   // Storage paths
   const storagePath = path.join(
     process.env.HOME || "~",
-    "Library", "Application Support", "Hangar"
+    "Library", "Application Support", "Canopy"
   );
 
   // --- Create vscode modules ---
@@ -1846,17 +1846,17 @@ git commit -m "test(shim): add test harness and Level 2 integration tests"
 ## Task 11: ShimProcess.swift
 
 **Files:**
-- Create: `Sources/Hangar/ShimProcess.swift`
-- Create: `Sources/Hangar/NodeDiscovery.swift`
+- Create: `Sources/Canopy/ShimProcess.swift`
+- Create: `Sources/Canopy/NodeDiscovery.swift`
 
 - [ ] **Step 1: Implement NodeDiscovery.swift**
 
 ```swift
-// Sources/Hangar/NodeDiscovery.swift
+// Sources/Canopy/NodeDiscovery.swift
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "NodeDiscovery")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "NodeDiscovery")
 
 enum NodeDiscovery {
     struct NodeInfo {
@@ -1942,12 +1942,12 @@ enum NodeDiscovery {
 - [ ] **Step 2: Implement ShimProcess.swift**
 
 ```swift
-// Sources/Hangar/ShimProcess.swift
+// Sources/Canopy/ShimProcess.swift
 import Foundation
 import WebKit
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "ShimProcess")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ShimProcess")
 
 final class ShimProcess: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
@@ -1962,7 +1962,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler {
     private var pendingMessages: [[String: Any]] = []
     private var stdoutBuffer = Data()
 
-    private let writeQueue = DispatchQueue(label: "sh.saqoo.Hangar.shimWrite")
+    private let writeQueue = DispatchQueue(label: "sh.saqoo.Canopy.shimWrite")
 
     let workingDirectory: URL
     var resumeSessionId: String?
@@ -2242,7 +2242,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler {
 - [ ] **Step 3: Commit**
 
 ```bash
-git add Sources/Hangar/ShimProcess.swift Sources/Hangar/NodeDiscovery.swift
+git add Sources/Canopy/ShimProcess.swift Sources/Canopy/NodeDiscovery.swift
 git commit -m "feat(swift): add ShimProcess and NodeDiscovery for Node.js subprocess management"
 ```
 
@@ -2251,9 +2251,9 @@ git commit -m "feat(swift): add ShimProcess and NodeDiscovery for Node.js subpro
 ## Task 12: Integrate ShimProcess with WebViewContainer + Feature Flag
 
 **Files:**
-- Modify: `Sources/Hangar/AppState.swift`
-- Modify: `Sources/Hangar/WebViewContainer.swift`
-- Modify: `Sources/Hangar/HangarApp.swift`
+- Modify: `Sources/Canopy/AppState.swift`
+- Modify: `Sources/Canopy/WebViewContainer.swift`
+- Modify: `Sources/Canopy/CanopyApp.swift`
 
 - [ ] **Step 1: Add useShim flag to AppState**
 
@@ -2273,14 +2273,14 @@ The key changes:
 - In `makeNSView`, if `useShim`, create ShimProcess and register as script message handler
 - In WKNavigationDelegate's `didFinish`, call `shimProcess?.webViewDidFinishLoad()`
 
-- [ ] **Step 3: Add menu toggle in HangarApp**
+- [ ] **Step 3: Add menu toggle in CanopyApp**
 
 Add a Debug menu item "Use VSCode Shim" that toggles `appState.useShim`. This allows switching between old and new implementations at runtime (requires restarting the session).
 
 - [ ] **Step 4: Build and verify**
 
 ```bash
-xcodegen generate && xcodebuild -scheme Hangar -configuration Debug -derivedDataPath build build
+xcodegen generate && xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
 ```
 
 Expected: Builds without errors. Both old and new code paths compile.
@@ -2288,7 +2288,7 @@ Expected: Builds without errors. Both old and new code paths compile.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Sources/Hangar/AppState.swift Sources/Hangar/WebViewContainer.swift Sources/Hangar/HangarApp.swift
+git add Sources/Canopy/AppState.swift Sources/Canopy/WebViewContainer.swift Sources/Canopy/CanopyApp.swift
 git commit -m "feat(swift): integrate ShimProcess with feature flag toggle"
 ```
 
@@ -2306,13 +2306,13 @@ Add the `Resources/vscode-shim/` directory as a resource bundle in `project.yml`
 - [ ] **Step 2: Regenerate and build**
 
 ```bash
-xcodegen generate && xcodebuild -scheme Hangar -configuration Debug -derivedDataPath build build
+xcodegen generate && xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
 ```
 
 - [ ] **Step 3: Verify bundle contains shim**
 
 ```bash
-ls build/Build/Products/Debug/Hangar.app/Contents/Resources/vscode-shim/
+ls build/Build/Products/Debug/Canopy.app/Contents/Resources/vscode-shim/
 ```
 
 Expected: `index.js`, `protocol.js`, `types.js`, `context.js`, `commands.js`, `workspace.js`, `window.js`, `notifications.js`, `env.js`, `stubs.js`
@@ -2328,9 +2328,9 @@ git commit -m "build: bundle vscode-shim resources in Xcode project"
 
 ## Task 14: Manual Smoke Test + Fix Iteration
 
-- [ ] **Step 1: Launch Hangar with shim mode**
+- [ ] **Step 1: Launch Canopy with shim mode**
 
-1. Build and launch Hangar
+1. Build and launch Canopy
 2. Enable "Use VSCode Shim" from Debug menu
 3. Select a directory and start a new session
 4. Verify the chat UI loads
@@ -2368,18 +2368,18 @@ Only after Task 14 confirms the shim works.
 - [ ] **Step 1: Delete old files**
 
 ```bash
-git rm Sources/Hangar/WebViewMessageHandler.swift
-git rm Sources/Hangar/ClaudeProcess.swift
+git rm Sources/Canopy/WebViewMessageHandler.swift
+git rm Sources/Canopy/ClaudeProcess.swift
 ```
 
 - [ ] **Step 2: Remove feature flag, make shim the default**
 
-Update `AppState.swift` to remove `useShim` flag. Update `WebViewContainer.swift` to always use `ShimProcess`. Remove Debug menu toggle from `HangarApp.swift`.
+Update `AppState.swift` to remove `useShim` flag. Update `WebViewContainer.swift` to always use `ShimProcess`. Remove Debug menu toggle from `CanopyApp.swift`.
 
 - [ ] **Step 3: Build and verify**
 
 ```bash
-xcodegen generate && xcodebuild -scheme Hangar -configuration Debug -derivedDataPath build build
+xcodegen generate && xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
 ```
 
 - [ ] **Step 4: Run all tests**
@@ -2416,7 +2416,7 @@ The vscode-shim now handles all extension communication."
 | 9 | Main entry (Module hook, activate) | `index.js` |
 | 10 | Test harness + integration tests | `test/helpers.js`, `test/shim-integration.test.js` |
 | 11 | ShimProcess.swift + NodeDiscovery | Swift subprocess manager |
-| 12 | Feature flag integration | WebViewContainer, AppState, HangarApp |
+| 12 | Feature flag integration | WebViewContainer, AppState, CanopyApp |
 | 13 | Bundle in Xcode project | project.yml |
 | 14 | Smoke test + iteration | Manual testing |
 | 15 | Cleanup old implementation | Delete WebViewMessageHandler + ClaudeProcess |

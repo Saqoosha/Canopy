@@ -2,7 +2,7 @@ out/
 node_modules/
 *.vsix
 build/
-Hangar.xcodeproj/
-Hangar.app/
+Canopy.xcodeproj/
+Canopy.app/
 .DS_Store
 firebase-debug.log

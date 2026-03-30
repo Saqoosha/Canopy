@@ -2,7 +2,7 @@ import Cocoa
 import WebKit
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "ContentViewer")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ContentViewer")
 
 /// Shows content in a Monaco editor overlay inside the main webview.
 enum ContentViewer {
@@ -27,7 +27,7 @@ enum ContentViewer {
         let js = """
         (function() {
             // Remove existing overlay if any
-            var existing = document.getElementById('hangar-content-viewer');
+            var existing = document.getElementById('canopy-content-viewer');
             if (existing) existing.remove();
 
             var content = \(contentJSON);
@@ -51,7 +51,7 @@ enum ContentViewer {
 
             // Create overlay
             var overlay = document.createElement('div');
-            overlay.id = 'hangar-content-viewer';
+            overlay.id = 'canopy-content-viewer';
             overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;';
 
             var modal = document.createElement('div');

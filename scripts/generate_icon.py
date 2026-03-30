@@ -237,7 +237,7 @@ def main():
         return 1
 
     output_dir = (
-        project_root / "Sources" / "Hangar" / "Resources" / "Assets.xcassets" / "AppIcon.appiconset"
+        project_root / "Sources" / "Canopy" / "Resources" / "Assets.xcassets" / "AppIcon.appiconset"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

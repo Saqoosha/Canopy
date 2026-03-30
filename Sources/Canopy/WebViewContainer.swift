@@ -2,7 +2,7 @@ import SwiftUI
 import WebKit
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "WebView")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "WebView")
 
 struct WebViewContainer: NSViewRepresentable {
     let workingDirectory: URL
@@ -128,7 +128,7 @@ struct WebViewContainer: NSViewRepresentable {
         guard let extPath = CCExtension.extensionPath() else {
             webView.loadHTMLString(
                 "<html><body style='background:#ffffff;color:#333;padding:40px;font-family:sans-serif'>"
-                + "<h1>Hangar</h1><p>Claude Code extension not found. Install it in VSCode first.</p></body></html>",
+                + "<h1>Canopy</h1><p>Claude Code extension not found. Install it in VSCode first.</p></body></html>",
                 baseURL: nil
             )
             return
@@ -253,16 +253,16 @@ struct WebViewContainer: NSViewRepresentable {
 
         // Write HTML to Application Support (under home dir so allowingReadAccessTo works)
         let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Hangar")
+            .appendingPathComponent("Library/Application Support/Canopy")
         try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
-        let htmlFile = appSupportDir.appendingPathComponent("_hangar.html")
+        let htmlFile = appSupportDir.appendingPathComponent("_canopy.html")
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
         } catch {
-            logger.error("Failed to write _hangar.html: \(error.localizedDescription, privacy: .public)")
+            logger.error("Failed to write _canopy.html: \(error.localizedDescription, privacy: .public)")
             webView.loadHTMLString(
                 "<html><body style='background:#fff;color:#333;padding:40px;font-family:sans-serif'>"
-                + "<h1>Hangar Error</h1><p>Failed to write webview HTML: \(error.localizedDescription)</p></body></html>",
+                + "<h1>Canopy Error</h1><p>Failed to write webview HTML: \(error.localizedDescription)</p></body></html>",
                 baseURL: nil
             )
             return
@@ -298,7 +298,7 @@ struct WebViewContainer: NSViewRepresentable {
                     }).join(' ')
                 });
             } catch(e) {
-                origError.apply(console, ['[Hangar console bridge error]', e]);
+                origError.apply(console, ['[Canopy console bridge error]', e]);
             }
         }
         console.log = function() { send('log', arguments); origLog.apply(console, arguments); };

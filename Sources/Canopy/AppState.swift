@@ -1,7 +1,7 @@
 import SwiftUI
 import os.log
 
-private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "AppState")
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "AppState")
 
 enum AppScreen {
     case launcher
@@ -46,7 +46,7 @@ final class AppState {
         {
             permissionMode = mode
         }
-        // Debug: auto-launch session via defaults write sh.saqoo.Hangar debugAutoLaunchDir /tmp
+        // Debug: auto-launch session via defaults write sh.saqoo.Canopy debugAutoLaunchDir /tmp
         debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")
     }
 

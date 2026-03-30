@@ -1,6 +1,6 @@
 # Development Guide
 
-Guide for developing and contributing to Hangar.
+Guide for developing and contributing to Canopy.
 
 ## Project Setup
 
@@ -20,19 +20,19 @@ Guide for developing and contributing to Hangar.
 xcodegen generate
 
 # Build from command line
-xcodebuild -scheme Hangar -configuration Debug -derivedDataPath build build
+xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
 
 # Run
-open build/Build/Products/Debug/Hangar.app
+open build/Build/Products/Debug/Canopy.app
 ```
 
-Or open `Hangar.xcodeproj` in Xcode, select the Hangar scheme, and run (Cmd+R).
+Or open `Canopy.xcodeproj` in Xcode, select the Canopy scheme, and run (Cmd+R).
 
 ### Project Configuration
 
 The project is defined in `project.yml` (XcodeGen format):
 
-- **Bundle ID:** `sh.saqoo.Hangar`
+- **Bundle ID:** `sh.saqoo.Canopy`
 - **Deployment target:** macOS 15.0
 - **Swift version:** 6.0
 - **Concurrency:** Strict concurrency checking enabled (`SWIFT_STRICT_CONCURRENCY: complete`)
@@ -74,14 +74,14 @@ fs.writeFileSync('theme-light.css', lines.join('\n') + '\n');
 
 ### 3. Replace the File
 
-Replace `Sources/Hangar/theme-light.css` with the new file. It is loaded at runtime from the app bundle by `VSCodeStub.themeCSSVariables`.
+Replace `Sources/Canopy/theme-light.css` with the new file. It is loaded at runtime from the app bundle by `VSCodeStub.themeCSSVariables`.
 
 ### Adding Dark Mode (Future)
 
 To support dark mode:
 
 1. Export a dark theme's CSS the same way (e.g., Default Dark+)
-2. Save as `Sources/Hangar/theme-dark.css`
+2. Save as `Sources/Canopy/theme-dark.css`
 3. Add it as a bundle resource in `project.yml`
 4. Modify `VSCodeStub.themeCSSVariables` to select the correct file based on `NSApp.effectiveAppearance`
 5. Change `<body class="vscode-light">` to `<body class="vscode-dark">` when in dark mode
@@ -91,7 +91,7 @@ To support dark mode:
 
 ### os_log (Unified Logging)
 
-All Swift-side logging uses `os.log.Logger` with subsystem `sh.saqoo.Hangar`. Each source file has its own category:
+All Swift-side logging uses `os.log.Logger` with subsystem `sh.saqoo.Canopy`. Each source file has its own category:
 
 | Category | Source |
 |----------|--------|
@@ -106,14 +106,14 @@ All Swift-side logging uses `os.log.Logger` with subsystem `sh.saqoo.Hangar`. Ea
 **View logs in Terminal:**
 
 ```bash
-# Stream all Hangar logs
-log stream --predicate 'subsystem == "sh.saqoo.Hangar"' --info
+# Stream all Canopy logs
+log stream --predicate 'subsystem == "sh.saqoo.Canopy"' --info
 
 # Filter by category
-log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ClaudeProcess"' --info
+log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ClaudeProcess"' --info
 
 # Search recent logs
-log show --predicate 'subsystem == "sh.saqoo.Hangar"' --info --last 5m
+log show --predicate 'subsystem == "sh.saqoo.Canopy"' --info --last 5m
 ```
 
 The `--info` flag is required because `logger.info` messages are not shown by default.
@@ -125,8 +125,8 @@ Note: `print()` does not work when the app is launched via `open` command or Fin
 The WKWebView has `isInspectable = true`, so you can debug the webview with Safari:
 
 1. In Safari, enable "Show features for web developers" (Settings > Advanced)
-2. Launch Hangar
-3. In Safari menu: Develop > Hangar > _hangar.html
+2. Launch Canopy
+3. In Safari menu: Develop > Canopy > _canopy.html
 4. You get full Web Inspector: Elements, Console, Network, Sources, etc.
 
 This is useful for:
@@ -146,10 +146,10 @@ Uncaught errors and unhandled promise rejections are also captured.
 
 ```bash
 # Watch shim subprocess logs (Node.js stderr + message routing)
-log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ShimProcess"' --info
+log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ShimProcess"' --info
 
 # Watch Node.js discovery
-log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "NodeDiscovery"' --info
+log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "NodeDiscovery"' --info
 ```
 
 ### Debug Auto-Launch
@@ -157,8 +157,8 @@ log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "NodeDisc
 Skip the launcher and start a session automatically (useful for testing):
 
 ```bash
-defaults write sh.saqoo.Hangar debugAutoLaunchDir /path/to/dir
-open build/Build/Products/Debug/Hangar.app
+defaults write sh.saqoo.Canopy debugAutoLaunchDir /path/to/dir
+open build/Build/Products/Debug/Canopy.app
 # Clears automatically after one use
 ```
 
@@ -166,7 +166,7 @@ open build/Build/Products/Debug/Hangar.app
 
 ### Why WKWebView Instead of Electron/Tauri
 
-The CC extension already has a complete React UI designed for VSCode's webview panel. Rather than rebuilding the UI or wrapping it in Electron, Hangar loads it directly in a WKWebView with minimal stubs. This gives us:
+The CC extension already has a complete React UI designed for VSCode's webview panel. Rather than rebuilding the UI or wrapping it in Electron, Canopy loads it directly in a WKWebView with minimal stubs. This gives us:
 - Native macOS app with minimal overhead
 - The exact same UI as Claude Code in VSCode
 - Automatic updates when the extension updates
@@ -178,7 +178,7 @@ The CC extension already has a complete React UI designed for VSCode's webview p
 ### Why Home Directory Read Access
 
 The `allowingReadAccessTo` parameter is set to the user's home directory because the webview needs to read from two separate locations:
-- `~/Library/Application Support/Hangar/_hangar.html` (the entry point)
+- `~/Library/Application Support/Canopy/_canopy.html` (the entry point)
 - `~/.vscode/extensions/anthropic.claude-code-*/webview/` (JS, CSS, assets)
 
 A more restrictive path would not cover both locations.
@@ -211,12 +211,12 @@ Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
 
 ### Auth shows unauthenticated
 
-Run `claude auth login` in Terminal first. Hangar reads auth status by running `claude auth status` as a subprocess.
+Run `claude auth login` in Terminal first. Canopy reads auth status by running `claude auth status` as a subprocess.
 
 ### Webview is blank or shows errors
 
-1. Open Safari Web Inspector (Develop > Hangar) to check for JS errors
-2. Check os_log: `log stream --predicate 'subsystem == "sh.saqoo.Hangar"' --info`
+1. Open Safari Web Inspector (Develop > Canopy) to check for JS errors
+2. Check os_log: `log stream --predicate 'subsystem == "sh.saqoo.Canopy"' --info`
 3. Verify the extension's webview files exist: `ls ~/.vscode/extensions/anthropic.claude-code-*/webview/`
 
 ### Theme looks wrong
@@ -228,7 +228,7 @@ If CSS variables are missing or incorrect:
 
 ### CLI process hangs or doesn't respond
 
-Check shim stderr output: `log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ShimProcess"' --info`
+Check shim stderr output: `log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ShimProcess"' --info`
 
 The CLI may be waiting for authentication or hitting rate limits.
 
@@ -243,7 +243,7 @@ node --test --test-timeout 120000 test/shim-integration.test.js
 
 ### Architecture
 
-The vscode-shim (`Resources/vscode-shim/`) runs the CC extension's `extension.js` in a Node.js subprocess. It intercepts `require("vscode")` and provides a compatibility shim that bridges the extension's webview I/O to Hangar's WKWebView via stdin/stdout NDJSON.
+The vscode-shim (`Resources/vscode-shim/`) runs the CC extension's `extension.js` in a Node.js subprocess. It intercepts `require("vscode")` and provides a compatibility shim that bridges the extension's webview I/O to Canopy's WKWebView via stdin/stdout NDJSON.
 
 See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for the full design spec.
 
