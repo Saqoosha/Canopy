@@ -54,7 +54,7 @@ struct LauncherView: View {
                 .frame(width: 96, height: 96)
             Text("Canopy")
                 .font(.largeTitle.bold())
-            Text("Claude Code Desktop")
+            Text("Claude Code for macOS")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
