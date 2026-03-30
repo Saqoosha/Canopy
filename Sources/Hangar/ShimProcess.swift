@@ -57,9 +57,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         self.sessionTitle = sessionTitle ?? ""
         self.statusBarData = statusBarData
         super.init()
-        // Set CLI version and git branch at init
+        // Set CLI version, git branch, and initial message count
         statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
         statusBarData?.gitBranch = Self.detectGitBranch(at: workingDirectory) ?? ""
+        if let sessionId = resumeSessionId {
+            statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
+                sessionId: sessionId, directory: workingDirectory
+            )
+        }
     }
 
     // MARK: - Lifecycle

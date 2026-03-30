@@ -25,7 +25,7 @@ struct StatusBarView: View {
                 }
             }
 
-            // Context usage: 171K/800K ██▒▒ 21%
+            // Context usage: 171K/1.0M ██▒▒ 17%
             if data.contextMax > 0 {
                 dot
                 segment {

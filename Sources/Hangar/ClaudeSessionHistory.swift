@@ -211,6 +211,28 @@ enum ClaudeSessionHistory {
     }
 
     /// Extract the first user message (up to 16KB) as the session title.
+    /// Count user + assistant messages in a session transcript file.
+    static func countMessages(sessionId: String, directory: URL) -> Int {
+        let encoded = encodePath(directory.path)
+        let filePath = claudeDir
+            .appendingPathComponent(encoded)
+            .appendingPathComponent("\(sessionId).jsonl").path
+        guard let handle = FileHandle(forReadingAtPath: filePath) else { return 0 }
+        defer { try? handle.close() }
+
+        var count = 0
+        let data = handle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return 0 }
+        for line in text.split(separator: "\n") {
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let type = json["type"] as? String
+            else { continue }
+            if type == "user" || type == "assistant" { count += 1 }
+        }
+        return count
+    }
+
     private static func extractTitle(from file: URL) -> String {
         extractTitle(fromPath: file.path)
     }
