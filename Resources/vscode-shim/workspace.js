@@ -32,6 +32,45 @@ function globToRegExp(pattern) {
       // ? matches single char except /
       re += "[^/]";
       i++;
+    } else if (ch === "[") {
+      // Character class — convert to regex (! becomes ^ for negation)
+      // Find closing ] first; if missing, treat [ as literal
+      let j = i + 1;
+      if (j < pattern.length && pattern[j] === "!") j++;
+      while (j < pattern.length && pattern[j] !== "]") j++;
+      if (j >= pattern.length) {
+        // No closing ] — treat [ as literal
+        re += "\\[";
+        i++;
+      } else {
+        i++; // skip [
+        if (i < pattern.length && pattern[i] === "!") {
+          re += "[^";
+          i++;
+        } else {
+          re += "[";
+        }
+        while (i < pattern.length && pattern[i] !== "]") {
+          re += pattern[i];
+          i++;
+        }
+        re += "]";
+        i++; // skip ]
+      }
+    } else if (ch === "{") {
+      // Brace expansion {a,b} → (a|b)
+      i++; // skip {
+      let alternatives = "";
+      while (i < pattern.length && pattern[i] !== "}") {
+        if (pattern[i] === ",") {
+          alternatives += "|";
+        } else {
+          alternatives += pattern[i].replace(/[.+^$()[\]\\]/g, "\\$&");
+        }
+        i++;
+      }
+      if (i < pattern.length) i++; // skip }
+      re += "(" + alternatives + ")";
     } else {
       // Escape any RegExp metacharacter
       re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -45,10 +84,94 @@ function globToRegExp(pattern) {
 // findFiles — recursive directory walk with glob matching
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse a .gitignore file and return an array of {pattern, negated} rules.
+ * Handles common patterns including **, *, ?, character classes, and negation.
+ * Does not handle nested .gitignore files or complex anchoring edge cases.
+ */
+function parseGitignore(filePath) {
+  let content;
+  try {
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return [];
+  }
+  const rules = [];
+  for (let line of content.split("\n")) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+    let negated = false;
+    if (line.startsWith("!")) {
+      negated = true;
+      line = line.slice(1);
+    }
+    // Remove trailing spaces (unless escaped)
+    line = line.replace(/(?<!\\)\s+$/, "");
+    if (!line) continue;
+    rules.push({ pattern: line, negated });
+  }
+  return rules;
+}
+
+/**
+ * Test whether a relative path is ignored by a list of gitignore rules.
+ * @param {string} relPath - relative path (forward slashes)
+ * @param {boolean} isDir - true if the entry is a directory
+ * @param {Array<{pattern:string, negated:boolean}>} rules
+ */
+function isGitignored(relPath, isDir, rules) {
+  let ignored = false;
+  for (const { pattern, negated } of rules) {
+    let p = pattern;
+    let dirOnly = false;
+    if (p.endsWith("/")) {
+      dirOnly = true;
+      p = p.slice(0, -1);
+    }
+    if (dirOnly && !isDir) continue;
+
+    // If pattern contains /, prefer full relative path; otherwise prefer basename.
+    // Both basename and full path are tested as fallback.
+    const matchAgainst = p.includes("/") ? relPath : path.basename(relPath);
+    const target = p.startsWith("/") ? p.slice(1) : p;
+
+    try {
+      if (!target.includes("/") && !target.includes("*")) {
+        // Simple name pattern (e.g. "dist", "build") — match against basename exactly
+        if (path.basename(relPath) === target) {
+          ignored = !negated;
+        }
+      } else {
+        const re = globToRegExp(target);
+        if (re.test(matchAgainst) || re.test(relPath)) {
+          ignored = !negated;
+        }
+      }
+    } catch {
+      // Skip malformed patterns
+    }
+  }
+  return ignored;
+}
+
+/**
+ * Load gitignore rules from the workspace root.
+ * Only reads the top-level .gitignore (subdirectory .gitignore files are not loaded).
+ */
+function loadGitignoreRules(baseDir) {
+  const rules = [];
+  // Root .gitignore
+  rules.push(...parseGitignore(path.join(baseDir, ".gitignore")));
+  return rules;
+}
+
 async function findFilesImpl(baseDir, pattern, exclude, maxResults, maxDepth) {
   const regex = globToRegExp(pattern);
   const excludeRegex = exclude ? globToRegExp(exclude) : null;
   const results = [];
+
+  // Load gitignore rules from workspace root
+  const gitignoreRules = loadGitignoreRules(baseDir);
 
   async function walk(dir, depth) {
     if (depth > maxDepth) return;
@@ -71,6 +194,11 @@ async function findFilesImpl(baseDir, pattern, exclude, maxResults, maxDepth) {
 
       const fullPath = path.join(dir, entry.name);
       const relativePath = path.relative(baseDir, fullPath);
+
+      // Check gitignore
+      if (gitignoreRules.length > 0 && isGitignored(relativePath, entry.isDirectory(), gitignoreRules)) {
+        continue;
+      }
 
       if (entry.isDirectory()) {
         await walk(fullPath, depth + 1);
@@ -104,6 +232,25 @@ function saveJson(filePath, data) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
+
+// VSCode built-in defaults that aren't in any extension's package.json.
+// The CC extension reads these to build ripgrep exclude globs for @-mention file listing.
+const VSCODE_BUILTIN_DEFAULTS = {
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/CVS": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/bower_components": true,
+    "**/*.code-search": true,
+  },
+  "search.useIgnoreFiles": true,
+};
 
 function createConfiguration(settingsPath, extensionPackageJson) {
   // Extract extension defaults from package.json contributes.configuration.properties
@@ -139,7 +286,11 @@ function createConfiguration(settingsPath, extensionPackageJson) {
         if (Object.prototype.hasOwnProperty.call(extDefaults, fullKey)) {
           return extDefaults[fullKey];
         }
-        // 3. Provided default
+        // 3. VSCode built-in defaults (files.exclude, search.exclude, etc.)
+        if (Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)) {
+          return VSCODE_BUILTIN_DEFAULTS[fullKey];
+        }
+        // 4. Provided default
         return defaultValue;
       },
 
@@ -147,7 +298,8 @@ function createConfiguration(settingsPath, extensionPackageJson) {
         const fullKey = section ? `${section}.${key}` : key;
         return (
           Object.prototype.hasOwnProperty.call(userSettings, fullKey) ||
-          Object.prototype.hasOwnProperty.call(extDefaults, fullKey)
+          Object.prototype.hasOwnProperty.call(extDefaults, fullKey) ||
+          Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)
         );
       },
 
@@ -165,11 +317,14 @@ function createConfiguration(settingsPath, extensionPackageJson) {
       inspect(key) {
         const fullKey = section ? `${section}.${key}` : key;
         const currentSettings = loadJson(settingsPath);
+        const defVal = Object.prototype.hasOwnProperty.call(extDefaults, fullKey)
+          ? extDefaults[fullKey]
+          : Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)
+            ? VSCODE_BUILTIN_DEFAULTS[fullKey]
+            : undefined;
         return {
           key: fullKey,
-          defaultValue: Object.prototype.hasOwnProperty.call(extDefaults, fullKey)
-            ? extDefaults[fullKey]
-            : undefined,
+          defaultValue: defVal,
           globalValue: Object.prototype.hasOwnProperty.call(currentSettings, fullKey)
             ? currentSettings[fullKey]
             : undefined,
