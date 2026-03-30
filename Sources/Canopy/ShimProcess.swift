@@ -36,6 +36,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var titleGenerated = false
     /// Session ID from webview's update_session_state, used to persist generated titles.
     private var activeSessionId: String?
+    /// Generated title waiting to be saved (when activeSessionId arrives after the title response).
+    private var pendingGeneratedTitle: String?
 
     private let writeQueue = DispatchQueue(label: "sh.saqoo.Canopy.shimWrite")
 
@@ -60,7 +62,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         self.permissionMode = permissionMode
         self.sessionTitle = sessionTitle ?? ""
         // When resuming with an AI-generated title, protect it from webview overwrite.
-        self.titleGenerated = resumeSessionId != nil && sessionTitle != nil && !sessionTitle!.isEmpty
+        if let st = sessionTitle, !st.isEmpty, resumeSessionId != nil {
+            self.titleGenerated = true
+        }
         self.statusBarData = statusBarData
         super.init()
         // Set CLI version, VCS branch, and initial message count
@@ -289,6 +293,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // Track session ID for title persistence.
                 if let sid = request["sessionId"] as? String, UUID(uuidString: sid) != nil {
                     activeSessionId = sid
+                    // Save any title that was generated before we had a session ID.
+                    if let pending = pendingGeneratedTitle {
+                        SessionTitleStore.save(title: pending, forSessionId: sid)
+                        pendingGeneratedTitle = nil
+                    }
                 }
                 if let title = request["title"] as? String, !title.isEmpty {
                     if !titleGenerated {
@@ -722,6 +731,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Persist to our own store (like Sessylph's SessionTitleStore).
             if let sid = activeSessionId ?? resumeSessionId {
                 SessionTitleStore.save(title: title, forSessionId: sid)
+            } else {
+                pendingGeneratedTitle = title
             }
         } else if respType == "rename_tab_response"
             || respType == "update_session_state_response"
