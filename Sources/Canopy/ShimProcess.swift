@@ -32,6 +32,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var channelId: String?
     /// Whether we've already requested an AI-generated title for this session.
     private var titleRequested = false
+    /// Whether an AI-generated title has been received (prevents raw title overwrite from webview).
+    private var titleGenerated = false
+    /// Session ID from webview's update_session_state, used to persist generated titles.
+    private var activeSessionId: String?
 
     private let writeQueue = DispatchQueue(label: "sh.saqoo.Canopy.shimWrite")
 
@@ -55,6 +59,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         self.resumeSessionId = resumeSessionId
         self.permissionMode = permissionMode
         self.sessionTitle = sessionTitle ?? ""
+        // When resuming with an AI-generated title, protect it from webview overwrite.
+        self.titleGenerated = resumeSessionId != nil && sessionTitle != nil && !sessionTitle!.isEmpty
         self.statusBarData = statusBarData
         super.init()
         // Set CLI version, VCS branch, and initial message count
@@ -280,11 +286,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let reqType = request["type"] as? String
         {
             if reqType == "rename_tab" || reqType == "update_session_state" {
+                // Track session ID for title persistence.
+                if let sid = request["sessionId"] as? String, UUID(uuidString: sid) != nil {
+                    activeSessionId = sid
+                }
                 if let title = request["title"] as? String, !title.isEmpty {
-                    let truncated = title.count > 60
-                        ? String(title.prefix(57)) + "..."
-                        : title
-                    updateWindowTitle(truncated)
+                    if !titleGenerated {
+                        let truncated = title.count > 60
+                            ? String(title.prefix(57)) + "..."
+                            : title
+                        updateWindowTitle(truncated)
+                    } else {
+                        // Don't overwrite generated title, but refresh in case window just became available.
+                        refreshWindowTitle()
+                    }
                 }
             }
         }
@@ -700,12 +715,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func applyTitleFromResponse(_ response: [String: Any]) {
         guard let title = response["title"] as? String, !title.isEmpty else { return }
         let respType = response["type"] as? String ?? ""
-        if respType == "generate_session_title_response"
-            || respType == "rename_tab_response"
+        if respType == "generate_session_title_response" {
+            logger.info("Title generated: \(title, privacy: .public)")
+            titleGenerated = true
+            updateWindowTitle(title)
+            // Persist to our own store (like Sessylph's SessionTitleStore).
+            if let sid = activeSessionId ?? resumeSessionId {
+                SessionTitleStore.save(title: title, forSessionId: sid)
+            }
+        } else if respType == "rename_tab_response"
             || respType == "update_session_state_response"
         {
-            logger.info("Title updated: \(title, privacy: .public)")
-            updateWindowTitle(title)
+            if !titleGenerated {
+                logger.info("Title updated: \(title, privacy: .public)")
+                updateWindowTitle(title)
+            }
         }
     }
 
