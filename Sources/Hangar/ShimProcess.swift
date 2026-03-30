@@ -33,6 +33,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var descendantPids: [pid_t] = []
     /// Channel ID from launch_claude, needed for generate_session_title requests.
     private var channelId: String?
+    /// Whether we've already requested an AI-generated title for this session.
+    private var titleRequested = false
 
     private let writeQueue = DispatchQueue(label: "sh.saqoo.Hangar.shimWrite")
 
@@ -214,7 +216,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 startSpinner()
             }
             // Request AI-generated short title for the first user message only.
-            if sessionTitle.isEmpty, let userMsg = ioMsg["message"] as? [String: Any] {
+            if !titleRequested, let userMsg = ioMsg["message"] as? [String: Any] {
                 if let content = userMsg["content"] as? [[String: Any]] {
                     let text = content.compactMap { $0["text"] as? String }.joined()
                     requestSessionTitle(description: text)
@@ -618,6 +620,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The extension forwards this to the CLI, which generates a short AI title.
     private func requestSessionTitle(description: String) {
         guard !description.isEmpty, let channelId else { return }
+        titleRequested = true
         let requestId = "hangar-title-\(UUID().uuidString.prefix(8))"
         sendToShim([
             "type": "webview_message",
