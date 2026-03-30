@@ -42,9 +42,7 @@ struct StatusBarView: View {
                 dot
                 segment {
                     Text("\(data.formatTokens(data.contextUsed))/\(data.formatTokens(data.compactionWindow))")
-                    ProgressView(value: Double(data.contextPct), total: 100)
-                        .frame(width: 36)
-                        .tint(pctColor(data.contextPct))
+                    contextBar(pct: data.contextPct)
                     Text("\(data.contextPct)%")
                         .foregroundStyle(pctColor(data.contextPct))
                     if data.didCompact {
@@ -111,6 +109,22 @@ struct StatusBarView: View {
     @ViewBuilder
     private func segment(@ViewBuilder content: () -> some View) -> some View {
         HStack(spacing: 3) { content() }
+    }
+
+    private func contextBar(pct: Int) -> some View {
+        let width: CGFloat = 36
+        let height: CGFloat = 8
+        let fill = width * CGFloat(pct) / 100
+        return ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: height / 2)
+                .fill(Color.secondary.opacity(0.2))
+                .frame(width: width, height: height)
+            if fill > 0 {
+                RoundedRectangle(cornerRadius: height / 2)
+                    .fill(pctColor(pct))
+                    .frame(width: max(height, fill), height: height)
+            }
+        }
     }
 
     private func pctColor(_ pct: Int) -> Color {
