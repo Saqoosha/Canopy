@@ -6,6 +6,32 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>1.1.0</title>
+            <pubDate>Mon, 30 Mar 2026 22:59:17 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Features
+- Added Preferences window (⌘,) with 4 settings:
+  - Default permission mode for new sessions
+  - Automatic update check toggle
+  - Max recent directories in launcher
+  - Default working directory
+
+### Bug Fixes
+- Fixed context usage bar in status bar showing incorrect fill level — the bar now accurately reflects the displayed percentage
+- Fixed Sparkle update window inheriting the main window size instead of using its own default size
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.1.0/Canopy-1.1.0.dmg" length="1896237" type="application/octet-stream" sparkle:edSignature="GyczYTm+a01P4HklgwcpZtQrzZF8r1Ev6JdTy57+pD8b0QaVpfkjnocVzOdWDQCuUrxW8jghccM8kv8aNKHEAA=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.1.0/Canopy5-4.delta" sparkle:deltaFrom="4" length="93078" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="nb2doMvRIW5Z6lJ5jnGAtgtG/SPeTp4mrcvI3ha0MI1TCIz0xrQYGAtmTw9VVqx98PTF8rO/cCIV+EqdlESwCA=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.1.0/Canopy5-3.delta" sparkle:deltaFrom="3" length="144122" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="3ZerKFrDR1MM9JBmWvPDfVfuK4GMYBCxrB+OG/Pr50DJuG+vlAEBwmXsKSTBt0QEgoF2B61GuMmzhiHQ64BgCQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.1.0/Canopy5-2.delta" sparkle:deltaFrom="2" length="143422" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="y7eG7Q/3S780CgU2ht8KPLLC4eceLjxxgJ+3poZfU2ZrO6fM1+MTNfYPGJcUWVIPU5W2FmaWfFmzAj+ZtrljBQ=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>1.0.2</title>
             <pubDate>Mon, 30 Mar 2026 21:07:46 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -23,7 +49,7 @@
 - Improved Sparkle appcast with embedded release notes and delta updates
 - Updated documentation
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.2/Canopy-1.0.2.dmg" length="1618999" type="application/octet-stream" sparkle:edSignature="EcXEzHwXjkWoUVzHuGhoBPUm2Z1+DCBf1g+gmgszaeqFt6nak4FrFGG08UGDFQYlpdV/8RFPPMsTOq+sS9MvBA=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.1.0/Canopy-1.0.2.dmg" length="1618999" type="application/octet-stream" sparkle:edSignature="EcXEzHwXjkWoUVzHuGhoBPUm2Z1+DCBf1g+gmgszaeqFt6nak4FrFGG08UGDFQYlpdV/8RFPPMsTOq+sS9MvBA=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.2/Canopy4-3.delta" sparkle:deltaFrom="3" length="91370" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="ED5pPu49zlUU74Pn2yZdLe4IQK9N2CGoz22LlP1CibBDrjyfTB9nP4Vg+Gi87q+jaYcHCoX8+XGNwjCfOcwdBw=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.2/Canopy4-2.delta" sparkle:deltaFrom="2" length="91658" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="tYzk3Ei0MS+WrpzJkkfVDHAZGgNwbfQeBgzn2QY4QnatxF0YhYJMNaCh72VdvHQu+qQp8BsTJlbiINDW/LkkDQ=="/>
@@ -36,32 +62,13 @@
             <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.2/Canopy-1.0.1.dmg" length="1880058" type="application/octet-stream" sparkle:edSignature="FYdvMcAZoAhM0jbH+CoKcWP0wDdIqA6ootX7lOEwlzR8U8tBr7YOOOJ3zWPBswkBt/qmVHyfeHFOSWRL8YDnDw=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.1.0/Canopy-1.0.1.dmg" length="1880058" type="application/octet-stream" sparkle:edSignature="FYdvMcAZoAhM0jbH+CoKcWP0wDdIqA6ootX7lOEwlzR8U8tBr7YOOOJ3zWPBswkBt/qmVHyfeHFOSWRL8YDnDw=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.1/Canopy3-2.delta" sparkle:deltaFrom="2" length="11018" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="oYkaAYs/PvkfgFdo4MpzOT+XMW6cNrwCYAx6O7qI3GkhVz7ewUucd6cIeD8KqP/GnNYd98HGMKpSIdaqAvTgAw=="/>
             </sparkle:deltas>
             <description sparkle:format="markdown"><![CDATA[### Changes
 
 - Updated launcher subtitle to "Claude Code for macOS"
-]]></description>
-        </item>
-        <item>
-            <title>1.0.0</title>
-            <pubDate>Mon, 30 Mar 2026 18:28:21 +0900</pubDate>
-            <sparkle:version>2</sparkle:version>
-            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.2/Canopy-1.0.0.dmg" length="1880065" type="application/octet-stream" sparkle:edSignature="FcPqwWiVoRNpOLvFi8r9qwx3pAjoL5uVjvnKwvgeGYsog0RVq66NcNLhKIeVgedOStqvlIOSrWuHaDhSGd9PBA=="/>
-            <description sparkle:format="markdown"><![CDATA[### Changes
-
-- Initial release of Canopy — standalone macOS app hosting Claude Code extension webview
-- Full chat with Claude via vscode-shim (Node.js subprocess running extension.js unmodified)
-- Session history with instant replay
-- Directory picker and recent directories
-- Real-time streaming with SSE events
-- Permission mode sync (default, acceptEdits, plan, bypassPermissions)
-- Sparkle auto-update support
 ]]></description>
         </item>
     </channel>
