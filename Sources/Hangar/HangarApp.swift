@@ -143,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct TabContentView: View {
     @State private var appState = AppState()
+    @State private var statusBarData = StatusBarData()
 
     var body: some View {
         Group {
@@ -150,12 +151,16 @@ struct TabContentView: View {
             case .launcher:
                 LauncherView(appState: appState)
             case .session:
-                WebViewContainer(
-                    workingDirectory: appState.workingDirectory,
-                    resumeSessionId: appState.resumeSessionId,
-                    permissionMode: appState.permissionMode,
-                    sessionTitle: appState.resumeSessionTitle
-                )
+                VStack(spacing: 0) {
+                    WebViewContainer(
+                        workingDirectory: appState.workingDirectory,
+                        resumeSessionId: appState.resumeSessionId,
+                        permissionMode: appState.permissionMode,
+                        sessionTitle: appState.resumeSessionTitle,
+                        statusBarData: statusBarData
+                    )
+                    StatusBarView(data: statusBarData)
+                }
                 .id(appState.webviewReloadToken)
             }
         }

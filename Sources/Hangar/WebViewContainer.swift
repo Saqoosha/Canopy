@@ -9,6 +9,7 @@ struct WebViewContainer: NSViewRepresentable {
     var resumeSessionId: String?
     var permissionMode: PermissionMode = .acceptEdits
     var sessionTitle: String?
+    var statusBarData: StatusBarData?
 
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var shimProcess: ShimProcess?
@@ -84,7 +85,8 @@ struct WebViewContainer: NSViewRepresentable {
             workingDirectory: workingDirectory,
             resumeSessionId: resumeSessionId,
             permissionMode: permissionMode,
-            sessionTitle: sessionTitle
+            sessionTitle: sessionTitle,
+            statusBarData: statusBarData
         )
         ucc.add(shim, name: "vscodeHost")
         context.coordinator.shimProcess = shim

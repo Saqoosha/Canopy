@@ -23,6 +23,17 @@ enum CCExtension {
         }
     }
 
+    /// Read extension version from package.json (e.g., "2.1.87").
+    static func extensionVersion() -> String? {
+        guard let extPath = extensionPath() else { return nil }
+        let packageJSON = extPath.appendingPathComponent("package.json")
+        guard let data = try? Data(contentsOf: packageJSON),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = json["version"] as? String
+        else { return nil }
+        return version
+    }
+
     /// Find the Claude CLI binary, checking common install locations.
     static func cliBinaryPath() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path

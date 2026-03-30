@@ -48,12 +48,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private static let idleIcon = "✳"
     private static let spinnerColor = NSColor(red: 0.851, green: 0.471, blue: 0.345, alpha: 1.0) // #D97858
 
-    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil) {
+    var statusBarData: StatusBarData?
+
+    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil) {
         self.workingDirectory = workingDirectory
         self.resumeSessionId = resumeSessionId
         self.permissionMode = permissionMode
         self.sessionTitle = sessionTitle ?? ""
+        self.statusBarData = statusBarData
         super.init()
+        // Set CLI version and git branch at init
+        statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
+        statusBarData?.gitBranch = Self.detectGitBranch(at: workingDirectory) ?? ""
     }
 
     // MARK: - Lifecycle
@@ -201,6 +207,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 ] as [String: Any],
             ]
             sendToWebView(statusMsg)
+
+            // Request initial rate limit data after a short delay (extension needs time to activate)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.requestUsageUpdate()
+            }
         }
 
         // Start spinner when user sends a message and request title generation
@@ -333,6 +344,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             innerMessage = patchAuthIfNeeded(innerMessage)
             trackWorkingState(innerMessage)
+            extractStatusData(innerMessage)
             extractTitle(innerMessage)
             sendToWebView(innerMessage)
 
@@ -582,6 +594,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Request rate limit data from extension (triggers /api/oauth/usage fetch).
+    private func requestUsageUpdate() {
+        let requestId = "hangar-usage-\(UUID().uuidString.prefix(8))"
+        sendToShim([
+            "type": "webview_message",
+            "message": [
+                "type": "request",
+                "requestId": requestId,
+                "request": [
+                    "type": "request_usage_update",
+                ] as [String: Any],
+            ] as [String: Any],
+        ])
+    }
+
     /// Send a synthetic generate_session_title request to the extension via shim.
     /// The extension forwards this to the CLI, which generates a short AI title.
     private func requestSessionTitle(description: String) {
@@ -669,6 +696,94 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    // MARK: - Status Bar Data Extraction
+
+    /// Extract usage/cost/model data from CLI events for the native status bar.
+    private func extractStatusData(_ message: [String: Any]) {
+        guard let data = statusBarData else { return }
+        guard message["type"] as? String == "from-extension",
+              let nested = message["message"] as? [String: Any]
+        else { return }
+
+        // Intercept usage_update requests from extension → webview
+        if let request = nested["request"] as? [String: Any],
+           request["type"] as? String == "usage_update",
+           let utilization = request["utilization"] as? [String: Any]
+        {
+            data.updateRateLimits(utilization)
+            return
+        }
+
+        // io_message events from CLI
+        guard nested["type"] as? String == "io_message",
+              let ioMsg = nested["message"] as? [String: Any],
+              let ioType = ioMsg["type"] as? String
+        else { return }
+
+        switch ioType {
+        case "stream_event":
+            guard let event = ioMsg["event"] as? [String: Any],
+                  let eventType = event["type"] as? String
+            else { return }
+
+            if eventType == "message_start",
+               let msg = event["message"] as? [String: Any]
+            {
+                // Model name
+                if let model = msg["model"] as? String {
+                    data.model = Self.formatModelName(model)
+                }
+                // Context usage from message_start (current context at API call time)
+                if let usage = msg["usage"] as? [String: Any] {
+                    let input = usage["input_tokens"] as? Int ?? 0
+                    let cacheCreate = usage["cache_creation_input_tokens"] as? Int ?? 0
+                    let cacheRead = usage["cache_read_input_tokens"] as? Int ?? 0
+                    data.contextUsed = input + cacheCreate + cacheRead
+                }
+            }
+
+        case "result":
+            // Context window size from modelUsage
+            if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
+                for (_, value) in modelUsage {
+                    if let info = value as? [String: Any],
+                       let cw = info["contextWindow"] as? Int
+                    {
+                        data.contextMax = cw
+                        break
+                    }
+                }
+            }
+            // Refresh rate limits after each turn
+            requestUsageUpdate()
+
+        case "user":
+            data.messageCount += 1
+
+        case "assistant":
+            data.messageCount += 1
+
+        case "compact_boundary":
+            data.resetContext()
+
+        default:
+            break
+        }
+    }
+
+    /// Format model ID to display name: "claude-opus-4-6-20260328" → "Opus 4.6"
+    private static func formatModelName(_ model: String) -> String {
+        // Known patterns: claude-{name}-{major}-{minor}[-date]
+        let stripped = model.replacingOccurrences(of: "claude-", with: "")
+        let parts = stripped.components(separatedBy: "-")
+        guard parts.count >= 3,
+              let _ = Int(parts[1]),
+              let _ = Int(parts[2])
+        else { return model }
+        let name = parts[0].prefix(1).uppercased() + parts[0].dropFirst()
+        return "\(name) \(parts[1]).\(parts[2])"
+    }
+
     private func refreshWindowTitle() {
         guard let window = webView?.window else { return }
         let dirName = workingDirectory.lastPathComponent
@@ -747,6 +862,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         })()
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    // MARK: - Git Branch Detection
+
+    /// Detect current git branch for status bar display.
+    private static func detectGitBranch(at directory: URL) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = ["rev-parse", "--abbrev-ref", "HEAD"]
+        proc.currentDirectoryURL = directory
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+        } catch { return nil }
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        return String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Process Tree Cleanup
