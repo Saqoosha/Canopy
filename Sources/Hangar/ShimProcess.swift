@@ -31,6 +31,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var stdoutBuffer = Data()
     /// Descendant PIDs collected before termination, used for cleanup on unexpected exit.
     private var descendantPids: [pid_t] = []
+    /// Channel ID from launch_claude, needed for generate_session_title requests.
+    private var channelId: String?
 
     private let writeQueue = DispatchQueue(label: "sh.saqoo.Hangar.shimWrite")
 
@@ -57,8 +59,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    /// Start the Node.js shim subprocess. Returns false if startup fails
-    /// (caller should fall back to legacy handler).
+    /// Start the Node.js shim subprocess. Returns false if startup fails.
     @discardableResult
     func start() -> Bool {
         guard process == nil else {
@@ -180,19 +181,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         didReceive message: WKScriptMessage
     ) {
         guard var dict = message.body as? [String: Any] else { return }
-        let msgType = dict["type"] as? String ?? "?"
-        if msgType == "request" {
-            let reqType = (dict["request"] as? [String: Any])?["type"] as? String ?? "?"
-            logger.info("WV→Host: type=\(msgType, privacy: .public) req=\(reqType, privacy: .public)")
-        }
 
         // Override permission mode in launch_claude from Hangar app settings
         if dict["type"] as? String == "launch_claude" {
             dict["permissionMode"] = permissionMode.rawValue
 
-            // Send synthetic system/status event to force webview permission mode UI.
-            // Synthetic system/status event forces webview permission mode UI.
             let channelId = dict["channelId"] as? String ?? ""
+            self.channelId = channelId.isEmpty ? nil : channelId
             let statusMsg: [String: Any] = [
                 "type": "from-extension",
                 "message": [
@@ -209,7 +204,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             sendToWebView(statusMsg)
         }
 
-        // Start spinner immediately when user sends a message (don't wait for CLI output)
+        // Start spinner when user sends a message and request title generation
         if dict["type"] as? String == "io_message",
            let ioMsg = dict["message"] as? [String: Any],
            ioMsg["type"] as? String == "user"
@@ -218,17 +213,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 isWorking = true
                 startSpinner()
             }
+            // Request AI-generated short title for the first user message only.
+            if sessionTitle.isEmpty, let userMsg = ioMsg["message"] as? [String: Any] {
+                if let content = userMsg["content"] as? [[String: Any]] {
+                    let text = content.compactMap { $0["text"] as? String }.joined()
+                    requestSessionTitle(description: text)
+                } else if let text = userMsg["content"] as? String {
+                    requestSessionTitle(description: text)
+                }
+            }
         }
 
         // Intercept title-related requests from webview
         if let request = dict["request"] as? [String: Any],
            let reqType = request["type"] as? String
         {
-            logger.info("Request type: \(reqType, privacy: .public)")
             if reqType == "rename_tab" || reqType == "update_session_state" {
-                let title = request["title"] as? String ?? "<nil>"
-                logger.info("Title found: \(title.prefix(80), privacy: .public) window=\(self.webView?.window != nil)")
-                if !title.isEmpty && title != "<nil>" {
+                if let title = request["title"] as? String, !title.isEmpty {
                     let truncated = title.count > 60
                         ? String(title.prefix(57)) + "..."
                         : title
@@ -613,6 +614,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Send a synthetic generate_session_title request to the extension via shim.
+    /// The extension forwards this to the CLI, which generates a short AI title.
+    private func requestSessionTitle(description: String) {
+        guard !description.isEmpty, let channelId else { return }
+        let requestId = "hangar-title-\(UUID().uuidString.prefix(8))"
+        sendToShim([
+            "type": "webview_message",
+            "message": [
+                "type": "request",
+                "requestId": requestId,
+                "request": [
+                    "type": "generate_session_title",
+                    "channelId": channelId,
+                    "description": description,
+                    "persist": false,
+                ] as [String: Any],
+            ] as [String: Any],
+        ])
+    }
+
     /// Extract session title from extension responses flowing to webview.
     /// Responses are NOT wrapped in from-extension (only unsolicited messages are).
     /// Format: {type:"response", requestId:"...", response:{type:"generate_session_title_response", title:"..."}}
@@ -680,10 +701,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     private func refreshWindowTitle() {
-        guard let window = webView?.window else {
-            logger.info("refreshWindowTitle: window is nil")
-            return
-        }
+        guard let window = webView?.window else { return }
         let dirName = workingDirectory.lastPathComponent
         let icon = isWorking ? Self.spinnerFrames[spinnerIndex] : Self.idleIcon
         let rest = sessionTitle.isEmpty ? dirName : "\(dirName) — \(sessionTitle)"
