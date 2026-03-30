@@ -1,0 +1,15 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Canopy</title>
+        <item>
+            <title>1.0.0</title>
+            <pubDate>Mon, 30 Mar 2026 18:28:21 +0900</pubDate>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.0.0/Canopy-1.0.0.dmg" length="1880065" type="application/octet-stream" sparkle:edSignature="FcPqwWiVoRNpOLvFi8r9qwx3pAjoL5uVjvnKwvgeGYsog0RVq66NcNLhKIeVgedOStqvlIOSrWuHaDhSGd9PBA=="/>
+        </item>
+    </channel>
+</rss>
