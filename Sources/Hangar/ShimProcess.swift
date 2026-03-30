@@ -1,4 +1,5 @@
 import Cocoa
+import UserNotifications
 import WebKit
 import os.log
 
@@ -28,6 +29,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         .appendingPathComponent("Library/Application Support/Hangar/authCache.json").path
     /// Accumulates partial lines from stdout (only accessed from readabilityHandler thread).
     private var stdoutBuffer = Data()
+    /// Descendant PIDs collected before termination, used for cleanup on unexpected exit.
+    private var descendantPids: [pid_t] = []
 
     private let writeQueue = DispatchQueue(label: "sh.saqoo.Hangar.shimWrite")
 
@@ -35,10 +38,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     var resumeSessionId: String?
     var permissionMode: PermissionMode
 
-    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits) {
+    // MARK: - Window Title & Spinner
+    private var sessionTitle: String = ""
+    private var isWorking = false
+    private var spinnerTimer: Timer?
+    private var spinnerIndex = 0
+    private static let spinnerFrames = ["·", "✻", "✽", "✶", "✳", "✢"]
+    private static let idleIcon = "✳"
+    private static let spinnerColor = NSColor(red: 0.851, green: 0.471, blue: 0.345, alpha: 1.0) // #D97858
+
+    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil) {
         self.workingDirectory = workingDirectory
         self.resumeSessionId = resumeSessionId
         self.permissionMode = permissionMode
+        self.sessionTitle = sessionTitle ?? ""
         super.init()
     }
 
@@ -123,14 +136,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         proc.terminationHandler = { [weak self] process in
             logger.info("Shim exited with status \(process.terminationStatus)")
+            let pid = process.processIdentifier
             DispatchQueue.main.async {
-                self?.handleProcessExit(status: process.terminationStatus)
+                self?.handleProcessExit(status: process.terminationStatus, pid: pid)
             }
         }
 
         do {
             try proc.run()
             logger.info("Shim started: PID \(proc.processIdentifier), node=\(nodeInfo.path, privacy: .public)")
+            refreshWindowTitle()
             return true
         } catch {
             logger.error("Failed to start shim: \(error.localizedDescription, privacy: .public)")
@@ -145,11 +160,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     func stop() {
         guard let proc = process, proc.isRunning else { return }
+        stopSpinner()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         stdinPipe?.fileHandleForWriting.closeFile()
+
+        // Collect entire process tree BEFORE terminating parent (pgrep -P fails after parent exits)
+        descendantPids = Self.collectDescendants(of: proc.processIdentifier)
         proc.terminate()
-        cleanupOrphans()
+
+        // Kill all descendants: SIGTERM first, SIGKILL after brief wait
+        Self.killProcessTree(descendantPids)
     }
 
     // MARK: - WKScriptMessageHandler
@@ -159,13 +180,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         didReceive message: WKScriptMessage
     ) {
         guard var dict = message.body as? [String: Any] else { return }
+        let msgType = dict["type"] as? String ?? "?"
+        if msgType == "request" {
+            let reqType = (dict["request"] as? [String: Any])?["type"] as? String ?? "?"
+            logger.info("WV→Host: type=\(msgType, privacy: .public) req=\(reqType, privacy: .public)")
+        }
 
         // Override permission mode in launch_claude from Hangar app settings
         if dict["type"] as? String == "launch_claude" {
             dict["permissionMode"] = permissionMode.rawValue
 
             // Send synthetic system/status event to force webview permission mode UI.
-            // Same approach as the old WebViewMessageHandler.
+            // Synthetic system/status event forces webview permission mode UI.
             let channelId = dict["channelId"] as? String ?? ""
             let statusMsg: [String: Any] = [
                 "type": "from-extension",
@@ -181,6 +207,34 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 ] as [String: Any],
             ]
             sendToWebView(statusMsg)
+        }
+
+        // Start spinner immediately when user sends a message (don't wait for CLI output)
+        if dict["type"] as? String == "io_message",
+           let ioMsg = dict["message"] as? [String: Any],
+           ioMsg["type"] as? String == "user"
+        {
+            if !isWorking {
+                isWorking = true
+                startSpinner()
+            }
+        }
+
+        // Intercept title-related requests from webview
+        if let request = dict["request"] as? [String: Any],
+           let reqType = request["type"] as? String
+        {
+            logger.info("Request type: \(reqType, privacy: .public)")
+            if reqType == "rename_tab" || reqType == "update_session_state" {
+                let title = request["title"] as? String ?? "<nil>"
+                logger.info("Title found: \(title.prefix(80), privacy: .public) window=\(self.webView?.window != nil)")
+                if !title.isEmpty && title != "<nil>" {
+                    let truncated = title.count > 60
+                        ? String(title.prefix(57)) + "..."
+                        : title
+                    updateWindowTitle(truncated)
+                }
+            }
         }
 
         sendToShim(["type": "webview_message", "message": dict])
@@ -278,6 +332,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return
             }
             innerMessage = patchAuthIfNeeded(innerMessage)
+            trackWorkingState(innerMessage)
+            extractTitle(innerMessage)
             sendToWebView(innerMessage)
 
         case "show_document":
@@ -471,7 +527,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             let data = try JSONSerialization.data(withJSONObject: authStatus)
             let dir = (Self.authCachePath as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            try data.write(to: URL(fileURLWithPath: Self.authCachePath))
+            let url = URL(fileURLWithPath: Self.authCachePath)
+            try data.write(to: url)
+            // Restrict file permissions to owner-only (contains auth tokens)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.authCachePath)
             logger.info("Cached authStatus")
         } catch {
             logger.error("Failed to cache authStatus: \(error.localizedDescription, privacy: .public)")
@@ -554,12 +613,134 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Extract session title from extension responses flowing to webview.
+    /// Responses are NOT wrapped in from-extension (only unsolicited messages are).
+    /// Format: {type:"response", requestId:"...", response:{type:"generate_session_title_response", title:"..."}}
+    /// Or wrapped: {type:"from-extension", message:{response:{...}}}
+    private func extractTitle(_ message: [String: Any]) {
+        // Try direct response (unwrapped format)
+        if let response = message["response"] as? [String: Any] {
+            applyTitleFromResponse(response)
+            return
+        }
+
+        // Try from-extension wrapped format
+        if message["type"] as? String == "from-extension",
+           let nested = message["message"] as? [String: Any],
+           let response = nested["response"] as? [String: Any]
+        {
+            applyTitleFromResponse(response)
+        }
+    }
+
+    private func applyTitleFromResponse(_ response: [String: Any]) {
+        guard let title = response["title"] as? String, !title.isEmpty else { return }
+        let respType = response["type"] as? String ?? ""
+        if respType == "generate_session_title_response"
+            || respType == "rename_tab_response"
+            || respType == "update_session_state_response"
+        {
+            logger.info("Title updated: \(title, privacy: .public)")
+            updateWindowTitle(title)
+        }
+    }
+
+    // MARK: - Window Title & Working State
+
+    private func updateWindowTitle(_ title: String) {
+        sessionTitle = title
+        refreshWindowTitle()
+    }
+
+    /// Track CLI working state from io_message events flowing to webview.
+    /// Message structure: {type:"from-extension", message:{type:"io_message", message:{type:"assistant"|"result"|...}}}
+    private func trackWorkingState(_ message: [String: Any]) {
+        guard message["type"] as? String == "from-extension",
+              let nested = message["message"] as? [String: Any],
+              nested["type"] as? String == "io_message",
+              let ioMsg = nested["message"] as? [String: Any],
+              let ioType = ioMsg["type"] as? String
+        else { return }
+
+        switch ioType {
+        case "assistant", "stream_event":
+            if !isWorking {
+                isWorking = true
+                startSpinner()
+            }
+        case "result":
+            if isWorking {
+                isWorking = false
+                stopSpinner()
+                postTaskCompletedNotification()
+            }
+        default:
+            break
+        }
+    }
+
+    private func refreshWindowTitle() {
+        guard let window = webView?.window else {
+            logger.info("refreshWindowTitle: window is nil")
+            return
+        }
+        let dirName = workingDirectory.lastPathComponent
+        let icon = isWorking ? Self.spinnerFrames[spinnerIndex] : Self.idleIcon
+        let rest = sessionTitle.isEmpty ? dirName : "\(dirName) — \(sessionTitle)"
+        let plainTitle = "\(icon) \(rest)"
+        window.title = plainTitle
+
+        let attributed = NSMutableAttributedString()
+        let iconAttrs: [NSAttributedString.Key: Any] = isWorking
+            ? [.foregroundColor: Self.spinnerColor]
+            : [.foregroundColor: NSColor.secondaryLabelColor]
+        attributed.append(NSAttributedString(string: "\(icon) ", attributes: iconAttrs))
+        attributed.append(NSAttributedString(string: rest))
+        window.tab.attributedTitle = attributed
+    }
+
+    private func startSpinner() {
+        spinnerTimer?.invalidate()
+        spinnerIndex = 0
+        spinnerTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.spinnerIndex = (self.spinnerIndex + 1) % Self.spinnerFrames.count
+            self.refreshWindowTitle()
+        }
+    }
+
+    private func stopSpinner() {
+        spinnerTimer?.invalidate()
+        spinnerTimer = nil
+        spinnerIndex = 0
+        refreshWindowTitle()
+    }
+
+    private func postTaskCompletedNotification() {
+        guard !NSApp.isActive else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Hangar"
+        content.body = sessionTitle.isEmpty ? "Task completed" : "\(sessionTitle) — completed"
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error { logger.error("Notification error: \(error.localizedDescription, privacy: .public)") }
+        }
+    }
+
     // MARK: - Process Exit
 
-    private func handleProcessExit(status: Int32) {
+    private func handleProcessExit(status: Int32, pid: pid_t) {
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
-        cleanupOrphans()
+
+        // Kill any surviving descendants (collected in stop(), or empty if crash without stop()).
+        // The JS-side exit handler also kills its children, so this is defense-in-depth.
+        if !descendantPids.isEmpty {
+            Self.killProcessTree(descendantPids)
+            descendantPids = []
+        }
+
         if status != 0 {
             logger.error("Shim crashed (status \(status))")
             showErrorInWebView("Claude process exited unexpectedly (status \(status)). Go back to launcher to restart.")
@@ -581,9 +762,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    /// Kill any child processes (e.g. Claude CLI) spawned by the Node.js shim.
-    private func cleanupOrphans() {
-        guard let pid = process?.processIdentifier, pid > 0 else { return }
+    // MARK: - Process Tree Cleanup
+
+    /// Recursively collect all descendant PIDs of a given process.
+    /// Must be called BEFORE terminating the parent — once the parent exits,
+    /// children are reparented to PID 1 and pgrep -P no longer finds them.
+    private static func collectDescendants(of pid: pid_t) -> [pid_t] {
+        guard pid > 0 else { return [] }
+        let directChildren = pgrepChildren(of: pid)
+        var all = directChildren
+        for child in directChildren {
+            all.append(contentsOf: collectDescendants(of: child))
+        }
+        return all
+    }
+
+    /// Run `pgrep -P <pid>` and return the list of child PIDs.
+    private static func pgrepChildren(of pid: pid_t) -> [pid_t] {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         task.arguments = ["-P", String(pid)]
@@ -593,13 +788,29 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         do {
             try task.run()
             task.waitUntilExit()
-        } catch { return }
+        } catch { return [] }
 
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        for line in output.split(separator: "\n") {
-            if let childPid = Int32(line.trimmingCharacters(in: .whitespaces)), childPid > 0 {
-                kill(childPid, SIGTERM)
-                logger.info("Sent SIGTERM to orphan PID \(childPid)")
+        return output.split(separator: "\n").compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
+    /// Send SIGTERM to all PIDs, wait briefly, then SIGKILL any survivors.
+    private static func killProcessTree(_ pids: [pid_t]) {
+        guard !pids.isEmpty else { return }
+
+        for pid in pids {
+            kill(pid, SIGTERM)
+            logger.info("SIGTERM → PID \(pid)")
+        }
+
+        // Brief grace period for clean shutdown
+        usleep(200_000) // 200ms
+
+        for pid in pids {
+            // Check if still alive (kill with signal 0 tests existence)
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL)
+                logger.info("SIGKILL → PID \(pid) (survived SIGTERM)")
             }
         }
     }

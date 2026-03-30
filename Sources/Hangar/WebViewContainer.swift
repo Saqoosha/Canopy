@@ -9,10 +9,8 @@ struct WebViewContainer: NSViewRepresentable {
     var resumeSessionId: String?
     var permissionMode: PermissionMode = .acceptEdits
     var sessionTitle: String?
-    var useShim: Bool = true
 
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-        var handler: WebViewMessageHandler?
         var shimProcess: ShimProcess?
         var consoleHandler: ConsoleLogHandler?
 
@@ -82,17 +80,14 @@ struct WebViewContainer: NSViewRepresentable {
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
 
-        if useShim {
-            let shim = ShimProcess(
-                workingDirectory: workingDirectory,
-                resumeSessionId: resumeSessionId,
-                permissionMode: permissionMode
-            )
-            ucc.add(shim, name: "vscodeHost")
-            context.coordinator.shimProcess = shim
-        } else {
-            addLegacyHandler(ucc: ucc, coordinator: context.coordinator)
-        }
+        let shim = ShimProcess(
+            workingDirectory: workingDirectory,
+            resumeSessionId: resumeSessionId,
+            permissionMode: permissionMode,
+            sessionTitle: sessionTitle
+        )
+        ucc.add(shim, name: "vscodeHost")
+        context.coordinator.shimProcess = shim
         context.coordinator.consoleHandler = consoleHandler
 
         config.userContentController = ucc
@@ -103,18 +98,9 @@ struct WebViewContainer: NSViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.isInspectable = true
 
-        if useShim {
-            context.coordinator.shimProcess?.webView = webView
-            if context.coordinator.shimProcess?.start() != true {
-                // Shim failed — fall back to legacy handler
-                logger.warning("Shim start failed, falling back to legacy handler")
-                ucc.removeScriptMessageHandler(forName: "vscodeHost")
-                context.coordinator.shimProcess = nil
-                addLegacyHandler(ucc: ucc, coordinator: context.coordinator)
-                context.coordinator.handler?.webView = webView
-            }
-        } else {
-            context.coordinator.handler?.webView = webView
+        context.coordinator.shimProcess?.webView = webView
+        if context.coordinator.shimProcess?.start() != true {
+            logger.error("Shim start failed — no fallback available")
         }
         loadCCWebview(webView)
         return webView
@@ -128,13 +114,8 @@ struct WebViewContainer: NSViewRepresentable {
         ucc.removeScriptMessageHandler(forName: "vscodeHost")
         ucc.removeScriptMessageHandler(forName: "consoleLog")
         ucc.removeAllUserScripts()
-        if let shim = coordinator.shimProcess {
-            shim.stop()
-            coordinator.shimProcess = nil
-        } else {
-            coordinator.handler?.terminateAll()
-            coordinator.handler = nil
-        }
+        coordinator.shimProcess?.stop()
+        coordinator.shimProcess = nil
         coordinator.consoleHandler = nil
         logger.info("WebView dismantled, handlers removed")
     }
@@ -287,17 +268,6 @@ struct WebViewContainer: NSViewRepresentable {
         // Allow read access to both temp dir (for HTML) and extension dir (for JS/CSS/resources)
         let commonParent = FileManager.default.homeDirectoryForCurrentUser
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
-    }
-
-    private func addLegacyHandler(ucc: WKUserContentController, coordinator: Coordinator) {
-        let handler = WebViewMessageHandler(
-            workingDirectory: workingDirectory,
-            resumeSessionId: resumeSessionId,
-            permissionMode: permissionMode,
-            sessionTitle: sessionTitle
-        )
-        ucc.add(handler, name: "vscodeHost")
-        coordinator.handler = handler
     }
 
     // MARK: - Auth Status for HTML injection

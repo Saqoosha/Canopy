@@ -129,9 +129,9 @@ async function main() {
   // Create ExtensionContext
   const context = createExtensionContext({ extensionPath, storagePath });
 
-  // Start stdin reader
+  // Start stdin reader. When stdin closes (Hangar exits/crashes), exit gracefully.
   let webviewReady = false;
-  startStdinReader((msg) => {
+  const stdinRl = startStdinReader((msg) => {
     if (msg.type === "webview_message") {
       window._handleWebviewMessage(msg.message);
     } else if (msg.type === "webview_ready") {
@@ -140,15 +140,29 @@ async function main() {
       window._handleNotificationResponse(msg.requestId, msg.buttonValue);
     }
   });
-
-  // Process cleanup handlers
-  process.on("exit", () => {
-    try {
-      process.kill(-process.pid, "SIGTERM");
-    } catch {
-      // May fail if no child process group
-    }
+  stdinRl.on("close", () => {
+    process.stderr.write("[vscode-shim] stdin closed, exiting\n");
+    process.exit(0);
   });
+
+  // Process cleanup: kill all children on exit.
+  // Cannot use process.kill(-pid) — we share the parent's process group,
+  // so that would kill Hangar itself. Instead, find and kill children individually.
+  function killChildren() {
+    try {
+      const { execSync } = require("node:child_process");
+      const output = execSync(`/usr/bin/pgrep -P ${process.pid}`, { encoding: "utf-8", timeout: 2000 });
+      for (const line of output.trim().split("\n")) {
+        const childPid = parseInt(line, 10);
+        if (childPid > 0) {
+          try { process.kill(childPid, "SIGTERM"); } catch { /* already dead */ }
+        }
+      }
+    } catch {
+      // pgrep exits 1 when no children found — expected
+    }
+  }
+  process.on("exit", killChildren);
   process.on("SIGTERM", () => process.exit(0));
   process.on("SIGINT", () => process.exit(0));
 

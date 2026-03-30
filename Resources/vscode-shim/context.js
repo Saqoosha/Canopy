@@ -39,6 +39,7 @@ class Memento {
     const dir = path.dirname(this._filePath);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(this._filePath, JSON.stringify(this._data, null, 2), "utf-8");
+    try { fs.chmodSync(this._filePath, 0o600); } catch { /* best effort */ }
   }
 
   keys() {
@@ -74,6 +75,7 @@ function createExtensionContext({ extensionPath, storagePath }) {
   function saveSecrets() {
     fs.mkdirSync(path.dirname(secretsFile), { recursive: true });
     fs.writeFileSync(secretsFile, JSON.stringify(secretsData, null, 2), "utf-8");
+    try { fs.chmodSync(secretsFile, 0o600); } catch { /* best effort */ }
   }
 
   const secretsOnDidChange = new (require("./types.js").EventEmitter)();

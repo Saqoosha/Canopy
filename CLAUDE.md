@@ -8,7 +8,7 @@ macOS native app that hosts the Claude Code VSCode extension's webview (React UI
 
 Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands.
 
-**vscode-shim complete (Tasks 1-14)** — Node.js subprocess runs `extension.js` unmodified. 10 JS modules + Swift integration (ShimProcess, NodeDiscovery, feature flag, Xcode bundling). Default enabled with legacy fallback. Task 15 (cleanup: remove old 1409-line handler) pending — waiting for stability confirmation.
+**vscode-shim complete (Tasks 1-15)** — Node.js subprocess runs `extension.js` unmodified. 10 JS modules + Swift integration (ShimProcess, NodeDiscovery, Xcode bundling). Legacy handler removed.
 
 ## Tech Stack
 - macOS 15.0+, Swift 6
@@ -26,7 +26,6 @@ open build/Build/Products/Debug/Hangar.app
 
 ## Architecture
 
-### Active (vscode-shim — default)
 ```
 WKWebView ─── postMessage ──→ ShimProcess.swift (~600 lines)
                                   │ stdin/stdout NDJSON
@@ -38,25 +37,17 @@ WKWebView ─── postMessage ──→ ShimProcess.swift (~600 lines)
                                        └─ spawns Claude CLI via child_process
 ```
 
-### Legacy (Swift protocol handler — fallback)
-```
-WKWebView ─── postMessage ──→ WebViewMessageHandler.swift (1409 lines)
-                                  └─→ ClaudeProcess.swift ─→ Claude CLI
-```
-
-The vscode-shim approach runs extension.js as-is — no protocol reimplementation needed. Extension updates require zero Hangar code changes. Falls back to legacy handler if Node.js not found. Toggle via Debug menu → "Use VSCode Shim". See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for full spec.
+Runs extension.js as-is — no protocol reimplementation needed. Extension updates require zero Hangar code changes. See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for full spec.
 
 ## Key Source Files
 
 ### Swift (Sources/Hangar/)
 - `HangarApp.swift` — SwiftUI app entry, launcher ↔ session switching, window title, menu commands
-- `AppState.swift` — Observable app state, PermissionMode enum, useShim flag, screen transitions
-- `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching
-- `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell)
+- `AppState.swift` — Observable app state, PermissionMode enum, screen transitions
+- `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching, process tree cleanup
+- `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell), result cached
 - `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop
 - `WebViewContainer.swift` — WKWebView setup, CC webview loading, VSCode default CSS injection
-- `WebViewMessageHandler.swift` — **LEGACY** protocol handler (to be replaced by ShimProcess)
-- `ClaudeProcess.swift` — **LEGACY** CLI process lifecycle (to be replaced by vscode-shim)
 - `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction
 - `RecentDirectories.swift` — MRU directory list in UserDefaults
 - `VSCodeStub.swift` — acquireVsCodeApi() JS stub, loads theme CSS from bundled resource
@@ -112,7 +103,7 @@ Chat:    io_message(user) → CLI stdin
 - Webview reads `data-initial-auth-status` HTML attribute for instant auth — inject cached authStatus here
 - `update_state` handler: `this.authStatus.value = state.authStatus ?? null` — any update_state without authStatus resets auth to null
 - `isAuthenticated` checks: (1) `forceLogin` not true, (2) `authStatus !== null`, (3) fallback: `claudeConfig.account`
-- Permission mode UI: controlled by synthetic `system/status` io_message (same as legacy handler), NOT by `initialPermissionMode`
+- Permission mode UI: controlled by synthetic `system/status` io_message in launch_claude intercept, NOT by `initialPermissionMode`
 - `init_response` lacks `authStatus` — injected from auth cache. `isOnboardingDismissed` must be patched to `true`
 - ShimProcess patches both `init_response` and `update_state`: authStatus, permissionMode, experimentGates, isOnboardingDismissed
 
@@ -144,11 +135,10 @@ To update theme CSS:
 - PermissionMode: type-safe enum (default, acceptEdits, plan, bypassPermissions)
 
 ## Next Steps
-1. **Task 15: Cleanup** — Remove WebViewMessageHandler.swift (1409 lines) + ClaudeProcess.swift (387 lines), make shim the only code path
-2. **Auth improvement** — Move secrets from file-based JSON to macOS Keychain; set file permissions on secrets.json
-3. Dark mode — support system appearance switching (theme-dark.css)
-4. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
-5. Window chrome — app icon, titlebar, tabs
+1. **Auth improvement** — Move secrets from file-based JSON to macOS Keychain (currently chmod 0o600)
+2. Dark mode — support system appearance switching (theme-dark.css)
+3. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
+4. Window chrome — app icon, titlebar, tabs
 
 ## Design & Plan Docs
 - `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` — Full design spec (500 lines)

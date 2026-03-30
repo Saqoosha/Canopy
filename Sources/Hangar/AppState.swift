@@ -27,12 +27,8 @@ enum PermissionMode: String, CaseIterable {
 @Observable
 final class AppState {
     private static let permissionModeKey = "lastPermissionMode"
-    private static let useShimKey = "useShim"
 
     private(set) var screen: AppScreen = .launcher
-    var useShim: Bool = true {
-        didSet { UserDefaults.standard.set(useShim, forKey: Self.useShimKey) }
-    }
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     var permissionMode: PermissionMode = .acceptEdits {
         didSet { UserDefaults.standard.set(permissionMode.rawValue, forKey: Self.permissionModeKey) }
@@ -49,9 +45,6 @@ final class AppState {
            let mode = PermissionMode(rawValue: saved)
         {
             permissionMode = mode
-        }
-        if UserDefaults.standard.object(forKey: Self.useShimKey) != nil {
-            useShim = UserDefaults.standard.bool(forKey: Self.useShimKey)
         }
         // Debug: auto-launch session via defaults write sh.saqoo.Hangar debugAutoLaunchDir /tmp
         debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")

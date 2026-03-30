@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct HangarApp: App {
@@ -38,12 +39,6 @@ struct HangarApp: App {
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
                 }
-            }
-            CommandMenu("Debug") {
-                Toggle("Use VSCode Shim", isOn: Binding(
-                    get: { ActiveTabState.shared.current?.useShim ?? true },
-                    set: { ActiveTabState.shared.current?.useShim = $0 }
-                ))
             }
         }
     }
@@ -107,12 +102,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
-        WebViewMessageHandler.requestNotificationPermission()
+        requestNotificationPermission()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(windowDidBecomeMain(_:)),
             name: NSWindow.didBecomeMainNotification, object: nil
         )
+    }
+
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error {
+                print("Notification permission error: \(error.localizedDescription)")
+            }
+        }
     }
 
     @objc private func windowDidBecomeMain(_ note: Notification) {
@@ -151,14 +154,13 @@ struct TabContentView: View {
                     workingDirectory: appState.workingDirectory,
                     resumeSessionId: appState.resumeSessionId,
                     permissionMode: appState.permissionMode,
-                    sessionTitle: appState.resumeSessionTitle,
-                    useShim: appState.useShim
+                    sessionTitle: appState.resumeSessionTitle
                 )
                 .id(appState.webviewReloadToken)
             }
         }
-        // Only set title for launcher; session title is managed by WebViewMessageHandler
-        .windowTitle(appState.screen == .launcher ? "Hangar" : "")
+        // Only set title for launcher; session title is managed by ShimProcess
+        .windowTitle(appState.screen == .launcher ? "Hangar" : nil)
         .onAppear {
             ActiveTabState.shared.current = appState
             // Debug: auto-launch session (defaults write sh.saqoo.Hangar debugAutoLaunchDir /tmp)
@@ -176,11 +178,12 @@ struct TabContentView: View {
 // MARK: - Window title helper
 
 private struct WindowTitleSetter: NSViewRepresentable {
-    let title: String
+    let title: String?
 
     func makeNSView(context: Context) -> NSView { NSView() }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        guard let title else { return } // nil = don't touch the title (managed elsewhere)
         DispatchQueue.main.async {
             nsView.window?.title = title
         }
@@ -188,7 +191,7 @@ private struct WindowTitleSetter: NSViewRepresentable {
 }
 
 extension View {
-    func windowTitle(_ title: String) -> some View {
+    func windowTitle(_ title: String?) -> some View {
         background(WindowTitleSetter(title: title))
     }
 }

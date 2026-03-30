@@ -99,8 +99,6 @@ All Swift-side logging uses `os.log.Logger` with subsystem `sh.saqoo.Hangar`. Ea
 | `CCExtension` | Extension/CLI path discovery |
 | `ShimProcess` | Node.js subprocess, NDJSON bridge, auth/permission patching |
 | `NodeDiscovery` | Node.js binary discovery and validation |
-| `ClaudeProcess` | **LEGACY** CLI process lifecycle |
-| `MessageHandler` | **LEGACY** Protocol messages, auth, IO routing |
 | `SessionHistory` | JSONL parsing, session listing |
 | `VSCodeStub` | Theme CSS loading |
 | `WebView` | WKWebView navigation events |
@@ -154,13 +152,6 @@ log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ShimProc
 log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "NodeDiscovery"' --info
 ```
 
-### Inspecting CLI Communication (Legacy)
-
-```bash
-# Watch CLI-related logs (only when useShim=false)
-log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ClaudeProcess"' --info
-```
-
 ### Debug Auto-Launch
 
 Skip the launcher and start a session automatically (useful for testing):
@@ -196,27 +187,9 @@ A more restrictive path would not cover both locations.
 
 Without this flag, the CLI only outputs batched `assistant` events (complete messages). With it, the CLI outputs `stream_event` lines containing real Anthropic SSE events (message_start, content_block_delta, etc.), enabling character-level streaming in the UI.
 
-### Why Serial DispatchQueue in ClaudeProcess
-
-The CLI's stdout can deliver data chunks on any thread via `readabilityHandler`. The line buffer (splitting raw data into NDJSON lines) is mutable state that must be accessed safely. A serial queue provides simple, correct synchronization without the complexity of actors (which would require async/await throughout).
-
 ### Why @unchecked Sendable
 
-`ClaudeProcess` is marked `@unchecked Sendable` because Swift 6's strict concurrency checking requires `Sendable` conformance for objects shared across concurrency domains. The class manages thread safety manually via its serial `DispatchQueue` rather than using Swift's actor model, so the compiler cannot verify safety automatically.
-
-### Content Array to String Conversion
-
-The CC extension webview sends user messages with content as an array of typed blocks:
-```json
-{"content": [{"type": "text", "text": "Hello"}]}
-```
-
-The CLI's `stream-json` input format expects content as a plain string:
-```json
-{"content": "Hello"}
-```
-
-`WebViewMessageHandler.handleIOMessage` performs this conversion, extracting and joining text from content blocks.
+`ShimProcess` is marked `@unchecked Sendable` because Swift 6's strict concurrency checking requires `Sendable` conformance for objects shared across concurrency domains. The class manages thread safety manually via serial queues and main-thread-only access patterns rather than using Swift's actor model.
 
 ## Common Issues and Solutions
 
@@ -255,15 +228,13 @@ If CSS variables are missing or incorrect:
 
 ### CLI process hangs or doesn't respond
 
-Check stderr output: `log stream --predicate 'composedMessage CONTAINS "[CLI stderr]"' --info`
+Check shim stderr output: `log stream --predicate 'subsystem == "sh.saqoo.Hangar" AND category == "ShimProcess"' --info`
 
-The CLI may be waiting for authentication or hitting rate limits. Check `log stream` output for `rate_limit_event` messages.
+The CLI may be waiting for authentication or hitting rate limits.
 
 ### Build fails after extension update
 
-If the CC extension updates its webview protocol (new message types, changed response formats), the `WebViewMessageHandler` may need updates. Check Safari Web Inspector console for unhandled request types, which are logged as warnings.
-
-**With vscode-shim:** Extension updates should require zero code changes. The shim runs extension.js directly. If a new vscode API is used, the Proxy will log warnings to stderr — check with:
+Extension updates should require zero code changes. The shim runs extension.js directly. If a new vscode API is used, the Proxy will log warnings to stderr — check with:
 ```bash
 node --test --test-timeout 120000 test/shim-integration.test.js
 ```

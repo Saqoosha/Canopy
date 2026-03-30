@@ -5,16 +5,22 @@ private let logger = Logger(subsystem: "sh.saqoo.Hangar", category: "NodeDiscove
 
 /// Discovers a suitable Node.js installation on the system (>= 18).
 /// Checks Homebrew, mise, nvm, and login shell PATH.
+/// Result is cached after the first successful lookup.
 enum NodeDiscovery {
     struct NodeInfo {
         let path: String
         let version: String
     }
 
+    /// Only accessed from the main thread (via ShimProcess.start).
+    private nonisolated(unsafe) static var cached: NodeInfo?
+
     static func find() -> NodeInfo? {
+        if let cached { return cached }
         for candidate in candidatePaths() {
             if let info = validate(path: candidate) {
                 logger.info("Found Node.js \(info.version) at \(info.path, privacy: .public)")
+                cached = info
                 return info
             }
         }
