@@ -693,6 +693,117 @@ describe("workspace", () => {
     const content = fs.readFileSync(testFile, "utf-8");
     assert.equal(content, "written");
   });
+
+  // --- Canopy settings layer tests ---
+
+  it("getConfiguration reads Canopy settings with highest priority", () => {
+    // Write user settings with one value
+    const settingsPath = path.join(tmpDir, "settings.json");
+    fs.writeFileSync(settingsPath, JSON.stringify({ "myExt.fontSize": 20 }));
+
+    // Write Canopy settings with a different value (should win)
+    const canopySettingsPath = path.join(tmpDir, "canopy-settings.json");
+    fs.writeFileSync(canopySettingsPath, JSON.stringify({ "myExt.fontSize": 32 }));
+
+    const ws2 = createWorkspace({
+      cwd: tmpDir,
+      settingsPath,
+      extensionPackageJson: {
+        contributes: {
+          configuration: {
+            properties: {
+              "myExt.fontSize": { default: 14, type: "number" },
+            },
+          },
+        },
+      },
+      canopySettingsPath,
+    });
+
+    const config = ws2.getConfiguration("myExt");
+    assert.equal(config.get("fontSize"), 32); // Canopy settings wins
+  });
+
+  it("getConfiguration falls through when Canopy settings has no value", () => {
+    // Write user settings with one value
+    const settingsPath = path.join(tmpDir, "settings.json");
+    fs.writeFileSync(settingsPath, JSON.stringify({ "myExt.fontSize": 20 }));
+
+    // Canopy settings has a different key, not fontSize
+    const canopySettingsPath = path.join(tmpDir, "canopy-settings.json");
+    fs.writeFileSync(canopySettingsPath, JSON.stringify({ "myExt.theme": "canopy-light" }));
+
+    const ws2 = createWorkspace({
+      cwd: tmpDir,
+      settingsPath,
+      extensionPackageJson: {
+        contributes: {
+          configuration: {
+            properties: {
+              "myExt.fontSize": { default: 14, type: "number" },
+              "myExt.theme": { default: "dark", type: "string" },
+            },
+          },
+        },
+      },
+      canopySettingsPath,
+    });
+
+    const config = ws2.getConfiguration("myExt");
+    // fontSize falls through to user settings (Canopy settings doesn't have it)
+    assert.equal(config.get("fontSize"), 20);
+    // theme comes from Canopy settings
+    assert.equal(config.get("theme"), "canopy-light");
+  });
+
+  it("inspect() includes Canopy settings as globalValue", () => {
+    const settingsPath = path.join(tmpDir, "settings.json");
+    fs.writeFileSync(settingsPath, JSON.stringify({ "myExt.fontSize": 20 }));
+
+    const canopySettingsPath = path.join(tmpDir, "canopy-settings.json");
+    fs.writeFileSync(canopySettingsPath, JSON.stringify({ "myExt.fontSize": 32 }));
+
+    const ws2 = createWorkspace({
+      cwd: tmpDir,
+      settingsPath,
+      extensionPackageJson: {
+        contributes: {
+          configuration: {
+            properties: {
+              "myExt.fontSize": { default: 14, type: "number" },
+            },
+          },
+        },
+      },
+      canopySettingsPath,
+    });
+
+    const info = ws2.getConfiguration("myExt").inspect("fontSize");
+    assert.equal(info.key, "myExt.fontSize");
+    assert.equal(info.defaultValue, 14);
+    assert.equal(info.globalValue, 32); // Canopy settings as globalValue
+    assert.equal(info.workspaceValue, 20); // User/workspace settings as workspaceValue
+    assert.equal(info.workspaceFolderValue, undefined);
+  });
+
+  it("inspect() returns workspaceValue even when Canopy settings has no key", () => {
+    const settingsPath = path.join(tmpDir, "settings.json");
+    fs.writeFileSync(settingsPath, JSON.stringify({ "myExt.fontSize": 20 }));
+
+    const canopySettingsPath = path.join(tmpDir, "canopy-settings.json");
+    fs.writeFileSync(canopySettingsPath, JSON.stringify({}));
+
+    const ws2 = createWorkspace({
+      cwd: tmpDir,
+      settingsPath,
+      canopySettingsPath,
+      extensionPackageJson: {},
+    });
+
+    const info = ws2.getConfiguration("myExt").inspect("fontSize");
+    assert.equal(info.globalValue, 20); // falls through to user settings
+    assert.equal(info.workspaceValue, undefined); // no canopy key → user stays in globalValue
+  });
 });
 
 // ===========================================================================

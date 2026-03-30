@@ -252,7 +252,7 @@ const VSCODE_BUILTIN_DEFAULTS = {
   "search.useIgnoreFiles": true,
 };
 
-function createConfiguration(settingsPath, extensionPackageJson) {
+function createConfiguration(settingsPath, extensionPackageJson, canopySettingsPath) {
   // Extract extension defaults from package.json contributes.configuration.properties
   const extDefaults = {};
   const configs = extensionPackageJson?.contributes?.configuration;
@@ -273,30 +273,36 @@ function createConfiguration(settingsPath, extensionPackageJson) {
 
   return function getConfiguration(section) {
     const userSettings = loadJson(settingsPath);
+    const canopySettings = canopySettingsPath ? loadJson(canopySettingsPath) : {};
 
     return {
       get(key, defaultValue) {
         const fullKey = section ? `${section}.${key}` : key;
 
-        // 1. User settings
+        // 1. Canopy global settings (highest priority)
+        if (Object.prototype.hasOwnProperty.call(canopySettings, fullKey)) {
+          return canopySettings[fullKey];
+        }
+        // 2. User settings (.vscode/settings.json)
         if (Object.prototype.hasOwnProperty.call(userSettings, fullKey)) {
           return userSettings[fullKey];
         }
-        // 2. Extension package.json defaults
+        // 3. Extension package.json defaults
         if (Object.prototype.hasOwnProperty.call(extDefaults, fullKey)) {
           return extDefaults[fullKey];
         }
-        // 3. VSCode built-in defaults (files.exclude, search.exclude, etc.)
+        // 4. VSCode built-in defaults (files.exclude, search.exclude, etc.)
         if (Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)) {
           return VSCODE_BUILTIN_DEFAULTS[fullKey];
         }
-        // 4. Provided default
+        // 5. Provided default
         return defaultValue;
       },
 
       has(key) {
         const fullKey = section ? `${section}.${key}` : key;
         return (
+          Object.prototype.hasOwnProperty.call(canopySettings, fullKey) ||
           Object.prototype.hasOwnProperty.call(userSettings, fullKey) ||
           Object.prototype.hasOwnProperty.call(extDefaults, fullKey) ||
           Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)
@@ -322,13 +328,20 @@ function createConfiguration(settingsPath, extensionPackageJson) {
           : Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)
             ? VSCODE_BUILTIN_DEFAULTS[fullKey]
             : undefined;
+        const canopyVal = Object.prototype.hasOwnProperty.call(canopySettings, fullKey)
+          ? canopySettings[fullKey]
+          : undefined;
+        const workspaceVal = Object.prototype.hasOwnProperty.call(currentSettings, fullKey)
+          ? currentSettings[fullKey]
+          : undefined;
+        // When Canopy settings exist, they take globalValue and user settings become workspaceValue.
+        // When no Canopy settings, user settings stay in globalValue (backward compatible).
+        const hasCanopyVal = canopyVal !== undefined;
         return {
           key: fullKey,
           defaultValue: defVal,
-          globalValue: Object.prototype.hasOwnProperty.call(currentSettings, fullKey)
-            ? currentSettings[fullKey]
-            : undefined,
-          workspaceValue: undefined,
+          globalValue: hasCanopyVal ? canopyVal : workspaceVal ?? undefined,
+          workspaceValue: hasCanopyVal ? workspaceVal ?? undefined : undefined,
           workspaceFolderValue: undefined,
         };
       },
@@ -365,7 +378,7 @@ function openTextDocument(uriOrOptions) {
 // createWorkspace
 // ---------------------------------------------------------------------------
 
-function createWorkspace({ cwd, settingsPath, extensionPackageJson }) {
+function createWorkspace({ cwd, settingsPath, extensionPackageJson, canopySettingsPath }) {
   const folderUri = Uri.file(cwd);
   const folderName = path.basename(cwd);
   const workspaceFolder = { uri: folderUri, name: folderName, index: 0 };
@@ -377,6 +390,7 @@ function createWorkspace({ cwd, settingsPath, extensionPackageJson }) {
   const getConfiguration = createConfiguration(
     settingsPath || path.join(cwd, ".vscode", "settings.json"),
     extensionPackageJson || {},
+    canopySettingsPath,
   );
 
   return {

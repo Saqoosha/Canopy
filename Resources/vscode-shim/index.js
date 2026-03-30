@@ -33,6 +33,8 @@ function parseArgs(argv) {
       args.resume = argv[++i];
     } else if (arg === "--permission-mode" && argv[i + 1]) {
       args.permissionMode = argv[++i];
+    } else if (arg === "--settings-path" && argv[i + 1]) {
+      args.settingsPath = argv[++i];
     }
   }
   return args;
@@ -108,6 +110,7 @@ async function main() {
     cwd: args.cwd,
     settingsPath: path.join(args.cwd, ".vscode", "settings.json"),
     extensionPackageJson,
+    canopySettingsPath: args.settingsPath,
   });
   const window = createWindow();
   const env = createEnv({

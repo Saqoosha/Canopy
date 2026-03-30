@@ -47,6 +47,10 @@ struct CanopyApp: App {
                 }
             }
         }
+
+        Settings {
+            SettingsView()
+        }
     }
 
     private func selectTab(at index: Int) {
