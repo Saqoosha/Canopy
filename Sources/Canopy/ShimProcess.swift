@@ -666,7 +666,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Request rate limit data from extension (triggers /api/oauth/usage fetch).
+    /// Throttled to at most once per 60 seconds to avoid API rate limits.
+    private var lastUsageUpdateTime: Date = .distantPast
     private func requestUsageUpdate() {
+        let now = Date()
+        guard now.timeIntervalSince(lastUsageUpdateTime) >= 60 else { return }
+        lastUsageUpdateTime = now
         let requestId = "canopy-usage-\(UUID().uuidString.prefix(8))"
         sendToShim([
             "type": "webview_message",
