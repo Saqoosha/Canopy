@@ -285,10 +285,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
         }
 
-        // Intercept title-related requests from webview
+        // Intercept requests from webview
         if let request = dict["request"] as? [String: Any],
            let reqType = request["type"] as? String
         {
+            // Handle open_file: read file and show in ContentViewer instead of
+            // forwarding to extension (which would trigger file:// navigation → WebContent crash).
+            if reqType == "open_file" {
+                handleOpenFile(request, requestId: dict["requestId"] as? String)
+                return
+            }
+
             if reqType == "rename_tab" || reqType == "update_session_state" {
                 // Track session ID for title persistence.
                 if let sid = request["sessionId"] as? String, UUID(uuidString: sid) != nil {
@@ -490,6 +497,55 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             "requestId": requestId,
             "buttonValue": buttonValue,
         ])
+    }
+
+    /// Handle open_file request from webview — show file in ContentViewer
+    /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
+    private func handleOpenFile(_ request: [String: Any], requestId: String?) {
+        let location = request["location"] as? [String: Any]
+
+        // Extract file path, stripping file:// scheme if present
+        var rawPath = location?["uri"] as? String
+            ?? location?["filePath"] as? String
+            ?? location?["path"] as? String
+            ?? location?["file"] as? String
+        if let s = rawPath, s.hasPrefix("file://") {
+            rawPath = URL(string: s)?.path ?? String(s.dropFirst(7))
+        }
+
+        if let filePath = rawPath {
+            let url: URL
+            if filePath.hasPrefix("/") {
+                url = URL(fileURLWithPath: filePath)
+            } else {
+                url = workingDirectory.appendingPathComponent(filePath)
+            }
+            if FileManager.default.fileExists(atPath: url.path) {
+                do {
+                    let content = try String(contentsOf: url, encoding: .utf8)
+                    logger.info("handleOpenFile: showing in ContentViewer: \(url.lastPathComponent, privacy: .public)")
+                    ContentViewer.show(content: content, title: url.lastPathComponent, in: webView)
+                } catch {
+                    logger.info("handleOpenFile: not UTF-8 text (\(error.localizedDescription, privacy: .public)), opening externally")
+                    if !NSWorkspace.shared.open(url) {
+                        logger.warning("handleOpenFile: NSWorkspace failed to open: \(url.path, privacy: .public)")
+                    }
+                }
+            } else {
+                logger.warning("handleOpenFile: file does not exist: \(url.path, privacy: .public)")
+            }
+        } else {
+            logger.warning("handleOpenFile: no file path in location keys: \(location?.keys.sorted().description ?? "nil", privacy: .public)")
+        }
+
+        // Send response so the webview doesn't hang waiting (fire-and-forget if no requestId)
+        if let requestId {
+            sendToWebView([
+                "type": "response",
+                "requestId": requestId,
+                "response": ["type": "open_file_response"] as [String: Any],
+            ] as [String: Any])
+        }
     }
 
     private func openTerminal(_ msg: [String: Any]) {

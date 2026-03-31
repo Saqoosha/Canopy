@@ -46,7 +46,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 
 ### Swift (Sources/Canopy/)
 - `CanopyApp.swift` — SwiftUI app entry, tabs, menu commands, Sparkle updater
-- `AppState.swift` — Observable app state, PermissionMode enum, screen transitions
+- `AppState.swift` — Observable app state, PermissionMode enum, screen transitions, StatusBarData reset on session launch
 - `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching, process tree cleanup
 - `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell), result cached
 - `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop
@@ -55,6 +55,8 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `RecentDirectories.swift` — MRU directory list in UserDefaults
 - `VSCodeStub.swift` — acquireVsCodeApi() JS stub, loads theme CSS from bundled resource
 - `CCExtension.swift` — Extension/CLI path discovery
+- `StatusBarData.swift` — Observable model for native status bar (context usage, model, CLI version, rate limits)
+- `StatusBarView.swift` — Native SwiftUI status bar: context usage bar, model/version, rate limit indicators
 - `ContentViewer.swift` — Monaco editor overlay for viewing file contents
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
 
@@ -136,7 +138,7 @@ To update theme CSS:
 - History replay: reads JSONL, walks parentUuid chain from leaf, sends via sync `dispatchEvent` (not async `postMessage`) for instant single-render display
 - Path encoding: `encodePath` replaces `/` and `.` with `-` (matching CLI behavior)
 - `loadAllSessions` reads `cwd` from JSONL metadata (avoids lossy path decoding)
-- PermissionMode: type-safe enum (default, acceptEdits, plan, bypassPermissions)
+- PermissionMode: type-safe enum (default, acceptEdits, auto, plan, bypassPermissions)
 
 ## Release Scripts
 ```bash
