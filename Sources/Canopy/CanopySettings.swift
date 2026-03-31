@@ -59,12 +59,33 @@ final class CanopySettings {
     }
 
     private func save() {
-        let dict: [String: Any] = [
-            "claudeCode.initialPermissionMode": initialPermissionMode.rawValue,
-            "claudeCode.allowDangerouslySkipPermissions": allowDangerouslySkipPermissions,
-            "claudeCode.useCtrlEnterToSend": useCtrlEnterToSend,
-            "claudeCode.respectGitIgnore": respectGitIgnore,
-        ]
+        var dict = loadCurrentDict()
+        dict["claudeCode.initialPermissionMode"] = initialPermissionMode.rawValue
+        dict["claudeCode.allowDangerouslySkipPermissions"] = allowDangerouslySkipPermissions
+        dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
+        dict["claudeCode.respectGitIgnore"] = respectGitIgnore
+        writeDict(dict)
+    }
+
+    /// Set or clear the claudeProcessWrapper setting for SSH remote mode.
+    func setProcessWrapper(_ path: String?) {
+        var dict = loadCurrentDict()
+        if let path {
+            dict["claudeCode.claudeProcessWrapper"] = path
+        } else {
+            dict.removeValue(forKey: "claudeCode.claudeProcessWrapper")
+        }
+        writeDict(dict)
+    }
+
+    private func loadCurrentDict() -> [String: Any] {
+        guard let data = try? Data(contentsOf: filePath),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return dict
+    }
+
+    private func writeDict(_ dict: [String: Any]) {
         do {
             let dir = filePath.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

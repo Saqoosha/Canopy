@@ -36,6 +36,7 @@ final class AppState {
     }
     var resumeSessionId: String?
     var resumeSessionTitle: String?
+    var remoteHost: String?
     var debugAutoLaunchDir: String?
     /// Incremented to force SwiftUI to recreate the WebViewContainer (via .id() modifier),
     /// ensuring a fresh WKWebView for each session.
@@ -48,19 +49,24 @@ final class AppState {
     /// Optional reference to the status bar data, set by TabContentView.
     weak var statusBarData: StatusBarData?
 
-    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil) {
-        RecentDirectories.add(directory)
+    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, remoteHost: String? = nil) {
+        // Don't add remote paths to local recent directories
+        if remoteHost == nil {
+            RecentDirectories.add(directory)
+        }
         workingDirectory = directory
         self.resumeSessionId = resumeSessionId
         self.resumeSessionTitle = sessionTitle
+        self.remoteHost = remoteHost
         statusBarData?.resetAll()
         webviewReloadToken += 1
         screen = .session
-        logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) mode=\(self.permissionMode.rawValue, privacy: .public)")
+        logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) mode=\(self.permissionMode.rawValue, privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")
     }
 
     func backToLauncher() {
         resumeSessionId = nil
+        remoteHost = nil
         screen = .launcher
     }
 }

@@ -12,6 +12,17 @@ struct StatusBarView: View {
 
     private func statusBar(now: Date) -> some View {
         HStack(spacing: 0) {
+            // Remote host indicator
+            if let remote = data.remoteHost {
+                segment {
+                    Image(systemName: "network")
+                        .font(.system(size: 9))
+                    Text(remote)
+                        .foregroundStyle(.orange)
+                }
+                dot
+            }
+
             // CLI version + Model
             segment {
                 if !data.cliVersion.isEmpty {

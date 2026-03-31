@@ -11,6 +11,7 @@ final class StatusBarData {
     var messageCount: Int = 0
     var gitBranch: String = ""
     var vcsType: VCSType = .unknown
+    var remoteHost: String?
 
     // Rate limits from usage_update (extension → webview, intercepted by ShimProcess)
     var sessionPct: Int = 0        // 5hr utilization 0-100
@@ -67,6 +68,7 @@ final class StatusBarData {
         weeklyPct = 0
         weeklyResetDate = nil
         didCompact = false
+        remoteHost = nil
     }
 
     /// Parse usage_update utilization from extension
