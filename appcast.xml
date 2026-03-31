@@ -13,8 +13,15 @@
             <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Changes
-- (Add release notes here)
+            <description sparkle:format="markdown"><![CDATA[### Features
+- Added AI-generated session titles so recent conversations are easier to scan and resume.
+
+### Changes
+- Reset native status bar session metrics when starting a new conversation to avoid carrying over stale usage data.
+- Reduced background usage polling to lower the chance of hitting API rate limits during active sessions.
+
+### Bug Fixes
+- Fixed file links in the chat UI crashing the WKWebView process by intercepting them safely and recovering automatically if WebContent terminates.
 ]]></description>
             <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.2.0/Canopy-1.2.0.dmg" length="1909174" type="application/octet-stream" sparkle:edSignature="9GC6T3lTCGVsl5RV/DHJLuW+H9OsdQ4nHl3WDdbr9/sQEnSGkPoajrNqvaRFFQkyYwg9AO1Ylou88EKLfe0YBw=="/>
             <sparkle:deltas>
