@@ -11,11 +11,27 @@ struct WebViewContainer: NSViewRepresentable {
     var sessionTitle: String?
     var statusBarData: StatusBarData?
     var remoteHost: String?
+    var connectionState: ConnectionState?
 
-    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, ShimProcessDelegate {
         var shimProcess: ShimProcess?
         var consoleHandler: ConsoleLogHandler?
         var linkHandler: LinkClickHandler?
+        var connectionState: ConnectionState?
+        /// Retained independently so reconnect can access it after shimProcess is nil'd.
+        weak var currentWebView: WKWebView?
+
+        // Params needed to create a new ShimProcess on reconnect
+        var workingDirectory: URL?
+        var remoteHost: String?
+        var permissionMode: PermissionMode = .acceptEdits
+        var statusBarData: StatusBarData?
+
+        private var reconnectTimer: Timer?
+        private var reconnectAttempt = 0
+        private var lastDisconnectedSessionId: String?
+        private static let maxReconnectAttempts = 3
+        private static let backoffIntervals: [TimeInterval] = [3, 6, 12]
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             logger.info("Page loaded successfully")
@@ -82,6 +98,95 @@ struct WebViewContainer: NSViewRepresentable {
             logger.error("WebContent process terminated — reloading")
             webView.reload()
         }
+
+        // MARK: - ShimProcessDelegate
+
+        func shimProcessDidDisconnect(_ shim: ShimProcess, sessionId: String) {
+            logger.info("SSH disconnected, starting reconnection for session \(sessionId, privacy: .public)")
+            lastDisconnectedSessionId = sessionId
+            reconnectAttempt = 0
+            connectionState?.status = .reconnecting(attempt: 1)
+            connectionState?.onRetry = { [weak self] in
+                self?.retryReconnect()
+            }
+            attemptReconnect(sessionId: sessionId)
+        }
+
+        private func attemptReconnect(sessionId: String) {
+            reconnectAttempt += 1
+            let attempt = reconnectAttempt
+
+            if attempt > Self.maxReconnectAttempts {
+                logger.error("All reconnect attempts exhausted")
+                connectionState?.status = .reconnectFailed
+                return
+            }
+
+            let delay = Self.backoffIntervals[min(attempt - 1, Self.backoffIntervals.count - 1)]
+            logger.info("Reconnect attempt \(attempt)/\(Self.maxReconnectAttempts) in \(delay)s")
+            connectionState?.status = .reconnecting(attempt: attempt)
+
+            reconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                self?.doReconnect(sessionId: sessionId)
+            }
+        }
+
+        private func doReconnect(sessionId: String) {
+            guard let webView = currentWebView,
+                  let workingDirectory,
+                  let remoteHost
+            else {
+                logger.error("Reconnect failed: missing webView or params")
+                connectionState?.status = .reconnectFailed
+                return
+            }
+
+            // Clean up old shim's message handler
+            let ucc = webView.configuration.userContentController
+            ucc.removeScriptMessageHandler(forName: "vscodeHost")
+            shimProcess = nil
+
+            // Create new ShimProcess with --resume
+            let newShim = ShimProcess(
+                workingDirectory: workingDirectory,
+                resumeSessionId: sessionId,
+                permissionMode: permissionMode,
+                sessionTitle: nil,
+                statusBarData: statusBarData,
+                remoteHost: remoteHost
+            )
+            newShim.delegate = self
+            newShim.webView = webView
+            ucc.add(newShim, name: "vscodeHost")
+
+            if newShim.start() {
+                logger.info("Reconnect succeeded")
+                shimProcess = newShim
+                reconnectAttempt = 0
+                connectionState?.status = .connected
+                newShim.webViewDidFinishLoad()
+            } else {
+                logger.error("Reconnect attempt \(self.reconnectAttempt) failed: shim start returned false")
+                ucc.removeScriptMessageHandler(forName: "vscodeHost")
+                attemptReconnect(sessionId: sessionId)
+            }
+        }
+
+        func cancelReconnect() {
+            reconnectTimer?.invalidate()
+            reconnectTimer = nil
+            reconnectAttempt = 0
+        }
+
+        private func retryReconnect() {
+            guard let sessionId = lastDisconnectedSessionId else {
+                logger.warning("retryReconnect: no session ID available")
+                return
+            }
+            cancelReconnect()
+            connectionState?.status = .reconnecting(attempt: 1)
+            attemptReconnect(sessionId: sessionId)
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -122,10 +227,16 @@ struct WebViewContainer: NSViewRepresentable {
             statusBarData: statusBarData,
             remoteHost: remoteHost
         )
+        shim.delegate = context.coordinator
         ucc.add(shim, name: "vscodeHost")
         context.coordinator.shimProcess = shim
         context.coordinator.consoleHandler = consoleHandler
         context.coordinator.linkHandler = linkHandler
+        context.coordinator.connectionState = connectionState
+        context.coordinator.workingDirectory = workingDirectory
+        context.coordinator.remoteHost = remoteHost
+        context.coordinator.permissionMode = permissionMode
+        context.coordinator.statusBarData = statusBarData
 
         config.userContentController = ucc
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
@@ -136,6 +247,7 @@ struct WebViewContainer: NSViewRepresentable {
         webView.isInspectable = true
 
         context.coordinator.shimProcess?.webView = webView
+        context.coordinator.currentWebView = webView
         if context.coordinator.shimProcess?.start() != true {
             logger.error("Shim start failed — no fallback available")
         }
@@ -147,6 +259,7 @@ struct WebViewContainer: NSViewRepresentable {
 
     /// Clean up WKScriptMessageHandler references to prevent memory leak.
     static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        coordinator.cancelReconnect()
         let ucc = nsView.configuration.userContentController
         ucc.removeScriptMessageHandler(forName: "vscodeHost")
         ucc.removeScriptMessageHandler(forName: "consoleLog")

@@ -163,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct TabContentView: View {
     @State private var appState = AppState()
     @State private var statusBarData = StatusBarData()
+    @State private var connectionState = ConnectionState()
 
     var body: some View {
         Group {
@@ -177,11 +178,26 @@ struct TabContentView: View {
                         permissionMode: appState.permissionMode,
                         sessionTitle: appState.resumeSessionTitle,
                         statusBarData: statusBarData,
-                        remoteHost: appState.remoteHost
+                        remoteHost: appState.remoteHost,
+                        connectionState: connectionState
                     )
+                    .overlay {
+                        ConnectionOverlayView(
+                            connectionState: connectionState,
+                            onBackToLauncher: {
+                                connectionState.status = .connected
+                                appState.backToLauncher()
+                            }
+                        )
+                    }
+                    .animation(.easeInOut(duration: 0.3), value: connectionState.isOverlayVisible)
                     StatusBarView(data: statusBarData)
                 }
                 .id(appState.webviewReloadToken)
+                .onChange(of: appState.webviewReloadToken) {
+                    connectionState.status = .connected
+                    connectionState.onRetry = nil
+                }
             }
         }
         // Only set title for launcher; session title is managed by ShimProcess

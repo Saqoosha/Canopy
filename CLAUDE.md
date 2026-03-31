@@ -70,6 +70,8 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `RemoteDirectoryBrowser.swift` — SSH-backed remote file browser (sheet), lists remote dirs via `ssh host cd path && pwd && ls -1pA`
 - `SSHHostStore.swift` — MRU list of SSH hosts in UserDefaults
 - `CanopySettings.swift` — Persistent settings (permission mode, wrapper path, etc.), JSON-backed
+- `ConnectionState.swift` — Observable connection status (connected, reconnecting, failed) for SSH overlay
+- `ConnectionOverlayView.swift` — SwiftUI overlay showing SSH disconnect/reconnect state
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
 
 ### SSH Remote (Resources/)
@@ -176,21 +178,33 @@ To update theme CSS:
 - Window title shows `[hostname]` prefix (orange), status bar shows network icon + hostname
 - Saved hosts persisted via `SSHHostStore` (UserDefaults), manageable in Preferences
 
-### Phase 1 Limitations
+### Connection Management (Phase 3)
+- SSH keepalive: `ServerAliveInterval=15`, `ServerAliveCountMax=3` — detects dead connections within 45s
+- Auto-reconnect framework: 3 attempts with exponential backoff (3s, 6s, 12s), uses `--resume SESSION_ID`
+- UI overlay: semi-transparent overlay on webview showing disconnect/reconnect state
+- Only activates for remote sessions with an established session ID
+- `ConnectionState` (@Observable) owns status + onRetry closure; `ConnectionOverlayView` renders it
+- `ShimProcessDelegate` protocol: `shimProcessDidDisconnect(_:sessionId:)` — Coordinator implements
+- `retryReconnect()` calls `cancelReconnect()` first to prevent concurrent reconnect attempts
+
+#### Known Limitation (Phase 3.1)
+SSH death kills the CLI subprocess but Node.js shim stays alive → `terminationHandler` does NOT fire → overlay is NOT triggered automatically. The CC extension detects CLI exit and shows error banner (exit code 255). The framework is built; Phase 3.1 will add detection via shim stderr or extension message.
+
+### Remaining Limitations
 - `@`-mention file listing doesn't work (workspace.fs is local)
 - `open_file` / ContentViewer can't read remote files
-- No SSH connection health monitoring (keepalive, reconnect)
 
 ## Next Steps
-1. SSH remote Phase 2 — remote file operations via SSH for @-mention support
-2. SSH remote Phase 3 — connection management (reconnect, keepalive)
-3. SSH remote Phase 4 — Linux remote support (XDG paths for globalState)
+1. SSH remote Phase 3.1 — detect CLI exit via shim to trigger reconnect overlay
+2. SSH remote Phase 2 — remote file operations via SSH for @-mention support
 
 ## Design & Plan Docs
 - `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` — Full design spec (500 lines)
 - `docs/superpowers/plans/2026-03-29-vscode-shim.md` — Implementation plan (15 tasks)
 - `docs/superpowers/specs/2026-03-31-ssh-remote.md` — SSH remote design spec + validation results
 - `docs/superpowers/plans/2026-03-31-ssh-remote.md` — SSH remote implementation plan (8 tasks)
+- `docs/superpowers/specs/2026-03-31-ssh-connection-management.md` — Phase 3 design spec
+- `docs/superpowers/plans/2026-03-31-ssh-connection-management.md` — Phase 3 implementation plan
 
 ## Running Tests
 ```bash

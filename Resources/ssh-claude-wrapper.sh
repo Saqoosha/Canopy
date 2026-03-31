@@ -28,7 +28,7 @@ done
 # The extension passes cwd via spawn options (useless over SSH),
 # so we use CANOPY_SSH_CWD env var set by ShimProcess.
 if [ -n "${CANOPY_SSH_CWD:-}" ]; then
-    exec ssh -T -o LogLevel=ERROR "$CANOPY_SSH_HOST" "cd '$CANOPY_SSH_CWD' && claude $*"
+    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" "cd '$CANOPY_SSH_CWD' && claude $*"
 else
-    exec ssh -T -o LogLevel=ERROR "$CANOPY_SSH_HOST" claude "$@"
+    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" claude "$@"
 fi
