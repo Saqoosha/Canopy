@@ -14,6 +14,7 @@ struct WebViewContainer: NSViewRepresentable {
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var shimProcess: ShimProcess?
         var consoleHandler: ConsoleLogHandler?
+        var linkHandler: LinkClickHandler?
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             logger.info("Page loaded successfully")
@@ -37,10 +38,19 @@ struct WebViewContainer: NSViewRepresentable {
                 decisionHandler(.cancel)
                 return
             }
+            // Safety net: block file:// link navigations that bypass JS interception
+            if let url = navigationAction.request.url,
+               url.scheme == "file",
+               navigationAction.navigationType == .linkActivated
+            {
+                logger.warning("Blocked file:// navigation: \(url.path, privacy: .public)")
+                decisionHandler(.cancel)
+                return
+            }
             decisionHandler(.allow)
         }
 
-        // Handle target="_blank" links (markdown links use this)
+        // Handle target="_blank" links
         func webView(
             _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,
@@ -57,6 +67,19 @@ struct WebViewContainer: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             logger.error("Provisional navigation failed: \(error.localizedDescription, privacy: .public)")
+        }
+
+        private var lastCrashReload: Date = .distantPast
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            let now = Date()
+            guard now.timeIntervalSince(lastCrashReload) > 5 else {
+                logger.error("WebContent crashed again within 5s — not reloading")
+                return
+            }
+            lastCrashReload = now
+            logger.error("WebContent process terminated — reloading")
+            webView.reload()
         }
     }
 
@@ -78,8 +101,17 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
+        ucc.addUserScript(WKUserScript(
+            source: Self.linkClickInterception,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
+
+        let linkHandler = LinkClickHandler(workingDirectory: workingDirectory)
+        ucc.add(linkHandler, name: "canopyLink")
 
         let shim = ShimProcess(
             workingDirectory: workingDirectory,
@@ -91,6 +123,7 @@ struct WebViewContainer: NSViewRepresentable {
         ucc.add(shim, name: "vscodeHost")
         context.coordinator.shimProcess = shim
         context.coordinator.consoleHandler = consoleHandler
+        context.coordinator.linkHandler = linkHandler
 
         config.userContentController = ucc
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
@@ -115,10 +148,12 @@ struct WebViewContainer: NSViewRepresentable {
         let ucc = nsView.configuration.userContentController
         ucc.removeScriptMessageHandler(forName: "vscodeHost")
         ucc.removeScriptMessageHandler(forName: "consoleLog")
+        ucc.removeScriptMessageHandler(forName: "canopyLink")
         ucc.removeAllUserScripts()
         coordinator.shimProcess?.stop()
         coordinator.shimProcess = nil
         coordinator.consoleHandler = nil
+        coordinator.linkHandler = nil
         logger.info("WebView dismantled, handlers removed")
     }
 
@@ -281,6 +316,28 @@ struct WebViewContainer: NSViewRepresentable {
         return " data-initial-auth-status=\"\(jsonStr.replacingOccurrences(of: "\"", with: "&quot;"))\""
     }
 
+    // MARK: - Link click interception JS
+
+    /// Intercept non-http(s) <a> link clicks to prevent file:// navigations
+    /// that crash WKWebView's WebContent process (sandbox restriction).
+    /// Runs in bubble phase so React handlers (tool result links) take priority.
+    private static let linkClickInterception = """
+    (function() {
+        document.addEventListener('click', function(e) {
+            if (e.defaultPrevented) return;
+            var link = e.target.closest('a[href]');
+            if (!link) return;
+            var href = link.getAttribute('href');
+            if (!href || href === '#' || href.startsWith('javascript:') ||
+                href.startsWith('http://') || href.startsWith('https://') ||
+                href.startsWith('mailto:') || href.startsWith('tel:')) return;
+            e.preventDefault();
+            try { window.webkit.messageHandlers.canopyLink.postMessage(href); }
+            catch(err) { console.error('[Canopy] canopyLink error:', err); }
+        }, false);
+    })();
+    """
+
     // MARK: - Console capture JS
 
     private static let consoleCapture = """
@@ -312,6 +369,48 @@ struct WebViewContainer: NSViewRepresentable {
         };
     })();
     """
+}
+
+// MARK: - Link click handler
+
+final class LinkClickHandler: NSObject, WKScriptMessageHandler {
+    let workingDirectory: URL
+
+    init(workingDirectory: URL) {
+        self.workingDirectory = workingDirectory
+    }
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        guard let href = message.body as? String else {
+            logger.warning("LinkClickHandler: unexpected message type: \(type(of: message.body))")
+            return
+        }
+        logger.info("Link clicked: \(href, privacy: .public)")
+
+        // Strip fragment (#L42 etc.) and file:// scheme
+        var path = href.split(separator: "#", maxSplits: 1).first.map(String.init) ?? href
+        if path.hasPrefix("file://") {
+            path = URL(string: path)?.path ?? String(path.dropFirst(7))
+        }
+
+        // Try as absolute path first
+        if path.hasPrefix("/") && FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
+        }
+
+        // Try relative to working directory
+        let resolved = workingDirectory.appendingPathComponent(path)
+        if FileManager.default.fileExists(atPath: resolved.path) {
+            NSWorkspace.shared.open(resolved)
+            return
+        }
+
+        logger.warning("File not found: \(resolved.path, privacy: .public)")
+    }
 }
 
 // MARK: - Console log handler
