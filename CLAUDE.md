@@ -4,13 +4,15 @@
 
 macOS native app that hosts the Claude Code VSCode extension's webview (React UI) in a WKWebView. No VSCode required. The CC extension's bundled JS/CSS renders directly in a native macOS window with real-time streaming.
 
-## Project Status: Fully Working (2026-03-30)
+## Project Status: Fully Working (2026-03-31)
 
-Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands, tabbed windows, Sparkle auto-update.
+Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands, tabbed windows, Sparkle auto-update, **SSH remote**.
 
 **vscode-shim complete (Tasks 1-15)** — Node.js subprocess runs `extension.js` unmodified. 10 JS modules + Swift integration (ShimProcess, NodeDiscovery, Xcode bundling). Legacy handler removed.
 
 **Sparkle auto-update** — SPM dependency, EdDSA-signed appcast on GitHub Pages, delta updates, embedded release notes from GitHub Releases.
+
+**SSH remote** — Run Claude CLI on remote machines via SSH. Uses CC extension's `claudeProcessWrapper` setting with a bundled wrapper script. Remote directory browser via SSH.
 
 ## Tech Stack
 - macOS 15.0+, Swift 6
@@ -40,6 +42,13 @@ WKWebView ─── postMessage ──→ ShimProcess.swift (~600 lines)
                                        └─ spawns Claude CLI via child_process
 ```
 
+SSH remote mode adds one layer: a wrapper script replaces the CLI spawn:
+
+```
+extension.js ─ child_process.spawn ──→ ssh-claude-wrapper.sh ──→ ssh -T host claude ...args
+                                        (claudeProcessWrapper)     (remote CLI)
+```
+
 Runs extension.js as-is — no protocol reimplementation needed. Extension updates require zero Canopy code changes. See `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` for full spec.
 
 ## Key Source Files
@@ -49,16 +58,22 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `AppState.swift` — Observable app state, PermissionMode enum, screen transitions, StatusBarData reset on session launch
 - `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching, process tree cleanup
 - `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell), result cached
-- `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop
+- `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop, SSH remote toggle
 - `WebViewContainer.swift` — WKWebView setup, CC webview loading, VSCode default CSS injection
 - `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction
 - `RecentDirectories.swift` — MRU directory list in UserDefaults
 - `VSCodeStub.swift` — acquireVsCodeApi() JS stub, loads theme CSS from bundled resource
 - `CCExtension.swift` — Extension/CLI path discovery
-- `StatusBarData.swift` — Observable model for native status bar (context usage, model, CLI version, rate limits)
-- `StatusBarView.swift` — Native SwiftUI status bar: context usage bar, model/version, rate limit indicators
+- `StatusBarData.swift` — Observable model for native status bar (context usage, model, CLI version, rate limits, remote host)
+- `StatusBarView.swift` — Native SwiftUI status bar: context usage bar, model/version, rate limit indicators, remote host
 - `ContentViewer.swift` — Monaco editor overlay for viewing file contents
+- `RemoteDirectoryBrowser.swift` — SSH-backed remote file browser (sheet), lists remote dirs via `ssh host cd path && pwd && ls -1pA`
+- `SSHHostStore.swift` — MRU list of SSH hosts in UserDefaults
+- `CanopySettings.swift` — Persistent settings (permission mode, wrapper path, etc.), JSON-backed
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
+
+### SSH Remote (Resources/)
+- `ssh-claude-wrapper.sh` — Process wrapper: strips local paths, runs `claude` on remote via SSH
 
 ### VSCode Shim (Resources/vscode-shim/)
 - `index.js` — Entry point: console redirect, Module hook, arg parsing, activate, stdin routing
@@ -150,12 +165,32 @@ To update theme CSS:
 - Appcast URL: `https://saqoosha.github.io/Canopy/appcast.xml`
 - EdDSA signing key stored in macOS Keychain (shared with Sessylph)
 
+## SSH Remote
+- Toggle "SSH Remote" in launcher, enter hostname (e.g. `mbp`, `user@server`)
+- Browse... opens SSH-backed remote directory browser
+- Uses CC extension's `claudeProcessWrapper` setting with bundled `ssh-claude-wrapper.sh`
+- Wrapper strips local node/claude paths, runs `claude` command on remote with CLI flags
+- `CANOPY_SSH_HOST` env var passes target host to wrapper script
+- `CanopySettings.setProcessWrapper()` dynamically sets/clears the wrapper before each session
+- Remote machine needs: Claude CLI installed + `claude login` done once interactively
+- Window title shows `[hostname]` prefix (orange), status bar shows network icon + hostname
+- Saved hosts persisted via `SSHHostStore` (UserDefaults), manageable in Preferences
+
+### Phase 1 Limitations
+- `@`-mention file listing doesn't work (workspace.fs is local)
+- `open_file` / ContentViewer can't read remote files
+- No SSH connection health monitoring (keepalive, reconnect)
+
 ## Next Steps
-1. SSH remote — run vscode-shim on remote machines via `ssh -T` (design spec Phase 5)
+1. SSH remote Phase 2 — remote file operations via SSH for @-mention support
+2. SSH remote Phase 3 — connection management (reconnect, keepalive)
+3. SSH remote Phase 4 — Linux remote support (XDG paths for globalState)
 
 ## Design & Plan Docs
 - `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` — Full design spec (500 lines)
 - `docs/superpowers/plans/2026-03-29-vscode-shim.md` — Implementation plan (15 tasks)
+- `docs/superpowers/specs/2026-03-31-ssh-remote.md` — SSH remote design spec + validation results
+- `docs/superpowers/plans/2026-03-31-ssh-remote.md` — SSH remote implementation plan (8 tasks)
 
 ## Running Tests
 ```bash

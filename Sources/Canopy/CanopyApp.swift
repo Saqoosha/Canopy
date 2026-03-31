@@ -176,7 +176,8 @@ struct TabContentView: View {
                         resumeSessionId: appState.resumeSessionId,
                         permissionMode: appState.permissionMode,
                         sessionTitle: appState.resumeSessionTitle,
-                        statusBarData: statusBarData
+                        statusBarData: statusBarData,
+                        remoteHost: appState.remoteHost
                     )
                     StatusBarView(data: statusBarData)
                 }

@@ -10,12 +10,28 @@ struct LauncherView: View {
     @State private var hoveredDirectoryPath: String?
     @State private var hoveredSessionId: String?
     @State private var isDropTargeted = false
+    @State private var remoteHost: String = ""
+    @State private var savedHosts: [String] = []
+    @State private var isRemoteMode = false
+    @State private var remoteDirectory: String = "~"
+    @State private var showRemoteBrowser = false
 
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
                 header
-                directoryCard
+
+                Toggle("SSH Remote", isOn: $isRemoteMode)
+                    .toggleStyle(.switch)
+                    .padding(.horizontal)
+
+                if isRemoteMode {
+                    sshHostCard
+                    remoteDirectoryCard
+                } else {
+                    directoryCard
+                }
+
                 startButton
 
                 if !recentDirectories.isEmpty || !sessions.isEmpty {
@@ -97,8 +113,7 @@ struct LauncherView: View {
 
     private var startButton: some View {
         Button {
-            guard let dir = selectedDirectory else { return }
-            appState.launchSession(directory: dir)
+            startSession()
         } label: {
             Label("Start Session", systemImage: "play.fill")
                 .font(.headline)
@@ -107,7 +122,9 @@ struct LauncherView: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(selectedDirectory == nil)
+        .disabled(isRemoteMode
+            ? (remoteHost.isEmpty || remoteDirectory.isEmpty)
+            : selectedDirectory == nil)
         .keyboardShortcut(.return, modifiers: [])
     }
 
@@ -270,10 +287,91 @@ struct LauncherView: View {
         }
     }
 
+    // MARK: - SSH Host Card
+
+    private var sshHostCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("SSH Host")
+                .font(.headline)
+
+            HStack(spacing: 10) {
+                Image(systemName: "network")
+                    .foregroundStyle(!remoteHost.isEmpty ? Color.blue : Color.secondary)
+                    .font(.title3)
+
+                TextField("hostname or user@host", text: $remoteHost)
+                    .textFieldStyle(.plain)
+                    .onSubmit { startSession() }
+
+                if !savedHosts.isEmpty {
+                    Menu {
+                        ForEach(savedHosts, id: \.self) { host in
+                            Button(host) { remoteHost = host }
+                        }
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 30)
+                }
+            }
+            .padding(12)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    // MARK: - Remote Directory Card
+
+    private var remoteDirectoryCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Working Directory")
+                .font(.headline)
+
+            HStack(spacing: 10) {
+                Image(systemName: "folder.fill")
+                    .foregroundStyle(!remoteDirectory.isEmpty ? Color.blue : Color.secondary)
+                    .font(.title3)
+
+                TextField("Remote path (e.g. ~/projects/myapp)", text: $remoteDirectory)
+                    .textFieldStyle(.plain)
+                    .onSubmit { startSession() }
+
+                Button("Browse...") {
+                    showRemoteBrowser = true
+                }
+                .disabled(remoteHost.isEmpty)
+            }
+            .padding(12)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .sheet(isPresented: $showRemoteBrowser) {
+            RemoteDirectoryBrowser(sshHost: remoteHost) { path in
+                remoteDirectory = path
+            }
+        }
+    }
+
     // MARK: - Actions
+
+    private func startSession() {
+        if isRemoteMode {
+            guard !remoteHost.isEmpty, !remoteDirectory.isEmpty else { return }
+            SSHHostStore.add(remoteHost)
+            savedHosts = SSHHostStore.hosts()
+            // Use remote directory as URL (path only, for display/tracking purposes)
+            let dir = URL(fileURLWithPath: remoteDirectory)
+            appState.launchSession(directory: dir, remoteHost: remoteHost)
+        } else {
+            guard let dir = selectedDirectory else { return }
+            appState.launchSession(directory: dir)
+        }
+    }
 
     private func loadData() {
         recentDirectories = RecentDirectories.load()
+        savedHosts = SSHHostStore.hosts()
         Task {
             let all = await Task.detached { ClaudeSessionHistory.loadAllSessions() }.value
             sessions = all

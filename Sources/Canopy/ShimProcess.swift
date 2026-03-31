@@ -44,6 +44,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     let workingDirectory: URL
     var resumeSessionId: String?
     var permissionMode: PermissionMode
+    var remoteHost: String?
 
     // MARK: - Window Title & Spinner
     private var sessionTitle: String = ""
@@ -56,7 +57,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     var statusBarData: StatusBarData?
 
-    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil) {
+    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil) {
         self.workingDirectory = workingDirectory
         self.resumeSessionId = resumeSessionId
         self.permissionMode = permissionMode
@@ -66,9 +67,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             self.titleGenerated = true
         }
         self.statusBarData = statusBarData
+        self.remoteHost = remoteHost
         super.init()
-        // Set CLI version, VCS branch, and initial message count
+        // Set CLI version, VCS branch, initial message count, and remote host
         statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
+        statusBarData?.remoteHost = remoteHost
         let dir = workingDirectory
         let barData = statusBarData
         DispatchQueue.global(qos: .utility).async {
@@ -147,6 +150,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let newPaths = extraPaths.filter { !existingPaths.contains($0) }
         if !newPaths.isEmpty {
             env["PATH"] = (newPaths + [currentPath]).joined(separator: ":")
+        }
+
+        // SSH remote: set env var and configure process wrapper
+        if let remote = remoteHost {
+            guard let wrapperPath = Self.findWrapperPath() else {
+                logger.error("SSH remote: wrapper script not found in bundle")
+                showErrorInWebView("SSH remote mode failed: wrapper script not found. Try reinstalling Canopy.")
+                return false
+            }
+            env["CANOPY_SSH_HOST"] = remote
+            env["CANOPY_SSH_CWD"] = workingDirectory.path
+            // Ensure wrapper has execute permission (Xcode may strip +x on copy)
+            if !FileManager.default.isExecutableFile(atPath: wrapperPath) {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapperPath)
+            }
+            CanopySettings.shared.setProcessWrapper(wrapperPath)
+            logger.info("SSH remote mode: host=\(remote, privacy: .public) wrapper=\(wrapperPath, privacy: .public)")
         }
 
         proc.environment = env
@@ -366,6 +386,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return nil
     }
 
+    private static func findWrapperPath() -> String? {
+        if let bundled = Bundle.main.path(forResource: "ssh-claude-wrapper", ofType: "sh") {
+            return bundled
+        }
+        // Development fallback
+        let sourceFile = URL(fileURLWithPath: #filePath)
+        let projectRoot = sourceFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let devPath = projectRoot.appendingPathComponent("Resources/ssh-claude-wrapper.sh").path
+        if FileManager.default.fileExists(atPath: devPath) {
+            return devPath
+        }
+        return nil
+    }
+
     // MARK: - stdout NDJSON Parsing
 
     /// Called from the stdout readabilityHandler thread. Accumulates data and
@@ -411,6 +448,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 writeToStdin(pending)
             }
             pendingMessages.removeAll()
+            // Clear wrapper from settings now that extension has activated and read it.
+            // This prevents other tabs from inheriting this session's wrapper.
+            if remoteHost != nil {
+                CanopySettings.shared.setProcessWrapper(nil)
+            }
 
         case "webview_message":
             guard var innerMessage = msg["message"] as? [String: Any] else {
@@ -968,8 +1010,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard let window = webView?.window else { return }
         let dirName = workingDirectory.lastPathComponent
         let icon = isWorking ? Self.spinnerFrames[spinnerIndex] : Self.idleIcon
+        let hostPrefix = remoteHost != nil ? "[\(remoteHost!)] " : ""
         let rest = sessionTitle.isEmpty ? dirName : "\(dirName) — \(sessionTitle)"
-        let plainTitle = "\(icon) \(rest)"
+        let plainTitle = "\(icon) \(hostPrefix)\(rest)"
         window.title = plainTitle
 
         let attributed = NSMutableAttributedString()
@@ -977,6 +1020,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             ? [.foregroundColor: Self.spinnerColor]
             : [.foregroundColor: NSColor.secondaryLabelColor]
         attributed.append(NSAttributedString(string: "\(icon) ", attributes: iconAttrs))
+        if let remote = remoteHost {
+            attributed.append(NSAttributedString(string: "[\(remote)] ", attributes: [.foregroundColor: NSColor.systemOrange]))
+        }
         attributed.append(NSAttributedString(string: rest))
         window.tab.attributedTitle = attributed
     }

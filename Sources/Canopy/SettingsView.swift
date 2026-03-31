@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var settings = CanopySettings.shared
+    @State private var sshHosts: [String] = SSHHostStore.hosts()
 
     var body: some View {
         Form {
@@ -34,6 +35,26 @@ struct SettingsView: View {
             } footer: {
                 Text("Takes effect immediately for @-mention file search.")
                     .foregroundStyle(.secondary)
+            }
+
+            Section("SSH Hosts") {
+                ForEach(sshHosts, id: \.self) { host in
+                    HStack {
+                        Text(host)
+                        Spacer()
+                        Button(role: .destructive) {
+                            SSHHostStore.remove(host)
+                            sshHosts = SSHHostStore.hosts()
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                if sshHosts.isEmpty {
+                    Text("No saved hosts. Add one from the launcher.")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
