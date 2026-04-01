@@ -77,6 +77,37 @@ for TAG in $RELEASES; do
   fi
 done
 
+# Strip code-signed xattrs from shell scripts in local DMG copies before delta generation.
+# codesign adds com.apple.cs.* xattrs to resource files; Sparkle can't diff files with
+# these xattrs. File contents (hashed in CodeResources) are unaffected, so this is safe.
+strip_sh_xattrs() {
+  local DMG="$1"
+  local MOUNT TMP_CONTENT
+  MOUNT=$(mktemp -d)
+  TMP_CONTENT=$(mktemp -d)
+  hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -quiet -readonly 2>/dev/null || {
+    rm -rf "$MOUNT" "$TMP_CONTENT"; return 0
+  }
+  # Only rebuild if any .sh has xattrs
+  if find "$MOUNT" -name "*.sh" -exec xattr {} \; 2>/dev/null | grep -q .; then
+    cp -Rp "$MOUNT"/* "$TMP_CONTENT/" 2>/dev/null || true
+    hdiutil detach "$MOUNT" -quiet
+    find "$TMP_CONTENT" -name "*.sh" -exec xattr -c {} \;
+    local TEMP_DMG; TEMP_DMG=$(mktemp "${BUILD_DIR}/stripped-XXXXXX").dmg
+    hdiutil create -srcfolder "$TMP_CONTENT" -format UDZO -volname "Canopy" -o "$TEMP_DMG" -quiet
+    mv "$TEMP_DMG" "$DMG"
+    echo "  Stripped xattrs: $(basename "$DMG")"
+  else
+    hdiutil detach "$MOUNT" -quiet
+  fi
+  rm -rf "$MOUNT" "$TMP_CONTENT"
+}
+
+echo "Stripping shell script xattrs from local DMG copies..."
+for _DMG in "$APPCAST_DIR"/*.dmg; do
+  strip_sh_xattrs "$_DMG"
+done
+
 # If an existing appcast.xml exists on gh-pages, fetch it so generate_appcast
 # can append to it (preserving older versions in the feed).
 EXISTING_APPCAST=$(mktemp)

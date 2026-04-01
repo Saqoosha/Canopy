@@ -29,6 +29,10 @@ echo "=== Notarizing app ==="
 "${ROOT_DIR}/scripts/notarize.sh" "${APP_PATH}"
 
 cp -R "${APP_PATH}" "${DMG_ROOT}/"
+# Strip code-signed xattrs from shell scripts — Sparkle can't create binary deltas when
+# files have code-signing xattrs (com.apple.cs.*). File-content hashes in CodeResources
+# are unaffected, so the bundle signature remains valid.
+find "${DMG_ROOT}" -name "*.sh" -exec xattr -c {} \;
 ln -s /Applications "${DMG_ROOT}/Applications"
 
 echo "=== Creating DMG ==="
