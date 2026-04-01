@@ -15,11 +15,13 @@ struct LauncherView: View {
     @State private var isRemoteMode = false
     @State private var remoteDirectory: String = "~"
     @State private var showRemoteBrowser = false
+    @State private var updater = ExtensionUpdater()
 
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
                 header
+                extensionUpdateBanner
 
                 Toggle("SSH Remote", isOn: $isRemoteMode)
                     .toggleStyle(.switch)
@@ -54,7 +56,10 @@ struct LauncherView: View {
             .frame(maxWidth: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear(perform: loadData)
+        .onAppear {
+            loadData()
+            Task { await updater.checkForUpdate() }
+        }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
         }
@@ -73,6 +78,74 @@ struct LauncherView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    // MARK: - Extension Update Banner
+
+    @ViewBuilder
+    private var extensionUpdateBanner: some View {
+        switch updater.state {
+        case .updateAvailable(let cliVersion):
+            updateBannerCard(icon: "arrow.down.circle", iconColor: .blue, tint: .blue) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Extension update available")
+                        .font(.subheadline.bold())
+                    Text("CLI v\(cliVersion) — update extension to match")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Update") {
+                    Task { await updater.triggerInstall() }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+
+        case .downloading, .installing:
+            let text = updater.state == .downloading ? "Downloading extension…" : "Installing extension…"
+            updateBannerCard(tint: .secondary) {
+                ProgressView().controlSize(.small)
+                Text(text).font(.subheadline).foregroundStyle(.secondary)
+            }
+
+        case .done(let version):
+            updateBannerCard(icon: "checkmark.circle.fill", iconColor: .green, tint: .green) {
+                Text("Extension v\(version) installed. Restart Canopy to apply.")
+                    .font(.subheadline)
+            }
+
+        case .failed(let message):
+            updateBannerCard(icon: "exclamationmark.triangle.fill", iconColor: .orange, tint: .orange) {
+                Text("Update failed: \(message)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Retry") {
+                    Task { await updater.checkForUpdate() }
+                }
+                .controlSize(.small)
+            }
+
+        case .idle, .checking, .upToDate:
+            EmptyView()
+        }
+    }
+
+    private func updateBannerCard<C: View>(
+        icon: String? = nil, iconColor: Color = .primary, tint: Color,
+        @ViewBuilder content: () -> C
+    ) -> some View {
+        HStack(spacing: 10) {
+            if let icon {
+                Image(systemName: icon).foregroundStyle(iconColor)
+            }
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal)
     }
 
     // MARK: - Directory Card
