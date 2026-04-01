@@ -971,6 +971,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if eventType == "message_start" {
                 // Clear compact indicator on next API call (fresh context reported)
                 data.clearCompactIndicator()
+                requestUsageUpdate()
             }
 
             if eventType == "message_start",
@@ -1026,9 +1027,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         case "user":
             data.messageCount += 1
+            requestUsageUpdate()
 
         case "assistant":
             data.messageCount += 1
+            requestUsageUpdate()
             // Update contextUsed to include output_tokens (matches CC popup: input + cache_creation + cache_read + output)
             let parentToolUseId = ioMsg["parent_tool_use_id"]
             if let msg = ioMsg["message"] as? [String: Any],
