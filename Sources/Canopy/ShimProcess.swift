@@ -707,10 +707,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             state["initialPermissionMode"] = permissionMode.rawValue
             state["allowDangerouslySkipPermissions"] = CanopySettings.shared.allowDangerouslySkipPermissions
             state["isOnboardingDismissed"] = true
-            if var gates = state["experimentGates"] as? [String: Any] {
-                gates["tengu_vscode_cc_auth"] = true
-                state["experimentGates"] = gates
-            }
+            var gates = (state["experimentGates"] as? [String: Any]) ?? [:]
+            gates["tengu_vscode_cc_auth"] = true
+            state["experimentGates"] = gates
             request["state"] = state
             nested["request"] = request
             var patchedMessage = message
@@ -733,10 +732,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             state["initialPermissionMode"] = permissionMode.rawValue
             state["allowDangerouslySkipPermissions"] = CanopySettings.shared.allowDangerouslySkipPermissions
             state["isOnboardingDismissed"] = true
-            if var gates = state["experimentGates"] as? [String: Any] {
-                gates["tengu_vscode_cc_auth"] = true
-                state["experimentGates"] = gates
-            }
+            var gates = (state["experimentGates"] as? [String: Any]) ?? [:]
+            gates["tengu_vscode_cc_auth"] = true
+            state["experimentGates"] = gates
             logger.info("Patched init_response: initialPermissionMode=\(self.permissionMode.rawValue, privacy: .public) allowSkip=true")
             response["state"] = state
             nested["response"] = response
