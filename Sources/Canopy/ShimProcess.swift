@@ -319,10 +319,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if let request = dict["request"] as? [String: Any],
            let reqType = request["type"] as? String
         {
-            // Handle open_file: read file and show in ContentViewer instead of
-            // forwarding to extension (which would trigger file:// navigation → WebContent crash).
+            // Handle open_file: read file and show in ContentViewer directly.
+            // open_content: show provided content in ContentViewer.
             if reqType == "open_file" {
                 handleOpenFile(request, requestId: dict["requestId"] as? String)
+                return
+            }
+            if reqType == "open_content" {
+                handleOpenContent(request, requestId: dict["requestId"] as? String)
                 return
             }
 
@@ -565,8 +569,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func handleOpenFile(_ request: [String: Any], requestId: String?) {
         let location = request["location"] as? [String: Any]
 
-        // Extract file path, stripping file:// scheme if present
-        var rawPath = location?["uri"] as? String
+        // Extract file path: CC extension sends filePath at top level of the request,
+        // location sub-dict may contain uri/line/col for positioning.
+        var rawPath = request["filePath"] as? String
+            ?? request["uri"] as? String
+            ?? location?["uri"] as? String
             ?? location?["filePath"] as? String
             ?? location?["path"] as? String
             ?? location?["file"] as? String
@@ -584,8 +591,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if FileManager.default.fileExists(atPath: url.path) {
                 do {
                     let content = try String(contentsOf: url, encoding: .utf8)
-                    logger.info("handleOpenFile: showing in ContentViewer: \(url.lastPathComponent, privacy: .public)")
-                    ContentViewer.show(content: content, title: url.lastPathComponent, in: webView)
+                    let startLine = location?["startLine"] as? Int
+                    let endLine = location?["endLine"] as? Int
+                    logger.info("handleOpenFile: showing in ContentViewer: \(url.lastPathComponent, privacy: .public) line:\(startLine ?? 0, privacy: .public)-\(endLine ?? 0, privacy: .public)")
+                    ContentViewer.show(content: content, title: url.lastPathComponent, in: webView, startLine: startLine, endLine: endLine)
                 } catch {
                     logger.info("handleOpenFile: not UTF-8 text (\(error.localizedDescription, privacy: .public)), opening externally")
                     if !NSWorkspace.shared.open(url) {
@@ -605,6 +614,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 "type": "response",
                 "requestId": requestId,
                 "response": ["type": "open_file_response"] as [String: Any],
+            ] as [String: Any])
+        }
+    }
+
+    /// Handle open_content request — show provided content directly in ContentViewer.
+    private func handleOpenContent(_ request: [String: Any], requestId: String?) {
+        let content = request["content"] as? String ?? ""
+        let fileName = request["fileName"] as? String ?? "untitled"
+        ContentViewer.show(content: content, title: fileName, in: webView)
+
+        if let requestId {
+            sendToWebView([
+                "type": "response",
+                "requestId": requestId,
+                "response": ["type": "open_content_response", "updatedContent": content] as [String: Any],
             ] as [String: Any])
         }
     }
