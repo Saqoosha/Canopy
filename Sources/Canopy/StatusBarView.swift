@@ -64,11 +64,13 @@ struct StatusBarView: View {
                 }
             }
 
-            // 5hr: 55% ⏳18m
+            // 5hr: ██▒▒ 55% ⏳18m
             if data.sessionPct > 0 {
                 dot
                 segment {
-                    Text("5hr:\(data.sessionPct)%")
+                    Text("5hr")
+                    contextBar(pct: data.sessionPct)
+                    Text("\(data.sessionPct)%")
                         .foregroundStyle(pctColor(data.sessionPct))
                     let reset = StatusBarData.formatResetTime(data.sessionResetDate)
                     if !reset.isEmpty {
@@ -78,11 +80,13 @@ struct StatusBarView: View {
                 }
             }
 
-            // Wk: 45% ⏳4d
+            // Wk: ██▒▒ 45% ⏳4d
             if data.weeklyPct > 0 {
                 dot
                 segment {
-                    Text("Wk:\(data.weeklyPct)%")
+                    Text("Wk")
+                    contextBar(pct: data.weeklyPct)
+                    Text("\(data.weeklyPct)%")
                         .foregroundStyle(pctColor(data.weeklyPct))
                     let reset = StatusBarData.formatResetTime(data.weeklyResetDate)
                     if !reset.isEmpty {
