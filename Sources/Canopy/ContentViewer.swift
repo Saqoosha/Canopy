@@ -32,7 +32,7 @@ enum ContentViewer {
         }
 
         let startLineJS = startLine.map(String.init) ?? "null"
-        let endLineJS = endLine.map(String.init) ?? startLineJS
+        let endLineJS = endLine.map(String.init) ?? (startLine != nil ? startLineJS : "null")
 
         let js = """
         (function() {

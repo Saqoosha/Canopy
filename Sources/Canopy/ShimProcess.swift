@@ -588,21 +588,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             } else {
                 url = workingDirectory.appendingPathComponent(filePath)
             }
-            if FileManager.default.fileExists(atPath: url.path) {
+            // Resolve symlinks and ensure the file is under the working directory (prevent path traversal)
+            let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+            let wdResolved = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+            guard resolved.path.hasPrefix(wdResolved.path + "/") || resolved.path == wdResolved.path else {
+                logger.warning("handleOpenFile: path traversal blocked: \(resolved.path, privacy: .public)")
+                if let requestId {
+                    sendToWebView([
+                        "type": "response",
+                        "requestId": requestId,
+                        "response": ["type": "open_file_response"] as [String: Any],
+                    ] as [String: Any])
+                }
+                return
+            }
+            if FileManager.default.fileExists(atPath: resolved.path) {
                 do {
-                    let content = try String(contentsOf: url, encoding: .utf8)
+                    let content = try String(contentsOf: resolved, encoding: .utf8)
                     let startLine = location?["startLine"] as? Int
                     let endLine = location?["endLine"] as? Int
-                    logger.info("handleOpenFile: showing in ContentViewer: \(url.lastPathComponent, privacy: .public) line:\(startLine ?? 0, privacy: .public)-\(endLine ?? 0, privacy: .public)")
-                    ContentViewer.show(content: content, title: url.lastPathComponent, in: webView, startLine: startLine, endLine: endLine)
+                    logger.info("handleOpenFile: showing in ContentViewer: \(resolved.lastPathComponent, privacy: .public) line:\(startLine ?? 0, privacy: .public)-\(endLine ?? 0, privacy: .public)")
+                    ContentViewer.show(content: content, title: resolved.lastPathComponent, in: webView, startLine: startLine, endLine: endLine)
                 } catch {
                     logger.info("handleOpenFile: not UTF-8 text (\(error.localizedDescription, privacy: .public)), opening externally")
-                    if !NSWorkspace.shared.open(url) {
-                        logger.warning("handleOpenFile: NSWorkspace failed to open: \(url.path, privacy: .public)")
+                    if !NSWorkspace.shared.open(resolved) {
+                        logger.warning("handleOpenFile: NSWorkspace failed to open: \(resolved.path, privacy: .public)")
                     }
                 }
             } else {
-                logger.warning("handleOpenFile: file does not exist: \(url.path, privacy: .public)")
+                logger.warning("handleOpenFile: file does not exist: \(resolved.path, privacy: .public)")
             }
         } else {
             logger.warning("handleOpenFile: no file path in location keys: \(location?.keys.sorted().description ?? "nil", privacy: .public)")
