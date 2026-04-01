@@ -5,6 +5,11 @@ import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ShimProcess")
 
+@MainActor
+protocol ShimProcessDelegate: AnyObject {
+    func shimProcessDidDisconnect(_ shim: ShimProcess, sessionId: String)
+}
+
 /// Manages a Node.js subprocess running the vscode-shim that bridges the CC extension
 /// to Canopy's WKWebView via stdin/stdout NDJSON.
 ///
@@ -56,6 +61,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private static let spinnerColor = NSColor(red: 0.851, green: 0.471, blue: 0.345, alpha: 1.0) // #D97858
 
     var statusBarData: StatusBarData?
+    weak var delegate: ShimProcessDelegate?
+    private var isIntentionalStop = false
+    /// Whether the process wrapper has been cleared from settings after CLI spawned.
+    private var wrapperCleared = false
 
     init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil) {
         self.workingDirectory = workingDirectory
@@ -236,6 +245,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     func stop() {
+        isIntentionalStop = true
         guard let proc = process, proc.isRunning else { return }
         stopSpinner()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
@@ -448,11 +458,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 writeToStdin(pending)
             }
             pendingMessages.removeAll()
-            // Clear wrapper from settings now that extension has activated and read it.
-            // This prevents other tabs from inheriting this session's wrapper.
-            if remoteHost != nil {
-                CanopySettings.shared.setProcessWrapper(nil)
-            }
+            // NOTE: Do NOT clear wrapper here — extension hasn't read it yet.
+            // Wrapper is cleared on first CLI io_message (see wrapperCleared flag).
 
         case "webview_message":
             guard var innerMessage = msg["message"] as? [String: Any] else {
@@ -461,6 +468,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             let innerType = (innerMessage["type"] as? String) ?? "?"
             logger.debug("[stdout→webview] type=\(innerType, privacy: .public)")
+            // Clear wrapper after CLI has spawned. Only trigger on io_message
+            // (not init_response or update_state) — io_message proves the CLI
+            // was spawned, meaning the extension already read the wrapper setting.
+            if !wrapperCleared && remoteHost != nil && innerType == "from-extension" {
+                if let nested = innerMessage["message"] as? [String: Any],
+                   nested["type"] as? String == "io_message"
+                {
+                    wrapperCleared = true
+                    CanopySettings.shared.setProcessWrapper(nil)
+                    logger.info("Cleared process wrapper from settings (CLI is running)")
+                }
+            }
             innerMessage = patchAuthIfNeeded(innerMessage)
             trackWorkingState(innerMessage)
             extractStatusData(innerMessage)
@@ -1062,14 +1081,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
 
-        // Kill any surviving descendants (collected in stop(), or empty if crash without stop()).
-        // The JS-side exit handler also kills its children, so this is defense-in-depth.
         if !descendantPids.isEmpty {
             Self.killProcessTree(descendantPids)
             descendantPids = []
         }
 
-        if status != 0 {
+        if status != 0 && !isIntentionalStop && remoteHost != nil {
+            if let sessionId = activeSessionId {
+                logger.error("SSH disconnection detected (status \(status)), requesting reconnect for session \(sessionId, privacy: .public)")
+                delegate?.shimProcessDidDisconnect(self, sessionId: sessionId)
+            } else {
+                logger.error("SSH connection lost before session established (status \(status))")
+                showErrorInWebView("SSH connection lost. Go back to launcher to reconnect.")
+            }
+        } else if status != 0 && !isIntentionalStop {
             logger.error("Shim crashed (status \(status))")
             showErrorInWebView("Claude process exited unexpectedly (status \(status)). Go back to launcher to restart.")
         }
