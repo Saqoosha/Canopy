@@ -697,21 +697,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               var nested = message["message"] as? [String: Any]
         else { return message }
 
-        // Patch update_state: inject authStatus from Keychain if missing + override permission settings
+        // Patch update_state: override permission/experiment settings but do NOT inject authStatus.
+        // The extension controls authStatus in update_state — injecting keychain auth here
+        // would prevent /login and "Switch Account" from showing the login screen.
         if var request = nested["request"] as? [String: Any],
            request["type"] as? String == "update_state",
            var state = request["state"] as? [String: Any]
         {
-            if state["authStatus"] == nil || state["authStatus"] is NSNull {
-                if let keychainAuth = KeychainAuth.readAuthStatus() {
-                    state["authStatus"] = keychainAuth
-                }
-            }
             state["initialPermissionMode"] = permissionMode.rawValue
             state["allowDangerouslySkipPermissions"] = CanopySettings.shared.allowDangerouslySkipPermissions
             state["isOnboardingDismissed"] = true
             if var gates = state["experimentGates"] as? [String: Any] {
-                gates["tengu_vscode_cc_auth"] = false
+                gates["tengu_vscode_cc_auth"] = true
                 state["experimentGates"] = gates
             }
             request["state"] = state
@@ -737,7 +734,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             state["allowDangerouslySkipPermissions"] = CanopySettings.shared.allowDangerouslySkipPermissions
             state["isOnboardingDismissed"] = true
             if var gates = state["experimentGates"] as? [String: Any] {
-                gates["tengu_vscode_cc_auth"] = false
+                gates["tengu_vscode_cc_auth"] = true
                 state["experimentGates"] = gates
             }
             logger.info("Patched init_response: initialPermissionMode=\(self.permissionMode.rawValue, privacy: .public) allowSkip=true")

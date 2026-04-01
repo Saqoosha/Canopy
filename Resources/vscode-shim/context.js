@@ -30,9 +30,10 @@ class Memento {
     if (value === undefined) {
       delete this._data[key];
     } else {
-      // Force-disable CC auth gate — Canopy uses keychain auth, not secrets API
+      // Enable CC auth gate — extension uses Secrets API (file-backed in shim) for auth.
+      // This allows /login and "Switch Account" to work properly.
       if (key === "experimentGates" && value && typeof value === "object") {
-        value = { ...value, tengu_vscode_cc_auth: false };
+        value = { ...value, tengu_vscode_cc_auth: true };
       }
       this._data[key] = value;
     }

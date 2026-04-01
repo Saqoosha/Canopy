@@ -81,7 +81,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `index.js` — Entry point: console redirect, Module hook, arg parsing, activate, stdin routing
 - `protocol.js` — NDJSON stdin/stdout read/write
 - `types.js` — Uri, EventEmitter, Disposable, Range, Position, Selection, enums
-- `context.js` — ExtensionContext with JSON-backed globalState, file-backed secrets, asAbsolutePath, CC auth gate override
+- `context.js` — ExtensionContext with JSON-backed globalState, file-backed secrets, asAbsolutePath, CC auth gate enabled
 - `commands.js` — registerCommand, executeCommand, setContext
 - `workspace.js` — getConfiguration (3-layer), workspaceFolders, findFiles, openTextDocument
 - `window.js` — Webview bridge (postMessage ↔ stdin/stdout), stubs, showTextDocument
@@ -121,14 +121,13 @@ Chat:    io_message(user) → CLI stdin
 
 ## Key Learnings (Shim-specific)
 - Extension sends two message formats: unsolicited wrapped in `{type:"from-extension"}`, responses NOT wrapped — ShimProcess must detect and wrap responses
-- **Auth architecture**: VSCode extension reads OAuth tokens from macOS Keychain (`security find-generic-password -a "$USER" -w -s "Claude Code-credentials"`), not `~/.claude.json`. Keychain stores JSON with `claudeAiOauth` (accessToken, refreshToken, expiresAt, scopes, subscriptionType). Extension calls `authManager.getAuthStatus()` synchronously during HTML generation to inject `data-initial-auth-status`. Canopy reads Keychain directly via `KeychainAuth.swift` — same source as the extension, works even on first launch. Result is cached after first read to avoid spawning `security` on every message.
-- `tengu_vscode_cc_auth` experiment gate: when true, webview uses Secrets API for auth (broken in Canopy). Must be forced to false in globalState + Memento.update
+- **Auth architecture**: `tengu_vscode_cc_auth` must be forced to `true` — extension uses Secrets API (file-backed in shim) for auth management. This enables `/login`, "Switch Account", and proper OAuth flow. Canopy injects Keychain auth into `init_response` only (not `update_state`) as a bootstrap for first launch. The extension's Node.js HTTP callback server on `127.0.0.1:0` handles OAuth redirects; `open_url` opens the OAuth URL in the default browser (supports 1Password etc.). Do NOT inject authStatus into `update_state` — it prevents logout/re-login.
 - Webview reads `data-initial-auth-status` HTML attribute for instant auth — inject cached authStatus here
 - `update_state` handler: `this.authStatus.value = state.authStatus ?? null` — any update_state without authStatus resets auth to null
 - `isAuthenticated` checks: (1) `forceLogin` not true, (2) `authStatus !== null`, (3) fallback: `claudeConfig.account`
 - Permission mode UI: controlled by synthetic `system/status` io_message in launch_claude intercept, NOT by `initialPermissionMode`
 - `init_response` lacks `authStatus` — injected from auth cache. `isOnboardingDismissed` must be patched to `true`
-- ShimProcess patches both `init_response` and `update_state`: authStatus, permissionMode, experimentGates, isOnboardingDismissed
+- ShimProcess patches `init_response` (authStatus + permissionMode + experimentGates + isOnboardingDismissed) and `update_state` (permissionMode + experimentGates + isOnboardingDismissed only — no authStatus)
 
 ## Key Learnings (General)
 - `--bare` flag skips keychain/OAuth auth — do NOT use
