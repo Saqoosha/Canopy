@@ -7,23 +7,33 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ContentView
 /// Shows content in a Monaco editor overlay inside the main webview.
 enum ContentViewer {
     /// Show content using Monaco editor overlay in the given webview.
-    static func show(content: String, title: String, in webView: WKWebView?) {
+    /// - Parameters:
+    ///   - startLine: 1-based start line to reveal and highlight (optional)
+    ///   - endLine: 1-based end line of highlight range (optional, defaults to startLine)
+    static func show(
+        content: String, title: String, in webView: WKWebView?,
+        startLine: Int? = nil, endLine: Int? = nil
+    ) {
         guard let webView else {
             logger.warning("ContentViewer: no webview available")
             return
         }
 
-        // Safely encode content and title as JSON strings to prevent JS injection
-        guard let contentData = try? JSONSerialization.data(withJSONObject: content),
+        // Safely encode content and title as JSON strings to prevent JS injection.
+        // JSONEncoder handles String directly; NSJSONSerialization only accepts Array/Dictionary
+        // and throws an uncatchable ObjC exception on bare strings.
+        guard let contentData = try? JSONEncoder().encode(content),
               let contentJSON = String(data: contentData, encoding: .utf8),
-              let titleData = try? JSONSerialization.data(withJSONObject: title),
+              let titleData = try? JSONEncoder().encode(title),
               let titleJSON = String(data: titleData, encoding: .utf8)
         else {
             logger.error("ContentViewer: failed to encode content as JSON")
             return
         }
 
-        // Guess language from file name
+        let startLineJS = startLine.map(String.init) ?? "null"
+        let endLineJS = endLine.map(String.init) ?? (startLine != nil ? startLineJS : "null")
+
         let js = """
         (function() {
             // Remove existing overlay if any
@@ -32,6 +42,8 @@ enum ContentViewer {
 
             var content = \(contentJSON);
             var title = \(titleJSON);
+            var startLine = \(startLineJS);
+            var endLine = \(endLineJS);
 
             // Guess language from title
             var lang = 'plaintext';
@@ -49,23 +61,23 @@ enum ContentViewer {
             };
             if (langMap[ext]) lang = langMap[ext];
 
-            // Create overlay
+            // Create overlay — matches CC extension's diff modal (modalBackdrop/modalContent_oXZawA)
             var overlay = document.createElement('div');
             overlay.id = 'canopy-content-viewer';
-            overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;';
+            overlay.style.cssText = 'position:fixed;inset:0;z-index:1000;background-color:var(--app-primary-background, rgba(0,0,0,0.4));display:flex;justify-content:center;align-items:center;padding:16px;';
 
             var modal = document.createElement('div');
-            modal.style.cssText = 'width:90%;height:85%;background:#fff;border-radius:8px;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.2);';
+            modal.style.cssText = 'background-color:var(--app-primary-background, #fff);display:flex;overflow:hidden;border:1px solid var(--app-input-border, #e0e0e0);border-radius:4px;flex-direction:column;width:calc(100vw - 40px);max-width:1400px;height:calc(100vh - 40px);max-height:900px;box-shadow:0 4px 12px rgba(0,0,0,0.05);';
 
-            // Header
+            // Header — matches CC extension's modalHeader_oXZawA
             var header = document.createElement('div');
-            header.style.cssText = 'padding:10px 16px;border-bottom:1px solid #e0e0e0;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;';
+            header.style.cssText = 'display:flex;border-bottom:1px solid var(--app-input-border, #e0e0e0);background-color:var(--app-secondary-background, #f5f5f5);align-items:center;gap:12px;padding:8px 12px;flex-shrink:0;';
             var titleEl = document.createElement('span');
             titleEl.textContent = title;
-            titleEl.style.cssText = 'font-weight:600;font-size:13px;font-family:-apple-system,sans-serif;';
+            titleEl.style.cssText = 'color:var(--app-primary-foreground, #333);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;font-weight:600;';
             var closeBtn = document.createElement('button');
             closeBtn.textContent = '✕';
-            closeBtn.style.cssText = 'border:none;background:none;font-size:18px;cursor:pointer;color:#666;padding:0 4px;';
+            closeBtn.style.cssText = 'border:none;background:none;font-size:16px;cursor:pointer;color:var(--app-secondary-foreground, #666);padding:0 4px;';
             closeBtn.onclick = function() { closeViewer(); };
             header.appendChild(titleEl);
             header.appendChild(closeBtn);
@@ -79,6 +91,7 @@ enum ContentViewer {
             document.body.appendChild(overlay);
 
             var editorInstance = null;
+            var decorations = [];
             function closeViewer() {
                 if (editorInstance) { editorInstance.dispose(); editorInstance = null; }
                 overlay.remove();
@@ -112,10 +125,34 @@ enum ContentViewer {
                     renderLineHighlight: 'none',
                     scrollbar: { vertical: 'auto', horizontal: 'auto' },
                 });
+
+                // Jump to line and highlight range
+                if (startLine !== null) {
+                    var sl = startLine;
+                    var el = endLine !== null ? endLine : sl;
+                    editorInstance.revealLineInCenter(sl);
+                    editorInstance.setSelection(new globalThis.monaco.Selection(sl, 1, el + 1, 1));
+                    decorations = editorInstance.deltaDecorations([], [{
+                        range: new globalThis.monaco.Range(sl, 1, el, 1000),
+                        options: {
+                            isWholeLine: true,
+                            className: 'canopy-line-highlight',
+                            overviewRuler: { color: 'rgba(255, 213, 79, 0.8)', position: 1 }
+                        }
+                    }]);
+                }
             } else {
                 // Fallback: plain text
                 editorDiv.style.cssText += 'padding:16px;overflow:auto;font-family:Menlo,monospace;font-size:12px;white-space:pre-wrap;';
                 editorDiv.textContent = content;
+            }
+
+            // Inject highlight style if not present
+            if (!document.getElementById('canopy-cv-style')) {
+                var style = document.createElement('style');
+                style.id = 'canopy-cv-style';
+                style.textContent = '.canopy-line-highlight { background: rgba(255, 213, 79, 0.3) !important; }';
+                document.head.appendChild(style);
             }
         })();
         """
