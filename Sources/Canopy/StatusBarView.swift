@@ -81,14 +81,14 @@ struct StatusBarView: View {
             }
 
             // Wk: ██▒▒ 45% ⏳4d
-            if data.weeklyPct > 0 {
+            if data.effectiveWeeklyPct > 0 {
                 dot
                 segment {
                     Text("Wk")
-                    contextBar(pct: data.weeklyPct)
-                    Text("\(data.weeklyPct)%")
-                        .foregroundStyle(pctColor(data.weeklyPct))
-                    let reset = StatusBarData.formatResetTime(data.weeklyResetDate)
+                    contextBar(pct: data.effectiveWeeklyPct)
+                    Text("\(data.effectiveWeeklyPct)%")
+                        .foregroundStyle(pctColor(data.effectiveWeeklyPct))
+                    let reset = StatusBarData.formatResetTime(data.effectiveWeeklyResetDate)
                     if !reset.isEmpty {
                         Text("⏳\(reset)")
                             .foregroundStyle(.tertiary)

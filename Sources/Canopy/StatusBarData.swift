@@ -18,6 +18,8 @@ final class StatusBarData {
     var sessionResetDate: Date?    // actual reset time (re-formatted on each render)
     var weeklyPct: Int = 0         // 7-day utilization 0-100
     var weeklyResetDate: Date?     // actual reset time
+    var weeklyPctSonnet: Int = 0   // 7-day Sonnet-only utilization 0-100
+    var weeklyResetDateSonnet: Date?  // actual reset time for Sonnet-only limit
 
     // Compact boundary indicator
     var didCompact: Bool = false
@@ -36,6 +38,15 @@ final class StatusBarData {
         let window = compactionWindow
         guard window > 0 else { return 0 }
         return min(100, contextUsed * 100 / window)
+    }
+
+    /// Weekly limit to display: Sonnet-only when using Sonnet and data available, otherwise all-models.
+    var effectiveWeeklyPct: Int {
+        model.lowercased().contains("sonnet") && weeklyResetDateSonnet != nil ? weeklyPctSonnet : weeklyPct
+    }
+
+    var effectiveWeeklyResetDate: Date? {
+        model.lowercased().contains("sonnet") && weeklyResetDateSonnet != nil ? weeklyResetDateSonnet : weeklyResetDate
     }
 
     func formatTokens(_ n: Int) -> String {
@@ -67,6 +78,8 @@ final class StatusBarData {
         sessionResetDate = nil
         weeklyPct = 0
         weeklyResetDate = nil
+        weeklyPctSonnet = 0
+        weeklyResetDateSonnet = nil
         didCompact = false
         remoteHost = nil
     }
@@ -88,6 +101,13 @@ final class StatusBarData {
             if let r = sevenDay["resetsAt"] as? String {
                 weeklyResetDate = StatusBarData.parseISO8601(r)
             }
+        }
+        if let sevenDaySonnet = utilization["sevenDaySonnet"] as? [String: Any] {
+            weeklyPctSonnet = sevenDaySonnet["utilization"].map { StatusBarData.parseUtilization($0) } ?? 0
+            weeklyResetDateSonnet = (sevenDaySonnet["resetsAt"] as? String).flatMap { StatusBarData.parseISO8601($0) }
+        } else {
+            weeklyPctSonnet = 0
+            weeklyResetDateSonnet = nil
         }
     }
 
