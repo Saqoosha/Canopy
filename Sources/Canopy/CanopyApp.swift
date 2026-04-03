@@ -148,8 +148,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configuredWindows.add(window)
 
         let otherWindow = NSApp.windows.first {
-            $0 !== window && $0.styleMask.contains(.titled) && $0.isVisible
+            $0 !== window
+                && $0.styleMask.contains(.titled)
+                && $0.isVisible
                 && !$0.isKind(of: NSPanel.self)
+                && $0.identifier?.rawValue.contains("main") == true
         }
         // Use async to run after SwiftUI finishes its layout pass
         DispatchQueue.main.async {
@@ -159,10 +162,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 window.setFrame(frame, display: true)
             } else {
                 // No other window — use saved size or default
-                let savedWidth = UserDefaults.standard.double(forKey: "lastWindowWidth")
-                let savedHeight = UserDefaults.standard.double(forKey: "lastWindowHeight")
-                let width = savedWidth >= 500 ? savedWidth : 500
-                let height = savedHeight >= 800 ? savedHeight : 800
+                let defaults = UserDefaults.standard
+                let savedWidth = defaults.object(forKey: "lastWindowWidth") != nil
+                    ? defaults.double(forKey: "lastWindowWidth") : 500
+                let savedHeight = defaults.object(forKey: "lastWindowHeight") != nil
+                    ? defaults.double(forKey: "lastWindowHeight") : 800
+                let width = max(savedWidth, 400)
+                let height = max(savedHeight, 600)
                 var frame = window.frame
                 frame.size = NSSize(width: width, height: height)
                 window.setFrame(frame, display: true)
