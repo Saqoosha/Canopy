@@ -7,19 +7,9 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Initial Permission Mode", selection: $settings.initialPermissionMode) {
-                    Text(PermissionMode.default.displayName).tag(PermissionMode.default)
-                    Text(PermissionMode.acceptEdits.displayName).tag(PermissionMode.acceptEdits)
-                    Text(PermissionMode.auto.displayName).tag(PermissionMode.auto)
-                    Text(PermissionMode.plan.displayName).tag(PermissionMode.plan)
-                    if settings.allowDangerouslySkipPermissions {
-                        Text(PermissionMode.bypassPermissions.displayName).tag(PermissionMode.bypassPermissions)
-                    }
-                }
-
                 Toggle("Allow Bypass Permissions Mode", isOn: $settings.allowDangerouslySkipPermissions)
             } footer: {
-                Text("Takes effect on next session. Use slash commands (/default, /auto, etc.) to change mid-session.")
+                Text("When enabled, \"Bypass All\" appears in the launcher's Permission picker.")
                     .foregroundStyle(.secondary)
             }
 

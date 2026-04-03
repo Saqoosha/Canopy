@@ -101,7 +101,10 @@ final class ActiveTabState {
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
         if panel.runModal() == .OK, let url = panel.url {
-            current?.launchSession(directory: url)
+            let model = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
+            let effort = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
+            let permission = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
+            current?.launchSession(directory: url, model: model, effortLevel: effort, permissionMode: permission)
         }
     }
 }
@@ -217,6 +220,8 @@ struct TabContentView: View {
                     WebViewContainer(
                         workingDirectory: appState.workingDirectory,
                         resumeSessionId: appState.resumeSessionId,
+                        model: appState.model,
+                        effortLevel: appState.effortLevel,
                         permissionMode: appState.permissionMode,
                         sessionTitle: appState.resumeSessionTitle,
                         statusBarData: statusBarData,
@@ -250,7 +255,10 @@ struct TabContentView: View {
             // Debug: auto-launch session (defaults write sh.saqoo.Canopy debugAutoLaunchDir /tmp)
             if let dir = appState.debugAutoLaunchDir, appState.screen == .launcher {
                 appState.debugAutoLaunchDir = nil
-                appState.launchSession(directory: URL(fileURLWithPath: dir))
+                let m = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
+                let e = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
+                let p = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
+                appState.launchSession(directory: URL(fileURLWithPath: dir), model: m, effortLevel: e, permissionMode: p)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)) { _ in

@@ -7,16 +7,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "CanopySetti
 final class CanopySettings {
     nonisolated(unsafe) static let shared = CanopySettings()
 
-    var initialPermissionMode: PermissionMode = .acceptEdits {
-        didSet { save() }
-    }
     var allowDangerouslySkipPermissions: Bool = false {
-        didSet {
-            if !allowDangerouslySkipPermissions && initialPermissionMode == .bypassPermissions {
-                initialPermissionMode = .acceptEdits
-            }
-            save()
-        }
+        didSet { save() }
     }
     var useCtrlEnterToSend: Bool = false {
         didSet { save() }
@@ -42,10 +34,6 @@ final class CanopySettings {
             return
         }
 
-        if let mode = dict["claudeCode.initialPermissionMode"] as? String,
-           let pm = PermissionMode(rawValue: mode) {
-            initialPermissionMode = pm
-        }
         if let allow = dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool {
             allowDangerouslySkipPermissions = allow
         }
@@ -55,12 +43,11 @@ final class CanopySettings {
         if let git = dict["claudeCode.respectGitIgnore"] as? Bool {
             respectGitIgnore = git
         }
-        logger.info("Loaded settings: permissionMode=\(self.initialPermissionMode.rawValue, privacy: .public)")
+        logger.info("Loaded settings: allowBypass=\(self.allowDangerouslySkipPermissions, privacy: .public)")
     }
 
     private func save() {
         var dict = loadCurrentDict()
-        dict["claudeCode.initialPermissionMode"] = initialPermissionMode.rawValue
         dict["claudeCode.allowDangerouslySkipPermissions"] = allowDangerouslySkipPermissions
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
         dict["claudeCode.respectGitIgnore"] = respectGitIgnore
