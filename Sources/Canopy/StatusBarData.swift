@@ -86,21 +86,13 @@ final class StatusBarData {
 
     /// Parse usage_update utilization from extension
     func updateRateLimits(_ utilization: [String: Any]) {
-        if let fiveHour = utilization["fiveHour"] as? [String: Any] {
-            if let u = fiveHour["utilization"] {
-                sessionPct = StatusBarData.parseUtilization(u)
-            }
-            if let r = fiveHour["resetsAt"] as? String {
-                sessionResetDate = StatusBarData.parseISO8601(r)
-            }
+        if let entry = utilization["fiveHour"] as? [String: Any] {
+            sessionPct = entry["utilization"].map { StatusBarData.parseUtilization($0) } ?? 0
+            sessionResetDate = (entry["resetsAt"] as? String).flatMap { StatusBarData.parseISO8601($0) }
         }
-        if let sevenDay = utilization["sevenDay"] as? [String: Any] {
-            if let u = sevenDay["utilization"] {
-                weeklyPct = StatusBarData.parseUtilization(u)
-            }
-            if let r = sevenDay["resetsAt"] as? String {
-                weeklyResetDate = StatusBarData.parseISO8601(r)
-            }
+        if let entry = utilization["sevenDay"] as? [String: Any] {
+            weeklyPct = entry["utilization"].map { StatusBarData.parseUtilization($0) } ?? 0
+            weeklyResetDate = (entry["resetsAt"] as? String).flatMap { StatusBarData.parseISO8601($0) }
         }
         if let sevenDaySonnet = utilization["sevenDaySonnet"] as? [String: Any] {
             weeklyPctSonnet = sevenDaySonnet["utilization"].map { StatusBarData.parseUtilization($0) } ?? 0

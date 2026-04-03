@@ -65,7 +65,7 @@ struct StatusBarView: View {
             }
 
             // 5hr: ██▒▒ 55% ⏳18m
-            if data.sessionPct > 0 {
+            if data.sessionResetDate != nil {
                 dot
                 segment {
                     Text("5hr")
@@ -80,8 +80,8 @@ struct StatusBarView: View {
                 }
             }
 
-            // Wk: ██▒▒ 45% ⏳4d
-            if data.effectiveWeeklyPct > 0 {
+            // Wk: ██▒▒ 45% ⏳4d (sevenDaySonnet when Sonnet model and data available; falls back to sevenDay)
+            if data.effectiveWeeklyResetDate != nil {
                 dot
                 segment {
                     Text("Wk")
