@@ -139,21 +139,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window = note.object as? NSWindow,
               !configuredWindows.contains(window),
               window.styleMask.contains(.titled),
-              // Exclude panels (NSOpenPanel, NSSavePanel, etc.)
-              !window.isKind(of: NSPanel.self),
-              // Only size-match app windows (WindowGroup id: "main" and newTab windows)
-              window.identifier?.rawValue.contains("main") == true
+              !window.isKind(of: NSPanel.self)
         else { return }
+        // Only handle app windows (WindowGroup id: "main" and newTab windows)
+        let isAppWindow = window.identifier?.rawValue.contains("main") == true
+        guard isAppWindow else { return }
         configuredWindows.add(window)
 
         let otherWindow = NSApp.windows.first {
             $0 !== window && $0.styleMask.contains(.titled) && $0.isVisible
                 && !$0.isKind(of: NSPanel.self)
         }
-        if let other = otherWindow, other.frame.width > 100 {
-            var frame = window.frame
-            frame.size = other.frame.size
-            window.setFrame(frame, display: false)
+        // Use async to run after SwiftUI finishes its layout pass
+        DispatchQueue.main.async {
+            if let other = otherWindow, other.frame.width > 100 {
+                var frame = window.frame
+                frame.size = other.frame.size
+                window.setFrame(frame, display: true)
+            } else {
+                // No other window — use saved size or default
+                let savedWidth = UserDefaults.standard.double(forKey: "lastWindowWidth")
+                let savedHeight = UserDefaults.standard.double(forKey: "lastWindowHeight")
+                let width = savedWidth >= 500 ? savedWidth : 500
+                let height = savedHeight >= 800 ? savedHeight : 800
+                var frame = window.frame
+                frame.size = NSSize(width: width, height: height)
+                window.setFrame(frame, display: true)
+            }
+        }
+
+        // Save window size on resize
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window, queue: .main
+        ) { note in
+            guard let w = note.object as? NSWindow else { return }
+            UserDefaults.standard.set(w.frame.width, forKey: "lastWindowWidth")
+            UserDefaults.standard.set(w.frame.height, forKey: "lastWindowHeight")
         }
     }
 }
