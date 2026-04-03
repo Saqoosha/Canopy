@@ -116,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userDriverDelegate: nil
     )
     private var configuredWindows = NSHashTable<NSWindow>.weakObjects()
+    private var resizeObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -168,14 +169,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Save window size on resize
-        NotificationCenter.default.addObserver(
+        // Save window size on resize; clean up when window closes
+        let resizeToken = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification,
             object: window, queue: .main
         ) { note in
             guard let w = note.object as? NSWindow else { return }
             UserDefaults.standard.set(w.frame.width, forKey: "lastWindowWidth")
             UserDefaults.standard.set(w.frame.height, forKey: "lastWindowHeight")
+        }
+        resizeObservers.append(resizeToken)
+
+        var closeToken: NSObjectProtocol?
+        closeToken = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window, queue: .main
+        ) { [weak self] _ in
+            NotificationCenter.default.removeObserver(resizeToken)
+            if let closeToken {
+                NotificationCenter.default.removeObserver(closeToken)
+            }
+            self?.resizeObservers.removeAll { $0 === resizeToken }
         }
     }
 }
