@@ -116,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userDriverDelegate: nil
     )
     private var configuredWindows = NSHashTable<NSWindow>.weakObjects()
+    private var resizeObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -139,21 +140,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window = note.object as? NSWindow,
               !configuredWindows.contains(window),
               window.styleMask.contains(.titled),
-              // Exclude panels (NSOpenPanel, NSSavePanel, etc.)
-              !window.isKind(of: NSPanel.self),
-              // Only size-match app windows (WindowGroup id: "main" and newTab windows)
-              window.identifier?.rawValue.contains("main") == true
+              !window.isKind(of: NSPanel.self)
         else { return }
+        // Only handle app windows (WindowGroup id: "main" and newTab windows)
+        let isAppWindow = window.identifier?.rawValue.contains("main") == true
+        guard isAppWindow else { return }
         configuredWindows.add(window)
 
         let otherWindow = NSApp.windows.first {
-            $0 !== window && $0.styleMask.contains(.titled) && $0.isVisible
+            $0 !== window
+                && $0.styleMask.contains(.titled)
+                && $0.isVisible
                 && !$0.isKind(of: NSPanel.self)
+                && $0.identifier?.rawValue.contains("main") == true
         }
-        if let other = otherWindow, other.frame.width > 100 {
-            var frame = window.frame
-            frame.size = other.frame.size
-            window.setFrame(frame, display: false)
+        // Use async to run after SwiftUI finishes its layout pass
+        DispatchQueue.main.async {
+            if let other = otherWindow, other.frame.width > 100 {
+                var frame = window.frame
+                frame.size = other.frame.size
+                window.setFrame(frame, display: true)
+            } else {
+                // No other window — use saved size or default
+                let defaults = UserDefaults.standard
+                let savedWidth = defaults.object(forKey: "lastWindowWidth") != nil
+                    ? defaults.double(forKey: "lastWindowWidth") : 500
+                let savedHeight = defaults.object(forKey: "lastWindowHeight") != nil
+                    ? defaults.double(forKey: "lastWindowHeight") : 800
+                let width = max(savedWidth, 400)
+                let height = max(savedHeight, 600)
+                var frame = window.frame
+                frame.size = NSSize(width: width, height: height)
+                window.setFrame(frame, display: true)
+            }
+        }
+
+        // Save window size on resize; clean up when window closes
+        let resizeToken = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window, queue: .main
+        ) { note in
+            guard let w = note.object as? NSWindow else { return }
+            UserDefaults.standard.set(w.frame.width, forKey: "lastWindowWidth")
+            UserDefaults.standard.set(w.frame.height, forKey: "lastWindowHeight")
+        }
+        resizeObservers.append(resizeToken)
+
+        var closeToken: NSObjectProtocol?
+        closeToken = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window, queue: .main
+        ) { [weak self] _ in
+            NotificationCenter.default.removeObserver(resizeToken)
+            if let closeToken {
+                NotificationCenter.default.removeObserver(closeToken)
+            }
+            self?.resizeObservers.removeAll { $0 === resizeToken }
         }
     }
 }
