@@ -175,6 +175,8 @@ struct TabContentView: View {
                     WebViewContainer(
                         workingDirectory: appState.workingDirectory,
                         resumeSessionId: appState.resumeSessionId,
+                        model: appState.model,
+                        effortLevel: appState.effortLevel,
                         permissionMode: appState.permissionMode,
                         sessionTitle: appState.resumeSessionTitle,
                         statusBarData: statusBarData,

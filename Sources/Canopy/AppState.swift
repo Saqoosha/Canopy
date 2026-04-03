@@ -13,14 +13,16 @@ enum PermissionMode: String, CaseIterable {
     case acceptEdits = "acceptEdits"
     case auto = "auto"
     case plan = "plan"
+    case dontAsk = "dontAsk"
     case bypassPermissions = "bypassPermissions"
 
     var displayName: String {
         switch self {
-        case .default: "Default (ask each time)"
+        case .default: "Default"
         case .acceptEdits: "Accept Edits"
         case .auto: "Auto"
-        case .plan: "Plan Mode"
+        case .plan: "Plan"
+        case .dontAsk: "Don't Ask"
         case .bypassPermissions: "Bypass All"
         }
     }
@@ -30,10 +32,9 @@ enum PermissionMode: String, CaseIterable {
 final class AppState {
     private(set) var screen: AppScreen = .launcher
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
-    var permissionMode: PermissionMode {
-        get { CanopySettings.shared.initialPermissionMode }
-        set { CanopySettings.shared.initialPermissionMode = newValue }
-    }
+    var permissionMode: PermissionMode = .acceptEdits
+    var model: String?
+    var effortLevel: String?
     var resumeSessionId: String?
     var resumeSessionTitle: String?
     var remoteHost: String?
@@ -49,7 +50,7 @@ final class AppState {
     /// Optional reference to the status bar data, set by TabContentView.
     weak var statusBarData: StatusBarData?
 
-    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, remoteHost: String? = nil) {
+    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil) {
         // Don't add remote paths to local recent directories
         if remoteHost == nil {
             RecentDirectories.add(directory)
@@ -57,11 +58,14 @@ final class AppState {
         workingDirectory = directory
         self.resumeSessionId = resumeSessionId
         self.resumeSessionTitle = sessionTitle
+        self.model = model
+        self.effortLevel = effortLevel
+        self.permissionMode = permissionMode
         self.remoteHost = remoteHost
         statusBarData?.resetAll()
         webviewReloadToken += 1
         screen = .session
-        logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) mode=\(self.permissionMode.rawValue, privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")
+        logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) model=\(model ?? "auto", privacy: .public) effort=\(effortLevel ?? "auto", privacy: .public) mode=\(permissionMode.rawValue, privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")
     }
 
     func backToLauncher() {

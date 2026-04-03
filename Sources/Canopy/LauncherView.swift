@@ -17,6 +17,14 @@ struct LauncherView: View {
     @State private var showRemoteBrowser = false
     @State private var updater = ExtensionUpdater()
 
+    @AppStorage("launcher.model") private var model = ""
+    @AppStorage("launcher.effortLevel") private var effortLevel = ""
+    @AppStorage("launcher.permissionMode") private var permissionModeRaw = "acceptEdits"
+
+    private static let modelOptions = ["", "opus", "sonnet", "sonnet[1m]", "haiku"]
+    private static let effortOptions = ["", "low", "medium", "high", "max"]
+    private static let permissionModes: [PermissionMode] = [.default, .plan, .auto, .acceptEdits, .dontAsk]
+
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
@@ -34,6 +42,7 @@ struct LauncherView: View {
                     directoryCard
                 }
 
+                sessionOptions
                 startButton
 
                 if !recentDirectories.isEmpty || !sessions.isEmpty {
@@ -182,6 +191,65 @@ struct LauncherView: View {
         }
     }
 
+    // MARK: - Session Options
+
+    private var sessionOptions: some View {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+            GridRow {
+                Text("Model:")
+                    .foregroundStyle(.secondary)
+                    .gridColumnAlignment(.trailing)
+                Picker("", selection: $model) {
+                    Text("Auto").tag("")
+                    ForEach(Self.modelOptions.dropFirst(), id: \.self) { alias in
+                        Text(Self.modelDisplayName(alias)).tag(alias)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+
+            GridRow {
+                Text("Effort:")
+                    .foregroundStyle(.secondary)
+                    .gridColumnAlignment(.trailing)
+                Picker("", selection: $effortLevel) {
+                    Text("Auto").tag("")
+                    ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
+                        Text(level.prefix(1).uppercased() + level.dropFirst()).tag(level)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+
+            GridRow {
+                Text("Permission:")
+                    .foregroundStyle(.secondary)
+                    .gridColumnAlignment(.trailing)
+                Picker("", selection: $permissionModeRaw) {
+                    ForEach(Self.permissionModes, id: \.rawValue) { mode in
+                        Text(mode.displayName).tag(mode.rawValue)
+                    }
+                    if CanopySettings.shared.allowDangerouslySkipPermissions {
+                        Text(PermissionMode.bypassPermissions.displayName)
+                            .tag(PermissionMode.bypassPermissions.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+        }
+        .padding(.horizontal)
+    }
+
+    private static func modelDisplayName(_ alias: String) -> String {
+        switch alias {
+        case "sonnet[1m]": "Sonnet (1M)"
+        default: alias.prefix(1).uppercased() + alias.dropFirst()
+        }
+    }
+
     // MARK: - Start Button
 
     private var startButton: some View {
@@ -245,7 +313,7 @@ struct LauncherView: View {
         let isHovered = hoveredDirectoryPath == dir.path
         Button {
             selectedDirectory = dir
-            appState.launchSession(directory: dir)
+            appState.launchSession(directory: dir, model: model.isEmpty ? nil : model, effortLevel: effortLevel.isEmpty ? nil : effortLevel, permissionMode: PermissionMode(rawValue: permissionModeRaw) ?? .acceptEdits)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "folder.fill")
@@ -310,7 +378,7 @@ struct LauncherView: View {
         let isHovered = hoveredSessionId == session.id
         Button {
             selectedDirectory = session.projectDirectory
-            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id, sessionTitle: session.title)
+            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id, sessionTitle: session.title, model: model.isEmpty ? nil : model, effortLevel: effortLevel.isEmpty ? nil : effortLevel, permissionMode: PermissionMode(rawValue: permissionModeRaw) ?? .acceptEdits)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "text.bubble.fill")
@@ -429,16 +497,19 @@ struct LauncherView: View {
     // MARK: - Actions
 
     private func startSession() {
+        let selectedModel = model.isEmpty ? nil : model
+        let selectedEffort = effortLevel.isEmpty ? nil : effortLevel
+        let selectedPermission = PermissionMode(rawValue: permissionModeRaw) ?? .acceptEdits
+
         if isRemoteMode {
             guard !remoteHost.isEmpty, !remoteDirectory.isEmpty else { return }
             SSHHostStore.add(remoteHost)
             savedHosts = SSHHostStore.hosts()
-            // Use remote directory as URL (path only, for display/tracking purposes)
             let dir = URL(fileURLWithPath: remoteDirectory)
-            appState.launchSession(directory: dir, remoteHost: remoteHost)
+            appState.launchSession(directory: dir, model: selectedModel, effortLevel: selectedEffort, permissionMode: selectedPermission, remoteHost: remoteHost)
         } else {
             guard let dir = selectedDirectory else { return }
-            appState.launchSession(directory: dir)
+            appState.launchSession(directory: dir, model: selectedModel, effortLevel: selectedEffort, permissionMode: selectedPermission)
         }
     }
 

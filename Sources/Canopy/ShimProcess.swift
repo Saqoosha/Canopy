@@ -48,6 +48,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     let workingDirectory: URL
     var resumeSessionId: String?
+    var model: String?
+    var effortLevel: String?
     var permissionMode: PermissionMode
     var remoteHost: String?
 
@@ -66,9 +68,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Whether the process wrapper has been cleared from settings after CLI spawned.
     private var wrapperCleared = false
 
-    init(workingDirectory: URL, resumeSessionId: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil) {
+    init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil) {
         self.workingDirectory = workingDirectory
         self.resumeSessionId = resumeSessionId
+        self.model = model
+        self.effortLevel = effortLevel
         self.permissionMode = permissionMode
         self.sessionTitle = sessionTitle ?? ""
         // When resuming with an AI-generated title, protect it from webview overwrite.
@@ -160,6 +164,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if !newPaths.isEmpty {
             env["PATH"] = (newPaths + [currentPath]).joined(separator: ":")
         }
+
+        // Write model/effort to ~/.claude/settings.json before CLI starts
+        Self.applyClaudeSetting("model", value: model)
+        Self.applyClaudeSetting("effortLevel", value: effortLevel)
 
         // SSH remote: set env var and configure process wrapper
         if let remote = remoteHost {
@@ -289,6 +297,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             ]
             sendToWebView(statusMsg)
 
+
             // Request initial rate limit data after a short delay (extension needs time to activate)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 self?.requestUsageUpdate()
@@ -375,6 +384,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Permission mode sync is handled via synthetic system/status io_message in
         // the launch_claude intercept.
         logger.info("Permission mode will sync via system/status on launch_claude")
+    }
+
+    // MARK: - Claude Settings
+
+    /// Write or remove a key in ~/.claude/settings.json.
+    /// nil value removes the key (Auto = use CLI default).
+    private static func applyClaudeSetting(_ key: String, value: String?) {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/settings.json")
+        var dict: [String: Any] = (try? Data(contentsOf: path))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        if let value {
+            dict[key] = value
+        } else {
+            dict.removeValue(forKey: key)
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: path)
+        }
+        logger.info("Applied ~/.claude/settings.json \(key, privacy: .public)=\(value ?? "nil", privacy: .public)")
     }
 
     // MARK: - Shim Path Discovery

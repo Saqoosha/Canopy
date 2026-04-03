@@ -7,6 +7,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "WebView")
 struct WebViewContainer: NSViewRepresentable {
     let workingDirectory: URL
     var resumeSessionId: String?
+    var model: String?
+    var effortLevel: String?
     var permissionMode: PermissionMode = .acceptEdits
     var sessionTitle: String?
     var statusBarData: StatusBarData?
@@ -24,6 +26,8 @@ struct WebViewContainer: NSViewRepresentable {
         // Params needed to create a new ShimProcess on reconnect
         var workingDirectory: URL?
         var remoteHost: String?
+        var model: String?
+        var effortLevel: String?
         var permissionMode: PermissionMode = .acceptEdits
         var statusBarData: StatusBarData?
 
@@ -150,6 +154,8 @@ struct WebViewContainer: NSViewRepresentable {
             let newShim = ShimProcess(
                 workingDirectory: workingDirectory,
                 resumeSessionId: sessionId,
+                model: model,
+                effortLevel: effortLevel,
                 permissionMode: permissionMode,
                 sessionTitle: nil,
                 statusBarData: statusBarData,
@@ -222,6 +228,8 @@ struct WebViewContainer: NSViewRepresentable {
         let shim = ShimProcess(
             workingDirectory: workingDirectory,
             resumeSessionId: resumeSessionId,
+            model: model,
+            effortLevel: effortLevel,
             permissionMode: permissionMode,
             sessionTitle: sessionTitle,
             statusBarData: statusBarData,
@@ -235,6 +243,8 @@ struct WebViewContainer: NSViewRepresentable {
         context.coordinator.connectionState = connectionState
         context.coordinator.workingDirectory = workingDirectory
         context.coordinator.remoteHost = remoteHost
+        context.coordinator.model = model
+        context.coordinator.effortLevel = effortLevel
         context.coordinator.permissionMode = permissionMode
         context.coordinator.statusBarData = statusBarData
 
