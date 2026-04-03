@@ -389,8 +389,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Write or remove multiple keys in ~/.claude/settings.json atomically (single read-modify-write).
     private static func applyClaudeSettings(_ pairs: [(key: String, value: String?)]) {
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
+        let claudeDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
+        let path = claudeDir.appendingPathComponent("settings.json")
+        try? FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
         var dict: [String: Any] = (try? Data(contentsOf: path))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         for (key, value) in pairs {
