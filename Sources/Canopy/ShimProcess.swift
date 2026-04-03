@@ -166,8 +166,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         // Write model/effort to ~/.claude/settings.json before CLI starts
-        Self.applyClaudeSetting("model", value: model)
-        Self.applyClaudeSetting("effortLevel", value: effortLevel)
+        Self.applyClaudeSettings([("model", model), ("effortLevel", effortLevel)])
 
         // SSH remote: set env var and configure process wrapper
         if let remote = remoteHost {
@@ -388,22 +387,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Claude Settings
 
-    /// Write or remove a key in ~/.claude/settings.json.
-    /// nil value removes the key (Auto = use CLI default).
-    private static func applyClaudeSetting(_ key: String, value: String?) {
+    /// Write or remove multiple keys in ~/.claude/settings.json atomically (single read-modify-write).
+    private static func applyClaudeSettings(_ pairs: [(key: String, value: String?)]) {
         let path = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/settings.json")
         var dict: [String: Any] = (try? Data(contentsOf: path))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-        if let value {
-            dict[key] = value
-        } else {
-            dict.removeValue(forKey: key)
+        for (key, value) in pairs {
+            if let value {
+                dict[key] = value
+            } else {
+                dict.removeValue(forKey: key)
+            }
         }
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: path)
         }
-        logger.info("Applied ~/.claude/settings.json \(key, privacy: .public)=\(value ?? "nil", privacy: .public)")
+        let desc = pairs.map { "\($0.key)=\($0.value ?? "nil")" }.joined(separator: ", ")
+        logger.info("Applied ~/.claude/settings.json: \(desc, privacy: .public)")
     }
 
     // MARK: - Shim Path Discovery

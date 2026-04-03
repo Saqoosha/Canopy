@@ -499,7 +499,11 @@ struct LauncherView: View {
     private func startSession() {
         let selectedModel = model.isEmpty ? nil : model
         let selectedEffort = effortLevel.isEmpty ? nil : effortLevel
-        let selectedPermission = PermissionMode(rawValue: permissionModeRaw) ?? .acceptEdits
+        var selectedPermission = PermissionMode(rawValue: permissionModeRaw) ?? .acceptEdits
+        if selectedPermission == .bypassPermissions && !CanopySettings.shared.allowDangerouslySkipPermissions {
+            selectedPermission = .acceptEdits
+            permissionModeRaw = PermissionMode.acceptEdits.rawValue
+        }
 
         if isRemoteMode {
             guard !remoteHost.isEmpty, !remoteDirectory.isEmpty else { return }
