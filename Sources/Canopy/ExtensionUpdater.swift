@@ -40,7 +40,31 @@ final class ExtensionUpdater {
             // Extension is same or newer than CLI — no downgrade
             state = .upToDate
         } else {
+            // Verify the version is actually available on the marketplace before showing update UI
+            guard await isVersionOnMarketplace(cliVer) else {
+                logger.info("Extension v\(cliVer, privacy: .public) not yet on marketplace — skipping update")
+                state = .upToDate
+                return
+            }
             state = .updateAvailable(cliVersion: cliVer)
+        }
+    }
+
+    private func isVersionOnMarketplace(_ version: String) async -> Bool {
+        let urlString = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/\(version)/vspackage"
+        guard let url = URL(string: urlString) else { return false }
+        // HEAD returns 405 on this endpoint, so use GET but only read response headers.
+        // bytes(for:) streams the body lazily — we don't iterate, so nothing is downloaded.
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        do {
+            let (_, response) = try await URLSession.shared.bytes(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            return status == 200 || status == 206
+        } catch {
+            // Network error — don't block updates, let user try
+            logger.warning("Marketplace check failed: \(error.localizedDescription, privacy: .public)")
+            return true
         }
     }
 

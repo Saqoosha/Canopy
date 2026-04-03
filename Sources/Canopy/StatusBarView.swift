@@ -65,7 +65,7 @@ struct StatusBarView: View {
             }
 
             // 5hr: ██▒▒ 55% ⏳18m
-            if data.sessionPct > 0 {
+            if data.sessionResetDate != nil {
                 dot
                 segment {
                     Text("5hr")
@@ -80,8 +80,21 @@ struct StatusBarView: View {
                 }
             }
 
-            // Wk: ██▒▒ 45% ⏳4d
-            if data.weeklyPct > 0 {
+            // Wk: ██▒▒ 45% ⏳4d  (sevenDaySonnet when Sonnet model and data available; falls back to sevenDay)
+            if data.isSonnetModel, data.weeklyResetDateSonnet != nil {
+                dot
+                segment {
+                    Text("Wk")
+                    contextBar(pct: data.weeklyPctSonnet)
+                    Text("\(data.weeklyPctSonnet)%")
+                        .foregroundStyle(pctColor(data.weeklyPctSonnet))
+                    let reset = StatusBarData.formatResetTime(data.weeklyResetDateSonnet)
+                    if !reset.isEmpty {
+                        Text("⏳\(reset)")
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            } else if data.weeklyResetDate != nil {
                 dot
                 segment {
                     Text("Wk")

@@ -14,13 +14,17 @@ final class StatusBarData {
     var remoteHost: String?
 
     // Rate limits from usage_update (extension → webview, intercepted by ShimProcess)
-    var sessionPct: Int = 0        // 5hr utilization 0-100
-    var sessionResetDate: Date?    // actual reset time (re-formatted on each render)
-    var weeklyPct: Int = 0         // 7-day utilization 0-100
-    var weeklyResetDate: Date?     // actual reset time
+    var sessionPct: Int = 0           // 5hr utilization 0-100
+    var sessionResetDate: Date?       // actual reset time (re-formatted on each render)
+    var weeklyPct: Int = 0            // 7-day overall utilization 0-100
+    var weeklyResetDate: Date?        // actual reset time
+    var weeklyPctSonnet: Int = 0      // 7-day Sonnet-specific utilization 0-100
+    var weeklyResetDateSonnet: Date?  // actual reset time
 
     // Compact boundary indicator
     var didCompact: Bool = false
+
+    var isSonnetModel: Bool { model.localizedCaseInsensitiveContains("sonnet") }
 
     enum VCSType { case unknown, git, jj }
 
@@ -67,27 +71,28 @@ final class StatusBarData {
         sessionResetDate = nil
         weeklyPct = 0
         weeklyResetDate = nil
+        weeklyPctSonnet = 0
+        weeklyResetDateSonnet = nil
         didCompact = false
         remoteHost = nil
     }
 
     /// Parse usage_update utilization from extension
     func updateRateLimits(_ utilization: [String: Any]) {
-        if let fiveHour = utilization["fiveHour"] as? [String: Any] {
-            if let u = fiveHour["utilization"] {
-                sessionPct = StatusBarData.parseUtilization(u)
-            }
-            if let r = fiveHour["resetsAt"] as? String {
-                sessionResetDate = StatusBarData.parseISO8601(r)
-            }
+        if let entry = utilization["fiveHour"] as? [String: Any] {
+            sessionPct = entry["utilization"].map { StatusBarData.parseUtilization($0) } ?? 0
+            sessionResetDate = (entry["resetsAt"] as? String).flatMap { StatusBarData.parseISO8601($0) }
         }
-        if let sevenDay = utilization["sevenDay"] as? [String: Any] {
-            if let u = sevenDay["utilization"] {
-                weeklyPct = StatusBarData.parseUtilization(u)
-            }
-            if let r = sevenDay["resetsAt"] as? String {
-                weeklyResetDate = StatusBarData.parseISO8601(r)
-            }
+        if let entry = utilization["sevenDay"] as? [String: Any] {
+            weeklyPct = entry["utilization"].map { StatusBarData.parseUtilization($0) } ?? 0
+            weeklyResetDate = (entry["resetsAt"] as? String).flatMap { StatusBarData.parseISO8601($0) }
+        }
+        if let entry = utilization["sevenDaySonnet"] as? [String: Any] {
+            weeklyPctSonnet = entry["utilization"].map { StatusBarData.parseUtilization($0) } ?? 0
+            weeklyResetDateSonnet = (entry["resetsAt"] as? String).flatMap { StatusBarData.parseISO8601($0) }
+        } else {
+            weeklyPctSonnet = 0
+            weeklyResetDateSonnet = nil
         }
     }
 
