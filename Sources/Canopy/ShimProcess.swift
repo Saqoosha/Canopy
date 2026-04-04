@@ -94,11 +94,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 barData?.gitBranch = vcsInfo.branch
             }
         }
-        // Restore cached contextMax/maxOutputTokens for immediate display on session resume
+        // Restore cached contextMax for immediate display on session resume
         let cachedMax = UserDefaults.standard.integer(forKey: "statusBar.contextMax.\(workingDirectory.path)")
         if cachedMax > 0 { statusBarData?.contextMax = cachedMax }
-        let cachedMaxOut = UserDefaults.standard.integer(forKey: "statusBar.contextMaxOutputTokens.\(workingDirectory.path)")
-        statusBarData?.contextMaxOutputTokens = cachedMaxOut > 0 ? cachedMaxOut : 0
         if let sessionId = resumeSessionId {
             statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
                 sessionId: sessionId, directory: workingDirectory
@@ -1020,22 +1018,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Context window size from modelUsage — use largest (main model has the biggest window)
             if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
                 var largestCW = 0
-                var largestMaxOut = 0
                 for (_, value) in modelUsage {
                     if let info = value as? [String: Any],
-                       let cw = info["contextWindow"] as? Int
+                       let cw = info["contextWindow"] as? Int,
+                       cw > largestCW
                     {
-                        if cw > largestCW {
-                            largestCW = cw
-                            largestMaxOut = info["maxOutputTokens"] as? Int ?? 0
-                        }
+                        largestCW = cw
                     }
                 }
                 if largestCW > 0 {
                     data.contextMax = largestCW
-                    data.contextMaxOutputTokens = largestMaxOut
                     UserDefaults.standard.set(largestCW, forKey: "statusBar.contextMax.\(workingDirectory.path)")
-                    UserDefaults.standard.set(largestMaxOut, forKey: "statusBar.contextMaxOutputTokens.\(workingDirectory.path)")
                 }
             }
             // Refresh VCS branch (user may have switched branches during session)

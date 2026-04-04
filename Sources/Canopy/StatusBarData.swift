@@ -7,7 +7,6 @@ final class StatusBarData {
     var model: String = ""
     var contextUsed: Int = 0
     var contextMax: Int = 0
-    var contextMaxOutputTokens: Int = 0
     var messageCount: Int = 0
     var gitBranch: String = ""
     var vcsType: VCSType = .unknown
@@ -26,11 +25,10 @@ final class StatusBarData {
 
     enum VCSType { case unknown, git, jj }
 
-    /// Effective context window for compaction purposes (matches CC's auto-compact popup).
-    /// = contextMax - contextMaxOutputTokens - 13000 (buffer). Falls back to contextMax when contextMaxOutputTokens is not yet available.
-    private static let compactionBuffer = 13_000
+    /// Effective context window for compaction purposes (matches CC's auto-compact: effectiveWindow = contextMax - 8000).
+    private static let compactionBuffer = 8_000
     var compactionWindow: Int {
-        let effective = contextMax - contextMaxOutputTokens - Self.compactionBuffer
+        let effective = contextMax - Self.compactionBuffer
         return effective > 0 ? effective : contextMax
     }
 
@@ -70,7 +68,6 @@ final class StatusBarData {
         model = ""
         contextUsed = 0
         contextMax = 0
-        contextMaxOutputTokens = 0
         messageCount = 0
         gitBranch = ""
         vcsType = .unknown
