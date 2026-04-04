@@ -55,9 +55,9 @@ else
   echo "  No release notes found"
 fi
 
-# Download previous version DMGs for delta generation
+# Download previous version DMGs for delta generation (last 2 only)
 echo "Downloading previous DMGs for delta generation..."
-RELEASES=$(gh release list --limit 5 --json tagName --jq '.[].tagName')
+RELEASES=$(gh release list --limit 3 --json tagName --jq '.[].tagName')
 for TAG in $RELEASES; do
   [[ "$TAG" == "v${VERSION}" ]] && continue
   PREV_VERSION="${TAG#v}"
@@ -93,9 +93,10 @@ strip_sh_xattrs() {
     cp -Rp "$MOUNT"/* "$TMP_CONTENT/" 2>/dev/null || true
     hdiutil detach "$MOUNT" -quiet
     find "$TMP_CONTENT" -name "*.sh" -exec xattr -c {} \;
-    local TEMP_DMG; TEMP_DMG=$(mktemp "${BUILD_DIR}/stripped-XXXXXX").dmg
+    local TEMP_DMG; TEMP_DMG=$(mktemp "${BUILD_DIR}/stripped-XXXXXX")
+    rm -f "$TEMP_DMG"  # mktemp creates the file; hdiutil create needs it absent
     hdiutil create -srcfolder "$TMP_CONTENT" -format UDZO -volname "Canopy" -o "$TEMP_DMG" -quiet
-    mv "$TEMP_DMG" "$DMG"
+    mv "${TEMP_DMG}.dmg" "$DMG"
     echo "  Stripped xattrs: $(basename "$DMG")"
   else
     hdiutil detach "$MOUNT" -quiet

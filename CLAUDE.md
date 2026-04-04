@@ -4,9 +4,9 @@
 
 macOS native app that hosts the Claude Code VSCode extension's webview (React UI) in a WKWebView. No VSCode required. The CC extension's bundled JS/CSS renders directly in a native macOS window with real-time streaming.
 
-## Project Status: Fully Working (2026-03-31)
+## Project Status: Fully Working (2026-04-04)
 
-Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands, tabbed windows, Sparkle auto-update, **SSH remote**.
+Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands, tabbed windows, Sparkle auto-update, **SSH remote**. Launcher includes model/effort/permission selectors.
 
 **vscode-shim complete (Tasks 1-15)** — Node.js subprocess runs `extension.js` unmodified. 10 JS modules + Swift integration (ShimProcess, NodeDiscovery, Xcode bundling). Legacy handler removed.
 
@@ -58,7 +58,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `AppState.swift` — Observable app state, PermissionMode enum, screen transitions, StatusBarData reset on session launch
 - `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching, process tree cleanup
 - `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell), result cached
-- `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop, SSH remote toggle
+- `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop, SSH remote toggle, model/effort/permission selectors
 - `WebViewContainer.swift` — WKWebView setup, CC webview loading, VSCode default CSS injection
 - `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction
 - `RecentDirectories.swift` — MRU directory list in UserDefaults
@@ -158,8 +158,8 @@ To update theme CSS:
 
 ## Release Scripts
 ```bash
-./scripts/release.sh 1.0.2      # Full release: build, sign, notarize, DMG, GitHub release, appcast
-./scripts/update_appcast.sh 1.0.2  # Update appcast only (after editing GitHub Release notes)
+./scripts/release.sh 1.5.2      # Full release: build, sign, notarize, DMG, GitHub release, appcast
+./scripts/update_appcast.sh 1.5.2  # Update appcast only (after editing GitHub Release notes)
 ```
 - `release.sh` — Bumps version, builds Release, creates signed/notarized DMG, creates GitHub Release, updates appcast
 - `update_appcast.sh` — Fetches release notes from GitHub, generates appcast with Sparkle's `generate_appcast`, pushes to gh-pages
