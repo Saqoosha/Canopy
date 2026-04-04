@@ -52,7 +52,8 @@ final class ExtensionUpdater {
     }
 
     private func isVersionOnMarketplace(_ version: String) async -> Bool {
-        let urlString = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/\(version)/vspackage"
+        let platform = Self.detectPlatform()
+        let urlString = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/\(version)/vspackage?targetPlatform=\(platform)"
         guard let url = URL(string: urlString) else { return false }
         // HEAD returns 405 on this endpoint, so use GET but only read response headers.
         // bytes(for:) streams the body lazily — we don't iterate, so nothing is downloaded.
@@ -91,7 +92,8 @@ final class ExtensionUpdater {
     // MARK: - Download
 
     private func downloadVSIX(version: String) async throws -> URL {
-        let urlString = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/\(version)/vspackage"
+        let platform = Self.detectPlatform()
+        let urlString = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/\(version)/vspackage?targetPlatform=\(platform)"
         guard let url = URL(string: urlString) else {
             throw UpdateError.invalidURL
         }
