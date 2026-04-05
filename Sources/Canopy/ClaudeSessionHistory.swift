@@ -153,9 +153,12 @@ enum ClaudeSessionHistory {
         let topCandidates = candidates.prefix(maxSessionsToParse)
 
         // Phase 3: resolve title (SessionTitleStore → JSONL ai-title → first user message)
+        // Skip sessions whose project directory no longer exists on disk.
         var entries: [SessionEntry] = []
         for candidate in topCandidates {
-            let projectDirectory = URL(fileURLWithPath: decodePath(candidate.projectEncoded))
+            let projectPath = decodePath(candidate.projectEncoded)
+            guard fm.fileExists(atPath: projectPath) else { continue }
+            let projectDirectory = URL(fileURLWithPath: projectPath)
             let title = SessionTitleStore.title(forSessionId: candidate.sessionId)
                 ?? extractTitle(fromPath: candidate.path)
 
