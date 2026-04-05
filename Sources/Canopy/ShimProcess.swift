@@ -133,13 +133,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         // Verify the working directory exists before starting the shim.
-        // If the directory was deleted/moved, the CLI will crash with ENOENT.
-        let cwdPath = workingDirectory.path
-        var isDir: ObjCBool = false
-        if !FileManager.default.fileExists(atPath: cwdPath, isDirectory: &isDir) || !isDir.boolValue {
-            logger.error("Working directory does not exist: \(cwdPath, privacy: .public)")
-            showErrorInWebView("Directory not found: \(cwdPath)")
-            return false
+        // Skip for SSH remote sessions — the path is on the remote machine.
+        if remoteHost == nil {
+            let cwdPath = workingDirectory.path
+            var isDir: ObjCBool = false
+            if !FileManager.default.fileExists(atPath: cwdPath, isDirectory: &isDir) || !isDir.boolValue {
+                logger.error("Working directory does not exist: \(cwdPath, privacy: .public)")
+                showErrorInWebView("Directory not found: \(cwdPath)")
+                return false
+            }
         }
 
         let proc = Process()
