@@ -12,7 +12,7 @@ struct StatusBarView: View {
 
     // MARK: - Main layout
 
-    private func statusBar(now: Date) -> some View {
+    private func statusBar(now _: Date) -> some View {
         HStack(spacing: 0) {
             Spacer(minLength: 0)
 
@@ -40,7 +40,7 @@ struct StatusBarView: View {
             if !data.gitBranch.isEmpty {
                 separator
                 let vcsEmoji = data.vcsType == .jj ? "🥋" : "🌿"
-                pill("\(vcsEmoji)  \(data.gitBranch)", color: .green)
+                pill("\(vcsEmoji)\u{2009}\(data.gitBranch)", color: .green)
                     .help("Branch: \(data.gitBranch)")
             }
 
