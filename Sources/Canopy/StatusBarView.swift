@@ -10,141 +10,178 @@ struct StatusBarView: View {
         }
     }
 
-    private func statusBar(now: Date) -> some View {
+    // MARK: - Main layout
+
+    private func statusBar(now _: Date) -> some View {
         HStack(spacing: 0) {
-            // Remote host indicator
+            Spacer(minLength: 0)
+
+            // Remote host
             if let remote = data.remoteHost {
-                segment {
-                    Image(systemName: "network")
-                        .font(.system(size: 9))
-                    Text(remote)
-                        .foregroundStyle(.orange)
-                }
-                dot
+                pill(remote, icon: "network", color: .orange)
+                    .help("SSH remote: \(remote)")
+                separator
             }
 
-            // CLI version + Model
-            segment {
+            // Model + Version
+            HStack(spacing: 5) {
+                if !data.model.isEmpty {
+                    pill(shortModelName(data.model), color: .purple)
+                        .help(data.model)
+                }
                 if !data.cliVersion.isEmpty {
                     Text("v\(data.cliVersion)")
-                }
-                if !data.model.isEmpty {
-                    Text("[\(data.model)]")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                 }
             }
 
-            // VCS branch (git or jj)
+            // VCS branch
             if !data.gitBranch.isEmpty {
-                dot
-                segment {
-                    switch data.vcsType {
-                    case .jj:
-                        Text("🥋").font(.system(size: 9))
-                    default:
-                        Text("🌿").font(.system(size: 9))
-                    }
-                    Text(data.gitBranch)
-                        .foregroundStyle(.green)
-                }
+                separator
+                let vcsEmoji = data.vcsType == .jj ? "🥋" : "🌿"
+                pill("\(vcsEmoji)\u{2009}\(data.gitBranch)", color: .green)
+                    .help("Branch: \(data.gitBranch)")
             }
 
-            // Context usage: 171K/1.0M ██▒▒ 17%
+            // Context usage
             if data.contextMax > 0 {
-                dot
-                segment {
+                separator
+                HStack(spacing: 5) {
                     Text("\(data.formatTokens(data.contextUsed))/\(data.formatTokens(data.compactionWindow))")
-                    contextBar(pct: data.contextPct)
+                    thinBar(pct: data.contextPct)
                     Text("\(data.contextPct)%")
                         .foregroundStyle(pctColor(data.contextPct))
                     if data.didCompact {
                         Text("↻")
                             .foregroundStyle(.blue)
-                            .help("Context was compacted")
                     }
                 }
+                .help("Context: \(data.formatTokens(data.contextUsed)) / \(data.formatTokens(data.compactionWindow)) tokens\(data.didCompact ? " (compacted)" : "")")
             }
 
-            // 5hr: ██▒▒ 55% ⏳18m
+            // 5hr rate limit
             if data.sessionResetDate != nil {
-                dot
-                segment {
-                    Text("5hr")
-                    contextBar(pct: data.sessionPct)
-                    Text("\(data.sessionPct)%")
-                        .foregroundStyle(pctColor(data.sessionPct))
-                    let reset = StatusBarData.formatResetTime(data.sessionResetDate)
-                    if !reset.isEmpty {
-                        Text("⏳\(reset)")
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+                separator
+                rateLimitSegment(label: "5hr", pct: data.sessionPct, resetDate: data.sessionResetDate)
             }
 
-            // Wk: ██▒▒ 45% ⏳4d (sevenDaySonnet when Sonnet model and data available; falls back to sevenDay)
+            // Weekly rate limit
             if data.effectiveWeeklyResetDate != nil {
-                dot
-                segment {
-                    Text("Wk")
-                    contextBar(pct: data.effectiveWeeklyPct)
-                    Text("\(data.effectiveWeeklyPct)%")
-                        .foregroundStyle(pctColor(data.effectiveWeeklyPct))
-                    let reset = StatusBarData.formatResetTime(data.effectiveWeeklyResetDate)
-                    if !reset.isEmpty {
-                        Text("⏳\(reset)")
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+                separator
+                rateLimitSegment(label: "Wk", pct: data.effectiveWeeklyPct, resetDate: data.effectiveWeeklyResetDate)
             }
 
             // Message count
             if data.messageCount > 0 {
-                dot
-                segment {
-                    Text("💬\(data.messageCount)")
-                        .foregroundStyle(.tertiary)
+                separator
+                HStack(spacing: 3) {
+                    Image(systemName: "bubble.left.fill")
+                        .font(.system(size: 8))
+                    Text("\(data.messageCount)")
                 }
+                .foregroundStyle(.tertiary)
+                .help("Messages: \(data.messageCount)")
             }
 
             Spacer()
         }
-        .font(.system(size: 11, design: .monospaced))
+        .font(.system(size: 11))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
-        .frame(height: 20)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(alignment: .top) {
-            Divider()
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 12)
+        .background(.ultraThinMaterial)
+    }
+
+    // MARK: - Components
+
+    private var separator: some View {
+        Rectangle()
+            .fill(.quaternary)
+            .frame(width: 1, height: 12)
+            .padding(.horizontal, 8)
+    }
+
+    private func pill(_ text: String, icon: String? = nil, color: Color = .secondary) -> some View {
+        HStack(spacing: 3) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 9))
+            }
+            Text(text)
         }
+        .font(.system(size: 10, weight: .medium))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(color.opacity(0.12), in: Capsule())
+        .foregroundStyle(color)
     }
 
-    private var dot: some View {
-        Text(" · ").foregroundStyle(.quaternary)
-    }
-
-    @ViewBuilder
-    private func segment(@ViewBuilder content: () -> some View) -> some View {
-        HStack(spacing: 3) { content() }
-    }
-
-    private func contextBar(pct: Int) -> some View {
-        let width: CGFloat = 36
-        let height: CGFloat = 8
+    private func thinBar(pct: Int, width: CGFloat = 40) -> some View {
+        let barHeight: CGFloat = 4
         let fill = width * CGFloat(pct) / 100
         return ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: height / 2)
-                .fill(Color.secondary.opacity(0.2))
-                .frame(width: width, height: height)
+            Capsule()
+                .fill(Color.secondary.opacity(0.15))
+                .frame(width: width, height: barHeight)
             if fill > 0 {
-                RoundedRectangle(cornerRadius: height / 2)
+                Capsule()
                     .fill(pctColor(pct))
-                    .frame(width: max(height, fill), height: height)
+                    .frame(width: max(barHeight, fill), height: barHeight)
             }
         }
     }
+
+    private func rateLimitSegment(label: String, pct: Int, resetDate: Date?) -> some View {
+        let reset = StatusBarData.formatResetTime(resetDate)
+        return HStack(spacing: 5) {
+            Text(label)
+                .foregroundStyle(.tertiary)
+            thinBar(pct: pct)
+            Text("\(pct)%")
+                .foregroundStyle(pctColor(pct))
+            if !reset.isEmpty {
+                Text(reset)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.quaternary)
+            }
+        }
+        .help("\(label) usage: \(pct)%\(reset.isEmpty ? "" : " — resets in \(reset)")")
+    }
+
+    // MARK: - Helpers
 
     private func pctColor(_ pct: Int) -> Color {
         if pct >= 80 { return .red }
         if pct >= 50 { return .orange }
         return .secondary
     }
+
+    private func shortModelName(_ model: String) -> String {
+        // "claude-sonnet-4-5-20250514" → "Sonnet 4.5"
+        // "claude-opus-4-6" → "Opus 4.6"
+        let lower = model.lowercased()
+        for (family, label) in [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
+            if lower.contains(family) {
+                if let v = extractVersion(from: lower, family: family) { return "\(label) \(v)" }
+                return label
+            }
+        }
+        return model
+    }
+
+    private func extractVersion(from model: String, family: String) -> String? {
+        // "claude-sonnet-4-5-20250514" → after "sonnet-" grab "4-5", convert to "4.5"
+        guard let range = model.range(of: "\(family)-") else { return nil }
+        let after = model[range.upperBound...]
+        var digits: [String] = []
+        for part in after.split(separator: "-") {
+            if part.allSatisfy(\.isNumber), part.count <= 2 { digits.append(String(part)) }
+            else { break }
+        }
+        return digits.isEmpty ? nil : digits.joined(separator: ".")
+    }
+
 }
