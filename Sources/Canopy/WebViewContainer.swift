@@ -14,12 +14,14 @@ struct WebViewContainer: NSViewRepresentable {
     var statusBarData: StatusBarData?
     var remoteHost: String?
     var connectionState: ConnectionState?
+    var onCrash: ((Int32) -> Void)?
 
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, ShimProcessDelegate {
         var shimProcess: ShimProcess?
         var consoleHandler: ConsoleLogHandler?
         var linkHandler: LinkClickHandler?
         var connectionState: ConnectionState?
+        var onCrash: ((Int32) -> Void)?
         /// Retained independently so reconnect can access it after shimProcess is nil'd.
         weak var currentWebView: WKWebView?
 
@@ -114,6 +116,11 @@ struct WebViewContainer: NSViewRepresentable {
                 self?.retryReconnect()
             }
             attemptReconnect(sessionId: sessionId)
+        }
+
+        func shimProcessDidCrash(_ shim: ShimProcess, status: Int32) {
+            logger.error("Shim crashed (status \(status)), returning to launcher")
+            onCrash?(status)
         }
 
         private func attemptReconnect(sessionId: String) {
@@ -247,6 +254,7 @@ struct WebViewContainer: NSViewRepresentable {
         context.coordinator.effortLevel = effortLevel
         context.coordinator.permissionMode = permissionMode
         context.coordinator.statusBarData = statusBarData
+        context.coordinator.onCrash = onCrash
 
         config.userContentController = ucc
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")

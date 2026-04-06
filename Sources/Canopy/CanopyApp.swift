@@ -1,6 +1,9 @@
+import os.log
 import Sparkle
 import SwiftUI
 import UserNotifications
+
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "App")
 
 @main
 struct CanopyApp: App {
@@ -209,6 +212,7 @@ struct TabContentView: View {
     @State private var appState = AppState()
     @State private var statusBarData = StatusBarData()
     @State private var connectionState = ConnectionState()
+    @State private var crashMessage: String?
 
     var body: some View {
         Group {
@@ -226,7 +230,12 @@ struct TabContentView: View {
                         sessionTitle: appState.resumeSessionTitle,
                         statusBarData: statusBarData,
                         remoteHost: appState.remoteHost,
-                        connectionState: connectionState
+                        connectionState: connectionState,
+                        onCrash: { status in
+                            logger.error("Session crashed (status \(status)), returning to launcher")
+                            crashMessage = "Claude process exited unexpectedly (exit code \(status))."
+                            appState.backToLauncher()
+                        }
                     )
                     .overlay {
                         ConnectionOverlayView(
@@ -249,6 +258,11 @@ struct TabContentView: View {
         }
         // Only set title for launcher; session title is managed by ShimProcess
         .windowTitle(appState.screen == .launcher ? "Canopy" : nil)
+        .alert("Session Ended", isPresented: Binding(get: { crashMessage != nil }, set: { if !$0 { crashMessage = nil } })) {
+            Button("OK") { crashMessage = nil }
+        } message: {
+            Text(crashMessage ?? "")
+        }
         .onAppear {
             appState.statusBarData = statusBarData
             ActiveTabState.shared.current = appState
