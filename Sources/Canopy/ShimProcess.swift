@@ -8,6 +8,7 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ShimProcess
 @MainActor
 protocol ShimProcessDelegate: AnyObject {
     func shimProcessDidDisconnect(_ shim: ShimProcess, sessionId: String)
+    func shimProcessDidCrash(_ shim: ShimProcess, status: Int32)
 }
 
 /// Manages a Node.js subprocess running the vscode-shim that bridges the CC extension
@@ -223,7 +224,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             self?.handleStdoutData(data)
         }
 
-        // Read stderr — shim logs
+        // Read stderr — shim logs + CLI exit detection
+        // Use nonisolated(unsafe) to satisfy Sendable requirements — the closure
+        // only dispatches to main thread, never accesses self directly.
+        nonisolated(unsafe) let weakSelf = self
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty {
@@ -233,6 +237,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 for line in str.split(separator: "\n") {
                     logger.info("[shim] \(line, privacy: .public)")
+                    // Detect CLI subprocess exit from extension error log
+                    if line.contains("process exited with code") || line.contains("process terminated by signal") {
+                        let lineStr = String(line)
+                        DispatchQueue.main.async {
+                            weakSelf.handleCLISubprocessExit(lineStr)
+                        }
+                    }
                 }
             }
         }
@@ -240,6 +251,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         proc.terminationHandler = { [weak self] process in
             logger.info("Shim exited with status \(process.terminationStatus)")
             let pid = process.processIdentifier
+            // Best-effort descendant cleanup — some may already be reparented to launchd.
+            // Only needed for unexpected exits (stop() collects them before terminating).
+            let orphans = Self.collectDescendants(of: pid)
+            if !orphans.isEmpty {
+                logger.info("Found \(orphans.count) orphan descendants after shim exit: \(orphans)")
+                Self.killProcessTree(orphans)
+            }
             DispatchQueue.main.async {
                 self?.handleProcessExit(status: process.terminationStatus, pid: pid)
             }
@@ -1144,6 +1162,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    // MARK: - CLI Subprocess Exit Detection
+
+    /// Called when stderr contains evidence that the CLI subprocess died
+    /// while the shim (Node.js) is still running.
+    private func handleCLISubprocessExit(_ line: String) {
+        guard !isIntentionalStop else { return }
+        // Extract exit code from "process exited with code NNN"
+        let exitCode: Int32
+        if let range = line.range(of: "exited with code "),
+           let code = Int32(line[range.upperBound...].prefix(while: \.isNumber)) {
+            exitCode = code
+        } else {
+            exitCode = -1
+        }
+        logger.error("CLI subprocess died (code \(exitCode)), stopping shim")
+        stop()
+        delegate?.shimProcessDidCrash(self, status: exitCode)
+    }
+
     // MARK: - Process Exit
 
     private func handleProcessExit(status: Int32, pid: pid_t) {
@@ -1155,17 +1192,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             descendantPids = []
         }
 
-        if status != 0 && !isIntentionalStop && remoteHost != nil {
-            if let sessionId = activeSessionId {
-                logger.error("SSH disconnection detected (status \(status)), requesting reconnect for session \(sessionId, privacy: .public)")
-                delegate?.shimProcessDidDisconnect(self, sessionId: sessionId)
-            } else {
-                logger.error("SSH connection lost before session established (status \(status))")
-                showErrorInWebView("SSH connection lost. Go back to launcher to reconnect.")
-            }
-        } else if status != 0 && !isIntentionalStop {
-            logger.error("Shim crashed (status \(status))")
-            showErrorInWebView("Claude process exited unexpectedly (status \(status)). Go back to launcher to restart.")
+        guard !isIntentionalStop else { return }
+
+        if remoteHost != nil, let sessionId = activeSessionId {
+            logger.error("SSH disconnection detected (status \(status)), requesting reconnect for session \(sessionId, privacy: .public)")
+            delegate?.shimProcessDidDisconnect(self, sessionId: sessionId)
+        } else {
+            logger.error("Shim exited unexpectedly (status \(status))")
+            delegate?.shimProcessDidCrash(self, status: status)
         }
     }
 
