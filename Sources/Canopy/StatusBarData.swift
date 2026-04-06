@@ -58,20 +58,4 @@ final class StatusBarData {
         remoteHost = nil
     }
 
-    /// Format reset Date as relative string: "18m", "2h05m", "4d", "soon"
-    static func formatResetTime(_ date: Date?) -> String {
-        guard let date else { return "" }
-        let seconds = Int(date.timeIntervalSinceNow)
-        guard seconds > 0 else { return "soon" }
-
-        let minutes = seconds / 60
-        if minutes == 0 { return "<1m" }
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        let remainMinutes = minutes % 60
-        if hours < 24 {
-            return remainMinutes > 0 ? "\(hours)h\(String(format: "%02d", remainMinutes))m" : "\(hours)h"
-        }
-        return "\(hours / 24)d"
-    }
 }

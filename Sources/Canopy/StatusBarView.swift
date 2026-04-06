@@ -137,7 +137,7 @@ struct StatusBarView: View {
     }
 
     private func rateLimitSegment(label: String, pct: Int, resetDate: Date?) -> some View {
-        let reset = StatusBarData.formatResetTime(resetDate)
+        let reset = SharedRateLimitData.formatResetTime(resetDate)
         return HStack(spacing: 5) {
             Text(label)
                 .foregroundStyle(.tertiary)
