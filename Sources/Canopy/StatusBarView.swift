@@ -2,6 +2,7 @@ import SwiftUI
 
 struct StatusBarView: View {
     let data: StatusBarData
+    private var rateLimit: SharedRateLimitData { SharedRateLimitData.shared }
 
     var body: some View {
         // TimelineView ticks every 60s so rate-limit reset countdowns stay fresh.
@@ -60,16 +61,17 @@ struct StatusBarView: View {
                 .help("Context: \(data.formatTokens(data.contextUsed)) / \(data.formatTokens(data.compactionWindow)) tokens\(data.didCompact ? " (compacted)" : "")")
             }
 
-            // 5hr rate limit
-            if data.sessionResetDate != nil {
+            // 5hr rate limit (shared across all tabs)
+            if rateLimit.sessionResetDate != nil {
                 separator
-                rateLimitSegment(label: "5hr", pct: data.sessionPct, resetDate: data.sessionResetDate)
+                rateLimitSegment(label: "5hr", pct: rateLimit.sessionPct, resetDate: rateLimit.sessionResetDate)
             }
 
-            // Weekly rate limit
-            if data.effectiveWeeklyResetDate != nil {
+            // Weekly rate limit (shared across all tabs)
+            let weeklyResetDate = rateLimit.effectiveWeeklyResetDate(for: data.model)
+            if weeklyResetDate != nil {
                 separator
-                rateLimitSegment(label: "Wk", pct: data.effectiveWeeklyPct, resetDate: data.effectiveWeeklyResetDate)
+                rateLimitSegment(label: "Wk", pct: rateLimit.effectiveWeeklyPct(for: data.model), resetDate: weeklyResetDate)
             }
 
             // Message count
@@ -135,7 +137,7 @@ struct StatusBarView: View {
     }
 
     private func rateLimitSegment(label: String, pct: Int, resetDate: Date?) -> some View {
-        let reset = StatusBarData.formatResetTime(resetDate)
+        let reset = SharedRateLimitData.formatResetTime(resetDate)
         return HStack(spacing: 5) {
             Text(label)
                 .foregroundStyle(.tertiary)
