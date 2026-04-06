@@ -94,10 +94,15 @@ final class SharedRateLimitData {
         return 0
     }
 
+    private static let isoFormatterWithFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let isoFormatterStandard = ISO8601DateFormatter()
+
     private static func parseISO8601(_ isoString: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: isoString) { return date }
-        return ISO8601DateFormatter().date(from: isoString)
+        if let date = isoFormatterWithFractional.date(from: isoString) { return date }
+        return isoFormatterStandard.date(from: isoString)
     }
 }
