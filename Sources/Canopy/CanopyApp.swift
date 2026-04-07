@@ -278,9 +278,10 @@ struct TabContentView: View {
         }
         .background(WindowRefReader(window: $hostWindow))
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)) { note in
-            if let window = note.object as? NSWindow, window === hostWindow {
-                ActiveTabState.shared.current = appState
-            }
+            guard let hostWin = hostWindow,
+                  let notifWin = note.object as? NSWindow,
+                  notifWin === hostWin else { return }
+            ActiveTabState.shared.current = appState
         }
     }
 }

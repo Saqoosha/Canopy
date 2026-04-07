@@ -95,9 +95,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 barData?.gitBranch = vcsInfo.branch
             }
         }
-        // Restore cached contextMax for immediate display on session resume
+        // Restore cached context limits for immediate display on session resume
         let cachedMax = UserDefaults.standard.integer(forKey: "statusBar.contextMax.\(workingDirectory.path)")
         if cachedMax > 0 { statusBarData?.contextMax = cachedMax }
+        let cachedMaxOutput = UserDefaults.standard.integer(forKey: "statusBar.maxOutputTokens.\(workingDirectory.path)")
+        if cachedMaxOutput > 0 { statusBarData?.maxOutputTokens = cachedMaxOutput }
         if let sessionId = resumeSessionId {
             statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
                 sessionId: sessionId, directory: workingDirectory
@@ -1042,7 +1044,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
 
         case "result":
-            // Context window size and max output tokens from modelUsage — use largest (main model has the biggest window)
+            // Use the model with the largest contextWindow (main model); take its maxOutputTokens too
             if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
                 var largestCW = 0
                 var maxOutput = 0
@@ -1059,6 +1061,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     data.contextMax = largestCW
                     data.maxOutputTokens = maxOutput
                     UserDefaults.standard.set(largestCW, forKey: "statusBar.contextMax.\(workingDirectory.path)")
+                    UserDefaults.standard.set(maxOutput, forKey: "statusBar.maxOutputTokens.\(workingDirectory.path)")
                 }
             }
             // Refresh VCS branch (user may have switched branches during session)
