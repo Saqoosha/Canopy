@@ -194,6 +194,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             CanopySettings.shared.setProcessWrapper(wrapperPath)
             logger.info("SSH remote mode: host=\(remote, privacy: .public) wrapper=\(wrapperPath, privacy: .public)")
+        } else {
+            // Local session: ensure no leftover wrapper from a previous SSH session
+            CanopySettings.shared.setProcessWrapper(nil)
         }
 
         proc.environment = env
@@ -1212,7 +1215,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         (function(){
             var el = document.getElementById('claude-error');
             if (!el) { el = document.createElement('pre'); el.id = 'claude-error'; document.body.prepend(el); }
-            el.style.cssText = 'padding:20px;color:#c00;font-size:14px;font-family:-apple-system,sans-serif;';
+            el.style.cssText = 'display:block;position:fixed;top:0;left:0;right:0;z-index:9999;margin:0;padding:12px 16px;background:#fee2e2;color:#991b1b;font-size:13px;white-space:pre-wrap;font-family:-apple-system,sans-serif;';
             el.textContent = '\(escaped)';
         })()
         """
