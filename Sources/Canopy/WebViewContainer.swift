@@ -460,12 +460,11 @@ struct WebViewContainer: NSViewRepresentable {
               font-weight: 430;
             }
 
-            /* Input area */
+            /* Input area — no line-height override (causes caret drift in WKWebView contenteditable) */
             [class*="messageInput_"],
             [class*="inputContainer_"] {
               font-family: system-ui, -apple-system, sans-serif;
               font-size: 14px;
-              line-height: 20px;
             }
 
             /* Headings: same size, bold 600 */
@@ -519,6 +518,12 @@ struct WebViewContainer: NSViewRepresentable {
               padding: 0 !important;
               border-radius: 0 !important;
               font-size: inherit !important;
+            }
+
+            /* To-do list: align checkbox with first line of text */
+            /* flex-start + margin-top: checkbox 11px centered in 22px line-height = (22-11)/2 ≈ 5.5px */
+            [class*="todoItem_"] [class*="checkbox_"] {
+              margin-top: 5.5px !important;
             }
 
             /* Font feature settings: disable ligatures in code */
