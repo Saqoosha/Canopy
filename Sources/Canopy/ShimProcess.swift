@@ -1042,19 +1042,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
 
         case "result":
-            // Context window size from modelUsage — use largest (main model has the biggest window)
+            // Context window size and max output tokens from modelUsage — use largest (main model has the biggest window)
             if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
                 var largestCW = 0
+                var maxOutput = 0
                 for (_, value) in modelUsage {
                     if let info = value as? [String: Any],
                        let cw = info["contextWindow"] as? Int,
                        cw > largestCW
                     {
                         largestCW = cw
+                        maxOutput = info["maxOutputTokens"] as? Int ?? 0
                     }
                 }
                 if largestCW > 0 {
                     data.contextMax = largestCW
+                    data.maxOutputTokens = maxOutput
                     UserDefaults.standard.set(largestCW, forKey: "statusBar.contextMax.\(workingDirectory.path)")
                 }
             }

@@ -213,6 +213,7 @@ struct TabContentView: View {
     @State private var statusBarData = StatusBarData()
     @State private var connectionState = ConnectionState()
     @State private var crashMessage: String?
+    @State private var hostWindow: NSWindow?
 
     var body: some View {
         Group {
@@ -275,8 +276,27 @@ struct TabContentView: View {
                 appState.launchSession(directory: URL(fileURLWithPath: dir), model: m, effortLevel: e, permissionMode: p)
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)) { _ in
-            ActiveTabState.shared.current = appState
+        .background(WindowRefReader(window: $hostWindow))
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)) { note in
+            if let window = note.object as? NSWindow, window === hostWindow {
+                ActiveTabState.shared.current = appState
+            }
+        }
+    }
+}
+
+// MARK: - Window ref reader
+
+private struct WindowRefReader: NSViewRepresentable {
+    @Binding var window: NSWindow?
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if window !== nsView.window {
+                window = nsView.window
+            }
         }
     }
 }
