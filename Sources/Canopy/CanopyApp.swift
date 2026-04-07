@@ -5,10 +5,24 @@ import UserNotifications
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "App")
 
+// MARK: - FocusedValue for AppState (menu commands → focused tab's AppState)
+
+private struct FocusedAppStateKey: FocusedValueKey {
+    typealias Value = AppState
+}
+
+extension FocusedValues {
+    var appState: AppState? {
+        get { self[FocusedAppStateKey.self] }
+        set { self[FocusedAppStateKey.self] = newValue }
+    }
+}
+
 @main
 struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
+    @FocusedValue(\.appState) private var focusedAppState
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -32,14 +46,16 @@ struct CanopyApp: App {
                 Divider()
 
                 Button("Back to Launcher") {
-                    ActiveTabState.shared.backToLauncher()
+                    focusedAppState?.backToLauncher()
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(focusedAppState == nil)
 
                 Button("Open Folder...") {
-                    ActiveTabState.shared.openFolder()
+                    openFolder()
                 }
                 .keyboardShortcut("o")
+                .disabled(focusedAppState == nil)
             }
             CommandGroup(after: .toolbar) {
                 ForEach(1...9, id: \.self) { index in
@@ -53,6 +69,21 @@ struct CanopyApp: App {
 
         Settings {
             SettingsView()
+        }
+    }
+
+    private func openFolder() {
+        guard let targetState = focusedAppState else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open"
+        if panel.runModal() == .OK, let url = panel.url {
+            let model = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
+            let effort = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
+            let permission = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
+            targetState.launchSession(directory: url, model: model, effortLevel: effort, permissionMode: permission)
         }
     }
 
@@ -82,33 +113,6 @@ struct CanopyApp: App {
         newWindow.isReleasedWhenClosed = false
         existingWindow.addTabbedWindow(newWindow, ordered: .above)
         newWindow.makeKeyAndOrderFront(nil)
-    }
-}
-
-// MARK: - Active tab state bridge (menu commands → active tab's AppState)
-
-/// Tracks the active tab's AppState so menu commands can target it.
-@MainActor
-final class ActiveTabState {
-    static let shared = ActiveTabState()
-    weak var current: AppState?
-
-    func backToLauncher() {
-        current?.backToLauncher()
-    }
-
-    func openFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Open"
-        if panel.runModal() == .OK, let url = panel.url {
-            let model = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
-            let effort = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
-            let permission = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
-            current?.launchSession(directory: url, model: model, effortLevel: effort, permissionMode: permission)
-        }
     }
 }
 
@@ -213,7 +217,6 @@ struct TabContentView: View {
     @State private var statusBarData = StatusBarData()
     @State private var connectionState = ConnectionState()
     @State private var crashMessage: String?
-    @State private var hostWindow: NSWindow?
 
     var body: some View {
         Group {
@@ -264,9 +267,9 @@ struct TabContentView: View {
         } message: {
             Text(crashMessage ?? "")
         }
+        .focusedSceneValue(\.appState, appState)
         .onAppear {
             appState.statusBarData = statusBarData
-            ActiveTabState.shared.current = appState
             // Debug: auto-launch session (defaults write sh.saqoo.Canopy debugAutoLaunchDir /tmp)
             if let dir = appState.debugAutoLaunchDir, appState.screen == .launcher {
                 appState.debugAutoLaunchDir = nil
@@ -274,29 +277,6 @@ struct TabContentView: View {
                 let e = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
                 let p = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
                 appState.launchSession(directory: URL(fileURLWithPath: dir), model: m, effortLevel: e, permissionMode: p)
-            }
-        }
-        .background(WindowRefReader(window: $hostWindow))
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)) { note in
-            guard let hostWin = hostWindow,
-                  let notifWin = note.object as? NSWindow,
-                  notifWin === hostWin else { return }
-            ActiveTabState.shared.current = appState
-        }
-    }
-}
-
-// MARK: - Window ref reader
-
-private struct WindowRefReader: NSViewRepresentable {
-    @Binding var window: NSWindow?
-
-    func makeNSView(context: Context) -> NSView { NSView() }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            if window !== nsView.window {
-                window = nsView.window
             }
         }
     }
