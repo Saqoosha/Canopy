@@ -94,7 +94,7 @@ struct StatusBarView: View {
         .frame(height: 28)
         .frame(maxWidth: .infinity)
         .padding(.bottom, 12)
-        .background(Color(red: 0xF3/255, green: 0xF4/255, blue: 0xF5/255))
+        .background(.white)
     }
 
     // MARK: - Components

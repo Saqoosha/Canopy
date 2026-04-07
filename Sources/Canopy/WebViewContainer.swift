@@ -310,21 +310,37 @@ struct WebViewContainer: NSViewRepresentable {
         logger.info("CSS exists: \(FileManager.default.fileExists(atPath: cssFile.path), privacy: .public)")
         logger.info("JS exists: \(FileManager.default.fileExists(atPath: jsFile.path), privacy: .public)")
 
+        // Prepare Application Support dir for HTML file
+        let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Canopy")
+        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
         let html = """
         <!DOCTYPE html>
         <html lang="en">
         <head>
           <meta charset="UTF-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <!-- Theme variables -->
           <style>\(VSCodeStub.themeCSSVariables)</style>
           <link href="\(cssFile.absoluteString)" rel="stylesheet">
           <style>
             :root {
+              /* Claude Desktop warm ivory palette */
               --vscode-editor-font-family: "SF Mono", Menlo, Monaco, monospace !important;
-              --vscode-editor-font-size: 13px !important;
+              --vscode-editor-font-size: 14px !important;
               --vscode-editor-font-weight: normal !important;
-              --vscode-chat-font-size: 13px;
-              --vscode-chat-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+              --vscode-chat-font-size: 14px;
+              --vscode-chat-font-family: system-ui, -apple-system, sans-serif;
+              --vscode-font-size: 14px;
+              /* Claude Desktop backgrounds */
+              --vscode-sideBar-background: #ffffff !important;
+              --vscode-editor-background: #ffffff !important;
+              --vscode-input-background: #ffffff !important;
+              --vscode-menu-background: #ffffff !important;
+              /* Warm text colors */
+              --vscode-editor-foreground: #141413 !important;
+              --vscode-foreground: #141413 !important;
+              --vscode-descriptionForeground: rgba(20, 20, 19, 0.65) !important;
               /* Variables injected by VSCode host, not defined in CC extension CSS */
               --app-code-background: var(--vscode-editor-background);
               --app-link-color: var(--vscode-textLink-foreground);
@@ -354,9 +370,9 @@ struct WebViewContainer: NSViewRepresentable {
                 overscroll-behavior-x: none;
                 background-color: transparent;
                 color: var(--vscode-editor-foreground);
-                font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
-                font-weight: var(--vscode-font-weight, normal);
-                font-size: var(--vscode-font-size, 13px);
+                font-family: var(--vscode-font-family, system-ui, -apple-system, sans-serif);
+                font-weight: var(--vscode-font-weight, 400);
+                font-size: var(--vscode-font-size, 14px);
                 margin: 0;
                 padding: 0;
               }
@@ -368,13 +384,20 @@ struct WebViewContainer: NSViewRepresentable {
                 outline-offset: -1px;
               }
               code {
-                font-family: var(--vscode-editor-font-family, monospace);
-                color: var(--vscode-textPreformat-foreground);
-                background-color: var(--vscode-textPreformat-background);
-                padding: 1px 3px;
-                border-radius: 4px;
+                font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+                color: rgb(138, 36, 36);
+                background-color: rgba(0, 0, 0, 0.04);
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                padding: 1px 4px;
+                border-radius: 6.4px;
+                font-size: 13px;
+                white-space: pre-wrap;
               }
-              pre code { padding: 0; }
+              pre code {
+                padding: 0;
+                border: none;
+                background-color: transparent;
+              }
               blockquote {
                 background: var(--vscode-textBlockQuote-background);
                 border-color: var(--vscode-textBlockQuote-border);
@@ -395,6 +418,7 @@ struct WebViewContainer: NSViewRepresentable {
               ::-webkit-scrollbar-thumb:active { background-color: var(--vscode-scrollbarSlider-activeBackground); }
             }
           </style>
+          <!-- Claude Desktop-inspired overrides -->
           <style>
             /* Fix br not rendering in contenteditable input fields in WKWebView */
             [contenteditable] {
@@ -403,26 +427,117 @@ struct WebViewContainer: NSViewRepresentable {
             }
             /* Tool name secondary text: use description color instead of link color */
             [class*="toolNameTextSecondary_"] {
-              color: var(--app-secondary-foreground) !important;
+              color: var(--app-secondary-text) !important;
             }
             /* Fix diff truncation gradient: hardcoded dark #1e1e1e → light */
             [class*="truncationGradient_"] {
               background: linear-gradient(transparent 0%, var(--vscode-editor-background, #ffffff) 100%) !important;
             }
+
+            /* Match Chromium's font smoothing (thinner/lighter than WebKit default) */
+            body {
+              -webkit-font-smoothing: antialiased;
+              -moz-osx-font-smoothing: grayscale;
+            }
+
+            /* --- Claude Desktop Code tab parity --- */
+
+            /* All messages: system-ui, 14px, weight 430 */
+            /* line-height 22px — WebKit clips inline code borders at tight line-heights */
+            [class*="timelineMessage_"] {
+              font-family: system-ui, -apple-system, sans-serif;
+              font-size: 14px;
+              line-height: 22px;
+              font-weight: 430;
+              color: rgb(20, 20, 19);
+            }
+
+            /* User messages */
+            [class*="userMessage_"] {
+              font-family: system-ui, -apple-system, sans-serif;
+              font-size: 14px;
+              line-height: 22px;
+              font-weight: 430;
+            }
+
+            /* Input area */
+            [class*="messageInput_"],
+            [class*="inputContainer_"] {
+              font-family: system-ui, -apple-system, sans-serif;
+              font-size: 14px;
+              line-height: 20px;
+            }
+
+            /* Headings: same size, bold 600 */
+            [class*="timelineMessage_"] h1,
+            [class*="timelineMessage_"] h2,
+            [class*="timelineMessage_"] h3 {
+              font-family: system-ui, -apple-system, sans-serif;
+              font-size: 14px !important;
+              font-weight: 600 !important;
+              line-height: 20px !important;
+              margin: 8px 0 0 !important;
+            }
+
+            /* Strong: weight 600 */
+            [class*="timelineMessage_"] strong {
+              font-weight: 600 !important;
+            }
+
+            /* Links: dark gray with underline (not blue) */
+            [class*="timelineMessage_"] a {
+              color: rgb(61, 61, 58) !important;
+              text-decoration: underline !important;
+            }
+
+            /* Code blocks: larger padding, rounder corners */
+            pre {
+              border-radius: 0.375rem !important;
+              padding: 0.857em 1.143em !important;
+            }
+
+            /* Inline code: exact Claude Desktop values */
+            [class*="timelineMessage_"] code,
+            [class*="userMessage_"] code {
+              font-family: "SF Mono", ui-monospace, monospace !important;
+              color: rgb(138, 36, 36) !important;
+              background-color: rgba(250, 249, 245, 0.5) !important;
+              border: 1px solid rgba(31, 30, 29, 0.15) !important;
+              padding: 1px 4px !important;
+              border-radius: 6.4px !important;
+              font-size: 13px !important;
+              line-height: 20px !important;
+              display: inline !important;
+              vertical-align: baseline !important;
+              white-space: pre-wrap;
+            }
+            /* Don't apply inline code styling inside code blocks */
+            pre code {
+              color: inherit !important;
+              background-color: transparent !important;
+              border: none !important;
+              padding: 0 !important;
+              border-radius: 0 !important;
+              font-size: inherit !important;
+            }
+
+            /* Font feature settings: disable ligatures in code */
+            code, pre, kbd, samp {
+              font-variant-ligatures: none;
+              font-feature-settings: "calt" 0, "liga" 0;
+            }
           </style>
         </head>
         <body class="vscode-light">
-          <pre id="claude-error"></pre>
+          <pre id="claude-error" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; margin:0; padding:12px 16px; background:#fee2e2; color:#991b1b; font-size:13px; white-space:pre-wrap;"></pre>
+          <script>new MutationObserver(function(){var e=document.getElementById('claude-error');if(e)e.style.display=e.textContent?'block':'none'}).observe(document.getElementById('claude-error'),{childList:true,characterData:true,subtree:true})</script>
           <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")\(Self.initialAuthStatusAttr())></div>
           <script src="\(jsFile.absoluteString)" type="module"></script>
         </body>
         </html>
         """
 
-        // Write HTML to Application Support (under home dir so allowingReadAccessTo works)
-        let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Canopy")
-        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+        // Write HTML to Application Support
         let htmlFile = appSupportDir.appendingPathComponent("_canopy.html")
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
@@ -448,6 +563,7 @@ struct WebViewContainer: NSViewRepresentable {
         guard let jsonStr = KeychainAuth.readAuthStatusJSON() else { return "" }
         return " data-initial-auth-status=\"\(jsonStr.replacingOccurrences(of: "\"", with: "&quot;"))\""
     }
+
 
     // MARK: - Link click interception JS
 
