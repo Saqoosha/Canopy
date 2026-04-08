@@ -40,13 +40,18 @@ struct LauncherView: View {
                     .toggleStyle(.switch)
                     .padding(.horizontal)
 
+                sessionOptions
+
                 if isRemoteMode {
                     sshHostCard
                     remoteDirectoryCard
                 } else {
-                    sessionOptions
                     directoryCard
-                    startButton
+                }
+
+                startButton
+
+                if !isRemoteMode {
                     searchField
                     listsSection
                 }
@@ -407,7 +412,7 @@ struct LauncherView: View {
         let isHovered = hoveredSessionId == session.id
         return Button {
             selectedDirectory = session.projectDirectory
-            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id, sessionTitle: session.title, model: model.isEmpty ? nil : model, effortLevel: effortLevel.isEmpty ? nil : effortLevel, permissionMode: PermissionMode(rawValue: permissionModeRaw) ?? .acceptEdits)
+            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id, sessionTitle: session.title, model: model.isEmpty ? nil : model, effortLevel: effortLevel.isEmpty ? nil : effortLevel, permissionMode: resolvedPermission)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "text.bubble")
@@ -535,6 +540,12 @@ struct LauncherView: View {
         return perm
     }
 
+    private func latestSession(for directory: URL) -> SessionEntry? {
+        sessions
+            .filter { $0.projectDirectory == directory }
+            .max { $0.timestamp < $1.timestamp }
+    }
+
     /// Launch from a recent directory row. If "Continue session" is on, resume the most recent session for that directory.
     private func launchFromDirectory(_ dir: URL) {
         let selectedModel = model.isEmpty ? nil : model
@@ -542,11 +553,9 @@ struct LauncherView: View {
 
         var resumeId: String?
         var resumeTitle: String?
-        if continueSession {
-            if let latest = sessions.first(where: { $0.projectDirectory == dir }) {
-                resumeId = latest.id
-                resumeTitle = latest.title
-            }
+        if continueSession, let latest = latestSession(for: dir) {
+            resumeId = latest.id
+            resumeTitle = latest.title
         }
         appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: resolvedPermission)
     }
@@ -570,7 +579,7 @@ struct LauncherView: View {
             var resumeId: String?
             var resumeTitle: String?
             if continueSession {
-                if let latest = sessions.first(where: { $0.projectDirectory == dir }) {
+                if let latest = latestSession(for: dir) {
                     resumeId = latest.id
                     resumeTitle = latest.title
                 }
