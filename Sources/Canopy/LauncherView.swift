@@ -452,11 +452,11 @@ struct LauncherView: View {
     }
 
     private var filteredSessions: [SessionEntry] {
-        guard !searchText.isEmpty else { return Array(sessions.prefix(20)) }
+        guard !searchText.isEmpty else { return Array(sessions.prefix(50)) }
         let q = searchText.lowercased()
-        return sessions.filter {
+        return Array(sessions.filter {
             $0.title.lowercased().contains(q) || $0.projectName.lowercased().contains(q)
-        }
+        }.prefix(50))
     }
 
     // MARK: - SSH Host Card
@@ -602,17 +602,16 @@ struct LauncherView: View {
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        for provider in providers {
-            provider.loadItem(forTypeIdentifier: "public.file-url") { data, _ in
-                guard let data = data as? Data,
-                      let url = URL(dataRepresentation: data, relativeTo: nil)
-                else { return }
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
-                      isDir.boolValue
-                else { return }
-                DispatchQueue.main.async { selectedDirectory = url }
-            }
+        guard let provider = providers.first else { return false }
+        provider.loadItem(forTypeIdentifier: "public.file-url") { data, _ in
+            guard let data = data as? Data,
+                  let url = URL(dataRepresentation: data, relativeTo: nil)
+            else { return }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+                  isDir.boolValue
+            else { return }
+            DispatchQueue.main.async { selectedDirectory = url }
         }
         return true
     }
