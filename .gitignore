@@ -6,3 +6,4 @@ Canopy.xcodeproj/
 Canopy.app/
 .DS_Store
 firebase-debug.log
+Resources/prism/

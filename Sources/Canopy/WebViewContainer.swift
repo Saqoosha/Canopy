@@ -306,6 +306,10 @@ struct WebViewContainer: NSViewRepresentable {
         let cssFile = webviewDir.appendingPathComponent("index.css")
         let jsFile = webviewDir.appendingPathComponent("index.js")
 
+        // Prism.js syntax highlighting
+        let prismJSURL = Bundle.main.url(forResource: "prism", withExtension: "js")
+        let prismCSSURL = Bundle.main.url(forResource: "prism-canopy", withExtension: "css")
+
         logger.info("Extension path: \(extPath.path, privacy: .public)")
         logger.info("CSS exists: \(FileManager.default.fileExists(atPath: cssFile.path), privacy: .public)")
         logger.info("JS exists: \(FileManager.default.fileExists(atPath: jsFile.path), privacy: .public)")
@@ -342,7 +346,7 @@ struct WebViewContainer: NSViewRepresentable {
               --vscode-foreground: #141413 !important;
               --vscode-descriptionForeground: rgba(20, 20, 19, 0.65) !important;
               /* Variables injected by VSCode host, not defined in CC extension CSS */
-              --app-code-background: var(--vscode-editor-background);
+              --app-code-background: #f5f5f0;
               --app-link-color: var(--vscode-textLink-foreground);
               --app-link-foreground: var(--vscode-textLink-foreground);
               --app-link: var(--vscode-textLink-foreground);
@@ -489,10 +493,16 @@ struct WebViewContainer: NSViewRepresentable {
               text-decoration: underline !important;
             }
 
-            /* Code blocks: larger padding, rounder corners */
-            pre {
-              border-radius: 0.375rem !important;
+            /* Code blocks: border, padding, rounder corners — matches Claude Desktop */
+            [class*="codeBlockWrapper_"] pre {
+              border: 0.5px solid rgba(0, 0, 0, 0.12) !important;
+              border-radius: 0.5rem !important;
               padding: 0.857em 1.143em !important;
+              background-color: rgba(245, 244, 240, 0.5) !important;
+            }
+            /* Tool/bash output: no background */
+            [class*="toolResult_"] {
+              background-color: transparent !important;
             }
 
             /* Inline code: exact Claude Desktop values */
@@ -510,7 +520,10 @@ struct WebViewContainer: NSViewRepresentable {
               vertical-align: baseline !important;
               white-space: pre-wrap;
             }
-            /* Don't apply inline code styling inside code blocks */
+            /* Don't apply inline code styling inside code blocks.
+               Needs [class*] to beat [class*="timelineMessage_"] code specificity (0-1-1 > 0-0-2). */
+            [class*="timelineMessage_"] pre code,
+            [class*="userMessage_"] pre code,
             pre code {
               color: inherit !important;
               background-color: transparent !important;
@@ -518,6 +531,8 @@ struct WebViewContainer: NSViewRepresentable {
               padding: 0 !important;
               border-radius: 0 !important;
               font-size: inherit !important;
+              line-height: inherit !important;
+              display: inline !important;
             }
 
             /* To-do list: align checkbox with first line of text */
@@ -532,12 +547,14 @@ struct WebViewContainer: NSViewRepresentable {
               font-feature-settings: "calt" 0, "liga" 0;
             }
           </style>
+          \(prismCSSURL.map { "<link href=\"\($0.absoluteString)\" rel=\"stylesheet\">" } ?? "<!-- prism-canopy.css not found -->")
         </head>
         <body class="vscode-light">
           <pre id="claude-error" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; margin:0; padding:12px 16px; background:#fee2e2; color:#991b1b; font-size:13px; white-space:pre-wrap;"></pre>
           <script>new MutationObserver(function(){var e=document.getElementById('claude-error');if(e)e.style.display=e.textContent?'block':'none'}).observe(document.getElementById('claude-error'),{childList:true,characterData:true,subtree:true})</script>
           <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")\(Self.initialAuthStatusAttr())></div>
           <script src="\(jsFile.absoluteString)" type="module"></script>
+          \(prismJSURL.map { "<script src=\"\($0.absoluteString)\"></script>" } ?? "<!-- prism.js not found -->")
         </body>
         </html>
         """

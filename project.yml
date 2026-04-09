@@ -28,6 +28,10 @@ targets:
         buildPhase: resources
       - path: Resources/ssh-claude-wrapper.sh
         buildPhase: resources
+      - path: Resources/prism.js
+        buildPhase: resources
+      - path: Resources/prism-canopy.css
+        buildPhase: resources
     resources:
       - path: Sources/Canopy/Resources/Assets.xcassets
       - path: Sources/Canopy/theme-light.css
