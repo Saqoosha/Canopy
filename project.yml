@@ -32,6 +32,8 @@ targets:
         buildPhase: resources
       - path: Resources/prism-canopy.css
         buildPhase: resources
+      - path: Resources/canopy-overrides.css
+        buildPhase: resources
     resources:
       - path: Sources/Canopy/Resources/Assets.xcassets
       - path: Sources/Canopy/theme-light.css
