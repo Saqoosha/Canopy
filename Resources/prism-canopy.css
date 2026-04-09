@@ -1,0 +1,119 @@
+/* Prism.js theme for Canopy — matches Claude Desktop Code colors */
+
+code[class*="language-"],
+pre[class*="language-"] {
+  color: rgb(20, 24, 31);
+  background: transparent;
+  font-family: var(--vscode-editor-font-family, "SF Mono", ui-monospace, monospace);
+  font-size: 13px;
+  text-align: left;
+  white-space: pre;
+  word-spacing: normal;
+  word-break: normal;
+  overflow-wrap: normal;
+  line-height: 20px;
+  tab-size: 2;
+  hyphens: none;
+}
+
+/* Comments */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata,
+.token.shebang {
+  color: rgb(110, 118, 135);
+}
+
+/* Punctuation */
+.token.punctuation {
+  color: rgb(43, 48, 59);
+}
+
+/* Keywords */
+.token.keyword,
+.token.control-flow,
+.token.tag,
+.token.boolean,
+.token.constant,
+.token.nil,
+.token.class-name.keyword {
+  color: rgb(129, 0, 194);
+}
+
+/* Operators, arrows & entity */
+.token.operator,
+.token.entity,
+.token.url,
+.token.spread,
+.token.arrow {
+  color: rgb(20, 24, 31);
+}
+
+/* Strings */
+.token.string,
+.token.char,
+.token.template-string,
+.token.attr-value,
+.token.inserted {
+  color: rgb(0, 128, 0);
+}
+
+/* Functions & methods */
+.token.function,
+.token.method,
+.token.builtin,
+.token.property-access,
+.token.function-variable,
+.token.method-variable {
+  color: rgb(0, 81, 194);
+}
+
+/* Parameters */
+.token.parameter {
+  color: rgb(184, 79, 5);
+}
+
+/* Object literal properties */
+.token.literal-property {
+  color: rgb(184, 10, 24);
+}
+
+/* Known classes, DOM globals, console */
+.token.known-class-name,
+.token.class-name,
+.token.maybe-class-name,
+.token.dom,
+.token.console {
+  color: rgb(179, 74, 0);
+}
+
+/* Numbers */
+.token.number {
+  color: rgb(0, 128, 128);
+}
+
+/* Regex */
+.token.regex {
+  color: rgb(0, 128, 0);
+}
+
+/* Attributes */
+.token.attr-name {
+  color: rgb(184, 79, 5);
+}
+
+/* Deleted (diff) */
+.token.deleted {
+  color: rgb(172, 33, 33);
+}
+
+/* Selection */
+.token.namespace {
+  opacity: 0.7;
+}
+
+/* Bold/Italic */
+.token.bold,
+.token.important { font-weight: bold; }
+.token.italic { font-style: italic; }

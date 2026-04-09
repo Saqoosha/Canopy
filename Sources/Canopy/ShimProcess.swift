@@ -87,7 +87,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
         statusBarData?.remoteHost = remoteHost
         let dir = workingDirectory
-        let barData = statusBarData
+        nonisolated(unsafe) let barData = statusBarData
         DispatchQueue.global(qos: .utility).async {
             guard let vcsInfo = Self.detectVCSInfo(at: dir) else { return }
             DispatchQueue.main.async {
