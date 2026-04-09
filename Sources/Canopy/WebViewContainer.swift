@@ -493,12 +493,19 @@ struct WebViewContainer: NSViewRepresentable {
               text-decoration: underline !important;
             }
 
-            /* Code blocks: border, padding, rounder corners — matches Claude Desktop */
+            /* Code blocks: border on wrapper, not pre — matches Claude Desktop */
+            [class*="codeBlockWrapper_"] {
+              border: 1px solid rgba(31, 30, 29, 0.15) !important;
+              border-radius: 8px !important;
+              background: rgba(250, 249, 245, 0.5) !important;
+              padding: 8px 40px 8px 8px !important;
+              overflow-x: auto !important;
+            }
             [class*="codeBlockWrapper_"] pre {
-              border: 0.5px solid rgba(0, 0, 0, 0.12) !important;
-              border-radius: 0.5rem !important;
-              padding: 0.857em 1.143em !important;
-              background-color: rgba(245, 244, 240, 0.5) !important;
+              padding: 0 !important;
+              margin: 0 !important;
+              border-radius: 0 !important;
+              background: transparent !important;
             }
             /* Tool/bash output: no background */
             [class*="toolResult_"] {

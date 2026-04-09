@@ -41,11 +41,12 @@ pre[class*="language-"] {
   color: rgb(129, 0, 194);
 }
 
-/* Operators & entity */
+/* Operators, arrows & entity */
 .token.operator,
 .token.entity,
 .token.url,
-.token.spread {
+.token.spread,
+.token.arrow {
   color: rgb(20, 24, 31);
 }
 
@@ -73,16 +74,18 @@ pre[class*="language-"] {
   color: rgb(184, 79, 5);
 }
 
-/* Known classes */
+/* Known classes, DOM globals, console */
 .token.known-class-name,
 .token.class-name,
-.token.maybe-class-name {
+.token.maybe-class-name,
+.token.dom,
+.token.console {
   color: rgb(179, 74, 0);
 }
 
 /* Numbers */
 .token.number {
-  color: rgb(0, 81, 194);
+  color: rgb(0, 128, 128);
 }
 
 /* Regex */
