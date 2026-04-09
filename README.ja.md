@@ -22,6 +22,7 @@
 - **リアルタイムストリーミング** — 思考、テキスト、ツール使用をライブ表示
 - **自動アップデート** — Sparkle によるデルタアップデート対応
 - **キーボードショートカット** — Cmd+N（ランチャー）、Cmd+O（フォルダを開く）、Cmd+T（新規タブ）
+- **カスタムスタイル** — タイポグラフィ、コードブロック、シンタックスハイライトを調整し、ネイティブ macOS に馴染む見た目に
 
 ## 必要なもの
 
@@ -86,6 +87,8 @@ Sources/Canopy/
 Resources/
   vscode-shim/                 VSCode API を shim する Node.js モジュール群
   ssh-claude-wrapper.sh        SSH リモート用ラッパースクリプト
+  canopy-overrides.css         カスタムスタイル: タイポグラフィ、コードブロック、WKWebView 修正
+  prism-canopy.css             シンタックスハイライトテーマ (Prism.js, Claude Desktop 風配色)
 ```
 
 ### テスト

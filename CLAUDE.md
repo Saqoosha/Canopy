@@ -62,7 +62,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `WebViewContainer.swift` — WKWebView setup, CC webview loading, VSCode default CSS injection
 - `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction
 - `RecentDirectories.swift` — MRU directory list in UserDefaults
-- `VSCodeStub.swift` — acquireVsCodeApi() JS stub, loads theme CSS from bundled resource
+- `VSCodeStub.swift` — acquireVsCodeApi() JS stub, Monaco theme patch, IME fix, loads theme CSS
 - `CCExtension.swift` — Extension/CLI path discovery
 - `StatusBarData.swift` — Observable model for native status bar (context usage, model, CLI version, rate limits, remote host)
 - `StatusBarView.swift` — Native SwiftUI status bar: context usage bar, model/version, rate limit indicators, remote host
@@ -73,6 +73,10 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `ConnectionState.swift` — Observable connection status (connected, reconnecting, failed) for SSH overlay
 - `ConnectionOverlayView.swift` — SwiftUI overlay showing SSH disconnect/reconnect state
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
+
+### Custom Styles (Resources/)
+- `canopy-overrides.css` — Custom CSS overrides: typography, code blocks, --app-* bridge vars, WKWebView fixes, timeline fix
+- `prism-canopy.css` — Prism.js syntax highlighting theme matching Claude Desktop Code colors
 
 ### SSH Remote (Resources/)
 - `ssh-claude-wrapper.sh` — Process wrapper: strips local paths, runs `claude` on remote via SSH
@@ -132,12 +136,16 @@ Chat:    io_message(user) → CLI stdin
 ## Key Learnings (General)
 - `--bare` flag skips keychain/OAuth auth — do NOT use
 - `--include-partial-messages` makes CLI output `stream_event` (real SSE) not just `assistant` (batch)
-- VSCode injects default CSS (`@layer vscode-default`) into webviews — includes `code { background-color }`, link colors, scrollbar styles
+- **CSS loading order**: theme-light.css → extension index.css → canopy-overrides.css → prism-canopy.css. Later layers override earlier ones
+- **Bundled CSS is inlined**: Bundle.main is outside WKWebView's `allowingReadAccessTo` scope, so canopy-overrides.css and prism-canopy.css are read into strings and embedded as `<style>` blocks
+- VSCode injects default CSS (`@layer vscode-default`) into webviews — Canopy replicates this in canopy-overrides.css
 - VSCode sets `<body class="vscode-light">` which CC extension CSS uses for theme-specific overrides
 - CC extension defines `--app-*` CSS vars mapped to `--vscode-*` vars in its own CSS
 - `--app-code-background` is NOT defined in CC extension CSS — must be provided by host
 - Timeline lines use `position:absolute` `:after` pseudo-elements; need `bottom: -15px` CSS fix because each timelineMessage is also a .message (position:relative)
 - Theme CSS: export from VSCode via "Developer: Generate Color Theme From Current Settings", convert with script
+- Monaco diff editor: CC extension hardcodes `theme:"vs-dark"` — VSCodeStub.swift redefines vs-dark as a light theme
+- Japanese IME: WebKit Bug 165004 — `compositionend` fires before `keydown`, patched via keyCode 229 check
 - Logging: use `os_log` (Logger) not `print()` — print doesn't work when launched via `open`
 
 ## Theme Management

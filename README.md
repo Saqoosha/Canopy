@@ -22,6 +22,7 @@ English | [日本語](README.ja.md)
 - **Real-time streaming** — thinking, text, tool use, all streamed live
 - **Auto-update** — Sparkle with delta updates
 - **Keyboard shortcuts** — Cmd+N (launcher), Cmd+O (open folder), Cmd+T (new tab)
+- **Custom styles** — refined typography, code block styling, and syntax highlighting that polish the extension's UI for a native macOS feel
 
 ## Requirements
 
@@ -86,6 +87,8 @@ Sources/Canopy/
 Resources/
   vscode-shim/                 Node.js modules that shim the VSCode API
   ssh-claude-wrapper.sh        SSH remote wrapper script
+  canopy-overrides.css         Custom styles: typography, code blocks, WKWebView fixes
+  prism-canopy.css             Syntax highlighting theme (Prism.js, Claude Desktop colors)
 ```
 
 ### Tests

@@ -375,25 +375,54 @@ Tool results come back as `user` type events from the CLI (the CLI handles tool 
 
 ## CSS/Theme System
 
-The CC extension UI relies on hundreds of VSCode CSS custom properties for theming. Canopy replicates this with three layers:
+The CC extension UI relies on hundreds of VSCode CSS custom properties for theming. Canopy replicates this environment and layers custom styles on top to refine the UI for a native macOS feel.
 
-### 1. VSCode Theme Variables (theme-light.css)
+### Loading Order
 
-456 `--vscode-*` CSS variables exported from a real VSCode instance running the Default Light+ theme. These define all colors, fonts, borders, shadows, and other visual properties.
+The HTML assembled in `WebViewContainer.loadCCWebview` loads stylesheets in this order — later layers override earlier ones:
+
+```
+1. theme-light.css          (inline <style>)    — 456 --vscode-* CSS variables
+2. CC extension index.css   (linked <link>)     — extension's own styles
+3. canopy-overrides.css     (inline <style>)    — custom overrides & WKWebView fixes
+4. prism-canopy.css         (inline <style>)    — syntax highlighting theme
+```
+
+Bundled CSS files (canopy-overrides, prism-canopy) are read from `Bundle.main` and inlined into the HTML because the app bundle path (`/Applications/`) is outside the WKWebView's `allowingReadAccessTo` scope (home directory only).
+
+### Layer 1: VSCode Theme Variables (`theme-light.css`)
+
+456 `--vscode-*` CSS variables exported from a real VSCode instance running the Default Light+ theme. These define all colors, fonts, borders, shadows, and other visual properties that the CC extension CSS references.
 
 **Export process:**
 1. Open VSCode with desired theme active
 2. Run "Developer: Generate Color Theme From Current Settings" (Cmd+Shift+P)
 3. Save the resulting JSON, strip JSONC comments
 4. Convert JSON color definitions to CSS custom properties
-5. Save as `theme-light.css`
+5. Save as `Sources/Canopy/theme-light.css`
 
-### 2. App Bridge Variables
+### Layer 2: CC Extension Styles (`index.css`)
 
-The CC extension CSS defines `--app-*` variables that map to `--vscode-*` variables, but some are not defined in the extension CSS and must be provided by the host:
+The extension's own stylesheet, linked from its install directory (`~/.vscode/extensions/anthropic.claude-code-*/webview/index.css`). Loaded unmodified via `<link>` tag — no Canopy changes.
+
+### Layer 3: Custom Overrides (`canopy-overrides.css`)
+
+Loaded after the extension's CSS so it can override specific styles. Uses `!important` or higher specificity where needed. This is the primary customization layer, organized into several sections:
+
+#### Root Variables
+
+Overrides `--vscode-*` variables from theme-light.css with values matching Claude Desktop's appearance (white backgrounds, adjusted foreground colors):
 
 ```css
---app-code-background: var(--vscode-textCodeBlock-background);
+--vscode-sideBar-background: #ffffff !important;
+--vscode-editor-background: #ffffff !important;
+--vscode-editor-foreground: #141413 !important;
+```
+
+Also provides `--app-*` bridge variables that the CC extension CSS expects but doesn't define itself:
+
+```css
+--app-code-background: #f5f5f0;
 --app-link-color: var(--vscode-textLink-foreground);
 --app-font-family-mono: var(--vscode-editor-font-family, monospace);
 --app-background: var(--vscode-editor-background);
@@ -401,25 +430,97 @@ The CC extension CSS defines `--app-*` variables that map to `--vscode-*` variab
 --app-secondary-text: var(--vscode-descriptionForeground);
 ```
 
-### 3. VSCode Default Webview CSS
+#### VSCode Default Webview CSS (`@layer vscode-default`)
 
-VSCode injects a set of default styles into all webviews via a `@layer vscode-default` block. This includes:
+VSCode normally injects a set of default styles into all webviews. Since Canopy hosts the webview directly, this layer is replicated manually:
+
 - Scrollbar styling using `--vscode-scrollbarSlider-*` variables
 - Body reset (margin, padding, background, font)
 - Link colors (`--vscode-textLink-foreground`)
-- Inline code styling (`--vscode-textPreformat-*`)
+- Inline `code` styling (background, border, border-radius, font)
 - Keyboard shortcut label styling (`--vscode-keybindingLabel-*`)
 - Blockquote styling
 
-### 4. Timeline CSS Fix
+#### Timeline Fix
 
-The CC extension's timeline view uses `::after` pseudo-elements with `position: absolute` for connecting lines between messages. Because Canopy's DOM structure differs slightly from VSCode's (each `timelineMessage` is also a `.message` with `position: relative`), the lines need a CSS fix:
+The CC extension's timeline uses `::after` pseudo-elements for connecting lines between messages. Each `timelineMessage` is also a `.message` (which has `position: relative`), creating a 15px gap. Fix:
 
 ```css
 [class*="message_"][class*="timelineMessage_"]::after {
   bottom: -15px !important;
 }
 ```
+
+#### WKWebView Fixes
+
+Fixes for WebKit-specific rendering differences from Chromium (which VSCode uses):
+
+- **contenteditable `<br>`**: WKWebView doesn't render `<br>` in contenteditable without `white-space: pre-wrap`
+- **Font smoothing**: WebKit's default is heavier than Chromium — `-webkit-font-smoothing: antialiased` matches VSCode's rendering
+
+#### Typography
+
+Message text and input fields use macOS system fonts with refined sizing:
+
+- Timeline/user messages: `system-ui, -apple-system`, 14px, line-height 22px, weight 430
+- Input fields: same font family/size but no line-height override (causes caret drift in WKWebView contenteditable)
+- Headings (h1–h3): normalized to 14px/600 weight (CC extension sizes vary)
+- Links in messages: dark color (`rgb(61, 61, 58)`) with underline instead of bright blue
+- Font ligatures disabled on all code elements (`font-variant-ligatures: none`)
+
+#### Code Blocks
+
+Wrapper-based styling that matches Claude Desktop's appearance:
+
+- Border: `1px solid rgba(31, 30, 29, 0.15)`, border-radius 8px
+- Background: `rgba(250, 249, 245, 0.5)` (warm off-white)
+- Inner `pre`: transparent background, no padding (handled by wrapper)
+- Font: SF Mono 13px, line-height 20px
+
+#### Inline Code
+
+Styled with higher specificity to override both the extension and `@layer vscode-default`:
+
+- Color: `rgb(138, 36, 36)` (dark red, matching VSCode's Default Light+)
+- Background: warm off-white with subtle border
+- `pre code` reset: transparent background, no border (code blocks handle their own styling)
+
+#### Misc
+
+- Todo checkbox alignment: `margin-top: 5.5px` to vertically center the 11px checkbox within 22px line-height
+- Truncation gradient: overrides extension's hardcoded dark `#1e1e1e` gradient with the current editor background
+- Tool result backgrounds: set to transparent
+
+### Layer 4: Syntax Highlighting (`prism-canopy.css`)
+
+Prism.js token colors matching Claude Desktop Code's appearance. Applied to code blocks where Prism.js has tokenized the content (injected via bundled `prism.js`).
+
+Key color assignments:
+
+| Token | Color | Example |
+|-------|-------|---------|
+| Comments | `rgb(110, 118, 135)` | `// comment` |
+| Keywords | `rgb(129, 0, 194)` | `const`, `if`, `return` |
+| Strings | `rgb(0, 128, 0)` | `"hello"` |
+| Functions | `rgb(0, 81, 194)` | `myFunction()` |
+| Numbers | `rgb(0, 128, 128)` | `42` |
+| Parameters | `rgb(184, 79, 5)` | function args |
+| Classes | `rgb(179, 74, 0)` | `MyClass` |
+
+### Monaco Theme Patch (`VSCodeStub.swift`)
+
+The CC extension hardcodes `theme: "vs-dark"` when creating Monaco diff editors. Since Canopy runs in light mode, a JavaScript patch redefines the `vs-dark` theme as a light theme:
+
+```javascript
+globalThis.MonacoEnvironment = { globalAPI: true };
+monaco.editor.defineTheme('vs-dark', { base: 'vs', inherit: true, rules: [], colors: {} });
+```
+
+This runs via a `setInterval` poll (50ms) until Monaco loads, with a 30s timeout.
+
+### Japanese IME Fix (`VSCodeStub.swift`)
+
+WebKit Bug 165004: `compositionend` fires before `keydown`, so `isComposing` is always false for the Enter key that confirms IME input. Canopy patches `isComposing` to `true` when `keyCode === 229` (VK_PROCESS), which WebKit sets for all IME keydowns. This prevents the CC extension from submitting the message on IME-confirming Enter.
 
 ### Body Class
 
