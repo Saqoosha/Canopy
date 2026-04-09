@@ -507,6 +507,7 @@ struct WebViewContainer: NSViewRepresentable {
               border-radius: 0 !important;
               background: transparent !important;
               font-size: 13px !important;
+              line-height: 20px !important;
             }
             /* Tool/bash output: no background */
             [class*="toolResult_"] {

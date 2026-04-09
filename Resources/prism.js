@@ -4438,6 +4438,28 @@ Prism.hooks.add('after-tokenize', function afterTokenizeGraphql(env) {
 }(Prism));
 
 ;(function() {
+  var domGlobals = /\b(document|window|console|navigator|location|history|localStorage|sessionStorage|fetch|XMLHttpRequest|FormData|URL|URLSearchParams|Headers|Request|Response|AbortController|MutationObserver|IntersectionObserver|ResizeObserver|performance|crypto|indexedDB|caches|Worker|SharedWorker|ServiceWorker|Notification|EventSource|WebSocket|Element|Node|NodeList|HTMLElement|Event|CustomEvent|Promise|Map|Set|WeakMap|WeakSet|Proxy|Reflect|Symbol|RegExp|JSON|Math|Date|Error|TypeError|RangeError|SyntaxError|Object|Array|String|Number|Boolean|Function|Intl)\b/;
+
+  Prism.hooks.add('after-tokenize', function(env) {
+    if (!env.tokens) return;
+    function walk(tokens) {
+      for (var i = 0; i < tokens.length; i++) {
+        var token = tokens[i];
+        if (typeof token === 'string') {
+          var match = domGlobals.exec(token);
+          if (match && match[0] === token.trim() && token.trim().length > 0) {
+            tokens[i] = new Prism.Token('dom', token, undefined, token);
+          }
+        } else if (token.content && Array.isArray(token.content)) {
+          walk(token.content);
+        }
+      }
+    }
+    walk(env.tokens);
+  });
+})();
+
+;(function() {
   // Track content hash per code element to detect changes during streaming
   var contentMap = new WeakMap();
 
