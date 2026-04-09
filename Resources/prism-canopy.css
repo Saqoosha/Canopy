@@ -74,6 +74,11 @@ pre[class*="language-"] {
   color: rgb(184, 79, 5);
 }
 
+/* Object literal properties */
+.token.literal-property {
+  color: rgb(184, 10, 24);
+}
+
 /* Known classes, DOM globals, console */
 .token.known-class-name,
 .token.class-name,
