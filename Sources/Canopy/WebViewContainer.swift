@@ -311,12 +311,14 @@ struct WebViewContainer: NSViewRepresentable {
         logger.info("JS exists: \(FileManager.default.fileExists(atPath: jsFile.path), privacy: .public)")
 
         // Read bundled CSS/JS content for inline embedding
-        // (Bundle.main is outside allowingReadAccessTo: homeDirectory in production,
+        // (Bundle.main is under /Applications, outside allowingReadAccessTo: homeDirectory,
         //  so we inline into the HTML instead of linking to external files)
         let overridesCSS = Self.readBundleResource("canopy-overrides", ext: "css") ?? ""
         if overridesCSS.isEmpty { logger.error("canopy-overrides.css not found in bundle") }
         let prismCSS = Self.readBundleResource("prism-canopy", ext: "css") ?? ""
+        if prismCSS.isEmpty { logger.warning("prism-canopy.css not found in bundle — syntax highlighting disabled") }
         let prismJS = Self.readBundleResource("prism", ext: "js") ?? ""
+        if prismJS.isEmpty { logger.warning("prism.js not found in bundle — syntax highlighting disabled") }
 
         let html = """
         <!DOCTYPE html>
@@ -355,7 +357,7 @@ struct WebViewContainer: NSViewRepresentable {
             )
             return
         }
-        // Allow read access to both temp dir (for HTML) and extension dir (for JS/CSS/resources)
+        // Allow read access to home directory (covers Application Support HTML and extension resources)
         let commonParent = FileManager.default.homeDirectoryForCurrentUser
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
     }
@@ -363,9 +365,15 @@ struct WebViewContainer: NSViewRepresentable {
     // MARK: - Bundle Resource Reading
 
     /// Read a bundle resource's contents as a String.
+    /// Returns `nil` if the resource is not found in the bundle.
     private static func readBundleResource(_ name: String, ext: String) -> String? {
         guard let url = Bundle.main.url(forResource: name, withExtension: ext) else { return nil }
-        return try? String(contentsOf: url, encoding: .utf8)
+        do {
+            return try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            logger.error("Failed to read \(name).\(ext) from bundle: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     // MARK: - Auth Status for HTML injection
