@@ -310,42 +310,39 @@ struct WebViewContainer: NSViewRepresentable {
         logger.info("CSS exists: \(FileManager.default.fileExists(atPath: cssFile.path), privacy: .public)")
         logger.info("JS exists: \(FileManager.default.fileExists(atPath: jsFile.path), privacy: .public)")
 
-        // Prepare Application Support dir for HTML file
-        let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Canopy")
-        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+        // Read bundled CSS/JS content for inline embedding
+        // (Bundle.main is outside allowingReadAccessTo: homeDirectory in production,
+        //  so we inline into the HTML instead of linking to external files)
+        let overridesCSS = Self.readBundleResource("canopy-overrides", ext: "css") ?? ""
+        if overridesCSS.isEmpty { logger.error("canopy-overrides.css not found in bundle") }
+        let prismCSS = Self.readBundleResource("prism-canopy", ext: "css") ?? ""
+        let prismJS = Self.readBundleResource("prism", ext: "js") ?? ""
 
-        // Copy bundled CSS/JS to Application Support so WKWebView can access them
-        // (Bundle.main is outside allowingReadAccessTo: homeDirectory scope in production)
-        let overridesCSSURL = Self.copyBundleResource("canopy-overrides", ext: "css", to: appSupportDir)
-        if overridesCSSURL == nil { logger.error("canopy-overrides.css not found in bundle") }
-        let prismJSURL = Self.copyBundleResource("prism", ext: "js", to: appSupportDir)
-        let prismCSSURL = Self.copyBundleResource("prism-canopy", ext: "css", to: appSupportDir)
         let html = """
         <!DOCTYPE html>
         <html lang="en">
         <head>
           <meta charset="UTF-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <!-- Theme variables -->
           <style>\(VSCodeStub.themeCSSVariables)</style>
           <link href="\(cssFile.absoluteString)" rel="stylesheet">
-          <!-- Canopy overrides: variables, VSCode defaults, Claude Desktop parity -->
-          \(overridesCSSURL.map { "<link href=\"\($0.absoluteString)\" rel=\"stylesheet\">" } ?? "<!-- canopy-overrides.css not found -->")
-          <!-- Prism.js syntax highlighting theme -->
-          \(prismCSSURL.map { "<link href=\"\($0.absoluteString)\" rel=\"stylesheet\">" } ?? "<!-- prism-canopy.css not found -->")
+          <style>\(overridesCSS)</style>
+          <style>\(prismCSS)</style>
         </head>
         <body class="vscode-light">
           <pre id="claude-error" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; margin:0; padding:12px 16px; background:#fee2e2; color:#991b1b; font-size:13px; white-space:pre-wrap;"></pre>
           <script>new MutationObserver(function(){var e=document.getElementById('claude-error');if(e)e.style.display=e.textContent?'block':'none'}).observe(document.getElementById('claude-error'),{childList:true,characterData:true,subtree:true})</script>
           <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")\(Self.initialAuthStatusAttr())></div>
           <script src="\(jsFile.absoluteString)" type="module"></script>
-          \(prismJSURL.map { "<script src=\"\($0.absoluteString)\"></script>" } ?? "<!-- prism.js not found -->")
+          <script>\(prismJS)</script>
         </body>
         </html>
         """
 
         // Write HTML to Application Support
+        let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Canopy")
+        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
         let htmlFile = appSupportDir.appendingPathComponent("_canopy.html")
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
@@ -363,25 +360,12 @@ struct WebViewContainer: NSViewRepresentable {
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
     }
 
-    // MARK: - Bundle Resource Copying
+    // MARK: - Bundle Resource Reading
 
-    /// Copy a bundle resource to Application Support, overwriting if the bundle version is newer.
-    /// Returns the destination URL, or nil if the resource is not in the bundle.
-    private static func copyBundleResource(_ name: String, ext: String, to dir: URL) -> URL? {
-        guard let src = Bundle.main.url(forResource: name, withExtension: ext) else { return nil }
-        let dst = dir.appendingPathComponent("\(name).\(ext)")
-        let fm = FileManager.default
-        // Always overwrite — bundle version may have changed after app update
-        if fm.fileExists(atPath: dst.path) {
-            try? fm.removeItem(at: dst)
-        }
-        do {
-            try fm.copyItem(at: src, to: dst)
-        } catch {
-            logger.error("Failed to copy \(name).\(ext) to Application Support: \(error.localizedDescription, privacy: .public)")
-            return nil
-        }
-        return dst
+    /// Read a bundle resource's contents as a String.
+    private static func readBundleResource(_ name: String, ext: String) -> String? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: ext) else { return nil }
+        return try? String(contentsOf: url, encoding: .utf8)
     }
 
     // MARK: - Auth Status for HTML injection
