@@ -306,10 +306,6 @@ struct WebViewContainer: NSViewRepresentable {
         let cssFile = webviewDir.appendingPathComponent("index.css")
         let jsFile = webviewDir.appendingPathComponent("index.js")
 
-        // Prism.js syntax highlighting
-        let prismJSURL = Bundle.main.url(forResource: "prism", withExtension: "js")
-        let prismCSSURL = Bundle.main.url(forResource: "prism-canopy", withExtension: "css")
-
         logger.info("Extension path: \(extPath.path, privacy: .public)")
         logger.info("CSS exists: \(FileManager.default.fileExists(atPath: cssFile.path), privacy: .public)")
         logger.info("JS exists: \(FileManager.default.fileExists(atPath: jsFile.path), privacy: .public)")
@@ -318,6 +314,13 @@ struct WebViewContainer: NSViewRepresentable {
         let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Canopy")
         try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+
+        // Copy bundled CSS/JS to Application Support so WKWebView can access them
+        // (Bundle.main is outside allowingReadAccessTo: homeDirectory scope in production)
+        let overridesCSSURL = Self.copyBundleResource("canopy-overrides", ext: "css", to: appSupportDir)
+        if overridesCSSURL == nil { logger.error("canopy-overrides.css not found in bundle") }
+        let prismJSURL = Self.copyBundleResource("prism", ext: "js", to: appSupportDir)
+        let prismCSSURL = Self.copyBundleResource("prism-canopy", ext: "css", to: appSupportDir)
         let html = """
         <!DOCTYPE html>
         <html lang="en">
@@ -327,235 +330,9 @@ struct WebViewContainer: NSViewRepresentable {
           <!-- Theme variables -->
           <style>\(VSCodeStub.themeCSSVariables)</style>
           <link href="\(cssFile.absoluteString)" rel="stylesheet">
-          <style>
-            :root {
-              /* Claude Desktop warm ivory palette */
-              --vscode-editor-font-family: "SF Mono", Menlo, Monaco, monospace !important;
-              --vscode-editor-font-size: 14px !important;
-              --vscode-editor-font-weight: normal !important;
-              --vscode-chat-font-size: 14px;
-              --vscode-chat-font-family: system-ui, -apple-system, sans-serif;
-              --vscode-font-size: 14px;
-              /* Claude Desktop backgrounds */
-              --vscode-sideBar-background: #ffffff !important;
-              --vscode-editor-background: #ffffff !important;
-              --vscode-input-background: #ffffff !important;
-              --vscode-menu-background: #ffffff !important;
-              /* Warm text colors */
-              --vscode-editor-foreground: #141413 !important;
-              --vscode-foreground: #141413 !important;
-              --vscode-descriptionForeground: rgba(20, 20, 19, 0.65) !important;
-              /* Variables injected by VSCode host, not defined in CC extension CSS */
-              --app-code-background: #f5f5f0;
-              --app-link-color: var(--vscode-textLink-foreground);
-              --app-link-foreground: var(--vscode-textLink-foreground);
-              --app-link: var(--vscode-textLink-foreground);
-              --app-font-family-mono: var(--vscode-editor-font-family, monospace);
-              --app-background: var(--vscode-editor-background);
-              --app-root-background: var(--vscode-sideBar-background);
-              --app-secondary-text: var(--vscode-descriptionForeground);
-              --app-text-secondary: var(--vscode-descriptionForeground);
-            }
-          </style>
-          <!-- Timeline line fix: each timelineMessage is also a .message (position:relative),
-               so ::after lines are scoped per-element. Extend bottom to bridge the 15px gap to next dot. -->
-          <style>
-            [class*="message_"][class*="timelineMessage_"]::after {
-              bottom: -15px !important;
-            }
-          </style>
-          <!-- VSCode webview default styles (from VSCode's webview/browser/pre/index.html) -->
-          <style>
-            @layer vscode-default {
-              html {
-                scrollbar-color: var(--vscode-scrollbarSlider-background) var(--vscode-editor-background);
-              }
-              body {
-                overscroll-behavior-x: none;
-                background-color: transparent;
-                color: var(--vscode-editor-foreground);
-                font-family: var(--vscode-font-family, system-ui, -apple-system, sans-serif);
-                font-weight: var(--vscode-font-weight, 400);
-                font-size: var(--vscode-font-size, 14px);
-                margin: 0;
-                padding: 0;
-              }
-              img, video { max-width: 100%; max-height: 100%; }
-              a, a code { color: var(--vscode-textLink-foreground); }
-              a:hover { color: var(--vscode-textLink-activeForeground); }
-              a:focus, input:focus, select:focus, textarea:focus {
-                outline: 1px solid -webkit-focus-ring-color;
-                outline-offset: -1px;
-              }
-              code {
-                font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
-                color: rgb(138, 36, 36);
-                background-color: rgba(0, 0, 0, 0.04);
-                border: 1px solid rgba(0, 0, 0, 0.1);
-                padding: 1px 4px;
-                border-radius: 6.4px;
-                font-size: 13px;
-                white-space: pre-wrap;
-              }
-              pre code {
-                padding: 0;
-                border: none;
-                background-color: transparent;
-              }
-              blockquote {
-                background: var(--vscode-textBlockQuote-background);
-                border-color: var(--vscode-textBlockQuote-border);
-              }
-              kbd {
-                background-color: var(--vscode-keybindingLabel-background);
-                color: var(--vscode-keybindingLabel-foreground);
-                border-style: solid; border-width: 1px; border-radius: 3px;
-                border-color: var(--vscode-keybindingLabel-border);
-                border-bottom-color: var(--vscode-keybindingLabel-bottomBorder);
-                box-shadow: inset 0 -1px 0 var(--vscode-widget-shadow);
-                vertical-align: middle; padding: 1px 3px;
-              }
-              ::-webkit-scrollbar { width: 10px; height: 10px; }
-              ::-webkit-scrollbar-corner { background-color: var(--vscode-editor-background); }
-              ::-webkit-scrollbar-thumb { background-color: var(--vscode-scrollbarSlider-background); }
-              ::-webkit-scrollbar-thumb:hover { background-color: var(--vscode-scrollbarSlider-hoverBackground); }
-              ::-webkit-scrollbar-thumb:active { background-color: var(--vscode-scrollbarSlider-activeBackground); }
-            }
-          </style>
-          <!-- Claude Desktop-inspired overrides -->
-          <style>
-            /* Fix br not rendering in contenteditable input fields in WKWebView */
-            [contenteditable] {
-              white-space: pre-wrap !important;
-              word-wrap: break-word !important;
-            }
-            /* Tool name secondary text: use description color instead of link color */
-            [class*="toolNameTextSecondary_"] {
-              color: var(--app-secondary-text) !important;
-            }
-            /* Fix diff truncation gradient: hardcoded dark #1e1e1e → light */
-            [class*="truncationGradient_"] {
-              background: linear-gradient(transparent 0%, var(--vscode-editor-background, #ffffff) 100%) !important;
-            }
-
-            /* Match Chromium's font smoothing (thinner/lighter than WebKit default) */
-            body {
-              -webkit-font-smoothing: antialiased;
-              -moz-osx-font-smoothing: grayscale;
-            }
-
-            /* --- Claude Desktop Code tab parity --- */
-
-            /* All messages: system-ui, 14px, weight 430 */
-            /* line-height 22px — WebKit clips inline code borders at tight line-heights */
-            [class*="timelineMessage_"] {
-              font-family: system-ui, -apple-system, sans-serif;
-              font-size: 14px;
-              line-height: 22px;
-              font-weight: 430;
-              color: rgb(20, 20, 19);
-            }
-
-            /* User messages */
-            [class*="userMessage_"] {
-              font-family: system-ui, -apple-system, sans-serif;
-              font-size: 14px;
-              line-height: 22px;
-              font-weight: 430;
-            }
-
-            /* Input area — no line-height override (causes caret drift in WKWebView contenteditable) */
-            [class*="messageInput_"],
-            [class*="inputContainer_"] {
-              font-family: system-ui, -apple-system, sans-serif;
-              font-size: 14px;
-            }
-
-            /* Headings: same size, bold 600 */
-            [class*="timelineMessage_"] h1,
-            [class*="timelineMessage_"] h2,
-            [class*="timelineMessage_"] h3 {
-              font-family: system-ui, -apple-system, sans-serif;
-              font-size: 14px !important;
-              font-weight: 600 !important;
-              line-height: 20px !important;
-              margin: 8px 0 0 !important;
-            }
-
-            /* Strong: weight 600 */
-            [class*="timelineMessage_"] strong {
-              font-weight: 600 !important;
-            }
-
-            /* Links: dark gray with underline (not blue) */
-            [class*="timelineMessage_"] a {
-              color: rgb(61, 61, 58) !important;
-              text-decoration: underline !important;
-            }
-
-            /* Code blocks: border on wrapper, not pre — matches Claude Desktop */
-            [class*="codeBlockWrapper_"] {
-              border: 1px solid rgba(31, 30, 29, 0.15) !important;
-              border-radius: 8px !important;
-              background: rgba(250, 249, 245, 0.5) !important;
-              padding: 8px 40px 8px 8px !important;
-              overflow-x: auto !important;
-            }
-            [class*="codeBlockWrapper_"] pre {
-              padding: 0 !important;
-              margin: 0 !important;
-              border-radius: 0 !important;
-              background: transparent !important;
-              font-size: 13px !important;
-              line-height: 20px !important;
-            }
-            /* Tool/bash output: no background */
-            [class*="toolResult_"] {
-              background-color: transparent !important;
-            }
-
-            /* Inline code: exact Claude Desktop values */
-            [class*="timelineMessage_"] code,
-            [class*="userMessage_"] code {
-              font-family: "SF Mono", ui-monospace, monospace !important;
-              color: rgb(138, 36, 36) !important;
-              background-color: rgba(250, 249, 245, 0.5) !important;
-              border: 1px solid rgba(31, 30, 29, 0.15) !important;
-              padding: 1px 4px !important;
-              border-radius: 6.4px !important;
-              font-size: 13px !important;
-              line-height: 20px !important;
-              display: inline !important;
-              vertical-align: baseline !important;
-              white-space: pre-wrap;
-            }
-            /* Don't apply inline code styling inside code blocks.
-               Needs [class*] to beat [class*="timelineMessage_"] code specificity (0-1-1 > 0-0-2). */
-            [class*="timelineMessage_"] pre code,
-            [class*="userMessage_"] pre code,
-            pre code {
-              color: inherit !important;
-              background-color: transparent !important;
-              border: none !important;
-              padding: 0 !important;
-              border-radius: 0 !important;
-              font-size: inherit !important;
-              line-height: inherit !important;
-              display: inline !important;
-            }
-
-            /* To-do list: align checkbox with first line of text */
-            /* flex-start + margin-top: checkbox 11px centered in 22px line-height = (22-11)/2 ≈ 5.5px */
-            [class*="todoItem_"] [class*="checkbox_"] {
-              margin-top: 5.5px !important;
-            }
-
-            /* Font feature settings: disable ligatures in code */
-            code, pre, kbd, samp {
-              font-variant-ligatures: none;
-              font-feature-settings: "calt" 0, "liga" 0;
-            }
-          </style>
+          <!-- Canopy overrides: variables, VSCode defaults, Claude Desktop parity -->
+          \(overridesCSSURL.map { "<link href=\"\($0.absoluteString)\" rel=\"stylesheet\">" } ?? "<!-- canopy-overrides.css not found -->")
+          <!-- Prism.js syntax highlighting theme -->
           \(prismCSSURL.map { "<link href=\"\($0.absoluteString)\" rel=\"stylesheet\">" } ?? "<!-- prism-canopy.css not found -->")
         </head>
         <body class="vscode-light">
@@ -584,6 +361,27 @@ struct WebViewContainer: NSViewRepresentable {
         // Allow read access to both temp dir (for HTML) and extension dir (for JS/CSS/resources)
         let commonParent = FileManager.default.homeDirectoryForCurrentUser
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
+    }
+
+    // MARK: - Bundle Resource Copying
+
+    /// Copy a bundle resource to Application Support, overwriting if the bundle version is newer.
+    /// Returns the destination URL, or nil if the resource is not in the bundle.
+    private static func copyBundleResource(_ name: String, ext: String, to dir: URL) -> URL? {
+        guard let src = Bundle.main.url(forResource: name, withExtension: ext) else { return nil }
+        let dst = dir.appendingPathComponent("\(name).\(ext)")
+        let fm = FileManager.default
+        // Always overwrite — bundle version may have changed after app update
+        if fm.fileExists(atPath: dst.path) {
+            try? fm.removeItem(at: dst)
+        }
+        do {
+            try fm.copyItem(at: src, to: dst)
+        } catch {
+            logger.error("Failed to copy \(name).\(ext) to Application Support: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        return dst
     }
 
     // MARK: - Auth Status for HTML injection

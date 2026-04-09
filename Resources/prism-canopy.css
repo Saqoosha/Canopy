@@ -4,13 +4,13 @@ code[class*="language-"],
 pre[class*="language-"] {
   color: rgb(20, 24, 31);
   background: transparent;
-  font-family: "SF Mono", ui-monospace, monospace;
+  font-family: var(--vscode-editor-font-family, "SF Mono", ui-monospace, monospace);
   font-size: 13px;
   text-align: left;
   white-space: pre;
   word-spacing: normal;
   word-break: normal;
-  word-wrap: normal;
+  overflow-wrap: normal;
   line-height: 20px;
   tab-size: 2;
   hyphens: none;
@@ -114,5 +114,6 @@ pre[class*="language-"] {
 }
 
 /* Bold/Italic */
-.token.bold { font-weight: bold; }
+.token.bold,
+.token.important { font-weight: bold; }
 .token.italic { font-style: italic; }

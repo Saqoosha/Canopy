@@ -1,0 +1,222 @@
+/* Loaded after CC extension's index.css — overrides must use !important or higher specificity */
+
+/* ===== Root variables ===== */
+:root {
+  --vscode-editor-font-family: "SF Mono", ui-monospace, monospace !important;
+  --vscode-editor-font-size: 14px !important;
+  --vscode-editor-font-weight: normal !important;
+  --vscode-chat-font-size: 14px;
+  --vscode-chat-font-family: system-ui, -apple-system, sans-serif;
+  --vscode-font-size: 14px;
+  /* Override theme-light.css to match Claude Desktop white backgrounds */
+  --vscode-sideBar-background: #ffffff !important;
+  --vscode-editor-background: #ffffff !important;
+  --vscode-input-background: #ffffff !important;
+  --vscode-menu-background: #ffffff !important;
+  --vscode-editor-foreground: #141413 !important;
+  --vscode-foreground: #141413 !important;
+  --vscode-descriptionForeground: rgba(20, 20, 19, 0.65) !important;
+  /* Not defined in CC extension CSS — must be provided by host */
+  --app-code-background: #f5f5f0;
+  --app-link-color: var(--vscode-textLink-foreground);
+  --app-link-foreground: var(--vscode-textLink-foreground);
+  --app-link: var(--vscode-textLink-foreground);
+  --app-font-family-mono: var(--vscode-editor-font-family, monospace);
+  --app-background: var(--vscode-editor-background);
+  --app-root-background: var(--vscode-sideBar-background);
+  --app-secondary-text: var(--vscode-descriptionForeground);
+  --app-text-secondary: var(--vscode-descriptionForeground);
+}
+
+/* ===== VSCode webview defaults ===== */
+/* Replicated from VSCode's webview/browser/pre/index.html */
+@layer vscode-default {
+  html {
+    scrollbar-color: var(--vscode-scrollbarSlider-background) var(--vscode-editor-background);
+  }
+  body {
+    overscroll-behavior-x: none;
+    background-color: transparent;
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family, system-ui, -apple-system, sans-serif);
+    font-weight: var(--vscode-font-weight, 400);
+    font-size: var(--vscode-font-size, 14px);
+    margin: 0;
+    padding: 0;
+  }
+  img, video { max-width: 100%; max-height: 100%; }
+  a, a code { color: var(--vscode-textLink-foreground); }
+  a:hover { color: var(--vscode-textLink-activeForeground); }
+  a:focus, input:focus, select:focus, textarea:focus {
+    outline: 1px solid -webkit-focus-ring-color;
+    outline-offset: -1px;
+  }
+  code {
+    font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+    color: rgb(138, 36, 36);
+    background-color: rgba(0, 0, 0, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    padding: 1px 4px;
+    border-radius: 6.4px;
+    font-size: 13px;
+    white-space: pre-wrap;
+  }
+  pre code {
+    padding: 0;
+    border: none;
+    background-color: transparent;
+  }
+  blockquote {
+    background: var(--vscode-textBlockQuote-background);
+    border-color: var(--vscode-textBlockQuote-border);
+  }
+  kbd {
+    background-color: var(--vscode-keybindingLabel-background);
+    color: var(--vscode-keybindingLabel-foreground);
+    border-style: solid; border-width: 1px; border-radius: 3px;
+    border-color: var(--vscode-keybindingLabel-border);
+    border-bottom-color: var(--vscode-keybindingLabel-bottomBorder);
+    box-shadow: inset 0 -1px 0 var(--vscode-widget-shadow);
+    vertical-align: middle; padding: 1px 3px;
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-corner { background-color: var(--vscode-editor-background); }
+  ::-webkit-scrollbar-thumb { background-color: var(--vscode-scrollbarSlider-background); }
+  ::-webkit-scrollbar-thumb:hover { background-color: var(--vscode-scrollbarSlider-hoverBackground); }
+  ::-webkit-scrollbar-thumb:active { background-color: var(--vscode-scrollbarSlider-activeBackground); }
+}
+
+/* ===== Timeline ===== */
+
+/* ::after lines are scoped per-element because timelineMessage is also .message (position:relative).
+   Extend bottom to bridge the 15px gap to next dot. */
+[class*="message_"][class*="timelineMessage_"]::after {
+  bottom: -15px !important;
+}
+
+/* ===== WKWebView fixes ===== */
+
+/* WKWebView doesn't render <br> in contenteditable without this */
+[contenteditable] {
+  white-space: pre-wrap !important;
+  word-wrap: break-word !important;
+}
+
+/* Match Chromium's font smoothing (WebKit default is heavier) */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ===== Typography ===== */
+
+[class*="toolNameTextSecondary_"] {
+  color: var(--app-secondary-text) !important;
+}
+
+/* CC extension hardcodes dark #1e1e1e gradient */
+[class*="truncationGradient_"] {
+  background: linear-gradient(transparent 0%, var(--vscode-editor-background, #ffffff) 100%) !important;
+}
+
+/* WebKit clips inline code borders at tight line-heights — 22px prevents clipping */
+[class*="timelineMessage_"],
+[class*="userMessage_"] {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 430;
+  color: rgb(20, 20, 19);
+}
+
+/* No line-height override — causes caret drift in WKWebView contenteditable */
+[class*="messageInput_"],
+[class*="inputContainer_"] {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+[class*="timelineMessage_"] h1,
+[class*="timelineMessage_"] h2,
+[class*="timelineMessage_"] h3 {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  line-height: 20px !important;
+  margin: 8px 0 0 !important;
+}
+
+[class*="timelineMessage_"] strong {
+  font-weight: 600 !important;
+}
+
+[class*="timelineMessage_"] a {
+  color: rgb(61, 61, 58) !important;
+  text-decoration: underline !important;
+}
+
+/* ===== Code blocks ===== */
+
+/* Border/background on wrapper (not pre) — matches Claude Desktop structure */
+[class*="codeBlockWrapper_"] {
+  border: 1px solid rgba(31, 30, 29, 0.15) !important;
+  border-radius: 8px !important;
+  background: rgba(250, 249, 245, 0.5) !important;
+  padding: 8px 40px 8px 8px !important;
+  overflow-x: auto !important;
+}
+[class*="codeBlockWrapper_"] pre {
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  font-size: 13px !important;
+  line-height: 20px !important;
+}
+
+[class*="toolResult_"] {
+  background-color: transparent !important;
+}
+
+/* ===== Inline code ===== */
+
+[class*="timelineMessage_"] code,
+[class*="userMessage_"] code {
+  font-family: "SF Mono", ui-monospace, monospace !important;
+  color: rgb(138, 36, 36) !important;
+  background-color: rgba(250, 249, 245, 0.5) !important;
+  border: 1px solid rgba(31, 30, 29, 0.15) !important;
+  padding: 1px 4px !important;
+  border-radius: 6.4px !important;
+  font-size: 13px !important;
+  line-height: 20px !important;
+  display: inline !important;
+  vertical-align: baseline !important;
+  white-space: pre-wrap;
+}
+
+/* Needs [class*] to beat [class*="timelineMessage_"] code specificity (0-1-1 < 0-1-2) */
+[class*="timelineMessage_"] pre code,
+[class*="userMessage_"] pre code,
+pre code {
+  color: inherit !important;
+  background-color: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
+  display: inline !important;
+}
+
+/* ===== Misc ===== */
+
+/* checkbox 11px centered in 22px line-height = (22-11)/2 ≈ 5.5px */
+[class*="todoItem_"] [class*="checkbox_"] {
+  margin-top: 5.5px !important;
+}
+
+code, pre, kbd, samp {
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0;
+}
