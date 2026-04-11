@@ -58,11 +58,15 @@ notify_slack() {
 ENDJSON
 )
 
+  # Slack notification is best-effort: bounded timeouts so a hung webhook
+  # cannot block the whole pipeline (and leave the lockfile around).
   local http_code
   http_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$webhook_url" \
+    --connect-timeout 5 \
+    --max-time 15 \
     -H 'Content-Type: application/json' \
     -d "$payload" 2>>"$LOG_FILE") || {
-    log "WARNING: Slack notification failed (curl error)"
+    log "WARNING: Slack notification failed (curl error / timeout)"
     return 0
   }
   if [ "$http_code" != "200" ]; then
@@ -114,8 +118,10 @@ cleanup() {
   local exit_code=$?
   set +e
   rm -f "$PROMPT_FILE" "$BUILD_LOG" "$ISSUE_BODY_FILE" "$PR_BODY_FILE"
-  rm -rf "$LOCKFILE"
+  # Release the lock AFTER cleanup_worktree, otherwise a concurrent run could
+  # grab the lock and collide with the still-present worktree directory.
   cleanup_worktree
+  rm -rf "$LOCKFILE"
   if [ $exit_code -ne 0 ]; then
     log "ERROR: Script exited with code $exit_code"
     if [ "$_SLACK_NOTIFIED" -eq 0 ]; then
@@ -217,16 +223,16 @@ BRANCH_NAME="auto-adopt/claude-code-v${CURRENT}"
 #   - if origin/$BRANCH_NAME exists (previous run pushed but PR create failed),
 #     use it as the starting ref so `git push` is fast-forward
 #   - otherwise, start from origin/main
+# Use `-B` (force-create) so a stale local branch from a previous failed run is
+# reset to the chosen START_REF instead of aborting with "branch already exists".
 if (cd "$REPO_DIR" && git show-ref --verify --quiet "refs/remotes/origin/$BRANCH_NAME"); then
   log "Resuming from existing remote branch origin/$BRANCH_NAME"
   START_REF="origin/$BRANCH_NAME"
 else
-  # Delete any stale local branch from a previous failed run so -b can recreate it
-  (cd "$REPO_DIR" && git branch -D "$BRANCH_NAME" 2>>"$LOG_FILE") || true
   START_REF="origin/main"
 fi
 
-if ! (cd "$REPO_DIR" && git worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$START_REF" 2>>"$LOG_FILE"); then
+if ! (cd "$REPO_DIR" && git worktree add -B "$BRANCH_NAME" "$WORKTREE_DIR" "$START_REF" 2>>"$LOG_FILE"); then
   log "ERROR: git worktree add failed for $BRANCH_NAME"
   exit 1
 fi

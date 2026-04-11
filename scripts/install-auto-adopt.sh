@@ -15,18 +15,28 @@ TEMPLATE="$SCRIPT_DIR/sh.saqoo.canopy.auto-adopt.plist.template"
 LABEL="sh.saqoo.canopy.auto-adopt"
 TARGET_DIR="$HOME/Library/LaunchAgents"
 TARGET="$TARGET_DIR/$LABEL.plist"
+STATE_DIR="$HOME/.local/share/canopy-auto-adopt"
 
 if [ ! -f "$TEMPLATE" ]; then
   echo "ERROR: template not found: $TEMPLATE" >&2
   exit 1
 fi
 
-mkdir -p "$TARGET_DIR"
+mkdir -p "$TARGET_DIR" "$STATE_DIR"
+
+# Escape characters that have special meaning in sed's replacement string
+# (\, &, and the delimiter |) so that repo paths or $HOME containing any of
+# them cannot break the substitution or inject sed commands.
+escape_sed_replacement() {
+  printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+REPO_DIR_ESC=$(escape_sed_replacement "$REPO_DIR")
+HOME_ESC=$(escape_sed_replacement "$HOME")
 
 # Substitute placeholders. Use | as sed delimiter since paths contain /.
 sed \
-  -e "s|__CANOPY_REPO__|$REPO_DIR|g" \
-  -e "s|__HOME__|$HOME|g" \
+  -e "s|__CANOPY_REPO__|$REPO_DIR_ESC|g" \
+  -e "s|__HOME__|$HOME_ESC|g" \
   "$TEMPLATE" > "$TARGET"
 
 # Validate the rendered plist
