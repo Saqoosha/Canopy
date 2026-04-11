@@ -34,9 +34,13 @@ notify_slack() {
   webhook_url=$(cat "$SLACK_WEBHOOK_FILE" 2>/dev/null) || return 0
   [ -n "$webhook_url" ] || return 0
 
+  # NOTE: use printf '%b' (not '%s') so that `\n` in body strings becomes a
+  # real newline BEFORE JSON-encoding. Otherwise Slack ends up displaying the
+  # literal characters `\n`. Body strings come from this script only (never
+  # user input), so escape interpretation is safe here.
   local escaped_title escaped_body
-  escaped_title=$(printf '%s' "$title" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || { log "WARNING: python3 not available for Slack notification"; return 0; }
-  escaped_body=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || return 0
+  escaped_title=$(printf '%b' "$title" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || { log "WARNING: python3 not available for Slack notification"; return 0; }
+  escaped_body=$(printf '%b' "$body" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || return 0
 
   local payload
   payload=$(cat <<ENDJSON
