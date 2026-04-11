@@ -283,8 +283,11 @@ enum ClaudeSessionHistory {
         }
         defer { try? handle.close() }
 
+        // Use lossy UTF-8 decoding so a 128KB boundary landing inside a
+        // multibyte sequence (e.g. Japanese content) doesn't drop the whole
+        // buffer and fall back to lossy path decoding.
         let data = handle.readData(ofLength: 131_072)
-        guard let text = String(data: data, encoding: .utf8) else { return ("Untitled", nil) }
+        let text = String(decoding: data, as: UTF8.self)
 
         var aiTitle: String?
         var firstUserMessage: String?
