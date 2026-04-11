@@ -5,7 +5,9 @@
 set -euo pipefail
 
 # --- PATH setup for launchd environment ---
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+# mise shims MUST come first so the npm/node that mise manages is preferred
+# over any Homebrew-installed versions. Without this, launchd can't find `npm`.
+export PATH="$HOME/.local/share/mise/shims:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="$HOME/.local/share/canopy-auto-adopt"
@@ -33,8 +35,8 @@ notify_slack() {
   [ -n "$webhook_url" ] || return 0
 
   local escaped_title escaped_body
-  escaped_title=$(printf '%b' "$title" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || { log "WARNING: python3 not available for Slack notification"; return 0; }
-  escaped_body=$(printf '%b' "$body" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || return 0
+  escaped_title=$(printf '%s' "$title" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || { log "WARNING: python3 not available for Slack notification"; return 0; }
+  escaped_body=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || return 0
 
   local payload
   payload=$(cat <<ENDJSON
@@ -61,6 +63,7 @@ ENDJSON
   }
   if [ "$http_code" != "200" ]; then
     log "WARNING: Slack notification returned HTTP $http_code"
+    return 0
   fi
   _SLACK_NOTIFIED=1
 }
@@ -79,7 +82,7 @@ if ! mkdir "$LOCKFILE" 2>/dev/null; then
 fi
 
 # --- Verify required commands ---
-for cmd in npm git gh xcodegen xcodebuild claude; do
+for cmd in npm git gh xcodegen xcodebuild claude python3 curl; do
   if ! command -v "$cmd" &>/dev/null; then
     log "ERROR: Required command '$cmd' not found in PATH=$PATH"
     exit 1
@@ -171,6 +174,15 @@ if [ "$CURRENT" = "$LAST" ]; then
   exit 0
 fi
 
+# Skip marker: if a version has been permanently skipped after exhausting retries,
+# don't keep retrying it every day. Advance the version tracker so the next run
+# starts looking at the version AFTER the one we gave up on.
+if [ -f "$STATE_DIR/skipped-${CURRENT}.txt" ]; then
+  log "Version $CURRENT was previously skipped (marker exists), advancing tracker"
+  echo "$CURRENT" > "$VERSION_FILE"
+  exit 0
+fi
+
 log "New version detected: $LAST → $CURRENT"
 
 # --- 2. Fetch release notes from GitHub ---
@@ -188,28 +200,42 @@ fi
 # --- 3. Create isolated git worktree ---
 cleanup_worktree
 
-# Fetch latest main before creating worktree
-if ! (cd "$REPO_DIR" && git fetch origin main 2>>"$LOG_FILE"); then
+# Fetch all branches so we can detect an existing remote auto-adopt branch
+# from a previous failed run (otherwise resume would try to push non-fast-forward)
+if ! (cd "$REPO_DIR" && git fetch --prune origin 2>>"$LOG_FILE"); then
   log "ERROR: git fetch failed — cannot create worktree from latest main"
   exit 1
 fi
 
 BRANCH_NAME="auto-adopt/claude-code-v${CURRENT}"
 
-# Delete any stale local branch from a previous failed run so -b can recreate it
-(cd "$REPO_DIR" && git branch -D "$BRANCH_NAME" 2>/dev/null) || true
+# Resume-safe worktree creation:
+#   - if origin/$BRANCH_NAME exists (previous run pushed but PR create failed),
+#     use it as the starting ref so `git push` is fast-forward
+#   - otherwise, start from origin/main
+if (cd "$REPO_DIR" && git show-ref --verify --quiet "refs/remotes/origin/$BRANCH_NAME"); then
+  log "Resuming from existing remote branch origin/$BRANCH_NAME"
+  START_REF="origin/$BRANCH_NAME"
+else
+  # Delete any stale local branch from a previous failed run so -b can recreate it
+  (cd "$REPO_DIR" && git branch -D "$BRANCH_NAME" 2>>"$LOG_FILE") || true
+  START_REF="origin/main"
+fi
 
-if ! (cd "$REPO_DIR" && git worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" origin/main 2>>"$LOG_FILE"); then
+if ! (cd "$REPO_DIR" && git worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$START_REF" 2>>"$LOG_FILE"); then
   log "ERROR: git worktree add failed for $BRANCH_NAME"
   exit 1
 fi
 cd "$WORKTREE_DIR" || { log "ERROR: Cannot cd to worktree $WORKTREE_DIR"; exit 1; }
 
-# Detect GitHub repo for gh commands
-GH_REPO_OUTPUT=$(cd "$REPO_DIR" && gh repo view --json nameWithOwner -q '.nameWithOwner' 2>&1) || true
-GH_REPO=$(echo "$GH_REPO_OUTPUT" | head -1)
-if [ -z "$GH_REPO" ] || [[ "$GH_REPO" == *"error"* ]]; then
-  log "ERROR: Could not detect GitHub repo: $GH_REPO_OUTPUT"
+# Detect GitHub repo for gh commands — use exit code, not string matching
+if ! GH_REPO=$(cd "$REPO_DIR" && gh repo view --json nameWithOwner -q '.nameWithOwner' 2>>"$LOG_FILE"); then
+  log "ERROR: gh repo view failed — cannot detect GitHub repo"
+  exit 1
+fi
+GH_REPO=$(echo "$GH_REPO" | tr -d '[:space:]')
+if [ -z "$GH_REPO" ]; then
+  log "ERROR: gh repo view returned empty nameWithOwner"
   exit 1
 fi
 
@@ -295,19 +321,22 @@ rm -f "$PROMPT_FILE"
 PROMPT_FILE=""
 
 # --- 5. Check if changes were made ---
-if echo "$RESULT" | grep -q "NO_ACTIONABLE_CHANGES"; then
+if printf '%s' "$RESULT" | grep -q "NO_ACTIONABLE_CHANGES"; then
   log "No actionable changes in v${CURRENT}"
   notify_slack "good" "Canopy · Claude Code v${CURRENT} — No Changes Needed" \
     "New version released (v${LAST} → v${CURRENT}) but no actionable changes for Canopy.\n\n<${CHANGELOG_URL}/tag/v${CURRENT}|View changelog>"
   echo "$CURRENT" > "$VERSION_FILE"
+  rm -f "$STATE_DIR/retry-count-${CURRENT}.txt"
   exit 0
 fi
 
-# Truncate RESULT to avoid GitHub API body size limits (65536 chars, with 5536 buffer)
+# Truncate RESULT to avoid GitHub API body size limits (65536 chars, with 5536 buffer).
+# Use python3 to truncate by Unicode code points (bash ${VAR:0:N} truncates by bytes
+# which can split multi-byte UTF-8 sequences).
 if [ ${#RESULT} -gt 60000 ]; then
   log "WARNING: Claude output truncated from ${#RESULT} to 60000 chars"
-  TRUNCATED="${RESULT:0:60000}"
-  FENCE_COUNT=$(echo "$TRUNCATED" | grep -c '```' || true)
+  TRUNCATED=$(printf '%s' "$RESULT" | python3 -c 'import sys; sys.stdout.write(sys.stdin.read()[:60000])')
+  FENCE_COUNT=$(printf '%s' "$TRUNCATED" | grep -c '```' || true)
   if [ $((FENCE_COUNT % 2)) -eq 1 ]; then
     RESULT="${TRUNCATED}
 \`\`\`
@@ -320,6 +349,9 @@ _(output truncated)_"
   fi
 fi
 
+# Mark untracked files as intent-to-add so `git diff --stat` sees them
+git add -N . 2>>"$LOG_FILE" || true
+
 # Check actual file changes (separate from Claude's text output)
 DIFF_STAT=$(git diff --stat 2>>"$LOG_FILE") || {
   log "ERROR: git diff --stat failed in worktree"
@@ -330,6 +362,7 @@ if [ -z "$DIFF_STAT" ]; then
   notify_slack "good" "Canopy · Claude Code v${CURRENT} — No Changes Needed" \
     "New version released (v${LAST} → v${CURRENT}). Claude analyzed the changelog but found no code changes needed.\n\n<${CHANGELOG_URL}/tag/v${CURRENT}|View changelog>"
   echo "$CURRENT" > "$VERSION_FILE"
+  rm -f "$STATE_DIR/retry-count-${CURRENT}.txt"
   exit 0
 fi
 
@@ -353,9 +386,13 @@ if ! xcodebuild -scheme Canopy -configuration Debug \
     RETRY_COUNT=0
   fi
   if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
-    log "ERROR: v${CURRENT} failed $MAX_RETRIES times, skipping"
+    log "ERROR: v${CURRENT} failed $MAX_RETRIES times, marking as skipped"
     notify_slack "danger" "Canopy · Claude Code v${CURRENT} — Giving Up" \
       "Build failed ${MAX_RETRIES} times. v${CURRENT} will be skipped permanently.\nManual intervention required.\n\n<${CHANGELOG_URL}/tag/v${CURRENT}|Changelog>"
+    # Create skip marker instead of advancing VERSION_FILE directly — this way
+    # the next run's version diff still fires (in case a fix lands in a newer
+    # version), but this specific version is recognized as already skipped.
+    touch "$STATE_DIR/skipped-${CURRENT}.txt"
     echo "$CURRENT" > "$VERSION_FILE"
     rm -f "$RETRY_FILE"
     exit 1
@@ -370,23 +407,19 @@ if ! xcodebuild -scheme Canopy -configuration Debug \
   if [ -z "$EXISTING_ISSUE" ]; then
     ISSUE_BODY_FILE=$(mktemp)
     {
-      echo "## auto-adopt: Claude Code v${CURRENT} — Build Failed"
-      echo ""
-      echo "### Claude's Analysis"
-      echo "$RESULT"
-      echo ""
-      echo "### Build Error (last 50 lines)"
-      echo '```'
+      printf '## auto-adopt: Claude Code v%s — Build Failed\n\n' "$CURRENT"
+      printf '### Claude'\''s Analysis\n'
+      printf '%s\n' "$RESULT"
+      printf '\n### Build Error (last 50 lines)\n'
+      printf '```\n'
       tail -50 "$BUILD_LOG"
-      echo '```'
-      echo ""
-      echo "### Details"
-      echo "- Previous version: v${LAST}"
-      echo "- New version: v${CURRENT}"
-      echo "- Retry: $((RETRY_COUNT + 1))/${MAX_RETRIES}"
-      echo "- Changelog: https://github.com/anthropics/claude-code/releases"
-      echo ""
-      echo "Auto-adopt pipeline detected actionable changes but the build failed."
+      printf '\n```\n\n'
+      printf '### Details\n'
+      printf -- '- Previous version: v%s\n' "$LAST"
+      printf -- '- New version: v%s\n' "$CURRENT"
+      printf -- '- Retry: %d/%d\n' "$((RETRY_COUNT + 1))" "$MAX_RETRIES"
+      printf -- '- Changelog: https://github.com/anthropics/claude-code/releases\n\n'
+      printf 'Auto-adopt pipeline detected actionable changes but the build failed.\n'
     } > "$ISSUE_BODY_FILE"
 
     if ISSUE_URL=$(gh issue create --repo "$GH_REPO" \
@@ -416,21 +449,22 @@ BUILD_LOG=""
 rm -f "$STATE_DIR/retry-count-${CURRENT}.txt"
 
 # --- 7. Create PR (build succeeded) ---
-# Configure git identity for this worktree (launchd env has no git config)
-git config user.name "Canopy Auto-Adopt" 2>>"$LOG_FILE" || true
-git config user.email "auto-adopt@canopy.local" 2>>"$LOG_FILE" || true
-
 if ! git add -A 2>>"$LOG_FILE"; then
   log "ERROR: git add failed for v${CURRENT}"
   exit 1
 fi
 
-if ! git commit -m "auto-adopt: claude-code v${CURRENT}
+# Use per-invocation -c flags instead of `git config` to avoid writing identity
+# into the repo's .git/config (which would pollute the user's local checkout).
+if ! git \
+  -c user.name="Canopy Auto-Adopt" \
+  -c user.email="auto-adopt@canopy.local" \
+  commit -m "auto-adopt: claude-code v${CURRENT}
 
 - Auto-adopted features from Claude Code v${CURRENT}
 - Build verified locally
 
-Co-Authored-By: Claude Code CLI <noreply@anthropic.com>" 2>>"$LOG_FILE"; then
+Co-Authored-By: Claude Sonnet <noreply@anthropic.com>" 2>>"$LOG_FILE"; then
   log "ERROR: git commit failed for v${CURRENT}"
   exit 1
 fi
@@ -442,34 +476,37 @@ fi
 
 PR_BODY_FILE=$(mktemp)
 {
-  echo "## Auto-adopted Changes from Claude Code v${CURRENT}"
-  echo ""
-  echo "Previous version: v${LAST}"
-  echo ""
-  echo "### Claude's Analysis"
-  echo "$RESULT"
-  echo ""
-  echo "### Build Verification"
-  echo "Build passed"
-  echo ""
-  echo "---"
-  echo "Changelog: https://github.com/anthropics/claude-code/releases"
+  printf '## Auto-adopted Changes from Claude Code v%s\n\n' "$CURRENT"
+  printf 'Previous version: v%s\n\n' "$LAST"
+  printf '### Claude'\''s Analysis\n'
+  printf '%s\n\n' "$RESULT"
+  printf '### Build Verification\nBuild passed\n\n'
+  printf -- '---\n'
+  printf 'Changelog: https://github.com/anthropics/claude-code/releases\n'
 } > "$PR_BODY_FILE"
 
-if ! PR_URL=$(gh pr create --repo "$GH_REPO" \
+# Check if a PR already exists for this branch (resume path)
+EXISTING_PR=$(gh pr list --repo "$GH_REPO" --head "$BRANCH_NAME" --state open \
+  --json url -q '.[0].url' 2>>"$LOG_FILE" || echo "")
+
+if [ -n "$EXISTING_PR" ]; then
+  log "PR already exists for $BRANCH_NAME: $EXISTING_PR"
+  PR_URL="$EXISTING_PR"
+elif ! PR_URL=$(gh pr create --repo "$GH_REPO" \
   --title "auto-adopt: Claude Code v${LAST} → v${CURRENT}" \
   --head "$BRANCH_NAME" \
   --label "auto-adopt" \
   --body-file "$PR_BODY_FILE" 2>>"$LOG_FILE"); then
   log "ERROR: Branch $BRANCH_NAME was pushed but PR creation failed (check that 'auto-adopt' label exists)"
-  log "Will retry on next run"
+  log "Will retry on next run (resume logic will pick up existing remote branch)"
   notify_slack "warning" "Canopy · Claude Code v${CURRENT} — PR Creation Failed" \
     "Branch \`${BRANCH_NAME}\` pushed but PR creation failed. Manual intervention needed.\n\n<${CHANGELOG_URL}/tag/v${CURRENT}|Changelog>"
   exit 1
+else
+  log "Created PR for v${CURRENT}: $PR_URL"
 fi
-log "Created PR for v${CURRENT}: $PR_URL"
 
-DIFF_SUMMARY=$(echo "$DIFF_STAT" | head -6)
+DIFF_SUMMARY=$(printf '%s\n' "$DIFF_STAT" | head -6)
 notify_slack "good" "Canopy · Claude Code v${LAST} → v${CURRENT} — PR Created" \
   "<${PR_URL}|View PR>\n\n\`\`\`\n${DIFF_SUMMARY}\n\`\`\`\n\n<${CHANGELOG_URL}/tag/v${CURRENT}|Changelog>"
 
