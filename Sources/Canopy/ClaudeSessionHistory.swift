@@ -19,19 +19,40 @@ enum ClaudeSessionHistory {
     /// Maximum number of sessions to parse (sorted by most recent first).
     private static let maxSessionsToParse = 50
 
-    /// Encode a directory path to the Claude project folder name.
-    /// Matches Claude CLI encoding: every non-alphanumeric character (except `_`)
-    /// inside a component becomes `-`. Components are joined with `-` and the result
-    /// is prefixed with `-` for the leading `/`. So `/.config` → `--config` and
-    /// `/Users/hiko/Canopy Companion` → `-Users-hiko-Canopy-Companion`.
+    /// Mirrors the current Claude CLI encoding: every character that is not a letter,
+    /// digit, or `_` collapses to `-`. Examples: `/.config` → `--config`,
+    /// `/Canopy Companion` → `-Canopy-Companion`.
     static func encodePath(_ path: String) -> String {
+        encodePath(path, legacyDotAndSpace: false)
+    }
+
+    /// Legacy CLI encoding that preserved `.` and spaces inside components.
+    /// Still needed because `~/.claude/projects/` contains folders written by older
+    /// CLI versions (e.g. `-Users-hiko-Documents-repos-Personal-Canopy Companion`).
+    private static func encodePathLegacy(_ path: String) -> String {
+        encodePath(path, legacyDotAndSpace: true)
+    }
+
+    private static func encodePath(_ path: String, legacyDotAndSpace: Bool) -> String {
         let components = path.split(separator: "/", omittingEmptySubsequences: true)
         let mapped = components.map { component -> String in
             String(component.map { ch -> Character in
-                (ch.isLetter || ch.isNumber || ch == "_") ? ch : "-"
+                if ch.isLetter || ch.isNumber || ch == "_" { return ch }
+                if legacyDotAndSpace, ch == "." || ch == " " { return ch }
+                return "-"
             })
         }
         return "-" + mapped.joined(separator: "-")
+    }
+
+    /// Every folder-name variant that may hold sessions for `path`, in preference order.
+    /// Current CLI encoding is tried first; legacy form is included only when it differs
+    /// and still points at a real folder on disk. Both must be consulted because users
+    /// can have sessions written by multiple CLI versions for the same directory.
+    static func encodedFolderCandidates(for path: String) -> [String] {
+        let strict = encodePath(path)
+        let legacy = encodePathLegacy(path)
+        return strict == legacy ? [strict] : [strict, legacy]
     }
 
     /// Decode encoded project directory name back to path.
@@ -103,10 +124,18 @@ enum ClaudeSessionHistory {
     }
 
     /// Load sessions for a specific working directory.
+    /// Consults every encoded folder variant (current + legacy) so sessions written
+    /// by older CLI versions still surface. Results are deduplicated by session id.
     static func loadSessions(for directory: URL) -> [SessionEntry] {
-        let encoded = encodePath(directory.path)
-        let projectDir = claudeDir.appendingPathComponent(encoded)
-        return loadSessionsFromDir(projectDir, projectDirectory: directory)
+        var seen = Set<String>()
+        var entries: [SessionEntry] = []
+        for encoded in encodedFolderCandidates(for: directory.path) {
+            let projectDir = claudeDir.appendingPathComponent(encoded)
+            for entry in loadSessionsFromDir(projectDir, projectDirectory: directory) where seen.insert(entry.id).inserted {
+                entries.append(entry)
+            }
+        }
+        return entries.sorted { $0.timestamp > $1.timestamp }
     }
 
     /// Load sessions across all projects, sorted by most recent.
@@ -146,11 +175,9 @@ enum ClaudeSessionHistory {
         candidates.sort { $0.modDate > $1.modDate }
         let topCandidates = candidates.prefix(maxSessionsToParse)
 
-        // Phase 3: resolve cwd and title from JSONL metadata (single read per file).
-        // Prefer the `cwd` field written by the CLI over lossy folder-name decoding —
-        // the encoded form collapses spaces/dots into `-` so directories like
-        // "Canopy Companion" can't be recovered by walking the filesystem.
-        // Skip sessions whose project directory no longer exists on disk.
+        // Phase 3: prefer the `cwd` field written by the CLI over `decodePath`.
+        // The encoded form collapses spaces and dots into `-`, so round-tripping
+        // a name like "Canopy Companion" by walking the filesystem is lossy.
         var entries: [SessionEntry] = []
         for candidate in topCandidates {
             let metadata = extractMetadata(fromPath: candidate.path)
@@ -215,11 +242,18 @@ enum ClaudeSessionHistory {
 
     /// Count user + assistant messages in a session transcript file.
     static func countMessages(sessionId: String, directory: URL) -> Int {
-        let encoded = encodePath(directory.path)
-        let filePath = claudeDir
-            .appendingPathComponent(encoded)
-            .appendingPathComponent("\(sessionId).jsonl").path
-        guard let handle = FileHandle(forReadingAtPath: filePath) else { return 0 }
+        let fm = FileManager.default
+        var filePath: String?
+        for encoded in encodedFolderCandidates(for: directory.path) {
+            let candidate = claudeDir
+                .appendingPathComponent(encoded)
+                .appendingPathComponent("\(sessionId).jsonl").path
+            if fm.fileExists(atPath: candidate) {
+                filePath = candidate
+                break
+            }
+        }
+        guard let filePath, let handle = FileHandle(forReadingAtPath: filePath) else { return 0 }
         defer { try? handle.close() }
 
         var count = 0
@@ -240,9 +274,9 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: file.path).title
     }
 
-    /// Read up to 128KB to find `ai-title` (generated by Claude Code, usually within the first
-    /// few lines but may be preceded by large base64 image data), the first user message, and
-    /// the `cwd` recorded on any entry. Returns both so callers can avoid lossy path decoding.
+    /// Read up to 128KB so large base64 image attachments don't push `ai-title`
+    /// past our window. Returns the cwd too so session discovery can skip
+    /// decoding the folder name.
     private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             return ("Untitled", nil)
@@ -285,7 +319,7 @@ enum ClaudeSessionHistory {
                 }
             }
 
-            if aiTitle != nil, cwd != nil, firstUserMessage != nil { break }
+            if cwd != nil, aiTitle != nil || firstUserMessage != nil { break }
         }
 
         let title = aiTitle ?? firstUserMessage ?? "Untitled"
