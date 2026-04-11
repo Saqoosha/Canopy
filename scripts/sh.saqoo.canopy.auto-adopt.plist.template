@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Auto-adopt pipeline: checks for Claude Code VSCode extension updates daily at 08:15 local time -->
+<!--
+  Auto-adopt pipeline: checks for Claude Code VSCode extension updates daily at 08:15 local time.
+
+  This is a TEMPLATE with placeholders. Do not install directly.
+  Run scripts/install-auto-adopt.sh, which substitutes the placeholders with
+  the absolute paths for this checkout and writes the rendered plist to
+  ~/Library/LaunchAgents/.
+-->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -10,7 +17,7 @@
   <array>
     <string>/usr/bin/env</string>
     <string>bash</string>
-    <string>/Users/hiko/Documents/repos/Personal/Canopy/scripts/auto-adopt.sh</string>
+    <string>__CANOPY_REPO__/scripts/auto-adopt.sh</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
@@ -28,7 +35,7 @@
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key>
-    <string>/Users/hiko</string>
+    <string>__HOME__</string>
   </dict>
 </dict>
 </plist>
