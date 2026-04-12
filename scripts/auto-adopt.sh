@@ -9,6 +9,12 @@ set -euo pipefail
 # over any Homebrew-installed versions. Without this, launchd can't find `npm`.
 export PATH="$HOME/.local/share/mise/shims:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
+# Pin a node version for mise shims. The auto-adopt worktree lives under /tmp,
+# so mise can't walk up to ~/.tool-versions to discover one — without this, the
+# Claude CLI's SessionEnd hook (which spawns `node`) fails with
+# "No version is set for shim: node". `lts` mirrors what ~/.tool-versions uses.
+export MISE_NODE_VERSION="${MISE_NODE_VERSION:-lts}"
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="$HOME/.local/share/canopy-auto-adopt"
 VERSION_FILE="$STATE_DIR/last-version.txt"
