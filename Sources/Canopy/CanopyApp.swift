@@ -56,6 +56,13 @@ struct CanopyApp: App {
                 }
                 .keyboardShortcut("o")
                 .disabled(focusedAppState == nil)
+
+                Divider()
+
+                Button("Close and Stop Session ⌥⌘W") {
+                    // close() bypasses windowShouldClose/handleCloseButton, closing directly
+                    NSApp.keyWindow?.close()
+                }
             }
             CommandGroup(after: .toolbar) {
                 ForEach(1...9, id: \.self) { index in
@@ -116,6 +123,61 @@ struct CanopyApp: App {
     }
 }
 
+// MARK: - Window close interception
+
+/// Decides whether to hide or close a window. Returns `true` if the window was hidden.
+/// Shared by all three close-interception layers (key monitor, close button, delegate proxy).
+@MainActor
+func hideOrCloseWindow(_ window: NSWindow, forceClose: Bool = false) -> Bool {
+    // App termination or explicit force close: allow real close
+    if AppDelegate.isTerminating || forceClose || AppDelegate.forceCloseWindows.remove(ObjectIdentifier(window)) != nil {
+        logger.debug("Window close: allowing real close (terminating=\(AppDelegate.isTerminating) force=\(forceClose))")
+        return false
+    }
+
+    // Tab in a group with other tabs: close just this tab
+    if let tabs = window.tabbedWindows, tabs.count > 1 {
+        logger.debug("Window close: closing tab (\(tabs.count) tabs in group)")
+        return false
+    }
+
+    // Launcher-only windows (no active session): allow normal close
+    if window.title == "Canopy" {
+        logger.debug("Window close: launcher window, allowing close")
+        return false
+    }
+
+    // Last tab or standalone window with session: hide instead of close
+    logger.debug("Window close: hiding window with active session")
+    window.orderOut(nil)
+    return true
+}
+
+/// Proxy that intercepts windowShouldClose to hide windows instead of closing them.
+/// Fallback layer — the close button override and key monitor are the primary mechanisms.
+@MainActor
+final class WindowDelegateProxy: NSObject, NSWindowDelegate {
+    weak var originalDelegate: (any NSWindowDelegate)?
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if hideOrCloseWindow(sender) {
+            return false // Was hidden, don't close
+        }
+        return originalDelegate?.windowShouldClose?(sender) ?? true
+    }
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if aSelector == #selector(NSWindowDelegate.windowShouldClose(_:)) {
+            return true
+        }
+        return originalDelegate?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        return originalDelegate
+    }
+}
+
 // MARK: - AppDelegate
 
 @MainActor
@@ -127,6 +189,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private var configuredWindows = NSHashTable<NSWindow>.weakObjects()
     private var resizeObservers: [NSObjectProtocol] = []
+    private var delegateProxies: [ObjectIdentifier: WindowDelegateProxy] = [:]
+    private var keyMonitor: Any?
+
+    /// Windows marked for force-close (Option+Cmd+W). Checked and cleared by WindowDelegateProxy.
+    static var forceCloseWindows = Set<ObjectIdentifier>()
+    /// Set during app termination to bypass hide-on-close behavior.
+    static var isTerminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -136,25 +205,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(windowDidBecomeMain(_:)),
             name: NSWindow.didBecomeMainNotification, object: nil
         )
+
+        // Intercept Cmd+W to hide window instead of closing it.
+        // This is more reliable than delegate proxy alone, since SwiftUI may override the delegate.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard flags == .command || flags == [.command, .option],
+                  event.charactersIgnoringModifiers == "w",
+                  let window = NSApp.keyWindow,
+                  self.isAppWindow(window)
+            else { return event }
+
+            let forceClose = flags.contains(.option)
+            if !hideOrCloseWindow(window, forceClose: forceClose) {
+                window.close()
+            }
+            return nil // Consume the event
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            let hiddenWindows = NSApp.windows.filter { isAppWindow($0) && !$0.isVisible }
+            if !hiddenWindows.isEmpty {
+                for window in hiddenWindows {
+                    window.makeKeyAndOrderFront(nil)
+                }
+                return false
+            }
+            // No hidden windows — let SwiftUI open a new one
+        }
+        return true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard ShimProcess.hasActiveSession else {
+            Self.isTerminating = true
+            return .terminateNow
+        }
+
+        let count = ShimProcess.activeCount
+        let alert = NSAlert()
+        alert.messageText = "Active Sessions Running"
+        alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. Quitting will stop all sessions."
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+
+        if alert.runModal() == .alertSecondButtonReturn {
+            return .terminateCancel
+        }
+        Self.isTerminating = true
+        return .terminateNow
+    }
+
+    private func isAppWindow(_ window: NSWindow) -> Bool {
+        window.identifier?.rawValue.contains("main") == true
+            && window.styleMask.contains(.titled)
+            && !window.isKind(of: NSPanel.self)
     }
 
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error {
-                print("Notification permission error: \(error.localizedDescription)")
+                logger.error("Notification permission error: \(error.localizedDescription)")
             }
         }
     }
 
+    @objc private func handleCloseButton(_ sender: NSButton) {
+        guard let window = sender.window else { return }
+        if !hideOrCloseWindow(window) {
+            window.close()
+        }
+    }
+
+    /// Install or reinstall the close-interception delegate proxy on a window.
+    private func installDelegateProxy(for window: NSWindow) {
+        let windowId = ObjectIdentifier(window)
+        // Already installed and still active
+        if let existing = delegateProxies[windowId], window.delegate === existing { return }
+
+        let proxy = WindowDelegateProxy()
+        proxy.originalDelegate = window.delegate
+        window.delegate = proxy
+        delegateProxies[windowId] = proxy
+    }
+
     @objc private func windowDidBecomeMain(_ note: Notification) {
         guard let window = note.object as? NSWindow,
-              !configuredWindows.contains(window),
-              window.styleMask.contains(.titled),
-              !window.isKind(of: NSPanel.self)
+              isAppWindow(window)
         else { return }
-        // Only handle app windows (WindowGroup id: "main" and newTab windows)
-        let isAppWindow = window.identifier?.rawValue.contains("main") == true
-        guard isAppWindow else { return }
+
+        // Install close interception (reinstall if SwiftUI reset the delegate)
+        installDelegateProxy(for: window)
+
+        // Override close button target/action (deferred so SwiftUI finishes its setup first).
+        // This is the primary mechanism — more reliable than the delegate proxy.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let closeButton = window.standardWindowButton(.closeButton) {
+                closeButton.target = self
+                closeButton.action = #selector(self.handleCloseButton(_:))
+            }
+        }
+
+        // First-time window configuration
+        guard !configuredWindows.contains(window) else { return }
         configuredWindows.add(window)
 
         let otherWindow = NSApp.windows.first {
@@ -206,6 +368,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NotificationCenter.default.removeObserver(closeToken)
             }
             self?.resizeObservers.removeAll { $0 === resizeToken }
+            if let self {
+                self.delegateProxies.removeValue(forKey: ObjectIdentifier(window))
+            }
         }
     }
 }
