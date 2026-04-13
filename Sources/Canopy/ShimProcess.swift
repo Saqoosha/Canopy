@@ -60,6 +60,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         instances.allObjects.filter { $0.process?.isRunning == true }.count
     }
 
+    /// Whether the given window contains a running shim process.
+    @MainActor static func hasActiveSession(in window: NSWindow) -> Bool {
+        instances.allObjects.contains { shim in
+            guard shim.process?.isRunning == true,
+                  let webView = shim.webView else { return false }
+            return webView.window === window
+        }
+    }
+
     let workingDirectory: URL
     var resumeSessionId: String?
     var model: String?
