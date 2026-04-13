@@ -129,10 +129,10 @@ struct CanopyApp: App {
 /// Decides whether to hide or close a window. Returns `true` if the window was hidden.
 /// Shared by all three close-interception layers (key monitor, close button, delegate proxy).
 @MainActor
-func hideOrCloseWindow(_ window: NSWindow, forceClose: Bool = false) -> Bool {
-    // App termination or explicit force close: allow real close
-    if AppDelegate.isTerminating || forceClose || AppDelegate.forceCloseWindows.remove(ObjectIdentifier(window)) != nil {
-        logger.debug("Window close: allowing real close (terminating=\(AppDelegate.isTerminating) force=\(forceClose))")
+func hideOrCloseWindow(_ window: NSWindow) -> Bool {
+    // App termination: allow real close
+    if AppDelegate.isTerminating {
+        logger.debug("Window close: allowing real close (terminating)")
         return false
     }
 
@@ -193,8 +193,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var delegateProxies: [ObjectIdentifier: WindowDelegateProxy] = [:]
     private var keyMonitor: Any?
 
-    /// Windows marked for force-close (Option+Cmd+W). Checked and cleared by WindowDelegateProxy.
-    static var forceCloseWindows = Set<ObjectIdentifier>()
     /// Set during app termination to bypass hide-on-close behavior.
     static var isTerminating = false
 

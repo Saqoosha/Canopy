@@ -60,11 +60,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         instances.allObjects.filter { $0.process?.isRunning == true }.count
     }
 
-    /// Whether the given window contains a running shim process.
+    /// Whether the given window contains a shim-managed session (running or reconnecting).
+    /// Checks webView presence rather than process state so SSH reconnect windows stay hidden.
     @MainActor static func hasActiveSession(in window: NSWindow) -> Bool {
         instances.allObjects.contains { shim in
-            guard shim.process?.isRunning == true,
-                  let webView = shim.webView else { return false }
+            guard let webView = shim.webView else { return false }
             return webView.window === window
         }
     }
