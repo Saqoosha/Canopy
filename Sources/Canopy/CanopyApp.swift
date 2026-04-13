@@ -59,10 +59,11 @@ struct CanopyApp: App {
 
                 Divider()
 
-                Button("Close and Stop Session ⌥⌘W") {
+                Button("Close and Stop Session") {
                     // close() bypasses windowShouldClose/handleCloseButton, closing directly
                     NSApp.keyWindow?.close()
                 }
+                .keyboardShortcut("w", modifiers: [.command, .option])
             }
             CommandGroup(after: .toolbar) {
                 ForEach(1...9, id: \.self) { index in
@@ -128,10 +129,10 @@ struct CanopyApp: App {
 /// Decides whether to hide or close a window. Returns `true` if the window was hidden.
 /// Shared by all three close-interception layers (key monitor, close button, delegate proxy).
 @MainActor
-func hideOrCloseWindow(_ window: NSWindow, forceClose: Bool = false) -> Bool {
-    // App termination or explicit force close: allow real close
-    if AppDelegate.isTerminating || forceClose || AppDelegate.forceCloseWindows.remove(ObjectIdentifier(window)) != nil {
-        logger.debug("Window close: allowing real close (terminating=\(AppDelegate.isTerminating) force=\(forceClose))")
+func hideOrCloseWindow(_ window: NSWindow) -> Bool {
+    // App termination: allow real close
+    if AppDelegate.isTerminating {
+        logger.debug("Window close: allowing real close (terminating)")
         return false
     }
 
@@ -141,9 +142,9 @@ func hideOrCloseWindow(_ window: NSWindow, forceClose: Bool = false) -> Bool {
         return false
     }
 
-    // Launcher-only windows (no active session): allow normal close
-    if window.title == "Canopy" {
-        logger.debug("Window close: launcher window, allowing close")
+    // No active session in this window: allow normal close
+    if !ShimProcess.hasActiveSession(in: window) {
+        logger.debug("Window close: no active session, allowing close")
         return false
     }
 
@@ -192,8 +193,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var delegateProxies: [ObjectIdentifier: WindowDelegateProxy] = [:]
     private var keyMonitor: Any?
 
-    /// Windows marked for force-close (Option+Cmd+W). Checked and cleared by WindowDelegateProxy.
-    static var forceCloseWindows = Set<ObjectIdentifier>()
     /// Set during app termination to bypass hide-on-close behavior.
     static var isTerminating = false
 
@@ -211,17 +210,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard flags == .command || flags == [.command, .option],
-                  event.charactersIgnoringModifiers == "w",
-                  let window = NSApp.keyWindow,
-                  self.isAppWindow(window)
+            guard flags == .command,
+                  event.charactersIgnoringModifiers == "w"
             else { return event }
+            let handled = MainActor.assumeIsolated {
+                guard let window = NSApp.keyWindow,
+                      self.isAppWindow(window)
+                else { return false }
 
-            let forceClose = flags.contains(.option)
-            if !hideOrCloseWindow(window, forceClose: forceClose) {
-                window.close()
+                // Cmd+W: hide or close tab
+                if !hideOrCloseWindow(window) {
+                    window.close()
+                }
+                return true
             }
-            return nil // Consume the event
+            return handled ? nil : event
         }
     }
 
