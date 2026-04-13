@@ -47,6 +47,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     private let writeQueue = DispatchQueue(label: "sh.saqoo.Canopy.shimWrite")
 
+    /// All living ShimProcess instances (weak references, auto-removed on dealloc).
+    @MainActor private static var instances = NSHashTable<ShimProcess>.weakObjects()
+
+    /// Whether any shim process is currently running. Used by AppDelegate for quit confirmation.
+    @MainActor static var hasActiveSession: Bool {
+        instances.allObjects.contains { $0.process?.isRunning == true }
+    }
+
+    /// Number of currently running shim processes.
+    @MainActor static var activeCount: Int {
+        instances.allObjects.filter { $0.process?.isRunning == true }.count
+    }
+
     let workingDirectory: URL
     var resumeSessionId: String?
     var model: String?
@@ -69,6 +82,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Whether the process wrapper has been cleared from settings after CLI spawned.
     private var wrapperCleared = false
 
+    @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil) {
         self.workingDirectory = workingDirectory
         self.resumeSessionId = resumeSessionId
@@ -83,6 +97,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         self.statusBarData = statusBarData
         self.remoteHost = remoteHost
         super.init()
+        Self.instances.add(self)
         // Set CLI version, VCS branch, initial message count, and remote host
         statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
         statusBarData?.remoteHost = remoteHost
