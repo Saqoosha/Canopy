@@ -117,7 +117,17 @@ class EventEmitter {
       try {
         listener(data);
       } catch (err) {
-        process.stderr.write(`[shim:EventEmitter] listener threw: ${err?.stack || err}\n`);
+        let details;
+        try {
+          details = err && err.stack ? err.stack : String(err);
+        } catch {
+          details = "<unstringifiable thrown value>";
+        }
+        try {
+          process.stderr.write(`[shim:EventEmitter] listener threw: ${details}\n`);
+        } catch {
+          // keep emitter resilient even if stderr is unavailable
+        }
       }
     }
   }

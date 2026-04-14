@@ -71,6 +71,11 @@ function createWindow() {
       return new Disposable(() => providers.delete(viewType));
     },
 
+    /**
+     * Create a secondary webview panel.
+     * IMPORTANT: Must not replace `activeView`; sidebar remains the primary
+     * message conduit for protocol/control messages.
+     */
     createWebviewPanel(viewType, _title, _showOptions, _options) {
       const view = createWebviewObject();
       view.viewType = viewType;
