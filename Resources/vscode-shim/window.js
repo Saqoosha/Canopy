@@ -74,7 +74,9 @@ function createWindow() {
     createWebviewPanel(viewType, _title, _showOptions, _options) {
       const view = createWebviewObject();
       view.viewType = viewType;
-      activeView = view;
+      // Do NOT replace activeView — sidebar must remain the primary message conduit.
+      // Panels (e.g. plan preview) are secondary; replacing activeView here breaks
+      // the sidebar's onDidReceiveMessage routing (e.g. ExitPlanMode responses).
       return view;
     },
 

@@ -114,7 +114,11 @@ class EventEmitter {
 
   fire(data) {
     for (const listener of [...this._listeners]) {
-      listener(data);
+      try {
+        listener(data);
+      } catch (err) {
+        process.stderr.write(`[shim:EventEmitter] listener threw: ${err?.stack || err}\n`);
+      }
     }
   }
 
