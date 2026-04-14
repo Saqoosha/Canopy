@@ -152,6 +152,8 @@ enum ClaudeSessionHistory {
 
         for projectEncoded in projectDirs {
             guard projectEncoded != "-" else { continue }
+            // Skip claude-mem observer sessions (auto-created by hooks, not user sessions)
+            guard !projectEncoded.hasSuffix("observer-sessions") else { continue }
 
             let projectPath = claudeDir.path + "/" + projectEncoded
             var isDir: ObjCBool = false
