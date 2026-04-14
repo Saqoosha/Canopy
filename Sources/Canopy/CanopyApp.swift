@@ -73,6 +73,21 @@ struct CanopyApp: App {
                     .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
                 }
             }
+            CommandGroup(after: .windowList) {
+                let hiddenWindows = NSApp.windows.filter {
+                    isCanopyWindow($0) && !$0.isVisible && $0.tabbedWindows == nil
+                }
+                if !hiddenWindows.isEmpty {
+                    Divider()
+                    Section("Hidden Windows") {
+                        ForEach(hiddenWindows, id: \.windowNumber) { window in
+                            Button(window.title.isEmpty ? "Canopy" : window.title) {
+                                window.makeKeyAndOrderFront(nil)
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Settings {
@@ -126,8 +141,20 @@ struct CanopyApp: App {
 
 // MARK: - Window close interception
 
-/// Decides whether to hide or close a window. Returns `true` if the window was hidden.
-/// Shared by all three close-interception layers (key monitor, close button, delegate proxy).
+/// Whether a window is a Canopy app window (not a panel, settings, etc.)
+@MainActor
+func isCanopyWindow(_ window: NSWindow) -> Bool {
+    window.identifier?.rawValue.hasPrefix("main") == true
+        && window.styleMask.contains(.titled)
+        && !window.isKind(of: NSPanel.self)
+}
+
+/// Reentrancy guard for hideOrCloseWindow — prevents stacked modal alerts.
+@MainActor
+private var isShowingCloseAlert = false
+
+/// Decides whether to hide, close, or prompt for a window. Returns `true` if the close was handled
+/// (hidden or cancelled). Shared by all three close-interception layers.
 @MainActor
 func hideOrCloseWindow(_ window: NSWindow) -> Bool {
     // App termination: allow real close
@@ -148,10 +175,40 @@ func hideOrCloseWindow(_ window: NSWindow) -> Bool {
         return false
     }
 
-    // Last tab or standalone window with session: hide instead of close
-    logger.debug("Window close: hiding window with active session")
-    window.orderOut(nil)
-    return true
+    // Prevent stacked alerts from rapid Cmd+W or double-clicks
+    guard !isShowingCloseAlert else {
+        logger.debug("Window close: alert already showing, ignoring")
+        return true
+    }
+    isShowingCloseAlert = true
+    defer { isShowingCloseAlert = false }
+
+    // Active session: ask user what to do
+    let alert = NSAlert()
+    alert.messageText = "Session is Running"
+    alert.informativeText = "This window has an active session. What would you like to do?"
+    alert.addButton(withTitle: "Hide Window")
+    alert.addButton(withTitle: "Stop Session and Close")
+    alert.addButton(withTitle: "Cancel")
+    alert.buttons[2].keyEquivalent = "\u{1b}" // Esc key for Cancel
+    alert.alertStyle = .informational
+
+    let response = alert.runModal()
+    switch response {
+    case .alertFirstButtonReturn:
+        logger.debug("Window close: user chose hide")
+        window.orderOut(nil)
+        return true
+    case .alertSecondButtonReturn:
+        logger.debug("Window close: user chose stop and close")
+        return false // Let the caller close the window (kills session)
+    case .alertThirdButtonReturn:
+        logger.debug("Window close: user cancelled")
+        return true
+    default:
+        logger.warning("Window close: unexpected modal response \(response.rawValue), treating as cancel")
+        return true
+    }
 }
 
 /// Proxy that intercepts windowShouldClose to hide windows instead of closing them.
@@ -268,9 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func isAppWindow(_ window: NSWindow) -> Bool {
-        window.identifier?.rawValue.contains("main") == true
-            && window.styleMask.contains(.titled)
-            && !window.isKind(of: NSPanel.self)
+        isCanopyWindow(window)
     }
 
     private func requestNotificationPermission() {
@@ -282,7 +337,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func handleCloseButton(_ sender: NSButton) {
-        guard let window = sender.window else { return }
+        guard let window = sender.window else {
+            logger.warning("handleCloseButton: sender has no window reference")
+            return
+        }
         if !hideOrCloseWindow(window) {
             window.close()
         }
