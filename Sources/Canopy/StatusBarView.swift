@@ -169,8 +169,7 @@ struct StatusBarView: View {
         var base = model
         var variantSuffix = ""
         if let bracketStart = model.firstIndex(of: "["),
-           let bracketEnd = model.firstIndex(of: "]"),
-           bracketStart < bracketEnd
+           let bracketEnd = model[bracketStart...].firstIndex(of: "]")
         {
             let variant = String(model[model.index(after: bracketStart)..<bracketEnd])
             base = String(model[..<bracketStart])
