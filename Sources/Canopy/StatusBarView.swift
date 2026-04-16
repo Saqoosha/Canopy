@@ -164,11 +164,23 @@ struct StatusBarView: View {
     private func shortModelName(_ model: String) -> String {
         // "claude-sonnet-4-5-20250514" → "Sonnet 4.5"
         // "claude-opus-4-6" → "Opus 4.6"
-        let lower = model.lowercased()
+        // "claude-opus-4-7[1m]" → "Opus 4.7 (1M)"
+        // Strip optional [variant] suffix (e.g. "[1m]") for parsing
+        var base = model
+        var variantSuffix = ""
+        if let bracketStart = model.firstIndex(of: "["),
+           let bracketEnd = model.firstIndex(of: "]"),
+           bracketStart < bracketEnd
+        {
+            let variant = String(model[model.index(after: bracketStart)..<bracketEnd])
+            base = String(model[..<bracketStart])
+            variantSuffix = variant.uppercased() == "1M" ? " (1M)" : " [\(variant)]"
+        }
+        let lower = base.lowercased()
         for (family, label) in [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
             if lower.contains(family) {
-                if let v = extractVersion(from: lower, family: family) { return "\(label) \(v)" }
-                return label
+                if let v = extractVersion(from: lower, family: family) { return "\(label) \(v)\(variantSuffix)" }
+                return "\(label)\(variantSuffix)"
             }
         }
         return model
