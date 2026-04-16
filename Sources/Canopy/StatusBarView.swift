@@ -173,7 +173,8 @@ struct StatusBarView: View {
                 return "\(label)\(variantSuffix)"
             }
         }
-        return model
+        // Unknown family: preserve variant suffix so raw "[1m]" doesn't leak through.
+        return base + variantSuffix
     }
 
     private func extractVersion(from model: String, family: String) -> String? {
