@@ -253,11 +253,10 @@ struct LauncherView: View {
     }
 
     private static func modelDisplayName(_ alias: String) -> String {
-        switch alias {
-        case "opus[1m]": "Opus (1M)"
-        case "sonnet[1m]": "Sonnet (1M)"
-        default: alias.prefix(1).uppercased() + alias.dropFirst()
-        }
+        // "opus" → "Opus", "opus[1m]" → "Opus (1M)", "sonnet[1m]" → "Sonnet (1M)"
+        let (base, suffix) = ModelNameFormatter.splitVariant(alias)
+        guard !base.isEmpty else { return alias }
+        return base.prefix(1).uppercased() + base.dropFirst() + suffix
     }
 
     private static func effortDisplayName(_ level: String) -> String {
