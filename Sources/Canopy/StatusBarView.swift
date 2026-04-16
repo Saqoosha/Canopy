@@ -173,6 +173,7 @@ struct StatusBarView: View {
         {
             let variant = String(model[model.index(after: bracketStart)..<bracketEnd])
             base = String(model[..<bracketStart])
+            // Anthropic markets the long-context tier as "(1M)"; pass other variants through verbatim.
             variantSuffix = variant.uppercased() == "1M" ? " (1M)" : " [\(variant)]"
         }
         let lower = base.lowercased()
