@@ -1057,9 +1057,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if eventType == "message_start",
                let msg = event["message"] as? [String: Any]
             {
-                // Model name
+                // Model name (raw ID; StatusBarView formats it for display)
                 if let model = msg["model"] as? String {
-                    data.model = Self.formatModelName(model)
+                    data.model = model
                 }
                 // Context usage from message_start (current context at API call time)
                 if let usage = msg["usage"] as? [String: Any] {
@@ -1130,30 +1130,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         default:
             break
         }
-    }
-
-    /// Format model ID to display name: "claude-opus-4-6-20260328" → "Opus 4.6", "claude-opus-4-7[1m]" → "Opus 4.7 (1M)"
-    private static func formatModelName(_ model: String) -> String {
-        // Known patterns: claude-{name}-{major}-{minor}[-date][\[variant\]]
-        // Extract optional [variant] suffix first (e.g. "[1m]")
-        var base = model
-        var variantSuffix = ""
-        if let bracketStart = model.firstIndex(of: "["),
-           let bracketEnd = model.firstIndex(of: "]"),
-           bracketStart < bracketEnd
-        {
-            let variant = String(model[model.index(after: bracketStart)..<bracketEnd])
-            base = String(model[..<bracketStart])
-            variantSuffix = variant.uppercased() == "1M" ? " (1M)" : " [\(variant)]"
-        }
-        let stripped = base.replacingOccurrences(of: "claude-", with: "")
-        let parts = stripped.components(separatedBy: "-")
-        guard parts.count >= 3,
-              let _ = Int(parts[1]),
-              let _ = Int(parts[2])
-        else { return model }
-        let name = parts[0].prefix(1).uppercased() + parts[0].dropFirst()
-        return "\(name) \(parts[1]).\(parts[2])\(variantSuffix)"
     }
 
     private func refreshWindowTitle() {
