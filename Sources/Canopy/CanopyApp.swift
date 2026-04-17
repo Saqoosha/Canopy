@@ -308,6 +308,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Sweep up shims orphaned by mid-flight reconnects so they don't trigger
+        // the "session still running" prompt below — they have no UI anyway.
+        ShimProcess.stopOrphanedSessions()
+
         guard ShimProcess.hasActiveSession else {
             Self.isTerminating = true
             return .terminateNow
