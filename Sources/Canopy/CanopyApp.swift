@@ -201,7 +201,11 @@ func hideOrCloseWindow(_ window: NSWindow) -> Bool {
         return true
     case .alertSecondButtonReturn:
         logger.debug("Window close: user chose stop and close")
-        return false // Let the caller close the window (kills session)
+        // Stop the shim synchronously here — relying on SwiftUI's dismantleNSView
+        // to do it later leaves the Node.js process running long enough for
+        // applicationShouldTerminate to think a session is still active.
+        ShimProcess.stopAllSessions(in: window)
+        return false // Let the caller close the window
     case .alertThirdButtonReturn:
         logger.debug("Window close: user cancelled")
         return true

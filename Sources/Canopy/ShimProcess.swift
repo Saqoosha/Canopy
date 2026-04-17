@@ -69,6 +69,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Synchronously stop all shim processes whose webView lives in the given window.
+    /// Called from the "Stop Session and Close" close-alert branch so the Node.js
+    /// process is gone before applicationShouldTerminate's active-session check.
+    /// (SwiftUI's dismantleNSView fires too late — or sometimes not at all — for that.)
+    @MainActor static func stopAllSessions(in window: NSWindow) {
+        for shim in instances.allObjects {
+            guard let webView = shim.webView, webView.window === window else { continue }
+            shim.stop()
+        }
+    }
+
     let workingDirectory: URL
     var resumeSessionId: String?
     var model: String?
