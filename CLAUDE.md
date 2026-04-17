@@ -132,6 +132,10 @@ Chat:    io_message(user) → CLI stdin
 - Permission mode UI: controlled by synthetic `system/status` io_message in launch_claude intercept, NOT by `initialPermissionMode`
 - `init_response` lacks `authStatus` — injected from auth cache. `isOnboardingDismissed` must be patched to `true`
 - ShimProcess patches `init_response` (authStatus + permissionMode + experimentGates + isOnboardingDismissed) and `update_state` (permissionMode + experimentGates + isOnboardingDismissed only — no authStatus)
+- **SSH remote patches** (in `vscode-shim/index.js`, gated on `CANOPY_SSH_HOST` env var):
+  - `fs.realpathSync` (+ `.native`) returns the input path unresolved on `ENOENT` — the CC extension's unguarded `realpathSync(workspaceFolder)` during webview view setup would otherwise crash the shim when the workspace lives only on the remote
+  - `child_process.spawn` rewrites a missing `cwd` to `$HOME` **only** for spawns whose command matches `CANOPY_SSH_WRAPPER_PATH`. Other spawns (git, ripgrep, MCP) pass through untouched so they fail cleanly instead of silently running in `$HOME` and returning wrong results
+- **Per-shim config overrides** (in `vscode-shim/workspace.js`): `getConfiguration` merges `envOverrides` as the highest-priority layer ahead of the shared Canopy settings file. SSH wrapper flows `ShimProcess.swift → CANOPY_SSH_WRAPPER_PATH → envOverrides["claudeCode.claudeProcessWrapper"]`. `get`/`has`/`inspect` all see the override. Avoids leaking per-session config through the shared file and surviving `/resume` re-spawns
 
 ## Key Learnings (General)
 - `--bare` flag skips keychain/OAuth auth — do NOT use
@@ -180,7 +184,8 @@ To update theme CSS:
 - Uses CC extension's `claudeProcessWrapper` setting with bundled `ssh-claude-wrapper.sh`
 - Wrapper strips local node/claude paths, runs `claude` command on remote with CLI flags
 - `CANOPY_SSH_HOST` env var passes target host to wrapper script
-- `CanopySettings.setProcessWrapper()` dynamically sets/clears the wrapper before each session
+- Wrapper path flows via `CANOPY_SSH_WRAPPER_PATH` env var → vscode-shim `workspace.js` exposes it as a per-shim `claudeCode.claudeProcessWrapper` override (layer 0, highest priority in `get`/`has`/`inspect`). Avoids writing to the shared settings file, which otherwise leaks across concurrent windows and was eagerly cleared mid-session, breaking `/resume`
+- `CanopySettings.clearStaleSSHWrapper()` runs once on local session launch to scrub pre-env-var values left by older Canopy builds; only removes entries whose basename is `ssh-claude-wrapper.sh` so user-configured custom wrappers stay intact
 - Remote machine needs: Claude CLI installed + `claude login` done once interactively
 - Window title shows `[hostname]` prefix (orange), status bar shows network icon + hostname
 - Saved hosts persisted via `SSHHostStore` (UserDefaults), manageable in Preferences

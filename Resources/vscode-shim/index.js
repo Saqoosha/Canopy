@@ -10,6 +10,79 @@ const Module = require("node:module");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// SSH remote: the workspace folder lives on the remote machine and is absent
+// locally. CC extension 2.1.112 calls fs.realpathSync(workspaceFolder) without
+// try/catch during webview view setup, crashing the shim with ENOENT. Patch
+// the sync forms to return the input path unresolved on ENOENT so the
+// extension can proceed; other fs operations against the remote path are
+// already expected to fail gracefully (documented SSH limitations).
+if (process.env.CANOPY_SSH_HOST) {
+  process.stderr.write(
+    `[vscode-shim] SSH remote mode (host=${process.env.CANOPY_SSH_HOST}); installing fs/spawn patches\n`,
+  );
+
+  const origRealpathSync = fs.realpathSync;
+  function patchedRealpathSync(p, options) {
+    try {
+      return origRealpathSync.call(fs, p, options);
+    } catch (err) {
+      if (err && err.code === "ENOENT") return typeof p === "string" ? p : String(p);
+      throw err;
+    }
+  }
+  if (typeof origRealpathSync.native === "function") {
+    const origNative = origRealpathSync.native;
+    patchedRealpathSync.native = function (p, options) {
+      try {
+        return origNative.call(fs, p, options);
+      } catch (err) {
+        if (err && err.code === "ENOENT") return typeof p === "string" ? p : String(p);
+        throw err;
+      }
+    };
+  }
+  fs.realpathSync = patchedRealpathSync;
+
+  // CC extension 2.1.112 passes the workspace folder as cwd when spawning the
+  // CLI wrapper. In SSH mode the folder only exists remotely, so spawn
+  // ENOENTs — the extension misreports this as "native binary not found".
+  // The wrapper ignores cwd (uses CANOPY_SSH_CWD env var), so redirect cwd
+  // to HOME for the wrapper spawn. Other spawns (git, ripgrep, MCP) must NOT
+  // be rewritten: they would run in HOME and return wrong results (e.g.
+  // @-mention would list HOME files instead of failing cleanly, which is the
+  // documented SSH limitation).
+  const child_process = require("node:child_process");
+  const origSpawn = child_process.spawn;
+  const homeDir = process.env.HOME || require("node:os").homedir();
+  const wrapperPath = process.env.CANOPY_SSH_WRAPPER_PATH || "";
+  function cwdExistsLocally(p) {
+    try { return fs.existsSync(p); } catch { return false; }
+  }
+  function isSshWrapper(command) {
+    // Exact-path match against the wrapper Swift bundled and passed via env.
+    // Avoids false positives on user-configured custom wrappers that happen
+    // to share the basename, and false negatives if the path layout changes.
+    return typeof command === "string" && wrapperPath !== "" && command === wrapperPath;
+  }
+  function rewriteCwd(options) {
+    if (!options || typeof options.cwd !== "string") return options;
+    if (cwdExistsLocally(options.cwd)) return options;
+    return { ...options, cwd: homeDir };
+  }
+  child_process.spawn = function (command, argsOrOptions, options) {
+    if (!isSshWrapper(command)) return origSpawn.apply(this, arguments);
+    if (Array.isArray(argsOrOptions)) {
+      return origSpawn.call(this, command, argsOrOptions, rewriteCwd(options));
+    }
+    // spawn(command, options) overload — argsOrOptions is actually options.
+    if (argsOrOptions && typeof argsOrOptions === "object") {
+      return origSpawn.call(this, command, rewriteCwd(argsOrOptions));
+    }
+    // spawn(command) — no args/options at all.
+    return origSpawn.call(this, command);
+  };
+}
+
 const { writeStdout, startStdinReader } = require("./protocol.js");
 const { createExtensionContext } = require("./context.js");
 const { createCommands } = require("./commands.js");

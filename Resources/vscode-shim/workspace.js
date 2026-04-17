@@ -271,6 +271,18 @@ function createConfiguration(settingsPath, extensionPackageJson, canopySettingsP
     }
   }
 
+  // Per-shim overrides from env vars — highest priority. Used for per-session
+  // settings that must NOT be written to the shared Canopy settings file
+  // (e.g. SSH wrapper, which would otherwise leak across concurrent windows
+  // and survive across /resume re-spawns when cleared eagerly).
+  const envOverrides = {};
+  if (process.env.CANOPY_SSH_WRAPPER_PATH) {
+    envOverrides["claudeCode.claudeProcessWrapper"] = process.env.CANOPY_SSH_WRAPPER_PATH;
+    process.stderr.write(
+      `[vscode-shim] env override: claudeCode.claudeProcessWrapper=${process.env.CANOPY_SSH_WRAPPER_PATH}\n`,
+    );
+  }
+
   return function getConfiguration(section) {
     const userSettings = loadJson(settingsPath);
     const canopySettings = canopySettingsPath ? loadJson(canopySettingsPath) : {};
@@ -279,7 +291,11 @@ function createConfiguration(settingsPath, extensionPackageJson, canopySettingsP
       get(key, defaultValue) {
         const fullKey = section ? `${section}.${key}` : key;
 
-        // 1. Canopy global settings (highest priority)
+        // 0. Per-shim env overrides (highest priority)
+        if (Object.prototype.hasOwnProperty.call(envOverrides, fullKey)) {
+          return envOverrides[fullKey];
+        }
+        // 1. Canopy global settings
         if (Object.prototype.hasOwnProperty.call(canopySettings, fullKey)) {
           return canopySettings[fullKey];
         }
@@ -302,6 +318,7 @@ function createConfiguration(settingsPath, extensionPackageJson, canopySettingsP
       has(key) {
         const fullKey = section ? `${section}.${key}` : key;
         return (
+          Object.prototype.hasOwnProperty.call(envOverrides, fullKey) ||
           Object.prototype.hasOwnProperty.call(canopySettings, fullKey) ||
           Object.prototype.hasOwnProperty.call(userSettings, fullKey) ||
           Object.prototype.hasOwnProperty.call(extDefaults, fullKey) ||
@@ -328,20 +345,25 @@ function createConfiguration(settingsPath, extensionPackageJson, canopySettingsP
           : Object.prototype.hasOwnProperty.call(VSCODE_BUILTIN_DEFAULTS, fullKey)
             ? VSCODE_BUILTIN_DEFAULTS[fullKey]
             : undefined;
+        const envVal = Object.prototype.hasOwnProperty.call(envOverrides, fullKey)
+          ? envOverrides[fullKey]
+          : undefined;
         const canopyVal = Object.prototype.hasOwnProperty.call(canopySettings, fullKey)
           ? canopySettings[fullKey]
           : undefined;
         const workspaceVal = Object.prototype.hasOwnProperty.call(currentSettings, fullKey)
           ? currentSettings[fullKey]
           : undefined;
-        // When Canopy settings exist, they take globalValue and user settings become workspaceValue.
-        // When no Canopy settings, user settings stay in globalValue (backward compatible).
-        const hasCanopyVal = canopyVal !== undefined;
+        // Env overrides and Canopy settings both present as globalValue (CC
+        // extension expects user-managed config there). Env > Canopy > workspace.
+        const globalValue =
+          envVal !== undefined ? envVal : canopyVal !== undefined ? canopyVal : workspaceVal;
+        const hasGlobalShadow = envVal !== undefined || canopyVal !== undefined;
         return {
           key: fullKey,
           defaultValue: defVal,
-          globalValue: hasCanopyVal ? canopyVal : workspaceVal ?? undefined,
-          workspaceValue: hasCanopyVal ? workspaceVal ?? undefined : undefined,
+          globalValue: globalValue ?? undefined,
+          workspaceValue: hasGlobalShadow ? workspaceVal ?? undefined : undefined,
           workspaceFolderValue: undefined,
         };
       },

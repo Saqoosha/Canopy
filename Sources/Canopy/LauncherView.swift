@@ -548,8 +548,11 @@ struct LauncherView: View {
     }
 
     private func latestSession(for directory: URL) -> SessionEntry? {
-        sessions
-            .filter { $0.projectDirectory == directory }
+        // Query disk directly so remote-only paths (SSH workspace folders that
+        // don't exist locally) still surface a session. The in-memory `sessions`
+        // list is populated by loadAllSessions, which excludes entries whose
+        // cwd is missing locally — fine for UI listing, wrong for continue.
+        ClaudeSessionHistory.loadSessions(for: directory)
             .max { $0.timestamp < $1.timestamp }
     }
 
@@ -575,24 +578,27 @@ struct LauncherView: View {
             permissionModeRaw = selectedPermission.rawValue
         }
 
+        let dir: URL
+        let targetRemote: String?
         if isRemoteMode {
             guard !remoteHost.isEmpty, !remoteDirectory.isEmpty else { return }
             SSHHostStore.add(remoteHost)
             savedHosts = SSHHostStore.hosts()
-            let dir = URL(fileURLWithPath: remoteDirectory)
-            appState.launchSession(directory: dir, model: selectedModel, effortLevel: selectedEffort, permissionMode: selectedPermission, remoteHost: remoteHost)
+            dir = URL(fileURLWithPath: remoteDirectory)
+            targetRemote = remoteHost
         } else {
-            guard let dir = selectedDirectory else { return }
-            var resumeId: String?
-            var resumeTitle: String?
-            if continueSession {
-                if let latest = latestSession(for: dir) {
-                    resumeId = latest.id
-                    resumeTitle = latest.title
-                }
-            }
-            appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: selectedPermission)
+            guard let local = selectedDirectory else { return }
+            dir = local
+            targetRemote = nil
         }
+
+        var resumeId: String?
+        var resumeTitle: String?
+        if continueSession, let latest = latestSession(for: dir) {
+            resumeId = latest.id
+            resumeTitle = latest.title
+        }
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: selectedPermission, remoteHost: targetRemote)
     }
 
     private func loadData() {

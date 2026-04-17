@@ -54,15 +54,17 @@ final class CanopySettings {
         writeDict(dict)
     }
 
-    /// Set or clear the claudeProcessWrapper setting for SSH remote mode.
-    func setProcessWrapper(_ path: String?) {
+    /// Remove any SSH wrapper path written by pre-env-var Canopy builds.
+    /// Preserves wrappers set by the user or other tools (e.g. custom tracing
+    /// wrappers) by only clearing values that point at our bundled script.
+    func clearStaleSSHWrapper() {
         var dict = loadCurrentDict()
-        if let path {
-            dict["claudeCode.claudeProcessWrapper"] = path
-        } else {
-            dict.removeValue(forKey: "claudeCode.claudeProcessWrapper")
-        }
+        guard let current = dict["claudeCode.claudeProcessWrapper"] as? String,
+              (current as NSString).lastPathComponent == "ssh-claude-wrapper.sh"
+        else { return }
+        dict.removeValue(forKey: "claudeCode.claudeProcessWrapper")
         writeDict(dict)
+        logger.info("Cleared stale SSH wrapper from settings: \(current, privacy: .public)")
     }
 
     private func loadCurrentDict() -> [String: Any] {
