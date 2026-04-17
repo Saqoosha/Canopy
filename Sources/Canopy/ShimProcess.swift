@@ -116,8 +116,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     var statusBarData: StatusBarData?
     weak var delegate: ShimProcessDelegate?
     private var isIntentionalStop = false
-    /// Whether the process wrapper has been cleared from settings after CLI spawned.
-    private var wrapperCleared = false
 
     @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil) {
@@ -233,7 +231,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Write model/effort to ~/.claude/settings.json before CLI starts
         Self.applyClaudeSettings([("model", model), ("effortLevel", effortLevel)])
 
-        // SSH remote: set env var and configure process wrapper
+        // SSH remote: pass wrapper path via env var (per-shim, not the shared
+        // settings file). Writing to the settings file caused cross-window
+        // interference and broke /resume when the wrapper was eagerly cleared
+        // after the first CLI spawn.
         if let remote = remoteHost {
             guard let wrapperPath = Self.findWrapperPath() else {
                 logger.error("SSH remote: wrapper script not found in bundle")
@@ -242,15 +243,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             env["CANOPY_SSH_HOST"] = remote
             env["CANOPY_SSH_CWD"] = workingDirectory.path
+            env["CANOPY_SSH_WRAPPER_PATH"] = wrapperPath
             // Ensure wrapper has execute permission (Xcode may strip +x on copy)
             if !FileManager.default.isExecutableFile(atPath: wrapperPath) {
                 try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapperPath)
             }
-            CanopySettings.shared.setProcessWrapper(wrapperPath)
             logger.info("SSH remote mode: host=\(remote, privacy: .public) wrapper=\(wrapperPath, privacy: .public)")
         } else {
-            // Local session: ensure no leftover wrapper from a previous SSH session
-            CanopySettings.shared.setProcessWrapper(nil)
+            // Local session: clear any ssh-claude-wrapper.sh left in the shared
+            // settings file by pre-env-var Canopy builds, so the CLI spawns
+            // directly. User-configured custom wrappers are preserved.
+            CanopySettings.shared.clearStaleSSHWrapper()
         }
 
         proc.environment = env
@@ -578,8 +581,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 writeToStdin(pending)
             }
             pendingMessages.removeAll()
-            // NOTE: Do NOT clear wrapper here — extension hasn't read it yet.
-            // Wrapper is cleared on first CLI io_message (see wrapperCleared flag).
 
         case "webview_message":
             guard var innerMessage = msg["message"] as? [String: Any] else {
@@ -588,18 +589,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             let innerType = (innerMessage["type"] as? String) ?? "?"
             logger.debug("[stdout→webview] type=\(innerType, privacy: .public)")
-            // Clear wrapper after CLI has spawned. Only trigger on io_message
-            // (not init_response or update_state) — io_message proves the CLI
-            // was spawned, meaning the extension already read the wrapper setting.
-            if !wrapperCleared && remoteHost != nil && innerType == "from-extension" {
-                if let nested = innerMessage["message"] as? [String: Any],
-                   nested["type"] as? String == "io_message"
-                {
-                    wrapperCleared = true
-                    CanopySettings.shared.setProcessWrapper(nil)
-                    logger.info("Cleared process wrapper from settings (CLI is running)")
-                }
-            }
             innerMessage = patchAuthIfNeeded(innerMessage)
             trackWorkingState(innerMessage)
             extractStatusData(innerMessage)
