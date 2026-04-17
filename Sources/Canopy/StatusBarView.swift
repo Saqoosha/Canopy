@@ -164,14 +164,17 @@ struct StatusBarView: View {
     private func shortModelName(_ model: String) -> String {
         // "claude-sonnet-4-5-20250514" → "Sonnet 4.5"
         // "claude-opus-4-6" → "Opus 4.6"
-        let lower = model.lowercased()
+        // "claude-opus-4-7[1m]" → "Opus 4.7 (1M)"
+        let (base, variantSuffix) = ModelNameFormatter.splitVariant(model)
+        let lower = base.lowercased()
         for (family, label) in [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
             if lower.contains(family) {
-                if let v = extractVersion(from: lower, family: family) { return "\(label) \(v)" }
-                return label
+                if let v = extractVersion(from: lower, family: family) { return "\(label) \(v)\(variantSuffix)" }
+                return "\(label)\(variantSuffix)"
             }
         }
-        return model
+        // Unknown family: preserve variant suffix so raw "[1m]" doesn't leak through.
+        return base + variantSuffix
     }
 
     private func extractVersion(from model: String, family: String) -> String? {

@@ -22,8 +22,8 @@ struct LauncherView: View {
     @AppStorage("launcher.permissionMode") private var permissionModeRaw = "acceptEdits"
     @AppStorage("launcher.continueSession") private var continueSession = false
 
-    private static let modelOptions = ["", "opus", "sonnet", "sonnet[1m]", "haiku"]
-    private static let effortOptions = ["", "low", "medium", "high", "max"]
+    private static let modelOptions = ["", "opus", "opus[1m]", "sonnet", "sonnet[1m]", "haiku"]
+    private static let effortOptions = ["", "low", "medium", "high", "xhigh", "max"]
     private static let permissionModes: [PermissionMode] = [.default, .plan, .auto, .acceptEdits, .dontAsk]
 
     /// Row height for list items (used to calculate fixed list height)
@@ -219,7 +219,7 @@ struct LauncherView: View {
                     Picker("", selection: $effortLevel) {
                         Text("Auto").tag("")
                         ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
-                            Text(level.prefix(1).uppercased() + level.dropFirst()).tag(level)
+                            Text(Self.effortDisplayName(level)).tag(level)
                         }
                     }
                     .labelsHidden()
@@ -253,9 +253,16 @@ struct LauncherView: View {
     }
 
     private static func modelDisplayName(_ alias: String) -> String {
-        switch alias {
-        case "sonnet[1m]": "Sonnet (1M)"
-        default: alias.prefix(1).uppercased() + alias.dropFirst()
+        // "opus" → "Opus", "opus[1m]" → "Opus (1M)", "sonnet[1m]" → "Sonnet (1M)"
+        let (base, suffix) = ModelNameFormatter.splitVariant(alias)
+        guard !base.isEmpty else { return alias }
+        return base.prefix(1).uppercased() + base.dropFirst() + suffix
+    }
+
+    private static func effortDisplayName(_ level: String) -> String {
+        switch level {
+        case "xhigh": "X-High"
+        default: level.prefix(1).uppercased() + level.dropFirst()
         }
     }
 
