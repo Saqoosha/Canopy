@@ -298,18 +298,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        logger.debug("applicationShouldHandleReopen: hasVisibleWindows=\(flag)")
+        logger.info("applicationShouldHandleReopen: hasVisibleWindows=\(flag)")
         if !flag {
             let hiddenWindows = NSApp.windows.filter { isAppWindow($0) && !$0.isVisible }
-            let active = hiddenWindows.filter { ShimProcess.hasActiveSession(in: $0) }
-            let stale = hiddenWindows.filter { !ShimProcess.hasActiveSession(in: $0) }
-            logger.debug("reopen: hidden=\(hiddenWindows.count) active=\(active.count) stale=\(stale.count)")
+            // hasRunningProcess (not hasActiveSession): "Stop and Close" leaves the
+            // webView attached but kills the process, so the looser check would
+            // misclassify those windows as active and resurrect a dead session.
+            let active = hiddenWindows.filter { ShimProcess.hasRunningProcess(in: $0) }
+            let stale = hiddenWindows.filter { !ShimProcess.hasRunningProcess(in: $0) }
+            logger.info("reopen: hidden=\(hiddenWindows.count) active=\(active.count) stale=\(stale.count)")
 
-            // Keep stale windows hidden. orderOut is non-destructive: we don't know
-            // whether SwiftUI/AppKit still holds a reference, and mid-flight states
-            // like SSH reconnect can briefly look stale without actually being so.
+            // SwiftUI's WindowGroup keeps closed windows around so the reopen
+            // event can resurrect them. close() with isReleasedWhenClosed=true
+            // tells AppKit to drop this one for real.
             for window in stale {
-                window.orderOut(nil)
+                window.isReleasedWhenClosed = true
+                window.close()
             }
 
             if !active.isEmpty {
@@ -353,7 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.isRestorable = false
         window.center()
         window.makeKeyAndOrderFront(nil)
-        logger.debug("opened fresh launcher window")
+        logger.info("opened fresh launcher window")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
