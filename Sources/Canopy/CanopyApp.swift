@@ -31,6 +31,7 @@ struct CanopyApp: App {
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 500, height: 800)
+        .restorationBehavior(.disabled)
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates...") {
@@ -294,17 +295,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        logger.info("applicationShouldHandleReopen: hasVisibleWindows=\(flag)")
         if !flag {
             let hiddenWindows = NSApp.windows.filter { isAppWindow($0) && !$0.isVisible }
-            if !hiddenWindows.isEmpty {
-                for window in hiddenWindows {
+            let active = hiddenWindows.filter { ShimProcess.hasActiveSession(in: $0) }
+            let stale = hiddenWindows.filter { !ShimProcess.hasActiveSession(in: $0) }
+            logger.info("reopen: hidden=\(hiddenWindows.count) active=\(active.count) stale=\(stale.count)")
+
+            for window in stale {
+                window.isReleasedWhenClosed = true
+                window.close()
+            }
+
+            if !active.isEmpty {
+                for window in active {
                     window.makeKeyAndOrderFront(nil)
                 }
                 return false
             }
-            // No hidden windows — let SwiftUI open a new one
+
+            // No active session windows. Open a fresh launcher window manually.
+            openFreshLauncherWindow()
+            return false
         }
         return true
+    }
+
+    private func openFreshLauncherWindow() {
+        let hostingView = NSHostingView(rootView: TabContentView().frame(minWidth: 400, minHeight: 600))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 800),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: true
+        )
+        window.contentView = hostingView
+        window.identifier = NSUserInterfaceItemIdentifier("main")
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        logger.info("opened fresh launcher window")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
