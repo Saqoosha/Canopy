@@ -31,6 +31,9 @@ struct CanopyApp: App {
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 500, height: 800)
+        // Disable scene state restoration so a closed session window cannot
+        // come back as a stale instance after relaunch. Pairs with
+        // applicationShouldHandleReopen, which handles the in-process case.
         .restorationBehavior(.disabled)
         .commands {
             CommandGroup(after: .appInfo) {
@@ -295,16 +298,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        logger.info("applicationShouldHandleReopen: hasVisibleWindows=\(flag)")
+        logger.debug("applicationShouldHandleReopen: hasVisibleWindows=\(flag)")
         if !flag {
             let hiddenWindows = NSApp.windows.filter { isAppWindow($0) && !$0.isVisible }
             let active = hiddenWindows.filter { ShimProcess.hasActiveSession(in: $0) }
             let stale = hiddenWindows.filter { !ShimProcess.hasActiveSession(in: $0) }
-            logger.info("reopen: hidden=\(hiddenWindows.count) active=\(active.count) stale=\(stale.count)")
+            logger.debug("reopen: hidden=\(hiddenWindows.count) active=\(active.count) stale=\(stale.count)")
 
+            // Keep stale windows hidden. orderOut is non-destructive: we don't know
+            // whether SwiftUI/AppKit still holds a reference, and mid-flight states
+            // like SSH reconnect can briefly look stale without actually being so.
             for window in stale {
-                window.isReleasedWhenClosed = true
-                window.close()
+                window.orderOut(nil)
             }
 
             if !active.isEmpty {
@@ -314,7 +319,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return false
             }
 
-            // No active session windows. Open a fresh launcher window manually.
+            // No window with an active session — surface a fresh launcher. Built by
+            // hand instead of openWindow(id:) because a closed WindowGroup instance
+            // would be reused, resurrecting the stale session state we just hid.
             openFreshLauncherWindow()
             return false
         }
@@ -322,18 +329,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openFreshLauncherWindow() {
+        let defaults = UserDefaults.standard
+        let savedWidth = defaults.object(forKey: "lastWindowWidth") != nil
+            ? defaults.double(forKey: "lastWindowWidth") : 500
+        let savedHeight = defaults.object(forKey: "lastWindowHeight") != nil
+            ? defaults.double(forKey: "lastWindowHeight") : 800
+        let width = max(savedWidth, 400)
+        let height = max(savedHeight, 600)
+
         let hostingView = NSHostingView(rootView: TabContentView().frame(minWidth: 400, minHeight: 600))
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 800),
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: true
         )
         window.contentView = hostingView
-        window.identifier = NSUserInterfaceItemIdentifier("main")
+        // "main-launcher" prefix keeps isAppWindow happy without colliding with
+        // the WindowGroup id ("main") or the newTab id ("main-tab").
+        window.identifier = NSUserInterfaceItemIdentifier("main-launcher")
+        // Mirror .restorationBehavior(.disabled) on the WindowGroup; this window
+        // is built outside the SwiftUI scene tree, so the modifier doesn't reach it.
+        window.isRestorable = false
         window.center()
         window.makeKeyAndOrderFront(nil)
-        logger.info("opened fresh launcher window")
+        logger.debug("opened fresh launcher window")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
