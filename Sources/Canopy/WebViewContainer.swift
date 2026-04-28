@@ -15,6 +15,11 @@ struct WebViewContainer: NSViewRepresentable {
     var remoteHost: String?
     var connectionState: ConnectionState?
     var onCrash: ((Int32) -> Void)?
+    /// When set, the coordinator writes the spawned `ShimProcess` and `WKWebView`
+    /// back to this OpenSession so `SessionStore.closeSession` can find them.
+    /// Used by the single-window-sidebar shell. Legacy multi-window code leaves
+    /// this nil and the refs stay private to the Coordinator.
+    var boundSession: OpenSession?
 
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, ShimProcessDelegate {
         var shimProcess: ShimProcess?
@@ -24,6 +29,9 @@ struct WebViewContainer: NSViewRepresentable {
         var onCrash: ((Int32) -> Void)?
         /// Retained independently so reconnect can access it after shimProcess is nil'd.
         weak var currentWebView: WKWebView?
+        /// Tracks which OpenSession the host is currently bound to so
+        /// `updateNSView` can detect a swap.
+        var lastBoundSessionId: UUID?
 
         // Params needed to create a new ShimProcess on reconnect
         var workingDirectory: URL?
@@ -204,7 +212,52 @@ struct WebViewContainer: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> WKWebView {
+    /// We return an NSView host that contains the WKWebView as a subview.
+    /// Wrapping in a host lets us swap WKWebViews in-place (via
+    /// `updateNSView`) when `boundSession` changes, without the heavy
+    /// SwiftUI `.id(...)` re-mount cycle. The WKWebView itself stays
+    /// alive on `OpenSession.webView`.
+    func makeNSView(context: Context) -> NSView {
+        let host = SessionWebViewHost()
+        host.translatesAutoresizingMaskIntoConstraints = true
+        host.autoresizingMask = [.width, .height]
+        attachWebView(to: host, coordinator: context.coordinator)
+        context.coordinator.lastBoundSessionId = boundSession?.id
+        return host
+    }
+
+    func updateNSView(_ host: NSView, context: Context) {
+        // Swap the inner WKWebView when the session bound to this view
+        // changes. Mismatch can happen because the SessionContainer's
+        // session parameter changes without SwiftUI re-mounting.
+        let newId = boundSession?.id
+        guard newId != context.coordinator.lastBoundSessionId else { return }
+        host.subviews.forEach { $0.removeFromSuperview() }
+        // Reset coordinator state — the previous webView's delegates and
+        // handlers were tied to the old session.
+        context.coordinator.cancelReconnect()
+        context.coordinator.shimProcess = nil
+        context.coordinator.consoleHandler = nil
+        context.coordinator.linkHandler = nil
+        attachWebView(to: host, coordinator: context.coordinator)
+        context.coordinator.lastBoundSessionId = newId
+    }
+
+    /// Build (or fetch cached) WKWebView for `boundSession` and add it
+    /// as a subview of the host, filling its bounds.
+    private func attachWebView(to host: NSView, coordinator: Coordinator) {
+        let webView = buildWebView(coordinator: coordinator)
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(webView)
+        NSLayoutConstraint.activate([
+            webView.topAnchor.constraint(equalTo: host.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            webView.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+        ])
+    }
+
+    private func buildWebView(coordinator: Coordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
         let ucc = WKUserContentController()
 
@@ -232,62 +285,128 @@ struct WebViewContainer: NSViewRepresentable {
         let linkHandler = LinkClickHandler(workingDirectory: workingDirectory)
         ucc.add(linkHandler, name: "canopyLink")
 
-        let shim = ShimProcess(
-            workingDirectory: workingDirectory,
-            resumeSessionId: resumeSessionId,
-            model: model,
-            effortLevel: effortLevel,
-            permissionMode: permissionMode,
-            sessionTitle: sessionTitle,
-            statusBarData: statusBarData,
-            remoteHost: remoteHost
-        )
-        shim.delegate = context.coordinator
+        // Reuse an existing shim when the OpenSession already owns one.
+        // This prevents the orphan-shim bug: SwiftUI runs makeNSView twice
+        // for the same SessionContainer (opacity transitions in Detail's
+        // ZStack), and creating a fresh shim each time leaves the first
+        // one CLI-connected but UI-disconnected.
+        //
+        // We also have to short-circuit BEFORE the per-handler `ucc.add`
+        // calls — adding a fresh ShimProcess would still happen (and waste
+        // a Node subprocess at construction time) if we left the original
+        // initializer call in the else branch. Instead, allocate a new
+        // shim only when none exists.
+        let shim: ShimProcess
+        let isFreshShim: Bool
+        if let existing = boundSession?.shim {
+            shim = existing
+            isFreshShim = false
+            // Re-bind to the new webView's userContentController. The old
+            // ucc has the shim registered as `vscodeHost`; the new ucc is
+            // a different instance and needs the same registration.
+        } else {
+            shim = ShimProcess(
+                workingDirectory: workingDirectory,
+                resumeSessionId: resumeSessionId,
+                model: model,
+                effortLevel: effortLevel,
+                permissionMode: permissionMode,
+                sessionTitle: sessionTitle,
+                statusBarData: statusBarData,
+                remoteHost: remoteHost
+            )
+            isFreshShim = true
+        }
+        shim.delegate = coordinator
         ucc.add(shim, name: "vscodeHost")
-        context.coordinator.shimProcess = shim
-        context.coordinator.consoleHandler = consoleHandler
-        context.coordinator.linkHandler = linkHandler
-        context.coordinator.connectionState = connectionState
-        context.coordinator.workingDirectory = workingDirectory
-        context.coordinator.remoteHost = remoteHost
-        context.coordinator.model = model
-        context.coordinator.effortLevel = effortLevel
-        context.coordinator.permissionMode = permissionMode
-        context.coordinator.statusBarData = statusBarData
-        context.coordinator.onCrash = onCrash
+        coordinator.shimProcess = shim
+        coordinator.consoleHandler = consoleHandler
+        coordinator.linkHandler = linkHandler
+        coordinator.connectionState = connectionState
+        coordinator.workingDirectory = workingDirectory
+        coordinator.remoteHost = remoteHost
+        coordinator.model = model
+        coordinator.effortLevel = effortLevel
+        coordinator.permissionMode = permissionMode
+        coordinator.statusBarData = statusBarData
+        coordinator.onCrash = onCrash
 
         config.userContentController = ucc
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.navigationDelegate = context.coordinator
-        webView.uiDelegate = context.coordinator
-        webView.isInspectable = true
-
-        context.coordinator.shimProcess?.webView = webView
-        context.coordinator.currentWebView = webView
-        if context.coordinator.shimProcess?.start() != true {
-            logger.error("Shim start failed — no fallback available")
+        // Reuse an existing WKWebView when the OpenSession already owns one.
+        // Detail.swift now mounts only the active SessionContainer (the
+        // 1×1-frame trick failed after window resizes), so swapping back to
+        // a previously-opened session goes through this path. The WebView
+        // is still strong-held by `OpenSession.webView`; we just need to
+        // re-attach handlers to its existing userContentController.
+        let webView: WKWebView
+        let isFreshWebView: Bool
+        if let cached = boundSession?.webView {
+            webView = cached
+            isFreshWebView = false
+            // Replace handler set on the existing ucc — old shim's
+            // registrations may still be there.
+            let cachedUcc = webView.configuration.userContentController
+            cachedUcc.removeScriptMessageHandler(forName: "vscodeHost")
+            cachedUcc.removeScriptMessageHandler(forName: "consoleLog")
+            cachedUcc.removeScriptMessageHandler(forName: "canopyLink")
+            cachedUcc.add(consoleHandler, name: "consoleLog")
+            cachedUcc.add(linkHandler, name: "canopyLink")
+            cachedUcc.add(shim, name: "vscodeHost")
+        } else {
+            webView = WKWebView(frame: .zero, configuration: config)
+            webView.isInspectable = true
+            isFreshWebView = true
         }
-        loadCCWebview(webView)
+        webView.navigationDelegate = coordinator
+        webView.uiDelegate = coordinator
+
+        shim.webView = webView
+        coordinator.currentWebView = webView
+        if isFreshShim {
+            if !shim.start() {
+                logger.error("Shim start failed — no fallback available")
+            }
+        }
+        if isFreshWebView {
+            loadCCWebview(webView)
+        }
+        // Bind shim and webView to the OpenSession (canonical owner) so:
+        //   - close button / status updates can reach the shim
+        //   - re-mounting the SessionContainer reuses the same webView
+        if let session = boundSession {
+            session.shim = shim
+            session.webView = webView
+            shim.boundSession = session
+        }
         return webView
     }
 
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
-
-    /// Clean up WKScriptMessageHandler references to prevent memory leak.
-    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+    /// Clean up handlers and detach the WKWebView subview from its host.
+    /// In the sidebar shell we KEEP the WebView and ShimProcess alive —
+    /// the OpenSession owns them. `SessionStore.closeSession` is the only
+    /// path that stops the shim and releases the webView.
+    static func dismantleNSView(_ host: NSView, coordinator: Coordinator) {
         coordinator.cancelReconnect()
-        let ucc = nsView.configuration.userContentController
-        ucc.removeScriptMessageHandler(forName: "vscodeHost")
-        ucc.removeScriptMessageHandler(forName: "consoleLog")
-        ucc.removeScriptMessageHandler(forName: "canopyLink")
-        ucc.removeAllUserScripts()
-        coordinator.shimProcess?.stop()
+        for sub in host.subviews {
+            if let wk = sub as? WKWebView {
+                wk.navigationDelegate = nil
+                wk.uiDelegate = nil
+                let ucc = wk.configuration.userContentController
+                ucc.removeScriptMessageHandler(forName: "vscodeHost")
+                ucc.removeScriptMessageHandler(forName: "consoleLog")
+                ucc.removeScriptMessageHandler(forName: "canopyLink")
+            }
+            sub.removeFromSuperview()
+        }
+        if coordinator.shimProcess?.boundSession == nil {
+            coordinator.shimProcess?.stop()
+        }
         coordinator.shimProcess = nil
         coordinator.consoleHandler = nil
         coordinator.linkHandler = nil
-        logger.info("WebView dismantled, handlers removed")
+        logger.info("WebView host dismantled (subview detached, retained by OpenSession)")
     }
 
     // MARK: - Load CC webview
@@ -502,4 +621,12 @@ final class ConsoleLogHandler: NSObject, WKScriptMessageHandler {
             logger.info("[JS] \(msg, privacy: .public)")
         }
     }
+}
+
+/// Host NSView that contains the active session's WKWebView as its sole
+/// subview. Wrapping in a host lets `WebViewContainer.updateNSView` swap
+/// the WKWebView in-place when the bound session changes — much faster
+/// than tearing down the SwiftUI representable and re-creating it.
+final class SessionWebViewHost: NSView {
+    override var isFlipped: Bool { true }
 }

@@ -117,7 +117,32 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Window Title & Spinner
     private var sessionTitle: String = ""
-    private var isWorking = false
+    private var isWorking = false {
+        didSet {
+            // When Claude starts a new round (user submitted), clear any
+            // outstanding AskUserQuestion asking state — the user already
+            // responded, we're back to thinking.
+            if isWorking && !oldValue {
+                lastAssistantHadAskUserQuestion = false
+                refreshAskingState()
+            }
+            boundSession?.isThinking = isWorking
+        }
+    }
+
+    /// True when the most recent assistant message contained a
+    /// `tool_use` block whose name is `AskUserQuestion`. Drives `isAsking`
+    /// once the result event fires and `isWorking` goes false.
+    private var lastAssistantHadAskUserQuestion = false
+
+    /// Optional OpenSession that owns this shim. Set by WebViewContainer
+    /// after spawn so isWorking transitions reach the sidebar's icon.
+    weak var boundSession: OpenSession?
+
+    /// In-flight `tool_permission_request` ids from extension → webview.
+    /// When non-empty the user is being asked to approve something; the
+    /// sidebar shows a "raised hand" icon while at least one is outstanding.
+    private var pendingPermissionRequestIds = Set<String>()
     private var spinnerTimer: Timer?
     private var spinnerIndex = 0
     private static let spinnerFrames = ["·", "✻", "✽", "✶", "✳", "✢"]
@@ -374,6 +399,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ) {
         guard var dict = message.body as? [String: Any] else { return }
 
+        // Webview → host responses to permission requests close out the
+        // `isAsking` flag on the bound OpenSession.
+        trackPermissionResponse(dict)
+
         // Override permission mode in launch_claude from Canopy app settings
         if dict["type"] as? String == "launch_claude" {
             dict["permissionMode"] = permissionMode.rawValue
@@ -509,7 +538,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Shim Path Discovery
 
-    private static func findShimPath() -> String? {
+    nonisolated static func findShimPath() -> String? {
         // 1. Bundle resources (production — after Task 13 bundles vscode-shim)
         if let bundled = Bundle.main.path(forResource: "index", ofType: "js", inDirectory: "vscode-shim") {
             return bundled
@@ -602,6 +631,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.debug("[stdout→webview] type=\(innerType, privacy: .public)")
             innerMessage = patchAuthIfNeeded(innerMessage)
             trackWorkingState(innerMessage)
+            trackPermissionState(stdoutMessage: msg)
             extractStatusData(innerMessage)
             extractTitle(innerMessage)
             sendToWebView(innerMessage)
@@ -1019,6 +1049,105 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         refreshWindowTitle()
     }
 
+    /// Watch host→webview messages for `tool_permission_request` and pair
+    /// them with their responses to mirror an `isAsking` flag onto the
+    /// bound OpenSession. The sidebar lights up a raised-hand icon while
+    /// at least one permission request is outstanding.
+    private func trackPermissionState(stdoutMessage message: [String: Any]) {
+        guard message["type"] as? String == "webview_message",
+              let outer = message["message"] as? [String: Any]
+        else { return }
+        // Extension may wrap host→webview requests in `from-extension`.
+        // Peel one layer if present.
+        let inner: [String: Any]
+        if outer["type"] as? String == "from-extension",
+           let unwrapped = outer["message"] as? [String: Any] {
+            inner = unwrapped
+        } else {
+            inner = outer
+        }
+        guard inner["type"] as? String == "request",
+              let requestId = inner["requestId"] as? String,
+              let request = inner["request"] as? [String: Any],
+              let reqType = request["type"] as? String
+        else { return }
+        guard reqType == "tool_permission_request" else { return }
+        pendingPermissionRequestIds.insert(requestId)
+        refreshAskingState()
+    }
+
+    /// Webview→host responses arrive via `userContentController`. When one
+    /// matches a tracked permission request id, clear it.
+    private func trackPermissionResponse(_ webviewMessage: [String: Any]) {
+        guard webviewMessage["type"] as? String == "response",
+              let requestId = webviewMessage["requestId"] as? String
+        else { return }
+        guard pendingPermissionRequestIds.contains(requestId) else { return }
+        pendingPermissionRequestIds.remove(requestId)
+        refreshAskingState()
+    }
+
+    /// Recompute the asking flag from outstanding permission requests AND
+    /// any pending AskUserQuestion tool call. Either condition flips the
+    /// sidebar icon to "raised hand".
+    ///
+    /// AskUserQuestion is reflected as soon as we see the `tool_use` block,
+    /// even while `isWorking` is still true — the CLI keeps streaming until
+    /// the user picks an answer (no `result` fires meanwhile), so we'd
+    /// otherwise stay stuck on the thinking flower forever.
+    private func refreshAskingState() {
+        let asking = !pendingPermissionRequestIds.isEmpty
+            || lastAssistantHadAskUserQuestion
+        boundSession?.isAsking = asking
+    }
+
+    /// Scan an io_message for `tool_use` blocks named `AskUserQuestion`,
+    /// and also clear the AskUserQuestion flag when a new assistant turn
+    /// begins (message_start stream_event). The latter handles the case
+    /// where the user dismissed the answer panel via Escape and Claude
+    /// started a new response without a fresh AskUserQuestion.
+    private func detectAskUserQuestion(in ioMsg: [String: Any]) {
+        let ioType = ioMsg["type"] as? String
+        var found = false
+        var newTurnStart = false
+        if ioType == "assistant",
+           let assistantMsg = ioMsg["message"] as? [String: Any],
+           let content = assistantMsg["content"] as? [[String: Any]] {
+            for block in content {
+                if block["type"] as? String == "tool_use",
+                   block["name"] as? String == "AskUserQuestion" {
+                    found = true
+                    break
+                }
+            }
+        } else if ioType == "stream_event",
+                  let event = ioMsg["event"] as? [String: Any] {
+            let evType = event["type"] as? String
+            if evType == "content_block_start",
+               let block = event["content_block"] as? [String: Any],
+               block["type"] as? String == "tool_use",
+               block["name"] as? String == "AskUserQuestion" {
+                found = true
+            } else if evType == "message_start" {
+                newTurnStart = true
+            }
+        }
+        if newTurnStart && lastAssistantHadAskUserQuestion {
+            // Stale flag from the previous turn — clear so the icon
+            // returns to the thinking flower for THIS turn (and we'll
+            // re-set it if the new turn also calls AskUserQuestion).
+            lastAssistantHadAskUserQuestion = false
+            refreshAskingState()
+        }
+        if found && !lastAssistantHadAskUserQuestion {
+            lastAssistantHadAskUserQuestion = true
+            // Immediately reflect — CLI won't emit `result` until the user
+            // picks an answer, so waiting for that would never trigger the
+            // raised-hand icon.
+            refreshAskingState()
+        }
+    }
+
     /// Track CLI working state from io_message events flowing to webview.
     /// Message structure: {type:"from-extension", message:{type:"io_message", message:{type:"assistant"|"result"|...}}}
     private func trackWorkingState(_ message: [String: Any]) {
@@ -1031,6 +1160,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         switch ioType {
         case "assistant", "stream_event":
+            detectAskUserQuestion(in: ioMsg)
             if !isWorking {
                 isWorking = true
                 startSpinner()
@@ -1041,6 +1171,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 stopSpinner()
                 postTaskCompletedNotification()
             }
+            // After Claude finishes, the AskUserQuestion (if any) is now
+            // visible in the webview waiting for the user's choice.
+            refreshAskingState()
         default:
             break
         }
@@ -1161,6 +1294,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     private func refreshWindowTitle() {
+        // In the single-window sidebar shell the title bar is owned by
+        // SwiftUI's `.navigationTitle` (set on Detail). Skip the legacy
+        // setTitle here so the SwiftUI title isn't overwritten on every
+        // spinner tick.
+        if CanopyApp.isUsingSidebar { return }
+
         guard let window = webView?.window else { return }
         let dirName = workingDirectory.lastPathComponent
         let icon = isWorking ? Self.spinnerFrames[spinnerIndex] : Self.idleIcon
