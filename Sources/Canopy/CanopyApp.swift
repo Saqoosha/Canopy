@@ -31,6 +31,10 @@ struct CanopyApp: App {
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 500, height: 800)
+        // Disable scene state restoration so a closed session window cannot
+        // come back as a stale instance after relaunch. Pairs with
+        // applicationShouldHandleReopen, which handles the in-process case.
+        .restorationBehavior(.disabled)
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates...") {
@@ -294,17 +298,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        logger.info("applicationShouldHandleReopen: hasVisibleWindows=\(flag)")
         if !flag {
             let hiddenWindows = NSApp.windows.filter { isAppWindow($0) && !$0.isVisible }
-            if !hiddenWindows.isEmpty {
-                for window in hiddenWindows {
+            // hasRunningProcess (not hasActiveSession): "Stop and Close" leaves the
+            // webView attached but kills the process, so the looser check would
+            // misclassify those windows as active and resurrect a dead session.
+            let active = hiddenWindows.filter { ShimProcess.hasRunningProcess(in: $0) }
+            let stale = hiddenWindows.filter { !ShimProcess.hasRunningProcess(in: $0) }
+            logger.info("reopen: hidden=\(hiddenWindows.count) active=\(active.count) stale=\(stale.count)")
+
+            // SwiftUI's WindowGroup keeps closed windows around so the reopen
+            // event can resurrect them. close() with isReleasedWhenClosed=true
+            // tells AppKit to drop this one for real.
+            for window in stale {
+                window.isReleasedWhenClosed = true
+                window.close()
+            }
+
+            if !active.isEmpty {
+                for window in active {
                     window.makeKeyAndOrderFront(nil)
                 }
                 return false
             }
-            // No hidden windows — let SwiftUI open a new one
+
+            // No window with an active session — surface a fresh launcher. Built by
+            // hand instead of openWindow(id:) because a closed WindowGroup instance
+            // would be reused, resurrecting the stale session state we just hid.
+            openFreshLauncherWindow()
+            return false
         }
         return true
+    }
+
+    private func openFreshLauncherWindow() {
+        let defaults = UserDefaults.standard
+        let savedWidth = defaults.object(forKey: "lastWindowWidth") != nil
+            ? defaults.double(forKey: "lastWindowWidth") : 500
+        let savedHeight = defaults.object(forKey: "lastWindowHeight") != nil
+            ? defaults.double(forKey: "lastWindowHeight") : 800
+        let width = max(savedWidth, 400)
+        let height = max(savedHeight, 600)
+
+        let hostingView = NSHostingView(rootView: TabContentView().frame(minWidth: 400, minHeight: 600))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: true
+        )
+        window.contentView = hostingView
+        // "main-launcher" prefix keeps isAppWindow happy without colliding with
+        // the WindowGroup id ("main") or the newTab id ("main-tab").
+        window.identifier = NSUserInterfaceItemIdentifier("main-launcher")
+        // Mirror .restorationBehavior(.disabled) on the WindowGroup; this window
+        // is built outside the SwiftUI scene tree, so the modifier doesn't reach it.
+        window.isRestorable = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        logger.info("opened fresh launcher window")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

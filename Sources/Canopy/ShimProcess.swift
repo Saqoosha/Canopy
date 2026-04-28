@@ -69,6 +69,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Whether the given window has a shim whose process is still running.
+    /// Use this (not hasActiveSession) when deciding if a hidden window's session
+    /// is recoverable — webView stays attached after stop(), so the looser check
+    /// would falsely classify "Stop and Close" windows as active.
+    @MainActor static func hasRunningProcess(in window: NSWindow) -> Bool {
+        instances.allObjects.contains { shim in
+            guard let webView = shim.webView, webView.window === window else { return false }
+            return shim.process?.isRunning == true
+        }
+    }
+
     /// Synchronously stop all shim processes whose webView lives in the given window.
     /// Called from the "Stop Session and Close" close-alert branch so the Node.js
     /// process is gone before applicationShouldTerminate's active-session check.

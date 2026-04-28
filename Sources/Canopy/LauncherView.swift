@@ -256,7 +256,7 @@ struct LauncherView: View {
         // "opus" → "Opus", "opus[1m]" → "Opus (1M)", "sonnet[1m]" → "Sonnet (1M)"
         let (base, suffix) = ModelNameFormatter.splitVariant(alias)
         guard !base.isEmpty else { return alias }
-        return base.prefix(1).uppercased() + base.dropFirst() + suffix
+        return base.prefix(1).uppercased() + String(base.dropFirst()) + suffix
     }
 
     private static func effortDisplayName(_ level: String) -> String {
