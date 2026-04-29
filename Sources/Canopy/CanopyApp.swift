@@ -339,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// quitting (and crucially while the run loop is still healthy enough to
     /// run a modal alert if the spawn fails). A canceled terminate clears
     /// this flag, so no `/bin/sh` waiter is ever left polling for our pid.
+    @MainActor
     private static var shouldRelaunchOnExit = false
 
     /// Schedule Canopy to relaunch by routing through `NSApp.terminate(nil)`
