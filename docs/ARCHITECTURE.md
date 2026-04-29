@@ -1,5 +1,28 @@
 # Architecture
 
+> **⚠ Stale (as of 1.12.0):** the body of this document predates two
+> migrations and is now wrong on both axes:
+>
+> 1. **Pre-sidebar:** `WindowGroup > AppState.screen` switching between a
+>    launcher and a session view, plus `WindowTitleSetter` (deleted in
+>    PR #48), no longer reflects reality. The shipping shell is a single
+>    window with `NavigationSplitView`; `SessionStore` + `OpenSession`
+>    own the shim / WKWebView refs; `Detail.swift` swaps the active
+>    session subview in place.
+> 2. **Pre-shim:** the System Overview diagram, the
+>    `WebViewMessageHandler.swift` section, the `ClaudeProcess.swift`
+>    section, and the Startup Sequence describe a Swift-side bridge
+>    that talks directly to the Claude CLI. That layer was replaced
+>    long ago by the Node.js vscode-shim subprocess. The real bridge
+>    lives in `Sources/Canopy/ShimProcess.swift` plus the JS modules
+>    under `Resources/vscode-shim/`. None of the files this doc names
+>    (`WebViewMessageHandler.swift`, `ClaudeProcess.swift`) exist.
+>
+> See `CLAUDE.md` and the spec at
+> `docs/superpowers/specs/2026-04-29-single-window-sidebar.md` for the
+> current model. The body below is preserved as historical reference;
+> a full rewrite is queued.
+
 Detailed technical architecture of Canopy, a macOS app that hosts the Claude Code VSCode extension's webview in a native WKWebView and bridges it to a real Claude CLI process.
 
 ## System Overview

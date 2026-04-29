@@ -22,6 +22,13 @@ enum SessionSelection: Hashable {
 @Observable
 @MainActor
 final class SessionStore {
+    /// Weakly held global reference. AppKit-side code (e.g. the close-alert
+    /// in `hideOrCloseWindow`) needs to clean `openSessions` in addition to
+    /// stopping shims, but `hideOrCloseWindow` is a free function with no
+    /// easy way to receive an injected store. Set in `init`; auto-cleared
+    /// on deinit via the weak ref.
+    nonisolated(unsafe) static weak var shared: SessionStore?
+
     /// Live sessions: shim is up (or spawning), webview mounted, user can
     /// switch to any of these instantly.
     private(set) var openSessions: [OpenSession] = []
@@ -101,7 +108,9 @@ final class SessionStore {
         return SidebarFilter.projects(in: unfiltered)
     }
 
-    init() {}
+    init() {
+        Self.shared = self
+    }
 
     // No deinit cleanup: SessionStore lives for the app's lifetime
     // (single instance owned by CanopyApp). Process exit cancels in-flight
@@ -117,7 +126,8 @@ final class SessionStore {
             // Don't bump lastActiveAt on selection: that would re-sort the
             // open block on every click, like browser tabs would never do.
             // The open block's order is fixed at insertion time (newest at
-            // top via openSessions.insert(_, at: 0)).
+            // the bottom via `openSessions.append(_:)` in openNew /
+            // openCloud — browser-tab convention).
             lastActiveResumeId = open.resumeId
             SessionStorePersistence.saveLastActiveResumeId(open.resumeId)
         }
@@ -170,9 +180,10 @@ final class SessionStore {
     }
 
     /// Open a closed local row by spawning a shim with --resume against the
-    /// existing JSONL.
+    /// existing JSONL. If `permissionMode` is nil, falls back to the global
+    /// default in `CanopySettings.defaultPermissionMode`.
     @discardableResult
-    func openLocal(_ entry: SessionEntry) -> OpenSession {
+    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil) -> OpenSession {
         // If this session is already open, just select it.
         if let existing = openSessions.first(where: { $0.resumeId == entry.id }) {
             select(.session(existing.id))
@@ -181,7 +192,8 @@ final class SessionStore {
         return openNew(
             directory: entry.projectDirectory,
             resumeId: entry.id,
-            sessionTitle: entry.title
+            sessionTitle: entry.title,
+            permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode
         )
     }
 
@@ -197,8 +209,9 @@ final class SessionStore {
     /// via `teleportError`. Phase A keeps this simpler than LauncherView's
     /// dialog-based flow; PR 4 polish can re-introduce a confirmation if
     /// users want it.
-    func openCloud(_ session: RemoteSession) {
-        Task { await openCloudAsync(session) }
+    func openCloud(_ session: RemoteSession, permissionMode: PermissionMode? = nil) {
+        let mode = permissionMode ?? CanopySettings.shared.defaultPermissionMode
+        Task { await openCloudAsync(session, permissionMode: mode) }
     }
 
     /// Most recent teleport error message, if any. Sidebar surfaces it via
@@ -212,7 +225,7 @@ final class SessionStore {
 
     func dismissTeleportError() { teleportError = nil }
 
-    private func openCloudAsync(_ session: RemoteSession) async {
+    private func openCloudAsync(_ session: RemoteSession, permissionMode: PermissionMode) async {
         guard teleportingCloudId == nil else {
             logger.info("openCloudAsync: a teleport is already in progress, ignoring")
             return
@@ -285,9 +298,13 @@ final class SessionStore {
             resumeId: localId,
             title: title,
             project: project,
-            status: .spawning
+            status: .spawning,
+            permissionMode: permissionMode
         )
-        openSessions.insert(opened, at: 0)
+        // Append (don't insert at top): match openNew's browser-tab
+        // convention so cloud reopens don't push existing Open rows
+        // around (and don't shift the Cmd+1..9 row indices).
+        openSessions.append(opened)
         // Drop the cloud row immediately so the sidebar reflects the new
         // state without waiting for the next /v1/sessions poll.
         cloud.removeAll { $0.id == session.id }
@@ -340,13 +357,36 @@ final class SessionStore {
         openSessions.remove(at: idx)
 
         if case .session(let sel) = selection, sel == id {
-            // Move to the next most-recently-active open session.
-            if let next = openSessions.max(by: { $0.lastActiveAt < $1.lastActiveAt }) {
-                selection = .session(next.id)
-            } else {
+            // Browser-tab convention: focus the row that took the closed
+            // tab's slot (i.e. what was just to its right), or the new
+            // last row if we closed the rightmost. `lastActiveAt` would
+            // jump to whichever was opened most recently regardless of
+            // proximity, which feels random when closing the active row.
+            if openSessions.isEmpty {
                 selection = .launcher
+            } else {
+                let target = idx < openSessions.count ? idx : openSessions.count - 1
+                selection = .session(openSessions[target].id)
             }
         }
+    }
+
+    /// Hard-stop every open session and reset the sidebar to the Launcher
+    /// row. Called from the close-alert's "Stop Sessions and Close" branch
+    /// after the window's `WindowDelegateProxy` decided to terminate. Just
+    /// killing the shims (which `ShimProcess.stopAllSessions()` does)
+    /// would leave dead `OpenSession` rows in `openSessions`; reopening
+    /// the window via Cmd+0 + clicking one of those rows would then reuse
+    /// the cached (dead) shim — `WebViewContainer.buildWebView` reads
+    /// `boundSession?.shim`, finds it non-nil, and skips `shim.start()`.
+    func closeAllSessions() {
+        for session in openSessions {
+            session.shim?.stop()
+            session.shim = nil
+            session.webView = nil
+        }
+        openSessions.removeAll()
+        selection = .launcher
     }
 
     // MARK: - Refresh

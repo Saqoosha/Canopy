@@ -1,7 +1,7 @@
 # Single-Window Sidebar: Sessions in One App Window
 
 **Date:** 2026-04-29
-**Status:** Proposed design
+**Status:** Implemented (Phase A shipped in PR #47, legacy multi-window stripped in the follow-up cleanup PR — single-window sidebar is the only shell from 1.12.0 onward)
 
 ## Problem
 

@@ -4,7 +4,8 @@ import Foundation
 /// Hashable so `List(selection:)` can target any of them.
 ///
 /// Sort order across a mixed array of rows:
-///   1. all `.open` first (any origin), by `lastActiveAt` desc
+///   1. all `.open` first (any origin), in insertion order (newest at
+///      the bottom — browser-tab convention)
 ///   2. all closed rows (`.closedLocal` + `.closedCloud`) mixed, by
 ///      `lastModified` desc
 ///
@@ -44,8 +45,10 @@ enum SidebarRow: Identifiable, Hashable {
         }
     }
 
-    /// Drives the closed-block sort order. For open rows we use lastActiveAt
-    /// (the open block has its own ordering, see `sorted(_:)`).
+    /// Drives the closed-block sort order only. The open block ignores
+    /// this field — it's sorted by insertion order in `sorted(_:)`.
+    /// `.open` rows still expose `lastActiveAt` here so dedup / filter
+    /// helpers can read a date from any row variant.
     var lastModified: Date {
         switch self {
         case .open(let s): s.lastActiveAt

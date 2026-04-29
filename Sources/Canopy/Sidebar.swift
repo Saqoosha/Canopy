@@ -397,14 +397,14 @@ private struct SidebarRowView: View {
 
     private var openIconSize: CGFloat {
         switch row {
-        case .open: return 8 // small dot for idle open
+        case .open: return 6 // small filled dot for idle open
         case .closedLocal, .closedCloud: return 14
         }
     }
 
     private var openIconWeight: Font.Weight {
         switch row {
-        case .open: return .black
+        case .open: return .regular
         case .closedLocal, .closedCloud: return .regular
         }
     }
@@ -426,7 +426,7 @@ private struct SidebarRowView: View {
 
     private var iconName: String {
         switch row {
-        case .open: return "circle.fill" // small subtle dot — "alive"
+        case .open: return "circle.fill" // small filled dot — "alive but idle"
         case .closedLocal: return "desktopcomputer"
         case .closedCloud: return "cloud"
         }

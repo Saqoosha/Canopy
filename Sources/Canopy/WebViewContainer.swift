@@ -15,10 +15,11 @@ struct WebViewContainer: NSViewRepresentable {
     var remoteHost: String?
     var connectionState: ConnectionState?
     var onCrash: ((Int32) -> Void)?
-    /// When set, the coordinator writes the spawned `ShimProcess` and `WKWebView`
-    /// back to this OpenSession so `SessionStore.closeSession` can find them.
-    /// Used by the single-window-sidebar shell. Legacy multi-window code leaves
-    /// this nil and the refs stay private to the Coordinator.
+    /// The OpenSession that owns this WebView's shim and WKWebView.
+    /// Always non-nil in the sidebar shell (every `SessionContainer`
+    /// passes one). The type stays Optional because the Coordinator's
+    /// reconnect helpers fall back to reading it after the SwiftUI
+    /// wrapper has already gone out of scope.
     var boundSession: OpenSession?
 
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, ShimProcessDelegate {
@@ -160,6 +161,14 @@ struct WebViewContainer: NSViewRepresentable {
                 return
             }
 
+            // Capture the OpenSession from the dying shim BEFORE we drop our
+            // reference so we can re-bind ownership onto the replacement.
+            // Without this rebinding, `stopOrphanedSessions()` (ownership-
+            // based: orphan = no boundSession or boundSession.shim !== self)
+            // would target the live reconnected shim at quit time and kill
+            // the user's session without confirmation.
+            let inheritedSession = shimProcess?.boundSession
+
             // Clean up old shim's message handler
             let ucc = webView.configuration.userContentController
             ucc.removeScriptMessageHandler(forName: "vscodeHost")
@@ -183,6 +192,10 @@ struct WebViewContainer: NSViewRepresentable {
             if newShim.start() {
                 logger.info("Reconnect succeeded")
                 shimProcess = newShim
+                if let session = inheritedSession {
+                    session.shim = newShim
+                    newShim.boundSession = session
+                }
                 reconnectAttempt = 0
                 connectionState?.status = .connected
                 newShim.webViewDidFinishLoad()
@@ -218,20 +231,33 @@ struct WebViewContainer: NSViewRepresentable {
     /// SwiftUI `.id(...)` re-mount cycle. The WKWebView itself stays
     /// alive on `OpenSession.webView`.
     func makeNSView(context: Context) -> NSView {
+        logger.debug("makeNSView: session=\(self.boundSession?.id.uuidString ?? "nil", privacy: .public) hasShim=\(self.boundSession?.shim != nil) hasWebView=\(self.boundSession?.webView != nil)")
         let host = SessionWebViewHost()
         host.translatesAutoresizingMaskIntoConstraints = true
         host.autoresizingMask = [.width, .height]
         attachWebView(to: host, coordinator: context.coordinator)
         context.coordinator.lastBoundSessionId = boundSession?.id
+        // First-mount focus: same rationale as updateNSView. host.window
+        // is nil at this point (SwiftUI hasn't placed the host yet), so
+        // defer until the next runloop pass when the window is wired.
+        let target = context.coordinator.currentWebView
+        DispatchQueue.main.async {
+            if let target, let window = target.window {
+                window.makeFirstResponder(target)
+            }
+        }
         return host
     }
 
     func updateNSView(_ host: NSView, context: Context) {
         // Swap the inner WKWebView when the session bound to this view
-        // changes. Mismatch can happen because the SessionContainer's
-        // session parameter changes without SwiftUI re-mounting.
+        // changes. With `.id(session.id)` on the SessionContainer this
+        // guard rarely fires (SwiftUI re-mounts on session change), but
+        // we keep it for the SwiftUI double-pass case where makeNSView
+        // is followed by an immediate updateNSView with the same id.
         let newId = boundSession?.id
         guard newId != context.coordinator.lastBoundSessionId else { return }
+        logger.debug("updateNSView: swapping \(context.coordinator.lastBoundSessionId?.uuidString ?? "nil", privacy: .public) → \(newId?.uuidString ?? "nil", privacy: .public)")
         host.subviews.forEach { $0.removeFromSuperview() }
         // Reset coordinator state — the previous webView's delegates and
         // handlers were tied to the old session.
@@ -241,6 +267,18 @@ struct WebViewContainer: NSViewRepresentable {
         context.coordinator.linkHandler = nil
         attachWebView(to: host, coordinator: context.coordinator)
         context.coordinator.lastBoundSessionId = newId
+        // After a swap (e.g. via Cmd+1..9 / sidebar click), the menu's
+        // key-event consumed first-responder status. The new WKWebView's
+        // CSS caret keeps blinking from prior focus state, but AppKit
+        // routes keystrokes to whoever is currently first responder
+        // (often the window itself), so the user gets a beep until they
+        // click into the input field. Hand focus back to the webview.
+        let target = context.coordinator.currentWebView
+        DispatchQueue.main.async {
+            if let target, let window = target.window {
+                window.makeFirstResponder(target)
+            }
+        }
     }
 
     /// Build (or fetch cached) WKWebView for `boundSession` and add it
@@ -316,6 +354,17 @@ struct WebViewContainer: NSViewRepresentable {
                 remoteHost: remoteHost
             )
             isFreshShim = true
+            // Bind the shim to the OpenSession IMMEDIATELY, before the
+            // expensive `shim.start()` call below. Otherwise a second
+            // `makeNSView` triggered while the Node subprocess is spawning
+            // (~150 ms) sees `boundSession.shim == nil`, allocates and
+            // starts a *second* shim, and orphans the first — which then
+            // keeps `process?.isRunning == true` forever and trips
+            // `hasActiveSession` even after the user closed the session.
+            if let session = boundSession {
+                session.shim = shim
+                shim.boundSession = session
+            }
         }
         shim.delegate = coordinator
         ucc.add(shim, name: "vscodeHost")
@@ -358,15 +407,29 @@ struct WebViewContainer: NSViewRepresentable {
             webView = WKWebView(frame: .zero, configuration: config)
             webView.isInspectable = true
             isFreshWebView = true
+            // Early-bind to the OpenSession before the (slow) loadCCWebview
+            // call. Without this, a concurrent `makeNSView` triggered while
+            // we're still inside this call sees `boundSession?.webView == nil`,
+            // allocates a *second* WebView, and the first one ends up
+            // orphaned — loaded but never attached to the user's view
+            // hierarchy. Pairs with the early shim bind above.
+            boundSession?.webView = webView
         }
         webView.navigationDelegate = coordinator
         webView.uiDelegate = coordinator
 
         shim.webView = webView
         coordinator.currentWebView = webView
+        logger.debug("buildWebView: isFreshShim=\(isFreshShim) isFreshWebView=\(isFreshWebView) shim=\(ObjectIdentifier(shim).hashValue) webView=\(ObjectIdentifier(webView).hashValue)")
         if isFreshShim {
             if !shim.start() {
                 logger.error("Shim start failed — no fallback available")
+                // Session was early-bound to this shim above. With the shim
+                // dead, the OpenSession would otherwise stay in `.spawning`
+                // forever (no termination handler fires). Route through the
+                // crash path so SessionContainer flips to `.crashed` and
+                // surfaces an error UI.
+                coordinator.onCrash?(-1)
             }
         }
         if isFreshWebView {
