@@ -2,6 +2,7 @@ out/
 node_modules/
 *.vsix
 build/
+build-release/
 Canopy.xcodeproj/
 Canopy.app/
 .DS_Store

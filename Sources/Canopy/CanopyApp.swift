@@ -334,27 +334,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Set when "Restart Now" is clicked. The actual relaunch helper is
+    /// spawned inside `applicationShouldTerminate` once we have committed to
+    /// quitting (and crucially while the run loop is still healthy enough to
+    /// run a modal alert if the spawn fails). A canceled terminate clears
+    /// this flag, so no `/bin/sh` waiter is ever left polling for our pid.
+    @MainActor
+    private static var shouldRelaunchOnExit = false
+
+    /// Schedule Canopy to relaunch by routing through `NSApp.terminate(nil)`
+    /// so `applicationShouldTerminate`'s active-sessions prompt and shim
+    /// cleanup still run. The `/bin/sh` waiter that re-`open`s the bundle is
+    /// only spawned once we've decided to terminate.
+    @MainActor
+    static func relaunch() {
+        Self.shouldRelaunchOnExit = true
+        NSApp.terminate(nil)
+    }
+
+    /// Spawn a detached `/bin/sh` that polls our pid via `kill -0` and, once
+    /// we exit, `exec`s `/usr/bin/open` against the current bundle. Pid and
+    /// bundle path are passed as positional args so the bundle path is never
+    /// re-interpreted by the shell. Returns `true` on success; on failure
+    /// the user is shown an alert and `false` is returned so the caller can
+    /// abort the quit instead of leaving them with no Canopy at all.
+    private func spawnRelaunchHelper() -> Bool {
+        let bundlePath = Bundle.main.bundlePath
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = [
+            "-c",
+            #"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#,
+            "canopy-relaunch",
+            String(pid),
+            bundlePath,
+        ]
+        // Detach stdio so the helper isn't anchored to launchd's pipes after
+        // we exit. The Process object goes out of scope after run() returns,
+        // which is fine — we're about to exit and launchd reaps the orphan.
+        task.standardInput = FileHandle.nullDevice
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            logger.info("Relaunch helper scheduled (pid=\(pid, privacy: .public))")
+            return true
+        } catch {
+            logger.error("Relaunch helper failed to spawn: \(error.localizedDescription, privacy: .public)")
+            let alert = NSAlert()
+            alert.messageText = "Couldn't Restart Canopy Automatically"
+            alert.informativeText = "Quit Canopy and reopen it manually to finish applying the extension update.\n\n\(error.localizedDescription)"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return false
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Sweep up shims orphaned by mid-flight reconnects so they don't trigger
         // the "session still running" prompt below — they have no UI anyway.
         ShimProcess.stopOrphanedSessions()
 
-        guard ShimProcess.hasActiveSession else {
-            Self.isTerminating = true
-            return .terminateNow
+        if ShimProcess.hasActiveSession {
+            let count = ShimProcess.activeCount
+            let alert = NSAlert()
+            alert.messageText = "Active Sessions Running"
+            alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. Quitting will stop all sessions."
+            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "Cancel")
+            alert.alertStyle = .warning
+            if alert.runModal() == .alertSecondButtonReturn {
+                // User backed out — clear the relaunch flag so the next normal
+                // quit doesn't unexpectedly re-open Canopy.
+                Self.shouldRelaunchOnExit = false
+                return .terminateCancel
+            }
         }
 
-        let count = ShimProcess.activeCount
-        let alert = NSAlert()
-        alert.messageText = "Active Sessions Running"
-        alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. Quitting will stop all sessions."
-        alert.addButton(withTitle: "Quit")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-
-        if alert.runModal() == .alertSecondButtonReturn {
+        // If "Restart Now" triggered this terminate, spawn the waiter now —
+        // before the run loop starts winding down — so the failure alert is
+        // delivered cleanly and the user can decide what to do.
+        if Self.shouldRelaunchOnExit, !spawnRelaunchHelper() {
+            Self.shouldRelaunchOnExit = false
             return .terminateCancel
         }
+
         Self.isTerminating = true
         return .terminateNow
     }
