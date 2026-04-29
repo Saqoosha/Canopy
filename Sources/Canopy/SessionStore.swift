@@ -369,6 +369,12 @@ final class SessionStore {
                 selection = .session(openSessions[target].id)
             }
         }
+
+        // The shim was just writing to the session's JSONL, so the on-disk
+        // metadata is newer than `recents` (which only refreshes explicitly —
+        // sidebar appear and post-teleport). Reload so the now-closed
+        // session shows up in the Recents block immediately.
+        Task { await refreshRecents() }
     }
 
     /// Hard-stop every open session and reset the sidebar to the Launcher
@@ -380,6 +386,9 @@ final class SessionStore {
     /// the cached (dead) shim — `WebViewContainer.buildWebView` reads
     /// `boundSession?.shim`, finds it non-nil, and skips `shim.start()`.
     func closeAllSessions() {
+        // No `refreshRecents()` here: this path tears the window down, so
+        // any reload would render into a disappearing view. The next Cmd+0
+        // reopen triggers `Sidebar.task` → `refreshRecents()` anyway.
         for session in openSessions {
             session.shim?.stop()
             session.shim = nil
