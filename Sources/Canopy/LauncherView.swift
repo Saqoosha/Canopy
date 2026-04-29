@@ -2,6 +2,9 @@ import SwiftUI
 
 struct LauncherView: View {
     @Bindable var appState: AppState
+    /// When true, hide the bottom Recents/Sessions/Web lists — the sidebar
+    /// shell already shows them and duplication just adds noise.
+    var compactMode: Bool = false
 
     @State private var selectedDirectory: URL?
     @State private var recentDirectories: [URL] = []
@@ -16,6 +19,18 @@ struct LauncherView: View {
     @State private var remoteDirectory: String = "~"
     @State private var showRemoteBrowser = false
     @State private var updater = ExtensionUpdater()
+
+    // Web (Claude Code Web) session teleport
+    @State private var showWebSessions = false
+    @State private var webSessions: [RemoteSession] = []
+    @State private var webSessionsLoading = false
+    @State private var webSessionsError: String?
+    @State private var teleportingSessionId: String?
+    @State private var teleportError: String?
+    @State private var hoveredWebSessionId: String?
+    @State private var pendingBranchPrompt: BranchPrompt?
+    @AppStorage("launcher.webSessionKind") private var webSessionKindRaw = RemoteSessionKind.web.rawValue
+    @AppStorage("launcher.webSessionsIncludeArchived") private var webSessionsIncludeArchived = false
 
     @AppStorage("launcher.model") private var model = ""
     @AppStorage("launcher.effortLevel") private var effortLevel = ""
@@ -34,6 +49,11 @@ struct LauncherView: View {
         ScrollView {
             VStack(spacing: 28) {
                 header
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["CANOPY_PROBE"] == "1" {
+                    ProbeRetentionView()
+                }
+                #endif
                 extensionUpdateBanner
 
                 Toggle("SSH Remote", isOn: $isRemoteMode)
@@ -51,9 +71,10 @@ struct LauncherView: View {
 
                 startButton
 
-                if !isRemoteMode {
+                if !isRemoteMode && !compactMode {
                     searchField
                     listsSection
+                    webSessionsSection
                 }
             }
             .padding(.horizontal, 36)
@@ -177,6 +198,28 @@ struct LauncherView: View {
                     .truncationMode(.middle)
 
                 Spacer()
+
+                if !recentDirectories.isEmpty {
+                    Menu {
+                        Section("Recent") {
+                            ForEach(recentDirectories.prefix(15), id: \.path) { dir in
+                                Button(dir.lastPathComponent) {
+                                    selectedDirectory = dir
+                                }
+                            }
+                        }
+                        Divider()
+                        Button("Open folder…") { chooseFolder() }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 22)
+                    .help("Recent folders")
+                }
 
                 Button("Browse...") { chooseFolder() }
             }
@@ -354,6 +397,188 @@ struct LauncherView: View {
             }
             .frame(maxWidth: .infinity)
         }
+    }
+
+    // MARK: - Web Sessions Section
+
+    private var webSessionsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Claude Code on the Web")
+                    .font(.headline)
+                Spacer()
+                if showWebSessions && webSessionsLoading {
+                    ProgressView().controlSize(.small)
+                }
+                Button {
+                    Task { await toggleWebSessions() }
+                } label: {
+                    Label(
+                        showWebSessions ? "Hide" : "Show",
+                        systemImage: showWebSessions ? "chevron.up" : "chevron.down"
+                    )
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption)
+                }
+                .controlSize(.small)
+            }
+
+            if showWebSessions {
+                HStack(spacing: 10) {
+                    Picker("", selection: $webSessionKindRaw) {
+                        ForEach(RemoteSessionKind.allCases, id: \.rawValue) { kind in
+                            Text(kind.displayName).tag(kind.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .fixedSize()
+                    Toggle("Include archived", isOn: $webSessionsIncludeArchived)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .font(.caption)
+                    Spacer()
+                    Button {
+                        Task { await fetchWebSessions() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.caption)
+                    }
+                    .controlSize(.small)
+                    .disabled(webSessionsLoading)
+                }
+
+                if let webSessionsError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(webSessionsError)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Retry") {
+                            Task { await fetchWebSessions() }
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(10)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    let filtered = filteredWebSessions
+                    if filtered.isEmpty && !webSessionsLoading {
+                        let kind = RemoteSessionKind(rawValue: webSessionKindRaw) ?? .web
+                        Text("No \(kind.displayName.lowercased()) sessions found.\(webSessionsIncludeArchived ? "" : " Toggle 'Include archived' to widen the search.")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.regularMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    } else {
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(Array(filtered.enumerated()), id: \.element.id) { index, session in
+                                    webSessionRow(session)
+                                    if index < filtered.count - 1 {
+                                        Divider().padding(.leading, 34)
+                                    }
+                                }
+                            }
+                        }
+                        .frame(height: Self.rowHeight * CGFloat(min(filtered.count, Self.listRowCount)))
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+
+                if let teleportError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(teleportError)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 4)
+                }
+            }
+        }
+        .alert(item: $pendingBranchPrompt) { prompt in
+            Alert(
+                title: Text("Switch git branch?"),
+                message: Text("This remote session was on branch '\(prompt.branch)'. Check it out in \(prompt.cwd.lastPathComponent) to keep file context aligned?"),
+                primaryButton: .default(Text("Switch")) {
+                    prompt.onDecision(true)
+                },
+                secondaryButton: .cancel(Text("Skip")) {
+                    prompt.onDecision(false)
+                }
+            )
+        }
+        .onDisappear {
+            // Safety net: if the window closes while the alert is up, fire
+            // the decision so the awaiting Task can finish and shutdown the
+            // bridge subprocess. ResolveOnce makes this a no-op if a button
+            // already responded.
+            if let prompt = pendingBranchPrompt {
+                prompt.onDecision(false)
+                pendingBranchPrompt = nil
+            }
+        }
+    }
+
+    private func webSessionRow(_ session: RemoteSession) -> some View {
+        let isHovered = hoveredWebSessionId == session.id
+        let isTeleporting = teleportingSessionId == session.id
+        return Button {
+            Task { await teleport(session) }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: session.status == "running" ? "circle.fill" : "globe")
+                    .foregroundStyle(session.status == "running" ? .green : .blue)
+                    .font(.callout)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.summary)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        if let owner = session.repoOwner, let name = session.repoName {
+                            Text("\(owner)/\(name)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let branch = session.displayBranch {
+                            Text("\u{00B7}")
+                                .font(.caption2)
+                                .foregroundStyle(.quaternary)
+                            Text(branch)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("\u{00B7}")
+                            .font(.caption2)
+                            .foregroundStyle(.quaternary)
+                        Text(Self.sessionDateFormatter.string(from: session.lastModified))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+                if isTeleporting {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isHovered ? Color.primary.opacity(0.04) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .disabled(teleportingSessionId != nil)
+        .onHover { h in hoveredWebSessionId = h ? session.id : nil }
     }
 
     // MARK: - Recent Row
@@ -610,6 +835,160 @@ struct LauncherView: View {
         }
     }
 
+    // MARK: - Web Sessions / Teleport
+
+    private func toggleWebSessions() async {
+        showWebSessions.toggle()
+        if showWebSessions && webSessions.isEmpty && !webSessionsLoading {
+            await fetchWebSessions()
+        }
+    }
+
+    private func fetchWebSessions() async {
+        webSessionsError = nil
+        webSessionsLoading = true
+        defer { webSessionsLoading = false }
+
+        do {
+            let sessions = try await RemoteSessionsAPI.listAll()
+            webSessions = sessions.sorted {
+                if $0.isRunning != $1.isRunning { return $0.isRunning && !$1.isRunning }
+                return $0.lastModified > $1.lastModified
+            }
+            // Empty result is a valid response — surface it as the empty-state
+            // message in the list, not as a "you might not be logged in" error.
+            // Real auth/HTTP errors throw and are caught below.
+        } catch {
+            webSessionsError = error.localizedDescription
+        }
+    }
+
+    private var filteredWebSessions: [RemoteSession] {
+        let kind = RemoteSessionKind(rawValue: webSessionKindRaw) ?? .web
+        return webSessions.filter { session in
+            guard session.kind == kind else { return false }
+            if !webSessionsIncludeArchived && session.status == "archived" { return false }
+            return true
+        }
+    }
+
+    private func teleport(_ session: RemoteSession) async {
+        teleportError = nil
+        teleportingSessionId = session.id
+        defer { teleportingSessionId = nil }
+
+        guard let cwd = resolveTeleportCwd(for: session) else {
+            teleportError = "Could not find a local clone of \(session.repoOwner ?? "?")/\(session.repoName ?? "?"). Pick a working directory first."
+            return
+        }
+
+        // Validate cwd exists before spawning a shim that would otherwise time
+        // out 30s later with a generic error.
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: cwd.path, isDirectory: &isDir), isDir.boolValue else {
+            teleportError = "Working directory not found: \(cwd.path)"
+            return
+        }
+
+        let bridge = RemoteSessionsBridge(cwd: cwd)
+        do {
+            try await bridge.start()
+        } catch {
+            teleportError = "Teleport failed: \(error.localizedDescription)"
+            bridge.shutdown()
+            return
+        }
+        // Tear the shim down on every exit path past start(), including SwiftUI
+        // task cancellation (window close mid-flight) — otherwise the Node
+        // process is orphaned.
+        defer { bridge.shutdown() }
+
+        let result: TeleportResult
+        do {
+            result = try await bridge.teleportSession(id: session.id)
+        } catch {
+            teleportError = "Teleport failed: \(error.localizedDescription)"
+            return
+        }
+
+        // If extension returned a branch, ask the user before checking it out.
+        // If they said Switch but the checkout failed, abort instead of resuming
+        // on the wrong branch — running teleported history against the wrong
+        // working copy is worse than not resuming at all.
+        if let branch = result.branch, !branch.isEmpty {
+            let switchToBranch = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                // Wrap the decision callback so the continuation can only be
+                // resumed once — even if both Alert and onDisappear fire.
+                let resolved = ResolveOnce(cont)
+                pendingBranchPrompt = BranchPrompt(branch: branch, cwd: cwd) { decision in
+                    resolved.fire(decision)
+                }
+            }
+            pendingBranchPrompt = nil
+
+            if switchToBranch {
+                var checkoutFailed = false
+                do {
+                    checkoutFailed = !(try await bridge.checkoutBranch(branch))
+                } catch {
+                    checkoutFailed = true
+                }
+                if checkoutFailed {
+                    try? await bridge.updateSkippedBranch(sessionId: session.id, branch: branch, failed: true)
+                    teleportError = "Couldn't switch to branch '\(branch)' in \(cwd.lastPathComponent). The session was saved locally but not resumed — switch the branch manually and use Continue session, or pick a different working directory."
+                    return
+                }
+            } else {
+                try? await bridge.updateSkippedBranch(sessionId: session.id, branch: branch, failed: false)
+            }
+        }
+
+        guard let localId = result.localSessionId else {
+            teleportError = "Teleport completed but no local session id was returned."
+            return
+        }
+
+        appState.launchSession(
+            directory: cwd,
+            resumeSessionId: localId,
+            sessionTitle: result.summary ?? session.summary,
+            model: model.isEmpty ? nil : model,
+            effortLevel: effortLevel.isEmpty ? nil : effortLevel,
+            permissionMode: resolvedPermission
+        )
+    }
+
+    private func resolveTeleportCwd(for session: RemoteSession) -> URL? {
+        if let selected = selectedDirectory { return selected }
+
+        // Find recents whose lastPathComponent matches the repo name. If
+        // exactly one matches, auto-confirm. If multiple, prompt the
+        // user — picking the wrong clone of "myapp" and then running
+        // checkoutBranch on it could damage unrelated work.
+        if let repoName = session.repoName?.lowercased() {
+            let matches = recentDirectories.filter { $0.lastPathComponent.lowercased() == repoName }
+            if matches.count == 1, let only = matches.first {
+                return only
+            }
+        }
+
+        // Either zero matches or ambiguous — prompt the user.
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        if let owner = session.repoOwner, let name = session.repoName {
+            panel.message = "Pick the local clone of \(owner)/\(name) to teleport into"
+        } else {
+            panel.message = "Choose a local working directory for this remote session"
+        }
+        panel.prompt = "Use This Folder"
+        if panel.runModal() == .OK, let url = panel.url {
+            return url
+        }
+        return nil
+    }
+
     private func chooseFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -636,6 +1015,33 @@ struct LauncherView: View {
             DispatchQueue.main.async { selectedDirectory = url }
         }
         return true
+    }
+}
+
+// MARK: - Supporting Types
+
+struct BranchPrompt: Identifiable {
+    let id = UUID()
+    let branch: String
+    let cwd: URL
+    let onDecision: (Bool) -> Void
+}
+
+/// Wraps a CheckedContinuation so it can only be resumed once. Used to bridge
+/// SwiftUI alerts (which can fire buttons OR be dismissed via system gestures)
+/// to async code without leaking continuations.
+final class ResolveOnce<T: Sendable>: @unchecked Sendable {
+    private var cont: CheckedContinuation<T, Never>?
+    private let lock = NSLock()
+    init(_ cont: CheckedContinuation<T, Never>) {
+        self.cont = cont
+    }
+    func fire(_ value: T) {
+        lock.lock()
+        let c = cont
+        cont = nil
+        lock.unlock()
+        c?.resume(returning: value)
     }
 }
 

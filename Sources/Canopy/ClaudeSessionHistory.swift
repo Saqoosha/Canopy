@@ -3,7 +3,7 @@ import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SessionHistory")
 
-struct SessionEntry: Identifiable {
+struct SessionEntry: Identifiable, Hashable {
     let id: String
     let title: String
     let timestamp: Date
@@ -198,6 +198,81 @@ enum ClaudeSessionHistory {
         }
 
         return entries
+    }
+
+    /// Walk every JSONL across `~/.claude/projects/` and return a map of
+    /// local session id → cloud session id, populated from `teleported-from`
+    /// header lines. Used by the sidebar to dedupe cloud rows that have
+    /// already been teleported into local sessions.
+    ///
+    /// Cheap: reads only the first ~16 KB of each file (the header chunk
+    /// where teleported-from is written by saveSession).
+    static func loadTeleportedFromMap() -> [String: String] {
+        guard FileManager.default.fileExists(atPath: claudeDir.path) else { return [:] }
+        let fm = FileManager.default
+        guard let projectDirs = try? fm.contentsOfDirectory(atPath: claudeDir.path) else { return [:] }
+        var map: [String: String] = [:]
+
+        for projectEncoded in projectDirs {
+            guard projectEncoded != "-" else { continue }
+            let projectPath = claudeDir.path + "/" + projectEncoded
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: projectPath, isDirectory: &isDir), isDir.boolValue else { continue }
+            guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { continue }
+
+            for file in files where file.hasSuffix(".jsonl") {
+                let sessionId = String(file.dropLast(6))
+                guard UUID(uuidString: sessionId) != nil else { continue }
+                let filePath = projectPath + "/" + file
+                guard let cloudId = extractTeleportedFrom(at: filePath) else { continue }
+                map[sessionId] = cloudId
+            }
+        }
+        return map
+    }
+
+    /// Scan a JSONL file's TAIL for a `teleported-from` header line and
+    /// return the cloud session id (`remoteSessionId`) if present.
+    ///
+    /// The CC extension writes `teleported-from` AFTER messages and the
+    /// summary in `c1.saveSession`, so it's always within the last few KB
+    /// of the file. We read just the tail (~64 KB) for speed — reading
+    /// every full JSONL across 300+ files would block startup.
+    private static func extractTeleportedFrom(at path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+
+        // Get file size to seek to tail.
+        let fileSize: UInt64
+        do {
+            fileSize = try handle.seekToEnd()
+        } catch {
+            return nil
+        }
+        let tailLength: UInt64 = 65_536 // 64 KB
+        let offset = fileSize > tailLength ? fileSize - tailLength : 0
+        do {
+            try handle.seek(toOffset: offset)
+        } catch {
+            return nil
+        }
+        guard let chunk = try? handle.readToEnd(),
+              let text = String(data: chunk, encoding: .utf8) else { return nil }
+
+        // Skip the first (partial) line if we didn't start at offset 0.
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        let startIndex = offset == 0 ? 0 : 1
+        guard startIndex < lines.count else { return nil }
+        for rawLine in lines[startIndex...].reversed() {
+            guard rawLine.contains("teleported-from") else { continue }
+            guard let lineData = rawLine.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  parsed["type"] as? String == "teleported-from",
+                  let remoteId = parsed["remoteSessionId"] as? String
+            else { continue }
+            return remoteId
+        }
+        return nil
     }
 
     // MARK: - Internal

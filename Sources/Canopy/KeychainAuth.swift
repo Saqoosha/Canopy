@@ -44,7 +44,32 @@ enum KeychainAuth {
         }
     }
 
-    private static func readOAuthFromKeychain() -> [String: Any]? {
+    /// Read raw OAuth blob (for callers that need accessToken / refreshToken).
+    static func readRawOAuth() -> [String: Any]? {
+        readOAuthFromKeychain()
+    }
+
+    /// Read the organization UUID stored alongside the OAuth tokens.
+    static func readOrganizationUUID() -> String? {
+        readKeychainBlob()?["organizationUuid"] as? String
+    }
+
+    /// Convenience: returns (accessToken, orgUUID) if both are present in
+    /// Keychain. Empty strings are treated as missing — sending an empty
+    /// `Authorization` / `x-organization-uuid` header would produce a
+    /// confusing 401/400 from the API.
+    static func readAccessTokenAndOrg() -> (token: String, orgUUID: String)? {
+        guard let blob = readKeychainBlob(),
+              let oauth = blob["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String, !token.isEmpty,
+              let org = blob["organizationUuid"] as? String, !org.isEmpty
+        else { return nil }
+        return (token, org)
+    }
+
+    /// Single source of truth: spawns `security find-generic-password` and
+    /// returns the parsed JSON blob. All other readers go through this.
+    private static func readKeychainBlob() -> [String: Any]? {
         let username = ProcessInfo.processInfo.environment["USER"] ?? NSUserName()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
@@ -58,7 +83,7 @@ enum KeychainAuth {
             logger.error("Failed to run security command: \(error.localizedDescription, privacy: .public)")
             return nil
         }
-        // Read pipe before waitUntilExit to avoid deadlock if buffer fills
+        // Read pipe before waitUntilExit to avoid deadlock if buffer fills.
         let output = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else {
@@ -69,18 +94,21 @@ enum KeychainAuth {
             logger.warning("Keychain returned empty data")
             return nil
         }
-        let keychainJSON: [String: Any]
         do {
             guard let parsed = try JSONSerialization.jsonObject(with: output) as? [String: Any] else {
                 logger.warning("Keychain data is not a JSON dictionary")
                 return nil
             }
-            keychainJSON = parsed
+            return parsed
         } catch {
             logger.error("Keychain JSON parse failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
-        guard let oauth = keychainJSON["claudeAiOauth"] as? [String: Any] else {
+    }
+
+    private static func readOAuthFromKeychain() -> [String: Any]? {
+        guard let blob = readKeychainBlob() else { return nil }
+        guard let oauth = blob["claudeAiOauth"] as? [String: Any] else {
             logger.warning("Keychain JSON missing 'claudeAiOauth' key")
             return nil
         }

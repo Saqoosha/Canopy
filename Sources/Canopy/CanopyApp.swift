@@ -24,69 +24,149 @@ struct CanopyApp: App {
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.appState) private var focusedAppState
 
+    /// Single-window sidebar shell flag. Set `CANOPY_SIDEBAR=1` in the
+    /// environment to opt in. PR 5 will flip the default and remove the
+    /// legacy WindowGroup path.
+    private static let useSidebar: Bool = {
+        ProcessInfo.processInfo.environment["CANOPY_SIDEBAR"] == "1"
+    }()
+
+    /// Exposed for AppDelegate's window-config logic, which needs to skip
+    /// legacy multi-window resize behaviour when the new shell is active.
+    static var isUsingSidebar: Bool { useSidebar }
+
+    @State private var sidebarStore = SessionStore()
+
     var body: some Scene {
         WindowGroup(id: "main") {
-            TabContentView()
-                .frame(minWidth: 400, minHeight: 600)
+            // Branch inside the view body, not at Scene level — SceneBuilder
+            // refuses if/else producing different Scene types. The legacy
+            // multi-window code lives inside this same WindowGroup; when the
+            // sidebar flag is on we render a fixed single-window UI.
+            Group {
+                if Self.useSidebar {
+                    NavigationSplitView {
+                        Sidebar(store: sidebarStore)
+                            .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 360)
+                    } detail: {
+                        Detail(store: sidebarStore)
+                    }
+                    .navigationSplitViewStyle(.balanced)
+                    // No explicit minWidth/minHeight: that re-asserts on every
+                    // app reactivation and yanks user-resized windows back to
+                    // the minimum. `defaultSize` (below) handles first launch.
+                } else {
+                    TabContentView()
+                        .frame(minWidth: 400, minHeight: 600)
+                }
+            }
         }
         .windowStyle(.titleBar)
-        .defaultSize(width: 500, height: 800)
+        .defaultSize(width: Self.useSidebar ? 1200 : 500, height: Self.useSidebar ? 800 : 800)
+        .commands {
+            if Self.useSidebar {
+                CommandGroup(after: .appInfo) {
+                    Button("Check for Updates...") {
+                        appDelegate.updaterController.updater.checkForUpdates()
+                    }
+                }
+                CommandGroup(replacing: .newItem) {
+                    Button("New Session") {
+                        sidebarStore.select(.launcher)
+                    }
+                    .keyboardShortcut("n")
+                }
+                CommandGroup(replacing: .windowList) {
+                    // Cmd+1..9 — jump to N-th visible sidebar row.
+                    ForEach(1...9, id: \.self) { idx in
+                        Button("Switch to Row \(idx)") {
+                            jumpToRow(at: idx - 1)
+                        }
+                        .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
+                    }
+                }
+                CommandMenu("Session") {
+                    Button("Close Session") {
+                        closeActiveSession()
+                    }
+                    .keyboardShortcut("w")
+                    .disabled(sidebarStore.activeSession == nil)
+                    Button("Close Window") {
+                        NSApp.keyWindow?.close()
+                    }
+                    .keyboardShortcut("w", modifiers: [.command, .shift])
+                    Divider()
+                    Button("Open Folder…") {
+                        sidebarOpenFolder()
+                    }
+                    .keyboardShortcut("o")
+                }
+            }
+        }
         // Disable scene state restoration so a closed session window cannot
         // come back as a stale instance after relaunch. Pairs with
         // applicationShouldHandleReopen, which handles the in-process case.
         .restorationBehavior(.disabled)
         .commands {
-            CommandGroup(after: .appInfo) {
-                Button("Check for Updates...") {
-                    appDelegate.updaterController.updater.checkForUpdates()
-                }
-            }
-            CommandGroup(after: .newItem) {
-                Button("New Tab") {
-                    newTab()
-                }
-                .keyboardShortcut("t")
-
-                Divider()
-
-                Button("Back to Launcher") {
-                    focusedAppState?.backToLauncher()
-                }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
-                .disabled(focusedAppState == nil)
-
-                Button("Open Folder...") {
-                    openFolder()
-                }
-                .keyboardShortcut("o")
-                .disabled(focusedAppState == nil)
-
-                Divider()
-
-                Button("Close and Stop Session") {
-                    // close() bypasses windowShouldClose/handleCloseButton, closing directly
-                    NSApp.keyWindow?.close()
-                }
-                .keyboardShortcut("w", modifiers: [.command, .option])
-            }
-            CommandGroup(after: .toolbar) {
-                ForEach(1...9, id: \.self) { index in
-                    Button("Select Tab \(index)") {
-                        selectTab(at: index - 1)
+            // Legacy multi-window menu commands. Skip the entire block in
+            // sidebar mode so we don't double-register Cmd+N / Cmd+W /
+            // Cmd+1..9 (the sidebar's own `.commands { if useSidebar }`
+            // block above already wires them).
+            if !Self.useSidebar {
+                CommandGroup(after: .appInfo) {
+                    Button("Check for Updates...") {
+                        appDelegate.updaterController.updater.checkForUpdates()
                     }
-                    .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
+                }
+                CommandGroup(after: .newItem) {
+                    Button("New Tab") {
+                        newTab()
+                    }
+                    .keyboardShortcut("t")
+
+                    Divider()
+
+                    Button("Back to Launcher") {
+                        focusedAppState?.backToLauncher()
+                    }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(focusedAppState == nil)
+
+                    Button("Open Folder...") {
+                        openFolder()
+                    }
+                    .keyboardShortcut("o")
+                    .disabled(focusedAppState == nil)
+
+                    Divider()
+
+                    Button("Close and Stop Session") {
+                        // close() bypasses windowShouldClose/handleCloseButton, closing directly
+                        NSApp.keyWindow?.close()
+                    }
+                    .keyboardShortcut("w", modifiers: [.command, .option])
+                }
+                CommandGroup(after: .toolbar) {
+                    ForEach(1...9, id: \.self) { index in
+                        Button("Select Tab \(index)") {
+                            selectTab(at: index - 1)
+                        }
+                        .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
+                    }
                 }
             }
-            CommandGroup(after: .windowList) {
-                let hiddenWindows = NSApp.windows.filter {
-                    isCanopyWindow($0) && !$0.isVisible && $0.tabbedWindows == nil
-                }
-                if !hiddenWindows.isEmpty {
-                    Divider()
-                    Section("Hidden Windows") {
-                        ForEach(hiddenWindows, id: \.windowNumber) { window in
-                            Button(window.title.isEmpty ? "Canopy" : window.title) {
-                                window.makeKeyAndOrderFront(nil)
+            if !Self.useSidebar {
+                CommandGroup(after: .windowList) {
+                    let hiddenWindows = NSApp.windows.filter {
+                        isCanopyWindow($0) && !$0.isVisible && $0.tabbedWindows == nil
+                    }
+                    if !hiddenWindows.isEmpty {
+                        Divider()
+                        Section("Hidden Windows") {
+                            ForEach(hiddenWindows, id: \.windowNumber) { window in
+                                Button(window.title.isEmpty ? "Canopy" : window.title) {
+                                    window.makeKeyAndOrderFront(nil)
+                                }
                             }
                         }
                     }
@@ -97,6 +177,43 @@ struct CanopyApp: App {
         Settings {
             SettingsView()
         }
+    }
+
+    // MARK: - Sidebar shell helpers
+
+    private func jumpToRow(at index: Int) {
+        let rows = sidebarStore.visibleRows
+        guard index < rows.count else { return }
+        let row = rows[index]
+        switch row {
+        case .open(let s):
+            sidebarStore.select(.session(s.id))
+        case .closedLocal(let entry):
+            sidebarStore.openLocal(entry)
+        case .closedCloud(let session):
+            // openCloud schedules its own Task internally — the synchronous
+            // call here is intentional (matches `Sidebar.handleClick`).
+            sidebarStore.openCloud(session)
+        }
+    }
+
+    private func closeActiveSession() {
+        if let active = sidebarStore.activeSession {
+            sidebarStore.closeSession(active.id)
+        }
+    }
+
+    private func sidebarOpenFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let model = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
+        let effort = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
+        let permission = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
+        sidebarStore.openNew(directory: url, model: model, effortLevel: effort, permissionMode: permission)
     }
 
     private func openFolder() {
@@ -262,6 +379,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static var isTerminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        SidebarLogicProbe.runIfRequested()
+        #endif
         NSWindow.allowsAutomaticWindowTabbing = false
         requestNotificationPermission()
 
@@ -299,6 +419,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         logger.info("applicationShouldHandleReopen: hasVisibleWindows=\(flag)")
+        // Sidebar shell: single window, no legacy restoration. Bring the
+        // existing main window forward (or let the system create a fresh
+        // one if it was actually closed).
+        if CanopyApp.isUsingSidebar {
+            if let main = NSApp.windows.first(where: { isAppWindow($0) }) {
+                main.makeKeyAndOrderFront(nil)
+                return false
+            }
+            return true
+        }
         if !flag {
             let hiddenWindows = NSApp.windows.filter { isAppWindow($0) && !$0.isVisible }
             // hasRunningProcess (not hasActiveSession): "Stop and Close" leaves the
@@ -440,6 +570,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // First-time window configuration
         guard !configuredWindows.contains(window) else { return }
         configuredWindows.add(window)
+
+        // Sidebar shell uses Window scene with defaultSize + macOS's built-in
+        // window-state restoration. Don't reapply legacy lastWindowWidth /
+        // lastWindowHeight on every reactivation — that yanks the window
+        // back to the legacy default whenever the user switches apps.
+        if CanopyApp.isUsingSidebar { return }
 
         let otherWindow = NSApp.windows.first {
             $0 !== window
