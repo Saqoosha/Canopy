@@ -334,6 +334,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Relaunch Canopy: spawn a detached `open` that waits for the current
+    /// process to exit, then quit through the normal terminate flow so the
+    /// "active sessions" prompt and shim cleanup still run.
+    static func relaunch() {
+        let bundlePath = Bundle.main.bundlePath
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = [
+            "-c",
+            "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"\(bundlePath)\"",
+        ]
+        do {
+            try task.run()
+        } catch {
+            logger.error("Relaunch helper failed to spawn: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        NSApp.terminate(nil)
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Sweep up shims orphaned by mid-flight reconnects so they don't trigger
         // the "session still running" prompt below — they have no UI anyway.

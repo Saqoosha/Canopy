@@ -145,6 +145,12 @@ struct LauncherView: View {
             updateBannerCard(icon: "checkmark.circle.fill", iconColor: .green, tint: .green) {
                 Text("Extension v\(version) installed. Restart Canopy to apply.")
                     .font(.subheadline)
+                Spacer()
+                Button("Restart Now") {
+                    AppDelegate.relaunch()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
 
         case .failed(let message):
