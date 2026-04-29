@@ -12,20 +12,21 @@ struct SettingsView: View {
             RemoteSettingsTab()
                 .tabItem { Label("Remote", systemImage: "network") }
         }
-        .scenePadding()
-        .frame(width: 500, height: 320)
+        .frame(width: 460)
+        .fixedSize()
     }
 }
 
-/// Footer text that mirrors macOS System Settings: small, secondary,
-/// always left-aligned. SwiftUI's grouped Form on macOS otherwise
-/// right-aligns footer Text under control rows, which looks wrong.
+/// Footer text that mirrors macOS System Settings: small, secondary, always
+/// left-aligned. macOS 15 SwiftUI's grouped Form otherwise right-aligns footer
+/// Text under control rows, which visually disconnects the footer from the
+/// section's leading edge.
 private struct SettingsFooter: View {
     let text: String
 
     var body: some View {
         Text(text)
-            .font(.callout)
+            .font(.footnote)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
@@ -36,7 +37,7 @@ private struct SettingsFooter: View {
 // MARK: - General
 
 private struct GeneralSettingsTab: View {
-    @Bindable var settings = CanopySettings.shared
+    @Bindable private var settings = CanopySettings.shared
 
     var body: some View {
         Form {
@@ -59,8 +60,12 @@ private struct GeneralSettingsTab: View {
 // MARK: - Permissions
 
 private struct PermissionsSettingsTab: View {
-    @Bindable var settings = CanopySettings.shared
+    @Bindable private var settings = CanopySettings.shared
 
+    // Mirrors LauncherView's Permission picker. The matching invariant — that
+    // defaultPermissionMode never persists as .bypassPermissions while the
+    // opt-in is off — is enforced by CanopySettings.allowDangerouslySkipPermissions
+    // in didSet + load(). Filtering here only governs what the Picker shows.
     private var visiblePermissionModes: [PermissionMode] {
         PermissionMode.allCases.filter { mode in
             mode != .bypassPermissions || settings.allowDangerouslySkipPermissions
@@ -106,6 +111,7 @@ private struct RemoteSettingsTab: View {
                         HStack {
                             Image(systemName: "server.rack")
                                 .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
                             Text(host)
                             Spacer()
                             Button(role: .destructive) {
@@ -119,12 +125,14 @@ private struct RemoteSettingsTab: View {
                         }
                     }
                 }
-            } header: {
-                Text("Saved SSH Hosts")
             } footer: {
                 SettingsFooter(text: "Hosts you've connected to from the launcher are remembered here for quick reuse.")
             }
         }
         .formStyle(.grouped)
+        // SSHHostStore is a UserDefaults-backed namespace, not @Observable, so
+        // additions made elsewhere (launcher) don't propagate live. Refresh
+        // whenever the tab becomes active so the list stays current.
+        .onAppear { sshHosts = SSHHostStore.hosts() }
     }
 }
