@@ -51,58 +51,54 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     @MainActor private static var instances = NSHashTable<ShimProcess>.weakObjects()
 
     /// Whether any shim process is currently running. Used by AppDelegate for quit confirmation.
+    /// `isIntentionalStop` shims are excluded — `proc.terminate()` is async, so
+    /// `process.isRunning` lingers true for a few ms after `stop()` returns; without
+    /// this filter, closing a session and then the window would still trip the
+    /// "Stop Sessions and Close" alert.
     @MainActor static var hasActiveSession: Bool {
-        instances.allObjects.contains { $0.process?.isRunning == true }
+        instances.allObjects.contains { $0.process?.isRunning == true && !$0.isIntentionalStop }
     }
 
-    /// Number of currently running shim processes.
+    /// Number of currently running shim processes (excluding ones already in
+    /// the middle of an intentional `stop()`).
     @MainActor static var activeCount: Int {
-        instances.allObjects.filter { $0.process?.isRunning == true }.count
+        instances.allObjects.filter { $0.process?.isRunning == true && !$0.isIntentionalStop }.count
     }
 
-    /// Whether the given window contains a shim-managed session (running or reconnecting).
-    /// Checks webView presence rather than process state so SSH reconnect windows stay hidden.
-    @MainActor static func hasActiveSession(in window: NSWindow) -> Bool {
-        instances.allObjects.contains { shim in
-            guard let webView = shim.webView else { return false }
-            return webView.window === window
-        }
-    }
-
-    /// Whether the given window has a shim whose process is still running.
-    /// Use this (not hasActiveSession) when deciding if a hidden window's session
-    /// is recoverable — webView stays attached after stop(), so the looser check
-    /// would falsely classify "Stop and Close" windows as active.
-    @MainActor static func hasRunningProcess(in window: NSWindow) -> Bool {
-        instances.allObjects.contains { shim in
-            guard let webView = shim.webView, webView.window === window else { return false }
-            return shim.process?.isRunning == true
-        }
-    }
-
-    /// Synchronously stop all shim processes whose webView lives in the given window.
-    /// Called from the "Stop Session and Close" close-alert branch so the Node.js
-    /// process is gone before applicationShouldTerminate's active-session check.
-    /// (SwiftUI's dismantleNSView fires too late — or sometimes not at all — for that.)
+    /// Synchronously stop every running shim — used by the "Stop Sessions and Close"
+    /// branch of the close-alert so the Node.js processes are gone before
+    /// applicationShouldTerminate's active-session check. (SwiftUI's
+    /// dismantleNSView fires too late — or sometimes not at all — for that.)
     ///
-    /// Caller invariant: `hideOrCloseWindow` already returns early when the window
-    /// has more than one tab. If that invariant changes, sibling tabs sharing the
-    /// same NSWindow object would be terminated by this call.
-    @MainActor static func stopAllSessions(in window: NSWindow) {
+    /// Tabs are disabled (`allowsAutomaticWindowTabbing = false`) and the sidebar
+    /// shell only ever has one Canopy window. Inactive sessions cache their
+    /// WKWebView on `OpenSession.webView` (detached from the window), so a
+    /// per-window filter would silently skip them — terminating every running
+    /// shim is what matches the alert's "stop all sessions" promise.
+    @MainActor static func stopAllSessions() {
         for shim in instances.allObjects {
-            guard let webView = shim.webView, webView.window === window else { continue }
             shim.stop()
         }
     }
 
-    /// Synchronously stop any running shim whose webView has been detached from a
-    /// window (e.g. orphaned by an SSH reconnect mid-flight). Called as a cleanup
-    /// pass from applicationShouldTerminate so leftover Node.js processes don't
-    /// trigger a spurious "session still running" prompt at quit time.
+    /// Synchronously stop any running shim that no `OpenSession` still
+    /// owns (e.g. orphaned by an SSH reconnect mid-flight). Called as a
+    /// cleanup pass from `applicationShouldTerminate` so leftover Node.js
+    /// processes don't trigger a spurious "session still running" prompt
+    /// at quit time.
+    ///
+    /// We can't use "webView detached from a window" as the orphan signal
+    /// here: in the sidebar shell, inactive open sessions cache their
+    /// WKWebView on `OpenSession.webView` with `.window == nil` — they're
+    /// legitimate background sessions, not orphans, and killing them on
+    /// quit would skip the terminate-confirmation alert. Ownership is the
+    /// honest signal: a shim whose `boundSession` is gone, or whose
+    /// `boundSession.shim` is now a *different* instance (SSH reconnect
+    /// replaced it), is what we actually want to clean up.
     @MainActor static func stopOrphanedSessions() {
         for shim in instances.allObjects {
-            // Orphan = no webView at all, or its webView is no longer in any window.
-            if shim.webView == nil || shim.webView?.window == nil {
+            let session = shim.boundSession
+            if session == nil || session?.shim !== shim {
                 shim.stop()
             }
         }
@@ -115,7 +111,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     var permissionMode: PermissionMode
     var remoteHost: String?
 
-    // MARK: - Window Title & Spinner
+    // MARK: - Activity tracking (drives sidebar spinner via boundSession.isThinking)
     private var sessionTitle: String = ""
     private var isWorking = false {
         didSet {
@@ -143,11 +139,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// When non-empty the user is being asked to approve something; the
     /// sidebar shows a "raised hand" icon while at least one is outstanding.
     private var pendingPermissionRequestIds = Set<String>()
-    private var spinnerTimer: Timer?
-    private var spinnerIndex = 0
-    private static let spinnerFrames = ["·", "✻", "✽", "✶", "✳", "✢"]
-    private static let idleIcon = "✳"
-    private static let spinnerColor = NSColor(red: 0.851, green: 0.471, blue: 0.345, alpha: 1.0) // #D97858
 
     var statusBarData: StatusBarData?
     weak var delegate: ShimProcessDelegate?
@@ -362,7 +353,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         do {
             try proc.run()
             logger.info("Shim started: PID \(proc.processIdentifier), node=\(nodeInfo.path, privacy: .public)")
-            refreshWindowTitle()
             return true
         } catch {
             logger.error("Failed to start shim: \(error.localizedDescription, privacy: .public)")
@@ -378,7 +368,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func stop() {
         isIntentionalStop = true
         guard let proc = process, proc.isRunning else { return }
-        stopSpinner()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         stdinPipe?.fileHandleForWriting.closeFile()
@@ -436,10 +425,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let ioMsg = dict["message"] as? [String: Any],
            ioMsg["type"] as? String == "user"
         {
-            if !isWorking {
-                isWorking = true
-                startSpinner()
-            }
+            isWorking = true
             // Request AI-generated short title for the first user message only.
             if !titleRequested, let userMsg = ioMsg["message"] as? [String: Any] {
                 if let content = userMsg["content"] as? [[String: Any]] {
@@ -482,10 +468,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                             ? String(title.prefix(57)) + "..."
                             : title
                         updateWindowTitle(truncated)
-                    } else {
-                        // Don't overwrite generated title, but refresh in case window just became available.
-                        refreshWindowTitle()
                     }
+                    // The generated-title path used to refresh the window
+                    // title here; SwiftUI now re-renders on `OpenSession.title`,
+                    // so no extra push is needed.
                 }
             }
         }
@@ -1046,7 +1032,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     private func updateWindowTitle(_ title: String) {
         sessionTitle = title
-        refreshWindowTitle()
+        // Sidebar shell: SwiftUI's `.navigationTitle` on Detail and the
+        // sidebar row both read `OpenSession.title`. Without this assignment
+        // generated / renamed titles would only live in our private
+        // `sessionTitle` and never reach the UI.
+        boundSession?.title = title
     }
 
     /// Watch host→webview messages for `tool_permission_request` and pair
@@ -1161,14 +1151,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         switch ioType {
         case "assistant", "stream_event":
             detectAskUserQuestion(in: ioMsg)
-            if !isWorking {
-                isWorking = true
-                startSpinner()
-            }
+            isWorking = true
         case "result":
             if isWorking {
                 isWorking = false
-                stopSpinner()
                 postTaskCompletedNotification()
             }
             // After Claude finishes, the AskUserQuestion (if any) is now
@@ -1291,50 +1277,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         default:
             break
         }
-    }
-
-    private func refreshWindowTitle() {
-        // In the single-window sidebar shell the title bar is owned by
-        // SwiftUI's `.navigationTitle` (set on Detail). Skip the legacy
-        // setTitle here so the SwiftUI title isn't overwritten on every
-        // spinner tick.
-        if CanopyApp.isUsingSidebar { return }
-
-        guard let window = webView?.window else { return }
-        let dirName = workingDirectory.lastPathComponent
-        let icon = isWorking ? Self.spinnerFrames[spinnerIndex] : Self.idleIcon
-        let hostPrefix = remoteHost != nil ? "[\(remoteHost!)] " : ""
-        let rest = sessionTitle.isEmpty ? dirName : "\(dirName) — \(sessionTitle)"
-        let plainTitle = "\(icon) \(hostPrefix)\(rest)"
-        window.title = plainTitle
-
-        let attributed = NSMutableAttributedString()
-        let iconAttrs: [NSAttributedString.Key: Any] = isWorking
-            ? [.foregroundColor: Self.spinnerColor]
-            : [.foregroundColor: NSColor.secondaryLabelColor]
-        attributed.append(NSAttributedString(string: "\(icon) ", attributes: iconAttrs))
-        if let remote = remoteHost {
-            attributed.append(NSAttributedString(string: "[\(remote)] ", attributes: [.foregroundColor: NSColor.systemOrange]))
-        }
-        attributed.append(NSAttributedString(string: rest))
-        window.tab.attributedTitle = attributed
-    }
-
-    private func startSpinner() {
-        spinnerTimer?.invalidate()
-        spinnerIndex = 0
-        spinnerTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.spinnerIndex = (self.spinnerIndex + 1) % Self.spinnerFrames.count
-            self.refreshWindowTitle()
-        }
-    }
-
-    private func stopSpinner() {
-        spinnerTimer?.invalidate()
-        spinnerTimer = nil
-        spinnerIndex = 0
-        refreshWindowTitle()
     }
 
     private func postTaskCompletedNotification() {

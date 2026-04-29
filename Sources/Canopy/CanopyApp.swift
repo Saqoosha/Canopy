@@ -5,172 +5,71 @@ import UserNotifications
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "App")
 
-// MARK: - FocusedValue for AppState (menu commands → focused tab's AppState)
-
-private struct FocusedAppStateKey: FocusedValueKey {
-    typealias Value = AppState
-}
-
-extension FocusedValues {
-    var appState: AppState? {
-        get { self[FocusedAppStateKey.self] }
-        set { self[FocusedAppStateKey.self] = newValue }
-    }
-}
-
 @main
 struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
-    @FocusedValue(\.appState) private var focusedAppState
-
-    /// Single-window sidebar shell flag. Set `CANOPY_SIDEBAR=1` in the
-    /// environment to opt in. PR 5 will flip the default and remove the
-    /// legacy WindowGroup path.
-    private static let useSidebar: Bool = {
-        ProcessInfo.processInfo.environment["CANOPY_SIDEBAR"] == "1"
-    }()
-
-    /// Exposed for AppDelegate's window-config logic, which needs to skip
-    /// legacy multi-window resize behaviour when the new shell is active.
-    static var isUsingSidebar: Bool { useSidebar }
 
     @State private var sidebarStore = SessionStore()
 
     var body: some Scene {
         WindowGroup(id: "main") {
-            // Branch inside the view body, not at Scene level — SceneBuilder
-            // refuses if/else producing different Scene types. The legacy
-            // multi-window code lives inside this same WindowGroup; when the
-            // sidebar flag is on we render a fixed single-window UI.
-            Group {
-                if Self.useSidebar {
-                    NavigationSplitView {
-                        Sidebar(store: sidebarStore)
-                            .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 360)
-                    } detail: {
-                        Detail(store: sidebarStore)
-                    }
-                    .navigationSplitViewStyle(.balanced)
-                    // No explicit minWidth/minHeight: that re-asserts on every
-                    // app reactivation and yanks user-resized windows back to
-                    // the minimum. `defaultSize` (below) handles first launch.
-                } else {
-                    TabContentView()
-                        .frame(minWidth: 400, minHeight: 600)
-                }
+            NavigationSplitView {
+                Sidebar(store: sidebarStore)
+                    .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 360)
+            } detail: {
+                Detail(store: sidebarStore)
             }
+            .navigationSplitViewStyle(.balanced)
         }
         .windowStyle(.titleBar)
-        .defaultSize(width: Self.useSidebar ? 1200 : 500, height: Self.useSidebar ? 800 : 800)
-        .commands {
-            if Self.useSidebar {
-                CommandGroup(after: .appInfo) {
-                    Button("Check for Updates...") {
-                        appDelegate.updaterController.updater.checkForUpdates()
-                    }
-                }
-                CommandGroup(replacing: .newItem) {
-                    Button("New Session") {
-                        sidebarStore.select(.launcher)
-                    }
-                    .keyboardShortcut("n")
-                }
-                CommandGroup(replacing: .windowList) {
-                    // Cmd+1..9 — jump to N-th visible sidebar row.
-                    ForEach(1...9, id: \.self) { idx in
-                        Button("Switch to Row \(idx)") {
-                            jumpToRow(at: idx - 1)
-                        }
-                        .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
-                    }
-                }
-                CommandMenu("Session") {
-                    Button("Close Session") {
-                        closeActiveSession()
-                    }
-                    .keyboardShortcut("w")
-                    .disabled(sidebarStore.activeSession == nil)
-                    Button("Close Window") {
-                        NSApp.keyWindow?.close()
-                    }
-                    .keyboardShortcut("w", modifiers: [.command, .shift])
-                    Divider()
-                    Button("Open Folder…") {
-                        sidebarOpenFolder()
-                    }
-                    .keyboardShortcut("o")
-                }
-            }
-        }
-        // Disable scene state restoration so a closed session window cannot
-        // come back as a stale instance after relaunch. Pairs with
-        // applicationShouldHandleReopen, which handles the in-process case.
+        .defaultSize(width: 1200, height: 800)
         .restorationBehavior(.disabled)
         .commands {
-            // Legacy multi-window menu commands. Skip the entire block in
-            // sidebar mode so we don't double-register Cmd+N / Cmd+W /
-            // Cmd+1..9 (the sidebar's own `.commands { if useSidebar }`
-            // block above already wires them).
-            if !Self.useSidebar {
-                CommandGroup(after: .appInfo) {
-                    Button("Check for Updates...") {
-                        appDelegate.updaterController.updater.checkForUpdates()
-                    }
-                }
-                CommandGroup(after: .newItem) {
-                    Button("New Tab") {
-                        newTab()
-                    }
-                    .keyboardShortcut("t")
-
-                    Divider()
-
-                    Button("Back to Launcher") {
-                        focusedAppState?.backToLauncher()
-                    }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
-                    .disabled(focusedAppState == nil)
-
-                    Button("Open Folder...") {
-                        openFolder()
-                    }
-                    .keyboardShortcut("o")
-                    .disabled(focusedAppState == nil)
-
-                    Divider()
-
-                    Button("Close and Stop Session") {
-                        // close() bypasses windowShouldClose/handleCloseButton, closing directly
-                        NSApp.keyWindow?.close()
-                    }
-                    .keyboardShortcut("w", modifiers: [.command, .option])
-                }
-                CommandGroup(after: .toolbar) {
-                    ForEach(1...9, id: \.self) { index in
-                        Button("Select Tab \(index)") {
-                            selectTab(at: index - 1)
-                        }
-                        .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
-                    }
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates...") {
+                    appDelegate.updaterController.updater.checkForUpdates()
                 }
             }
-            if !Self.useSidebar {
-                CommandGroup(after: .windowList) {
-                    let hiddenWindows = NSApp.windows.filter {
-                        isCanopyWindow($0) && !$0.isVisible && $0.tabbedWindows == nil
-                    }
-                    if !hiddenWindows.isEmpty {
-                        Divider()
-                        Section("Hidden Windows") {
-                            ForEach(hiddenWindows, id: \.windowNumber) { window in
-                                Button(window.title.isEmpty ? "Canopy" : window.title) {
-                                    window.makeKeyAndOrderFront(nil)
-                                }
-                            }
-                        }
-                    }
+            CommandGroup(replacing: .newItem) {
+                Button("New Session") {
+                    sidebarStore.select(.launcher)
                 }
+                .keyboardShortcut("n")
+            }
+            CommandGroup(replacing: .windowList) {
+                Button("Show Main Window") {
+                    showMainWindow()
+                }
+                .keyboardShortcut("0", modifiers: .command)
+                Divider()
+                // Cmd+1..9 — jump to N-th visible sidebar row.
+                ForEach(1...9, id: \.self) { idx in
+                    Button("Switch to Row \(idx)") {
+                        jumpToRow(at: idx - 1)
+                    }
+                    .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
+                }
+            }
+            CommandMenu("Session") {
+                // Cmd+W closes the active session ONLY when the main
+                // Canopy window is key. If Settings, the Sparkle update
+                // alert, or another window is key, fall through to its
+                // own close handler — otherwise Cmd+W in Settings would
+                // kill the user's session.
+                Button(closeShortcutTitle) {
+                    handleCloseShortcut()
+                }
+                .keyboardShortcut("w")
+                Button("Close Window") {
+                    NSApp.keyWindow?.performClose(nil)
+                }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
+                Divider()
+                Button("Open Folder…") {
+                    sidebarOpenFolder()
+                }
+                .keyboardShortcut("o")
             }
         }
 
@@ -203,6 +102,43 @@ struct CanopyApp: App {
         }
     }
 
+    /// Cmd+W menu-item title. Reflects what the shortcut will do given
+    /// the current key window + active-session state.
+    private var closeShortcutTitle: String {
+        let key = NSApp.keyWindow
+        if let key, !isCanopyWindow(key) {
+            return "Close Window"
+        }
+        return sidebarStore.activeSession == nil ? "Close Window" : "Close Session"
+    }
+
+    /// Cmd+W behaviour: close the focused non-main window first
+    /// (Settings, Sparkle alert), otherwise close the active session,
+    /// otherwise fall through to closing the main window.
+    private func handleCloseShortcut() {
+        if let key = NSApp.keyWindow, !isCanopyWindow(key) {
+            key.performClose(nil)
+            return
+        }
+        if sidebarStore.activeSession != nil {
+            closeActiveSession()
+        } else {
+            NSApp.keyWindow?.performClose(nil)
+        }
+    }
+
+    private func showMainWindow() {
+        if let main = NSApp.windows.first(where: { isCanopyWindow($0) }) {
+            main.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            // Window was closed (e.g. via "Stop Sessions and Close") and the
+            // SwiftUI WindowGroup released it — ask the scene to spawn a
+            // fresh one.
+            openWindow(id: "main")
+        }
+    }
+
     private func sidebarOpenFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -212,62 +148,36 @@ struct CanopyApp: App {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let model = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
         let effort = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
-        let permission = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
-        sidebarStore.openNew(directory: url, model: model, effortLevel: effort, permissionMode: permission)
-    }
-
-    private func openFolder() {
-        guard let targetState = focusedAppState else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Open"
-        if panel.runModal() == .OK, let url = panel.url {
-            let model = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
-            let effort = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
-            let permission = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
-            targetState.launchSession(directory: url, model: model, effortLevel: effort, permissionMode: permission)
-        }
-    }
-
-    private func selectTab(at index: Int) {
-        guard let window = NSApp.keyWindow,
-              let tabs = window.tabbedWindows,
-              index < tabs.count
-        else { return }
-        tabs[index].makeKeyAndOrderFront(nil)
-    }
-
-    private func newTab() {
-        guard let existingWindow = NSApp.keyWindow else {
-            openWindow(id: "main")
-            return
-        }
-
-        let contentView = NSHostingView(rootView: TabContentView().frame(minWidth: 400, minHeight: 600))
-        let newWindow = NSWindow(
-            contentRect: existingWindow.contentLayoutRect,
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: true
+        // Use the same recents-default preference as sidebar reopens —
+        // bypassing it here would leave the menu's "Open Folder…" entry as
+        // the one place that ignored Settings → Default for Recents.
+        sidebarStore.openNew(
+            directory: url,
+            model: model,
+            effortLevel: effort,
+            permissionMode: CanopySettings.shared.defaultPermissionMode
         )
-        newWindow.contentView = contentView
-        newWindow.identifier = NSUserInterfaceItemIdentifier("main-tab")
-        newWindow.isReleasedWhenClosed = false
-        existingWindow.addTabbedWindow(newWindow, ordered: .above)
-        newWindow.makeKeyAndOrderFront(nil)
     }
 }
 
 // MARK: - Window close interception
 
-/// Whether a window is a Canopy app window (not a panel, settings, etc.)
+/// Whether a window is a Canopy app window (not a panel, settings, etc.).
+/// SwiftUI's `WindowGroup(id: "main")` doesn't always preserve the literal
+/// identifier — observed values in the wild include `main`, `main-AppWindow-1`,
+/// and the same series for the AppKit autosave name. Settings is its own
+/// scene with a `com_apple_SwiftUI_Settings_window` identifier, the Sparkle
+/// updater alert is an `NSPanel`. Match permissively on either signal.
 @MainActor
 func isCanopyWindow(_ window: NSWindow) -> Bool {
-    window.identifier?.rawValue.hasPrefix("main") == true
-        && window.styleMask.contains(.titled)
-        && !window.isKind(of: NSPanel.self)
+    guard window.styleMask.contains(.titled),
+          !window.isKind(of: NSPanel.self)
+    else { return false }
+    let id = window.identifier?.rawValue ?? ""
+    let autosave = window.frameAutosaveName
+    return id == "main"
+        || id.hasPrefix("main-AppWindow")
+        || autosave.hasPrefix("main-AppWindow")
 }
 
 /// Reentrancy guard for hideOrCloseWindow — prevents stacked modal alerts.
@@ -275,7 +185,7 @@ func isCanopyWindow(_ window: NSWindow) -> Bool {
 private var isShowingCloseAlert = false
 
 /// Decides whether to hide, close, or prompt for a window. Returns `true` if the close was handled
-/// (hidden or cancelled). Shared by all three close-interception layers.
+/// (hidden or cancelled).
 @MainActor
 func hideOrCloseWindow(_ window: NSWindow) -> Bool {
     // App termination: allow real close
@@ -284,15 +194,9 @@ func hideOrCloseWindow(_ window: NSWindow) -> Bool {
         return false
     }
 
-    // Tab in a group with other tabs: close just this tab
-    if let tabs = window.tabbedWindows, tabs.count > 1 {
-        logger.debug("Window close: closing tab (\(tabs.count) tabs in group)")
-        return false
-    }
-
-    // No active session in this window: allow normal close
-    if !ShimProcess.hasActiveSession(in: window) {
-        logger.debug("Window close: no active session, allowing close")
+    // No active session: allow normal close
+    if !ShimProcess.hasActiveSession {
+        logger.debug("Window close: no active sessions, allowing close")
         return false
     }
 
@@ -304,12 +208,12 @@ func hideOrCloseWindow(_ window: NSWindow) -> Bool {
     isShowingCloseAlert = true
     defer { isShowingCloseAlert = false }
 
-    // Active session: ask user what to do
+    let count = ShimProcess.activeCount
     let alert = NSAlert()
-    alert.messageText = "Session is Running"
-    alert.informativeText = "This window has an active session. What would you like to do?"
+    alert.messageText = count == 1 ? "Session is Running" : "Sessions are Running"
+    alert.informativeText = "Closing the window keeps \(count) session\(count == 1 ? "" : "s") running in the background. Stop them or hide the window?"
     alert.addButton(withTitle: "Hide Window")
-    alert.addButton(withTitle: "Stop Session and Close")
+    alert.addButton(withTitle: "Stop Sessions and Close")
     alert.addButton(withTitle: "Cancel")
     alert.buttons[2].keyEquivalent = "\u{1b}" // Esc key for Cancel
     alert.alertStyle = .informational
@@ -322,10 +226,15 @@ func hideOrCloseWindow(_ window: NSWindow) -> Bool {
         return true
     case .alertSecondButtonReturn:
         logger.debug("Window close: user chose stop and close")
-        // Stop the shim synchronously here — relying on SwiftUI's dismantleNSView
-        // to do it later leaves the Node.js process running long enough for
-        // applicationShouldTerminate to think a session is still active.
-        ShimProcess.stopAllSessions(in: window)
+        // Stop every running shim AND clear the SessionStore. Killing
+        // shims alone leaves dead `OpenSession` rows behind; the App
+        // scene's `@State sidebarStore` survives the window destroy, so a
+        // Cmd+0 reopen + click would otherwise re-mount one of those rows
+        // whose cached shim already exited — `WebViewContainer.buildWebView`
+        // would skip the start path and the user would see a stale WebView
+        // with no live CLI.
+        ShimProcess.stopAllSessions()
+        SessionStore.shared?.closeAllSessions()
         return false // Let the caller close the window
     case .alertThirdButtonReturn:
         logger.debug("Window close: user cancelled")
@@ -337,7 +246,7 @@ func hideOrCloseWindow(_ window: NSWindow) -> Bool {
 }
 
 /// Proxy that intercepts windowShouldClose to hide windows instead of closing them.
-/// Fallback layer — the close button override and key monitor are the primary mechanisms.
+/// Fallback layer — the close button override is the primary mechanism.
 @MainActor
 final class WindowDelegateProxy: NSObject, NSWindowDelegate {
     weak var originalDelegate: (any NSWindowDelegate)?
@@ -371,9 +280,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userDriverDelegate: nil
     )
     private var configuredWindows = NSHashTable<NSWindow>.weakObjects()
-    private var resizeObservers: [NSObjectProtocol] = []
     private var delegateProxies: [ObjectIdentifier: WindowDelegateProxy] = [:]
-    private var keyMonitor: Any?
+
+    /// UserDefaults key holding the last main-window frame. We persist
+    /// this ourselves rather than relying on AppKit's autosave because
+    /// SwiftUI's `WindowGroup(id: "main")` assigns each fresh window
+    /// instance its own internal autosave name (`main-AppWindow-1`,
+    /// `-2`, ...), so a "Stop Sessions and Close" + Cmd+0 round-trip
+    /// keeps creating new keys and never restores the user's frame.
+    private let savedFrameKey = "canopy.mainWindowFrame"
+
+    /// Minimum sane size for a restored frame. Sub-minimum frames are
+    /// dropped on read AND skipped on save, otherwise a transient
+    /// teardown frame would persist and then silently fail to restore.
+    private let minRestoredSize = NSSize(width: 600, height: 400)
 
     /// Set during app termination to bypass hide-on-close behavior.
     static var isTerminating = false
@@ -390,26 +310,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWindow.didBecomeMainNotification, object: nil
         )
 
-        // Intercept Cmd+W to hide window instead of closing it.
-        // This is more reliable than delegate proxy alone, since SwiftUI may override the delegate.
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard flags == .command,
-                  event.charactersIgnoringModifiers == "w"
-            else { return event }
-            let handled = MainActor.assumeIsolated {
-                guard let window = NSApp.keyWindow,
-                      self.isAppWindow(window)
-                else { return false }
-
-                // Cmd+W: hide or close tab
-                if !hideOrCloseWindow(window) {
-                    window.close()
-                }
-                return true
-            }
-            return handled ? nil : event
+        // SwiftUI may make the first window main before our observer is
+        // registered, in which case `didBecomeMainNotification` fires
+        // before this point and we miss the chance to install the close
+        // proxy / restore the saved frame. Sweep existing windows here.
+        for window in NSApp.windows where isAppWindow(window) {
+            configureCanopyWindow(window)
         }
     }
 
@@ -419,75 +325,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         logger.info("applicationShouldHandleReopen: hasVisibleWindows=\(flag)")
-        // Sidebar shell: single window, no legacy restoration. Bring the
-        // existing main window forward (or let the system create a fresh
-        // one if it was actually closed).
-        if CanopyApp.isUsingSidebar {
-            if let main = NSApp.windows.first(where: { isAppWindow($0) }) {
-                main.makeKeyAndOrderFront(nil)
-                return false
-            }
-            return true
-        }
-        if !flag {
-            let hiddenWindows = NSApp.windows.filter { isAppWindow($0) && !$0.isVisible }
-            // hasRunningProcess (not hasActiveSession): "Stop and Close" leaves the
-            // webView attached but kills the process, so the looser check would
-            // misclassify those windows as active and resurrect a dead session.
-            let active = hiddenWindows.filter { ShimProcess.hasRunningProcess(in: $0) }
-            let stale = hiddenWindows.filter { !ShimProcess.hasRunningProcess(in: $0) }
-            logger.info("reopen: hidden=\(hiddenWindows.count) active=\(active.count) stale=\(stale.count)")
-
-            // SwiftUI's WindowGroup keeps closed windows around so the reopen
-            // event can resurrect them. close() with isReleasedWhenClosed=true
-            // tells AppKit to drop this one for real.
-            for window in stale {
-                window.isReleasedWhenClosed = true
-                window.close()
-            }
-
-            if !active.isEmpty {
-                for window in active {
-                    window.makeKeyAndOrderFront(nil)
-                }
-                return false
-            }
-
-            // No window with an active session — surface a fresh launcher. Built by
-            // hand instead of openWindow(id:) because a closed WindowGroup instance
-            // would be reused, resurrecting the stale session state we just hid.
-            openFreshLauncherWindow()
+        // Sidebar shell: single window. Bring the existing main window forward,
+        // or let the system create a fresh one if it was actually closed.
+        if let main = NSApp.windows.first(where: { isAppWindow($0) }) {
+            main.makeKeyAndOrderFront(nil)
             return false
         }
         return true
-    }
-
-    private func openFreshLauncherWindow() {
-        let defaults = UserDefaults.standard
-        let savedWidth = defaults.object(forKey: "lastWindowWidth") != nil
-            ? defaults.double(forKey: "lastWindowWidth") : 500
-        let savedHeight = defaults.object(forKey: "lastWindowHeight") != nil
-            ? defaults.double(forKey: "lastWindowHeight") : 800
-        let width = max(savedWidth, 400)
-        let height = max(savedHeight, 600)
-
-        let hostingView = NSHostingView(rootView: TabContentView().frame(minWidth: 400, minHeight: 600))
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: true
-        )
-        window.contentView = hostingView
-        // "main-launcher" prefix keeps isAppWindow happy without colliding with
-        // the WindowGroup id ("main") or the newTab id ("main-tab").
-        window.identifier = NSUserInterfaceItemIdentifier("main-launcher")
-        // Mirror .restorationBehavior(.disabled) on the WindowGroup; this window
-        // is built outside the SwiftUI scene tree, so the modifier doesn't reach it.
-        window.isRestorable = false
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        logger.info("opened fresh launcher window")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -553,12 +397,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window = note.object as? NSWindow,
               isAppWindow(window)
         else { return }
+        configureCanopyWindow(window)
+    }
 
+    /// Installs the close proxy / overrides the close button / restores
+    /// the saved frame and registers the resize+move+close observers.
+    /// Idempotent: only the per-window-instance bits run once.
+    private func configureCanopyWindow(_ window: NSWindow) {
         // Install close interception (reinstall if SwiftUI reset the delegate)
         installDelegateProxy(for: window)
 
         // Override close button target/action (deferred so SwiftUI finishes its setup first).
-        // This is the primary mechanism — more reliable than the delegate proxy.
+        // This is the primary close-protection mechanism.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if let closeButton = window.standardWindowButton(.closeButton) {
@@ -567,54 +417,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // First-time window configuration
+        // First-time window configuration: restore the saved frame
+        // ourselves (overriding SwiftUI's defaultSize / per-instance
+        // autosave) and start tracking resizes so the frame survives a
+        // window destroy-recreate cycle.
         guard !configuredWindows.contains(window) else { return }
         configuredWindows.add(window)
 
-        // Sidebar shell uses Window scene with defaultSize + macOS's built-in
-        // window-state restoration. Don't reapply legacy lastWindowWidth /
-        // lastWindowHeight on every reactivation — that yanks the window
-        // back to the legacy default whenever the user switches apps.
-        if CanopyApp.isUsingSidebar { return }
+        let savedAutosave = window.frameAutosaveName
+        logger.debug("configureCanopyWindow: id=\(window.identifier?.rawValue ?? "nil", privacy: .public) autosave=\(savedAutosave, privacy: .public) frame=\(NSStringFromRect(window.frame), privacy: .public)")
 
-        let otherWindow = NSApp.windows.first {
-            $0 !== window
-                && $0.styleMask.contains(.titled)
-                && $0.isVisible
-                && !$0.isKind(of: NSPanel.self)
-                && $0.identifier?.rawValue.contains("main") == true
-        }
-        // Use async to run after SwiftUI finishes its layout pass
-        DispatchQueue.main.async {
-            if let other = otherWindow, other.frame.width > 100 {
-                var frame = window.frame
-                frame.size = other.frame.size
-                window.setFrame(frame, display: true)
-            } else {
-                // No other window — use saved size or default
-                let defaults = UserDefaults.standard
-                let savedWidth = defaults.object(forKey: "lastWindowWidth") != nil
-                    ? defaults.double(forKey: "lastWindowWidth") : 500
-                let savedHeight = defaults.object(forKey: "lastWindowHeight") != nil
-                    ? defaults.double(forKey: "lastWindowHeight") : 800
-                let width = max(savedWidth, 400)
-                let height = max(savedHeight, 600)
-                var frame = window.frame
-                frame.size = NSSize(width: width, height: height)
-                window.setFrame(frame, display: true)
+        if let saved = readSavedWindowFrame(forScreen: window.screen) {
+            // SwiftUI applies `defaultSize` synchronously during window
+            // creation, then runs view updates on this RunLoop pass. A
+            // single `setFrame` call here would race against any
+            // late-arriving SwiftUI restore, so we apply twice: once now,
+            // once one runloop later. Both calls are no-ops if the user
+            // has already started resizing.
+            logger.debug("  restoring saved frame: \(NSStringFromRect(saved), privacy: .public)")
+            window.setFrame(saved, display: true)
+            DispatchQueue.main.async {
+                window.setFrame(saved, display: true)
             }
+        } else {
+            logger.debug("  no saved frame yet — leaving SwiftUI defaultSize")
         }
 
-        // Save window size on resize; clean up when window closes
         let resizeToken = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification,
             object: window, queue: .main
-        ) { note in
-            guard let w = note.object as? NSWindow else { return }
-            UserDefaults.standard.set(w.frame.width, forKey: "lastWindowWidth")
-            UserDefaults.standard.set(w.frame.height, forKey: "lastWindowHeight")
+        ) { [weak self] note in
+            guard let self, let w = note.object as? NSWindow else { return }
+            self.saveWindowFrame(w.frame)
         }
-        resizeObservers.append(resizeToken)
+
+        let moveToken = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: window, queue: .main
+        ) { [weak self] note in
+            guard let self, let w = note.object as? NSWindow else { return }
+            self.saveWindowFrame(w.frame)
+        }
 
         var closeToken: NSObjectProtocol?
         closeToken = NotificationCenter.default.addObserver(
@@ -622,106 +465,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: window, queue: .main
         ) { [weak self] _ in
             NotificationCenter.default.removeObserver(resizeToken)
+            NotificationCenter.default.removeObserver(moveToken)
             if let closeToken {
                 NotificationCenter.default.removeObserver(closeToken)
             }
-            self?.resizeObservers.removeAll { $0 === resizeToken }
             if let self {
                 self.delegateProxies.removeValue(forKey: ObjectIdentifier(window))
             }
         }
     }
-}
 
-// MARK: - Tab content (each window/tab owns its own state)
-
-struct TabContentView: View {
-    @State private var appState = AppState()
-    @State private var statusBarData = StatusBarData()
-    @State private var connectionState = ConnectionState()
-    @State private var crashMessage: String?
-
-    var body: some View {
-        Group {
-            switch appState.screen {
-            case .launcher:
-                LauncherView(appState: appState)
-            case .session:
-                VStack(spacing: 0) {
-                    WebViewContainer(
-                        workingDirectory: appState.workingDirectory,
-                        resumeSessionId: appState.resumeSessionId,
-                        model: appState.model,
-                        effortLevel: appState.effortLevel,
-                        permissionMode: appState.permissionMode,
-                        sessionTitle: appState.resumeSessionTitle,
-                        statusBarData: statusBarData,
-                        remoteHost: appState.remoteHost,
-                        connectionState: connectionState,
-                        onCrash: { status in
-                            logger.error("Session crashed (status \(status)), returning to launcher")
-                            crashMessage = "Claude process exited unexpectedly (exit code \(status))."
-                            appState.backToLauncher()
-                        }
-                    )
-                    .overlay {
-                        ConnectionOverlayView(
-                            connectionState: connectionState,
-                            onBackToLauncher: {
-                                connectionState.status = .connected
-                                appState.backToLauncher()
-                            }
-                        )
-                    }
-                    .animation(.easeInOut(duration: 0.3), value: connectionState.isOverlayVisible)
-                    StatusBarView(data: statusBarData)
-                }
-                .id(appState.webviewReloadToken)
-                .onChange(of: appState.webviewReloadToken) {
-                    connectionState.status = .connected
-                    connectionState.onRetry = nil
-                }
-            }
-        }
-        // Only set title for launcher; session title is managed by ShimProcess
-        .windowTitle(appState.screen == .launcher ? "Canopy" : nil)
-        .alert("Session Ended", isPresented: Binding(get: { crashMessage != nil }, set: { if !$0 { crashMessage = nil } })) {
-            Button("OK") { crashMessage = nil }
-        } message: {
-            Text(crashMessage ?? "")
-        }
-        .focusedSceneValue(\.appState, appState)
-        .onAppear {
-            appState.statusBarData = statusBarData
-            // Debug: auto-launch session (defaults write sh.saqoo.Canopy debugAutoLaunchDir /tmp)
-            if let dir = appState.debugAutoLaunchDir, appState.screen == .launcher {
-                appState.debugAutoLaunchDir = nil
-                let m = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
-                let e = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
-                let p = PermissionMode(rawValue: UserDefaults.standard.string(forKey: "launcher.permissionMode") ?? "") ?? .acceptEdits
-                appState.launchSession(directory: URL(fileURLWithPath: dir), model: m, effortLevel: e, permissionMode: p)
-            }
-        }
+    private func saveWindowFrame(_ frame: NSRect) {
+        // Skip below-minimum sizes so a transient zero/tiny frame during
+        // teardown doesn't get persisted and then silently rejected by
+        // `readSavedWindowFrame`'s `>= 600 / >= 400` clamp on next launch.
+        guard frame.size.width >= minRestoredSize.width,
+              frame.size.height >= minRestoredSize.height
+        else { return }
+        let dict: [String: Double] = [
+            "x": frame.origin.x,
+            "y": frame.origin.y,
+            "w": frame.size.width,
+            "h": frame.size.height,
+        ]
+        UserDefaults.standard.set(dict, forKey: savedFrameKey)
+        logger.debug("saveWindowFrame: \(NSStringFromRect(frame), privacy: .public)")
     }
-}
 
-// MARK: - Window title helper
-
-private struct WindowTitleSetter: NSViewRepresentable {
-    let title: String?
-
-    func makeNSView(context: Context) -> NSView { NSView() }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        guard let title else { return } // nil = don't touch the title (managed elsewhere)
-        DispatchQueue.main.async {
-            nsView.window?.title = title
+    /// Read the saved frame and clamp it onto the given screen so a
+    /// window saved on a now-disconnected display doesn't materialize
+    /// off-screen. Size is shrunk first if it exceeds the screen, then
+    /// origin is clamped — otherwise `visible.maxX - rect.width` would
+    /// go negative for oversized rects and the origin clamp would push
+    /// the window off the left edge.
+    private func readSavedWindowFrame(forScreen screen: NSScreen?) -> NSRect? {
+        guard let dict = UserDefaults.standard.dictionary(forKey: savedFrameKey),
+              let x = dict["x"] as? Double,
+              let y = dict["y"] as? Double,
+              let w = dict["w"] as? Double,
+              let h = dict["h"] as? Double,
+              w >= 600, h >= 400
+        else { return nil }
+        var rect = NSRect(x: x, y: y, width: w, height: h)
+        if let visible = (screen ?? NSScreen.main)?.visibleFrame {
+            let clampedW = min(rect.width, visible.width)
+            let clampedH = min(rect.height, visible.height)
+            rect.size = NSSize(width: clampedW, height: clampedH)
+            rect.origin.x = min(max(rect.origin.x, visible.minX), visible.maxX - clampedW)
+            rect.origin.y = min(max(rect.origin.y, visible.minY), visible.maxY - clampedH)
         }
-    }
-}
-
-extension View {
-    func windowTitle(_ title: String?) -> some View {
-        background(WindowTitleSetter(title: title))
+        return rect
     }
 }

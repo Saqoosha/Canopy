@@ -1,7 +1,7 @@
 # Plan: Single-Window Sidebar — Phase A
 
 **Spec:** [2026-04-29-single-window-sidebar.md](../specs/2026-04-29-single-window-sidebar.md)
-**Status:** Pre-flight passed (Probe #1 + #2). Ready to implement.
+**Status:** Completed. Phase A landed in PR #47; legacy multi-window code removed in PR #48 (1.12.0). The `CANOPY_SIDEBAR` env var and `Settings.useSidebar` UserDefault flag described below no longer exist — sidebar is unconditional.
 
 Phase A is the shell conversion: single `Window` + NavigationSplitView, flat sidebar list with open/closed row states, click-to-spawn, hover × close, filter menu, persistence. No live cap; closed → open on click only.
 

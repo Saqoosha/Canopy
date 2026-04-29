@@ -8,12 +8,28 @@ final class CanopySettings {
     nonisolated(unsafe) static let shared = CanopySettings()
 
     var allowDangerouslySkipPermissions: Bool = false {
-        didSet { save() }
+        didSet {
+            // Toggling the opt-in off must also clamp the recents default
+            // away from `.bypassPermissions`; otherwise sidebar reopens
+            // would keep launching with bypass while the launcher Picker
+            // hides that mode (UI / behavior would diverge).
+            if !allowDangerouslySkipPermissions, defaultPermissionMode == .bypassPermissions {
+                defaultPermissionMode = .acceptEdits
+            }
+            save()
+        }
     }
     var useCtrlEnterToSend: Bool = false {
         didSet { save() }
     }
     var respectGitIgnore: Bool = true {
+        didSet { save() }
+    }
+    /// Default permission mode used when the sidebar reopens a recent
+    /// session (closed local row or closed cloud / teleport row). The
+    /// Launcher view tracks its own per-session selection separately —
+    /// this preference only governs sessions resumed via a single click.
+    var defaultPermissionMode: PermissionMode = .acceptEdits {
         didSet { save() }
     }
 
@@ -43,6 +59,25 @@ final class CanopySettings {
         if let git = dict["claudeCode.respectGitIgnore"] as? Bool {
             respectGitIgnore = git
         }
+        if let raw = dict["canopy.defaultPermissionMode"] as? String,
+           let mode = PermissionMode(rawValue: raw)
+        {
+            defaultPermissionMode = mode
+        } else if let legacy = UserDefaults.standard.string(forKey: "launcher.permissionMode"),
+                  let migrated = PermissionMode(rawValue: legacy)
+        {
+            // First run after the preference moved into settings.json — seed
+            // it from the launcher's last picker value so existing users
+            // don't get a surprise "acceptEdits" default for recents.
+            defaultPermissionMode = migrated
+        }
+        // Re-clamp on load: if a stale settings.json paired bypass with a
+        // disabled opt-in (manual edit, downgrade, etc.) the launcher
+        // Picker would silently drop bypass while the recents default
+        // kept it. Force them back into sync.
+        if !allowDangerouslySkipPermissions, defaultPermissionMode == .bypassPermissions {
+            defaultPermissionMode = .acceptEdits
+        }
         logger.info("Loaded settings: allowBypass=\(self.allowDangerouslySkipPermissions, privacy: .public)")
     }
 
@@ -51,6 +86,7 @@ final class CanopySettings {
         dict["claudeCode.allowDangerouslySkipPermissions"] = allowDangerouslySkipPermissions
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
         dict["claudeCode.respectGitIgnore"] = respectGitIgnore
+        dict["canopy.defaultPermissionMode"] = defaultPermissionMode.rawValue
         writeDict(dict)
     }
 

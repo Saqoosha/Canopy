@@ -4,12 +4,33 @@ struct SettingsView: View {
     @Bindable var settings = CanopySettings.shared
     @State private var sshHosts: [String] = SSHHostStore.hosts()
 
+    private var visiblePermissionModes: [PermissionMode] {
+        // Hide bypass unless the user has explicitly opted in — keeps the
+        // dropdown short and matches the launcher's existing behaviour.
+        PermissionMode.allCases.filter { mode in
+            mode != .bypassPermissions || settings.allowDangerouslySkipPermissions
+        }
+    }
+
     var body: some View {
         Form {
             Section {
                 Toggle("Allow Bypass Permissions Mode", isOn: $settings.allowDangerouslySkipPermissions)
             } footer: {
                 Text("When enabled, \"Bypass All\" appears in the launcher's Permission picker.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Picker("Default for Recents", selection: $settings.defaultPermissionMode) {
+                    ForEach(visiblePermissionModes) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+            } header: {
+                Text("Permission Mode")
+            } footer: {
+                Text("Used when reopening a recent session from the sidebar (local or teleported cloud). The Launcher tracks its own per-session selection separately.")
                     .foregroundStyle(.secondary)
             }
 

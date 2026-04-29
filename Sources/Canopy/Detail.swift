@@ -23,11 +23,16 @@ struct Detail: View {
                 SessionContainer(session: session) { _ in
                     store.closeSession(session.id)
                 }
-                // No `.id(session.id)` — WebViewContainer now wraps the
-                // WKWebView in a host NSView and swaps the WebView in
-                // place via `updateNSView`. SwiftUI keeps the same view
-                // identity, so switching is ~10ms instead of ~200ms
-                // (no SwiftUI re-mount, no NSView re-parent).
+                // `.id(session.id)` forces SwiftUI to re-mount the
+                // SessionContainer when the active session changes. We
+                // tried omitting it — `updateNSView` was supposed to
+                // swap the WebView in place — but SwiftUI silently
+                // refused to call `updateNSView` after the second
+                // `openNew`, so sessions 2..N stayed invisible. The
+                // `OpenSession.shim` / `OpenSession.webView` cache plus
+                // `WebViewContainer.buildWebView`'s reuse path keep the
+                // re-mount cheap (no shim restart, no HTML reload).
+                .id(session.id)
             } else {
                 DetailLauncher(store: store)
             }

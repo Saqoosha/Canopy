@@ -8,13 +8,15 @@ enum AppScreen {
     case session
 }
 
-enum PermissionMode: String, CaseIterable {
+enum PermissionMode: String, CaseIterable, Identifiable {
     case `default` = "default"
     case acceptEdits = "acceptEdits"
     case auto = "auto"
     case plan = "plan"
     case dontAsk = "dontAsk"
     case bypassPermissions = "bypassPermissions"
+
+    var id: String { rawValue }
 
     var displayName: String {
         switch self {
@@ -47,9 +49,6 @@ final class AppState {
         debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")
     }
 
-    /// Optional reference to the status bar data, set by TabContentView.
-    weak var statusBarData: StatusBarData?
-
     func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil) {
         // Don't add remote paths to local recent directories
         if remoteHost == nil {
@@ -62,7 +61,6 @@ final class AppState {
         self.effortLevel = effortLevel
         self.permissionMode = permissionMode
         self.remoteHost = remoteHost
-        statusBarData?.resetAll()
         webviewReloadToken += 1
         screen = .session
         logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) model=\(model ?? "auto", privacy: .public) effort=\(effortLevel ?? "auto", privacy: .public) mode=\(permissionMode.rawValue, privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")

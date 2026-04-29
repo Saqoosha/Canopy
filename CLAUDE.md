@@ -4,9 +4,9 @@
 
 macOS native app that hosts the Claude Code VSCode extension's webview (React UI) in a WKWebView. No VSCode required. The CC extension's bundled JS/CSS renders directly in a native macOS window with real-time streaming.
 
-## Project Status: Fully Working (2026-04-04)
+## Project Status: Fully Working (2026-04-29)
 
-Full chat with Claude works via vscode-shim. Launcher screen with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands, tabbed windows, Sparkle auto-update, **SSH remote**. Launcher includes model/effort/permission selectors.
+Full chat with Claude works via vscode-shim. **Single-window sidebar shell** (Arc/Chrome-style vertical tabs) — sessions live in a persistent left sidebar, the detail pane swaps the active WKWebView in place. Launcher row in the sidebar with directory picker, session history with instant replay, real auth, CLI process, real SSE streaming, tool use display, light theme matching VSCode, permission mode sync, slash commands, Sparkle auto-update, **SSH remote**, **Claude Code on the Web teleport**. Launcher includes model/effort/permission selectors.
 
 **vscode-shim complete (Tasks 1-15)** — Node.js subprocess runs `extension.js` unmodified. 10 JS modules + Swift integration (ShimProcess, NodeDiscovery, Xcode bundling). Legacy handler removed.
 
@@ -54,13 +54,23 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 ## Key Source Files
 
 ### Swift (Sources/Canopy/)
-- `CanopyApp.swift` — SwiftUI app entry, tabs, menu commands, Sparkle updater
-- `AppState.swift` — Observable app state, PermissionMode enum, screen transitions, StatusBarData reset on session launch
-- `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching, process tree cleanup
+- `CanopyApp.swift` — SwiftUI app entry (single `WindowGroup` with `NavigationSplitView`), menu commands (Cmd+N new session, Cmd+W context-aware close session/window, Cmd+Shift+W close window, Cmd+0 show main window, Cmd+1..9 jump-to-row, Cmd+O open folder), Sparkle updater, AppDelegate (close-button override, reopen handler, manual main-window frame save/restore via `canopy.mainWindowFrame` UserDefaults)
+- `Sidebar.swift` — Left column List with Open + Recents sections, per-row icon (spawning spinner / asking yellow hand / thinking orange flower / idle dot for open rows; computer for closed local; cloud for closed cloud), filter gear popover, right-click "Hide from sidebar", AppKit-direct scroll-to-top via `ListScrollToTop`, `ThinkingFlower` TimelineView animating Unicode flower glyphs
+- `Detail.swift` — Right pane: switches between `DetailLauncher` (when sidebar selection is `.launcher`) and `SessionContainer` (when `.session`); sets `.navigationTitle` (session title) + `.navigationSubtitle` (project)
+- `SessionContainer.swift` — `WebViewContainer` + `ConnectionOverlayView` + `StatusBarView` + `SpawningOverlay`
+- `SessionStore.swift` — `@Observable @MainActor` store: `openSessions` (insertion-ordered), `recents`, `cloud`, `filter`, `hiddenIds`, `selection`. Owns sidebar state, drives cloud polling (30 s) when sidebar visible, tracks `teleportingCloudId` so concurrent teleports serialize
+- `OpenSession.swift` — `@Observable` per-session record: `origin` (local / remote / teleportedFrom), `resumeId`, `title`, `project`, `status` (.spawning/.live/.crashed), `lastActiveAt`, `statusBar`, `connection`, `isThinking`, `isAsking`. **Canonical owner** of the strong `ShimProcess` and `WKWebView` references
+- `SidebarRow.swift` — Row enum (`.open` / `.closedLocal` / `.closedCloud`) + `sorted(_:)` (open block insertion-order, closed block date desc) + `deduped(_:teleportedFromMap:)` (drops cloud rows already teleported)
+- `SidebarFilter.swift` — Codable filter (`status`, `origin`, `project`, `lastActivity`) with `apply(to:)` + `projects(in:)`
+- `SessionStorePersistence.swift` — JSON-encoded filter / lastActiveResumeId / hiddenIds in UserDefaults
+- `RemoteSessionsAPI.swift` — Direct `/v1/sessions` REST call using OAuth from Keychain, classifies entries Web / Local / Bridged, parses GitHub repo URLs (https + ssh + scp form)
+- `RemoteSessionsBridge.swift` — Short-lived shim subprocess for `teleport_session` / `checkout_branch` / `update_skipped_branch` IPC; SIGTERM → SIGKILL escalation, idempotent shutdown
+- `AppState.swift` — Per-launcher observable state (PermissionMode enum, working directory, model/effort, screen transitions). Used by `LauncherView` embedded in `DetailLauncher`; the global app no longer owns one
+- `ShimProcess.swift` — Node.js subprocess manager, WKScriptMessageHandler, NDJSON bridge, auth/permission patching, process tree cleanup, `boundSession` weak ref, permission-request tracking, `AskUserQuestion` detection
 - `NodeDiscovery.swift` — Finds Node.js >= 18 (Homebrew, mise, nvm, login shell), result cached
 - `LauncherView.swift` — Welcome screen: directory picker, recent dirs, session history, drag-and-drop, SSH remote toggle, model/effort/permission selectors
-- `WebViewContainer.swift` — WKWebView setup, CC webview loading, VSCode default CSS injection
-- `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction
+- `WebViewContainer.swift` — `NSViewRepresentable` wrapping an NSView host; swaps the WKWebView subview in-place via `updateNSView` when `boundSession.id` changes (~10–30 ms switching, no re-mount). Reuses `boundSession.webView` when present
+- `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction, `loadTeleportedFromMap` reads tail 64 KB only
 - `RecentDirectories.swift` — MRU directory list in UserDefaults
 - `VSCodeStub.swift` — acquireVsCodeApi() JS stub, Monaco theme patch, IME fix, loads theme CSS
 - `CCExtension.swift` — Extension/CLI path discovery
@@ -69,9 +79,17 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `ContentViewer.swift` — Monaco editor overlay for viewing file contents
 - `RemoteDirectoryBrowser.swift` — SSH-backed remote file browser (sheet), lists remote dirs via `ssh host cd path && pwd && ls -1pA`
 - `SSHHostStore.swift` — MRU list of SSH hosts in UserDefaults
-- `CanopySettings.swift` — Persistent settings (permission mode, wrapper path, etc.), JSON-backed
+- `CanopySettings.swift` — Persistent JSON settings (`allowDangerouslySkipPermissions`, `useCtrlEnterToSend`, `respectGitIgnore`, `defaultPermissionMode`). The bypass-permissions toggle clamps `defaultPermissionMode` away from `.bypassPermissions` (didSet + load). `clearStaleSSHWrapper()` migration scrubs pre-env-var wrapper paths from settings.json
 - `ConnectionState.swift` — Observable connection status (connected, reconnecting, failed) for SSH overlay
 - `ConnectionOverlayView.swift` — SwiftUI overlay showing SSH disconnect/reconnect state
+- `KeychainAuth.swift` — Reads CC OAuth blob from macOS Keychain (`Claude Code-credentials`); single source of truth via `readKeychainBlob`, exposes authStatus / accessToken+orgUUID / orgUUID-only readers
+- `ExtensionUpdater.swift` — Self-update path for the bundled CC extension; checks for newer versions on launch
+- `ModelNameFormatter.swift` — Formats CLI model identifiers into the short labels surfaced in the status bar
+- `SessionTitleStore.swift` — Persists per-session AI-generated titles in UserDefaults so closed rows keep their label
+- `SettingsView.swift` — Preferences window content: bypass-permissions opt-in toggle, "Default for Recents" permission Picker, "Use Ctrl+Enter to Send" toggle, "Respect .gitignore in File Search" toggle, saved SSH hosts list with delete buttons
+- `SharedRateLimitData.swift` — Cross-session rate-limit observable; the shim broadcasts limit events here and the status bar reads from it
+- `_SidebarLogicProbe.swift` — DEBUG-only probe (`CANOPY_RUN_LOGIC_PROBE=1`): 11 unit tests for sort / dedup / filter / isActive
+- `_ProbeWebViewRetention.swift` — DEBUG-only probe kept as historical reference: validates the early ZStack/opacity-based retention pattern that was superseded by the in-place subview swap shipped in `WebViewContainer`
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
 
 ### Custom Styles (Resources/)
@@ -160,13 +178,17 @@ To update theme CSS:
 4. Replace `Sources/Canopy/theme-light.css`
 
 ## Session Management
-- Launcher screen: Cmd+N returns to launcher, Cmd+O opens folder picker
+- Sidebar shell shortcuts: Cmd+N selects the Launcher row (new session), Cmd+O opens folder picker, Cmd+W closes the active session (falls back to the focused non-main window — Settings / Sparkle alert — if the main Canopy window isn't key, and to closing the main window when no session is active), Cmd+Shift+W closes the focused window via `performClose(nil)` so the active-session prompt fires, Cmd+0 brings the main window forward (or `openWindow(id:"main")` if it was destroyed), Cmd+1..9 jumps to the N-th visible sidebar row
+- Sessions toggle between **open** (live shim, hot, instant switch) and **closed** (history only — click to reopen). Active row stays at its insertion-order position; new opens append to the bottom
+- Window frame is persisted under `canopy.mainWindowFrame` UserDefaults (didResize + didMove → save; first `configureCanopyWindow` → restore, clamped to current screen `visibleFrame`). AppKit's autosave was unusable: SwiftUI assigns each fresh `WindowGroup(id: "main")` instance a different `main-AppWindow-N` autosave key, so a "Stop Sessions and Close" + Cmd+0 round-trip kept resetting to defaultSize
+- Default permission mode for recents lives in `canopy.defaultPermissionMode` (settings.json key, exposed in Settings → "Permission Mode → Default for Recents"). `SessionStore.openLocal/openCloud` fall through to this when the caller doesn't pass an override; the Launcher view tracks its own per-session selection independently
+- Active session uses an in-place WKWebView subview swap (~10–30 ms), so switching keeps DOM state. WebView is cached on `OpenSession.webView`; the shim is owned via a strong ref on `OpenSession.shim`
 - `list_sessions_request` returns real sessions from `~/.claude/projects/`
 - Session resume: `--resume SESSION_ID` flag passed to CLI
 - History replay: reads JSONL, walks parentUuid chain from leaf, sends via sync `dispatchEvent` (not async `postMessage`) for instant single-render display
 - Path encoding: `encodePath` replaces `/` and `.` with `-` (matching CLI behavior)
 - `loadAllSessions` reads `cwd` from JSONL metadata (avoids lossy path decoding)
-- PermissionMode: type-safe enum (default, acceptEdits, auto, plan, bypassPermissions)
+- PermissionMode: type-safe enum (default, acceptEdits, auto, plan, dontAsk, bypassPermissions)
 
 ## Release Scripts
 ```bash
@@ -184,10 +206,10 @@ To update theme CSS:
 - Uses CC extension's `claudeProcessWrapper` setting with bundled `ssh-claude-wrapper.sh`
 - Wrapper strips local node/claude paths, runs `claude` command on remote with CLI flags
 - `CANOPY_SSH_HOST` env var passes target host to wrapper script
-- Wrapper path flows via `CANOPY_SSH_WRAPPER_PATH` env var → vscode-shim `workspace.js` exposes it as a per-shim `claudeCode.claudeProcessWrapper` override (layer 0, highest priority in `get`/`has`/`inspect`). Avoids writing to the shared settings file, which otherwise leaks across concurrent windows and was eagerly cleared mid-session, breaking `/resume`
+- Wrapper path flows via `CANOPY_SSH_WRAPPER_PATH` env var → vscode-shim `workspace.js` exposes it as a per-shim `claudeCode.claudeProcessWrapper` override (layer 0, highest priority in `get`/`has`/`inspect`). Avoids writing to the shared settings file, which otherwise leaks across concurrent open sessions and was eagerly cleared mid-session, breaking `/resume`
 - `CanopySettings.clearStaleSSHWrapper()` runs once on local session launch to scrub pre-env-var values left by older Canopy builds; only removes entries whose basename is `ssh-claude-wrapper.sh` so user-configured custom wrappers stay intact
 - Remote machine needs: Claude CLI installed + `claude login` done once interactively
-- Window title shows `[hostname]` prefix (orange), status bar shows network icon + hostname
+- Remote sessions surface the host as `host:dir` in the navigation subtitle (project line); the status bar shows a network icon + hostname in orange
 - Saved hosts persisted via `SSHHostStore` (UserDefaults), manageable in Preferences
 
 ### Connection Management (Phase 3)
@@ -217,6 +239,8 @@ SSH death kills the CLI subprocess but Node.js shim stays alive → `termination
 - `docs/superpowers/plans/2026-03-31-ssh-remote.md` — SSH remote implementation plan (8 tasks)
 - `docs/superpowers/specs/2026-03-31-ssh-connection-management.md` — Phase 3 design spec
 - `docs/superpowers/plans/2026-03-31-ssh-connection-management.md` — Phase 3 implementation plan
+- `docs/superpowers/specs/2026-04-29-single-window-sidebar.md` — Single-window sidebar shell design spec
+- `docs/superpowers/plans/2026-04-29-single-window-sidebar.md` — Single-window sidebar implementation plan
 
 ## Running Tests
 ```bash
