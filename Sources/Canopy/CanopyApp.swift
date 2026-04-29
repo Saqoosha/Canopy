@@ -334,25 +334,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Relaunch Canopy: spawn a detached `open` that waits for the current
-    /// process to exit, then quit through the normal terminate flow so the
-    /// "active sessions" prompt and shim cleanup still run.
+    /// Set when "Restart Now" is clicked. The actual relaunch helper is
+    /// spawned in `applicationWillTerminate` — i.e. only after the
+    /// terminate decision is committed — so a "Cancel" on the active-sessions
+    /// alert does not leave a `/bin/sh` waiter polling for our pid that would
+    /// later, on a normal quit, silently re-open Canopy hours later.
+    private static var shouldRelaunchOnExit = false
+
+    /// Schedule Canopy to relaunch and route through `NSApp.terminate(nil)`
+    /// so the active-sessions prompt and shim cleanup in
+    /// `applicationShouldTerminate` still run. The actual `/bin/sh` waiter
+    /// that re-`open`s the bundle is not spawned until
+    /// `applicationWillTerminate`, so a canceled terminate leaves nothing
+    /// behind.
+    @MainActor
     static func relaunch() {
+        Self.shouldRelaunchOnExit = true
+        NSApp.terminate(nil)
+    }
+
+    /// Spawn a detached `/bin/sh` that polls our pid via `kill -0` and, once
+    /// we exit, runs `/usr/bin/open` against the current bundle. Pid and
+    /// bundle path are passed as positional args so the bundle path is never
+    /// re-interpreted by the shell.
+    private func spawnRelaunchHelper() {
         let bundlePath = Bundle.main.bundlePath
         let pid = ProcessInfo.processInfo.processIdentifier
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
         task.arguments = [
             "-c",
-            "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"\(bundlePath)\"",
+            #"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#,
+            "canopy-relaunch",
+            String(pid),
+            bundlePath,
         ]
+        // Don't let the helper inherit our stdio — we're about to exit and
+        // launchd's pipes shouldn't keep the child anchored to us.
+        task.standardInput = FileHandle.nullDevice
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
         do {
             try task.run()
+            logger.info("Relaunch helper scheduled (pid=\(pid, privacy: .public))")
         } catch {
             logger.error("Relaunch helper failed to spawn: \(error.localizedDescription, privacy: .public)")
-            return
+            let alert = NSAlert()
+            alert.messageText = "Couldn't Restart Canopy Automatically"
+            alert.informativeText = "Quit Canopy and reopen it manually to finish applying the extension update.\n\n\(error.localizedDescription)"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
         }
-        NSApp.terminate(nil)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        guard Self.shouldRelaunchOnExit else { return }
+        spawnRelaunchHelper()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -374,6 +412,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .warning
 
         if alert.runModal() == .alertSecondButtonReturn {
+            // User backed out — clear the relaunch flag so the next normal
+            // quit doesn't unexpectedly re-open Canopy.
+            Self.shouldRelaunchOnExit = false
             return .terminateCancel
         }
         Self.isTerminating = true
