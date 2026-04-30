@@ -420,6 +420,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
         }
 
+        // Backstop: any webview→host message scoped to a running Claude
+        // session (io_message, request, interrupt_claude, etc.) carries
+        // channelId on the top-level dict. Channel-agnostic messages (init,
+        // get_claude_state, get_asset_uris, list_sessions) don't, and the
+        // !cid.isEmpty guard correctly skips them. If `launch_claude` failed
+        // to set channelId for any reason, the next channel-scoped message
+        // recovers it; without this, `requestSessionTitle`'s nil-guard would
+        // silently disable title generation for the session's whole lifetime.
+        // First non-empty channelId wins; once set, only the launch_claude
+        // handler above is allowed to replace it.
+        if self.channelId == nil,
+           let cid = dict["channelId"] as? String, !cid.isEmpty
+        {
+            let msgType = dict["type"] as? String ?? "?"
+            logger.info(
+                "channelId recovered via backstop from \(msgType, privacy: .public) message"
+            )
+            self.channelId = cid
+        }
+
         // Start spinner when user sends a message and request title generation
         if dict["type"] as? String == "io_message",
            let ioMsg = dict["message"] as? [String: Any],
@@ -967,7 +987,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Send a synthetic generate_session_title request to the extension via shim.
     /// The extension forwards this to the CLI, which generates a short AI title.
     private func requestSessionTitle(description: String) {
-        guard !description.isEmpty, let channelId else { return }
+        guard !description.isEmpty else { return }
+        guard let channelId else {
+            logger.warning("requestSessionTitle skipped: channelId still nil")
+            return
+        }
         titleRequested = true
         let requestId = "canopy-title-\(UUID().uuidString.prefix(8))"
         sendToShim([
