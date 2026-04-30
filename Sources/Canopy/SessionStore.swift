@@ -22,11 +22,10 @@ enum SessionSelection: Hashable {
 @Observable
 @MainActor
 final class SessionStore {
-    /// Weakly held global reference. AppKit-side code (e.g. the close-alert
-    /// in `hideOrCloseWindow`) needs to clean `openSessions` in addition to
-    /// stopping shims, but `hideOrCloseWindow` is a free function with no
-    /// easy way to receive an injected store. Set in `init`; auto-cleared
-    /// on deinit via the weak ref.
+    /// Weakly held global reference. AppKit-side code (the Cmd+W keyDown
+    /// monitor in `AppDelegate`) reads `activeSession` from a closure that
+    /// has no SwiftUI environment to receive an injected store. Set in
+    /// `init`; auto-cleared on deinit via the weak ref.
     nonisolated(unsafe) static weak var shared: SessionStore?
 
     /// Live sessions: shim is up (or spawning), webview mounted, user can
@@ -375,27 +374,6 @@ final class SessionStore {
         // sidebar appear and post-teleport). Reload so the now-closed
         // session shows up in the Recents block immediately.
         Task { await refreshRecents() }
-    }
-
-    /// Hard-stop every open session and reset the sidebar to the Launcher
-    /// row. Called from the close-alert's "Stop Sessions and Close" branch
-    /// after the window's `WindowDelegateProxy` decided to terminate. Just
-    /// killing the shims (which `ShimProcess.stopAllSessions()` does)
-    /// would leave dead `OpenSession` rows in `openSessions`; reopening
-    /// the window via Cmd+0 + clicking one of those rows would then reuse
-    /// the cached (dead) shim — `WebViewContainer.buildWebView` reads
-    /// `boundSession?.shim`, finds it non-nil, and skips `shim.start()`.
-    func closeAllSessions() {
-        // No `refreshRecents()` here: this path tears the window down, so
-        // any reload would render into a disappearing view. The next Cmd+0
-        // reopen triggers `Sidebar.task` → `refreshRecents()` anyway.
-        for session in openSessions {
-            session.shim?.stop()
-            session.shim = nil
-            session.webView = nil
-        }
-        openSessions.removeAll()
-        selection = .launcher
     }
 
     // MARK: - Refresh

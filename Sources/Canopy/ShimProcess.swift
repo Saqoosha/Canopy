@@ -50,11 +50,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// All living ShimProcess instances (weak references, auto-removed on dealloc).
     @MainActor private static var instances = NSHashTable<ShimProcess>.weakObjects()
 
-    /// Whether any shim process is currently running. Used by AppDelegate for quit confirmation.
-    /// `isIntentionalStop` shims are excluded — `proc.terminate()` is async, so
-    /// `process.isRunning` lingers true for a few ms after `stop()` returns; without
-    /// this filter, closing a session and then the window would still trip the
-    /// "Stop Sessions and Close" alert.
+    /// Whether any shim process is currently running. Used by AppDelegate's
+    /// quit-time confirmation alert. `isIntentionalStop` shims are excluded —
+    /// `proc.terminate()` is async, so `process.isRunning` lingers true for a
+    /// few ms after `stop()` returns and would otherwise trip the prompt.
     @MainActor static var hasActiveSession: Bool {
         instances.allObjects.contains { $0.process?.isRunning == true && !$0.isIntentionalStop }
     }
@@ -63,22 +62,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// the middle of an intentional `stop()`).
     @MainActor static var activeCount: Int {
         instances.allObjects.filter { $0.process?.isRunning == true && !$0.isIntentionalStop }.count
-    }
-
-    /// Synchronously stop every running shim — used by the "Stop Sessions and Close"
-    /// branch of the close-alert so the Node.js processes are gone before
-    /// applicationShouldTerminate's active-session check. (SwiftUI's
-    /// dismantleNSView fires too late — or sometimes not at all — for that.)
-    ///
-    /// Tabs are disabled (`allowsAutomaticWindowTabbing = false`) and the sidebar
-    /// shell only ever has one Canopy window. Inactive sessions cache their
-    /// WKWebView on `OpenSession.webView` (detached from the window), so a
-    /// per-window filter would silently skip them — terminating every running
-    /// shim is what matches the alert's "stop all sessions" promise.
-    @MainActor static func stopAllSessions() {
-        for shim in instances.allObjects {
-            shim.stop()
-        }
     }
 
     /// Synchronously stop any running shim that no `OpenSession` still
