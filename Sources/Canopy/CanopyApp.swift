@@ -31,12 +31,43 @@ struct CanopyApp: App {
                     appDelegate.updaterController.updater.checkForUpdates()
                 }
             }
+            // File menu: browser-style — New Session / Open Folder above the
+            // Close pair. SwiftUI's auto-generated "Close" item is suppressed
+            // by the empty `.saveItem` / `.printItem` replacements below.
             CommandGroup(replacing: .newItem) {
                 Button("New Session") {
                     sidebarStore.select(.launcher)
                 }
                 .keyboardShortcut("n")
+                Button("Open Folder…") {
+                    sidebarOpenFolder()
+                }
+                .keyboardShortcut("o")
+                Divider()
+                // Browser-style: label is always "Close Session" regardless
+                // of selection state. The actual handler is the keyDown monitor
+                // (handleCloseShortcut here is only reached on mouse click);
+                // both fall back to closing the window when no session is open.
+                Button("Close Session") {
+                    handleCloseShortcut()
+                }
+                .keyboardShortcut("w")
+                Button("Close Window") {
+                    if let key = NSApp.keyWindow, isCanopyWindow(key) {
+                        windowCloseOnly(key)
+                    } else {
+                        NSApp.keyWindow?.performClose(nil)
+                    }
+                }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
             }
+            // SwiftUI auto-injects a "Close" item with Cmd+W under the
+            // .saveItem placement (and another under .printItem on some
+            // macOS versions), duplicating our File > Close Session. We
+            // have no Save / Revert / Print UX, so empty replacements are
+            // the cleanest way to suppress those auto items.
+            CommandGroup(replacing: .saveItem) {}
+            CommandGroup(replacing: .printItem) {}
             CommandGroup(replacing: .windowList) {
                 Button("Show Main Window") {
                     showMainWindow()
@@ -50,26 +81,6 @@ struct CanopyApp: App {
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
                 }
-            }
-            CommandMenu("Session") {
-                // Cmd+W closes the active session ONLY when the main
-                // Canopy window is key. If Settings, the Sparkle update
-                // alert, or another window is key, fall through to its
-                // own close handler — otherwise Cmd+W in Settings would
-                // kill the user's session.
-                Button(closeShortcutTitle) {
-                    handleCloseShortcut()
-                }
-                .keyboardShortcut("w")
-                Button("Close Window") {
-                    NSApp.keyWindow?.performClose(nil)
-                }
-                .keyboardShortcut("w", modifiers: [.command, .shift])
-                Divider()
-                Button("Open Folder…") {
-                    sidebarOpenFolder()
-                }
-                .keyboardShortcut("o")
             }
         }
 
@@ -102,19 +113,9 @@ struct CanopyApp: App {
         }
     }
 
-    /// Cmd+W menu-item title. Reflects what the shortcut will do given
-    /// the current key window + active-session state.
-    private var closeShortcutTitle: String {
-        let key = NSApp.keyWindow
-        if let key, !isCanopyWindow(key) {
-            return "Close Window"
-        }
-        return sidebarStore.activeSession == nil ? "Close Window" : "Close Session"
-    }
-
-    /// Cmd+W behaviour: close the focused non-main window first
-    /// (Settings, Sparkle alert), otherwise close the active session,
-    /// otherwise fall through to closing the main window.
+    /// Cmd+W behaviour (browser-style): close the focused non-main window
+    /// first (Settings, Sparkle alert), otherwise close the active session,
+    /// otherwise close the main window itself.
     private func handleCloseShortcut() {
         if let key = NSApp.keyWindow, !isCanopyWindow(key) {
             key.performClose(nil)
@@ -122,8 +123,8 @@ struct CanopyApp: App {
         }
         if sidebarStore.activeSession != nil {
             closeActiveSession()
-        } else {
-            NSApp.keyWindow?.performClose(nil)
+        } else if let key = NSApp.keyWindow, isCanopyWindow(key) {
+            windowCloseOnly(key)
         }
     }
 
@@ -132,9 +133,8 @@ struct CanopyApp: App {
             main.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
-            // Window was closed (e.g. via "Stop Sessions and Close") and the
-            // SwiftUI WindowGroup released it — ask the scene to spawn a
-            // fresh one.
+            // Window was closed and the SwiftUI WindowGroup released it —
+            // ask the scene to spawn a fresh one.
             openWindow(id: "main")
         }
     }
@@ -180,68 +180,26 @@ func isCanopyWindow(_ window: NSWindow) -> Bool {
         || autosave.hasPrefix("main-AppWindow")
 }
 
-/// Reentrancy guard for hideOrCloseWindow — prevents stacked modal alerts.
+/// Close or hide the window without touching any sessions. Browser-style:
+/// the red title-bar button and Cmd+Shift+W always operate on the *window*,
+/// never on individual sessions. If background shims are still running we
+/// hide so Cmd+0 can bring the window back; if nothing is running we let
+/// the window actually close.
+///
+/// Uses `window.close()` for the close path (bypasses delegate) so this is
+/// safe to call from `windowShouldClose` without re-entering the proxy.
 @MainActor
-private var isShowingCloseAlert = false
-
-/// Decides whether to hide, close, or prompt for a window. Returns `true` if the close was handled
-/// (hidden or cancelled).
-@MainActor
-func hideOrCloseWindow(_ window: NSWindow) -> Bool {
-    // App termination: allow real close
+func windowCloseOnly(_ window: NSWindow) {
     if AppDelegate.isTerminating {
-        logger.debug("Window close: allowing real close (terminating)")
-        return false
+        window.close()
+        return
     }
-
-    // No active session: allow normal close
-    if !ShimProcess.hasActiveSession {
-        logger.debug("Window close: no active sessions, allowing close")
-        return false
-    }
-
-    // Prevent stacked alerts from rapid Cmd+W or double-clicks
-    guard !isShowingCloseAlert else {
-        logger.debug("Window close: alert already showing, ignoring")
-        return true
-    }
-    isShowingCloseAlert = true
-    defer { isShowingCloseAlert = false }
-
-    let count = ShimProcess.activeCount
-    let alert = NSAlert()
-    alert.messageText = count == 1 ? "Session is Running" : "Sessions are Running"
-    alert.informativeText = "Closing the window keeps \(count) session\(count == 1 ? "" : "s") running in the background. Stop them or hide the window?"
-    alert.addButton(withTitle: "Hide Window")
-    alert.addButton(withTitle: "Stop Sessions and Close")
-    alert.addButton(withTitle: "Cancel")
-    alert.buttons[2].keyEquivalent = "\u{1b}" // Esc key for Cancel
-    alert.alertStyle = .informational
-
-    let response = alert.runModal()
-    switch response {
-    case .alertFirstButtonReturn:
-        logger.debug("Window close: user chose hide")
+    if ShimProcess.hasActiveSession {
+        logger.debug("Window: hiding (background sessions still running)")
         window.orderOut(nil)
-        return true
-    case .alertSecondButtonReturn:
-        logger.debug("Window close: user chose stop and close")
-        // Stop every running shim AND clear the SessionStore. Killing
-        // shims alone leaves dead `OpenSession` rows behind; the App
-        // scene's `@State sidebarStore` survives the window destroy, so a
-        // Cmd+0 reopen + click would otherwise re-mount one of those rows
-        // whose cached shim already exited — `WebViewContainer.buildWebView`
-        // would skip the start path and the user would see a stale WebView
-        // with no live CLI.
-        ShimProcess.stopAllSessions()
-        SessionStore.shared?.closeAllSessions()
-        return false // Let the caller close the window
-    case .alertThirdButtonReturn:
-        logger.debug("Window close: user cancelled")
-        return true
-    default:
-        logger.warning("Window close: unexpected modal response \(response.rawValue), treating as cancel")
-        return true
+    } else {
+        logger.debug("Window: closing (no active sessions)")
+        window.close()
     }
 }
 
@@ -252,10 +210,17 @@ final class WindowDelegateProxy: NSObject, NSWindowDelegate {
     weak var originalDelegate: (any NSWindowDelegate)?
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if hideOrCloseWindow(sender) {
-            return false // Was hidden, don't close
+        if AppDelegate.isTerminating {
+            return originalDelegate?.windowShouldClose?(sender) ?? true
         }
-        return originalDelegate?.windowShouldClose?(sender) ?? true
+        // Defensive fallback only. Cmd+W is intercepted upstream by the
+        // global keyDown monitor; the red button and Cmd+Shift+W call
+        // `windowCloseOnly` directly. If something else manages to invoke
+        // `performClose(_:)` on a Canopy window, fall back to
+        // window-only behaviour to avoid surprising session loss.
+        logger.debug("windowShouldClose: unexpected performClose path, windowCloseOnly")
+        windowCloseOnly(sender)
+        return false
     }
 
     override func responds(to aSelector: Selector!) -> Bool {
@@ -286,7 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// this ourselves rather than relying on AppKit's autosave because
     /// SwiftUI's `WindowGroup(id: "main")` assigns each fresh window
     /// instance its own internal autosave name (`main-AppWindow-1`,
-    /// `-2`, ...), so a "Stop Sessions and Close" + Cmd+0 round-trip
+    /// `-2`, ...), so a close + Cmd+0 round-trip
     /// keeps creating new keys and never restores the user's frame.
     private let savedFrameKey = "canopy.mainWindowFrame"
 
@@ -297,6 +262,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Set during app termination to bypass hide-on-close behavior.
     static var isTerminating = false
+
+    /// Local event monitor that intercepts Cmd+W on the main window before
+    /// AppKit dispatches it to `performClose(_:)`. Without this, Cmd+W flashes
+    /// the red title-bar button (because performClose simulates a button click)
+    /// even when we end up just closing the active session. Catching the
+    /// keyDown here keeps the title bar still.
+    private var cmdWMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
@@ -310,6 +282,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWindow.didBecomeMainNotification, object: nil
         )
 
+        installCmdWMonitor()
+
         // SwiftUI may make the first window main before our observer is
         // registered, in which case `didBecomeMainNotification` fires
         // before this point and we miss the chance to install the close
@@ -319,8 +293,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Install a `.keyDown` local monitor that swallows Cmd+W on Canopy
+    /// windows. The monitor runs before responder-chain dispatch, so neither
+    /// `performClose(_:)` nor the SwiftUI menu's keyEquivalent ever fires —
+    /// we route the keystroke straight to our session/window logic.
+    /// Cmd+Shift+W (Close Window) is NOT consumed: only plain Cmd+W matches.
+    private func installCmdWMonitor() {
+        guard cmdWMonitor == nil else { return }
+        cmdWMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard modifiers == .command,
+                  event.charactersIgnoringModifiers?.lowercased() == "w"
+            else { return event }
+            guard let key = NSApp.keyWindow else { return event }
+
+            // Non-Canopy window (Settings, Sparkle alert): close it normally.
+            // We also have to handle this here because removing the auto File
+            // > Close item from the menu would otherwise leave Cmd+W with no
+            // handler in those windows.
+            if !isCanopyWindow(key) {
+                logger.debug("Cmd+W: non-Canopy window, performClose")
+                key.performClose(nil)
+                return nil
+            }
+
+            logger.debug("Cmd+W intercepted (pre-performClose)")
+            if let store = SessionStore.shared, let active = store.activeSession {
+                logger.debug("  → closing active session id=\(active.id.uuidString, privacy: .public)")
+                store.closeSession(active.id)
+            } else {
+                logger.debug("  → no active session, windowCloseOnly")
+                windowCloseOnly(key)
+            }
+            return nil // consume — no flash
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let monitor = cmdWMonitor {
+            NSEvent.removeMonitor(monitor)
+            cmdWMonitor = nil
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -442,9 +459,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             logger.warning("handleCloseButton: sender has no window reference")
             return
         }
-        if !hideOrCloseWindow(window) {
-            window.close()
-        }
+        // The Cmd+W path is intercepted by `cmdWMonitor` before AppKit dispatches
+        // `performClose(_:)`, so this only fires for real mouse clicks on the
+        // red title-bar button — always window-only, never session-close.
+        logger.debug("handleCloseButton: red close button clicked")
+        windowCloseOnly(window)
     }
 
     /// Install or reinstall the close-interception delegate proxy on a window.
