@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import SwiftUI
@@ -232,12 +233,10 @@ final class SessionStore {
         teleportingCloudId = session.id
         defer { teleportingCloudId = nil }
         teleportError = nil
-        // 1. Resolve target cwd: prefer matching repo name in recents,
-        //    fall back to the user's home dir as a sentinel for "needs a
-        //    folder picker" — we surface that to the UI by setting
-        //    teleportError and bailing out (Phase B can add the picker).
+        // 1. Resolve target cwd: prefer a unique matching recent clone; if
+        //    zero matches or ambiguous, prompt the user with NSOpenPanel.
         guard let cwd = resolveTargetCwd(for: session) else {
-            teleportError = "Pick a working directory first to teleport \(session.repoOwner ?? "?")/\(session.repoName ?? "?")"
+            // User cancelled the folder picker.
             return
         }
 
@@ -247,6 +246,10 @@ final class SessionStore {
             teleportError = "Working directory not found: \(cwd.path)"
             return
         }
+
+        // Remember the picked directory so future teleports of sibling
+        // sessions in the same repo auto-resolve without a second prompt.
+        RecentDirectories.add(cwd)
 
         let bridge = RemoteSessionsBridge(cwd: cwd)
         do {
@@ -316,13 +319,28 @@ final class SessionStore {
     /// Map a cloud session to a local working directory: auto-resolve only
     /// when exactly one recent clone matches by name. Multiple matches are
     /// ambiguous (different clones of the same repo), and we'd otherwise
-    /// run `checkoutBranch` on the wrong working copy. Caller surfaces an
-    /// error so the user can pick via the launcher's folder browser.
+    /// run `checkoutBranch` on the wrong working copy. Zero or multiple
+    /// matches drop into an NSOpenPanel so the user can point at the
+    /// correct local clone. Returns nil only when the user cancels.
     private func resolveTargetCwd(for session: RemoteSession) -> URL? {
-        guard let name = session.repoName?.lowercased() else { return nil }
-        let matches = RecentDirectories.load().filter { $0.lastPathComponent.lowercased() == name }
-        guard matches.count == 1 else { return nil }
-        return matches.first
+        if let name = session.repoName?.lowercased() {
+            let matches = RecentDirectories.load().filter { $0.lastPathComponent.lowercased() == name }
+            if matches.count == 1, let only = matches.first {
+                return only
+            }
+        }
+
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        if let owner = session.repoOwner, let name = session.repoName {
+            panel.message = "Pick the local clone of \(owner)/\(name) to teleport into"
+        } else {
+            panel.message = "Choose a local working directory for this remote session"
+        }
+        panel.prompt = "Use This Folder"
+        return panel.runModal() == .OK ? panel.url : nil
     }
 
     /// Close an open session: stop the shim, drop the strong refs, move the

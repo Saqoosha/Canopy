@@ -260,12 +260,16 @@ final class RemoteSessionsBridge: @unchecked Sendable {
         )
     }
 
+    /// Returns true on success. The extension throws on failure (surfaced as
+    /// `RemoteSessionsBridgeError.requestFailed`), and its success response
+    /// is just `{type:"checkout_branch_response"}` with no `success` field —
+    /// so receiving a response without throwing IS the success signal.
     func checkoutBranch(_ branch: String) async throws -> Bool {
-        let response = try await sendRequest(
+        _ = try await sendRequest(
             type: "checkout_branch",
             extraFields: ["branch": branch]
         )
-        return (response["success"] as? Bool) ?? false
+        return true
     }
 
     func updateSkippedBranch(sessionId: String, branch: String, failed: Bool) async throws {
