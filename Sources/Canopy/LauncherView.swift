@@ -94,12 +94,11 @@ struct LauncherView: View {
             Task { await updater.checkForUpdate() }
         }
         .onChange(of: selectedProviderId) {
-            // When switching to a non-Anthropic provider, reset "Auto" permission
-            // and "Auto" effort — these concepts don't exist for third-party APIs.
             if !selectedProviderId.isEmpty {
                 if permissionModeRaw == PermissionMode.auto.rawValue {
                     permissionModeRaw = PermissionMode.acceptEdits.rawValue
                 }
+                effortLevel = ""
             }
         }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
