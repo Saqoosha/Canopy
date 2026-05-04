@@ -224,6 +224,7 @@ private struct ProvidersSettingsTab: View {
         }
         .formStyle(.grouped)
         .onAppear {
+            ModelProviderStore.migrateIfNeeded()
             providers = ModelProviderStore.load()
             selectedId = ModelProviderStore.selectedId()
         }
