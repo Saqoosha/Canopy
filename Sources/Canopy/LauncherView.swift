@@ -93,6 +93,15 @@ struct LauncherView: View {
             loadData()
             Task { await updater.checkForUpdate() }
         }
+        .onChange(of: selectedProviderId) {
+            // When switching to a non-Anthropic provider, reset "Auto" permission
+            // and "Auto" effort — these concepts don't exist for third-party APIs.
+            if !selectedProviderId.isEmpty {
+                if permissionModeRaw == PermissionMode.auto.rawValue {
+                    permissionModeRaw = PermissionMode.acceptEdits.rawValue
+                }
+            }
+        }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
         }
@@ -247,54 +256,19 @@ struct LauncherView: View {
 
     // MARK: - Session Options
 
+    private var isAnthropicProvider: Bool { selectedProviderId.isEmpty }
+
+    private var visiblePermissionModes: [PermissionMode] {
+        if isAnthropicProvider {
+            Self.permissionModes
+        } else {
+            Self.permissionModes.filter { $0 != .auto }
+        }
+    }
+
     private var sessionOptions: some View {
         VStack(spacing: 12) {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                GridRow {
-                    Text("Model:")
-                        .foregroundStyle(.secondary)
-                        .gridColumnAlignment(.trailing)
-                    Picker("", selection: $model) {
-                        Text("Auto").tag("")
-                        ForEach(Self.modelOptions.dropFirst(), id: \.self) { alias in
-                            Text(Self.modelDisplayName(alias)).tag(alias)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-
-                GridRow {
-                    Text("Effort:")
-                        .foregroundStyle(.secondary)
-                        .gridColumnAlignment(.trailing)
-                    Picker("", selection: $effortLevel) {
-                        Text("Auto").tag("")
-                        ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
-                            Text(Self.effortDisplayName(level)).tag(level)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-
-                GridRow {
-                    Text("Permission:")
-                        .foregroundStyle(.secondary)
-                        .gridColumnAlignment(.trailing)
-                    Picker("", selection: $permissionModeRaw) {
-                        ForEach(Self.permissionModes, id: \.rawValue) { mode in
-                            Text(mode.displayName).tag(mode.rawValue)
-                        }
-                        if CanopySettings.shared.allowDangerouslySkipPermissions {
-                            Text(PermissionMode.bypassPermissions.displayName)
-                                .tag(PermissionMode.bypassPermissions.rawValue)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-
                 if !providers.isEmpty {
                     GridRow {
                         Text("Provider:")
@@ -309,6 +283,53 @@ struct LauncherView: View {
                         .labelsHidden()
                         .fixedSize()
                     }
+                }
+
+                GridRow {
+                    Text("Model:")
+                        .foregroundStyle(.secondary)
+                        .gridColumnAlignment(.trailing)
+                    Picker("", selection: $model) {
+                        Text("Auto").tag("")
+                        ForEach(Self.modelOptions.dropFirst(), id: \.self) { alias in
+                            Text(Self.modelDisplayName(alias)).tag(alias)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                if isAnthropicProvider {
+                    GridRow {
+                        Text("Effort:")
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        Picker("", selection: $effortLevel) {
+                            Text("Auto").tag("")
+                            ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
+                                Text(Self.effortDisplayName(level)).tag(level)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+
+                GridRow {
+                    Text("Permission:")
+                        .foregroundStyle(.secondary)
+                        .gridColumnAlignment(.trailing)
+                    Picker("", selection: $permissionModeRaw) {
+                        ForEach(visiblePermissionModes, id: \.rawValue) { mode in
+                            Text(mode.displayName).tag(mode.rawValue)
+                        }
+                        if CanopySettings.shared.allowDangerouslySkipPermissions {
+                            Text(PermissionMode.bypassPermissions.displayName)
+                                .tag(PermissionMode.bypassPermissions.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
                 }
             }
 
