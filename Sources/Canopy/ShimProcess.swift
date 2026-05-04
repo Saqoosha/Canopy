@@ -274,9 +274,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // third-party model ids.
         if let api = customApi, api.isEnabled {
             env["ANTHROPIC_BASE_URL"] = api.baseURL
-            if !api.authToken.isEmpty {
-                env["ANTHROPIC_AUTH_TOKEN"] = api.authToken
-            }
+            env["ANTHROPIC_AUTH_TOKEN"] = api.authToken.isEmpty ? "" : api.authToken
             env["ANTHROPIC_API_KEY"] = ""
             if !api.opusModel.isEmpty { env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = api.opusModel }
             if !api.sonnetModel.isEmpty { env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = api.sonnetModel }

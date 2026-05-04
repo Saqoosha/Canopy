@@ -82,7 +82,7 @@ struct ModelProvider: Identifiable, Codable, Equatable {
     }
 
     init(from template: ModelProviderTemplate) {
-        self.id = template.id
+        self.id = UUID().uuidString
         self.name = template.name
         self.baseURL = template.baseURL
         self.opusModel = template.opusModel
