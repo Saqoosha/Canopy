@@ -146,7 +146,8 @@ final class SessionStore {
         model: String? = nil,
         effortLevel: String? = nil,
         permissionMode: PermissionMode = .acceptEdits,
-        remoteHost: String? = nil
+        remoteHost: String? = nil,
+        customApi: ModelProvider? = nil
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -164,7 +165,8 @@ final class SessionStore {
             status: .spawning,
             permissionMode: permissionMode,
             model: model,
-            effortLevel: effortLevel
+            effortLevel: effortLevel,
+            customApi: customApi
         )
         // Don't persist remote-host paths in recents (matches existing behaviour).
         if remoteHost == nil {

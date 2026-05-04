@@ -13,6 +13,7 @@ struct WebViewContainer: NSViewRepresentable {
     var sessionTitle: String?
     var statusBarData: StatusBarData?
     var remoteHost: String?
+    var customApi: ModelProvider?
     var connectionState: ConnectionState?
     var onCrash: ((Int32) -> Void)?
     /// The OpenSession that owns this WebView's shim and WKWebView.
@@ -41,6 +42,7 @@ struct WebViewContainer: NSViewRepresentable {
         var effortLevel: String?
         var permissionMode: PermissionMode = .acceptEdits
         var statusBarData: StatusBarData?
+        var customApi: ModelProvider?
 
         private var reconnectTimer: Timer?
         private var reconnectAttempt = 0
@@ -183,7 +185,8 @@ struct WebViewContainer: NSViewRepresentable {
                 permissionMode: permissionMode,
                 sessionTitle: nil,
                 statusBarData: statusBarData,
-                remoteHost: remoteHost
+                remoteHost: remoteHost,
+                customApi: customApi
             )
             newShim.delegate = self
             newShim.webView = webView
@@ -351,7 +354,8 @@ struct WebViewContainer: NSViewRepresentable {
                 permissionMode: permissionMode,
                 sessionTitle: sessionTitle,
                 statusBarData: statusBarData,
-                remoteHost: remoteHost
+                remoteHost: remoteHost,
+                customApi: customApi
             )
             isFreshShim = true
             // Bind the shim to the OpenSession IMMEDIATELY, before the
@@ -378,6 +382,7 @@ struct WebViewContainer: NSViewRepresentable {
         coordinator.effortLevel = effortLevel
         coordinator.permissionMode = permissionMode
         coordinator.statusBarData = statusBarData
+        coordinator.customApi = customApi
         coordinator.onCrash = onCrash
 
         config.userContentController = ucc

@@ -67,6 +67,7 @@ final class OpenSession: Identifiable, Hashable {
     var permissionMode: PermissionMode
     var model: String?
     var effortLevel: String?
+    var customApi: ModelProvider?
     /// True while Claude is generating a response (assistant / stream_event
     /// messages flowing). Updated by `ShimProcess.boundSession` mirror.
     /// Drives the animated flower icon in the sidebar.
@@ -92,7 +93,8 @@ final class OpenSession: Identifiable, Hashable {
         lastActiveAt: Date = Date(),
         permissionMode: PermissionMode = .acceptEdits,
         model: String? = nil,
-        effortLevel: String? = nil
+        effortLevel: String? = nil,
+        customApi: ModelProvider? = nil
     ) {
         self.id = id
         self.origin = origin
@@ -106,6 +108,7 @@ final class OpenSession: Identifiable, Hashable {
         self.permissionMode = permissionMode
         self.model = model
         self.effortLevel = effortLevel
+        self.customApi = customApi
         self.statusBar.remoteHost = origin.remoteHost
     }
 

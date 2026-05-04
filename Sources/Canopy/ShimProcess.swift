@@ -93,6 +93,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     var effortLevel: String?
     var permissionMode: PermissionMode
     var remoteHost: String?
+    var customApi: ModelProvider?
 
     // MARK: - Activity tracking (drives sidebar spinner via boundSession.isThinking)
     private var sessionTitle: String = ""
@@ -128,7 +129,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var isIntentionalStop = false
 
     @MainActor
-    init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil) {
+    init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil) {
         self.workingDirectory = workingDirectory
         self.resumeSessionId = resumeSessionId
         self.model = model
@@ -141,6 +142,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         self.statusBarData = statusBarData
         self.remoteHost = remoteHost
+        self.customApi = customApi
         super.init()
         Self.instances.add(self)
         // Set CLI version, VCS branch, initial message count, and remote host
@@ -264,6 +266,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // settings file by pre-env-var Canopy builds, so the CLI spawns
             // directly. User-configured custom wrappers are preserved.
             CanopySettings.shared.clearStaleSSHWrapper()
+        }
+
+        // Custom API Provider: inject env vars before CLI starts.
+        // These are read by the Claude CLI directly (ANTHROPIC_BASE_URL,
+        // ANTHROPIC_AUTH_TOKEN, etc.) and map Anthropic model aliases to
+        // third-party model ids.
+        if let api = customApi, api.isEnabled {
+            env["ANTHROPIC_BASE_URL"] = api.baseURL
+            if !api.authToken.isEmpty {
+                env["ANTHROPIC_AUTH_TOKEN"] = api.authToken
+            }
+            env["ANTHROPIC_API_KEY"] = ""
+            if !api.opusModel.isEmpty { env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = api.opusModel }
+            if !api.sonnetModel.isEmpty { env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = api.sonnetModel }
+            if !api.haikuModel.isEmpty { env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = api.haikuModel }
+            if !api.subagentModel.isEmpty { env["CLAUDE_CODE_SUBAGENT_MODEL"] = api.subagentModel }
+            logger.info("Custom API: baseURL=\(api.baseURL, privacy: .private) opus=\(api.opusModel, privacy: .public) sonnet=\(api.sonnetModel, privacy: .public) haiku=\(api.haikuModel, privacy: .public) subagent=\(api.subagentModel, privacy: .public)")
         }
 
         proc.environment = env

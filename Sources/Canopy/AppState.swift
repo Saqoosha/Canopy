@@ -40,6 +40,7 @@ final class AppState {
     var resumeSessionId: String?
     var resumeSessionTitle: String?
     var remoteHost: String?
+    var customApi: ModelProvider?
     var debugAutoLaunchDir: String?
     /// Incremented to force SwiftUI to recreate the WebViewContainer (via .id() modifier),
     /// ensuring a fresh WKWebView for each session.
@@ -49,7 +50,7 @@ final class AppState {
         debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")
     }
 
-    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil) {
+    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil, customApi: ModelProvider? = nil) {
         // Don't add remote paths to local recent directories
         if remoteHost == nil {
             RecentDirectories.add(directory)
@@ -61,9 +62,10 @@ final class AppState {
         self.effortLevel = effortLevel
         self.permissionMode = permissionMode
         self.remoteHost = remoteHost
+        self.customApi = customApi
         webviewReloadToken += 1
         screen = .session
-        logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) model=\(model ?? "auto", privacy: .public) effort=\(effortLevel ?? "auto", privacy: .public) mode=\(permissionMode.rawValue, privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")
+        logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) model=\(model ?? "auto", privacy: .public) effort=\(effortLevel ?? "auto", privacy: .public) mode=\(permissionMode.rawValue, privacy: .public) remote=\(remoteHost ?? "local", privacy: .public) customApi=\(customApi?.isEnabled == true ? "yes" : "no", privacy: .public)")
     }
 
     func backToLauncher() {

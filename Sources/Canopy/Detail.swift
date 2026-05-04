@@ -81,7 +81,8 @@ private struct DetailLauncher: View {
                         model: localAppState.model,
                         effortLevel: localAppState.effortLevel,
                         permissionMode: localAppState.permissionMode,
-                        remoteHost: localAppState.remoteHost
+                        remoteHost: localAppState.remoteHost,
+                        customApi: localAppState.customApi
                     )
                     // Reset the local appState so the next Start works again
                     localAppState.backToLauncher()
