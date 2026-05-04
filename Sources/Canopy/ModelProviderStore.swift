@@ -12,11 +12,19 @@ enum ModelProviderStore {
 
     static func load() -> [ModelProvider] {
         guard let data = UserDefaults.standard.data(forKey: providersKey) else { return [] }
-        return (try? JSONDecoder().decode([ModelProvider].self, from: data)) ?? []
+        do {
+            return try JSONDecoder().decode([ModelProvider].self, from: data)
+        } catch {
+            logger.error("Failed to decode model providers: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
     }
 
     static func save(_ providers: [ModelProvider]) {
-        guard let data = try? JSONEncoder().encode(providers) else { return }
+        guard let data = try? JSONEncoder().encode(providers) else {
+            logger.error("Failed to encode model providers")
+            return
+        }
         UserDefaults.standard.set(data, forKey: providersKey)
     }
 

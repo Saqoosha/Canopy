@@ -275,7 +275,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if let api = customApi, api.isEnabled {
             env["ANTHROPIC_BASE_URL"] = api.baseURL
             env["ANTHROPIC_AUTH_TOKEN"] = api.authToken.isEmpty ? "" : api.authToken
-            env["ANTHROPIC_API_KEY"] = ""
+            // Remove inherited Anthropic key so it never leaks to a custom API endpoint
+            env.removeValue(forKey: "ANTHROPIC_API_KEY")
             if !api.opusModel.isEmpty { env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = api.opusModel }
             if !api.sonnetModel.isEmpty { env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = api.sonnetModel }
             if !api.haikuModel.isEmpty { env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = api.haikuModel }

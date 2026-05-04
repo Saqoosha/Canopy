@@ -195,7 +195,8 @@ final class SessionStore {
             directory: entry.projectDirectory,
             resumeId: entry.id,
             sessionTitle: entry.title,
-            permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode
+            permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,
+            customApi: ModelProviderStore.selectedProvider()
         )
     }
 
