@@ -26,6 +26,7 @@ struct SessionContainer: View {
                     sessionTitle: session.title,
                     statusBarData: session.statusBar,
                     remoteHost: session.origin.remoteHost,
+                    customApi: session.customApi,
                     connectionState: session.connection,
                     onCrash: { code in
                         logger.error("Session \(session.id.uuidString, privacy: .public) crashed (status \(code))")

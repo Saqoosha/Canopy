@@ -32,6 +32,9 @@ struct LauncherView: View {
     @AppStorage("launcher.webSessionKind") private var webSessionKindRaw = RemoteSessionKind.web.rawValue
     @AppStorage("launcher.webSessionsIncludeArchived") private var webSessionsIncludeArchived = false
 
+    @AppStorage("selectedProviderId") private var selectedProviderId = ""
+    @State private var providers: [ModelProvider] = []
+
     @AppStorage("launcher.model") private var model = ""
     @AppStorage("launcher.effortLevel") private var effortLevel = ""
     @AppStorage("launcher.permissionMode") private var permissionModeRaw = "acceptEdits"
@@ -89,6 +92,15 @@ struct LauncherView: View {
         .onAppear {
             loadData()
             Task { await updater.checkForUpdate() }
+        }
+        .onChange(of: selectedProviderId) {
+            // When switching to a non-Anthropic provider, reset "Auto" permission
+            // and "Auto" effort — these concepts don't exist for third-party APIs.
+            if !selectedProviderId.isEmpty {
+                if permissionModeRaw == PermissionMode.auto.rawValue {
+                    permissionModeRaw = PermissionMode.acceptEdits.rawValue
+                }
+            }
         }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
@@ -244,9 +256,35 @@ struct LauncherView: View {
 
     // MARK: - Session Options
 
+    private var isAnthropicProvider: Bool { selectedProviderId.isEmpty }
+
+    private var visiblePermissionModes: [PermissionMode] {
+        if isAnthropicProvider {
+            Self.permissionModes
+        } else {
+            Self.permissionModes.filter { $0 != .auto }
+        }
+    }
+
     private var sessionOptions: some View {
         VStack(spacing: 12) {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                if !providers.isEmpty {
+                    GridRow {
+                        Text("Provider:")
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        Picker("", selection: $selectedProviderId) {
+                            Text("Anthropic (default)").tag("")
+                            ForEach(providers) { provider in
+                                Text(provider.name).tag(provider.id)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+
                 GridRow {
                     Text("Model:")
                         .foregroundStyle(.secondary)
@@ -261,18 +299,20 @@ struct LauncherView: View {
                     .fixedSize()
                 }
 
-                GridRow {
-                    Text("Effort:")
-                        .foregroundStyle(.secondary)
-                        .gridColumnAlignment(.trailing)
-                    Picker("", selection: $effortLevel) {
-                        Text("Auto").tag("")
-                        ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
-                            Text(Self.effortDisplayName(level)).tag(level)
+                if isAnthropicProvider {
+                    GridRow {
+                        Text("Effort:")
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        Picker("", selection: $effortLevel) {
+                            Text("Auto").tag("")
+                            ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
+                                Text(Self.effortDisplayName(level)).tag(level)
+                            }
                         }
+                        .labelsHidden()
+                        .fixedSize()
                     }
-                    .labelsHidden()
-                    .fixedSize()
                 }
 
                 GridRow {
@@ -280,7 +320,7 @@ struct LauncherView: View {
                         .foregroundStyle(.secondary)
                         .gridColumnAlignment(.trailing)
                     Picker("", selection: $permissionModeRaw) {
-                        ForEach(Self.permissionModes, id: \.rawValue) { mode in
+                        ForEach(visiblePermissionModes, id: \.rawValue) { mode in
                             Text(mode.displayName).tag(mode.rawValue)
                         }
                         if CanopySettings.shared.allowDangerouslySkipPermissions {
@@ -650,7 +690,7 @@ struct LauncherView: View {
         let isHovered = hoveredSessionId == session.id
         return Button {
             selectedDirectory = session.projectDirectory
-            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id, sessionTitle: session.title, model: model.isEmpty ? nil : model, effortLevel: effortLevel.isEmpty ? nil : effortLevel, permissionMode: resolvedPermission)
+            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id, sessionTitle: session.title, model: model.isEmpty ? nil : model, effortLevel: effortLevel.isEmpty ? nil : effortLevel, permissionMode: resolvedPermission, customApi: buildCustomApiConfig())
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "text.bubble")
@@ -778,6 +818,11 @@ struct LauncherView: View {
         return perm
     }
 
+    private func buildCustomApiConfig() -> ModelProvider? {
+        guard !selectedProviderId.isEmpty else { return nil }
+        return providers.first { $0.id == selectedProviderId }
+    }
+
     private func latestSession(for directory: URL) -> SessionEntry? {
         // Query disk directly so remote-only paths (SSH workspace folders that
         // don't exist locally) still surface a session. The in-memory `sessions`
@@ -798,7 +843,7 @@ struct LauncherView: View {
             resumeId = latest.id
             resumeTitle = latest.title
         }
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: resolvedPermission)
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: resolvedPermission, customApi: buildCustomApiConfig())
     }
 
     private func startSession() {
@@ -829,10 +874,12 @@ struct LauncherView: View {
             resumeId = latest.id
             resumeTitle = latest.title
         }
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: selectedPermission, remoteHost: targetRemote)
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: selectedPermission, remoteHost: targetRemote, customApi: buildCustomApiConfig())
     }
 
     private func loadData() {
+        ModelProviderStore.migrateIfNeeded()
+        providers = ModelProviderStore.load()
         recentDirectories = RecentDirectories.load()
         savedHosts = SSHHostStore.hosts()
         Task {
@@ -960,7 +1007,8 @@ struct LauncherView: View {
             sessionTitle: result.summary ?? session.summary,
             model: model.isEmpty ? nil : model,
             effortLevel: effortLevel.isEmpty ? nil : effortLevel,
-            permissionMode: resolvedPermission
+            permissionMode: resolvedPermission,
+            customApi: buildCustomApiConfig()
         )
     }
 
