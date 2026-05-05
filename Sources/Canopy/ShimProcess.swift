@@ -36,10 +36,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var descendantPids: [pid_t] = []
     /// Channel ID from launch_claude, needed for generate_session_title requests.
     private var channelId: String?
-    /// Whether we've already requested an AI-generated title for this session.
-    private var titleRequested = false
-    /// Whether an AI-generated title has been received (prevents raw title overwrite from webview).
-    private var titleGenerated = false
+    /// Counts user messages since the last AI title generation attempt.
+    /// Starts at `titleRefreshInterval` so the first user message triggers an immediate request.
+    private var userMessagesSinceLastTitle = 4
+    /// Generate a fresh AI title every N user messages.
+    private let titleRefreshInterval = 4
+    /// True while a `generate_session_title` request is awaiting a response.
+    private var titleRequestInFlight = false
+    /// Most recent user message text, used as fallback when AI generation doesn't respond.
+    private var lastUserMessageText: String?
     /// Session ID from webview's update_session_state, used to persist generated titles.
     private var activeSessionId: String?
     /// Generated title waiting to be saved (when activeSessionId arrives after the title response).
@@ -136,10 +141,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         self.effortLevel = effortLevel
         self.permissionMode = permissionMode
         self.sessionTitle = sessionTitle ?? ""
-        // When resuming with an AI-generated title, protect it from webview overwrite.
-        if let st = sessionTitle, !st.isEmpty, resumeSessionId != nil {
-            self.titleGenerated = true
-        }
         self.statusBarData = statusBarData
         self.remoteHost = remoteHost
         self.customApi = customApi
@@ -447,14 +448,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            ioMsg["type"] as? String == "user"
         {
             isWorking = true
-            // Request AI-generated short title for the first user message only.
-            if !titleRequested, let userMsg = ioMsg["message"] as? [String: Any] {
+
+            // Capture user message text for fallback titles.
+            if let userMsg = ioMsg["message"] as? [String: Any] {
                 if let content = userMsg["content"] as? [[String: Any]] {
-                    let text = content.compactMap { $0["text"] as? String }.joined()
-                    requestSessionTitle(description: text)
+                    lastUserMessageText = content.compactMap { $0["text"] as? String }.joined()
                 } else if let text = userMsg["content"] as? String {
-                    requestSessionTitle(description: text)
+                    lastUserMessageText = text
                 }
+            }
+
+            // Request AI title every `titleRefreshInterval` user messages.
+            userMessagesSinceLastTitle += 1
+            if userMessagesSinceLastTitle >= titleRefreshInterval,
+               !titleRequestInFlight,
+               let text = lastUserMessageText
+            {
+                requestSessionTitle(description: text)
             }
         }
 
@@ -484,15 +494,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     }
                 }
                 if let title = request["title"] as? String, !title.isEmpty {
-                    if !titleGenerated {
-                        let truncated = title.count > 60
-                            ? String(title.prefix(57)) + "..."
-                            : title
-                        updateWindowTitle(truncated)
-                    }
-                    // The generated-title path used to refresh the window
-                    // title here; SwiftUI now re-renders on `OpenSession.title`,
-                    // so no extra push is needed.
+                    let truncated = title.count > 60
+                        ? String(title.prefix(57)) + "..."
+                        : title
+                    updateWindowTitle(truncated)
                 }
             }
         }
@@ -993,7 +998,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.warning("requestSessionTitle skipped: channelId still nil")
             return
         }
-        titleRequested = true
+        titleRequestInFlight = true
+        userMessagesSinceLastTitle = 0
+
         let requestId = "canopy-title-\(UUID().uuidString.prefix(8))"
         sendToShim([
             "type": "webview_message",
@@ -1008,6 +1015,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 ] as [String: Any],
             ] as [String: Any],
         ])
+
+        // Fallback: if the extension never responds (custom API providers
+        // where generate_session_title may be slow or silently dropped),
+        // use the most recent user message as the title.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
+            guard let self, self.titleRequestInFlight else { return }
+            self.titleRequestInFlight = false
+            guard let fallback = self.lastUserMessageText, !fallback.isEmpty else { return }
+            let truncated = fallback.count > 60
+                ? String(fallback.prefix(57)) + "..."
+                : fallback
+            logger.info("Title fallback (AI generation timed out): \(truncated, privacy: .public)")
+            self.updateWindowTitle(truncated)
+            if let sid = self.activeSessionId ?? self.resumeSessionId {
+                SessionTitleStore.save(title: truncated, forSessionId: sid)
+            } else {
+                self.pendingGeneratedTitle = truncated
+            }
+        }
     }
 
     /// Extract session title from extension responses flowing to webview.
@@ -1032,24 +1058,29 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     private func applyTitleFromResponse(_ response: [String: Any]) {
         guard let title = response["title"] as? String, !title.isEmpty else { return }
+        let truncated = title.count > 60
+            ? String(title.prefix(57)) + "..."
+            : title
         let respType = response["type"] as? String ?? ""
+
         if respType == "generate_session_title_response" {
             logger.info("Title generated: \(title, privacy: .public)")
-            titleGenerated = true
-            updateWindowTitle(title)
+            titleRequestInFlight = false
+            updateWindowTitle(truncated)
             // Persist to our own store (like Sessylph's SessionTitleStore).
             if let sid = activeSessionId ?? resumeSessionId {
-                SessionTitleStore.save(title: title, forSessionId: sid)
+                SessionTitleStore.save(title: truncated, forSessionId: sid)
             } else {
-                pendingGeneratedTitle = title
+                pendingGeneratedTitle = truncated
             }
         } else if respType == "rename_tab_response"
             || respType == "update_session_state_response"
         {
-            if !titleGenerated {
-                logger.info("Title updated: \(title, privacy: .public)")
-                updateWindowTitle(title)
-            }
+            // Always accept native title updates from the extension; they
+            // reflect evolving conversation context. Periodic AI title
+            // generation runs on its own cadence and overwrites when ready.
+            logger.info("Title updated: \(title, privacy: .public)")
+            updateWindowTitle(truncated)
         }
     }
 
