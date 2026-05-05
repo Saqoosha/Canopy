@@ -1015,7 +1015,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 "request": [
                     "type": "generate_session_title",
                     "channelId": channelId,
-                    "description": description,
+                    "description": "Generate a concise session title (max 40 chars, plain facts, no emoji, no roleplay): \(description)",
                     "persist": false,
                 ] as [String: Any],
             ] as [String: Any],
