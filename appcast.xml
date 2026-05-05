@@ -16,10 +16,8 @@
             <description sparkle:format="markdown"><![CDATA[### Bug Fixes
 - Fixed footer rate limit info (5hr/weekly) incorrectly showing for custom API provider models
 - Fixed custom API provider configuration not being applied to SSH remote sessions
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-2.1.1.dmg" length="2569487" type="application/octet-stream" sparkle:edSignature="abGvOjHURqZ6vtVW5whn6RPhHelmYEy5bZjbcqK/gczI73N5PkZRnRsHEHo+ySzbE6PbmvanIen8I21+89NoBA=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-2.1.1.dmg" length="2569461" type="application/octet-stream" sparkle:edSignature="IKaHQ3obwt24PneUJDkgJ1WlbeVXXrAWnS8OZbi+HbJwdFACh1Uakc5mRNK52fDWpEJCyaem6Tk0T/zDFymZBA=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy43-42.delta" sparkle:deltaFrom="42" length="77330" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Sj/H5PacyjBHYqXjsx3fw/7++J1MoWwJOQ+DK8orL/ijadOHKiD9ZFd9JxbMaUQTtbS1uWfBs01BRxzYTNA4AA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy43-41.delta" sparkle:deltaFrom="41" length="249462" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="TGxDLJ9XJ7DbYDK5MEP/ELWCyJ6+3mD5DPXWrmz4/jv6M7iamf299kZb66EByZCGgzqZbT5FELzDkPej5hpPBQ=="/>
@@ -46,7 +44,7 @@
 - Moved custom API configuration from Launcher to Preferences for cleaner session setup
 - Legacy single-provider settings automatically migrate to the new multi-provider system
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-2.1.0.dmg" length="2569371" type="application/octet-stream" sparkle:edSignature="kzPKr67qxinH62DT/c0r1pQx/Rh3cQk9LbqplK1bezLKZquVW7TH3sTw+nBMku2Z2NxjrnV8JQdm+vhLjvwEAw=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-2.1.0.dmg" length="2569351" type="application/octet-stream" sparkle:edSignature="19GALkh30CXckqKWIyD9DNEKRuFaZhUVg2TTCyLTdgl2arDXeMCXy+TWZSexaGAUkh5YLWqwKvW+QhPSDi+pBg=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.0/Canopy42-41.delta" sparkle:deltaFrom="41" length="239414" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="ygSQW+nRE4xXa7hlAJijs9rsfbQQ2BUvtOgaFm3duC9YmJVbbBpnEu9F/Wpm2mVAxnFpWHlPNTMD6BZXzat0Aw=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.0/Canopy42-40.delta" sparkle:deltaFrom="40" length="492198" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="kQ3m/sJoxrnCBGvFeFXnlNQCXb3VXPqZbtkPywr1LbKmegfW8EThUpzVEcoahQiMZT2D4lwc3MKi4ymJE54cCw=="/>
@@ -67,7 +65,7 @@
 - Cloud session teleport now prompts you to pick a local clone with a folder picker when no matching recent directory is found (or when multiple match). Previously failed silently with a toast.
 - Fixed branch checkout always reporting failure after a successful teleport. The "Resumed locally but couldn't switch to branch ..." toast no longer appears when checkout actually succeeded.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-2.0.3.dmg" length="2499758" type="application/octet-stream" sparkle:edSignature="4krijzM/ZDFzIR0NoCEmYpXlx15rRiKOkSvpw3dnTRQzrcymB/J1Scfas4LBBqg/Hih9zlim3Wf8eFJJ6yESDw=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-2.0.3.dmg" length="2499758" type="application/octet-stream" sparkle:edSignature="GbsomC17jgIvuaEZQLgOH5Q0qHnB7nPO4axmKsmYWBNz4xQZy7QSOuuRJtt4GV5tH4RxesXHuD2qX3uuTRjCDw=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.0.3/Canopy41-40.delta" sparkle:deltaFrom="40" length="411554" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OO0JRrCWbu0LyDhIRiCc+OXqdHfvaGd06OwvrjF8ZDnwIMQQcoO8A8HeszO+rMRqZrOpK/Se5MDE/i/vS9e0AA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.0.3/Canopy41-39.delta" sparkle:deltaFrom="39" length="417762" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="IvTz2FiURP+QVHzuJkGtIIp/VHaLOeT0s+gvCtuTWCFdAh2PIUZEo9KclU1XVR4fy/yMMVyaXAPS4hJZ2Li3CA=="/>
@@ -91,7 +89,7 @@
   - All selections persist across app restarts
 - Permission mode setting moved from Preferences to launcher for easier per-session control
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-1.5.0.dmg" length="2193482" type="application/octet-stream" sparkle:edSignature="sHQT/+2MXhr7rg60o/4skfCFRZiwNL+ojyL+K30CyCCOwc6rW5/rpZPDlPDmYgdwjiTXx+iI756l1giG+XVaDQ=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-1.5.0.dmg" length="2193072" type="application/octet-stream" sparkle:edSignature="275nQzYGxwHgcB2u5g4XdfyAcikHOK/VidbRQ6QDYGt+CC0dYHofv4iWNaQe6ZJsS64o/YnPaNCOVBm7m3p+BQ=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy13-12.delta" sparkle:deltaFrom="12" length="336298" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="wvu7rerWGcfgdaPkY1yc3HzlDVcqorHWl/pamQmbmohyh8syPwKaADxpbMuPYzlNAgOCM3xEeWpnFQj7cQ3NAA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy13-11.delta" sparkle:deltaFrom="11" length="150698" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="l2ovq35HxonTItrTJV5TPHCGl/euQlmbiKLeqBPiN2qimZOFM0kaCQYgeieQ/lz0dxHdfX7MOW5A933XH3UXDw=="/>
@@ -110,7 +108,7 @@
             <description sparkle:format="markdown"><![CDATA[### Changes
 - Status bar now shows the Sonnet-only weekly rate limit when using a Sonnet model, instead of the all-models weekly limit. Falls back to the all-models limit when Sonnet-specific data is not available.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-1.4.3.dmg" length="2166826" type="application/octet-stream" sparkle:edSignature="2Or/DtwGk/WXeZKRtQBCZ3dz4XwV272i758sIBoM0q89mnmAt3YQFNxiWT4FZvg4iYipgh0kRBgRotyB8WJ0Bg=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.1.1/Canopy-1.4.3.dmg" length="2166816" type="application/octet-stream" sparkle:edSignature="tLx3gX8DFDSKJBGmyOKg2DJw76bUHrZyjJ6k/5uHjsSHaZsGYkip96Tx5JuN9YdpXgBJlHVCSBS4boWiiuMLAQ=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.4.4/Canopy11-10.delta" sparkle:deltaFrom="10" length="309446" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OX7fYiD8NOq2DDbbyDsWGQEY5s8ISw0u+JtNmCV0XOdtSuiCsv+kIOV7gWXVXoKMbmCtJgopBhPwf7sFMjYbCQ=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v1.4.4/Canopy11-9.delta" sparkle:deltaFrom="9" length="309474" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="KP9DtQnQ7APkxLux6cF5wvZwV/EqpFj0j9NCkh/byzEViXmV+vyVFSvzdmkq1JDUeJNet8VILyyMV5sCFMN6Dg=="/>
