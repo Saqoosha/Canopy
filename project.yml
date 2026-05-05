@@ -12,8 +12,8 @@ packages:
 
 settings:
   base:
-    MARKETING_VERSION: "2.1.0"
-    CURRENT_PROJECT_VERSION: "42"
+    MARKETING_VERSION: "2.1.1"
+    CURRENT_PROJECT_VERSION: "43"
     SWIFT_VERSION: "6.0"
     DEVELOPMENT_TEAM: G5G54TCH8W
 
@@ -56,6 +56,12 @@ targets:
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: sh.saqoo.Canopy
       SWIFT_STRICT_CONCURRENCY: complete
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Automatic
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Developer ID Application: Whatever Co. (G5G54TCH8W)"
     info:
       path: Sources/Canopy/Info.plist
       properties:
