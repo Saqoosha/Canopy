@@ -43,6 +43,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private let titleRefreshInterval = 4
     /// True while a `generate_session_title` request is awaiting a response.
     private var titleRequestInFlight = false
+    /// Request ID of the current title generation, used to reject stale responses.
+    private var currentTitleRequestId: String?
     /// Most recent user message text, used as fallback when AI generation doesn't respond.
     private var lastUserMessageText: String?
     /// Session ID from webview's update_session_state, used to persist generated titles.
@@ -452,8 +454,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Capture user message text for fallback titles.
             if let userMsg = ioMsg["message"] as? [String: Any] {
                 if let content = userMsg["content"] as? [[String: Any]] {
-                    lastUserMessageText = content.compactMap { $0["text"] as? String }.joined()
-                } else if let text = userMsg["content"] as? String {
+                    let extracted = content.compactMap { $0["text"] as? String }.joined()
+                    if !extracted.isEmpty { lastUserMessageText = extracted }
+                } else if let text = userMsg["content"] as? String, !text.isEmpty {
                     lastUserMessageText = text
                 }
             }
@@ -494,6 +497,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     }
                 }
                 if let title = request["title"] as? String, !title.isEmpty {
+                    // Don't overwrite with raw webview titles while an AI
+                    // title request is in flight — the AI response (or its
+                    // fallback) will set a better title shortly.
+                    guard !titleRequestInFlight else { return }
                     let truncated = title.count > 60
                         ? String(title.prefix(57)) + "..."
                         : title
@@ -1002,6 +1009,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         userMessagesSinceLastTitle = 0
 
         let requestId = "canopy-title-\(UUID().uuidString.prefix(8))"
+        currentTitleRequestId = requestId
         sendToShim([
             "type": "webview_message",
             "message": [
@@ -1022,6 +1030,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
             guard let self, self.titleRequestInFlight else { return }
             self.titleRequestInFlight = false
+            self.currentTitleRequestId = nil
             guard let fallback = self.lastUserMessageText, !fallback.isEmpty else { return }
             let truncated = fallback.count > 60
                 ? String(fallback.prefix(57)) + "..."
@@ -1043,7 +1052,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func extractTitle(_ message: [String: Any]) {
         // Try direct response (unwrapped format)
         if let response = message["response"] as? [String: Any] {
-            applyTitleFromResponse(response)
+            applyTitleFromResponse(response, requestId: message["requestId"] as? String)
             return
         }
 
@@ -1052,11 +1061,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let nested = message["message"] as? [String: Any],
            let response = nested["response"] as? [String: Any]
         {
-            applyTitleFromResponse(response)
+            applyTitleFromResponse(response, requestId: nested["requestId"] as? String)
         }
     }
 
-    private func applyTitleFromResponse(_ response: [String: Any]) {
+    private func applyTitleFromResponse(_ response: [String: Any], requestId: String? = nil) {
         guard let title = response["title"] as? String, !title.isEmpty else { return }
         let truncated = title.count > 60
             ? String(title.prefix(57)) + "..."
@@ -1064,8 +1073,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let respType = response["type"] as? String ?? ""
 
         if respType == "generate_session_title_response" {
+            // Reject stale responses that don't match the current request.
+            if let requestId, let current = currentTitleRequestId, requestId != current {
+                return
+            }
             logger.info("Title generated: \(title, privacy: .public)")
             titleRequestInFlight = false
+            currentTitleRequestId = nil
             updateWindowTitle(truncated)
             // Persist to our own store (like Sessylph's SessionTitleStore).
             if let sid = activeSessionId ?? resumeSessionId {
