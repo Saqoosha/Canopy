@@ -454,7 +454,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Capture user message text for fallback titles.
             if let userMsg = ioMsg["message"] as? [String: Any] {
                 if let content = userMsg["content"] as? [[String: Any]] {
-                    let extracted = content.compactMap { $0["text"] as? String }.joined()
+                    let extracted = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
                     if !extracted.isEmpty { lastUserMessageText = extracted }
                 } else if let text = userMsg["content"] as? String, !text.isEmpty {
                     lastUserMessageText = text
@@ -501,10 +501,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     // title request is in flight — the AI response (or its
                     // fallback) will set a better title shortly.
                     guard !titleRequestInFlight else { return }
-                    let truncated = title.count > 60
-                        ? String(title.prefix(57)) + "..."
-                        : title
-                    updateWindowTitle(truncated)
+                    updateWindowTitle(Self.truncatedTitle(title))
                 }
             }
         }
@@ -1032,9 +1029,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             self.titleRequestInFlight = false
             self.currentTitleRequestId = nil
             guard let fallback = self.lastUserMessageText, !fallback.isEmpty else { return }
-            let truncated = fallback.count > 60
-                ? String(fallback.prefix(57)) + "..."
-                : fallback
+            let truncated = Self.truncatedTitle(fallback)
             logger.info("Title fallback (AI generation timed out): \(truncated, privacy: .public)")
             self.updateWindowTitle(truncated)
             if let sid = self.activeSessionId ?? self.resumeSessionId {
@@ -1067,9 +1062,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     private func applyTitleFromResponse(_ response: [String: Any], requestId: String? = nil) {
         guard let title = response["title"] as? String, !title.isEmpty else { return }
-        let truncated = title.count > 60
-            ? String(title.prefix(57)) + "..."
-            : title
+        let truncated = Self.truncatedTitle(title)
         let respType = response["type"] as? String ?? ""
 
         if respType == "generate_session_title_response" {
@@ -1099,6 +1092,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     // MARK: - Window Title & Working State
+
+    private static func truncatedTitle(_ title: String, maxLength: Int = 60) -> String {
+        title.count > maxLength
+            ? String(title.prefix(maxLength - 3)) + "..."
+            : title
+    }
 
     private func updateWindowTitle(_ title: String) {
         sessionTitle = title
