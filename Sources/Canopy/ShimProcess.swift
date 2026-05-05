@@ -41,6 +41,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var userMessagesSinceLastTitle = 4
     /// Generate a fresh AI title every N user messages.
     private let titleRefreshInterval = 4
+    /// True after an AI-generated title (or fallback) has been applied.
+    /// Blocks raw webview title overwrites until the next title request cycle.
+    private var hasGeneratedTitle = false
     /// True while a `generate_session_title` request is awaiting a response.
     private var titleRequestInFlight = false
     /// Request ID of the current title generation, used to reject stale responses.
@@ -497,11 +500,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     }
                 }
                 if let title = request["title"] as? String, !title.isEmpty {
-                    // Don't overwrite with raw webview titles while an AI
-                    // title request is in flight — the AI response (or its
-                    // fallback) will set a better title shortly.
-                    guard !titleRequestInFlight else { return }
-                    updateWindowTitle(Self.truncatedTitle(title))
+                    // Once an AI title (or fallback) has been applied, block
+                    // raw webview titles — the extension keeps re-sending its
+                    // stale internal title and would otherwise overwrite.
+                    if !hasGeneratedTitle {
+                        updateWindowTitle(Self.truncatedTitle(title))
+                    }
                 }
             }
         }
@@ -1003,6 +1007,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return
         }
         titleRequestInFlight = true
+        hasGeneratedTitle = false
         userMessagesSinceLastTitle = 0
 
         let requestId = "canopy-title-\(UUID().uuidString.prefix(8))"
@@ -1028,6 +1033,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             guard let self, self.titleRequestInFlight else { return }
             self.titleRequestInFlight = false
             self.currentTitleRequestId = nil
+            self.hasGeneratedTitle = true
             guard let fallback = self.lastUserMessageText, !fallback.isEmpty else { return }
             let truncated = Self.truncatedTitle(fallback)
             logger.info("Title fallback (AI generation timed out): \(truncated, privacy: .public)")
@@ -1073,6 +1079,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.info("Title generated: \(title, privacy: .public)")
             titleRequestInFlight = false
             currentTitleRequestId = nil
+            hasGeneratedTitle = true
             updateWindowTitle(truncated)
             // Persist to our own store (like Sessylph's SessionTitleStore).
             if let sid = activeSessionId ?? resumeSessionId {
