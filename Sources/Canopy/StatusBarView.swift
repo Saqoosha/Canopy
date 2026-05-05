@@ -61,17 +61,18 @@ struct StatusBarView: View {
                 .help("Context: \(data.formatTokens(data.contextUsed)) / \(data.formatTokens(data.compactionWindow)) tokens\(data.didCompact ? " (compacted)" : "")")
             }
 
-            // 5hr rate limit (shared across all tabs)
-            if rateLimit.sessionResetDate != nil {
-                separator
-                rateLimitSegment(label: "5hr", pct: rateLimit.sessionPct, resetDate: rateLimit.sessionResetDate)
-            }
+            // 5hr + weekly rate limits — only shown for Anthropic models
+            if data.model.lowercased().contains("claude") {
+                if rateLimit.sessionResetDate != nil {
+                    separator
+                    rateLimitSegment(label: "5hr", pct: rateLimit.sessionPct, resetDate: rateLimit.sessionResetDate)
+                }
 
-            // Weekly rate limit (shared across all tabs)
-            let weeklyResetDate = rateLimit.effectiveWeeklyResetDate(for: data.model)
-            if weeklyResetDate != nil {
-                separator
-                rateLimitSegment(label: "Wk", pct: rateLimit.effectiveWeeklyPct(for: data.model), resetDate: weeklyResetDate)
+                let weeklyResetDate = rateLimit.effectiveWeeklyResetDate(for: data.model)
+                if weeklyResetDate != nil {
+                    separator
+                    rateLimitSegment(label: "Wk", pct: rateLimit.effectiveWeeklyPct(for: data.model), resetDate: weeklyResetDate)
+                }
             }
 
             // Message count

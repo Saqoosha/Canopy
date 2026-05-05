@@ -24,11 +24,37 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Escape a value for safe inclusion in a single-quoted shell string.
+# Turns internal single quotes into '\'' (end single-quote, escaped quote, resume).
+shell_quote() {
+    local s="${1//\'/\'\\\'\'}"
+    printf "'%s'" "$s"
+}
+
+# Forward custom API provider env vars to the remote machine.
+# ShimProcess sets these locally, but SSH doesn't forward them — the
+# remote claude would fall back to the default Anthropic API / Sonnet.
+REMOTE_ENV=""
+for var in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN \
+           ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+           ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL; do
+    eval "val=\${$var:-}"
+    if [ -n "$val" ]; then
+        REMOTE_ENV="$REMOTE_ENV $var=$(shell_quote "$val")"
+    fi
+done
+
+# Shell-quote every remaining CLI arg so args with spaces survive SSH.
+REMOTE_ARGS=""
+for arg in "$@"; do
+    REMOTE_ARGS="$REMOTE_ARGS $(shell_quote "$arg")"
+done
+
 # cd to the remote working directory before running claude.
 # The extension passes cwd via spawn options (useless over SSH),
 # so we use CANOPY_SSH_CWD env var set by ShimProcess.
 if [ -n "${CANOPY_SSH_CWD:-}" ]; then
-    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" "cd '$CANOPY_SSH_CWD' && claude $*"
+    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" "cd $(shell_quote "$CANOPY_SSH_CWD") && $REMOTE_ENV claude$REMOTE_ARGS"
 else
-    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" claude "$@"
+    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" "$REMOTE_ENV claude$REMOTE_ARGS"
 fi
