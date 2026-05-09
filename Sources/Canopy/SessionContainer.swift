@@ -92,6 +92,10 @@ private struct SpawningOverlay: View {
                 Text(project)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                // Keep the same line count as TeleportOverlay so the
+                // spinner doesn't jump during the transition.
+                Text(" ")
+                    .font(.callout)
             }
         }
     }

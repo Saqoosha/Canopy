@@ -13,10 +13,11 @@ struct Detail: View {
 
     @ViewBuilder
     var body: some View {
-        // No ZStack: render exactly one of launcher / session. Background
-        // color is provided by NavigationSplitView's detail column. With
-        // a ZStack here, WKWebView's NSView could end up alongside the
-        // launcher in the same NSHostingView and steal clicks on resize.
+        // No ZStack around the launcher/session swap: WKWebView's NSView
+        // could otherwise end up alongside the launcher in the same
+        // NSHostingView and steal clicks on resize. The teleport overlay
+        // sits in a separate `.overlay` so it never co-mounts with the
+        // WebView host.
         Group {
             if case .session(let id) = store.selection,
                let session = store.openSessions.first(where: { $0.id == id }) {
@@ -38,6 +39,13 @@ struct Detail: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay {
+            if let progress = store.teleporting {
+                TeleportOverlay(progress: progress)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: store.teleporting)
         .navigationTitle(windowTitle)
         .navigationSubtitle(windowSubtitle)
     }
@@ -58,6 +66,41 @@ struct Detail: View {
         store.activeSession?.project ?? ""
     }
 
+}
+
+/// Full-pane overlay shown while a cloud session is being teleported. The
+/// flow takes 2–10 s (shim spawn + JSONL download + optional `git checkout`)
+/// and the underlying selection doesn't change until it completes, so without
+/// this the user sees nothing happen after clicking the row.
+private struct TeleportOverlay: View {
+    let progress: SessionStore.TeleportProgress
+
+    var body: some View {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor).opacity(0.92)
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.large)
+                Text("Teleporting \(progress.title)")
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if !progress.project.isEmpty {
+                    Text(progress.project)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Text(progress.stage.label)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: progress.stage)
+            }
+            .padding(24)
+        }
+    }
 }
 
 /// Embeds the existing LauncherView. The Launcher still owns the new-session

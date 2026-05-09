@@ -185,6 +185,7 @@ struct Sidebar: View {
             row: row,
             isHovered: hoveredRowId == row.id,
             isActive: isActive(row),
+            isTeleporting: isTeleporting(row),
             onClose: { handleClose(row) }
         )
         .background(
@@ -228,6 +229,12 @@ struct Sidebar: View {
         case (.open(let s), .session(let id)): return s.id == id
         default: return false
         }
+    }
+
+    private func isTeleporting(_ row: SidebarRow) -> Bool {
+        guard let id = store.teleportingCloudId,
+              case .closedCloud(let s) = row else { return false }
+        return s.id == id
     }
 
 
@@ -333,6 +340,7 @@ private struct SidebarRowView: View {
     let row: SidebarRow
     let isHovered: Bool
     let isActive: Bool
+    let isTeleporting: Bool
     let onClose: () -> Void
 
     var body: some View {
@@ -374,7 +382,7 @@ private struct SidebarRowView: View {
 
     @ViewBuilder
     private var iconView: some View {
-        if isSpawning {
+        if isSpawning || isTeleporting {
             ProgressView()
                 .controlSize(.small)
                 .scaleEffect(0.7)
