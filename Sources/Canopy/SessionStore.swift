@@ -221,20 +221,58 @@ final class SessionStore {
     /// a toast. Cleared on successful teleport or when the user dismisses.
     var teleportError: String?
 
-    /// Cloud session id currently being teleported. Prevents the user
-    /// from kicking off a second teleport before the first finishes —
-    /// teleportError is a single slot and concurrent flows would race.
-    private(set) var teleportingCloudId: String?
+    /// Stages a teleport runs through. Used to drive the sidebar row
+    /// spinner and the detail-pane overlay so the user can tell which
+    /// part of the multi-second flow is currently running.
+    enum TeleportStage: Equatable {
+        case startingShim
+        case downloading
+        case checkingOutBranch(branch: String)
+
+        var label: String {
+            switch self {
+            case .startingShim: return "Connecting…"
+            case .downloading: return "Downloading session…"
+            case .checkingOutBranch(let b): return "Switching to \(b)…"
+            }
+        }
+    }
+
+    /// Snapshot of an in-flight teleport. Sidebar matches `cloudId` to
+    /// pick the row that should show the spinner; the detail pane reads
+    /// `stage`/`title`/`project` to render its overlay.
+    struct TeleportProgress: Equatable {
+        let cloudId: String
+        var stage: TeleportStage
+        let title: String
+        let project: String
+    }
+
+    /// In-flight teleport, or nil. Also acts as the "a teleport is
+    /// already running" guard — concurrent flows would race on
+    /// `teleportError`'s single slot.
+    private(set) var teleporting: TeleportProgress?
+
+    /// Back-compat accessor for callers that only need the id.
+    var teleportingCloudId: String? { teleporting?.cloudId }
 
     func dismissTeleportError() { teleportError = nil }
 
     private func openCloudAsync(_ session: RemoteSession, permissionMode: PermissionMode) async {
-        guard teleportingCloudId == nil else {
+        guard teleporting == nil else {
             logger.info("openCloudAsync: a teleport is already in progress, ignoring")
             return
         }
-        teleportingCloudId = session.id
-        defer { teleportingCloudId = nil }
+        let projectLabel = (session.repoOwner.map { "\($0)/\(session.repoName ?? "?")" })
+            ?? session.repoName
+            ?? ""
+        teleporting = TeleportProgress(
+            cloudId: session.id,
+            stage: .startingShim,
+            title: session.summary,
+            project: projectLabel
+        )
+        defer { teleporting = nil }
         teleportError = nil
         // 1. Resolve target cwd: prefer a unique matching recent clone; if
         //    zero matches or ambiguous, prompt the user with NSOpenPanel.
@@ -264,6 +302,7 @@ final class SessionStore {
         }
         defer { bridge.shutdown() }
 
+        teleporting?.stage = .downloading
         let result: TeleportResult
         do {
             result = try await bridge.teleportSession(id: session.id)
@@ -276,6 +315,7 @@ final class SessionStore {
         // name (skip "HEAD" / nil — those are detached / no-branch).
         if let branch = result.branch,
            !branch.isEmpty, branch != "HEAD" {
+            teleporting?.stage = .checkingOutBranch(branch: branch)
             do {
                 let ok = try await bridge.checkoutBranch(branch)
                 if !ok {
