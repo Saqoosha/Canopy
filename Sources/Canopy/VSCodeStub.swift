@@ -21,6 +21,8 @@ enum VSCodeStub {
         document.addEventListener('mousedown', function(e) {
             if (e.metaKey) {
                 lastMetaClickAt = Date.now();
+            } else {
+                lastMetaClickAt = 0;
             }
         }, true);
         window.__canopyConsumeMetaClick = function() {
@@ -41,7 +43,10 @@ enum VSCodeStub {
                         && window.__canopyConsumeMetaClick()) {
                         msg.request.openExternal = true;
                     }
-                } catch (e) { /* never block postMessage */ }
+                } catch (e) {
+                    console.error('[Canopy] Cmd-click tagging failed:', e);
+                    // continue to postMessage — never block it
+                }
                 window.webkit.messageHandlers.vscodeHost.postMessage(msg);
             },
             getState: function() { return null; },

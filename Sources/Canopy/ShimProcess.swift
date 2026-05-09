@@ -771,8 +771,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ])
     }
 
-    /// Handle open_file request from webview — show file in ContentViewer
+    /// Handle open_file request from webview. By default shows the file in ContentViewer
     /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
+    /// When `openExternal` is true (set by Cmd-click), opens in the macOS default app.
     private func handleOpenFile(_ request: [String: Any], requestId: String?) {
         let location = request["location"] as? [String: Any]
         let openExternal = request["openExternal"] as? Bool == true
