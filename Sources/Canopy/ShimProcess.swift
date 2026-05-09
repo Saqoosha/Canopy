@@ -775,6 +775,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
     private func handleOpenFile(_ request: [String: Any], requestId: String?) {
         let location = request["location"] as? [String: Any]
+        let openExternal = request["openExternal"] as? Bool == true
 
         // Extract file path: CC extension sends filePath at top level of the request,
         // location sub-dict may contain uri/line/col for positioning.
@@ -810,16 +811,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return
             }
             if FileManager.default.fileExists(atPath: resolved.path) {
-                do {
-                    let content = try String(contentsOf: resolved, encoding: .utf8)
-                    let startLine = location?["startLine"] as? Int
-                    let endLine = location?["endLine"] as? Int
-                    logger.info("handleOpenFile: showing in ContentViewer: \(resolved.lastPathComponent, privacy: .public) line:\(startLine ?? 0, privacy: .public)-\(endLine ?? 0, privacy: .public)")
-                    ContentViewer.show(content: content, title: resolved.lastPathComponent, in: webView, startLine: startLine, endLine: endLine)
-                } catch {
-                    logger.info("handleOpenFile: not UTF-8 text (\(error.localizedDescription, privacy: .public)), opening externally")
+                if openExternal {
+                    logger.info("handleOpenFile: opening externally (Cmd-click): \(resolved.path, privacy: .public)")
                     if !NSWorkspace.shared.open(resolved) {
                         logger.warning("handleOpenFile: NSWorkspace failed to open: \(resolved.path, privacy: .public)")
+                    }
+                } else {
+                    do {
+                        let content = try String(contentsOf: resolved, encoding: .utf8)
+                        let startLine = location?["startLine"] as? Int
+                        let endLine = location?["endLine"] as? Int
+                        logger.info("handleOpenFile: showing in ContentViewer: \(resolved.lastPathComponent, privacy: .public) line:\(startLine ?? 0, privacy: .public)-\(endLine ?? 0, privacy: .public)")
+                        ContentViewer.show(content: content, title: resolved.lastPathComponent, in: webView, startLine: startLine, endLine: endLine)
+                    } catch {
+                        logger.info("handleOpenFile: not UTF-8 text (\(error.localizedDescription, privacy: .public)), opening externally")
+                        if !NSWorkspace.shared.open(resolved) {
+                            logger.warning("handleOpenFile: NSWorkspace failed to open: \(resolved.path, privacy: .public)")
+                        }
                     }
                 }
             } else {
