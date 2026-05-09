@@ -40,12 +40,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Blocks raw webview title overwrites; the extension keeps re-sending
     /// stale internal titles unless we explicitly replace them.
     private var hasGeneratedTitle = false
+    /// True when the current title should be regenerated on the next prompt.
+    /// Set on session resume (stored title may not reflect new conversation)
+    /// and when the 30s fallback fires. Cleared once an AI title arrives.
+    private var titleIsFallback = false
     /// True while a `generate_session_title` request is awaiting a response.
     private var titleRequestInFlight = false
     /// Title generation may queue behind the main turn and MCP startup.
     private let titleFallbackDelay: TimeInterval = 30.0
     /// Request ID of the current title generation, used to reject stale responses.
     private var currentTitleRequestId: String?
+    /// Sliding window of recent user prompts (max 5), used as context for title generation.
+    private var promptHistory: [String] = []
     /// Most recent user message text, used as fallback when AI generation doesn't respond.
     private var lastUserMessageText: String?
     /// Session ID from webview's update_session_state, used to persist generated titles.
@@ -157,6 +163,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             self.sessionTitle = truncated
             self.generatedSessionTitle = truncated
             self.hasGeneratedTitle = true
+            // Allow one regeneration on the first new prompt so the title
+            // can incorporate the resumed conversation direction.
+            self.titleIsFallback = true
         }
         super.init()
         Self.instances.add(self)
@@ -479,6 +488,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Generate a fresh title for every user prompt, but only after the
             // prompt itself has reached the extension/CLI.
             if let userText {
+                promptHistory.append(userText)
+                if promptHistory.count > 5 { promptHistory.removeFirst() }
                 lastUserMessageText = userText
                 titleRequestDescriptionAfterForward = userText
             }
@@ -505,7 +516,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                let description = request["description"] as? String,
                !description.isEmpty
             {
-                request["description"] = Self.titleGenerationDescription(for: description)
+                request["description"] = titleGenerationDescription(for: description)
                 request["persist"] = false
             }
 
@@ -1056,11 +1067,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.warning("requestSessionTitle skipped: channelId still nil")
             return
         }
+        // Don't regenerate if we already have a good AI title (not a fallback).
+        if hasGeneratedTitle, !titleIsFallback {
+            logger.debug("requestSessionTitle skipped: already have AI-generated title")
+            return
+        }
         titleRequestInFlight = true
 
         let requestId = "canopy-title-\(UUID().uuidString.prefix(8))"
         currentTitleRequestId = requestId
-        let fallbackText = description
+        let fallbackText = lastUserMessageText ?? description
         sendToShim([
             "type": "webview_message",
             "message": [
@@ -1069,7 +1085,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 "request": [
                     "type": "generate_session_title",
                     "channelId": channelId,
-                    "description": Self.titleGenerationDescription(for: description),
+                    "description": titleGenerationDescription(for: description),
                     "persist": false,
                 ] as [String: Any],
             ] as [String: Any],
@@ -1085,6 +1101,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                   self.currentTitleRequestId == requestId
             else { return }
             self.hasGeneratedTitle = true
+            self.titleIsFallback = true
             let truncated = Self.truncatedTitle(fallbackText)
             self.generatedSessionTitle = truncated
             logger.info("Title fallback (AI generation still pending): \(truncated, privacy: .public)")
@@ -1117,8 +1134,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    private static func titleGenerationDescription(for description: String) -> String {
-        "Generate a concise session title (max 40 chars, plain facts, no emoji, no roleplay): \(description)"
+    private func titleGenerationDescription(for latest: String) -> String {
+        let base = "Generate a concise session title (max 40 chars, plain facts, no emoji, no roleplay) that captures the overall conversation."
+        let prompts = promptHistory.isEmpty ? [latest] : promptHistory
+        if prompts.count <= 1 {
+            return "\(base) User said: \(latest)"
+        }
+        let list = prompts.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+        return "\(base)\nRecent messages:\n\(list)"
     }
 
     private static func isCanopyOwnedResponse(_ message: [String: Any]) -> Bool {
@@ -1161,6 +1184,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             titleRequestInFlight = false
             currentTitleRequestId = nil
             hasGeneratedTitle = true
+            titleIsFallback = false
             generatedSessionTitle = truncated
             updateWindowTitle(truncated)
             // Persist to our own store (like Sessylph's SessionTitleStore).
