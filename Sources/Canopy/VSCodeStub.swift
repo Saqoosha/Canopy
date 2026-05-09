@@ -12,10 +12,41 @@ enum VSCodeStub {
     window.IS_FULL_EDITOR = true;
     window.IS_SESSION_LIST_ONLY = false;
 
+    // Track Cmd-click so we can route file-link opens to the macOS default app.
+    // Capture phase runs before the CC extension's own click handlers, and we
+    // remember the modifier state of the most recent click. The postMessage
+    // wrapper below tags `open_file` requests when that click was meta+recent.
+    (function() {
+        var lastMetaClickAt = 0;
+        document.addEventListener('mousedown', function(e) {
+            if (e.metaKey) {
+                lastMetaClickAt = Date.now();
+            } else {
+                lastMetaClickAt = 0;
+            }
+        }, true);
+        window.__canopyConsumeMetaClick = function() {
+            // 1.5s window covers IPC roundtrip without leaking into later clicks.
+            if (Date.now() - lastMetaClickAt < 1500) {
+                lastMetaClickAt = 0;
+                return true;
+            }
+            return false;
+        };
+    })();
 
     window.acquireVsCodeApi = function() {
         return {
             postMessage: function(msg) {
+                try {
+                    if (msg && msg.request && msg.request.type === 'open_file'
+                        && window.__canopyConsumeMetaClick()) {
+                        msg.request.openExternal = true;
+                    }
+                } catch (e) {
+                    console.error('[Canopy] Cmd-click tagging failed:', e);
+                    // continue to postMessage — never block it
+                }
                 window.webkit.messageHandlers.vscodeHost.postMessage(msg);
             },
             getState: function() { return null; },
