@@ -333,6 +333,11 @@ final class SessionStore {
             return
         }
 
+        // Clear the teleport overlay before we mount SessionContainer.
+        // SessionContainer shows its own SpawningOverlay (status == .spawning)
+        // and we don't want two progress screens stacked on top of each other.
+        teleporting = nil
+
         // Promote the cloud row to an OpenSession. The origin remembers the
         // cloud id so the sidebar can dedupe the cloud row out of view.
         let title = result.summary ?? session.summary
