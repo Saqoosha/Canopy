@@ -485,8 +485,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
             }
 
-            // Generate a fresh title for every user prompt, but only after the
-            // prompt itself has reached the extension/CLI.
+            // Generate a title for the first user prompt (or first after a
+            // fallback). Once an AI title is acquired, further prompts skip
+            // generation unless the current title is only a fallback.
             if let userText {
                 promptHistory.append(userText)
                 if promptHistory.count > 5 { promptHistory.removeFirst() }
@@ -1096,15 +1097,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // late AI title can still replace it; the next user prompt will
         // install a newer request id and naturally reject this response.
         DispatchQueue.main.asyncAfter(deadline: .now() + titleFallbackDelay) { [weak self] in
-            guard let self,
-                  self.titleRequestInFlight,
-                  self.currentTitleRequestId == requestId
-            else { return }
+            guard let self else {
+                logger.debug("Title fallback skipped: ShimProcess deallocated")
+                return
+            }
+            guard self.titleRequestInFlight else {
+                logger.debug("Title fallback skipped: titleRequestInFlight already false")
+                return
+            }
+            guard self.currentTitleRequestId == requestId else {
+                logger.debug("Title fallback skipped: requestId mismatch (current=\(self.currentTitleRequestId ?? "nil"), expected=\(requestId))")
+                return
+            }
             self.hasGeneratedTitle = true
             self.titleIsFallback = true
+            self.titleRequestInFlight = false
             let truncated = Self.truncatedTitle(fallbackText)
             self.generatedSessionTitle = truncated
-            logger.info("Title fallback (AI generation still pending): \(truncated, privacy: .public)")
+            logger.info("Title fallback (no AI response after \(self.titleFallbackDelay)s): \(truncated, privacy: .public)")
             self.updateWindowTitle(truncated)
             if let sid = self.activeSessionId ?? self.resumeSessionId {
                 SessionTitleStore.save(title: truncated, forSessionId: sid)
@@ -1171,11 +1181,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         if respType == "generate_session_title_response" {
             // Reject stale responses that don't match the newest request.
-            // Fallback titles keep the current request alive, so late AI
-            // responses can replace them as long as no newer prompt has
-            // started another title request.
+            // Late AI responses can replace a fallback title as long as no
+            // newer prompt has started another title request.
             guard let requestId,
-                  titleRequestInFlight,
                   requestId == currentTitleRequestId
             else {
                 return
