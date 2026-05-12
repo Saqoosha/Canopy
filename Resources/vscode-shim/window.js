@@ -248,6 +248,9 @@ function createWindow() {
       return {
         all: [],
         activeTabGroup: { tabs: [], isActive: true, viewColumn: 1 },
+        onDidChangeTabs: noopEvent,
+        onDidChangeTabGroups: noopEvent,
+        close: async () => false,
       };
     },
 
