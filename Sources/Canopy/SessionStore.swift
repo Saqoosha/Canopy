@@ -95,6 +95,17 @@ final class SessionStore {
         return filter.apply(to: sorted)
     }
 
+    /// Flattened display order matching what the sidebar List actually renders
+    /// (open rows first, then closed rows grouped by the active grouping mode).
+    /// Used by Cmd+1..9 shortcuts so the index matches visual position.
+    var displayRows: [SidebarRow] {
+        let rows = visibleRows
+        let openRows = rows.filter(\.isOpen)
+        let closedRows = rows.filter { !$0.isOpen }
+        let closedSections = SidebarGrouping.sections(from: closedRows, mode: groupingMode)
+        return openRows + closedSections.flatMap(\.rows)
+    }
+
     /// True when the active selection points at an open session.
     var activeSession: OpenSession? {
         if case .session(let id) = selection {

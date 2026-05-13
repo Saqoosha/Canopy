@@ -568,7 +568,12 @@ private struct ListScrollToTop: NSViewRepresentable {
 
 // MARK: - Sidebar grouping
 
-/// Ordered sections produced by a grouping mode. Use `sections(from:mode:)`.
+/// Ordered sections produced by a grouping mode. Each mode guarantees a
+/// stable, deterministic order:
+///   - .date: Today → Yesterday → This Week → This Month → Older
+///   - .project: most-recent-first (by max lastModified per project)
+///   - .env: Local → Cloud
+/// Use `sections(from:mode:)`.
 struct SidebarGrouping {
     let title: String
     let rows: [SidebarRow]
@@ -602,7 +607,8 @@ struct SidebarGrouping {
 
 // MARK: - Date grouping
 
-/// Groups closed-sidebar rows into the same buckets Claude Desktop uses.
+/// Groups closed-sidebar rows into the same buckets Claude Desktop uses
+/// (as of 2026-05).
 enum DateGroup: String, Comparable, CaseIterable {
     case today = "Today"
     case yesterday = "Yesterday"
@@ -624,9 +630,8 @@ enum DateGroup: String, Comparable, CaseIterable {
         lhs.rank < rhs.rank
     }
 
-    static func classify(_ date: Date) -> DateGroup {
+    static func classify(_ date: Date, now: Date = Date()) -> DateGroup {
         let calendar = Calendar.current
-        let now = Date()
         if calendar.isDateInToday(date) { return .today }
         if calendar.isDateInYesterday(date) { return .yesterday }
         if calendar.isDate(date, equalTo: now, toGranularity: .weekOfYear) { return .thisWeek }
