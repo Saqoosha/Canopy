@@ -51,6 +51,11 @@ final class SessionStore {
         didSet { SessionStorePersistence.saveFilter(filter) }
     }
 
+    /// How closed sidebar rows are grouped. Persists across launches.
+    var groupingMode: GroupingMode = SessionStorePersistence.loadGroupingMode() {
+        didSet { SessionStorePersistence.saveGroupingMode(groupingMode) }
+    }
+
     /// Resume id of the session that was active at last quit. The sidebar
     /// uses this to highlight that row on cold launch (the user can click to
     /// reopen). Phase A doesn't auto-spawn the shim — restoration is one
@@ -88,6 +93,17 @@ final class SessionStore {
         let deduped = SidebarRow.deduped(allRows, teleportedFromMap: teleportedFromMap)
         let sorted = SidebarRow.sorted(deduped)
         return filter.apply(to: sorted)
+    }
+
+    /// Flattened display order matching what the sidebar List actually renders
+    /// (open rows first, then closed rows grouped by the active grouping mode).
+    /// Used by Cmd+1..9 shortcuts so the index matches visual position.
+    var displayRows: [SidebarRow] {
+        let rows = visibleRows
+        let openRows = rows.filter(\.isOpen)
+        let closedRows = rows.filter { !$0.isOpen }
+        let closedSections = SidebarGrouping.sections(from: closedRows, mode: groupingMode)
+        return openRows + closedSections.flatMap(\.rows)
     }
 
     /// True when the active selection points at an open session.

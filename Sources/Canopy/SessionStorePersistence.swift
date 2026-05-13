@@ -17,6 +17,7 @@ enum SessionStorePersistence {
     private static let filterKey = "canopy.sidebarFilter.v1"
     private static let lastActiveResumeKey = "canopy.lastActiveResumeId.v1"
     private static let hiddenIdsKey = "canopy.hiddenSessionIds.v1"
+    private static let groupingModeKey = "canopy.groupingMode.v1"
 
     // MARK: - Hidden sessions
 
@@ -69,5 +70,19 @@ enum SessionStorePersistence {
         } else {
             UserDefaults.standard.removeObject(forKey: lastActiveResumeKey)
         }
+    }
+
+    // MARK: - Grouping mode
+
+    static func loadGroupingMode() -> GroupingMode {
+        guard let raw = UserDefaults.standard.string(forKey: groupingModeKey),
+              let mode = GroupingMode(rawValue: raw) else {
+            return .date
+        }
+        return mode
+    }
+
+    static func saveGroupingMode(_ mode: GroupingMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: groupingModeKey)
     }
 }

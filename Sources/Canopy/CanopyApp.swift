@@ -92,7 +92,7 @@ struct CanopyApp: App {
     // MARK: - Sidebar shell helpers
 
     private func jumpToRow(at index: Int) {
-        let rows = sidebarStore.visibleRows
+        let rows = sidebarStore.displayRows
         guard index < rows.count else { return }
         let row = rows[index]
         switch row {
