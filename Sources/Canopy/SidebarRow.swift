@@ -1,5 +1,12 @@
 import Foundation
 
+/// How closed sidebar rows are grouped into sections.
+enum GroupingMode: String, CaseIterable {
+    case date = "Date"
+    case project = "Project"
+    case env = "Env"
+}
+
 /// One row in the sidebar list. Three flavours, all unified by Identifiable +
 /// Hashable so `List(selection:)` can target any of them.
 ///

@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Sidebar list: one flat ForEach over `store.visibleRows`, sorted with open
-/// rows first (live sessions, sortable by lastActiveAt) and closed rows after
-/// (local + cloud mixed by lastModified). No section headers; rows encode
-/// state via icon and tint.
+/// Sidebar list with switchable grouping mode (segmented picker):
+///   - Date: Today / Yesterday / This Week / This Month / Older
+///   - Project: one section per project, most-recent-first
+///   - Env: Local / Cloud
+/// Open sessions always stay in their own "Open" block regardless of mode.
+/// Grouping mode persists across launches via UserDefaults.
 ///
 /// Click semantics:
 ///   - .open       → select that session
@@ -18,12 +20,15 @@ struct Sidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Top: + New session + filter gear
-            HStack(spacing: 4) {
-                newSessionButton
-                    .layoutPriority(1)
-                Spacer(minLength: 0)
-                filterButton
+            // Top: + New session + grouping mode + filter gear
+            VStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    newSessionButton
+                        .layoutPriority(1)
+                    Spacer(minLength: 0)
+                    filterButton
+                }
+                groupingModePicker
             }
             .padding(.horizontal, 8)
             .padding(.top, 8)
@@ -38,6 +43,7 @@ struct Sidebar: View {
                 let rows = store.visibleRows
                 let openRows = rows.filter(\.isOpen)
                 let closedRows = rows.filter { !$0.isOpen }
+                let closedSections = SidebarGrouping.sections(from: closedRows, mode: store.groupingMode)
 
                 if !openRows.isEmpty {
                     Section("Open") {
@@ -46,9 +52,9 @@ struct Sidebar: View {
                         }
                     }
                 }
-                if !closedRows.isEmpty {
-                    Section("Recents") {
-                        ForEach(closedRows, id: \.id) { row in
+                ForEach(closedSections, id: \.title) { section in
+                    Section(section.title) {
+                        ForEach(section.rows, id: \.id) { row in
                             rowView(row)
                         }
                     }
@@ -139,6 +145,17 @@ struct Sidebar: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 24)
+    }
+
+    private var groupingModePicker: some View {
+        Picker("Group by", selection: $store.groupingMode) {
+            ForEach(GroupingMode.allCases, id: \.self) { mode in
+                Text(mode.rawValue).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .controlSize(.small)
+        .labelsHidden()
     }
 
     private var filterButton: some View {
@@ -546,6 +563,82 @@ private struct ListScrollToTop: NSViewRepresentable {
             if let s = findScrollViewDescendant(of: sub) { return s }
         }
         return nil
+    }
+}
+
+// MARK: - Sidebar grouping
+
+/// Ordered sections produced by a grouping mode. Use `sections(from:mode:)`.
+struct SidebarGrouping {
+    let title: String
+    let rows: [SidebarRow]
+
+    static func sections(from rows: [SidebarRow], mode: GroupingMode) -> [SidebarGrouping] {
+        guard !rows.isEmpty else { return [] }
+        switch mode {
+        case .date:
+            let groups = DateGroup.grouped(rows)
+            return DateGroup.allCases.compactMap { group in
+                groups[group].map { SidebarGrouping(title: group.rawValue, rows: $0) }
+            }
+        case .project:
+            let grouped = Dictionary(grouping: rows) { $0.project }
+            return grouped.map { SidebarGrouping(title: $0.key, rows: $0.value) }
+                .sorted { a, b in
+                    let aMax = a.rows.map(\.lastModified).max() ?? .distantPast
+                    let bMax = b.rows.map(\.lastModified).max() ?? .distantPast
+                    return aMax > bMax
+                }
+        case .env:
+            let locals = rows.filter { $0.origin == .local }
+            let clouds = rows.filter { $0.origin == .cloud }
+            var result: [SidebarGrouping] = []
+            if !locals.isEmpty { result.append(SidebarGrouping(title: "Local", rows: locals)) }
+            if !clouds.isEmpty { result.append(SidebarGrouping(title: "Cloud", rows: clouds)) }
+            return result
+        }
+    }
+}
+
+// MARK: - Date grouping
+
+/// Groups closed-sidebar rows into the same buckets Claude Desktop uses.
+enum DateGroup: String, Comparable, CaseIterable {
+    case today = "Today"
+    case yesterday = "Yesterday"
+    case thisWeek = "This Week"
+    case thisMonth = "This Month"
+    case older = "Older"
+
+    private var rank: Int {
+        switch self {
+        case .today: 0
+        case .yesterday: 1
+        case .thisWeek: 2
+        case .thisMonth: 3
+        case .older: 4
+        }
+    }
+
+    static func < (lhs: DateGroup, rhs: DateGroup) -> Bool {
+        lhs.rank < rhs.rank
+    }
+
+    static func classify(_ date: Date) -> DateGroup {
+        let calendar = Calendar.current
+        let now = Date()
+        if calendar.isDateInToday(date) { return .today }
+        if calendar.isDateInYesterday(date) { return .yesterday }
+        if calendar.isDate(date, equalTo: now, toGranularity: .weekOfYear) { return .thisWeek }
+        if calendar.isDate(date, equalTo: now, toGranularity: .month) { return .thisMonth }
+        return .older
+    }
+
+    /// Group rows by date, keyed by DateGroup. Returns an empty dictionary
+    /// when given no rows (not an empty `.older` group).
+    static func grouped(_ rows: [SidebarRow]) -> [DateGroup: [SidebarRow]] {
+        guard !rows.isEmpty else { return [:] }
+        return Dictionary(grouping: rows) { classify($0.lastModified) }
     }
 }
 

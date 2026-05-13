@@ -51,6 +51,11 @@ final class SessionStore {
         didSet { SessionStorePersistence.saveFilter(filter) }
     }
 
+    /// How closed sidebar rows are grouped. Persists across launches.
+    var groupingMode: GroupingMode = SessionStorePersistence.loadGroupingMode() {
+        didSet { SessionStorePersistence.saveGroupingMode(groupingMode) }
+    }
+
     /// Resume id of the session that was active at last quit. The sidebar
     /// uses this to highlight that row on cold launch (the user can click to
     /// reopen). Phase A doesn't auto-spawn the shim — restoration is one
