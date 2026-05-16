@@ -58,7 +58,7 @@ struct StatusBarView: View {
                             .foregroundStyle(.blue)
                     }
                 }
-                .help("Context: \(data.formatTokens(data.contextUsed)) / \(data.formatTokens(data.compactionWindow)) tokens\(data.didCompact ? " (compacted)" : "")")
+                .help(contextTooltip())
             }
 
             // 5hr + weekly rate limits — only shown for Anthropic models
@@ -84,7 +84,7 @@ struct StatusBarView: View {
                     Text("\(data.messageCount)")
                 }
                 .foregroundStyle(.tertiary)
-                .help("Messages: \(data.messageCount)")
+                .help("Messages in session: \(Self.numberFormatter.string(from: NSNumber(value: data.messageCount)) ?? "\(data.messageCount)")")
             }
 
             Spacer()
@@ -139,6 +139,7 @@ struct StatusBarView: View {
 
     private func rateLimitSegment(label: String, pct: Int, resetDate: Date?) -> some View {
         let reset = SharedRateLimitData.formatResetTime(resetDate)
+        let absoluteReset = SharedRateLimitData.formatAbsoluteResetTime(resetDate)
         return HStack(spacing: 5) {
             Text(label)
                 .foregroundStyle(.tertiary)
@@ -147,14 +148,48 @@ struct StatusBarView: View {
                 .foregroundStyle(pctColor(pct))
             if !reset.isEmpty {
                 Text(reset)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.quaternary)
+                    .font(.system(size: 10, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
         }
-        .help("\(label) usage: \(pct)%\(reset.isEmpty ? "" : " — resets in \(reset)")")
+        .help(rateLimitTooltip(label: label, pct: pct, reset: reset, absoluteReset: absoluteReset))
+    }
+
+    private func rateLimitTooltip(label: String, pct: Int, reset: String, absoluteReset: String) -> String {
+        let fullLabel = label == "5hr" ? "5-hour session" : (label == "Wk" ? "Weekly" : label)
+        var lines = ["\(fullLabel) usage: \(pct)%"]
+        if !absoluteReset.isEmpty {
+            if !reset.isEmpty {
+                lines.append("Resets \(absoluteReset) (in \(reset))")
+            } else {
+                lines.append("Resets \(absoluteReset)")
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Helpers
+
+    private static let numberFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        return f
+    }()
+
+    private func contextTooltip() -> String {
+        let used = Self.numberFormatter.string(from: NSNumber(value: data.contextUsed)) ?? "\(data.contextUsed)"
+        let window = Self.numberFormatter.string(from: NSNumber(value: data.compactionWindow)) ?? "\(data.compactionWindow)"
+        let maxTokens = Self.numberFormatter.string(from: NSNumber(value: data.contextMax)) ?? "\(data.contextMax)"
+        var lines = [
+            "Context: \(used) / \(window) tokens (\(data.contextPct)%)",
+            "Maximum window: \(maxTokens) tokens",
+        ]
+        if data.didCompact {
+            lines.append("Recently compacted")
+        }
+        return lines.joined(separator: "\n")
+    }
 
     private func pctColor(_ pct: Int) -> Color {
         if pct >= 80 { return .red }

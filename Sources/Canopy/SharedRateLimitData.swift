@@ -82,6 +82,17 @@ final class SharedRateLimitData {
         return "\(hours / 24)d"
     }
 
+    /// Format reset Date as absolute date+time, e.g. "Today at 6:09 PM" or "May 20 at 12:00 AM".
+    /// MainActor-isolated (inherits from class) — DateFormatter is reused per call by SwiftUI body redraws.
+    static func formatAbsoluteResetTime(_ date: Date?) -> String {
+        guard let date else { return "" }
+        let formatter = DateFormatter()
+        formatter.doesRelativeDateFormatting = true
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
     // MARK: - Parsing helpers
 
     private static func parseUtilization(_ value: Any) -> Int {
