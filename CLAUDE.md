@@ -88,7 +88,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `SessionTitleStore.swift` — Persists per-session AI-generated titles in UserDefaults so closed rows keep their label
 - `SettingsView.swift` — Preferences window content: bypass-permissions opt-in toggle, "Default for Recents" permission Picker, "Use Ctrl+Enter to Send" toggle, "Respect .gitignore in File Search" toggle, saved SSH hosts list with delete buttons
 - `SharedRateLimitData.swift` — Cross-session rate-limit observable; the shim broadcasts limit events here and the status bar reads from it
-- `_SidebarLogicProbe.swift` — DEBUG-only probe (`CANOPY_RUN_LOGIC_PROBE=1`): 11 unit tests for sort / dedup / filter / isActive
+- `_SidebarLogicProbe.swift` — DEBUG-only probe (`CANOPY_RUN_LOGIC_PROBE=1`): 15 unit tests for sort / dedup / filter / scheduled-task detection
 - `_ProbeWebViewRetention.swift` — DEBUG-only probe kept as historical reference: validates the early ZStack/opacity-based retention pattern that was superseded by the in-place subview swap shipped in `WebViewContainer`
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
 

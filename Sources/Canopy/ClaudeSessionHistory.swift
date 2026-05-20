@@ -414,7 +414,9 @@ enum ClaudeSessionHistory {
                 }
             }
 
-            if cwd != nil, aiTitle != nil || firstUserMessage != nil { break }
+            // Do not break early on cwd/title alone — scheduled-task enqueue may
+            // appear after the first user line in some JSONL orderings.
+            if isBackgroundScheduled { break }
         }
 
         let title = aiTitle ?? firstUserMessage ?? "Untitled"

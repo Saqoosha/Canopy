@@ -215,11 +215,16 @@ enum SidebarLogicProbe {
         let enqueueOtherJSONL = """
         {"type":"queue-operation","operation":"enqueue","content":"/ship-it"}
         """
+        let scheduledAfterUserJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe"}
+        {"type":"queue-operation","operation":"enqueue","content":"<scheduled-task name=\\"late\\">run</scheduled-task>"}
+        """
         let scheduledPath = writeProbeJSONL(scheduledJSONL)
         let normalPath = writeProbeJSONL(normalJSONL)
         let enqueueOtherPath = writeProbeJSONL(enqueueOtherJSONL)
+        let scheduledLatePath = writeProbeJSONL(scheduledAfterUserJSONL)
         defer {
-            for path in [scheduledPath, normalPath, enqueueOtherPath] {
+            for path in [scheduledPath, normalPath, enqueueOtherPath, scheduledLatePath] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
         }
@@ -229,6 +234,8 @@ enum SidebarLogicProbe {
                normalPath.map { !ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
         record("scheduled: other enqueue not flagged",
                enqueueOtherPath.map { !ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
+        record("scheduled: enqueue after first user line",
+               scheduledLatePath.map { ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
