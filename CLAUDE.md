@@ -187,6 +187,7 @@ To update theme CSS:
 - Session resume: `--resume SESSION_ID` flag passed to CLI
 - History replay: reads JSONL, walks parentUuid chain from leaf, sends via sync `dispatchEvent` (not async `postMessage`) for instant single-render display
 - Path encoding: `encodePath` replaces `/` and `.` with `-` (matching CLI behavior)
+- Background scheduled-task JSONLs (Claude Code `queue-operation` enqueue with `<scheduled-task` in `content`) are excluded from sidebar recents and launcher session lists
 - `loadAllSessions` reads `cwd` from JSONL metadata (avoids lossy path decoding)
 - PermissionMode: type-safe enum (default, acceptEdits, auto, plan, dontAsk, bypassPermissions)
 

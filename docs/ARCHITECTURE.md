@@ -125,7 +125,7 @@ Reads Claude Code session data from `~/.claude/projects/`:
 - `loadSessions(for:)` — lists JSONL files in a project folder, extracts title (first user message, up to 8KB) and modification date
 - `loadAllSessions()` — scans all project folders, reads `cwd` from JSONL metadata to get real paths (avoids lossy path decoding)
 - `extractCwd` — reads first 4KB of a JSONL file to find the `cwd` field
-- Filters out subagent files (`agent-*` prefix)
+- Filters out subagent files (`agent-*` prefix) and background scheduled-task sessions (`queue-operation` enqueue whose `content` contains `<scheduled-task`)
 
 ### RecentDirectories.swift
 

@@ -183,6 +183,7 @@ enum ClaudeSessionHistory {
         var entries: [SessionEntry] = []
         for candidate in topCandidates {
             let metadata = extractMetadata(fromPath: candidate.path)
+            guard !metadata.isBackgroundScheduled else { continue }
             let projectPath = metadata.cwd ?? decodePath(candidate.projectEncoded)
             guard fm.fileExists(atPath: projectPath) else { continue }
             let projectDirectory = URL(fileURLWithPath: projectPath)
@@ -292,8 +293,11 @@ enum ClaudeSessionHistory {
                 if sessionId.hasPrefix("agent-") { continue }
                 guard UUID(uuidString: sessionId) != nil else { continue }
 
+                let metadata = extractMetadata(fromPath: file.path)
+                guard !metadata.isBackgroundScheduled else { continue }
+
                 let title = SessionTitleStore.title(forSessionId: sessionId)
-                    ?? extractTitle(from: file)
+                    ?? metadata.title
                 let mtime: Date
                 do {
                     let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
@@ -346,17 +350,18 @@ enum ClaudeSessionHistory {
         return count
     }
 
-    /// Extract session title: prefer `ai-title` entry, fall back to first user message.
-    private static func extractTitle(from file: URL) -> String {
-        extractMetadata(fromPath: file.path).title
+    /// True when the JSONL was created by Claude Code's scheduled-task runner
+    /// (`queue-operation` / `enqueue` whose `content` contains `<scheduled-task`).
+    static func isBackgroundScheduledSession(atPath path: String) -> Bool {
+        extractMetadata(fromPath: path).isBackgroundScheduled
     }
 
     /// Read up to 128KB so large base64 image attachments don't push `ai-title`
     /// past our window. Returns the cwd too so session discovery can skip
     /// decoding the folder name.
-    private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?) {
+    private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
-            return ("Untitled", nil)
+            return ("Untitled", nil, false)
         }
         defer { try? handle.close() }
 
@@ -369,6 +374,7 @@ enum ClaudeSessionHistory {
         var aiTitle: String?
         var firstUserMessage: String?
         var cwd: String?
+        var isBackgroundScheduled = false
 
         for line in text.components(separatedBy: "\n") {
             guard !line.isEmpty,
@@ -381,6 +387,15 @@ enum ClaudeSessionHistory {
             }
 
             guard let type = json["type"] as? String else { continue }
+
+            if !isBackgroundScheduled,
+               type == "queue-operation",
+               json["operation"] as? String == "enqueue",
+               let content = json["content"] as? String,
+               content.contains("<scheduled-task")
+            {
+                isBackgroundScheduled = true
+            }
 
             if aiTitle == nil, type == "ai-title",
                let value = json["aiTitle"] as? String, !value.isEmpty
@@ -403,6 +418,6 @@ enum ClaudeSessionHistory {
         }
 
         let title = aiTitle ?? firstUserMessage ?? "Untitled"
-        return (title, cwd)
+        return (title, cwd, isBackgroundScheduled)
     }
 }
