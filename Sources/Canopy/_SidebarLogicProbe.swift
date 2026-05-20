@@ -204,9 +204,53 @@ enum SidebarLogicProbe {
         f.status = .openOnly
         record("filter isActive=true after change", f.isActive)
 
+        // Test 10–12: background scheduled-task JSONL detection
+        let scheduledJSONL = """
+        {"type":"queue-operation","operation":"enqueue","content":"<scheduled-task name=\\"probe-task\\">run</scheduled-task>"}
+        {"type":"user","message":{"role":"user","content":"hello"}}
+        """
+        let normalJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"}}
+        """
+        let enqueueOtherJSONL = """
+        {"type":"queue-operation","operation":"enqueue","content":"/ship-it"}
+        """
+        let scheduledAfterUserJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe"}
+        {"type":"queue-operation","operation":"enqueue","content":"<scheduled-task name=\\"late\\">run</scheduled-task>"}
+        """
+        let scheduledPath = writeProbeJSONL(scheduledJSONL)
+        let normalPath = writeProbeJSONL(normalJSONL)
+        let enqueueOtherPath = writeProbeJSONL(enqueueOtherJSONL)
+        let scheduledLatePath = writeProbeJSONL(scheduledAfterUserJSONL)
+        defer {
+            for path in [scheduledPath, normalPath, enqueueOtherPath, scheduledLatePath] {
+                if let path { try? FileManager.default.removeItem(atPath: path) }
+            }
+        }
+        record("scheduled: enqueue with <scheduled-task",
+               scheduledPath.map { ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
+        record("scheduled: normal user session",
+               normalPath.map { !ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
+        record("scheduled: other enqueue not flagged",
+               enqueueOtherPath.map { !ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
+        record("scheduled: enqueue after first user line",
+               scheduledLatePath.map { ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return lines.joined(separator: "\n")
+    }
+
+    private static func writeProbeJSONL(_ contents: String) -> String? {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("canopy-probe-\(UUID().uuidString).jsonl")
+        do {
+            try contents.write(to: url, atomically: true, encoding: .utf8)
+            return url.path
+        } catch {
+            return nil
+        }
     }
 }
 #endif
