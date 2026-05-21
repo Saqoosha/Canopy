@@ -16,6 +16,7 @@ struct CloneRepoSheet: View {
     @State private var branch: String = ""
     @AppStorage("launcher.clone.parentDir") private var parentDirPath: String = ""
     @State private var isCloning = false
+    @State private var didFinishCloning = false
     @State private var errorMessage: String?
 
     private var parentDir: URL? {
@@ -101,7 +102,7 @@ struct CloneRepoSheet: View {
                         .disabled(isCloning)
                 }
 
-                if let target = targetURL {
+                if let target = targetURL, !didFinishCloning {
                     HStack(spacing: 6) {
                         Image(systemName: targetExists ? "exclamationmark.triangle.fill" : "arrow.right")
                             .foregroundStyle(targetExists ? Color.orange : Color.secondary)
@@ -199,6 +200,11 @@ struct CloneRepoSheet: View {
                 target: target,
                 branch: trimmedBranch.isEmpty ? nil : trimmedBranch
             )
+            // Suppress the "Will clone into / Already exists" hint before
+            // dismiss runs — body re-renders between dismiss() and the
+            // actual sheet teardown, and the hint would briefly flash to
+            // "Already exists" because we just created the directory.
+            didFinishCloning = true
             onCloned(target)
             dismiss()
         } catch let CloneError.failed(message) {
