@@ -18,6 +18,7 @@ struct CloneRepoSheet: View {
     @State private var isCloning = false
     @State private var didFinishCloning = false
     @State private var errorMessage: String?
+    @State private var cloneTask: Task<Void, Never>?
 
     private var parentDir: URL? {
         guard !parentDirPath.isEmpty else { return nil }
@@ -152,13 +153,20 @@ struct CloneRepoSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(isCloning)
-                Button("Clone") { Task { await runClone() } }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canClone)
+                Button("Cancel") {
+                    if isCloning {
+                        cloneTask?.cancel()
+                    } else {
+                        dismiss()
+                    }
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("Clone") {
+                    cloneTask = Task { await runClone() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(!canClone)
             }
             .padding()
         }
@@ -167,6 +175,13 @@ struct CloneRepoSheet: View {
             if parentDirPath.isEmpty {
                 parentDirPath = FileManager.default.homeDirectoryForCurrentUser.path
             }
+        }
+        .onDisappear {
+            // Catches every dismissal path — Cancel, window close, app quit —
+            // and propagates cancellation to the subprocess via the
+            // cancellation handler in runProcess. Without this, the
+            // unstructured `Task { await runClone() }` outlives the view.
+            cloneTask?.cancel()
         }
     }
 
@@ -200,19 +215,55 @@ struct CloneRepoSheet: View {
                 target: target,
                 branch: trimmedBranch.isEmpty ? nil : trimmedBranch
             )
-            // Suppress the "Will clone into / Already exists" hint before
-            // dismiss runs — body re-renders between dismiss() and the
-            // actual sheet teardown, and the hint would briefly flash to
-            // "Already exists" because we just created the directory.
+            // Body re-renders between dismiss() and sheet teardown; without
+            // this the hint flashes to "Already exists" for one frame
+            // because the clone just created the directory.
             didFinishCloning = true
             onCloned(target)
             dismiss()
         } catch let CloneError.failed(message) {
-            logger.error("Clone failed: \(message, privacy: .public)")
+            if Task.isCancelled {
+                cleanUpPartialClone(at: target)
+                dismiss()
+                return
+            }
+            logger.error("Clone failed: \(message, privacy: .private)")
+            cleanUpPartialClone(at: target)
             errorMessage = message
         } catch {
-            logger.error("Clone failed with unexpected error: \(String(describing: error), privacy: .public)")
+            if Task.isCancelled {
+                cleanUpPartialClone(at: target)
+                dismiss()
+                return
+            }
+            logger.error("Clone failed with unexpected error: \(String(describing: error), privacy: .private)")
+            cleanUpPartialClone(at: target)
             errorMessage = "Clone failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Removes a directory that we created during a failed/cancelled clone.
+    /// Skips anything that doesn't look like our own partial clone so a
+    /// pre-existing folder that slipped past the pre-flight check is never
+    /// nuked.
+    private func cleanUpPartialClone(at target: URL) {
+        guard FileManager.default.fileExists(atPath: target.path) else { return }
+        let looksLikeOurClone: Bool = {
+            if FileManager.default.fileExists(atPath: target.appendingPathComponent(".git").path) {
+                return true
+            }
+            let contents = try? FileManager.default.contentsOfDirectory(atPath: target.path)
+            return contents?.isEmpty ?? false
+        }()
+        guard looksLikeOurClone else {
+            logger.warning("Skipping cleanup at \(target.path, privacy: .public): does not look like a partial clone")
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: target)
+            logger.info("Cleaned up partial clone at \(target.path, privacy: .public)")
+        } catch {
+            logger.error("Failed to clean up partial clone at \(target.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -423,12 +474,16 @@ enum GitCloner {
                     // Log stderr regardless of exit code — git and gh emit
                     // diagnostic warnings (auth scope, LFS misses, partial
                     // fetches) on the success path that we'd otherwise lose.
+                    // The stderr body is marked `.private` because a user can
+                    // pass `https://token@host/...` and git/gh echoes the URL
+                    // back on failure, which would leak the token in archived
+                    // Console logs otherwise.
                     if !stderrText.isEmpty {
                         let trimmed = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
                         if status == 0 {
-                            logger.info("\(executable, privacy: .public) stderr: \(trimmed, privacy: .public)")
+                            logger.info("\(executable, privacy: .public) stderr: \(trimmed, privacy: .private)")
                         } else {
-                            logger.error("\(executable, privacy: .public) failed (status \(status), signal=\(signaled)): \(trimmed, privacy: .public)")
+                            logger.error("\(executable, privacy: .public) failed (status \(status), signal=\(signaled)): \(trimmed, privacy: .private)")
                         }
                     }
 
@@ -456,9 +511,11 @@ enum GitCloner {
     }
 }
 
-/// Holds a weakly-shared reference to a running `Process` so the cancellation
-/// handler can `terminate()` it from outside the dispatch block that owns it.
-/// Without this, dismissing the sheet mid-clone orphans the subprocess.
+/// Holds a reference to a running `Process` so the `withTaskCancellationHandler`
+/// in `runProcess` can `terminate()` it from outside the dispatch block that
+/// owns it. The caller (`CloneRepoSheet`) drives the cancellation by storing
+/// its `Task` and calling `.cancel()` from `.onDisappear` and the Cancel
+/// button — without that hookup, the cancellation handler never fires.
 private final class ProcessHandle: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
