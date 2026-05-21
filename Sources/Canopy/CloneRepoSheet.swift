@@ -231,45 +231,62 @@ struct CloneRepoSheet: View {
             dismiss()
         } catch let CloneError.failed(message) {
             if Task.isCancelled {
-                await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
+                _ = await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
                 dismiss()
                 return
             }
             logger.error("Clone failed: \(message, privacy: .private)")
-            await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
-            errorMessage = message
+            let cleanupError = await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
+            errorMessage = composeErrorMessage(message, cleanupError: cleanupError, target: target)
         } catch {
             if Task.isCancelled {
-                await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
+                _ = await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
                 dismiss()
                 return
             }
             logger.error("Clone failed with unexpected error: \(String(describing: error), privacy: .private)")
-            await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
-            errorMessage = "Clone failed: \(error.localizedDescription)"
+            let cleanupError = await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
+            errorMessage = composeErrorMessage(
+                "Clone failed: \(error.localizedDescription)",
+                cleanupError: cleanupError,
+                target: target
+            )
         }
     }
 
     /// Removes a directory that we created during a failed/cancelled clone.
+    /// Returns a description of any cleanup failure so the caller can surface
+    /// it to the user — silently logging would leave a partial dir behind and
+    /// permanently disable the retry button (`canClone` requires
+    /// `!targetExists`).
+    ///
     /// `ownedByUs` is the ground truth — heuristics on directory contents
     /// can't tell a half-finished clone (no `.git` yet) from a user folder
     /// the pre-flight check raced past.
-    private func cleanUpPartialClone(at target: URL, ownedByUs: Bool) async {
+    private func cleanUpPartialClone(at target: URL, ownedByUs: Bool) async -> String? {
         guard ownedByUs else {
             logger.warning("Skipping cleanup at \(target.path, privacy: .public): existed before clone")
-            return
+            return nil
         }
-        guard FileManager.default.fileExists(atPath: target.path) else { return }
+        guard FileManager.default.fileExists(atPath: target.path) else { return nil }
         // Run off the MainActor — wiping a large partial clone can take
         // hundreds of ms and would otherwise freeze the UI mid-dismiss.
-        await Task.detached(priority: .utility) {
+        return await Task.detached(priority: .utility) { () -> String? in
             do {
                 try FileManager.default.removeItem(at: target)
                 logger.info("Cleaned up partial clone at \(target.path, privacy: .public)")
+                return nil
             } catch {
-                logger.error("Failed to clean up partial clone at \(target.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                let description = error.localizedDescription
+                logger.error("Failed to clean up partial clone at \(target.path, privacy: .public): \(description, privacy: .public)")
+                return description
             }
         }.value
+    }
+
+    private func composeErrorMessage(_ primary: String, cleanupError: String?, target: URL) -> String {
+        guard let cleanupError else { return primary }
+        return "\(primary)\n\nLeftover files at \(target.path) couldn't be removed (\(cleanupError)). Delete them manually before retrying."
     }
 
     /// Parses a repo input into the local folder name we'd clone into.
