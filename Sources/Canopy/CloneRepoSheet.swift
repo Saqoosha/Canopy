@@ -177,11 +177,13 @@ struct CloneRepoSheet: View {
             }
         }
         .onDisappear {
-            // Catches every dismissal path — Cancel, window close, app quit —
-            // and propagates cancellation to the subprocess via the
-            // cancellation handler in runProcess. Without this, the
-            // unstructured `Task { await runClone() }` outlives the view.
-            cloneTask?.cancel()
+            // Cancel only if the clone hasn't reached its own dismiss() yet.
+            // On the success path `didFinishCloning` is set right before
+            // dismiss runs, so this branch skips cancelling a Task that's
+            // already past its only cancellation point.
+            if !didFinishCloning {
+                cloneTask?.cancel()
+            }
         }
     }
 
@@ -209,6 +211,12 @@ struct CloneRepoSheet: View {
         isCloning = true
         defer { isCloning = false }
 
+        // Snapshot whether the dir already existed BEFORE we ran clone. If
+        // it did, the pre-flight check inside GitCloner.clone throws and we
+        // must not remove the user's data. If it did not, anything found at
+        // the path afterward was created by us and is safe to wipe.
+        let weCreatedTarget = !FileManager.default.fileExists(atPath: target.path)
+
         do {
             try await GitCloner.clone(
                 repo: repo,
@@ -223,48 +231,45 @@ struct CloneRepoSheet: View {
             dismiss()
         } catch let CloneError.failed(message) {
             if Task.isCancelled {
-                cleanUpPartialClone(at: target)
+                await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
                 dismiss()
                 return
             }
             logger.error("Clone failed: \(message, privacy: .private)")
-            cleanUpPartialClone(at: target)
+            await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
             errorMessage = message
         } catch {
             if Task.isCancelled {
-                cleanUpPartialClone(at: target)
+                await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
                 dismiss()
                 return
             }
             logger.error("Clone failed with unexpected error: \(String(describing: error), privacy: .private)")
-            cleanUpPartialClone(at: target)
+            await cleanUpPartialClone(at: target, ownedByUs: weCreatedTarget)
             errorMessage = "Clone failed: \(error.localizedDescription)"
         }
     }
 
     /// Removes a directory that we created during a failed/cancelled clone.
-    /// Skips anything that doesn't look like our own partial clone so a
-    /// pre-existing folder that slipped past the pre-flight check is never
-    /// nuked.
-    private func cleanUpPartialClone(at target: URL) {
-        guard FileManager.default.fileExists(atPath: target.path) else { return }
-        let looksLikeOurClone: Bool = {
-            if FileManager.default.fileExists(atPath: target.appendingPathComponent(".git").path) {
-                return true
-            }
-            let contents = try? FileManager.default.contentsOfDirectory(atPath: target.path)
-            return contents?.isEmpty ?? false
-        }()
-        guard looksLikeOurClone else {
-            logger.warning("Skipping cleanup at \(target.path, privacy: .public): does not look like a partial clone")
+    /// `ownedByUs` is the ground truth — heuristics on directory contents
+    /// can't tell a half-finished clone (no `.git` yet) from a user folder
+    /// the pre-flight check raced past.
+    private func cleanUpPartialClone(at target: URL, ownedByUs: Bool) async {
+        guard ownedByUs else {
+            logger.warning("Skipping cleanup at \(target.path, privacy: .public): existed before clone")
             return
         }
-        do {
-            try FileManager.default.removeItem(at: target)
-            logger.info("Cleaned up partial clone at \(target.path, privacy: .public)")
-        } catch {
-            logger.error("Failed to clean up partial clone at \(target.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
-        }
+        guard FileManager.default.fileExists(atPath: target.path) else { return }
+        // Run off the MainActor — wiping a large partial clone can take
+        // hundreds of ms and would otherwise freeze the UI mid-dismiss.
+        await Task.detached(priority: .utility) {
+            do {
+                try FileManager.default.removeItem(at: target)
+                logger.info("Cleaned up partial clone at \(target.path, privacy: .public)")
+            } catch {
+                logger.error("Failed to clean up partial clone at \(target.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }.value
     }
 
     /// Parses a repo input into the local folder name we'd clone into.
