@@ -18,6 +18,7 @@ struct LauncherView: View {
     @State private var isRemoteMode = false
     @State private var remoteDirectory: String = "~"
     @State private var showRemoteBrowser = false
+    @State private var showCloneSheet = false
     @State private var updater = ExtensionUpdater()
 
     // Web (Claude Code Web) session teleport
@@ -250,6 +251,23 @@ struct LauncherView: View {
                         lineWidth: isDropTargeted ? 2 : 1
                     )
             )
+
+            HStack {
+                Spacer()
+                Button {
+                    showCloneSheet = true
+                } label: {
+                    Label("Clone from GitHub…", systemImage: "arrow.down.circle")
+                }
+                .help("Clone a GitHub repository into a folder you choose")
+            }
+        }
+        .sheet(isPresented: $showCloneSheet) {
+            CloneRepoSheet { cloned in
+                selectedDirectory = cloned
+                RecentDirectories.add(cloned)
+                recentDirectories = RecentDirectories.load()
+            }
         }
     }
 
