@@ -202,25 +202,27 @@ struct CloneRepoSheet: View {
             onCloned(target)
             dismiss()
         } catch let CloneError.failed(message) {
+            logger.error("Clone failed: \(message, privacy: .public)")
             errorMessage = message
         } catch {
-            errorMessage = error.localizedDescription
+            logger.error("Clone failed with unexpected error: \(String(describing: error), privacy: .public)")
+            errorMessage = "Clone failed: \(error.localizedDescription)"
         }
     }
 
     /// Parses a repo input into the local folder name we'd clone into.
-    /// Returns nil for inputs that don't end in a usable folder name.
+    /// Accepts `owner/repo`, `https://host/owner/repo[.git]`, and
+    /// `git@host:owner/repo[.git]`. Returns nil for inputs that lack an
+    /// `owner/name` structure or contain shell/path metacharacters.
     static func deriveRepoName(from input: String) -> String? {
         var s = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
-        if s.hasSuffix("/") { s = String(s.dropLast()) }
+        while s.hasSuffix("/") { s = String(s.dropLast()) }
         if s.hasSuffix(".git") { s = String(s.dropLast(4)) }
 
-        // ssh form: git@host:owner/repo → drop everything up to ':'
         if s.hasPrefix("git@"), let colonIdx = s.firstIndex(of: ":") {
             s = String(s[s.index(after: colonIdx)...])
         }
-        // https://host/path → drop scheme + host
         if let schemeRange = s.range(of: "://") {
             let afterScheme = s[schemeRange.upperBound...]
             if let slashIdx = afterScheme.firstIndex(of: "/") {
@@ -229,6 +231,12 @@ struct CloneRepoSheet: View {
                 return nil
             }
         }
+
+        // A bare `owner` (no slash) is ambiguous on the `git` fallback path —
+        // we'd synthesize `https://github.com/owner.git` which never resolves.
+        // Reject upfront so the Clone button stays disabled with the
+        // placeholder hint visible.
+        guard s.contains("/") else { return nil }
 
         if let lastSlash = s.lastIndex(of: "/") {
             s = String(s[s.index(after: lastSlash)...])
@@ -248,9 +256,8 @@ enum CloneError: Error {
 
 enum GitCloner {
     static func clone(repo: String, target: URL, branch: String?) async throws {
-        // Make sure the parent dir actually exists before we hand off — git's
-        // error for a missing parent is a generic "could not create work tree"
-        // that doesn't make the cause obvious.
+        // Pre-flight the parent dir: git's own error for a missing parent is
+        // a generic "could not create work tree" that hides the real cause.
         let parent = target.deletingLastPathComponent()
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDir), isDir.boolValue else {
@@ -260,13 +267,21 @@ enum GitCloner {
             throw CloneError.failed("Target directory already exists: \(target.path)")
         }
 
-        if let ghPath = findGh(), await isGhAuthenticated(ghPath: ghPath) {
-            logger.info("Using gh for clone: \(ghPath, privacy: .public)")
-            try await runGhClone(ghPath: ghPath, repo: repo, target: target, branch: branch)
+        // Prefer `gh` when authenticated so private repos work without the
+        // user having to configure SSH keys or a credential helper. Fall
+        // back to plain `git` otherwise.
+        if let ghPath = findGh() {
+            if await isGhAuthenticated(ghPath: ghPath) {
+                logger.info("Using gh for clone: \(ghPath, privacy: .public)")
+                try await runGhClone(ghPath: ghPath, repo: repo, target: target, branch: branch)
+                return
+            } else {
+                logger.warning("gh at \(ghPath, privacy: .public) is not authenticated; falling back to git (private repos will fail)")
+            }
         } else {
-            logger.info("Using git for clone")
-            try await runGitClone(repo: repo, target: target, branch: branch)
+            logger.info("gh not found; using git")
         }
+        try await runGitClone(repo: repo, target: target, branch: branch)
     }
 
     private static func findGh() -> String? {
@@ -301,17 +316,11 @@ enum GitCloner {
     private static func runGhClone(ghPath: String, repo: String, target: URL, branch: String?) async throws {
         var args = ["repo", "clone", repo, target.path]
         if let branch, !branch.isEmpty {
-            // Everything after `--` is forwarded to git clone.
+            // `--` separates gh's own args from flags forwarded to git clone.
             args.append(contentsOf: ["--", "--branch", branch])
         }
         let result = await runProcess(executable: ghPath, args: args)
-        if result.status != 0 {
-            throw CloneError.failed(
-                result.errorOutput.isEmpty
-                    ? "gh repo clone exited with status \(result.status)"
-                    : result.errorOutput
-            )
-        }
+        try throwIfFailed(tool: "gh repo clone", path: ghPath, result: result)
     }
 
     private static func runGitClone(repo: String, target: URL, branch: String?) async throws {
@@ -323,20 +332,28 @@ enum GitCloner {
         }
         args.append(contentsOf: [normalized, target.path])
         let result = await runProcess(executable: gitPath, args: args)
-        if result.status != 0 {
-            throw CloneError.failed(
-                result.errorOutput.isEmpty
-                    ? "git clone exited with status \(result.status)"
-                    : result.errorOutput
-            )
+        try throwIfFailed(tool: "git clone", path: gitPath, result: result)
+    }
+
+    private static func throwIfFailed(tool: String, path: String, result: ProcessResult) throws {
+        if let spawnError = result.spawnError {
+            throw CloneError.failed("Couldn't start \(tool) at \(path): \(spawnError)")
         }
+        if result.status == 0 { return }
+        let prefix = result.terminatedBySignal
+            ? "\(tool) was terminated by a signal (status \(result.status))"
+            : "\(tool) exited with status \(result.status)"
+        throw CloneError.failed(
+            result.errorOutput.isEmpty ? prefix : "\(prefix):\n\(result.errorOutput)"
+        )
     }
 
     private static func normalizeForGit(_ input: String) -> String {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.contains("://") || trimmed.hasPrefix("git@") {
             return trimmed
         }
+        while trimmed.hasSuffix("/") { trimmed = String(trimmed.dropLast()) }
         let stripped = trimmed.hasSuffix(".git") ? String(trimmed.dropLast(4)) : trimmed
         return "https://github.com/\(stripped).git"
     }
@@ -344,54 +361,114 @@ enum GitCloner {
     struct ProcessResult {
         let status: Int32
         let errorOutput: String
+        let spawnError: String?
+        let terminatedBySignal: Bool
     }
 
     private static func runProcess(executable: String, args: [String]) async -> ProcessResult {
-        await withCheckedContinuation { (cont: CheckedContinuation<ProcessResult, Never>) in
-            DispatchQueue.global().async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = args
-                process.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
-
-                let stderrPipe = Pipe()
-                let stdoutPipe = Pipe()
-                process.standardError = stderrPipe
-                process.standardOutput = stdoutPipe
-
-                do {
-                    try process.run()
-                } catch {
-                    cont.resume(returning: ProcessResult(status: -1, errorOutput: error.localizedDescription))
-                    return
-                }
-
-                // Drain stderr concurrently so the pipe never fills up (the
-                // buffer is ~64 KB on macOS and a chatty clone can fill it).
-                var stderrData = Data()
-                let group = DispatchGroup()
-                group.enter()
+        let handle = ProcessHandle()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<ProcessResult, Never>) in
                 DispatchQueue.global().async {
-                    stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                    group.leave()
-                }
-                _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                group.wait()
-                process.waitUntilExit()
+                    let process = Process()
+                    process.executableURL = URL(fileURLWithPath: executable)
+                    process.arguments = args
+                    process.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
 
-                let stderrText = String(data: stderrData, encoding: .utf8) ?? ""
-                let summary: String
-                if process.terminationStatus != 0 {
-                    let lines = stderrText
-                        .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
-                        .map { $0.trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty }
-                    summary = lines.suffix(6).joined(separator: "\n")
-                } else {
-                    summary = ""
+                    let stderrPipe = Pipe()
+                    let stdoutPipe = Pipe()
+                    process.standardError = stderrPipe
+                    process.standardOutput = stdoutPipe
+
+                    handle.attach(process)
+
+                    do {
+                        try process.run()
+                    } catch {
+                        let message = error.localizedDescription
+                        logger.error("Failed to spawn \(executable, privacy: .public): \(message, privacy: .public)")
+                        cont.resume(returning: ProcessResult(
+                            status: -1,
+                            errorOutput: message,
+                            spawnError: message,
+                            terminatedBySignal: false
+                        ))
+                        return
+                    }
+
+                    // Drain stderr concurrently — a chatty `git clone` can fill
+                    // the pipe buffer and deadlock the writer before we get to
+                    // read it after stdout completes.
+                    var stderrData = Data()
+                    let group = DispatchGroup()
+                    group.enter()
+                    DispatchQueue.global().async {
+                        stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                        group.leave()
+                    }
+                    _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    group.wait()
+                    process.waitUntilExit()
+
+                    let stderrText = String(data: stderrData, encoding: .utf8) ?? ""
+                    let signaled = process.terminationReason == .uncaughtSignal
+                    let status = process.terminationStatus
+
+                    // Log stderr regardless of exit code — git and gh emit
+                    // diagnostic warnings (auth scope, LFS misses, partial
+                    // fetches) on the success path that we'd otherwise lose.
+                    if !stderrText.isEmpty {
+                        let trimmed = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if status == 0 {
+                            logger.info("\(executable, privacy: .public) stderr: \(trimmed, privacy: .public)")
+                        } else {
+                            logger.error("\(executable, privacy: .public) failed (status \(status), signal=\(signaled)): \(trimmed, privacy: .public)")
+                        }
+                    }
+
+                    let summary: String
+                    if status != 0 {
+                        let lines = stderrText
+                            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+                            .map { $0.trimmingCharacters(in: .whitespaces) }
+                            .filter { !$0.isEmpty }
+                        summary = lines.suffix(6).joined(separator: "\n")
+                    } else {
+                        summary = ""
+                    }
+                    cont.resume(returning: ProcessResult(
+                        status: status,
+                        errorOutput: summary,
+                        spawnError: nil,
+                        terminatedBySignal: signaled
+                    ))
                 }
-                cont.resume(returning: ProcessResult(status: process.terminationStatus, errorOutput: summary))
             }
+        } onCancel: {
+            handle.terminate()
+        }
+    }
+}
+
+/// Holds a weakly-shared reference to a running `Process` so the cancellation
+/// handler can `terminate()` it from outside the dispatch block that owns it.
+/// Without this, dismissing the sheet mid-clone orphans the subprocess.
+private final class ProcessHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+
+    func attach(_ process: Process) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.process = process
+    }
+
+    func terminate() {
+        lock.lock()
+        let p = process
+        lock.unlock()
+        if let p, p.isRunning {
+            p.terminate()
         }
     }
 }
