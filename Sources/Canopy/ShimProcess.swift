@@ -133,12 +133,27 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Optional OpenSession that owns this shim. Set by WebViewContainer
     /// after spawn so isWorking transitions reach the sidebar's icon.
-    weak var boundSession: OpenSession?
+    ///
+    /// didSet re-syncs the session's asking flag against this shim's current
+    /// internal state. On SSH reconnect a fresh shim inherits an existing
+    /// OpenSession whose `isAsking` may still be true from the previous (now
+    /// dead) shim — without this sync the raised-hand icon would linger
+    /// until something else triggered `refreshAskingState`.
+    weak var boundSession: OpenSession? {
+        didSet { refreshAskingState() }
+    }
 
     /// In-flight `tool_permission_request` ids from extension → webview.
     /// When non-empty the user is being asked to approve something; the
     /// sidebar shows a "raised hand" icon while at least one is outstanding.
     private var pendingPermissionRequestIds = Set<String>()
+
+    /// Subset of `pendingPermissionRequestIds` whose `toolName` is
+    /// `AskUserQuestion`. Tracked separately so resolving/cancelling an
+    /// AskUserQuestion request can immediately clear
+    /// `lastAssistantHadAskUserQuestion` instead of waiting for the next
+    /// turn's `message_start` stream event.
+    private var pendingAskUserQuestionRequestIds = Set<String>()
 
     var statusBarData: StatusBarData?
     weak var delegate: ShimProcessDelegate?
@@ -1236,10 +1251,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         boundSession?.title = title
     }
 
-    /// Watch host→webview messages for `tool_permission_request` and pair
-    /// them with their responses to mirror an `isAsking` flag onto the
-    /// bound OpenSession. The sidebar lights up a raised-hand icon while
-    /// at least one permission request is outstanding.
+    /// Watch host→webview messages for `tool_permission_request` (start) and
+    /// `cancel_request` (extension-initiated abort) so the sidebar's
+    /// raised-hand icon mirrors the user's actual asking state. Pair-only
+    /// matching against `response` lives in `trackPermissionResponse`.
     private func trackPermissionState(stdoutMessage message: [String: Any]) {
         guard message["type"] as? String == "webview_message",
               let outer = message["message"] as? [String: Any]
@@ -1253,14 +1268,45 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         } else {
             inner = outer
         }
-        guard inner["type"] as? String == "request",
-              let requestId = inner["requestId"] as? String,
-              let request = inner["request"] as? [String: Any],
-              let reqType = request["type"] as? String
+
+        let innerType = inner["type"] as? String
+
+        if innerType == "request",
+           let requestId = inner["requestId"] as? String,
+           let request = inner["request"] as? [String: Any],
+           request["type"] as? String == "tool_permission_request"
+        {
+            pendingPermissionRequestIds.insert(requestId)
+            if request["toolName"] as? String == "AskUserQuestion" {
+                pendingAskUserQuestionRequestIds.insert(requestId)
+            }
+            refreshAskingState()
+            return
+        }
+
+        // The extension cancels an in-flight tool_permission_request when
+        // the user presses Stop or the channel aborts. The webview hides
+        // its prompt UI on `cancel_request`, but no `response` follows, so
+        // without this handler the requestId leaks and the raised-hand
+        // icon stays lit forever.
+        if innerType == "cancel_request",
+           let targetRequestId = inner["targetRequestId"] as? String,
+           pendingPermissionRequestIds.remove(targetRequestId) != nil
+        {
+            clearAskUserQuestionFlagIfMatching(targetRequestId)
+            refreshAskingState()
+        }
+    }
+
+    /// When an AskUserQuestion permission request resolves (response or
+    /// cancel), also clear `lastAssistantHadAskUserQuestion` so the hand
+    /// icon disappears immediately. Otherwise it would linger until the
+    /// next assistant turn's `message_start` stream event.
+    private func clearAskUserQuestionFlagIfMatching(_ requestId: String) {
+        guard pendingAskUserQuestionRequestIds.remove(requestId) != nil,
+              pendingAskUserQuestionRequestIds.isEmpty
         else { return }
-        guard reqType == "tool_permission_request" else { return }
-        pendingPermissionRequestIds.insert(requestId)
-        refreshAskingState()
+        lastAssistantHadAskUserQuestion = false
     }
 
     /// Webview→host responses arrive via `userContentController`. When one
@@ -1269,8 +1315,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard webviewMessage["type"] as? String == "response",
               let requestId = webviewMessage["requestId"] as? String
         else { return }
-        guard pendingPermissionRequestIds.contains(requestId) else { return }
-        pendingPermissionRequestIds.remove(requestId)
+        guard pendingPermissionRequestIds.remove(requestId) != nil else { return }
+        clearAskUserQuestionFlagIfMatching(requestId)
+        refreshAskingState()
+    }
+
+    /// Drop every asking-related signal and resync the bound session.
+    /// Called when the shim/CLI exits so a crashed or disconnected session
+    /// row doesn't keep a stale raised-hand icon — once the process is gone
+    /// no protocol message will ever clear the pending sets organically.
+    private func resetAskingState() {
+        pendingPermissionRequestIds.removeAll()
+        pendingAskUserQuestionRequestIds.removeAll()
+        lastAssistantHadAskUserQuestion = false
         refreshAskingState()
     }
 
@@ -1354,8 +1411,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 isWorking = false
                 postTaskCompletedNotification()
             }
-            // After Claude finishes, the AskUserQuestion (if any) is now
-            // visible in the webview waiting for the user's choice.
+            // If the turn ended without any AskUserQuestion permission
+            // request being tracked, the `tool_use`-stream-derived
+            // `lastAssistantHadAskUserQuestion` flag is orphaned — e.g. user
+            // pressed Stop and the extension sent `cancel_request` before
+            // the corresponding `tool_permission_request` ever reached us,
+            // so neither lifecycle path could clear it. Drop it now so the
+            // hand icon doesn't linger until the next user message. When a
+            // permission request IS tracked, leave the flag alone — the
+            // user is genuinely being asked.
+            if pendingAskUserQuestionRequestIds.isEmpty {
+                lastAssistantHadAskUserQuestion = false
+            }
             refreshAskingState()
         default:
             break
@@ -1503,6 +1570,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             exitCode = -1
         }
         logger.error("CLI subprocess died (code \(exitCode)), stopping shim")
+        resetAskingState()
         stop()
         delegate?.shimProcessDidCrash(self, status: exitCode)
     }
@@ -1517,6 +1585,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             Self.killProcessTree(descendantPids)
             descendantPids = []
         }
+
+        // Even for intentional stops the bound session is about to be
+        // dropped or replaced — clearing here keeps the sidebar consistent
+        // through the crash/disconnect/close paths uniformly.
+        resetAskingState()
 
         guard !isIntentionalStop else { return }
 
