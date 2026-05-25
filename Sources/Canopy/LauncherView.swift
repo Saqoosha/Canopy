@@ -83,7 +83,7 @@ struct LauncherView: View {
             }
             .padding(.horizontal, 36)
             .padding(.vertical, 36)
-            .frame(maxWidth: 720)
+            .frame(maxWidth: 560)
             .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -129,14 +129,23 @@ struct LauncherView: View {
     @ViewBuilder
     private var extensionUpdateBanner: some View {
         switch updater.state {
-        case .updateAvailable(let cliVersion):
+        case .updateAvailable(let cliVersion, let currentVersion):
             updateBannerCard(icon: "arrow.down.circle", iconColor: .blue, tint: .blue) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Extension update available")
                         .font(.subheadline.bold())
-                    Text("CLI v\(cliVersion) — update extension to match")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        if let currentVersion {
+                            Text("v\(currentVersion) → v\(cliVersion)")
+                        } else {
+                            Text("v\(cliVersion)")
+                        }
+                        Text("·").foregroundStyle(.tertiary)
+                        Link("Changelog", destination: ExtensionUpdater.changelogURL)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Update") {
@@ -195,7 +204,6 @@ struct LauncherView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal)
     }
 
     // MARK: - Directory Card
