@@ -10,12 +10,14 @@ final class ExtensionUpdater {
         case idle
         case checking
         case upToDate
-        case updateAvailable(cliVersion: String)
+        case updateAvailable(cliVersion: String, currentVersion: String?)
         case downloading
         case installing
         case done(version: String)
         case failed(message: String)
     }
+
+    static let changelogURL = URL(string: "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md")!
 
     private(set) var state: State = .idle
 
@@ -47,7 +49,7 @@ final class ExtensionUpdater {
                 state = .upToDate
                 return
             }
-            state = .updateAvailable(cliVersion: cliVer)
+            state = .updateAvailable(cliVersion: cliVer, currentVersion: extVer)
         }
     }
 
@@ -71,7 +73,7 @@ final class ExtensionUpdater {
     }
 
     func triggerInstall() async {
-        guard case .updateAvailable(let version) = state else { return }
+        guard case .updateAvailable(let version, _) = state else { return }
         await installUpdate(version: version)
     }
 
