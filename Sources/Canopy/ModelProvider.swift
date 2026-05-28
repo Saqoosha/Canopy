@@ -36,7 +36,7 @@ struct ModelProvider: Identifiable, Codable, Equatable {
             id: "openrouter",
             name: "OpenRouter",
             baseURL: "https://openrouter.ai/api",
-            opusModel: "anthropic/claude-opus-4-7",
+            opusModel: "anthropic/claude-opus-4-8",
             sonnetModel: "anthropic/claude-sonnet-4-6",
             haikuModel: "anthropic/claude-haiku-4-5",
             subagentModel: "anthropic/claude-haiku-4-5"

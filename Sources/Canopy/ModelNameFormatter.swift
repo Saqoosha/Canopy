@@ -5,8 +5,10 @@ enum ModelNameFormatter {
     /// Split a model ID or alias into its base and a display-ready variant suffix.
     ///
     /// Examples:
+    ///   "claude-opus-4-8[1m]" → (base: "claude-opus-4-8", displaySuffix: " (1M)")
     ///   "claude-opus-4-7[1m]" → (base: "claude-opus-4-7", displaySuffix: " (1M)")
     ///   "opus[1m]"            → (base: "opus",            displaySuffix: " (1M)")
+    ///   "claude-opus-4-8"     → (base: "claude-opus-4-8", displaySuffix: "")
     ///   "claude-opus-4-6"     → (base: "claude-opus-4-6", displaySuffix: "")
     ///   "opus[beta]"          → (base: "opus",            displaySuffix: " [beta]")
     ///

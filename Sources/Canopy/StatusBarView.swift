@@ -201,6 +201,7 @@ struct StatusBarView: View {
         // "claude-sonnet-4-5-20250514" → "Sonnet 4.5"
         // "claude-opus-4-6" → "Opus 4.6"
         // "claude-opus-4-7[1m]" → "Opus 4.7 (1M)"
+        // "claude-opus-4-8[1m]" → "Opus 4.8 (1M)"
         let (base, variantSuffix) = ModelNameFormatter.splitVariant(model)
         let lower = base.lowercased()
         for (family, label) in [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
