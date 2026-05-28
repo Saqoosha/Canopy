@@ -1073,6 +1073,7 @@ struct LauncherView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
         panel.message = "Select a project directory"
         panel.prompt = "Select"
 
