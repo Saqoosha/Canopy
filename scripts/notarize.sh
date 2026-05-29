@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Configuration
-DEVELOPER_ID="Developer ID Application: Whatever Co. (G5G54TCH8W)"
-TEAM_ID="G5G54TCH8W"
+DEVELOPER_ID="Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
+TEAM_ID="VCFY2GFR89"
 KEYCHAIN_PROFILE="notarytool-profile"
 
 APP_PATH="$1"

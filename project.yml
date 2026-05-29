@@ -15,7 +15,7 @@ settings:
     MARKETING_VERSION: "2.5.3"
     CURRENT_PROJECT_VERSION: "56"
     SWIFT_VERSION: "6.0"
-    DEVELOPMENT_TEAM: G5G54TCH8W
+    DEVELOPMENT_TEAM: VCFY2GFR89
 
 targets:
   Canopy:
@@ -62,7 +62,7 @@ targets:
           CODE_SIGN_IDENTITY: "Apple Development"
         Release:
           CODE_SIGN_STYLE: Manual
-          CODE_SIGN_IDENTITY: "Developer ID Application: Whatever Co. (G5G54TCH8W)"
+          CODE_SIGN_IDENTITY: "Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
     info:
       path: Sources/Canopy/Info.plist
       properties:
