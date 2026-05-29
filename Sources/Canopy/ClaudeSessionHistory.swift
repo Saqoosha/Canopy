@@ -183,7 +183,7 @@ enum ClaudeSessionHistory {
         var entries: [SessionEntry] = []
         for candidate in topCandidates {
             let metadata = extractMetadata(fromPath: candidate.path)
-            guard !metadata.isBackgroundScheduled else { continue }
+            guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { continue }
             let projectPath = metadata.cwd ?? decodePath(candidate.projectEncoded)
             guard fm.fileExists(atPath: projectPath) else { continue }
             let projectDirectory = URL(fileURLWithPath: projectPath)
@@ -294,7 +294,7 @@ enum ClaudeSessionHistory {
                 guard UUID(uuidString: sessionId) != nil else { continue }
 
                 let metadata = extractMetadata(fromPath: file.path)
-                guard !metadata.isBackgroundScheduled else { continue }
+                guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { continue }
 
                 let title = SessionTitleStore.title(forSessionId: sessionId)
                     ?? metadata.title
@@ -356,12 +356,22 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).isBackgroundScheduled
     }
 
+    /// True when the JSONL was created by a non-interactive `claude -p` / SDK run
+    /// (`entrypoint: "sdk-cli"`) — memory observers, `/ship-it` sub-agents, etc.
+    static func isAutomatedSession(atPath path: String) -> Bool {
+        extractMetadata(fromPath: path).isAutomated
+    }
+
     /// Read up to 128KB so large base64 image attachments don't push `ai-title`
     /// past our window. Returns the cwd too so session discovery can skip
     /// decoding the folder name.
-    private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool) {
+    ///
+    /// `isAutomated` flags non-interactive `claude -p` / SDK-driven runs
+    /// (memory observers, sub-agents from `/ship-it`, etc.), detected via the
+    /// `entrypoint: "sdk-cli"` marker the CLI writes on its user lines.
+    private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
-            return ("Untitled", nil, false)
+            return ("Untitled", nil, false, false)
         }
         defer { try? handle.close() }
 
@@ -375,6 +385,7 @@ enum ClaudeSessionHistory {
         var firstUserMessage: String?
         var cwd: String?
         var isBackgroundScheduled = false
+        var entrypoint: String?
 
         for line in text.components(separatedBy: "\n") {
             guard !line.isEmpty,
@@ -384,6 +395,10 @@ enum ClaudeSessionHistory {
 
             if cwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
                 cwd = value
+            }
+
+            if entrypoint == nil, let value = json["entrypoint"] as? String, !value.isEmpty {
+                entrypoint = value
             }
 
             guard let type = json["type"] as? String else { continue }
@@ -420,6 +435,6 @@ enum ClaudeSessionHistory {
         }
 
         let title = aiTitle ?? firstUserMessage ?? "Untitled"
-        return (title, cwd, isBackgroundScheduled)
+        return (title, cwd, isBackgroundScheduled, entrypoint == "sdk-cli")
     }
 }

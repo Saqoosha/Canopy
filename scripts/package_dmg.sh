@@ -14,7 +14,7 @@ DMG_NAME="Canopy-${VERSION}"
 DMG_ROOT="${BUILD_DIR}/dmg-root"
 OUT_DMG="${BUILD_DIR}/${DMG_NAME}.dmg"
 
-DEVELOPER_ID="Developer ID Application: Whatever Co. (G5G54TCH8W)"
+DEVELOPER_ID="Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
 KEYCHAIN_PROFILE="notarytool-profile"
 
 rm -rf "${DMG_ROOT}"

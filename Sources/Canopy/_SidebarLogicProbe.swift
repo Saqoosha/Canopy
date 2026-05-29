@@ -223,8 +223,45 @@ enum SidebarLogicProbe {
         let normalPath = writeProbeJSONL(normalJSONL)
         let enqueueOtherPath = writeProbeJSONL(enqueueOtherJSONL)
         let scheduledLatePath = writeProbeJSONL(scheduledAfterUserJSONL)
+
+        // Test 13–19: non-interactive `claude -p` / SDK session detection
+        let sdkCliJSONL = """
+        {"type":"user","message":{"role":"user","content":"You are a memory observer"},"entrypoint":"sdk-cli"}
+        """
+        let vscodeJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"claude-vscode"}
+        """
+        let cliJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"cli"}
+        """
+        // Older sessions predate the `entrypoint` key — must stay visible.
+        let noEntrypointJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"}}
+        """
+        // sdk-cli marker on a later line (first line is a header without entrypoint).
+        let lateSdkCliJSONL = """
+        {"type":"summary","summary":"prior session"}
+        {"type":"user","message":{"role":"user","content":"observe"},"entrypoint":"sdk-cli"}
+        """
+        // Present-but-empty entrypoint is skipped by the !isEmpty guard → not flagged.
+        let emptyEntrypointJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"entrypoint":""}
+        """
+        // Exact-match allowlist-of-one: other real entrypoints must not be flagged.
+        let desktopJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"claude-desktop"}
+        """
+        let sdkCliPath = writeProbeJSONL(sdkCliJSONL)
+        let vscodePath = writeProbeJSONL(vscodeJSONL)
+        let cliPath = writeProbeJSONL(cliJSONL)
+        let noEntrypointPath = writeProbeJSONL(noEntrypointJSONL)
+        let lateSdkCliPath = writeProbeJSONL(lateSdkCliJSONL)
+        let emptyEntrypointPath = writeProbeJSONL(emptyEntrypointJSONL)
+        let desktopPath = writeProbeJSONL(desktopJSONL)
         defer {
-            for path in [scheduledPath, normalPath, enqueueOtherPath, scheduledLatePath] {
+            for path in [scheduledPath, normalPath, enqueueOtherPath, scheduledLatePath,
+                         sdkCliPath, vscodePath, cliPath,
+                         noEntrypointPath, lateSdkCliPath, emptyEntrypointPath, desktopPath] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
         }
@@ -236,6 +273,20 @@ enum SidebarLogicProbe {
                enqueueOtherPath.map { !ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
         record("scheduled: enqueue after first user line",
                scheduledLatePath.map { ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
+        record("automated: sdk-cli entrypoint flagged",
+               sdkCliPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
+        record("automated: claude-vscode not flagged",
+               vscodePath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
+        record("automated: cli not flagged",
+               cliPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
+        record("automated: missing entrypoint key not flagged",
+               noEntrypointPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
+        record("automated: sdk-cli on later line flagged",
+               lateSdkCliPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
+        record("automated: empty entrypoint not flagged",
+               emptyEntrypointPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
+        record("automated: claude-desktop not flagged",
+               desktopPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
