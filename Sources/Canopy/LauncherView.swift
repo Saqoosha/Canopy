@@ -41,7 +41,12 @@ struct LauncherView: View {
     @AppStorage("launcher.permissionMode") private var permissionModeRaw = "acceptEdits"
     @AppStorage("launcher.continueSession") private var continueSession = false
 
-    private static let modelOptions = ["", "opus", "opus[1m]", "sonnet", "sonnet[1m]", "haiku"]
+    // Explicit Opus IDs (not the "opus" alias) for clean version pinning + display.
+    // NOTE: the full ID alone does NOT keep you on the 200K tier — for 1M-eligible
+    // accounts the CLI upgrades any opus model to "[1m]" at runtime. The actual 200K
+    // enforcement is the CLAUDE_CODE_DISABLE_1M_CONTEXT env var set in ShimProcess for
+    // non-"[1m]" opus selections. Entries carrying "[1m]" stay on the 1M tier.
+    private static let modelOptions = ["", "claude-opus-4-8", "opus[1m]", "claude-opus-4-7", "claude-opus-4-7[1m]", "sonnet", "sonnet[1m]", "haiku"]
     private static let effortOptions = ["", "low", "medium", "high", "xhigh", "max"]
     private static let permissionModes: [PermissionMode] = [.default, .plan, .auto, .acceptEdits, .dontAsk]
 
@@ -91,6 +96,9 @@ struct LauncherView: View {
         .defaultScrollAnchor(.center)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .onAppear {
+            // Migrate the dropped bare "opus" alias (older builds offered it) to the
+            // explicit 200K id so the Picker shows a matching selection after upgrade.
+            if model == "opus" { model = "claude-opus-4-8" }
             loadData()
             Task { await updater.checkForUpdate() }
         }
@@ -367,6 +375,14 @@ struct LauncherView: View {
     }
 
     private static func modelDisplayName(_ alias: String) -> String {
+        // Explicit full model IDs map to their short marketing name. The latest shows
+        // plainly as "Opus"; older pinned versions keep their version number.
+        switch alias {
+        case "claude-opus-4-8": return "Opus"
+        case "claude-opus-4-7": return "Opus 4.7"
+        case "claude-opus-4-7[1m]": return "Opus 4.7 (1M)"
+        default: break
+        }
         // "opus" → "Opus", "opus[1m]" → "Opus (1M)", "sonnet[1m]" → "Sonnet (1M)"
         let (base, suffix) = ModelNameFormatter.splitVariant(alias)
         guard !base.isEmpty else { return alias }

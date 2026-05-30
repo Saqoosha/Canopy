@@ -31,13 +31,15 @@ shell_quote() {
     printf "'%s'" "$s"
 }
 
-# Forward custom API provider env vars to the remote machine.
-# ShimProcess sets these locally, but SSH doesn't forward them — the
-# remote claude would fall back to the default Anthropic API / Sonnet.
+# Forward selected env vars to the remote machine. ShimProcess sets these
+# locally, but SSH doesn't forward arbitrary env vars — without this the remote
+# claude would fall back to the default Anthropic API / Sonnet, and (for
+# CLAUDE_CODE_DISABLE_1M_CONTEXT) force-upgrade Opus to the 1M tier.
 REMOTE_ENV=""
 for var in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN \
            ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
-           ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL; do
+           ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL \
+           CLAUDE_CODE_DISABLE_1M_CONTEXT; do
     eval "val=\${$var:-}"
     if [ -n "$val" ]; then
         REMOTE_ENV="$REMOTE_ENV $var=$(shell_quote "$val")"
