@@ -282,6 +282,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Write model/effort to ~/.claude/settings.json before CLI starts
         Self.applyClaudeSettings([("model", model), ("effortLevel", effortLevel)])
 
+        // Pin the standard 200K context tier when the user picked a non-1M Opus model.
+        // For 1M-eligible accounts the CLI force-appends "[1m]" to ANY opus model at
+        // runtime (observed in the CC CLI ~2.1.x via internal, minified symbols — the
+        // 1M-eligibility gate and the opus-id rewriter; names change every bundle, so
+        // they're not cited here), so the model string alone — even the explicit
+        // "claude-opus-4-8" — still resolves to the 1M variant. CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+        // turns that auto-upgrade off for this process. Scoped to opus (the only family
+        // with this runtime upgrade) and skipped for "[1m]" selections so 1M still works.
+        // For SSH remote sessions, ssh-claude-wrapper.sh forwards this var to the remote.
+        if customApi == nil, let model, model.contains("opus"), !model.contains("[1m]") {
+            env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
+        }
+
         // SSH remote: pass wrapper path via env var (per-shim, not the shared
         // settings file). Writing to the settings file caused cross-window
         // interference and broke /resume when the wrapper was eagerly cleared
