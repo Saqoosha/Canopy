@@ -247,9 +247,15 @@ enum SidebarLogicProbe {
         let emptyEntrypointJSONL = """
         {"type":"user","message":{"role":"user","content":"hello"},"entrypoint":""}
         """
-        // Exact-match allowlist-of-one: other real entrypoints must not be flagged.
+        // Prefix match: interactive entrypoints must not be flagged.
         let desktopJSONL = """
         {"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"claude-desktop"}
+        """
+        // Python Agent SDK runs (e.g. security-guidance plugin background reviews)
+        // write sdk-py — must be flagged like sdk-cli.
+        let sdkPyJSONL = """
+        {"type":"queue-operation","operation":"enqueue","content":"Review this change for security vulnerabilities."}
+        {"type":"user","message":{"role":"user","content":"Review this change"},"entrypoint":"sdk-py"}
         """
         let sdkCliPath = writeProbeJSONL(sdkCliJSONL)
         let vscodePath = writeProbeJSONL(vscodeJSONL)
@@ -258,10 +264,12 @@ enum SidebarLogicProbe {
         let lateSdkCliPath = writeProbeJSONL(lateSdkCliJSONL)
         let emptyEntrypointPath = writeProbeJSONL(emptyEntrypointJSONL)
         let desktopPath = writeProbeJSONL(desktopJSONL)
+        let sdkPyPath = writeProbeJSONL(sdkPyJSONL)
         defer {
             for path in [scheduledPath, normalPath, enqueueOtherPath, scheduledLatePath,
                          sdkCliPath, vscodePath, cliPath,
-                         noEntrypointPath, lateSdkCliPath, emptyEntrypointPath, desktopPath] {
+                         noEntrypointPath, lateSdkCliPath, emptyEntrypointPath, desktopPath,
+                         sdkPyPath] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
         }
@@ -287,6 +295,8 @@ enum SidebarLogicProbe {
                emptyEntrypointPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
         record("automated: claude-desktop not flagged",
                desktopPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
+        record("automated: sdk-py entrypoint flagged",
+               sdkPyPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
