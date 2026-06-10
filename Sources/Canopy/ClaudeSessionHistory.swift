@@ -357,7 +357,8 @@ enum ClaudeSessionHistory {
     }
 
     /// True when the JSONL was created by a non-interactive `claude -p` / SDK run
-    /// (`entrypoint: "sdk-cli"`) — memory observers, `/ship-it` sub-agents, etc.
+    /// (`entrypoint: "sdk-*"` — sdk-cli, sdk-py, sdk-ts) — memory observers,
+    /// `/ship-it` sub-agents, plugin background reviews, etc.
     static func isAutomatedSession(atPath path: String) -> Bool {
         extractMetadata(fromPath: path).isAutomated
     }
@@ -367,8 +368,9 @@ enum ClaudeSessionHistory {
     /// decoding the folder name.
     ///
     /// `isAutomated` flags non-interactive `claude -p` / SDK-driven runs
-    /// (memory observers, sub-agents from `/ship-it`, etc.), detected via the
-    /// `entrypoint: "sdk-cli"` marker the CLI writes on its user lines.
+    /// (memory observers, sub-agents from `/ship-it`, plugin background
+    /// reviews, etc.), detected via the `entrypoint: "sdk-*"` marker the
+    /// CLI/SDKs write on their user lines (`sdk-cli`, `sdk-py`, `sdk-ts`).
     private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             return ("Untitled", nil, false, false)
@@ -435,6 +437,6 @@ enum ClaudeSessionHistory {
         }
 
         let title = aiTitle ?? firstUserMessage ?? "Untitled"
-        return (title, cwd, isBackgroundScheduled, entrypoint == "sdk-cli")
+        return (title, cwd, isBackgroundScheduled, entrypoint?.hasPrefix("sdk-") == true)
     }
 }
