@@ -203,7 +203,7 @@ struct StatusBarView: View {
         // "claude-opus-4-7[1m]" → "Opus 4.7 (1M)"
         let (base, variantSuffix) = ModelNameFormatter.splitVariant(model)
         let lower = base.lowercased()
-        for (family, label) in [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
+        for (family, label) in [("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
             if lower.contains(family) {
                 if let v = extractVersion(from: lower, family: family) { return "\(label) \(v)\(variantSuffix)" }
                 return "\(label)\(variantSuffix)"
