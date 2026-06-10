@@ -46,7 +46,7 @@ struct LauncherView: View {
     // accounts the CLI upgrades any opus model to "[1m]" at runtime. The actual 200K
     // enforcement is the CLAUDE_CODE_DISABLE_1M_CONTEXT env var set in ShimProcess for
     // non-"[1m]" opus selections. Entries carrying "[1m]" stay on the 1M tier.
-    private static let modelOptions = ["", "claude-opus-4-8", "opus[1m]", "claude-opus-4-7", "claude-opus-4-7[1m]", "sonnet", "sonnet[1m]", "haiku"]
+    private static let modelOptions = ["", "claude-fable-5", "claude-opus-4-8", "opus[1m]", "claude-opus-4-7", "claude-opus-4-7[1m]", "sonnet", "sonnet[1m]", "haiku"]
     private static let effortOptions = ["", "low", "medium", "high", "xhigh", "max"]
     private static let permissionModes: [PermissionMode] = [.default, .plan, .auto, .acceptEdits, .dontAsk]
 
@@ -378,6 +378,7 @@ struct LauncherView: View {
         // Explicit full model IDs map to their short marketing name. The latest shows
         // plainly as "Opus"; older pinned versions keep their version number.
         switch alias {
+        case "claude-fable-5": return "Fable"
         case "claude-opus-4-8": return "Opus"
         case "claude-opus-4-7": return "Opus 4.7"
         case "claude-opus-4-7[1m]": return "Opus 4.7 (1M)"
