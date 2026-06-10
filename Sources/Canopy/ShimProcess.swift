@@ -279,8 +279,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             env["PATH"] = (newPaths + [currentPath]).joined(separator: ":")
         }
 
-        // Write model/effort to ~/.claude/settings.json before CLI starts
-        Self.applyClaudeSettings([("model", model), ("effortLevel", effortLevel)])
+        // Write model/effort to ~/.claude/settings.json before CLI starts.
+        // Remote sessions skip this: the CLI runs on the remote host and reads
+        // the remote ~/.claude/settings.json, so a local write only pollutes
+        // local defaults. The selection travels via CANOPY_REMOTE_MODEL/EFFORT
+        // env vars instead, which ssh-claude-wrapper.sh turns into --model /
+        // --effort CLI flags on the remote command line.
+        if remoteHost == nil {
+            Self.applyClaudeSettings([("model", model), ("effortLevel", effortLevel)])
+        } else {
+            if let model, !model.isEmpty { env["CANOPY_REMOTE_MODEL"] = model }
+            if let effortLevel, !effortLevel.isEmpty { env["CANOPY_REMOTE_EFFORT"] = effortLevel }
+        }
 
         // Pin the standard 200K context tier when the user picked a non-1M Opus model.
         // For 1M-eligible accounts the CLI force-appends "[1m]" to ANY opus model at
