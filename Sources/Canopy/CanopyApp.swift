@@ -74,9 +74,9 @@ struct CanopyApp: App {
                 }
                 .keyboardShortcut("0", modifiers: .command)
                 Divider()
-                // Cmd+1..9 — jump to N-th visible sidebar row.
+                // Cmd+1..9 — switch to N-th open session (closed rows skipped).
                 ForEach(1...9, id: \.self) { idx in
-                    Button("Switch to Row \(idx)") {
+                    Button("Switch to Open Session \(idx)") {
                         jumpToRow(at: idx - 1)
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
@@ -92,19 +92,11 @@ struct CanopyApp: App {
     // MARK: - Sidebar shell helpers
 
     private func jumpToRow(at index: Int) {
-        let rows = sidebarStore.displayRows
-        guard index < rows.count else { return }
-        let row = rows[index]
-        switch row {
-        case .open(let s):
-            sidebarStore.select(.session(s.id))
-        case .closedLocal(let entry):
-            sidebarStore.openLocal(entry)
-        case .closedCloud(let session):
-            // openCloud schedules its own Task internally — the synchronous
-            // call here is intentional (matches `Sidebar.handleClick`).
-            sidebarStore.openCloud(session)
-        }
+        // Cmd+1..9 switches among open sessions only; closed rows are ignored.
+        let openRows = sidebarStore.visibleRows.filter(\.isOpen)
+        guard index < openRows.count,
+              case .open(let s) = openRows[index] else { return }
+        sidebarStore.select(.session(s.id))
     }
 
     private func closeActiveSession() {
