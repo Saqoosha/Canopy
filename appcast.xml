@@ -13,8 +13,8 @@
             <sparkle:shortVersionString>2.5.9</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Changes
-- (Add release notes here)
+            <description sparkle:format="markdown"><![CDATA[### Bug Fixes
+- Fixed Cmd+1..9 keyboard shortcuts accidentally reopening closed sidebar sessions — shortcuts now switch among open sessions only
 ]]></description>
             <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.5.9/Canopy-2.5.9.dmg" length="2699547" type="application/octet-stream" sparkle:edSignature="4nPL7Mhegwg1c8yzIb1YrpVcP2p2aNrUq7GoKvH0fbSmgXwwszOuXeiWuJL+aBPH76f4/MI2u9ocw7n5ZfelBg=="/>
             <sparkle:deltas>
