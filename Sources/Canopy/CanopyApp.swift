@@ -76,7 +76,7 @@ struct CanopyApp: App {
                 Divider()
                 // Cmd+1..9 — switch to N-th open session (closed rows skipped).
                 ForEach(1...9, id: \.self) { idx in
-                    Button("Switch to Row \(idx)") {
+                    Button("Switch to Open Session \(idx)") {
                         jumpToRow(at: idx - 1)
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
@@ -92,10 +92,8 @@ struct CanopyApp: App {
     // MARK: - Sidebar shell helpers
 
     private func jumpToRow(at index: Int) {
-        // Cmd+1..9 must not reopen closed sessions (displayRows includes them
-        // after open rows). Filter to visible open rows so Cmd+3 is always the
-        // 3rd live session, matching sidebar order among open rows only.
-        let openRows = sidebarStore.displayRows.filter(\.isOpen)
+        // Cmd+1..9 switches among open sessions only; closed rows are ignored.
+        let openRows = sidebarStore.visibleRows.filter(\.isOpen)
         guard index < openRows.count,
               case .open(let s) = openRows[index] else { return }
         sidebarStore.select(.session(s.id))
