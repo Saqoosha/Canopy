@@ -121,10 +121,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if isWorking && !oldValue {
                 lastAssistantHadAskUserQuestion = false
                 refreshAskingState()
+                // Reconcile pending background tasks against the session
+                // JSONL: only the ids whose `<task-notification>` has
+                // landed in the log get cleared. Multi-bg-task case and
+                // user-typed-while-bg case both resolve correctly — see
+                // `clearCompletedBackgroundTasksOnWake()`.
+                if !pendingBackgroundTaskIds.isEmpty {
+                    clearCompletedBackgroundTasksOnWake()
+                }
             }
             boundSession?.isThinking = isWorking
+            refreshWaitingState()
         }
     }
+
+    /// Outstanding `tool_use` ids whose call was either a `Bash` with
+    /// `run_in_background:true` or an `Agent` with `run_in_background:true`.
+    /// The CLI never streams the matching `<task-notification>` back through
+    /// the io_message channel (verified empirically with bg-trace logging),
+    /// so we can't watch for completion directly. Instead we scan the session
+    /// JSONL tail on the next `isWorking: false→true` transition — see
+    /// `clearCompletedBackgroundTasksOnWake()` for the full rationale.
+    /// While the set is non-empty and `isWorking` is false, the sidebar shows
+    /// the "waiting" hourglass.
+    private var pendingBackgroundTaskIds = Set<String>()
 
     /// True when the most recent assistant message contained a
     /// `tool_use` block whose name is `AskUserQuestion`. Drives `isAsking`
@@ -140,7 +160,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// dead) shim — without this sync the raised-hand icon would linger
     /// until something else triggered `refreshAskingState`.
     weak var boundSession: OpenSession? {
-        didSet { refreshAskingState() }
+        didSet {
+            refreshAskingState()
+            refreshWaitingState()
+        }
     }
 
     /// In-flight `tool_permission_request` ids from extension → webview.
@@ -1343,15 +1366,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         refreshAskingState()
     }
 
-    /// Drop every asking-related signal and resync the bound session.
-    /// Called when the shim/CLI exits so a crashed or disconnected session
-    /// row doesn't keep a stale raised-hand icon — once the process is gone
-    /// no protocol message will ever clear the pending sets organically.
-    private func resetAskingState() {
+    /// Drop every transient activity signal (asking AND waiting) and resync
+    /// the bound session. Called when the shim/CLI exits so a crashed or
+    /// disconnected session row doesn't keep a stale raised-hand or hourglass
+    /// icon — once the process is gone no protocol message will ever clear
+    /// the pending sets organically.
+    private func resetActivityState() {
         pendingPermissionRequestIds.removeAll()
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
+        pendingBackgroundTaskIds.removeAll()
         refreshAskingState()
+        refreshWaitingState()
     }
 
     /// Recompute the asking flag from outstanding permission requests AND
@@ -1366,6 +1392,160 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let asking = !pendingPermissionRequestIds.isEmpty
             || lastAssistantHadAskUserQuestion
         boundSession?.isAsking = asking
+    }
+
+    /// Recompute the waiting flag. We only flip the sidebar to "waiting" when
+    /// Claude itself is idle — if `isWorking` is true the thinking flower
+    /// takes precedence (and the user already knows the session is alive).
+    private func refreshWaitingState() {
+        boundSession?.isWaiting = !isWorking && !pendingBackgroundTaskIds.isEmpty
+    }
+
+    /// Reconcile `pendingBackgroundTaskIds` against the session JSONL on the
+    /// `isWorking: false→true` transition. Only ids whose `<task-notification>`
+    /// has already been written to the log get cleared; everything else stays
+    /// pending so the hourglass keeps showing for bg tasks that are actually
+    /// still running.
+    ///
+    /// Rationale: the CLI does NOT route `<task-notification>` user messages
+    /// through the io_message stream (verified empirically), so we can't
+    /// watch for completion directly. But the CLI does persist every
+    /// task-notification to `~/.claude/projects/<encoded>/<sid>.jsonl` —
+    /// both as a `queue-operation` enqueue and as the synthetic `user`
+    /// message that wakes Claude. By the time we observe `isWorking` going
+    /// true (first `stream_event` of the new turn), those JSONL entries are
+    /// flushed, so a scan of the file's tail is authoritative for which
+    /// pending ids are done.
+    ///
+    /// Falls back to bulk-clear when the JSONL is unreachable (SSH remote
+    /// runs the CLI on the other machine; a brand-new session may not have
+    /// flushed yet; a folder-encoding mismatch). The "user-typed-while-bg"
+    /// and "multi-bg first completion" edge cases reappear in that fallback
+    /// path only.
+    private func clearCompletedBackgroundTasksOnWake() {
+        if let path = sessionJSONLPath(),
+           let tail = Self.readJSONLTail(path: path, bytes: 32_768)
+        {
+            var removed: [String] = []
+            for id in pendingBackgroundTaskIds
+            where Self.jsonlTailHasCompletion(tail: tail, taskId: id)
+            {
+                pendingBackgroundTaskIds.remove(id)
+                removed.append(id)
+            }
+            if !removed.isEmpty {
+                logger.info("[bg] wake jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+                refreshWaitingState()
+            }
+            return
+        }
+
+        let count = pendingBackgroundTaskIds.count
+        pendingBackgroundTaskIds.removeAll()
+        logger.info("[bg] wake bulk-cleared (no JSONL access) count=\(count, privacy: .public)")
+        refreshWaitingState()
+    }
+
+    /// True when the JSONL tail contains a `<task-notification>` completion
+    /// marker for `taskId`. The CLI emits the id verbatim inside both
+    /// `queue-operation` enqueue lines and the synthetic `user` message,
+    /// surrounded by literal `<tool-use-id>...</tool-use-id>` tags — see
+    /// recent session JSONLs for fixtures. Extracted as a `static` so the
+    /// probe can lock the contract without standing up a live shim — if the
+    /// CLI ever changes the wrapper format, the probe goes red instead of
+    /// the hourglass silently sticking on every session forever.
+    static func jsonlTailHasCompletion(tail: String, taskId: String) -> Bool {
+        tail.contains("<tool-use-id>\(taskId)</tool-use-id>")
+    }
+
+    /// Resolve the local path to the session's JSONL log, or nil if it is not
+    /// reachable from this process (SSH remote sessions write on the other
+    /// machine; a brand-new session may not yet have a session id).
+    private func sessionJSONLPath() -> String? {
+        guard remoteHost == nil else { return nil }
+        guard let sid = activeSessionId ?? resumeSessionId, !sid.isEmpty else { return nil }
+        let home = NSHomeDirectory()
+        let fm = FileManager.default
+        for encoded in ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.path) {
+            let path = "\(home)/.claude/projects/\(encoded)/\(sid).jsonl"
+            if fm.fileExists(atPath: path) {
+                return path
+            }
+        }
+        return nil
+    }
+
+    /// Read the final `bytes` of a JSONL file. Returns nil only on real
+    /// I/O failure (handle open, seek, read) — callers then fall back to
+    /// bulk-clear. The 32 KB offset typically lands mid-line and possibly
+    /// mid-multibyte; lossy UTF-8 decoding swallows the garbled prefix
+    /// without dropping the rest of the tail (the substring match further
+    /// down looks for ASCII-only `<tool-use-id>…</tool-use-id>` markers,
+    /// which live on later, fully-formed lines). Same pattern as
+    /// `ClaudeSessionHistory.extractMetadata` — both files share heavy
+    /// Japanese content in practice, so a strict UTF-8 decoder would nil
+    /// out on every wake-up and quietly defeat the JSONL reconcile.
+    private static func readJSONLTail(path: String, bytes: Int) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else {
+            // Race window: file existed at the `fileExists` probe in
+            // `sessionJSONLPath` but is gone now. Expected/recoverable.
+            logger.debug("[bg] readJSONLTail open failed path=\(path, privacy: .public)")
+            return nil
+        }
+        defer { try? handle.close() }
+        do {
+            let size = try handle.seekToEnd()
+            let offset = size > UInt64(bytes) ? size - UInt64(bytes) : 0
+            try handle.seek(toOffset: offset)
+            let data = try handle.readToEnd() ?? Data()
+            return String(decoding: data, as: UTF8.self)
+        } catch {
+            // Genuine I/O failure (EPERM/EACCES/EIO/EBADF). Shouldn't happen
+            // in normal operation; surface it so a sandbox/disk regression
+            // isn't masked as the documented "JSONL unreachable" fallback.
+            logger.warning("[bg] readJSONLTail I/O error: \(error.localizedDescription, privacy: .public) path=\(path, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Detect `tool_use` blocks whose call kicked off a background task
+    /// (Bash with `run_in_background:true`, or Agent with same flag).
+    /// We only inspect the final `assistant` io_message — for stream_event
+    /// content_block_start the `input` field is typically empty (input arrives
+    /// over later content_block_delta `input_json_delta` events), so the
+    /// `run_in_background` flag isn't observable there. The assistant message
+    /// fires within a few hundred ms of the tool call, which is plenty fast
+    /// for a between-turns indicator.
+    private func detectBackgroundTaskLaunch(in ioMsg: [String: Any]) {
+        guard ioMsg["type"] as? String == "assistant",
+              let assistantMsg = ioMsg["message"] as? [String: Any],
+              let content = assistantMsg["content"] as? [[String: Any]]
+        else { return }
+
+        var added: [String] = []
+        for block in content {
+            guard let id = block["id"] as? String,
+                  Self.isBackgroundLaunchBlock(block)
+            else { continue }
+            if pendingBackgroundTaskIds.insert(id).inserted {
+                added.append(id)
+            }
+        }
+        if !added.isEmpty {
+            logger.info("[bg] launch +\(added.count, privacy: .public) ids=\(added.joined(separator: ","), privacy: .public) pending=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+            refreshWaitingState()
+        }
+    }
+
+    /// True if `block` is a `tool_use` for `Bash` or `Agent` whose input
+    /// has `run_in_background:true`. Static so `_SidebarLogicProbe` can test
+    /// the predicate without spawning a shim.
+    static func isBackgroundLaunchBlock(_ block: [String: Any]) -> Bool {
+        guard block["type"] as? String == "tool_use" else { return false }
+        let name = block["name"] as? String ?? ""
+        guard name == "Bash" || name == "Agent" else { return false }
+        let input = block["input"] as? [String: Any] ?? [:]
+        return input["run_in_background"] as? Bool == true
     }
 
     /// Scan an io_message for `tool_use` blocks named `AskUserQuestion`,
@@ -1428,6 +1608,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         switch ioType {
         case "assistant", "stream_event":
             detectAskUserQuestion(in: ioMsg)
+            detectBackgroundTaskLaunch(in: ioMsg)
             isWorking = true
         case "result":
             if isWorking {
@@ -1593,7 +1774,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             exitCode = -1
         }
         logger.error("CLI subprocess died (code \(exitCode)), stopping shim")
-        resetAskingState()
+        resetActivityState()
         stop()
         delegate?.shimProcessDidCrash(self, status: exitCode)
     }
@@ -1612,7 +1793,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Even for intentional stops the bound session is about to be
         // dropped or replaced — clearing here keeps the sidebar consistent
         // through the crash/disconnect/close paths uniformly.
-        resetAskingState()
+        resetActivityState()
 
         guard !isIntentionalStop else { return }
 

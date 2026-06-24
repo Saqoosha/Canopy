@@ -77,6 +77,12 @@ final class OpenSession: Identifiable, Hashable {
     /// asked the webview for tool approval and the user hasn't responded
     /// yet. Drives the "asking" icon in the sidebar (e.g. raised hand).
     var isAsking: Bool = false
+
+    /// True when Claude is idle (no `stream_event`/`assistant` in flight)
+    /// but at least one `run_in_background` task (Bash shell or Agent) is
+    /// still running. Drives the sidebar's "waiting" hourglass icon.
+    /// Mutually exclusive with `isThinking` — only true between turns.
+    var isWaiting: Bool = false
     /// The shim subprocess. Strong reference; nil only between init and start.
     var shim: ShimProcess?
     /// The WKWebView mounted into the detail pane's ZStack. Strong reference;

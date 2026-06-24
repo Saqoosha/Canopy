@@ -55,11 +55,11 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 
 ### Swift (Sources/Canopy/)
 - `CanopyApp.swift` — SwiftUI app entry (single `WindowGroup` with `NavigationSplitView`), menu commands (Cmd+N new session, Cmd+W context-aware close session/window, Cmd+Shift+W close window, Cmd+0 show main window, Cmd+1..9 switch among open sessions, Cmd+O open folder), Sparkle updater, AppDelegate (close-button override, reopen handler, manual main-window frame save/restore via `canopy.mainWindowFrame` UserDefaults)
-- `Sidebar.swift` — Left column List with Open + Recents sections, per-row icon (spawning spinner / asking yellow hand / thinking orange flower / idle dot for open rows; computer for closed local; cloud for closed cloud), filter gear popover, right-click "Hide from sidebar", AppKit-direct scroll-to-top via `ListScrollToTop`, `ThinkingFlower` TimelineView animating Unicode flower glyphs
+- `Sidebar.swift` — Left column List with Open + Recents sections, per-row icon (spawning spinner / asking yellow hand / thinking orange flower / waiting blue hourglass / idle dot for open rows; computer for closed local; cloud for closed cloud), filter gear popover, right-click "Hide from sidebar", AppKit-direct scroll-to-top via `ListScrollToTop`, `ThinkingFlower` TimelineView animating Unicode flower glyphs
 - `Detail.swift` — Right pane: switches between `DetailLauncher` (when sidebar selection is `.launcher`) and `SessionContainer` (when `.session`); sets `.navigationTitle` (session title) + `.navigationSubtitle` (project)
 - `SessionContainer.swift` — `WebViewContainer` + `ConnectionOverlayView` + `StatusBarView` + `SpawningOverlay`
 - `SessionStore.swift` — `@Observable @MainActor` store: `openSessions` (insertion-ordered), `recents`, `cloud`, `filter`, `hiddenIds`, `selection`. Owns sidebar state, drives cloud polling (30 s) when sidebar visible, tracks `teleportingCloudId` so concurrent teleports serialize
-- `OpenSession.swift` — `@Observable` per-session record: `origin` (local / remote / teleportedFrom), `resumeId`, `title`, `project`, `status` (.spawning/.live/.crashed), `lastActiveAt`, `statusBar`, `connection`, `isThinking`, `isAsking`. **Canonical owner** of the strong `ShimProcess` and `WKWebView` references
+- `OpenSession.swift` — `@Observable` per-session record: `origin` (local / remote / teleportedFrom), `resumeId`, `title`, `project`, `status` (.spawning/.live/.crashed), `lastActiveAt`, `statusBar`, `connection`, `isThinking`, `isAsking`, `isWaiting`. **Canonical owner** of the strong `ShimProcess` and `WKWebView` references
 - `SidebarRow.swift` — Row enum (`.open` / `.closedLocal` / `.closedCloud`) + `sorted(_:)` (open block insertion-order, closed block date desc) + `deduped(_:teleportedFromMap:)` (drops cloud rows already teleported)
 - `SidebarFilter.swift` — Codable filter (`status`, `origin`, `project`, `lastActivity`) with `apply(to:)` + `projects(in:)`
 - `SessionStorePersistence.swift` — JSON-encoded filter / lastActiveResumeId / hiddenIds in UserDefaults
@@ -88,7 +88,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `SessionTitleStore.swift` — Persists per-session AI-generated titles in UserDefaults so closed rows keep their label
 - `SettingsView.swift` — Preferences window content: bypass-permissions opt-in toggle, "Default for Recents" permission Picker, "Use Ctrl+Enter to Send" toggle, "Respect .gitignore in File Search" toggle, saved SSH hosts list with delete buttons
 - `SharedRateLimitData.swift` — Cross-session rate-limit observable; the shim broadcasts limit events here and the status bar reads from it
-- `_SidebarLogicProbe.swift` — DEBUG-only probe (`CANOPY_RUN_LOGIC_PROBE=1`): 23 unit tests for sort / dedup / filter / scheduled-task / automated-session (`claude -p` / SDK `entrypoint: "sdk-*"` — sdk-cli, sdk-py) detection
+- `_SidebarLogicProbe.swift` — DEBUG-only probe (`CANOPY_RUN_LOGIC_PROBE=1`): 33 unit tests for sort / dedup / filter / scheduled-task / automated-session (`claude -p` / SDK `entrypoint: "sdk-*"` — sdk-cli, sdk-py) detection / background-task launch detection (`run_in_background` tool_use blocks) / JSONL `<task-notification>` completion-marker matching (the wake-up reconcile contract)
 - `_ProbeWebViewRetention.swift` — DEBUG-only probe kept as historical reference: validates the early ZStack/opacity-based retention pattern that was superseded by the in-place subview swap shipped in `WebViewContainer`
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
 
