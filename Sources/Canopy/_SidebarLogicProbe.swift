@@ -298,6 +298,66 @@ enum SidebarLogicProbe {
         record("automated: sdk-py entrypoint flagged",
                sdkPyPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
 
+        // background-task launch detection (drives sidebar "waiting" icon)
+        let bashBg: [String: Any] = [
+            "type": "tool_use",
+            "id": "toolu_bash_bg",
+            "name": "Bash",
+            "input": ["command": "sleep 60", "run_in_background": true],
+        ]
+        let agentBg: [String: Any] = [
+            "type": "tool_use",
+            "id": "toolu_agent_bg",
+            "name": "Agent",
+            "input": ["prompt": "...", "run_in_background": true],
+        ]
+        let bashForeground: [String: Any] = [
+            "type": "tool_use",
+            "id": "toolu_bash_fg",
+            "name": "Bash",
+            "input": ["command": "ls", "run_in_background": false],
+        ]
+        let editTool: [String: Any] = [
+            "type": "tool_use",
+            "id": "toolu_edit",
+            "name": "Edit",
+            "input": ["file_path": "/x", "run_in_background": true],
+        ]
+        let textBlock: [String: Any] = ["type": "text", "text": "hello"]
+
+        record("bg launch: Bash run_in_background:true",
+               ShimProcess.isBackgroundLaunchBlock(bashBg))
+        record("bg launch: Agent run_in_background:true",
+               ShimProcess.isBackgroundLaunchBlock(agentBg))
+        record("bg launch: foreground Bash NOT flagged",
+               !ShimProcess.isBackgroundLaunchBlock(bashForeground))
+        record("bg launch: Edit tool NOT flagged even with flag",
+               !ShimProcess.isBackgroundLaunchBlock(editTool))
+        record("bg launch: text block NOT flagged",
+               !ShimProcess.isBackgroundLaunchBlock(textBlock))
+
+        // background-task completion marker (the JSONL contract). The
+        // wake-up reconcile is shim-coupled so it can't run from this
+        // static probe, but the substring matcher is pure — lock it down
+        // here so a CLI format drift in `<tool-use-id>` lights up the
+        // probe instead of silently sticking the hourglass forever.
+        let jsonlTail = """
+        {"type":"queue-operation","operation":"enqueue","content":"<task-notification>\\n<task-id>aea7914f15afc48af</task-id>\\n<tool-use-id>toolu_01KDTwPWn2C3FdoCKvZSnmJx</tool-use-id>\\n<status>completed</status>\\n</task-notification>"}
+        {"type":"user","message":{"role":"user","content":"<task-notification>\\n<task-id>b6zqqmb6q</task-id>\\n<tool-use-id>toolu_01GFkSMYZ37n46jxw6D3wSAy</tool-use-id>\\n<status>killed</status>\\n</task-notification>"}}
+        """
+        record("bg complete: tail contains id → match",
+               ShimProcess.jsonlTailHasCompletion(tail: jsonlTail, taskId: "toolu_01KDTwPWn2C3FdoCKvZSnmJx"))
+        record("bg complete: second id also matches",
+               ShimProcess.jsonlTailHasCompletion(tail: jsonlTail, taskId: "toolu_01GFkSMYZ37n46jxw6D3wSAy"))
+        record("bg complete: unmatched id → no match",
+               !ShimProcess.jsonlTailHasCompletion(tail: jsonlTail, taskId: "toolu_99XXXNEVERSEEN"))
+        record("bg complete: empty tail → no match",
+               !ShimProcess.jsonlTailHasCompletion(tail: "", taskId: "toolu_01KDTwPWn2C3FdoCKvZSnmJx"))
+        // Partial / wrong-tag-wrapper IDs must NOT trigger a false match —
+        // this is the regression case if the CLI ever changes the wrapper.
+        record("bg complete: bare id without wrapper → no match",
+               !ShimProcess.jsonlTailHasCompletion(tail: "toolu_01KDTwPWn2C3FdoCKvZSnmJx", taskId: "toolu_01KDTwPWn2C3FdoCKvZSnmJx"))
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return lines.joined(separator: "\n")

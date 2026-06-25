@@ -412,6 +412,11 @@ private struct SidebarRowView: View {
                 .foregroundStyle(SidebarPalette.askingYellow)
         } else if isThinking {
             ThinkingFlower()
+        } else if isWaiting {
+            // Claude is idle but a background Bash/Agent task is still
+            // running — surface that so the row reads as "alive but not
+            // your turn" instead of the plain idle dot.
+            WaitingHourglass()
         } else {
             Image(systemName: iconName)
                 .symbolRenderingMode(.hierarchical)
@@ -446,6 +451,11 @@ private struct SidebarRowView: View {
 
     private var isAsking: Bool {
         if case .open(let s) = row { return s.isAsking }
+        return false
+    }
+
+    private var isWaiting: Bool {
+        if case .open(let s) = row { return s.isWaiting }
         return false
     }
 
@@ -653,6 +663,35 @@ private enum SidebarPalette {
     /// Soft amber for "asking" state — warmer than system yellow, calmer
     /// than orange. Reads as "your attention please" without screaming.
     static let askingYellow = Color(red: 0.95, green: 0.74, blue: 0.18)
+    /// Muted blue for "waiting on background task" state. Cool palette so
+    /// it doesn't compete with the warmer thinking/asking colors — the
+    /// session is alive but not demanding attention.
+    static let waitingBlue = Color(red: 0.40, green: 0.58, blue: 0.78)
+}
+
+/// Animated hourglass shown while a background task (Bash run_in_background
+/// or Agent run_in_background) is still running but Claude itself is idle.
+/// Cycles `hourglass.tophalf.filled` ↔ `hourglass.bottomhalf.filled` — sand
+/// pours, then "flips" back. The plain (empty) `hourglass` glyph isn't in
+/// the cycle on purpose: it reads as "no sand", which is the wrong story
+/// for "still running". Slow (~1.2s per frame, ~2.4s round trip) so the icon
+/// ticks quietly without demanding attention.
+private struct WaitingHourglass: View {
+    private static let frames = [
+        "hourglass.tophalf.filled",
+        "hourglass.bottomhalf.filled",
+    ]
+    private static let secondsPerFrame: TimeInterval = 1.2
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: Self.secondsPerFrame)) { context in
+            let idx = Int(context.date.timeIntervalSince1970 / Self.secondsPerFrame)
+                % Self.frames.count
+            Image(systemName: Self.frames[idx])
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(SidebarPalette.waitingBlue)
+        }
+    }
 }
 
 /// Animated 6-petal flower shown while Claude is generating a response.
