@@ -137,16 +137,16 @@ struct LauncherView: View {
     @ViewBuilder
     private var extensionUpdateBanner: some View {
         switch updater.state {
-        case .updateAvailable(let cliVersion, let currentVersion):
+        case .updateAvailable(let latestVersion, let currentVersion):
             updateBannerCard(icon: "arrow.down.circle", iconColor: .blue, tint: .blue) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Extension update available")
                         .font(.subheadline.bold())
                     HStack(spacing: 6) {
                         if let currentVersion {
-                            Text("v\(currentVersion) → v\(cliVersion)")
+                            Text("v\(currentVersion) → v\(latestVersion)")
                         } else {
-                            Text("v\(cliVersion)")
+                            Text("v\(latestVersion)")
                         }
                         Text("·").foregroundStyle(.tertiary)
                         Link("Changelog", destination: ExtensionUpdater.changelogURL)

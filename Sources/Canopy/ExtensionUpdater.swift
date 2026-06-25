@@ -10,7 +10,7 @@ final class ExtensionUpdater {
         case idle
         case checking
         case upToDate
-        case updateAvailable(cliVersion: String, currentVersion: String?)
+        case updateAvailable(latestVersion: String, currentVersion: String?)
         case downloading
         case installing
         case done(version: String)
@@ -25,50 +25,68 @@ final class ExtensionUpdater {
         guard state == .idle || state == .upToDate || state.isTerminal else { return }
 
         state = .checking
-        guard let cliVer = await CCExtension.cliVersion() else {
-            logger.warning("Could not determine CLI version — CLI not found or failed to run")
+        guard let latestVer = await marketplaceLatestVersion() else {
+            logger.warning("Could not determine marketplace latest version")
             state = .idle
             return
         }
-        guard Self.isValidVersion(cliVer) else {
-            logger.error("CLI returned invalid version string: \(cliVer, privacy: .public)")
+        guard Self.isValidVersion(latestVer) else {
+            logger.error("Marketplace returned invalid version string: \(latestVer, privacy: .public)")
             state = .idle
             return
         }
         let extVer = CCExtension.extensionVersion()
-        if extVer == cliVer {
-            state = .upToDate
-        } else if let extVer, Self.compareVersions(extVer, cliVer) >= 0 {
-            // Extension is same or newer than CLI — no downgrade
+        if let extVer, Self.compareVersions(extVer, latestVer) >= 0 {
             state = .upToDate
         } else {
-            // Verify the version is actually available on the marketplace before showing update UI
-            // (CLI may report a newer version before the extension is published)
-            guard await isVersionOnMarketplace(cliVer) else {
-                logger.info("Extension v\(cliVer, privacy: .public) not yet on marketplace — skipping update")
-                state = .upToDate
-                return
-            }
-            state = .updateAvailable(cliVersion: cliVer, currentVersion: extVer)
+            state = .updateAvailable(latestVersion: latestVer, currentVersion: extVer)
         }
     }
 
-    private func isVersionOnMarketplace(_ version: String) async -> Bool {
+    /// Query the VS Marketplace for the latest published `anthropic.claude-code` version
+    /// matching the current platform. Returns nil on network error or parse failure.
+    private func marketplaceLatestVersion() async -> String? {
         let platform = Self.detectPlatform()
-        let urlString = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/\(version)/vspackage?targetPlatform=\(platform)"
-        guard let url = URL(string: urlString) else { return false }
-        // HEAD returns 405 on this endpoint, so use GET but only read response headers.
-        // bytes(for:) streams the body lazily — we don't iterate, so nothing is downloaded.
+        let urlString = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
+        guard let url = URL(string: urlString) else { return nil }
         var request = URLRequest(url: url)
+        request.httpMethod = "POST"
         request.timeoutInterval = 10
+        request.setValue("application/json;api-version=3.0-preview.1", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // flags=914 includes IncludeVersions + IncludeFiles + IncludeVersionProperties so each
+        // version entry carries its targetPlatform.
+        let body: [String: Any] = [
+            "filters": [["criteria": [["filterType": 7, "value": "anthropic.claude-code"]]]],
+            "flags": 914,
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
         do {
-            let (_, response) = try await URLSession.shared.bytes(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            return status == 200 || status == 206
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResp = response as? HTTPURLResponse,
+                  (200...299).contains(httpResp.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let results = json["results"] as? [[String: Any]],
+                  let extensions = results.first?["extensions"] as? [[String: Any]],
+                  let versions = extensions.first?["versions"] as? [[String: Any]]
+            else {
+                logger.warning("Marketplace query: unexpected response shape")
+                return nil
+            }
+            // Versions are returned newest-first. Prefer the first entry matching our platform.
+            for v in versions {
+                if let version = v["version"] as? String,
+                   v["targetPlatform"] as? String == platform,
+                   Self.isValidVersion(version)
+                {
+                    return version
+                }
+            }
+            return nil
         } catch {
-            // Network error — don't block updates, let user try
-            logger.warning("Marketplace check failed: \(error.localizedDescription, privacy: .public)")
-            return true
+            logger.warning("Marketplace query failed: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
     }
 
