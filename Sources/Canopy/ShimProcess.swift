@@ -140,11 +140,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The CLI never streams the matching `<task-notification>` back through
     /// the io_message channel (verified empirically with bg-trace logging),
     /// so we can't watch for completion directly. Instead we scan the session
-    /// JSONL tail on the next `isWorking: false→true` transition — see
-    /// `clearCompletedBackgroundTasksOnWake()` for the full rationale.
-    /// While the set is non-empty and `isWorking` is false, the sidebar shows
-    /// the "waiting" hourglass.
-    private var pendingBackgroundTaskIds = Set<String>()
+    /// JSONL from each launch's byte offset on the next `isWorking: false→true`
+    /// transition — see `clearCompletedBackgroundTasksOnWake()` for the full
+    /// rationale. While the map is non-empty and `isWorking` is false, the
+    /// sidebar shows the "waiting" hourglass.
+    ///
+    /// Value is the JSONL byte size captured at detection time. Scanning from
+    /// `min(values)` to EOF is the natural correct bound — anything before
+    /// every launch can't contain a completion marker for any pending id.
+    /// A fixed-size tail (the old 32 KB) silently fails when Claude continues
+    /// streaming heavy tool output between launch and the next wake-up: the
+    /// completion marker scrolls off the tail and the hourglass sticks
+    /// forever.
+    private var pendingBackgroundTaskIds: [String: UInt64] = [:]
 
     /// True when the most recent assistant message contained a
     /// `tool_use` block whose name is `AskUserQuestion`. Drives `isAsking`
@@ -1417,24 +1425,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// flushed, so a scan of the file's tail is authoritative for which
     /// pending ids are done.
     ///
+    /// Scans from `min(pendingBackgroundTaskIds.values)` — the earliest launch
+    /// offset captured at detection time. This bounds the read to bytes
+    /// written since the bg launch and guarantees the completion marker (if
+    /// any) is in the scanned window, regardless of how much intervening
+    /// tool output Claude streamed. A fixed-size tail silently dropped the
+    /// marker once the file grew past it (see the launch-offset comment on
+    /// `pendingBackgroundTaskIds`).
+    ///
     /// Falls back to bulk-clear when the JSONL is unreachable (SSH remote
     /// runs the CLI on the other machine; a brand-new session may not have
     /// flushed yet; a folder-encoding mismatch). The "user-typed-while-bg"
     /// and "multi-bg first completion" edge cases reappear in that fallback
     /// path only.
     private func clearCompletedBackgroundTasksOnWake() {
+        let minOffset = pendingBackgroundTaskIds.values.min() ?? 0
         if let path = sessionJSONLPath(),
-           let tail = Self.readJSONLTail(path: path, bytes: 32_768)
+           let tail = Self.readJSONLFromOffset(path: path, offset: minOffset)
         {
+            // Snapshot keys before mutating — iterating `.keys` while removing
+            // from the dictionary is undefined behavior in Swift.
             var removed: [String] = []
-            for id in pendingBackgroundTaskIds
+            for id in Array(pendingBackgroundTaskIds.keys)
             where Self.jsonlTailHasCompletion(tail: tail, taskId: id)
             {
-                pendingBackgroundTaskIds.remove(id)
+                pendingBackgroundTaskIds.removeValue(forKey: id)
                 removed.append(id)
             }
             if !removed.isEmpty {
-                logger.info("[bg] wake jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+                logger.info("[bg] wake jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) bytes=\(tail.utf8.count, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
                 refreshWaitingState()
             }
             return
@@ -1475,37 +1494,51 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return nil
     }
 
-    /// Read the final `bytes` of a JSONL file. Returns nil only on real
-    /// I/O failure (handle open, seek, read) — callers then fall back to
-    /// bulk-clear. The 32 KB offset typically lands mid-line and possibly
-    /// mid-multibyte; lossy UTF-8 decoding swallows the garbled prefix
-    /// without dropping the rest of the tail (the substring match further
-    /// down looks for ASCII-only `<tool-use-id>…</tool-use-id>` markers,
-    /// which live on later, fully-formed lines). Same pattern as
-    /// `ClaudeSessionHistory.extractMetadata` — both files share heavy
-    /// Japanese content in practice, so a strict UTF-8 decoder would nil
-    /// out on every wake-up and quietly defeat the JSONL reconcile.
-    private static func readJSONLTail(path: String, bytes: Int) -> String? {
+    /// Read a JSONL file from `offset` to EOF. Returns nil only on real I/O
+    /// failure (handle open, seek, read) — callers then fall back to bulk-
+    /// clear. Lossy UTF-8 decoding is intentional: an offset that lands
+    /// mid-line possibly straddles a multibyte boundary, and a strict
+    /// decoder would nil out on every wake-up for Japanese-heavy sessions,
+    /// silently degrading the JSONL reconcile to bulk-clear (same pattern
+    /// as `ClaudeSessionHistory.extractMetadata`). The substring match
+    /// further down looks for ASCII-only `<tool-use-id>…</tool-use-id>`
+    /// markers, which live on later, fully-formed lines.
+    private static func readJSONLFromOffset(path: String, offset: UInt64) -> String? {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             // Race window: file existed at the `fileExists` probe in
             // `sessionJSONLPath` but is gone now. Expected/recoverable.
-            logger.debug("[bg] readJSONLTail open failed path=\(path, privacy: .public)")
+            logger.debug("[bg] readJSONLFromOffset open failed path=\(path, privacy: .public)")
             return nil
         }
         defer { try? handle.close() }
         do {
             let size = try handle.seekToEnd()
-            let offset = size > UInt64(bytes) ? size - UInt64(bytes) : 0
-            try handle.seek(toOffset: offset)
+            // If the captured launch offset is past EOF (e.g. file was
+            // truncated/rotated since detection), clamp to 0 — the launch
+            // marker is gone anyway, so scanning the whole file is safe.
+            let start = offset < size ? offset : 0
+            try handle.seek(toOffset: start)
             let data = try handle.readToEnd() ?? Data()
             return String(decoding: data, as: UTF8.self)
         } catch {
             // Genuine I/O failure (EPERM/EACCES/EIO/EBADF). Shouldn't happen
             // in normal operation; surface it so a sandbox/disk regression
             // isn't masked as the documented "JSONL unreachable" fallback.
-            logger.warning("[bg] readJSONLTail I/O error: \(error.localizedDescription, privacy: .public) path=\(path, privacy: .public)")
+            logger.warning("[bg] readJSONLFromOffset I/O error: \(error.localizedDescription, privacy: .public) path=\(path, privacy: .public)")
             return nil
         }
+    }
+
+    /// Current byte size of the session JSONL, or nil when the file is not
+    /// reachable (SSH remote / not yet flushed). Used to snapshot the launch
+    /// offset at bg-task detection time so `clearCompletedBackgroundTasksOnWake`
+    /// can scan exactly from "now" forward instead of a fixed-size tail.
+    private static func jsonlFileSize(path: String?) -> UInt64? {
+        guard let path else { return nil }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? UInt64
+        else { return nil }
+        return size
     }
 
     /// Detect `tool_use` blocks whose call kicked off a background task
@@ -1522,17 +1555,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let content = assistantMsg["content"] as? [[String: Any]]
         else { return }
 
+        // Snapshot JSONL size once per assistant message — a single message can
+        // launch several bg tools (rare but possible), and they all share this
+        // lower bound. A size taken before the CLI flushes the launch line is
+        // still safe: the completion marker is always written *after* the
+        // launch line, so scanning from a slightly earlier offset just
+        // includes the launch (a harmless no-op for completion matching).
+        let launchOffset = Self.jsonlFileSize(path: sessionJSONLPath()) ?? 0
         var added: [String] = []
         for block in content {
             guard let id = block["id"] as? String,
                   Self.isBackgroundLaunchBlock(block)
             else { continue }
-            if pendingBackgroundTaskIds.insert(id).inserted {
+            if pendingBackgroundTaskIds[id] == nil {
+                pendingBackgroundTaskIds[id] = launchOffset
                 added.append(id)
             }
         }
         if !added.isEmpty {
-            logger.info("[bg] launch +\(added.count, privacy: .public) ids=\(added.joined(separator: ","), privacy: .public) pending=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+            logger.info("[bg] launch +\(added.count, privacy: .public) ids=\(added.joined(separator: ","), privacy: .public) offset=\(launchOffset, privacy: .public) pending=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
             refreshWaitingState()
         }
     }
