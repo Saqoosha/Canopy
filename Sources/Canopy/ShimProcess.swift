@@ -1484,40 +1484,71 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// path only.
     private func clearCompletedBackgroundTasksOnWake() {
         let minOffset = pendingBackgroundTaskIds.values.min() ?? 0
-        if let path = sessionJSONLPath(),
-           let read = Self.readJSONLFromOffset(path: path, offset: minOffset)
-        {
-            // Snapshot keys before mutating — iterating `.keys` while removing
-            // from the dictionary is unsupported and can trap or silently
-            // skip elements. The `Array(...)` copy is cheap (id strings only).
-            var removed: [String] = []
-            for id in Array(pendingBackgroundTaskIds.keys)
-            where Self.jsonlTailHasCompletion(tail: read.text, taskId: id)
-            {
-                pendingBackgroundTaskIds.removeValue(forKey: id)
-                removed.append(id)
-            }
-            if !removed.isEmpty {
-                logger.info("[bg] wake jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) bytes=\(read.endOffset - minOffset, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
-                refreshWaitingState()
-            }
-            // Advance every still-pending id to the read's end: their marker
-            // wasn't in the bytes we just scanned (we just verified), so any
-            // future marker must land at offset ≥ endOffset. Bounds the next
-            // wake's read to file growth, not cumulative-since-launch.
-            if !pendingBackgroundTaskIds.isEmpty {
-                for id in Array(pendingBackgroundTaskIds.keys) {
-                    pendingBackgroundTaskIds[id] = read.endOffset
-                }
-            }
+        guard let path = sessionJSONLPath() else {
+            let count = pendingBackgroundTaskIds.count
+            pendingBackgroundTaskIds.removeAll()
+            logger.info("[bg] wake bulk-cleared (no JSONL access) count=\(count, privacy: .public)")
+            refreshWaitingState()
             return
         }
-
-        let count = pendingBackgroundTaskIds.count
-        pendingBackgroundTaskIds.removeAll()
-        logger.info("[bg] wake bulk-cleared (no JSONL access) count=\(count, privacy: .public)")
-        refreshWaitingState()
+        // Run the read on a background queue so a multi-MB JSONL doesn't
+        // stall the main thread mid-wake. The serial queue serializes
+        // overlapping wakes (the next user message can fire `isWorking`
+        // false→true→false→true before the first read returns); per-id
+        // offsets are tolerant of stale reads because the apply step
+        // only ever clears ids that the read positively matched.
+        Self.bgReadQueue.async { [weak self] in
+            let read = Self.readJSONLFromOffset(path: path, offset: minOffset)
+            DispatchQueue.main.async { [weak self] in
+                self?.applyBgReconcile(read: read, scannedFrom: minOffset)
+            }
+        }
     }
+
+    /// Apply the result of an async wake-up scan back on the main actor.
+    /// Split out from `clearCompletedBackgroundTasksOnWake` so the I/O can
+    /// live off the main thread without leaking the state mutations off it.
+    private func applyBgReconcile(read: (text: String, endOffset: JSONLByteOffset)?, scannedFrom minOffset: JSONLByteOffset) {
+        guard let read else {
+            // Read failed (I/O error during seek/readToEnd, file vanished
+            // between our path probe and the open). Bulk-clear preserves
+            // the documented contract of the offline path.
+            let count = pendingBackgroundTaskIds.count
+            pendingBackgroundTaskIds.removeAll()
+            logger.info("[bg] wake bulk-cleared (read failed) count=\(count, privacy: .public)")
+            refreshWaitingState()
+            return
+        }
+        // Snapshot keys before mutating — iterating `.keys` while removing
+        // from the dictionary is unsupported and can trap or silently
+        // skip elements. The `Array(...)` copy is cheap (id strings only).
+        var removed: [String] = []
+        for id in Array(pendingBackgroundTaskIds.keys)
+        where Self.jsonlTailHasCompletion(tail: read.text, taskId: id)
+        {
+            pendingBackgroundTaskIds.removeValue(forKey: id)
+            removed.append(id)
+        }
+        if !removed.isEmpty {
+            logger.info("[bg] wake jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) bytes=\(read.endOffset - minOffset, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+            refreshWaitingState()
+        }
+        // Advance every still-pending id to the read's end: their marker
+        // wasn't in the bytes we just scanned (we just verified), so any
+        // future marker must land at offset ≥ endOffset. Bounds the next
+        // wake's read to file growth, not cumulative-since-launch.
+        if !pendingBackgroundTaskIds.isEmpty {
+            for id in Array(pendingBackgroundTaskIds.keys) {
+                pendingBackgroundTaskIds[id] = read.endOffset
+            }
+        }
+    }
+
+    /// Serial background queue for the wake-up JSONL scan. Serial guarantees
+    /// overlapping wakes apply in dispatch order (so per-id `endOffset`
+    /// advances are monotonic); `userInitiated` matches the user-visible
+    /// "they just sent a message, the row's about to update" expectation.
+    private static let bgReadQueue = DispatchQueue(label: "sh.saqoo.Canopy.bgReadQueue", qos: .userInitiated)
 
     /// True when the JSONL tail contains a `<task-notification>` completion
     /// marker for `taskId`. The CLI emits the id verbatim inside both
@@ -1575,10 +1606,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         defer { try? handle.close() }
         do {
             let size = try handle.seekToEnd()
-            // If the captured launch offset is past EOF (e.g. file was
-            // truncated/rotated since detection), clamp to 0 — the launch
-            // marker is gone anyway, so scanning the whole file is safe.
-            let start = offset < size ? offset : 0
+            // Only clamp when offset is strictly past EOF (file was truncated
+            // or rotated). The `==` case is the steady state — nothing new
+            // appended since the last advance — and reading 0 bytes from
+            // there is the correct (and cheap) answer. The earlier `<`
+            // boundary re-scanned the whole file every wake when nothing
+            // new had been written.
+            let start = offset <= size ? offset : 0
             try handle.seek(toOffset: start)
             let data = try handle.readToEnd() ?? Data()
             let endOffset = start + JSONLByteOffset(data.count)
