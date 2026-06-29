@@ -16,6 +16,49 @@ BUILD_DIR="${ROOT_DIR}/build"
 SPARKLE_BIN="${BUILD_DIR}/SourcePackages/artifacts/sparkle/Sparkle/bin"
 APPCAST_DIR="${BUILD_DIR}/appcast"
 
+# Sparkle's generate_appcast attaches every DMG it inspects for delta
+# generation and does not detach them — they pile up across releases as
+# stealth mounts (no /Volumes/ entry), holding file descriptors on the
+# source DMGs and crowding the /dev/disk* table. Eject anything still
+# attached from $APPCAST_DIR on exit so each run leaves a clean state.
+# Scope is intentionally limited to $APPCAST_DIR — never touch a DMG the
+# developer mounted by hand.
+cleanup_appcast_mounts() {
+  local devs detached=0 failed=0 dev
+  devs=$(APPCAST_DIR="$APPCAST_DIR" hdiutil info -plist 2>/dev/null | python3 -c "
+import os, plistlib, sys
+appcast_dir = os.environ.get('APPCAST_DIR', '')
+if not appcast_dir:
+    sys.exit(0)
+try:
+    data = plistlib.loads(sys.stdin.buffer.read())
+except (plistlib.InvalidFileException, ValueError, EOFError):
+    sys.exit(0)
+prefix = appcast_dir.rstrip('/') + '/'
+for img in data.get('images', []):
+    path = img.get('image-path', '') or ''
+    if not path.startswith(prefix):
+        continue
+    entries = img.get('system-entities', [])
+    parents = sorted((e.get('dev-entry','') for e in entries if e.get('dev-entry')), key=len)
+    if parents:
+        print(parents[0])
+" 2>/dev/null) || return 0
+  while IFS= read -r dev; do
+    [[ -z "$dev" ]] && continue
+    if hdiutil detach "$dev" -force -quiet 2>/dev/null; then
+      detached=$((detached + 1))
+    else
+      failed=$((failed + 1))
+      echo "  warn: failed to detach leftover appcast mount $dev" >&2
+    fi
+  done <<<"$devs"
+  if (( detached > 0 || failed > 0 )); then
+    echo "Appcast mount cleanup: detached=$detached failed=$failed" >&2
+  fi
+}
+trap cleanup_appcast_mounts EXIT
+
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
   VERSION=$(grep 'MARKETING_VERSION:' "${ROOT_DIR}/project.yml" | sed 's/.*: *"\(.*\)".*/\1/')
@@ -181,7 +224,9 @@ fi
 
 # Push appcast.xml to gh-pages branch
 WORKTREE_DIR=$(mktemp -d)
-trap 'rm -rf "$WORKTREE_DIR"' EXIT
+# Replaces the earlier cleanup_appcast_mounts-only trap; the new trap must
+# also call cleanup_appcast_mounts so DMG mount cleanup still runs on exit.
+trap 'rm -rf "$WORKTREE_DIR"; cleanup_appcast_mounts' EXIT
 
 # Check if gh-pages branch exists
 if git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
