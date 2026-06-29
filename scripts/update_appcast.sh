@@ -16,6 +16,30 @@ BUILD_DIR="${ROOT_DIR}/build"
 SPARKLE_BIN="${BUILD_DIR}/SourcePackages/artifacts/sparkle/Sparkle/bin"
 APPCAST_DIR="${BUILD_DIR}/appcast"
 
+# Sparkle's generate_appcast mounts every DMG it inspects for delta generation
+# and does not detach them — they pile up across releases as stealth mounts
+# (no /Volumes/ entry) and clutter installers. Eject any leftover Canopy DMGs
+# on exit so each run leaves a clean state.
+cleanup_appcast_mounts() {
+  hdiutil info -plist 2>/dev/null | python3 -c "
+import plistlib, sys
+try:
+    data = plistlib.loads(sys.stdin.buffer.read())
+except Exception:
+    sys.exit(0)
+for img in data.get('images', []):
+    path = img.get('image-path', '') or ''
+    if '${APPCAST_DIR}/' in path or '/Canopy-' in path:
+        entries = img.get('system-entities', [])
+        devs = sorted((e.get('dev-entry','') for e in entries if e.get('dev-entry')), key=len)
+        if devs:
+            print(devs[0])
+" 2>/dev/null | while read -r dev; do
+    [[ -n "$dev" ]] && hdiutil detach "$dev" -force -quiet 2>/dev/null || true
+  done
+}
+trap cleanup_appcast_mounts EXIT
+
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
   VERSION=$(grep 'MARKETING_VERSION:' "${ROOT_DIR}/project.yml" | sed 's/.*: *"\(.*\)".*/\1/')
@@ -181,7 +205,7 @@ fi
 
 # Push appcast.xml to gh-pages branch
 WORKTREE_DIR=$(mktemp -d)
-trap 'rm -rf "$WORKTREE_DIR"' EXIT
+trap 'rm -rf "$WORKTREE_DIR"; cleanup_appcast_mounts' EXIT
 
 # Check if gh-pages branch exists
 if git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
