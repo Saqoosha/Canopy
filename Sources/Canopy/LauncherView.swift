@@ -41,6 +41,14 @@ struct LauncherView: View {
     @AppStorage("launcher.permissionMode") private var permissionModeRaw = "acceptEdits"
     @AppStorage("launcher.continueSession") private var continueSession = false
 
+    @State private var startInWorktree = false
+    @State private var worktreeBranch = ""
+    @State private var isCreatingWorktree = false
+    /// Computed once per launcher so the placeholder and the empty-field
+    /// fallback produce the same branch name (a per-render call would drift
+    /// by its seconds-precision timestamp).
+    @State private var suggestedWorktreeBranch = GitWorktree.suggestedBranchName()
+
     // Explicit Opus IDs (not the "opus" alias) for clean version pinning + display.
     // NOTE: the full ID alone does NOT keep you on the 200K tier — for 1M-eligible
     // accounts the CLI upgrades any opus model to "[1m]" at runtime. The actual 200K
@@ -112,6 +120,14 @@ struct LauncherView: View {
         }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
+        }
+    }
+
+    private var selectedDirectoryIsGitRepo: Bool {
+        if let d = selectedDirectory {
+            GitWorktree.isGitRepo(d)
+        } else {
+            false
         }
     }
 
@@ -364,6 +380,23 @@ struct LauncherView: View {
                     .labelsHidden()
                     .fixedSize()
                 }
+
+                if !isRemoteMode && selectedDirectoryIsGitRepo {
+                    GridRow {
+                        Text("Worktree:")
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        HStack {
+                            Toggle("Start in new worktree", isOn: $startInWorktree)
+                                .toggleStyle(.checkbox)
+                            if startInWorktree {
+                                TextField("", text: $worktreeBranch, prompt: Text(suggestedWorktreeBranch))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 180)
+                            }
+                        }
+                    }
+                }
             }
 
             HStack(spacing: 16) {
@@ -403,16 +436,17 @@ struct LauncherView: View {
         Button {
             startSession()
         } label: {
-            Label("Start Session", systemImage: "play.fill")
+            Label(isCreatingWorktree ? "Creating Worktree…" : "Start Session",
+                  systemImage: "play.fill")
                 .font(.headline)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(isRemoteMode
+        .disabled(isCreatingWorktree || (isRemoteMode
             ? (remoteHost.isEmpty || remoteDirectory.isEmpty)
-            : selectedDirectory == nil)
+            : selectedDirectory == nil))
         .keyboardShortcut(.return, modifiers: [])
     }
 
@@ -896,27 +930,66 @@ struct LauncherView: View {
             permissionModeRaw = selectedPermission.rawValue
         }
 
-        let dir: URL
-        let targetRemote: String?
         if isRemoteMode {
             guard !remoteHost.isEmpty, !remoteDirectory.isEmpty else { return }
             SSHHostStore.add(remoteHost)
             savedHosts = SSHHostStore.hosts()
-            dir = URL(fileURLWithPath: remoteDirectory)
-            targetRemote = remoteHost
-        } else {
-            guard let local = selectedDirectory else { return }
-            dir = local
-            targetRemote = nil
+            launchLocal(URL(fileURLWithPath: remoteDirectory), remoteHost: remoteHost,
+                        model: selectedModel, effort: selectedEffort, permission: selectedPermission)
+            return
         }
 
+        guard let local = selectedDirectory else { return }
+        guard startInWorktree, selectedDirectoryIsGitRepo else {
+            launchLocal(local, remoteHost: nil,
+                        model: selectedModel, effort: selectedEffort, permission: selectedPermission)
+            return
+        }
+
+        // Worktree checkout can take seconds on big repos — keep it off the
+        // main thread and disable the Start button while it runs.
+        var branch = GitWorktree.sanitizeBranchName(worktreeBranch)
+        if branch.isEmpty {
+            branch = suggestedWorktreeBranch
+        }
+        // Reflect what will actually be used, so a sanitized or auto-generated
+        // name is never a silent surprise.
+        worktreeBranch = branch
+        isCreatingWorktree = true
+        let repo = local
+        let branchName = branch
+        Task {
+            defer { isCreatingWorktree = false }
+            do {
+                let worktree = try await Task.detached(priority: .userInitiated) {
+                    try GitWorktree.createWorktree(repo: repo, branch: branchName)
+                }.value
+                RecentDirectories.add(worktree)
+                recentDirectories = RecentDirectories.load()
+                launchLocal(worktree, remoteHost: nil,
+                            model: selectedModel, effort: selectedEffort, permission: selectedPermission)
+            } catch {
+                // NSAlert instead of a SwiftUI .alert: the user can navigate
+                // away mid-creation, destroying this view's @State — a
+                // view-bound alert would never appear (silent failure).
+                let alert = NSAlert()
+                alert.messageText = "Worktree Creation Failed"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+    }
+
+    private func launchLocal(_ dir: URL, remoteHost: String?, model: String?, effort: String?, permission: PermissionMode) {
         var resumeId: String?
         var resumeTitle: String?
         if continueSession, let latest = latestSession(for: dir) {
             resumeId = latest.id
             resumeTitle = latest.title
         }
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: selectedPermission, remoteHost: targetRemote, customApi: buildCustomApiConfig())
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig())
     }
 
     private func loadData() {

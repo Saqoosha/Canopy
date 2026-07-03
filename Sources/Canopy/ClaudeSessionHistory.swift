@@ -9,7 +9,7 @@ struct SessionEntry: Identifiable, Hashable {
     let timestamp: Date
     let projectDirectory: URL
 
-    var projectName: String { projectDirectory.lastPathComponent }
+    var projectName: String { GitWorktree.projectDisplayName(for: projectDirectory) }
 }
 
 enum ClaudeSessionHistory {

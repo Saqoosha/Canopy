@@ -4,8 +4,9 @@ import os.log
 
 /// Smoke tests for sidebar logic and other pure non-UI helpers (row
 /// sort/dedup/filter, JSONL session classification, background-task
-/// markers, title-generation helpers). Project has no XCTest target, so
-/// we run these at app launch when `CANOPY_RUN_LOGIC_PROBE=1` is set and exit.
+/// markers, title-generation helpers, git worktree helpers). Project has
+/// no XCTest target, so we run these at app launch when
+/// `CANOPY_RUN_LOGIC_PROBE=1` is set and exit.
 ///
 /// PASS/FAIL is printed to stderr and to the unified log under
 /// `subsystem=sh.saqoo.Canopy category=LogicProbe`.
@@ -439,6 +440,76 @@ enum SidebarLogicProbe {
         } else {
             record("title prompts: chunked read with promptless head → tail only", false, "write failed")
         }
+
+        record("sanitizeBranchName: spaces → hyphens",
+               GitWorktree.sanitizeBranchName("feature my branch") == "feature-my-branch")
+        record("sanitizeBranchName: keeps inner slash, strips invalid",
+               GitWorktree.sanitizeBranchName("  fix/title?*[gen]  ") == "fix/titlegen")
+        record("sanitizeBranchName: strips leading/trailing dots",
+               GitWorktree.sanitizeBranchName("..weird..") == "weird")
+        record("sanitizeBranchName: empty input",
+               GitWorktree.sanitizeBranchName("") == "")
+        record("sanitizeBranchName: strips trailing .lock",
+               GitWorktree.sanitizeBranchName("branch.lock") == "branch")
+        // Garbage-only input must reduce to empty — that is what triggers the
+        // suggestedBranchName fallback in the launcher.
+        record("sanitizeBranchName: invalid-chars-only input → empty",
+               GitWorktree.sanitizeBranchName("?*[]") == "")
+        record("sanitizeBranchName: dots-only input → empty",
+               GitWorktree.sanitizeBranchName("...") == "")
+        record("sanitizeBranchName: collapses repeated slashes",
+               GitWorktree.sanitizeBranchName("feat//x") == "feat/x")
+        record("sanitizeBranchName: strips leading/trailing slashes",
+               GitWorktree.sanitizeBranchName("/feat/x/") == "feat/x")
+
+        // Default branch name: deterministic shape, and must survive its own
+        // sanitizer unchanged (a git-invalid default breaks every empty-field
+        // worktree launch).
+        let suggested = GitWorktree.suggestedBranchName(now: Date(timeIntervalSince1970: 1_751_600_000))
+        record("suggestedBranchName: work-<8 digits>-<6 digits> shape",
+               suggested.range(of: #"^work-\d{8}-\d{6}$"#, options: .regularExpression) != nil,
+               suggested)
+        record("suggestedBranchName: git-valid as-is",
+               GitWorktree.sanitizeBranchName(suggested) == suggested)
+
+        let gitProbeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: gitProbeDir) }
+        record("isGitRepo: no .git → false",
+               !GitWorktree.isGitRepo(gitProbeDir))
+        try? FileManager.default.createDirectory(at: gitProbeDir, withIntermediateDirectories: true)
+        let gitDotGit = gitProbeDir.appendingPathComponent(".git", isDirectory: true)
+        try? FileManager.default.createDirectory(at: gitDotGit, withIntermediateDirectories: true)
+        record("isGitRepo: .git directory → true",
+               GitWorktree.isGitRepo(gitProbeDir))
+        // Worktree/submodule checkouts have a .git FILE (gitlink), not a dir —
+        // both must count as a repo.
+        let gitFileDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: gitFileDir) }
+        try? FileManager.default.createDirectory(at: gitFileDir, withIntermediateDirectories: true)
+        try? "gitdir: /somewhere/.git/worktrees/x".write(
+            to: gitFileDir.appendingPathComponent(".git"), atomically: true, encoding: .utf8)
+        record("isGitRepo: .git file (gitlink) → true",
+               GitWorktree.isGitRepo(gitFileDir))
+
+        record("projectDisplayName: managed worktree → repo · branch",
+               GitWorktree.projectDisplayName(
+                   for: GitWorktree.worktreesRoot
+                       .appendingPathComponent("Canopy/fix-foo")) == "Canopy · fix-foo")
+        record("projectDisplayName: legacy sibling layout → repo · branch",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/Canopy-worktrees/work-123")) == "Canopy · work-123")
+        record("projectDisplayName: normal dir → folder name",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/Canopy")) == "Canopy")
+        record("projectDisplayName: bare '-worktrees' folder not treated as worktree",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/-worktrees/x")) == "x")
+        record("projectDisplayName: '..'-laden path still recognized",
+               GitWorktree.projectDisplayName(
+                   for: GitWorktree.worktreesRoot
+                       .appendingPathComponent("Other/../Canopy/fix-foo")) == "Canopy · fix-foo")
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
