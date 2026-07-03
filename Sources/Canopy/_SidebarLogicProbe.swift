@@ -2,9 +2,10 @@
 import Foundation
 import os.log
 
-/// Smoke tests for `SidebarRow.sorted`, `SidebarRow.deduped`, and
-/// `SidebarFilter.apply`. Project has no XCTest target, so we run these
-/// at app launch when `CANOPY_RUN_LOGIC_PROBE=1` is set and exit.
+/// Smoke tests for sidebar logic and other pure non-UI helpers (row
+/// sort/dedup/filter, JSONL session classification, background-task
+/// markers, title-generation helpers). Project has no XCTest target, so
+/// we run these at app launch when `CANOPY_RUN_LOGIC_PROBE=1` is set and exit.
 ///
 /// PASS/FAIL is printed to stderr and to the unified log under
 /// `subsystem=sh.saqoo.Canopy category=LogicProbe`.
@@ -357,6 +358,87 @@ enum SidebarLogicProbe {
         // this is the regression case if the CLI ever changes the wrapper.
         record("bg complete: bare id without wrapper → no match",
                !ShimProcess.jsonlTailHasCompletion(tail: "toolu_01KDTwPWn2C3FdoCKvZSnmJx", taskId: "toolu_01KDTwPWn2C3FdoCKvZSnmJx"))
+
+        // Title-generation context: prompt extraction from session JSONL
+        // (resume seeding) and first-prompt pinning (anti-drift). Noise
+        // fixtures mirror the real records the CLI writes — a slash-command
+        // line starts with <command-message>, a post-/compact continuation
+        // carries isCompactSummary, etc.
+        let promptsJSONL = """
+        {"type":"user","isCompactSummary":true,"message":{"role":"user","content":"Compact summary body without the standard prefix"}}
+        {"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}
+        {"type":"user","message":{"role":"user","content":"fix the AO blur artifact in the renderer"},"cwd":"/tmp/probe"}
+        {"type":"user","isMeta":true,"message":{"role":"user","content":"meta noise"}}
+        {"type":"user","message":{"role":"user","content":"<command-message>release</command-message>\\n<command-name>/release</command-name>"}}
+        {"type":"user","message":{"role":"user","content":"<local-command-stdout>done</local-command-stdout>"}}
+        {"type":"user","message":{"role":"user","content":"<task-notification>\\n<task-id>abc</task-id>\\n</task-notification>"}}
+        {"type":"user","message":{"role":"user","content":"<system-reminder>background task finished</system-reminder>"}}
+        {"type":"user","message":{"role":"user","content":"[Request interrupted by user for tool use]"}}
+        {"type":"user","message":{"role":"user","content":"Caveat: the messages below were generated"}}
+        {"type":"user","message":{"role":"user","content":"[Image #1]"}}
+        {"type":"user","message":{"role":"user","content":"[Image #2] fix the toolbar icon"}}
+        {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_x","content":"result"}]}}
+        {"type":"user","message":{"role":"user","content":[{"type":"text","text":"also check the shadow pass"}]}}
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"assistant reply"}]}}
+        """
+        let promptsPath = writeProbeJSONL(promptsJSONL)
+        defer {
+            if let promptsPath { try? FileManager.default.removeItem(atPath: promptsPath) }
+        }
+        if let promptsPath {
+            let prompts = ClaudeSessionHistory.loadUserPrompts(atPath: promptsPath)
+            record("title prompts: user text extracted, noise skipped",
+                   prompts == ["fix the AO blur artifact in the renderer", "fix the toolbar icon", "also check the shadow pass"],
+                   "\(prompts)")
+        } else {
+            record("title prompts: user text extracted, noise skipped", false, "write failed")
+        }
+        let longHistory = ["goal", "a", "b", "c", "d", "e", "f"]
+        record("title history: first prompt pinned + last 4 kept",
+               ShimProcess.trimmedPromptHistory(longHistory) == ["goal", "c", "d", "e", "f"])
+        record("title history: short history untouched",
+               ShimProcess.trimmedPromptHistory(["goal", "a"]) == ["goal", "a"])
+
+        // Chunked-read path: a file past the 2×128KB whole-read cap must
+        // still surface the head's first prompt and the tail's recent one.
+        let filler = String(repeating: "x", count: 1_000)
+        var bigLines = ["{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"the original goal prompt\"}}"]
+        for i in 0..<400 {
+            bigLines.append("{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"\(filler)\(i)\"}]}}")
+        }
+        bigLines.append("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"latest tail prompt\"}}")
+        let bigPath = writeProbeJSONL(bigLines.joined(separator: "\n"))
+        defer {
+            if let bigPath { try? FileManager.default.removeItem(atPath: bigPath) }
+        }
+        if let bigPath {
+            let bigPrompts = ClaudeSessionHistory.loadUserPrompts(atPath: bigPath)
+            record("title prompts: chunked read keeps head goal + tail recent",
+                   bigPrompts == ["the original goal prompt", "latest tail prompt"],
+                   "\(bigPrompts)")
+        } else {
+            record("title prompts: chunked read keeps head goal + tail recent", false, "write failed")
+        }
+
+        // Chunked read with no user prompt in the head chunk: falls back to
+        // tail prompts only instead of crashing or returning nothing.
+        var headlessLines: [String] = []
+        for i in 0..<400 {
+            headlessLines.append("{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"\(filler)\(i)\"}]}}")
+        }
+        headlessLines.append("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"only tail prompt here\"}}")
+        let headlessPath = writeProbeJSONL(headlessLines.joined(separator: "\n"))
+        defer {
+            if let headlessPath { try? FileManager.default.removeItem(atPath: headlessPath) }
+        }
+        if let headlessPath {
+            let headlessPrompts = ClaudeSessionHistory.loadUserPrompts(atPath: headlessPath)
+            record("title prompts: chunked read with promptless head → tail only",
+                   headlessPrompts == ["only tail prompt here"],
+                   "\(headlessPrompts)")
+        } else {
+            record("title prompts: chunked read with promptless head → tail only", false, "write failed")
+        }
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")

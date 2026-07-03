@@ -350,6 +350,110 @@ enum ClaudeSessionHistory {
         return count
     }
 
+    /// User-typed prompts from a session JSONL, for seeding title-generation
+    /// context on resume. Skips meta records, slash-command wrappers, and
+    /// tool-result-only user lines. Callers cap the result (see
+    /// `ShimProcess.trimmedPromptHistory`).
+    static func loadUserPrompts(sessionId: String, directory: URL) -> [String] {
+        let fm = FileManager.default
+        for encoded in encodedFolderCandidates(for: directory.path) {
+            let candidate = claudeDir
+                .appendingPathComponent(encoded)
+                .appendingPathComponent("\(sessionId).jsonl").path
+            if fm.fileExists(atPath: candidate) {
+                return loadUserPrompts(atPath: candidate)
+            }
+        }
+        return []
+    }
+
+    /// Bounded read: session JSONLs grow to tens of MB and this runs in
+    /// `ShimProcess.init` on the main thread (like the sibling readers, which
+    /// cap at 128KB head / 64KB tail). Head chunk keeps the first prompt
+    /// (the session's goal), tail chunk keeps the recent ones.
+    static func loadUserPrompts(atPath path: String) -> [String] {
+        let chunkSize = 131_072
+        guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
+        defer { try? handle.close() }
+        guard let fileSize = try? handle.seekToEnd() else { return [] }
+
+        if fileSize <= UInt64(chunkSize * 2) {
+            guard (try? handle.seek(toOffset: 0)) != nil,
+                  let data = try? handle.readToEnd()
+            else { return [] }
+            return parseUserPrompts(String(decoding: data, as: UTF8.self))
+        }
+
+        guard (try? handle.seek(toOffset: 0)) != nil,
+              let headData = try? handle.read(upToCount: chunkSize)
+        else { return [] }
+        let headPrompts = parseUserPrompts(String(decoding: headData, as: UTF8.self))
+        // Tail starts one byte early so dropping through the first newline is
+        // always legitimate: if the nominal window boundary happens to land
+        // exactly on a line start, that extra byte is the previous line's
+        // terminator and the full boundary line survives. Head may end
+        // mid-line (the partial line fails JSON parse and is skipped).
+        guard (try? handle.seek(toOffset: fileSize - UInt64(chunkSize) - 1)) != nil,
+              let tailData = try? handle.readToEnd()
+        else { return headPrompts }
+        var tail = String(decoding: tailData, as: UTF8.self)
+        if let newline = tail.firstIndex(of: "\n") {
+            tail = String(tail[tail.index(after: newline)...])
+        }
+        let tailPrompts = parseUserPrompts(tail)
+        guard let first = headPrompts.first else { return tailPrompts }
+        return [first] + tailPrompts
+    }
+
+    private static func parseUserPrompts(_ text: String) -> [String] {
+        // `<command-` covers both `<command-message>` (line 1 of a
+        // slash-command record) and `<command-name>`.
+        let skipPrefixes = [
+            "Caveat:", "<command-", "<local-command",
+            "<task-notification", "<system-reminder",
+            "[Request interrupted",
+            "This session is being continued",
+        ]
+        var prompts: [String] = []
+        for line in text.split(separator: "\n") {
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  json["type"] as? String == "user",
+                  json["isMeta"] as? Bool != true,
+                  json["isCompactSummary"] as? Bool != true,
+                  let message = json["message"] as? [String: Any]
+            else { continue }
+
+            var extracted: String?
+            if let content = message["content"] as? String {
+                extracted = content
+            } else if let contentArr = message["content"] as? [[String: Any]] {
+                // Text blocks only — tool_result blocks have no top-level "text".
+                let joined = contentArr
+                    .filter { $0["type"] as? String == "text" }
+                    .compactMap { $0["text"] as? String }
+                    .joined(separator: "\n")
+                if !joined.isEmpty { extracted = joined }
+            }
+            guard let raw = extracted else { continue }
+            var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  !skipPrefixes.contains(where: { trimmed.hasPrefix($0) })
+            else { continue }
+            // Pasted-image placeholders: strip the tokens but keep the user's
+            // words ("[Image #1] fix this layout" → "fix this layout"); a
+            // placeholder-only prompt becomes empty and is skipped.
+            if trimmed.contains("[Image #") {
+                trimmed = trimmed
+                    .replacingOccurrences(of: #"\[Image #\d+\]"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+            }
+            prompts.append(String(trimmed.prefix(500)))
+        }
+        return prompts
+    }
+
     /// True when the JSONL was created by Claude Code's scheduled-task runner
     /// (`queue-operation` / `enqueue` whose `content` contains `<scheduled-task`).
     static func isBackgroundScheduledSession(atPath path: String) -> Bool {
