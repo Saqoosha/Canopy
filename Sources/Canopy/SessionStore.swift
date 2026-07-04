@@ -158,7 +158,7 @@ final class SessionStore {
             ?? .local(directory)
         let title = sessionTitle ?? "Untitled"
         let project = remoteHost.map { "\($0):\(directory.lastPathComponent)" }
-            ?? directory.lastPathComponent
+            ?? GitWorktree.projectDisplayName(for: directory)
         // CC sessions need a resumeId so the JSONL filename is stable; if the
         // caller didn't supply one we let the CLI pick on first message and
         // backfill via update_session_state.
