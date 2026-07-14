@@ -320,6 +320,12 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
+        ucc.addUserScript(WKUserScript(
+            source: ImagePreviewScript.javascript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
 
