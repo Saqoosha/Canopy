@@ -39,6 +39,20 @@ struct CloneRepoSheet: View {
         return FileManager.default.fileExists(atPath: target.path)
     }
 
+    /// Hint text for the clone destination row. `git`/`gh` create the target
+    /// directory early during clone, so `targetExists` flips true mid-flight
+    /// even though the user didn't have a pre-existing folder.
+    private var targetPathHint: (isWarning: Bool, text: String)? {
+        guard let target = targetURL else { return nil }
+        if isCloning {
+            return (false, "Cloning into: \(target.abbreviatingWithTilde)")
+        }
+        if targetExists {
+            return (true, "Already exists: \(target.abbreviatingWithTilde)")
+        }
+        return (false, "Will clone into: \(target.abbreviatingWithTilde)")
+    }
+
     private var canClone: Bool {
         !isCloning
             && derivedRepoName != nil
@@ -103,18 +117,14 @@ struct CloneRepoSheet: View {
                         .disabled(isCloning)
                 }
 
-                if let target = targetURL, !didFinishCloning {
+                if let hint = targetPathHint, !didFinishCloning {
                     HStack(spacing: 6) {
-                        Image(systemName: targetExists ? "exclamationmark.triangle.fill" : "arrow.right")
-                            .foregroundStyle(targetExists ? Color.orange : Color.secondary)
+                        Image(systemName: hint.isWarning ? "exclamationmark.triangle.fill" : "arrow.right")
+                            .foregroundStyle(hint.isWarning ? Color.orange : Color.secondary)
                             .font(.caption)
-                        Text(
-                            targetExists
-                                ? "Already exists: \(target.abbreviatingWithTilde)"
-                                : "Will clone into: \(target.abbreviatingWithTilde)"
-                        )
+                        Text(hint.text)
                         .font(.caption)
-                        .foregroundStyle(targetExists ? Color.orange : Color.secondary)
+                        .foregroundStyle(hint.isWarning ? Color.orange : Color.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         Spacer()
