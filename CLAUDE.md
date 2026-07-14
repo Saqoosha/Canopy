@@ -73,6 +73,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `ClaudeSessionHistory.swift` — Session JSONL parser, chain walking, cwd extraction, `loadTeleportedFromMap` reads tail 64 KB only
 - `RecentDirectories.swift` — MRU directory list in UserDefaults
 - `VSCodeStub.swift` — acquireVsCodeApi() JS stub, Monaco theme patch, IME fix, loads theme CSS
+- `ImagePreviewScript.swift` — Injected JS: inline thumbnails + click-to-zoom lightbox for image Read tool results. The CC extension's Read renderer is `body(){return null}` (VSCode shows only the filename; iOS renders natively), so this watches io_message / get_session response streams, pairs Read tool_use ids with base64 image tool_results, and decorates matching "Read <file>" summary rows via MutationObserver (per-file sequence numbers assigned at tool_use time keep row⇔image pairing stable across failed reads / evictions / replays). No dependency on minified identifiers or hashed CSS class names — survives extension minification churn
 - `CCExtension.swift` — Extension/CLI path discovery
 - `StatusBarData.swift` — Observable model for native status bar (context usage, model, CLI version, rate limits, remote host)
 - `StatusBarView.swift` — Native SwiftUI status bar: context usage bar, model/version, rate limit indicators, remote host

@@ -9,3 +9,4 @@ Canopy.app/
 firebase-debug.log
 Resources/prism/
 tmp/
+.claude/scheduled_tasks.lock
