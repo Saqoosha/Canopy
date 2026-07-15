@@ -742,6 +742,154 @@ enum SidebarLogicProbe {
                !midTurnChanged && tracker.rows.count == 2,
                "changed=\(midTurnChanged) count=\(tracker.rows.count)")
 
+        // Bg Agent: initial `tool_result` is an ack ("Command running in
+        // background with ID: bXX"), not completion. Row must stay running.
+        var bgTracker = SubagentTracker()
+        let bgLaunch: [String: Any] = [
+            "type": "assistant",
+            "message": [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "name": "Agent",
+                        "id": "toolu_BG",
+                        "input": [
+                            "description": "background review",
+                            "subagent_type": "general-purpose",
+                            "run_in_background": true,
+                            "prompt": "x",
+                        ],
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        _ = bgTracker.observe(bgLaunch, now: t0)
+        let bgAck: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_BG",
+                        "content": "Command running in background with ID: b1abc",
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let bgAckChanged = bgTracker.observe(bgAck, now: t0)
+        record("subagent: bg Agent ack tool_result does NOT finish the row",
+               !bgAckChanged && bgTracker.rows.count == 1 && bgTracker.rows[0].isRunning,
+               "changed=\(bgAckChanged) running=\(bgTracker.rows.first?.isRunning ?? false)")
+        // But main-conversation `result` still freezes the bg row (better
+        // than a stuck spinner post-turn).
+        let bgResultChanged = bgTracker.observe(["type": "result"], now: t0)
+        record("subagent: bg row freezes on turn `result`",
+               bgResultChanged && !bgTracker.rows[0].isRunning)
+
+        // Subagent-originated `result` (has parent_tool_use_id) must NOT
+        // freeze main-conversation rows — otherwise a sibling subagent
+        // finishing would false-checkmark every other running row and trip
+        // turnEnded, wiping the list on the next mid-turn message_start.
+        var sibTracker = SubagentTracker()
+        _ = sibTracker.observe(launchMsg, now: t0) // toolu_A + toolu_B running
+        let subResult: [String: Any] = [
+            "type": "result",
+            "parent_tool_use_id": "toolu_A",
+        ]
+        let sibChanged = sibTracker.observe(subResult, now: t0)
+        record("subagent: subagent-tagged result doesn't freeze main rows",
+               !sibChanged
+                   && sibTracker.rows.allSatisfy(\.isRunning),
+               "changed=\(sibChanged) running=\(sibTracker.rows.filter(\.isRunning).count)")
+
+        // Batched tool_results: parallel Agent calls completing near-
+        // simultaneously arrive in a single user io_message. Every match
+        // must finish, not just the first.
+        var batchTracker = SubagentTracker()
+        _ = batchTracker.observe(launchMsg, now: t0)
+        let batchFinish: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_A", "content": "ok"],
+                    ["type": "tool_result", "tool_use_id": "toolu_B", "content": "ok"],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let batchChanged = batchTracker.observe(batchFinish, now: t0)
+        record("subagent: batched tool_results finish all matching rows",
+               batchChanged
+                   && batchTracker.rows.allSatisfy { !$0.isRunning },
+               "changed=\(batchChanged) running=\(batchTracker.rows.filter(\.isRunning).count)")
+
+        // Malformed user content: array shape with NO tool_result blocks
+        // (e.g. an empty array, or a text-only content) must NOT clear
+        // rows — silently wiping the visible list on an unknown CLI shape
+        // is worse than preserving stale rows.
+        var preserveTracker = SubagentTracker()
+        _ = preserveTracker.observe(launchMsg, now: t0)
+        let emptyArrayContent: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let emptyChanged = preserveTracker.observe(emptyArrayContent, now: t0)
+        record("subagent: empty content array preserves rows",
+               !emptyChanged && preserveTracker.rows.count == 2)
+
+        // Unknown-id tool_result mixed with a valid one: unknown skipped,
+        // valid finished, rows NOT cleared. Guards against stale/foreign
+        // tool_results (e.g. from a prior turn's bg task) wiping the list.
+        var mixedTracker = SubagentTracker()
+        _ = mixedTracker.observe(launchMsg, now: t0)
+        let mixed: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_UNKNOWN", "content": "?"],
+                    ["type": "tool_result", "tool_use_id": "toolu_A", "content": "done"],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        _ = mixedTracker.observe(mixed, now: t0)
+        record("subagent: unknown-id mixed with valid → only valid finishes; rows kept",
+               mixedTracker.rows.count == 2
+                   && !mixedTracker.rows[0].isRunning
+                   && mixedTracker.rows[1].isRunning)
+
+        // Empty-string metadata falls back to placeholders instead of a
+        // blank 190pt column.
+        var placeholderTracker = SubagentTracker()
+        let blankLaunch: [String: Any] = [
+            "type": "assistant",
+            "message": [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "name": "Agent",
+                        "id": "toolu_BLANK",
+                        "input": [
+                            "description": "",
+                            "subagent_type": "",
+                            "prompt": "x",
+                        ],
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        _ = placeholderTracker.observe(blankLaunch, now: t0)
+        record("subagent: empty-string metadata falls back to labelled placeholder",
+               placeholderTracker.rows.count == 1
+                   && placeholderTracker.rows[0].agentType == "agent"
+                   && placeholderTracker.rows[0].label == "Agent task")
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return lines.joined(separator: "\n")

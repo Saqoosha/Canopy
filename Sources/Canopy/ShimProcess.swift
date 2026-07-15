@@ -1530,16 +1530,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         refreshAskingState()
     }
 
-    /// Drop every transient activity signal (asking AND waiting) and resync
-    /// the bound session. Called when the shim/CLI exits so a crashed or
-    /// disconnected session row doesn't keep a stale raised-hand or hourglass
-    /// icon — once the process is gone no protocol message will ever clear
-    /// the pending sets organically.
+    /// Drop every transient activity signal (asking, waiting, subagent
+    /// activity) and resync the bound session. Called when the shim/CLI
+    /// exits so a crashed or disconnected session row doesn't keep a stale
+    /// raised-hand, hourglass, or spinning subagent row — once the process
+    /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
         pendingPermissionRequestIds.removeAll()
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
+        subagentTracker = SubagentTracker()
+        statusBarData?.subagents = []
         refreshAskingState()
         refreshWaitingState()
     }

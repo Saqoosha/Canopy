@@ -12,6 +12,15 @@ struct SubagentInfo: Identifiable, Equatable {
     /// cache_read + output of its most recent assistant message). Grows as
     /// the subagent works, same as the "↓ Nk tokens" column in the CLI.
     var tokens: Int = 0
+    /// `input.run_in_background == true` at launch. Bg Agent's initial
+    /// `tool_result` is just an ack ("Command running in background with
+    /// ID: bXX"), NOT completion — the real completion goes to the JSONL
+    /// as a `<task-notification>` that the CLI does not re-emit through
+    /// io_message. Rows with this flag therefore don't finish on
+    /// `tool_result`; they stay running until the turn's `result` freezes
+    /// everything. Foreground rows (the common case) finish on
+    /// `tool_result` as usual.
+    let runInBackground: Bool
 
     var isRunning: Bool { finishedAt == nil }
 
@@ -43,8 +52,10 @@ struct SubagentTracker {
     /// previous turn's rows there.
     private var turnEnded = false
 
-    /// Feed one io_message dict (`{type:"assistant"|"user"|"result", ...}`).
-    /// Returns true when `rows` changed.
+    /// Feed one io_message dict (`{type:"assistant"|"user"|"result"|"stream_event", ...}`).
+    /// Returns true when `rows` changed. `stream_event` is load-bearing:
+    /// its `message_start` after a `result` is the robust "new turn"
+    /// clear signal (see `turnEnded` above).
     mutating func observe(_ ioMsg: [String: Any], now: Date) -> Bool {
         switch ioMsg["type"] as? String {
         case "assistant":
@@ -61,6 +72,14 @@ struct SubagentTracker {
             return handleUserMessage(ioMsg: ioMsg, now: now)
 
         case "result":
+            // Subagents run their own Agent-SDK loop and emit their own
+            // `result` event tagged with `parent_tool_use_id`. Freezing
+            // main-conversation rows on that would mark every sibling
+            // subagent as done and trip `turnEnded`, causing the next
+            // main-conversation `message_start` (still mid-turn) to wipe
+            // the whole list. Only the untagged main-conversation `result`
+            // ends the turn.
+            guard !(ioMsg["parent_tool_use_id"] is String) else { return false }
             // Turn ended — freeze anything still marked running (user pressed
             // Stop, or a background agent's tool_result never came back this
             // turn). A stuck spinner is worse than an early "done".
@@ -110,13 +129,22 @@ struct SubagentTracker {
             let input = block["input"] as? [String: Any] ?? [:]
             rows.append(SubagentInfo(
                 id: id,
-                agentType: input["subagent_type"] as? String ?? "agent",
-                label: input["description"] as? String ?? "Agent task",
-                startedAt: now
+                // Empty-string metadata is treated as absent: a blank
+                // 190pt column with just a spinner is worse UX than a
+                // labelled placeholder.
+                agentType: nonEmpty(input["subagent_type"]) ?? "agent",
+                label: nonEmpty(input["description"]) ?? "Agent task",
+                startedAt: now,
+                runInBackground: input["run_in_background"] as? Bool == true
             ))
             changed = true
         }
         return changed
+    }
+
+    private func nonEmpty(_ value: Any?) -> String? {
+        guard let s = value as? String, !s.isEmpty else { return nil }
+        return s
     }
 
     private mutating func updateTokens(parentId: String, ioMsg: [String: Any]) -> Bool {
@@ -136,24 +164,38 @@ struct SubagentTracker {
 
     private mutating func handleUserMessage(ioMsg: [String: Any], now: Date) -> Bool {
         guard let msg = ioMsg["message"] as? [String: Any] else { return false }
-        // Tool results come back as a content array; a real user prompt is a
-        // plain string (or a content array with no tool_result blocks).
+        // Two well-known shapes:
+        //   1. `content: [[...tool_result blocks...]]` — CLI feeding tool
+        //      results back to Claude. Match each to a row and finish it
+        //      (except bg rows — their initial tool_result is an ack).
+        //   2. `content: "some prompt"` (String) — the user actually typed
+        //      something, so drop the previous turn's rows.
+        // Anything else (empty content array, single dict wrapper, missing
+        // content) is malformed by our contract; preserving rows is safer
+        // than clearing them silently, and a legitimate CLI shape drift
+        // shouldn't wipe the visible activity list.
         if let content = msg["content"] as? [[String: Any]] {
-            var sawToolResult = false
             var changed = false
             for block in content {
                 guard block["type"] as? String == "tool_result" else { continue }
-                sawToolResult = true
                 if let id = block["tool_use_id"] as? String,
                    let idx = rows.firstIndex(where: { $0.id == id }),
-                   rows[idx].finishedAt == nil {
+                   rows[idx].finishedAt == nil,
+                   // Bg Agent's initial `tool_result` is an ack ("Command
+                   // running in background with ID: bXX"), not completion —
+                   // the real end signal is a `<task-notification>` that
+                   // never flows through io_message. Leave bg rows running
+                   // until the turn's `result` freezes them.
+                   !rows[idx].runInBackground
+                {
                     rows[idx].finishedAt = now
                     changed = true
                 }
             }
-            if sawToolResult { return changed }
+            return changed
         }
         // A real user prompt starts a new turn — drop the previous turn's rows.
+        guard msg["content"] is String else { return false }
         turnEnded = false
         guard !rows.isEmpty else { return false }
         rows = []

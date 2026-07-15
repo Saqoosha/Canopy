@@ -94,7 +94,7 @@ struct SubagentListView: View {
         return "\(minutes)m \(seconds)s"
     }
 
-    /// CLI-style lowercase token counts: 1.2M / 65.8k / 42.
+    /// CLI-style token counts: 1.2M / 65.8k / 42.
     private func formatTokens(_ n: Int) -> String {
         if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
         if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
