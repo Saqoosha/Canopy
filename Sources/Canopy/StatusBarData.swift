@@ -16,6 +16,11 @@ final class StatusBarData {
     // Compact boundary indicator
     var didCompact: Bool = false
 
+    /// Subagent activity rows for the current turn (CLI-style task list,
+    /// rendered by SubagentListView). Snapshot pushed from ShimProcess's
+    /// SubagentTracker whenever it changes.
+    var subagents: [SubagentInfo] = []
+
     enum VCSType { case unknown, git, jj }
 
     /// Effective context window matching CC extension's pie chart: contextWindow - maxOutputTokens - 13000.
@@ -58,6 +63,7 @@ final class StatusBarData {
         vcsType = .unknown
         didCompact = false
         remoteHost = nil
+        subagents = []
     }
 
 }

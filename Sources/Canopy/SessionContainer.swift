@@ -47,6 +47,9 @@ struct SessionContainer: View {
                 }
                 .animation(.easeInOut(duration: 0.3), value: session.connection.isOverlayVisible)
 
+                SubagentListView(data: session.statusBar)
+                    .animation(.easeInOut(duration: 0.2), value: session.statusBar.subagents.count)
+
                 StatusBarView(data: session.statusBar)
             }
 

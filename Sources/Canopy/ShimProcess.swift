@@ -218,6 +218,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// stable boundary even if the CLI starts appending immediately.
     private var historicJsonlBound: JSONLByteOffset = 0
 
+    /// Tracks Agent tool subagent activity for the native CLI-style task
+    /// list. Snapshots are pushed to `statusBarData.subagents` on change.
+    private var subagentTracker = SubagentTracker()
+
     /// True when the most recent assistant message contained a
     /// `tool_use` block whose name is `AskUserQuestion`. Drives `isAsking`
     /// once the result event fires and `isWorking` goes false.
@@ -2061,6 +2065,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let ioMsg = nested["message"] as? [String: Any],
               let ioType = ioMsg["type"] as? String
         else { return }
+
+        if subagentTracker.observe(ioMsg, now: Date()) {
+            data.subagents = subagentTracker.rows
+        }
 
         switch ioType {
         case "stream_event":

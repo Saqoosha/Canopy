@@ -578,6 +578,170 @@ enum SidebarLogicProbe {
                    for: GitWorktree.worktreesRoot
                        .appendingPathComponent("Other/../Canopy/fix-foo")) == "Canopy · fix-foo")
 
+        // --- SubagentTracker ---
+        // Pure value-type probe: feed io_message dicts and assert the CLI-style
+        // task-list rows (launch / dedupe / tokens / finish / clear).
+        let t0 = Date()
+        var tracker = SubagentTracker()
+        let launchMsg: [String: Any] = [
+            "type": "assistant",
+            "message": [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "name": "Agent",
+                        "id": "toolu_A",
+                        "input": [
+                            "description": "CodeRabbit review",
+                            "subagent_type": "coderabbit:code-reviewer",
+                            "prompt": "x",
+                        ],
+                    ],
+                    [
+                        "type": "tool_use",
+                        "name": "Task",
+                        "id": "toolu_B",
+                        "input": [
+                            "description": "CodeRabbit review",
+                            "subagent_type": "coderabbit:code-reviewer",
+                            "prompt": "x",
+                        ],
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let launchChanged = tracker.observe(launchMsg, now: t0)
+        record("subagent: launch Agent+Task → 2 running rows",
+               launchChanged
+                   && tracker.rows.count == 2
+                   && tracker.rows[0].agentType == "coderabbit:code-reviewer"
+                   && tracker.rows[0].label == "CodeRabbit review"
+                   && tracker.rows[0].isRunning
+                   && tracker.rows[1].isRunning,
+               "changed=\(launchChanged) count=\(tracker.rows.count)")
+
+        record("subagent: duplicate launch → observe false (dedupe by id)",
+               !tracker.observe(launchMsg, now: t0)
+                   && tracker.rows.count == 2)
+
+        let usageBig: [String: Any] = [
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_A",
+            "message": [
+                "role": "assistant",
+                "usage": [
+                    "input_tokens": 1000,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 300,
+                    "output_tokens": 500,
+                ],
+            ] as [String: Any],
+        ]
+        let usageSmall: [String: Any] = [
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_A",
+            "message": [
+                "role": "assistant",
+                "usage": [
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 50,
+                ],
+            ] as [String: Any],
+        ]
+        let tokensChanged = tracker.observe(usageBig, now: t0)
+        let tokensIgnored = tracker.observe(usageSmall, now: t0)
+        record("subagent: parent usage grows tokens; smaller total ignored",
+               tokensChanged
+                   && !tokensIgnored
+                   && tracker.rows[0].tokens == 2000,
+               "changed=\(tokensChanged) ignored=\(tokensIgnored) tokens=\(tracker.rows[0].tokens)")
+
+        let nestedUser: [String: Any] = [
+            "type": "user",
+            "parent_tool_use_id": "toolu_A",
+            "message": [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_unrelated",
+                        "content": "ok",
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let nestedChanged = tracker.observe(nestedUser, now: t0)
+        record("subagent: nested user (parent_tool_use_id) → no change",
+               !nestedChanged && tracker.rows.count == 2,
+               "changed=\(nestedChanged) count=\(tracker.rows.count)")
+
+        let finishA: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_A",
+                        "content": "done",
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let finishChanged = tracker.observe(finishA, now: t0)
+        record("subagent: tool_result finishes matching row only",
+               finishChanged
+                   && !tracker.rows[0].isRunning
+                   && tracker.rows[1].isRunning,
+               "changed=\(finishChanged) aRunning=\(tracker.rows[0].isRunning) bRunning=\(tracker.rows[1].isRunning)")
+
+        let resultChanged = tracker.observe(["type": "result"], now: t0)
+        record("subagent: result freezes all remaining running rows",
+               resultChanged
+                   && tracker.rows.allSatisfy { !$0.isRunning },
+               "changed=\(resultChanged) running=\(tracker.rows.filter(\.isRunning).count)")
+
+        let nextPrompt: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": "next prompt",
+            ] as [String: Any],
+        ]
+        let clearChanged = tracker.observe(nextPrompt, now: t0)
+        record("subagent: real user prompt clears rows",
+               clearChanged && tracker.rows.isEmpty,
+               "changed=\(clearChanged) count=\(tracker.rows.count)")
+
+        // New turn via message_start after result — the CLI doesn't reliably
+        // echo typed prompts as user io_messages, so this is the robust clear.
+        _ = tracker.observe(launchMsg, now: t0)
+        _ = tracker.observe(["type": "result"], now: t0)
+        let nestedStart: [String: Any] = [
+            "type": "stream_event",
+            "parent_tool_use_id": "toolu_A",
+            "event": ["type": "message_start"] as [String: Any],
+        ]
+        let nestedStartChanged = tracker.observe(nestedStart, now: t0)
+        let mainStart: [String: Any] = [
+            "type": "stream_event",
+            "event": ["type": "message_start"] as [String: Any],
+        ]
+        let mainStartChanged = tracker.observe(mainStart, now: t0)
+        record("subagent: post-result message_start clears (nested one doesn't)",
+               !nestedStartChanged && mainStartChanged && tracker.rows.isEmpty,
+               "nested=\(nestedStartChanged) main=\(mainStartChanged) count=\(tracker.rows.count)")
+
+        // Mid-turn message_start (no result yet) must NOT clear running rows.
+        _ = tracker.observe(launchMsg, now: t0)
+        let midTurnChanged = tracker.observe(mainStart, now: t0)
+        record("subagent: mid-turn message_start keeps running rows",
+               !midTurnChanged && tracker.rows.count == 2,
+               "changed=\(midTurnChanged) count=\(tracker.rows.count)")
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return lines.joined(separator: "\n")
