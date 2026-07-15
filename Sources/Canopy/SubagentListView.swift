@@ -11,7 +11,12 @@ struct SubagentListView: View {
             EmptyView()
         } else {
             // Tick once a second while any row is still running so elapsed
-            // times stay live; idle at 1h when everything is finished.
+            // times stay live; idle at 1h when everything is finished. The
+            // cadence flips only when `body` re-runs — i.e. when
+            // `data.subagents` mutates, since that's the observation. So
+            // "idle at 1h" only kicks in after the final row's state update
+            // lands; TimelineView doesn't self-reevaluate `anyRunning`
+            // between ticks.
             let anyRunning = data.subagents.contains(where: \.isRunning)
             TimelineView(.periodic(from: .now, by: anyRunning ? 1 : 3600)) { context in
                 listContent(now: context.date)

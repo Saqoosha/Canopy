@@ -317,26 +317,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Snapshot every historic `toolu_…` id in the existing JSONL so
             // `detectBackgroundTaskLaunch` can skip CLI replays of already-
             // logged assistant messages instead of tracking their bg ids as
-            // "live" — see `historicToolUseIds` for why. Remote sessions
-            // write on the other machine, so the local JSONL is unreachable;
-            // fall back to the empty set (all detections treated as live).
+            // "live" — see `historicToolUseIds` doc for the full rationale.
+            // Remote sessions write on the other machine, so the local JSONL
+            // is unreachable; fall back to the empty set (all detections
+            // treated as live).
             //
-            // The bound is snapshotted synchronously here so the async
-            // extractor reads only bytes committed before the shim spawned.
-            // Bytes appended later are live events (this shim's own turns)
-            // — if they leaked into the historic set, a running bg task
-            // would be silently classified as historic and the hourglass
-            // would never appear at all. The `attributesOfItem` call itself
-            // is fast (metadata, not content).
-            //
-            // The read itself runs off the main actor so a multi-MB session
-            // doesn't stall the sidebar's click-to-open. The CLI needs
-            // several hundred ms to boot Node, activate the extension, and
-            // start streaming replay events; by the time the first replayed
-            // assistant io_message arrives the historic set is normally
-            // populated. If a detection genuinely races the loader, the
-            // completion continuation purges any id it turns out to have
-            // been historic — bounded flicker instead of stuck-forever.
+            // The read runs off the main actor so a multi-MB session doesn't
+            // stall the sidebar's click-to-open. The CLI needs several hundred
+            // ms to boot Node, activate the extension, and start streaming
+            // replay events; by the time the first replayed assistant
+            // io_message arrives the historic set is normally populated. If a
+            // detection genuinely races the loader, the completion continuation
+            // purges any id it turns out to have been historic — bounded
+            // flicker instead of stuck-forever.
             if remoteHost == nil,
                let path = Self.jsonlPath(
                    sessionId: sessionId, workingDirectory: workingDirectory
@@ -348,19 +341,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     let ids = Self.extractToolUseIds(fromPath: path, upToOffset: bound)
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
-                        // Assign, don't union: this is a single-shot loader
-                        // and `historicToolUseIds` is otherwise untouched
-                        // (starts as `[]`). Either form gives the same
-                        // set — `=` makes the ownership explicit.
                         self.historicToolUseIds = ids
-                        // Same historic gate for the subagent activity
-                        // list: without this, `--resume` replays re-add
-                        // old Agent/Task launches as fresh running rows.
-                        self.subagentTracker.historicToolUseIds = ids
-                        // Also purge any subagent rows that raced ahead of
-                        // the loader — same reasoning as the pending-bg
-                        // purge below.
-                        let subagentPurged = self.subagentTracker.purgeHistoric()
+                        // Same historic gate for the subagent activity list —
+                        // `loadHistoricIds` atomically installs the set and
+                        // returns the number of live rows purged (rows that
+                        // raced in as "live" before the loader landed).
+                        let subagentPurged = self.subagentTracker.loadHistoricIds(ids)
                         if subagentPurged > 0 {
                             self.statusBarData?.subagents = self.subagentTracker.rows
                         }
@@ -1742,9 +1728,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// and Anthropic's id space is wide enough that a new `toolu_…`
     /// colliding with a historic one is astronomically unlikely.
     ///
-    /// Lossy UTF-8 decoding matches `readJSONLFromOffset` — see there for
-    /// the Japanese-heavy-log rationale. `toolu_…` is ASCII-only, so
-    /// substring hits survive any replacement characters.
+    /// See `extractToolUseIds(fromText:)` for the scan implementation and the
+    /// macOS 26 Tahoe libdispatch rationale for avoiding `NSRegularExpression`.
+    /// `toolu_…` is pure ASCII, so both the lossy `String(decoding:)`
+    /// conversion here and the subsequent UTF-8 byte scan in the text variant
+    /// are robust to any invalid bytes in surrounding Japanese/emoji content.
     private static func extractToolUseIds(fromPath path: String, upToOffset bound: JSONLByteOffset) -> Set<String> {
         guard bound > 0 else { return [] }
         guard let handle = FileHandle(forReadingAtPath: path) else {
@@ -1757,7 +1745,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         defer { try? handle.close() }
         let data: Data
         do {
-            try handle.seek(toOffset: 0)
+            // `FileHandle(forReadingAtPath:)` opens at offset 0; no seek needed
+            // and adding one would only obscure which call raised on failure.
             // `read(upToCount:)` returns fewer bytes if EOF hits first — no
             // clamp needed vs. the actual file size.
             data = try handle.read(upToCount: Int(clamping: bound)) ?? Data()

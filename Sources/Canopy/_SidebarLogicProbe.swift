@@ -407,8 +407,50 @@ enum SidebarLogicProbe {
                overIds.isEmpty || overIds.contains(idOver))
         record("historic ids: 15-char id rejected (below min)",
                ShimProcess.extractToolUseIds(fromText: "toolu_" + String(repeating: "A", count: 15)).isEmpty)
+        // Positive lower boundary: exactly 16 alnum chars is the minimum
+        // accepted. Regression class: an off-by-one flipping `>= 16` to
+        // `> 16` would silently drop the shortest valid id shape while
+        // still passing the 15-char reject and 40-char accept tests.
+        let idMin = "toolu_" + String(repeating: "A", count: 16)
+        record("historic ids: 16-char id captured (min boundary)",
+               ShimProcess.extractToolUseIds(fromText: idMin).contains(idMin))
 
-        // Multiple ids on a single line — regex must iterate, not
+        // Trailing-underscore reject — the `(?![A-Za-z0-9_])` half of the
+        // guard, which the over-length test can't reach because that one
+        // trips the alphanumeric branch first. Regression class: dropping
+        // the underscore check from `isAsciiAlnumOrUnderscore` would leave
+        // this test as the sole tripwire.
+        let withTrailingUnderscore = "toolu_" + String(repeating: "A", count: 20) + "_"
+        record("historic ids: trailing underscore rejects the run",
+               !ShimProcess.extractToolUseIds(fromText: withTrailingUnderscore)
+                   .contains("toolu_" + String(repeating: "A", count: 20)))
+
+        // Multi-byte neighbors — session JSONLs are Japanese/emoji-heavy.
+        // The byte-scan claim in `extractToolUseIds(fromText:)` is that the
+        // ASCII prefix + `[A-Za-z0-9]{16..40}` scan is safe against any
+        // multi-byte characters surrounding a valid id. Regression class:
+        // a future switch to `text.count` / `unicodeScalars`-based indexing
+        // would silently drop ids in JP-heavy sessions.
+        let idJP = "toolu_" + String(repeating: "A", count: 20)
+        let jpText = "前置き " + idJP + " 🚀 後続"
+        record("historic ids: id survives multi-byte JP/emoji neighbors",
+               ShimProcess.extractToolUseIds(fromText: jpText).contains(idJP))
+
+        // Back-to-back ids with no separator byte. The `i = max(end, i + prefixLen)`
+        // advance is designed to prevent a valid match's trailing byte from
+        // seeding a phantom re-match. With two 20-char bodies concatenated,
+        // the scanner sees a single 40-char run after the first prefix
+        // (`AAAA…AAAAtoolu_BBBB…` reads as prefix + `A×20` + `toolu_` +
+        // `B×20`, but the alnum run after the first prefix continues into
+        // `toolu_` — no separator). Contract: either both captured or
+        // neither, never a truncated first-only capture.
+        let backToBack = "toolu_" + String(repeating: "A", count: 20)
+                       + "toolu_" + String(repeating: "B", count: 20)
+        let backToBackIds = ShimProcess.extractToolUseIds(fromText: backToBack)
+        record("historic ids: back-to-back ids don't yield a truncated capture",
+               backToBackIds.count == 2 || backToBackIds.isEmpty)
+
+        // Multiple ids on a single line — scanner must iterate, not
         // short-circuit on first hit. Regression class: a future switch to
         // `firstMatch(in:)` would silently drop every id after the first.
         let multiIds = ShimProcess.extractToolUseIds(
@@ -895,21 +937,30 @@ enum SidebarLogicProbe {
         // async by ShimProcess after its JSONL snapshot) must prevent
         // those from adding new rows.
         var historicTracker = SubagentTracker()
-        historicTracker.historicToolUseIds = ["toolu_A"]
+        historicTracker.loadHistoricIds(["toolu_A"])
         _ = historicTracker.observe(launchMsg, now: t0)
         record("subagent: historic tool_use skipped, non-historic added",
                historicTracker.rows.count == 1 && historicTracker.rows[0].id == "toolu_B",
                "ids=\(historicTracker.rows.map(\.id))")
 
         // Purge: rows that landed before the historic set loaded must
-        // be dropped once it arrives.
+        // be dropped once it arrives. `loadHistoricIds` returns the number
+        // it purged in the same call, so the shim path never sees a state
+        // where the set is populated but stale rows still sit in `rows`.
         var purgeTracker = SubagentTracker()
         _ = purgeTracker.observe(launchMsg, now: t0)
-        purgeTracker.historicToolUseIds = ["toolu_A"]
-        let purged = purgeTracker.purgeHistoric()
-        record("subagent: purgeHistoric drops race-window rows",
+        let purged = purgeTracker.loadHistoricIds(["toolu_A"])
+        record("subagent: loadHistoricIds installs set AND purges race rows",
                purged == 1 && purgeTracker.rows.count == 1 && purgeTracker.rows[0].id == "toolu_B",
                "purged=\(purged) ids=\(purgeTracker.rows.map(\.id))")
+
+        // Unknown message type — future CLI protocol extension shouldn't
+        // trip a fatal. Regression class: a switch to strict enum decoding
+        // would crash instead of the current no-op-with-DEBUG-log.
+        var unknownTracker = SubagentTracker()
+        record("subagent: unknown ioMsg type → observe false, no crash",
+               !unknownTracker.observe(["type": "future_extension"], now: t0)
+                   && unknownTracker.rows.isEmpty)
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")

@@ -1,20 +1,27 @@
 import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SubagentTracker")
 
 /// One row in the native subagent activity list — mirrors what the Claude
 /// Code CLI renders at the bottom of the terminal while Agent tool calls run.
 struct SubagentInfo: Identifiable, Equatable {
     let id: String // Agent tool_use block id
-    let agentType: String // input.subagent_type, e.g. "coderabbit:code-reviewer"
-    let label: String // input.description, e.g. "CodeRabbit review"
+    let agentType: String // input.subagent_type (e.g. "code-reviewer")
+    let label: String // input.description (short human-readable task title)
     let startedAt: Date
-    var finishedAt: Date?
+    /// One-way: `nil` while running, set exactly once when the row finishes.
+    /// Enforced by `finish(at:)` — external assignment isn't allowed so a
+    /// stray re-set can't "un-finish" or move the completion earlier.
+    private(set) var finishedAt: Date?
     /// Latest observed context size of the subagent (input + cache_creation +
     /// cache_read + output of its most recent assistant message). Grows as
     /// the subagent works, same as the "↓ Nk tokens" column in the CLI.
-    var tokens: Int = 0
+    /// Monotonic — enforced by `bumpTokens(to:)`.
+    private(set) var tokens: Int = 0
     /// `input.run_in_background == true` at launch. Bg Agent's initial
     /// `tool_result` is just an ack ("Command running in background with
-    /// ID: bXX"), NOT completion — the real completion goes to the JSONL
+    /// ID: …"), NOT completion — the real completion goes to the JSONL
     /// as a `<task-notification>` that the CLI does not re-emit through
     /// io_message. Rows with this flag therefore don't finish on
     /// `tool_result`; they stay running until the turn's `result` freezes
@@ -26,6 +33,32 @@ struct SubagentInfo: Identifiable, Equatable {
 
     func elapsed(now: Date) -> TimeInterval {
         (finishedAt ?? now).timeIntervalSince(startedAt)
+    }
+
+    /// Empty-string metadata is treated as absent: a blank 190pt column with
+    /// just a spinner is worse UX than a labelled placeholder. Centralised
+    /// here so callers can pass raw dict values without pre-sanitising.
+    init(id: String, agentType: String, label: String, startedAt: Date, runInBackground: Bool) {
+        self.id = id
+        self.agentType = agentType.isEmpty ? "agent" : agentType
+        self.label = label.isEmpty ? "Agent task" : label
+        self.startedAt = startedAt
+        self.runInBackground = runInBackground
+    }
+
+    /// Mark the row done. Idempotent — re-calling on an already-finished row
+    /// preserves the original completion time. The tracker relies on this
+    /// so a subagent-side `result` (silently ignored) can't accidentally
+    /// backdate a main-conversation row's `finishedAt`.
+    mutating func finish(at date: Date) {
+        if finishedAt == nil { finishedAt = date }
+    }
+
+    /// Monotonic token update. Ignores smaller totals so out-of-order streaming
+    /// snapshots don't rewind the display. See `SubagentTracker.updateTokens`
+    /// for the caller-side type-safety guard.
+    mutating func bumpTokens(to newTotal: Int) {
+        if newTotal > tokens { tokens = newTotal }
     }
 }
 
@@ -49,18 +82,20 @@ struct SubagentTracker {
     /// user's next typed prompt back as a `user` io_message (those are mostly
     /// tool_result messages), so the robust "new turn" signal is the first
     /// main-conversation `message_start` after a `result` — clear the
-    /// previous turn's rows there.
+    /// previous turn's rows there. The rare case where the CLI *does*
+    /// forward a typed prompt is handled defensively as a String-content
+    /// backup in `handleUserMessage`.
     private var turnEnded = false
 
     /// `toolu_…` ids the CLI already logged before this shim spawned. On
     /// `--resume`, historic `Agent`/`Task` tool_use blocks are re-emitted
     /// through the io_message stream and would otherwise appear as fresh
     /// running rows in the activity list. ShimProcess populates this after
-    /// the async JSONL scan completes (see `historicToolUseIds` there);
-    /// while the set is still loading, historic launches may briefly show
-    /// as live — same bounded-flicker trade-off documented on the shim's
-    /// snapshot.
-    var historicToolUseIds: Set<String> = []
+    /// the async JSONL scan completes via `loadHistoricIds(_:)` — that call
+    /// atomically installs the set AND purges any rows that raced in as
+    /// "live" while the loader was still running. Not writable by other
+    /// callers so the fill-then-purge contract can't be split.
+    private(set) var historicToolUseIds: Set<String> = []
 
     /// Feed one io_message dict (`{type:"assistant"|"user"|"result"|"stream_event", ...}`).
     /// Returns true when `rows` changed. `stream_event` is load-bearing:
@@ -96,7 +131,7 @@ struct SubagentTracker {
             turnEnded = true
             var changed = false
             for i in rows.indices where rows[i].finishedAt == nil {
-                rows[i].finishedAt = now
+                rows[i].finish(at: now)
                 changed = true
             }
             return changed
@@ -115,6 +150,14 @@ struct SubagentTracker {
             return true
 
         default:
+            // Unknown io_message type — usually a CLI protocol extension we
+            // don't model yet. Log at debug so a stream-format drift that
+            // silently disables the activity list can be root-caused from
+            // the unified log without spamming production.
+            #if DEBUG
+            let type = (ioMsg["type"] as? String) ?? "<missing>"
+            logger.debug("observe: ignoring unknown io_message type=\(type, privacy: .public)")
+            #endif
             return false
         }
     }
@@ -122,8 +165,8 @@ struct SubagentTracker {
     /// Register `Agent` tool_use blocks from a main-conversation assistant
     /// message. Only the final assistant message carries a populated `input`
     /// (stream_event content_block_start has it empty — input arrives over
-    /// input_json_delta), so that's the one we key off, same as
-    /// `detectBackgroundTaskLaunch`.
+    /// input_json_delta), so that's the one we key off — same reasoning as
+    /// `detectBackgroundTaskLaunch` uses for reading `input.run_in_background`.
     private mutating func addLaunches(ioMsg: [String: Any], now: Date) -> Bool {
         guard let msg = ioMsg["message"] as? [String: Any],
               let content = msg["content"] as? [[String: Any]]
@@ -145,11 +188,8 @@ struct SubagentTracker {
             let input = block["input"] as? [String: Any] ?? [:]
             rows.append(SubagentInfo(
                 id: id,
-                // Empty-string metadata is treated as absent: a blank
-                // 190pt column with just a spinner is worse UX than a
-                // labelled placeholder.
-                agentType: nonEmpty(input["subagent_type"]) ?? "agent",
-                label: nonEmpty(input["description"]) ?? "Agent task",
+                agentType: (input["subagent_type"] as? String) ?? "",
+                label: (input["description"] as? String) ?? "",
                 startedAt: now,
                 runInBackground: input["run_in_background"] as? Bool == true
             ))
@@ -158,11 +198,20 @@ struct SubagentTracker {
         return changed
     }
 
+    /// Atomically install the historic-id snapshot and purge any live rows
+    /// that raced ahead of the loader. Callers get a single API to invoke
+    /// in one go — the fill-then-purge sequencing can't be split, so we
+    /// can't leak into a state where the set is populated but stale rows
+    /// still sit in `rows`. Returns the number purged.
+    @discardableResult
+    mutating func loadHistoricIds(_ ids: Set<String>) -> Int {
+        historicToolUseIds = ids
+        return purgeHistoric()
+    }
+
     /// Drop any row whose id is in `historicToolUseIds`. Returns the
-    /// number purged. Called after the async historic-id snapshot lands
-    /// so replays that raced ahead of the loader (added as "live" rows
-    /// before the gate was populated) get removed instead of sticking
-    /// as ghosts.
+    /// number purged. Also invoked by `loadHistoricIds(_:)` — kept
+    /// separately so the probe can drive it independently of an install.
     mutating func purgeHistoric() -> Int {
         guard !historicToolUseIds.isEmpty, !rows.isEmpty else { return 0 }
         let before = rows.count
@@ -170,32 +219,45 @@ struct SubagentTracker {
         return before - rows.count
     }
 
-    private func nonEmpty(_ value: Any?) -> String? {
-        guard let s = value as? String, !s.isEmpty else { return nil }
-        return s
-    }
-
     private mutating func updateTokens(parentId: String, ioMsg: [String: Any]) -> Bool {
         guard let idx = rows.firstIndex(where: { $0.id == parentId }),
               let msg = ioMsg["message"] as? [String: Any],
               let usage = msg["usage"] as? [String: Any]
         else { return false }
-        let total = (usage["input_tokens"] as? Int ?? 0)
+        // Mandatory fields — if the CLI ever ships these as Doubles (JSON
+        // number promotion) or renames them, the `?? 0` fallback in the
+        // sum below would silently freeze tokens at 0 with no signal. A
+        // strict guard here surfaces the drift in DEBUG builds without
+        // making prod any less forgiving (still returns false).
+        guard let inputTokens = usage["input_tokens"] as? Int,
+              let outputTokens = usage["output_tokens"] as? Int
+        else {
+            #if DEBUG
+            let keys = usage.keys.sorted().joined(separator: ",")
+            logger.debug("updateTokens: usage type mismatch keys=\(keys, privacy: .public)")
+            #endif
+            return false
+        }
+        // cache_* fields are legitimately absent in early messages, so keep
+        // the `?? 0` there. Present-but-wrong-type on those still degrades
+        // to zero silently, which mirrors the CLI's own display behavior.
+        let total = inputTokens
             + (usage["cache_creation_input_tokens"] as? Int ?? 0)
             + (usage["cache_read_input_tokens"] as? Int ?? 0)
-            + (usage["output_tokens"] as? Int ?? 0)
+            + outputTokens
         // Context only grows within a subagent; ignore out-of-order updates.
-        guard total > rows[idx].tokens else { return false }
-        rows[idx].tokens = total
-        return true
+        let before = rows[idx].tokens
+        rows[idx].bumpTokens(to: total)
+        return rows[idx].tokens != before
     }
 
     private mutating func handleUserMessage(ioMsg: [String: Any], now: Date) -> Bool {
         guard let msg = ioMsg["message"] as? [String: Any] else { return false }
         // Two well-known shapes:
-        //   1. `content: [[...tool_result blocks...]]` — CLI feeding tool
-        //      results back to Claude. Match each to a row and finish it
-        //      (except bg rows — their initial tool_result is an ack).
+        //   1. `content: [tool_result, tool_result, …]` — a JSON array of
+        //      block dicts the CLI feeds back to Claude. Match each to a
+        //      row and finish it (except bg rows — their initial tool_result
+        //      is an ack, not completion).
         //   2. `content: "some prompt"` (String) — the user actually typed
         //      something, so drop the previous turn's rows.
         // Anything else (empty content array, single dict wrapper, missing
@@ -210,19 +272,24 @@ struct SubagentTracker {
                    let idx = rows.firstIndex(where: { $0.id == id }),
                    rows[idx].finishedAt == nil,
                    // Bg Agent's initial `tool_result` is an ack ("Command
-                   // running in background with ID: bXX"), not completion —
+                   // running in background with ID: …"), not completion —
                    // the real end signal is a `<task-notification>` that
                    // never flows through io_message. Leave bg rows running
                    // until the turn's `result` freezes them.
                    !rows[idx].runInBackground
                 {
-                    rows[idx].finishedAt = now
+                    rows[idx].finish(at: now)
                     changed = true
                 }
             }
             return changed
         }
         // A real user prompt starts a new turn — drop the previous turn's rows.
+        // Defensive backup path: the primary "new turn" signal is the
+        // post-result `message_start` in the `stream_event` branch, since the
+        // CLI usually replays user prompts as tool_result batches. This
+        // String-content branch fires when the CLI does forward the typed
+        // prompt as-is.
         guard msg["content"] is String else { return false }
         turnEnded = false
         guard !rows.isEmpty else { return false }
