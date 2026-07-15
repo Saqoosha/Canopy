@@ -353,6 +353,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         // (starts as `[]`). Either form gives the same
                         // set — `=` makes the ownership explicit.
                         self.historicToolUseIds = ids
+                        // Same historic gate for the subagent activity
+                        // list: without this, `--resume` replays re-add
+                        // old Agent/Task launches as fresh running rows.
+                        self.subagentTracker.historicToolUseIds = ids
+                        // Also purge any subagent rows that raced ahead of
+                        // the loader — same reasoning as the pending-bg
+                        // purge below.
+                        let subagentPurged = self.subagentTracker.purgeHistoric()
+                        if subagentPurged > 0 {
+                            self.statusBarData?.subagents = self.subagentTracker.rows
+                        }
                         // Race-window reconcile: if a replayed assistant
                         // io_message arrived before the loader completed,
                         // its id is now in `pendingBackgroundTaskIds` even
@@ -371,7 +382,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         if purged > 0 {
                             self.refreshWaitingState()
                         }
-                        logger.info("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) purged=\(purged, privacy: .public) bound=\(bound, privacy: .public) path=\(path, privacy: .public)")
+                        logger.info("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) purged=\(purged, privacy: .public) subagentPurged=\(subagentPurged, privacy: .public) bound=\(bound, privacy: .public) path=\(path, privacy: .public)")
                     }
                 }
             }

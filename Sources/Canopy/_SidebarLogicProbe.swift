@@ -890,6 +890,27 @@ enum SidebarLogicProbe {
                    && placeholderTracker.rows[0].agentType == "agent"
                    && placeholderTracker.rows[0].label == "Agent task")
 
+        // Historic gate: `--resume` re-emits already-logged Agent/Task
+        // tool_use blocks through io_message. `historicToolUseIds` (loaded
+        // async by ShimProcess after its JSONL snapshot) must prevent
+        // those from adding new rows.
+        var historicTracker = SubagentTracker()
+        historicTracker.historicToolUseIds = ["toolu_A"]
+        _ = historicTracker.observe(launchMsg, now: t0)
+        record("subagent: historic tool_use skipped, non-historic added",
+               historicTracker.rows.count == 1 && historicTracker.rows[0].id == "toolu_B",
+               "ids=\(historicTracker.rows.map(\.id))")
+
+        // Purge: rows that landed before the historic set loaded must
+        // be dropped once it arrives.
+        var purgeTracker = SubagentTracker()
+        _ = purgeTracker.observe(launchMsg, now: t0)
+        purgeTracker.historicToolUseIds = ["toolu_A"]
+        let purged = purgeTracker.purgeHistoric()
+        record("subagent: purgeHistoric drops race-window rows",
+               purged == 1 && purgeTracker.rows.count == 1 && purgeTracker.rows[0].id == "toolu_B",
+               "purged=\(purged) ids=\(purgeTracker.rows.map(\.id))")
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return lines.joined(separator: "\n")

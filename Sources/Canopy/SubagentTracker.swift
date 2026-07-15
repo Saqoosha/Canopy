@@ -52,6 +52,16 @@ struct SubagentTracker {
     /// previous turn's rows there.
     private var turnEnded = false
 
+    /// `toolu_…` ids the CLI already logged before this shim spawned. On
+    /// `--resume`, historic `Agent`/`Task` tool_use blocks are re-emitted
+    /// through the io_message stream and would otherwise appear as fresh
+    /// running rows in the activity list. ShimProcess populates this after
+    /// the async JSONL scan completes (see `historicToolUseIds` there);
+    /// while the set is still loading, historic launches may briefly show
+    /// as live — same bounded-flicker trade-off documented on the shim's
+    /// snapshot.
+    var historicToolUseIds: Set<String> = []
+
     /// Feed one io_message dict (`{type:"assistant"|"user"|"result"|"stream_event", ...}`).
     /// Returns true when `rows` changed. `stream_event` is load-bearing:
     /// its `message_start` after a `result` is the robust "new turn"
@@ -124,7 +134,13 @@ struct SubagentTracker {
                   let name = block["name"] as? String,
                   name == "Agent" || name == "Task", // "Task" = pre-rename CLIs
                   let id = block["id"] as? String,
-                  !rows.contains(where: { $0.id == id })
+                  !rows.contains(where: { $0.id == id }),
+                  // Historic replay from `--resume`: the id was in the JSONL
+                  // when the shim spawned, so this is the CLI re-emitting an
+                  // already-completed (or abandoned) subagent, not a live
+                  // launch. Skip — same reasoning as ShimProcess's
+                  // `pendingBackgroundTaskIds` historic gate.
+                  !historicToolUseIds.contains(id)
             else { continue }
             let input = block["input"] as? [String: Any] ?? [:]
             rows.append(SubagentInfo(
@@ -140,6 +156,18 @@ struct SubagentTracker {
             changed = true
         }
         return changed
+    }
+
+    /// Drop any row whose id is in `historicToolUseIds`. Returns the
+    /// number purged. Called after the async historic-id snapshot lands
+    /// so replays that raced ahead of the loader (added as "live" rows
+    /// before the gate was populated) get removed instead of sticking
+    /// as ghosts.
+    mutating func purgeHistoric() -> Int {
+        guard !historicToolUseIds.isEmpty, !rows.isEmpty else { return 0 }
+        let before = rows.count
+        rows.removeAll { historicToolUseIds.contains($0.id) }
+        return before - rows.count
     }
 
     private func nonEmpty(_ value: Any?) -> String? {
