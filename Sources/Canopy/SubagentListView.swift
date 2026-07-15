@@ -1,4 +1,7 @@
 import SwiftUI
+import os.log
+
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SubagentListView")
 
 /// CLI-style subagent task list — mirrors the bottom-of-terminal agent rows
 /// Claude Code shows while Agent / Task tool calls run. Data comes from
@@ -21,12 +24,24 @@ struct SubagentListView: View {
             TimelineView(.periodic(from: .now, by: anyRunning ? 1 : 3600)) { context in
                 listContent(now: context.date)
             }
+            // Watchdog: if the probe never lands (JS selector broke, auth
+            // screen with no chat, etc.) the fallback width persists
+            // silently and the row detaches from the input column on wide
+            // windows. Log at info level so the failure is grep-able.
+            .task(id: data.subagents.count) {
+                try? await Task.sleep(for: .seconds(5))
+                if data.chatInputWidth == nil {
+                    logger.info("chatInputWidth still nil after 5s — probe may not have attached")
+                }
+            }
         }
     }
 
     /// Fallback width when the JS probe hasn't reported yet (auth screen,
-    /// initial load). Roughly matches CC extension's default chat-column
-    /// width so the list doesn't jump when the measurement lands.
+    /// initial load). Slightly under the empirically-measured 680pt at a
+    /// 1059pt viewport so the first live probe report always expands the
+    /// row (never contracts it) — reads cleaner than jitter in either
+    /// direction.
     private static let fallbackContentWidth: CGFloat = 640
 
     @ViewBuilder

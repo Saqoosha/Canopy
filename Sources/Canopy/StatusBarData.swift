@@ -26,7 +26,18 @@ final class StatusBarData {
     /// the probe reports its first value or when the target element can't
     /// be found. `SubagentListView` mirrors this width so its rows line up
     /// with the input area instead of sprawling edge-to-edge.
-    var chatInputWidth: CGFloat?
+    ///
+    /// `didSet` clamps any non-positive assignment back to `nil` — the
+    /// message handler already filters, so this guards against future
+    /// direct assignments that skip the pipeline. Non-triggering on
+    /// initialisation is fine (default is already `nil`).
+    var chatInputWidth: CGFloat? {
+        didSet {
+            if let w = chatInputWidth, w <= 0 {
+                chatInputWidth = nil
+            }
+        }
+    }
 
     enum VCSType { case unknown, git, jj }
 
