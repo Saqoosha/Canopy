@@ -189,6 +189,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// sticks forever. The offset-tracked approach above is the fix.
     private var pendingBackgroundTaskIds: [BackgroundTaskID: JSONLByteOffset] = [:]
 
+    /// Every `toolu_…` id that already existed in the session JSONL when this
+    /// shim spawned. On `--resume`, the CLI re-emits historical `assistant`
+    /// io_messages through the same io_message stream that carries live
+    /// events — `detectBackgroundTaskLaunch` can't tell them apart from the
+    /// payload alone. Any bg tool_use whose id is in this set is a replay,
+    /// not a fresh launch, and must NOT be added to `pendingBackgroundTaskIds`:
+    /// - If it already completed, its `<tool-use-id>` marker lives at a low
+    ///   JSONL offset that the wake-up scan (bounded at `rawSize - 1MB` at
+    ///   detection time, i.e. ~EOF at replay) will never reach → the entry
+    ///   would stick forever.
+    /// - If it was abandoned (process died without the CLI writing a
+    ///   `task-notification`, or the earlier shim was killed mid-flight),
+    ///   the marker never gets written at all → same stuck-forever outcome.
+    /// Snapshotting the historic ids at spawn side-steps both cases.
+    private var historicToolUseIds: Set<BackgroundTaskID> = []
+
     /// True when the most recent assistant message contained a
     /// `tool_use` block whose name is `AskUserQuestion`. Drives `isAsking`
     /// once the result event fires and `isWorking` goes false.
@@ -281,8 +297,50 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
                 sessionId: sessionId, directory: workingDirectory
             )
+            // Snapshot every historic `toolu_…` id in the existing JSONL so
+            // `detectBackgroundTaskLaunch` can skip CLI replays of already-
+            // logged assistant messages instead of tracking their bg ids as
+            // "live" — see `historicToolUseIds` for why. Remote sessions
+            // write on the other machine, so the local JSONL is unreachable;
+            // fall back to the empty set (all detections treated as live).
+            //
+            // Runs off the main actor so a 20+ MB session doesn't stall the
+            // sidebar's click-to-open. The CLI needs several hundred ms to
+            // boot Node, activate the extension, and start streaming replay
+            // events; by the time the first assistant io_message arrives the
+            // set is normally populated. If a detection genuinely races
+            // ahead, the worst case is one or two replayed ids getting
+            // tracked as live — they'll clear on the next wake-up scan if
+            // their completion marker lives near EOF, otherwise the sidebar
+            // shows a spurious hourglass for one turn (better than freezing
+            // session open by hundreds of ms every time).
+            if remoteHost == nil,
+               let path = Self.jsonlPath(
+                   sessionId: sessionId, workingDirectory: workingDirectory
+               )
+            {
+                Self.bgHistoricLoadQueue.async { [weak self] in
+                    let ids = Self.extractToolUseIds(fromPath: path)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        // Union so any live detections that fired before the
+                        // scan finished (already-added pending ids) aren't
+                        // demoted — but historic ids are still recognized.
+                        self.historicToolUseIds.formUnion(ids)
+                        logger.info("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) path=\(path, privacy: .public)")
+                    }
+                }
+            }
         }
     }
+
+    /// Serial background queue for the init-time historic-id snapshot.
+    /// Serial guarantees the load completes before any later `formUnion`
+    /// racing against it; `.utility` matches the surrounding non-critical
+    /// init work (VCS branch detection is on the global utility queue).
+    private static let bgHistoricLoadQueue = DispatchQueue(
+        label: "sh.saqoo.Canopy.bgHistoricLoadQueue", qos: .utility
+    )
 
     // MARK: - Lifecycle
 
@@ -1586,16 +1644,73 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func sessionJSONLPath() -> String? {
         guard remoteHost == nil else { return nil }
         guard let sid = activeSessionId ?? resumeSessionId, !sid.isEmpty else { return nil }
+        return Self.jsonlPath(sessionId: sid, workingDirectory: workingDirectory)
+    }
+
+    /// Static form of `sessionJSONLPath()` for callers that don't have an
+    /// instance handy yet (init-time historic-id snapshot). Returns the first
+    /// existing `~/.claude/projects/<encoded>/<sid>.jsonl` path across the
+    /// encoded-folder candidates, or nil when the session log isn't on disk
+    /// (brand-new session, or a folder-encoding drift the CLI doesn't cover).
+    static func jsonlPath(sessionId: String, workingDirectory: URL) -> String? {
+        guard !sessionId.isEmpty else { return nil }
         let home = NSHomeDirectory()
         let fm = FileManager.default
         for encoded in ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.path) {
-            let path = "\(home)/.claude/projects/\(encoded)/\(sid).jsonl"
+            let path = "\(home)/.claude/projects/\(encoded)/\(sessionId).jsonl"
             if fm.fileExists(atPath: path) {
                 return path
             }
         }
         return nil
     }
+
+    /// Read the given JSONL and collect every `toolu_…` id that appears
+    /// anywhere in the file. Used at spawn to snapshot the set of ids the
+    /// CLI knows about from prior turns — see `historicToolUseIds`.
+    ///
+    /// The pattern is deliberately loose (any `toolu_[A-Za-z0-9]+`
+    /// substring): CC uses that id shape for both `assistant` `tool_use.id`
+    /// and `user` `tool_result.tool_use_id` blocks, plus the
+    /// `<tool-use-id>` completion wrapper — matching any occurrence catches
+    /// them all without JSON parsing 28+ MB of log per session start. The
+    /// price is over-inclusion of ids that only ever appeared in a
+    /// `tool_result` and never as a launch, but that's harmless: those ids
+    /// were never valid bg-launch candidates anyway, and Anthropic's id
+    /// space is wide enough that a new `toolu_…` colliding with a historic
+    /// one is astronomically unlikely.
+    ///
+    /// Lossy UTF-8 decoding matches `readJSONLFromOffset` — see there for
+    /// the Japanese-heavy-log rationale. `toolu_…` is ASCII-only, so
+    /// substring hits survive any replacement characters.
+    static func extractToolUseIds(fromPath path: String) -> Set<String> {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return []
+        }
+        let text = String(decoding: data, as: UTF8.self)
+        return extractToolUseIds(fromText: text)
+    }
+
+    /// Text-only variant of `extractToolUseIds(fromPath:)` so the probe can
+    /// lock the regex without touching the filesystem.
+    static func extractToolUseIds(fromText text: String) -> Set<String> {
+        guard let regex = Self.toolUseIdRegex else { return [] }
+        var out = Set<String>()
+        let ns = text as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        regex.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
+            guard let match else { return }
+            out.insert(ns.substring(with: match.range))
+        }
+        return out
+    }
+
+    /// Anthropic `tool_use` id shape. 22 chars is the current CLI format
+    /// but we accept 16..40 to survive minor drift without silently
+    /// dropping historic ids.
+    private static let toolUseIdRegex = try? NSRegularExpression(
+        pattern: #"toolu_[A-Za-z0-9]{16,40}"#
+    )
 
     /// Read a JSONL file from `offset` to EOF and return the lossy-decoded
     /// text alongside the byte offset where the read ended (start + bytes-
@@ -1727,10 +1842,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             ? rawSize - Self.bgScanSafetyMarginBytes
             : 0
         var added: [String] = []
+        var skippedHistoric = 0
         for block in content {
             guard let id = block["id"] as? String,
                   Self.isBackgroundLaunchBlock(block)
             else { continue }
+            // Historic replay: the CLI re-emits already-logged assistant
+            // messages through the io_message stream on `--resume`, so
+            // detection alone can't tell "just fired" apart from "fired
+            // days ago". If the id was in the JSONL at spawn time, this
+            // is a replay — don't track it as pending. See
+            // `historicToolUseIds` for why we can't rely on the wake-up
+            // scan to catch these later.
+            if historicToolUseIds.contains(id) {
+                skippedHistoric += 1
+                continue
+            }
             // Only insert on first sight: re-inserting would replace a
             // smaller (safer) launch offset with a larger one — possibly one
             // that's past this id's completion marker — and the wake-up scan
@@ -1740,6 +1867,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 pendingBackgroundTaskIds[id] = launchOffset
                 added.append(id)
             }
+        }
+        if skippedHistoric > 0 {
+            logger.debug("[bg] skipped historic replays count=\(skippedHistoric, privacy: .public)")
         }
         if !added.isEmpty {
             logger.info("[bg] launch +\(added.count, privacy: .public) ids=\(added.joined(separator: ","), privacy: .public) offset=\(launchOffset, privacy: .public) rawSize=\(rawSize, privacy: .public) pending=\(self.pendingBackgroundTaskIds.count, privacy: .public)")

@@ -360,6 +360,35 @@ enum SidebarLogicProbe {
         record("bg complete: bare id without wrapper → no match",
                !ShimProcess.jsonlTailHasCompletion(tail: "toolu_01KDTwPWn2C3FdoCKvZSnmJx", taskId: "toolu_01KDTwPWn2C3FdoCKvZSnmJx"))
 
+        // Historic-id snapshot: `extractToolUseIds` grabs every `toolu_…`
+        // occurrence in the JSONL so `detectBackgroundTaskLaunch` can
+        // suppress CLI replays of already-logged assistant messages. The
+        // fixture covers the three shapes the CLI writes: assistant
+        // `tool_use.id`, user `tool_result.tool_use_id`, and the
+        // `<tool-use-id>` completion wrapper.
+        let historicJSONL = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01AAAAAAAAAAAAAAAAAA","name":"Bash","input":{"command":"echo hi","run_in_background":true}}]}}
+        {"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01AAAAAAAAAAAAAAAAAA","type":"tool_result","content":"Command running in background with ID: babcdef01"}]}}
+        {"type":"queue-operation","operation":"enqueue","content":"<task-notification>\\n<task-id>abc</task-id>\\n<tool-use-id>toolu_01BBBBBBBBBBBBBBBBBB</tool-use-id>\\n<status>completed</status>\\n</task-notification>"}
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"nothing to see here"}]}}
+        """
+        let historicIds = ShimProcess.extractToolUseIds(fromText: historicJSONL)
+        record("historic ids: tool_use.id extracted",
+               historicIds.contains("toolu_01AAAAAAAAAAAAAAAAAA"),
+               "\(historicIds)")
+        record("historic ids: <tool-use-id> wrapper extracted",
+               historicIds.contains("toolu_01BBBBBBBBBBBBBBBBBB"),
+               "\(historicIds)")
+        record("historic ids: unrelated id absent",
+               !historicIds.contains("toolu_99NEVERAPPEARSXXXXX"),
+               "\(historicIds)")
+        record("historic ids: empty text → empty set",
+               ShimProcess.extractToolUseIds(fromText: "").isEmpty)
+        // Too-short "toolu_…" fragments must NOT be captured — otherwise a
+        // stray `toolu_X` in a text field would poison the historic set.
+        record("historic ids: short fragment rejected",
+               !ShimProcess.extractToolUseIds(fromText: "prefix toolu_short suffix").contains(where: { $0.hasPrefix("toolu_") }))
+
         // Title-generation context: prompt extraction from session JSONL
         // (resume seeding) and first-prompt pinning (anti-drift). Noise
         // fixtures mirror the real records the CLI writes — a slash-command
