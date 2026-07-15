@@ -326,11 +326,20 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
+        ucc.addUserScript(WKUserScript(
+            source: InputWidthProbe.javascript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
 
         let linkHandler = LinkClickHandler(workingDirectory: workingDirectory)
         ucc.add(linkHandler, name: "canopyLink")
+
+        let inputWidthHandler = InputWidthMessageHandler(statusBarData: statusBarData)
+        ucc.add(inputWidthHandler, name: InputWidthProbe.messageHandlerName)
 
         // Reuse an existing shim when the OpenSession already owns one.
         // This prevents the orphan-shim bug: SwiftUI runs makeNSView twice

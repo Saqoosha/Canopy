@@ -24,19 +24,23 @@ struct SubagentListView: View {
         }
     }
 
-    /// Matches the CC extension's chat-column max width so the CLI-style
-    /// task list lines up visually with the input area instead of sprawling
-    /// edge-to-edge across a wide window.
-    private static let contentMaxWidth: CGFloat = 720
+    /// Fallback width when the JS probe hasn't reported yet (auth screen,
+    /// initial load). Roughly matches CC extension's default chat-column
+    /// width so the list doesn't jump when the measurement lands.
+    private static let fallbackContentWidth: CGFloat = 640
 
     @ViewBuilder
     private func listContent(now: Date) -> some View {
+        // Live width from the webview's chat-input column (see
+        // `InputWidthProbe`). Falls back to a sensible default the moment
+        // the webview is up but the probe hasn't reported yet.
+        let contentWidth = data.chatInputWidth ?? Self.fallbackContentWidth
         let rows = VStack(alignment: .leading, spacing: 3) {
             ForEach(data.subagents) { agent in
                 row(agent, now: now)
             }
         }
-        .frame(maxWidth: Self.contentMaxWidth, alignment: .leading)
+        .frame(maxWidth: contentWidth, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
@@ -68,14 +72,17 @@ struct SubagentListView: View {
             }
             .frame(width: 14, height: 14)
 
+            // Match StatusBarView's tone hierarchy so the two footers read
+            // as one strip: secondary for the primary label, tertiary for
+            // secondary metadata (agent type + trailing metrics).
             Text(agent.agentType)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
                 .frame(width: 190, alignment: .leading)
                 .lineLimit(1)
                 .truncationMode(.middle)
 
             Text(agent.label)
-                .foregroundStyle(.primary)
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
 
             Spacer()

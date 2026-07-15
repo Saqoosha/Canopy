@@ -21,6 +21,13 @@ final class StatusBarData {
     /// SubagentTracker whenever it changes.
     var subagents: [SubagentInfo] = []
 
+    /// Live width (in AppKit points) of the CC extension's chat-input
+    /// column, measured from the webview via `InputWidthProbe`. `nil` until
+    /// the probe reports its first value or when the target element can't
+    /// be found. `SubagentListView` mirrors this width so its rows line up
+    /// with the input area instead of sprawling edge-to-edge.
+    var chatInputWidth: CGFloat?
+
     enum VCSType { case unknown, git, jj }
 
     /// Effective context window matching CC extension's pie chart: contextWindow - maxOutputTokens - 13000.
@@ -64,6 +71,7 @@ final class StatusBarData {
         didCompact = false
         remoteHost = nil
         subagents = []
+        chatInputWidth = nil
     }
 
 }
