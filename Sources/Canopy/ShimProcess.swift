@@ -1774,31 +1774,80 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Text-only variant of `extractToolUseIds(fromPath:upToOffset:)` so the
-    /// probe can lock the regex without touching the filesystem.
+    /// probe can lock the scanner without touching the filesystem.
+    ///
+    /// Pure-Swift UTF-8 scan — deliberately does NOT use `NSRegularExpression`.
+    /// Under macOS 26 Tahoe, `NSRegularExpression.enumerateMatches` invoked on
+    /// a background dispatch queue trips a spurious main-thread precondition
+    /// inside Foundation and crashes the process with
+    /// `BUG IN CLIENT OF LIBDISPATCH: Block was expected to execute on queue
+    /// [com.apple.main-thread]` — even when the closure never touches main.
+    /// The historic-id loader has to run off-main (session JSONLs can be
+    /// tens of MB), so we scan bytes directly:
+    ///   - Match the literal `toolu_` prefix
+    ///   - Collect 16..40 following `[A-Za-z0-9]` bytes
+    ///   - Reject if the next byte is `[A-Za-z0-9_]` (mirrors the regex's
+    ///     `(?![A-Za-z0-9_])` — an overlong id must be captured whole or
+    ///     dropped entirely, never truncated to a 40-char prefix)
+    /// All target bytes are ASCII, so the UTF-8 view is safe against any
+    /// multi-byte characters in surrounding Japanese / emoji content.
     static func extractToolUseIds(fromText text: String) -> Set<String> {
         var out = Set<String>()
-        let ns = text as NSString
-        let range = NSRange(location: 0, length: ns.length)
-        Self.toolUseIdRegex.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
-            guard let match else { return }
-            out.insert(ns.substring(with: match.range))
+        let bytes = Array(text.utf8)
+        let n = bytes.count
+        // "toolu_"
+        let prefix: [UInt8] = [0x74, 0x6f, 0x6f, 0x6c, 0x75, 0x5f]
+        let prefixLen = prefix.count
+        guard n >= prefixLen + 16 else { return out }
+        var i = 0
+        while i <= n - prefixLen {
+            // Fast reject on first byte mismatch.
+            if bytes[i] != prefix[0] {
+                i += 1
+                continue
+            }
+            var matched = true
+            for k in 1..<prefixLen where bytes[i + k] != prefix[k] {
+                matched = false
+                break
+            }
+            if !matched {
+                i += 1
+                continue
+            }
+            let idStart = i
+            let bodyStart = i + prefixLen
+            var end = bodyStart
+            while end < n && Self.isAsciiAlnum(bytes[end]) {
+                end += 1
+            }
+            let bodyLen = end - bodyStart
+            if bodyLen >= 16, bodyLen <= 40,
+               end == n || !Self.isAsciiAlnumOrUnderscore(bytes[end])
+            {
+                // Slice is guaranteed ASCII (prefix + [A-Za-z0-9]*), so
+                // String(decoding:as:) never inserts replacement characters.
+                out.insert(String(decoding: bytes[idStart..<end], as: UTF8.self))
+            }
+            // Advance past the scanned run so a valid match's trailing byte
+            // can't seed a phantom re-match. When bodyLen == 0 (bare
+            // "toolu_" with no alnum) we still advance by prefixLen.
+            i = max(end, i + prefixLen)
         }
         return out
     }
 
-    /// Anthropic `tool_use` id shape. 22 chars is the current CLI format
-    /// but we accept 16..40 to survive minor drift without silently
-    /// dropping historic ids. The trailing `(?![A-Za-z0-9_])` lookahead
-    /// rejects an overlong id being silently truncated to a 40-char prefix
-    /// — otherwise a hypothetical future 44-char id would insert a
-    /// non-matching prefix into `historicToolUseIds` and the real id would
-    /// leak through the gate anyway. `try!` is intentional: the pattern is
-    /// a compile-time literal, so any failure here is a code bug that
-    /// should crash the developer's build immediately rather than silently
-    /// disable historic filtering in production.
-    private static let toolUseIdRegex: NSRegularExpression = try! NSRegularExpression(
-        pattern: #"toolu_[A-Za-z0-9]{16,40}(?![A-Za-z0-9_])"#
-    )
+    @inline(__always)
+    private static func isAsciiAlnum(_ c: UInt8) -> Bool {
+        (c >= 0x30 && c <= 0x39) // 0-9
+            || (c >= 0x41 && c <= 0x5A) // A-Z
+            || (c >= 0x61 && c <= 0x7A) // a-z
+    }
+
+    @inline(__always)
+    private static func isAsciiAlnumOrUnderscore(_ c: UInt8) -> Bool {
+        isAsciiAlnum(c) || c == 0x5F // _
+    }
 
     /// Read a JSONL file from `offset` to EOF and return the lossy-decoded
     /// text alongside the byte offset where the read ended (start + bytes-
