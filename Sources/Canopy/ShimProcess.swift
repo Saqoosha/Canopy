@@ -218,6 +218,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// stable boundary even if the CLI starts appending immediately.
     private var historicJsonlBound: JSONLByteOffset = 0
 
+    /// Tracks Agent tool subagent activity for the native CLI-style task
+    /// list. Snapshots are pushed to `statusBarData.subagents` on change.
+    private var subagentTracker = SubagentTracker()
+
     /// True when the most recent assistant message contained a
     /// `tool_use` block whose name is `AskUserQuestion`. Drives `isAsking`
     /// once the result event fires and `isWorking` goes false.
@@ -313,26 +317,27 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Snapshot every historic `toolu_…` id in the existing JSONL so
             // `detectBackgroundTaskLaunch` can skip CLI replays of already-
             // logged assistant messages instead of tracking their bg ids as
-            // "live" — see `historicToolUseIds` for why. Remote sessions
-            // write on the other machine, so the local JSONL is unreachable;
-            // fall back to the empty set (all detections treated as live).
+            // "live" — see `historicToolUseIds` doc for the full rationale.
             //
-            // The bound is snapshotted synchronously here so the async
-            // extractor reads only bytes committed before the shim spawned.
-            // Bytes appended later are live events (this shim's own turns)
-            // — if they leaked into the historic set, a running bg task
-            // would be silently classified as historic and the hourglass
-            // would never appear at all. The `attributesOfItem` call itself
-            // is fast (metadata, not content).
+            // Remote (SSH) sessions write JSONL on the other machine, so the
+            // local path is unreachable — fall back to the empty set. The
+            // visible impact is bounded: replayed turns self-clean because
+            // the CLI re-emits each historic `result`, which freezes any
+            // still-running rows and the following `message_start` clears
+            // them. The residual flicker is limited to the *last* incomplete
+            // turn's bg Agent rows — they stay "running" until the user's
+            // next input triggers a fresh `message_start`. A proper fix
+            // would need an SSH round-trip to snapshot the remote JSONL at
+            // spawn time; deferred, since the current trade-off is small.
             //
-            // The read itself runs off the main actor so a multi-MB session
-            // doesn't stall the sidebar's click-to-open. The CLI needs
-            // several hundred ms to boot Node, activate the extension, and
-            // start streaming replay events; by the time the first replayed
-            // assistant io_message arrives the historic set is normally
-            // populated. If a detection genuinely races the loader, the
-            // completion continuation purges any id it turns out to have
-            // been historic — bounded flicker instead of stuck-forever.
+            // The read runs off the main actor so a multi-MB session doesn't
+            // stall the sidebar's click-to-open. The CLI needs several hundred
+            // ms to boot Node, activate the extension, and start streaming
+            // replay events; by the time the first replayed assistant
+            // io_message arrives the historic set is normally populated. If a
+            // detection genuinely races the loader, the completion continuation
+            // purges any id it turns out to have been historic — bounded
+            // flicker instead of stuck-forever.
             if remoteHost == nil,
                let path = Self.jsonlPath(
                    sessionId: sessionId, workingDirectory: workingDirectory
@@ -344,11 +349,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     let ids = Self.extractToolUseIds(fromPath: path, upToOffset: bound)
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
-                        // Assign, don't union: this is a single-shot loader
-                        // and `historicToolUseIds` is otherwise untouched
-                        // (starts as `[]`). Either form gives the same
-                        // set — `=` makes the ownership explicit.
                         self.historicToolUseIds = ids
+                        // Same historic gate for the subagent activity list —
+                        // `loadHistoricIds` atomically installs the set and
+                        // returns the number of live rows purged (rows that
+                        // raced in as "live" before the loader landed).
+                        let subagentPurged = self.subagentTracker.loadHistoricIds(ids)
+                        if subagentPurged > 0 {
+                            self.statusBarData?.subagents = self.subagentTracker.rows
+                        }
                         // Race-window reconcile: if a replayed assistant
                         // io_message arrived before the loader completed,
                         // its id is now in `pendingBackgroundTaskIds` even
@@ -367,7 +376,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         if purged > 0 {
                             self.refreshWaitingState()
                         }
-                        logger.info("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) purged=\(purged, privacy: .public) bound=\(bound, privacy: .public) path=\(path, privacy: .public)")
+                        logger.info("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) purged=\(purged, privacy: .public) subagentPurged=\(subagentPurged, privacy: .public) bound=\(bound, privacy: .public) path=\(path, privacy: .public)")
                     }
                 }
             }
@@ -1526,16 +1535,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         refreshAskingState()
     }
 
-    /// Drop every transient activity signal (asking AND waiting) and resync
-    /// the bound session. Called when the shim/CLI exits so a crashed or
-    /// disconnected session row doesn't keep a stale raised-hand or hourglass
-    /// icon — once the process is gone no protocol message will ever clear
-    /// the pending sets organically.
+    /// Drop every transient activity signal (asking, waiting, subagent
+    /// activity) and resync the bound session. Called when the shim/CLI
+    /// exits so a crashed or disconnected session row doesn't keep a stale
+    /// raised-hand, hourglass, or spinning subagent row — once the process
+    /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
         pendingPermissionRequestIds.removeAll()
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
+        subagentTracker = SubagentTracker()
+        statusBarData?.subagents = []
         refreshAskingState()
         refreshWaitingState()
     }
@@ -1725,9 +1736,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// and Anthropic's id space is wide enough that a new `toolu_…`
     /// colliding with a historic one is astronomically unlikely.
     ///
-    /// Lossy UTF-8 decoding matches `readJSONLFromOffset` — see there for
-    /// the Japanese-heavy-log rationale. `toolu_…` is ASCII-only, so
-    /// substring hits survive any replacement characters.
+    /// See `extractToolUseIds(fromText:)` for the scan implementation and the
+    /// macOS 26 Tahoe libdispatch rationale for avoiding `NSRegularExpression`.
+    /// `toolu_…` is pure ASCII, so both the lossy `String(decoding:)`
+    /// conversion here and the subsequent UTF-8 byte scan in the text variant
+    /// are robust to any invalid bytes in surrounding Japanese/emoji content.
     private static func extractToolUseIds(fromPath path: String, upToOffset bound: JSONLByteOffset) -> Set<String> {
         guard bound > 0 else { return [] }
         guard let handle = FileHandle(forReadingAtPath: path) else {
@@ -1740,7 +1753,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         defer { try? handle.close() }
         let data: Data
         do {
-            try handle.seek(toOffset: 0)
+            // `FileHandle(forReadingAtPath:)` opens at offset 0; no seek needed
+            // and adding one would only obscure which call raised on failure.
             // `read(upToCount:)` returns fewer bytes if EOF hits first — no
             // clamp needed vs. the actual file size.
             data = try handle.read(upToCount: Int(clamping: bound)) ?? Data()
@@ -1757,31 +1771,80 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Text-only variant of `extractToolUseIds(fromPath:upToOffset:)` so the
-    /// probe can lock the regex without touching the filesystem.
+    /// probe can lock the scanner without touching the filesystem.
+    ///
+    /// Pure-Swift UTF-8 scan — deliberately does NOT use `NSRegularExpression`.
+    /// Under macOS 26 Tahoe, `NSRegularExpression.enumerateMatches` invoked on
+    /// a background dispatch queue trips a spurious main-thread precondition
+    /// inside Foundation and crashes the process with
+    /// `BUG IN CLIENT OF LIBDISPATCH: Block was expected to execute on queue
+    /// [com.apple.main-thread]` — even when the closure never touches main.
+    /// The historic-id loader has to run off-main (session JSONLs can be
+    /// tens of MB), so we scan bytes directly:
+    ///   - Match the literal `toolu_` prefix
+    ///   - Collect 16..40 following `[A-Za-z0-9]` bytes
+    ///   - Reject if the next byte is `[A-Za-z0-9_]` (mirrors the regex's
+    ///     `(?![A-Za-z0-9_])` — an overlong id must be captured whole or
+    ///     dropped entirely, never truncated to a 40-char prefix)
+    /// All target bytes are ASCII, so the UTF-8 view is safe against any
+    /// multi-byte characters in surrounding Japanese / emoji content.
     static func extractToolUseIds(fromText text: String) -> Set<String> {
         var out = Set<String>()
-        let ns = text as NSString
-        let range = NSRange(location: 0, length: ns.length)
-        Self.toolUseIdRegex.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
-            guard let match else { return }
-            out.insert(ns.substring(with: match.range))
+        let bytes = Array(text.utf8)
+        let n = bytes.count
+        // "toolu_"
+        let prefix: [UInt8] = [0x74, 0x6f, 0x6f, 0x6c, 0x75, 0x5f]
+        let prefixLen = prefix.count
+        guard n >= prefixLen + 16 else { return out }
+        var i = 0
+        while i <= n - prefixLen {
+            // Fast reject on first byte mismatch.
+            if bytes[i] != prefix[0] {
+                i += 1
+                continue
+            }
+            var matched = true
+            for k in 1..<prefixLen where bytes[i + k] != prefix[k] {
+                matched = false
+                break
+            }
+            if !matched {
+                i += 1
+                continue
+            }
+            let idStart = i
+            let bodyStart = i + prefixLen
+            var end = bodyStart
+            while end < n && Self.isAsciiAlnum(bytes[end]) {
+                end += 1
+            }
+            let bodyLen = end - bodyStart
+            if bodyLen >= 16, bodyLen <= 40,
+               end == n || !Self.isAsciiAlnumOrUnderscore(bytes[end])
+            {
+                // Slice is guaranteed ASCII (prefix + [A-Za-z0-9]*), so
+                // String(decoding:as:) never inserts replacement characters.
+                out.insert(String(decoding: bytes[idStart..<end], as: UTF8.self))
+            }
+            // Advance past the scanned run so a valid match's trailing byte
+            // can't seed a phantom re-match. When bodyLen == 0 (bare
+            // "toolu_" with no alnum) we still advance by prefixLen.
+            i = max(end, i + prefixLen)
         }
         return out
     }
 
-    /// Anthropic `tool_use` id shape. 22 chars is the current CLI format
-    /// but we accept 16..40 to survive minor drift without silently
-    /// dropping historic ids. The trailing `(?![A-Za-z0-9_])` lookahead
-    /// rejects an overlong id being silently truncated to a 40-char prefix
-    /// — otherwise a hypothetical future 44-char id would insert a
-    /// non-matching prefix into `historicToolUseIds` and the real id would
-    /// leak through the gate anyway. `try!` is intentional: the pattern is
-    /// a compile-time literal, so any failure here is a code bug that
-    /// should crash the developer's build immediately rather than silently
-    /// disable historic filtering in production.
-    private static let toolUseIdRegex: NSRegularExpression = try! NSRegularExpression(
-        pattern: #"toolu_[A-Za-z0-9]{16,40}(?![A-Za-z0-9_])"#
-    )
+    @inline(__always)
+    private static func isAsciiAlnum(_ c: UInt8) -> Bool {
+        (c >= 0x30 && c <= 0x39) // 0-9
+            || (c >= 0x41 && c <= 0x5A) // A-Z
+            || (c >= 0x61 && c <= 0x7A) // a-z
+    }
+
+    @inline(__always)
+    private static func isAsciiAlnumOrUnderscore(_ c: UInt8) -> Bool {
+        isAsciiAlnum(c) || c == 0x5F // _
+    }
 
     /// Read a JSONL file from `offset` to EOF and return the lossy-decoded
     /// text alongside the byte offset where the read ended (start + bytes-
@@ -2061,6 +2124,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let ioMsg = nested["message"] as? [String: Any],
               let ioType = ioMsg["type"] as? String
         else { return }
+
+        if subagentTracker.observe(ioMsg, now: Date()) {
+            data.subagents = subagentTracker.rows
+        }
 
         switch ioType {
         case "stream_event":

@@ -407,8 +407,50 @@ enum SidebarLogicProbe {
                overIds.isEmpty || overIds.contains(idOver))
         record("historic ids: 15-char id rejected (below min)",
                ShimProcess.extractToolUseIds(fromText: "toolu_" + String(repeating: "A", count: 15)).isEmpty)
+        // Positive lower boundary: exactly 16 alnum chars is the minimum
+        // accepted. Regression class: an off-by-one flipping `>= 16` to
+        // `> 16` would silently drop the shortest valid id shape while
+        // still passing the 15-char reject and 40-char accept tests.
+        let idMin = "toolu_" + String(repeating: "A", count: 16)
+        record("historic ids: 16-char id captured (min boundary)",
+               ShimProcess.extractToolUseIds(fromText: idMin).contains(idMin))
 
-        // Multiple ids on a single line — regex must iterate, not
+        // Trailing-underscore reject — the `(?![A-Za-z0-9_])` half of the
+        // guard, which the over-length test can't reach because that one
+        // trips the alphanumeric branch first. Regression class: dropping
+        // the underscore check from `isAsciiAlnumOrUnderscore` would leave
+        // this test as the sole tripwire.
+        let withTrailingUnderscore = "toolu_" + String(repeating: "A", count: 20) + "_"
+        record("historic ids: trailing underscore rejects the run",
+               !ShimProcess.extractToolUseIds(fromText: withTrailingUnderscore)
+                   .contains("toolu_" + String(repeating: "A", count: 20)))
+
+        // Multi-byte neighbors — session JSONLs are Japanese/emoji-heavy.
+        // The byte-scan claim in `extractToolUseIds(fromText:)` is that the
+        // ASCII prefix + `[A-Za-z0-9]{16..40}` scan is safe against any
+        // multi-byte characters surrounding a valid id. Regression class:
+        // a future switch to `text.count` / `unicodeScalars`-based indexing
+        // would silently drop ids in JP-heavy sessions.
+        let idJP = "toolu_" + String(repeating: "A", count: 20)
+        let jpText = "前置き " + idJP + " 🚀 後続"
+        record("historic ids: id survives multi-byte JP/emoji neighbors",
+               ShimProcess.extractToolUseIds(fromText: jpText).contains(idJP))
+
+        // Back-to-back ids with no separator byte. The `i = max(end, i + prefixLen)`
+        // advance is designed to prevent a valid match's trailing byte from
+        // seeding a phantom re-match. With two 20-char bodies concatenated,
+        // the scanner sees a single 40-char run after the first prefix
+        // (`AAAA…AAAAtoolu_BBBB…` reads as prefix + `A×20` + `toolu_` +
+        // `B×20`, but the alnum run after the first prefix continues into
+        // `toolu_` — no separator). Contract: either both captured or
+        // neither, never a truncated first-only capture.
+        let backToBack = "toolu_" + String(repeating: "A", count: 20)
+                       + "toolu_" + String(repeating: "B", count: 20)
+        let backToBackIds = ShimProcess.extractToolUseIds(fromText: backToBack)
+        record("historic ids: back-to-back ids don't yield a truncated capture",
+               backToBackIds.count == 2 || backToBackIds.isEmpty)
+
+        // Multiple ids on a single line — scanner must iterate, not
         // short-circuit on first hit. Regression class: a future switch to
         // `firstMatch(in:)` would silently drop every id after the first.
         let multiIds = ShimProcess.extractToolUseIds(
@@ -577,6 +619,348 @@ enum SidebarLogicProbe {
                GitWorktree.projectDisplayName(
                    for: GitWorktree.worktreesRoot
                        .appendingPathComponent("Other/../Canopy/fix-foo")) == "Canopy · fix-foo")
+
+        // --- SubagentTracker ---
+        // Pure value-type probe: feed io_message dicts and assert the CLI-style
+        // task-list rows (launch / dedupe / tokens / finish / clear).
+        let t0 = Date()
+        var tracker = SubagentTracker()
+        let launchMsg: [String: Any] = [
+            "type": "assistant",
+            "message": [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "name": "Agent",
+                        "id": "toolu_A",
+                        "input": [
+                            "description": "CodeRabbit review",
+                            "subagent_type": "coderabbit:code-reviewer",
+                            "prompt": "x",
+                        ],
+                    ],
+                    [
+                        "type": "tool_use",
+                        "name": "Task",
+                        "id": "toolu_B",
+                        "input": [
+                            "description": "CodeRabbit review",
+                            "subagent_type": "coderabbit:code-reviewer",
+                            "prompt": "x",
+                        ],
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let launchChanged = tracker.observe(launchMsg, now: t0)
+        record("subagent: launch Agent+Task → 2 running rows",
+               launchChanged
+                   && tracker.rows.count == 2
+                   && tracker.rows[0].agentType == "coderabbit:code-reviewer"
+                   && tracker.rows[0].label == "CodeRabbit review"
+                   && tracker.rows[0].isRunning
+                   && tracker.rows[1].isRunning,
+               "changed=\(launchChanged) count=\(tracker.rows.count)")
+
+        record("subagent: duplicate launch → observe false (dedupe by id)",
+               !tracker.observe(launchMsg, now: t0)
+                   && tracker.rows.count == 2)
+
+        let usageBig: [String: Any] = [
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_A",
+            "message": [
+                "role": "assistant",
+                "usage": [
+                    "input_tokens": 1000,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 300,
+                    "output_tokens": 500,
+                ],
+            ] as [String: Any],
+        ]
+        let usageSmall: [String: Any] = [
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_A",
+            "message": [
+                "role": "assistant",
+                "usage": [
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 50,
+                ],
+            ] as [String: Any],
+        ]
+        let tokensChanged = tracker.observe(usageBig, now: t0)
+        let tokensIgnored = tracker.observe(usageSmall, now: t0)
+        record("subagent: parent usage grows tokens; smaller total ignored",
+               tokensChanged
+                   && !tokensIgnored
+                   && tracker.rows[0].tokens == 2000,
+               "changed=\(tokensChanged) ignored=\(tokensIgnored) tokens=\(tracker.rows[0].tokens)")
+
+        let nestedUser: [String: Any] = [
+            "type": "user",
+            "parent_tool_use_id": "toolu_A",
+            "message": [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_unrelated",
+                        "content": "ok",
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let nestedChanged = tracker.observe(nestedUser, now: t0)
+        record("subagent: nested user (parent_tool_use_id) → no change",
+               !nestedChanged && tracker.rows.count == 2,
+               "changed=\(nestedChanged) count=\(tracker.rows.count)")
+
+        let finishA: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_A",
+                        "content": "done",
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let finishChanged = tracker.observe(finishA, now: t0)
+        record("subagent: tool_result finishes matching row only",
+               finishChanged
+                   && !tracker.rows[0].isRunning
+                   && tracker.rows[1].isRunning,
+               "changed=\(finishChanged) aRunning=\(tracker.rows[0].isRunning) bRunning=\(tracker.rows[1].isRunning)")
+
+        let resultChanged = tracker.observe(["type": "result"], now: t0)
+        record("subagent: result freezes all remaining running rows",
+               resultChanged
+                   && tracker.rows.allSatisfy { !$0.isRunning },
+               "changed=\(resultChanged) running=\(tracker.rows.filter(\.isRunning).count)")
+
+        let nextPrompt: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": "next prompt",
+            ] as [String: Any],
+        ]
+        let clearChanged = tracker.observe(nextPrompt, now: t0)
+        record("subagent: real user prompt clears rows",
+               clearChanged && tracker.rows.isEmpty,
+               "changed=\(clearChanged) count=\(tracker.rows.count)")
+
+        // New turn via message_start after result — the CLI doesn't reliably
+        // echo typed prompts as user io_messages, so this is the robust clear.
+        _ = tracker.observe(launchMsg, now: t0)
+        _ = tracker.observe(["type": "result"], now: t0)
+        let nestedStart: [String: Any] = [
+            "type": "stream_event",
+            "parent_tool_use_id": "toolu_A",
+            "event": ["type": "message_start"] as [String: Any],
+        ]
+        let nestedStartChanged = tracker.observe(nestedStart, now: t0)
+        let mainStart: [String: Any] = [
+            "type": "stream_event",
+            "event": ["type": "message_start"] as [String: Any],
+        ]
+        let mainStartChanged = tracker.observe(mainStart, now: t0)
+        record("subagent: post-result message_start clears (nested one doesn't)",
+               !nestedStartChanged && mainStartChanged && tracker.rows.isEmpty,
+               "nested=\(nestedStartChanged) main=\(mainStartChanged) count=\(tracker.rows.count)")
+
+        // Mid-turn message_start (no result yet) must NOT clear running rows.
+        _ = tracker.observe(launchMsg, now: t0)
+        let midTurnChanged = tracker.observe(mainStart, now: t0)
+        record("subagent: mid-turn message_start keeps running rows",
+               !midTurnChanged && tracker.rows.count == 2,
+               "changed=\(midTurnChanged) count=\(tracker.rows.count)")
+
+        // Bg Agent: initial `tool_result` is an ack ("Command running in
+        // background with ID: bXX"), not completion. Row must stay running.
+        var bgTracker = SubagentTracker()
+        let bgLaunch: [String: Any] = [
+            "type": "assistant",
+            "message": [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "name": "Agent",
+                        "id": "toolu_BG",
+                        "input": [
+                            "description": "background review",
+                            "subagent_type": "general-purpose",
+                            "run_in_background": true,
+                            "prompt": "x",
+                        ],
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        _ = bgTracker.observe(bgLaunch, now: t0)
+        let bgAck: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_BG",
+                        "content": "Command running in background with ID: b1abc",
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let bgAckChanged = bgTracker.observe(bgAck, now: t0)
+        record("subagent: bg Agent ack tool_result does NOT finish the row",
+               !bgAckChanged && bgTracker.rows.count == 1 && bgTracker.rows[0].isRunning,
+               "changed=\(bgAckChanged) running=\(bgTracker.rows.first?.isRunning ?? false)")
+        // But main-conversation `result` still freezes the bg row (better
+        // than a stuck spinner post-turn).
+        let bgResultChanged = bgTracker.observe(["type": "result"], now: t0)
+        record("subagent: bg row freezes on turn `result`",
+               bgResultChanged && !bgTracker.rows[0].isRunning)
+
+        // Subagent-originated `result` (has parent_tool_use_id) must NOT
+        // freeze main-conversation rows — otherwise a sibling subagent
+        // finishing would false-checkmark every other running row and trip
+        // turnEnded, wiping the list on the next mid-turn message_start.
+        var sibTracker = SubagentTracker()
+        _ = sibTracker.observe(launchMsg, now: t0) // toolu_A + toolu_B running
+        let subResult: [String: Any] = [
+            "type": "result",
+            "parent_tool_use_id": "toolu_A",
+        ]
+        let sibChanged = sibTracker.observe(subResult, now: t0)
+        record("subagent: subagent-tagged result doesn't freeze main rows",
+               !sibChanged
+                   && sibTracker.rows.allSatisfy(\.isRunning),
+               "changed=\(sibChanged) running=\(sibTracker.rows.filter(\.isRunning).count)")
+
+        // Batched tool_results: parallel Agent calls completing near-
+        // simultaneously arrive in a single user io_message. Every match
+        // must finish, not just the first.
+        var batchTracker = SubagentTracker()
+        _ = batchTracker.observe(launchMsg, now: t0)
+        let batchFinish: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_A", "content": "ok"],
+                    ["type": "tool_result", "tool_use_id": "toolu_B", "content": "ok"],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let batchChanged = batchTracker.observe(batchFinish, now: t0)
+        record("subagent: batched tool_results finish all matching rows",
+               batchChanged
+                   && batchTracker.rows.allSatisfy { !$0.isRunning },
+               "changed=\(batchChanged) running=\(batchTracker.rows.filter(\.isRunning).count)")
+
+        // Malformed user content: array shape with NO tool_result blocks
+        // (e.g. an empty array, or a text-only content) must NOT clear
+        // rows — silently wiping the visible list on an unknown CLI shape
+        // is worse than preserving stale rows.
+        var preserveTracker = SubagentTracker()
+        _ = preserveTracker.observe(launchMsg, now: t0)
+        let emptyArrayContent: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        let emptyChanged = preserveTracker.observe(emptyArrayContent, now: t0)
+        record("subagent: empty content array preserves rows",
+               !emptyChanged && preserveTracker.rows.count == 2)
+
+        // Unknown-id tool_result mixed with a valid one: unknown skipped,
+        // valid finished, rows NOT cleared. Guards against stale/foreign
+        // tool_results (e.g. from a prior turn's bg task) wiping the list.
+        var mixedTracker = SubagentTracker()
+        _ = mixedTracker.observe(launchMsg, now: t0)
+        let mixed: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_UNKNOWN", "content": "?"],
+                    ["type": "tool_result", "tool_use_id": "toolu_A", "content": "done"],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        _ = mixedTracker.observe(mixed, now: t0)
+        record("subagent: unknown-id mixed with valid → only valid finishes; rows kept",
+               mixedTracker.rows.count == 2
+                   && !mixedTracker.rows[0].isRunning
+                   && mixedTracker.rows[1].isRunning)
+
+        // Empty-string metadata falls back to placeholders instead of a
+        // blank 190pt column.
+        var placeholderTracker = SubagentTracker()
+        let blankLaunch: [String: Any] = [
+            "type": "assistant",
+            "message": [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "name": "Agent",
+                        "id": "toolu_BLANK",
+                        "input": [
+                            "description": "",
+                            "subagent_type": "",
+                            "prompt": "x",
+                        ],
+                    ],
+                ] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        _ = placeholderTracker.observe(blankLaunch, now: t0)
+        record("subagent: empty-string metadata falls back to labelled placeholder",
+               placeholderTracker.rows.count == 1
+                   && placeholderTracker.rows[0].agentType == "agent"
+                   && placeholderTracker.rows[0].label == "Agent task")
+
+        // Historic gate: `--resume` re-emits already-logged Agent/Task
+        // tool_use blocks through io_message. `historicToolUseIds` (loaded
+        // async by ShimProcess after its JSONL snapshot) must prevent
+        // those from adding new rows.
+        var historicTracker = SubagentTracker()
+        historicTracker.loadHistoricIds(["toolu_A"])
+        _ = historicTracker.observe(launchMsg, now: t0)
+        record("subagent: historic tool_use skipped, non-historic added",
+               historicTracker.rows.count == 1 && historicTracker.rows[0].id == "toolu_B",
+               "ids=\(historicTracker.rows.map(\.id))")
+
+        // Purge: rows that landed before the historic set loaded must
+        // be dropped once it arrives. `loadHistoricIds` returns the number
+        // it purged in the same call, so the shim path never sees a state
+        // where the set is populated but stale rows still sit in `rows`.
+        var purgeTracker = SubagentTracker()
+        _ = purgeTracker.observe(launchMsg, now: t0)
+        let purged = purgeTracker.loadHistoricIds(["toolu_A"])
+        record("subagent: loadHistoricIds installs set AND purges race rows",
+               purged == 1 && purgeTracker.rows.count == 1 && purgeTracker.rows[0].id == "toolu_B",
+               "purged=\(purged) ids=\(purgeTracker.rows.map(\.id))")
+
+        // Unknown message type — future CLI protocol extension shouldn't
+        // trip a fatal. Regression class: a switch to strict enum decoding
+        // would crash instead of the current no-op-with-DEBUG-log.
+        var unknownTracker = SubagentTracker()
+        record("subagent: unknown ioMsg type → observe false, no crash",
+               !unknownTracker.observe(["type": "future_extension"], now: t0)
+                   && unknownTracker.rows.isEmpty)
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")

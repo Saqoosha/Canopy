@@ -75,8 +75,10 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `VSCodeStub.swift` — acquireVsCodeApi() JS stub, Monaco theme patch, IME fix, loads theme CSS
 - `ImagePreviewScript.swift` — Injected JS: inline thumbnails + click-to-zoom lightbox for image Read tool results. The CC extension's Read renderer is `body(){return null}` (VSCode shows only the filename; iOS renders natively), so this watches io_message / get_session response streams, pairs Read tool_use ids with base64 image tool_results, and decorates matching "Read <file>" summary rows via MutationObserver (per-file sequence numbers assigned at tool_use time keep row⇔image pairing stable across failed reads / evictions / replays). No dependency on minified identifiers or hashed CSS class names — survives extension minification churn
 - `CCExtension.swift` — Extension/CLI path discovery
-- `StatusBarData.swift` — Observable model for native status bar (context usage, model, CLI version, rate limits, remote host)
+- `StatusBarData.swift` — Observable model for native status bar (context usage, model, CLI version, rate limits, remote host, subagent rows)
 - `StatusBarView.swift` — Native SwiftUI status bar: context usage bar, model/version, rate limit indicators, remote host
+- `SubagentTracker.swift` — `SubagentInfo` + pure `SubagentTracker`: builds CLI-style subagent task rows from the io_message stream (Agent tool_use launch → parent_tool_use_id usage for tokens → tool_result/result finish → post-result message_start clears). Probe-tested
+- `SubagentListView.swift` — Native CLI-style subagent activity list between webview and status bar: spinner/checkmark, agent type, description, live elapsed time, token count; ScrollView cap beyond 8 rows
 - `ContentViewer.swift` — Monaco editor overlay for viewing file contents
 - `RemoteDirectoryBrowser.swift` — SSH-backed remote file browser (sheet), lists remote dirs via `ssh host cd path && pwd && ls -1pA`
 - `SSHHostStore.swift` — MRU list of SSH hosts in UserDefaults

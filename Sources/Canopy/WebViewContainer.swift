@@ -326,11 +326,27 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
+        ucc.addUserScript(WKUserScript(
+            source: InputWidthProbe.javascript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
 
         let linkHandler = LinkClickHandler(workingDirectory: workingDirectory)
         ucc.add(linkHandler, name: "canopyLink")
+
+        // Handler init takes a non-optional StatusBarData so callers with
+        // nothing to write into just skip registration entirely (compile-
+        // time enforcement of "no data → no handler"). Nothing else in
+        // buildWebView constructs one without also having statusBarData
+        // set, but keep the guard so a future refactor can't slip past.
+        let inputWidthHandler = statusBarData.map { InputWidthMessageHandler(statusBarData: $0) }
+        if let inputWidthHandler {
+            ucc.add(inputWidthHandler, name: InputWidthProbe.messageHandlerName)
+        }
 
         // Reuse an existing shim when the OpenSession already owns one.
         // This prevents the orphan-shim bug: SwiftUI runs makeNSView twice
@@ -411,9 +427,13 @@ struct WebViewContainer: NSViewRepresentable {
             cachedUcc.removeScriptMessageHandler(forName: "vscodeHost")
             cachedUcc.removeScriptMessageHandler(forName: "consoleLog")
             cachedUcc.removeScriptMessageHandler(forName: "canopyLink")
+            cachedUcc.removeScriptMessageHandler(forName: InputWidthProbe.messageHandlerName)
             cachedUcc.add(consoleHandler, name: "consoleLog")
             cachedUcc.add(linkHandler, name: "canopyLink")
             cachedUcc.add(shim, name: "vscodeHost")
+            if let inputWidthHandler {
+                cachedUcc.add(inputWidthHandler, name: InputWidthProbe.messageHandlerName)
+            }
         } else {
             webView = WKWebView(frame: .zero, configuration: config)
             webView.isInspectable = true
@@ -471,6 +491,7 @@ struct WebViewContainer: NSViewRepresentable {
                 ucc.removeScriptMessageHandler(forName: "vscodeHost")
                 ucc.removeScriptMessageHandler(forName: "consoleLog")
                 ucc.removeScriptMessageHandler(forName: "canopyLink")
+                ucc.removeScriptMessageHandler(forName: InputWidthProbe.messageHandlerName)
             }
             sub.removeFromSuperview()
         }
