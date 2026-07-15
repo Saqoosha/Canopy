@@ -318,9 +318,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // `detectBackgroundTaskLaunch` can skip CLI replays of already-
             // logged assistant messages instead of tracking their bg ids as
             // "live" — see `historicToolUseIds` doc for the full rationale.
-            // Remote sessions write on the other machine, so the local JSONL
-            // is unreachable; fall back to the empty set (all detections
-            // treated as live).
+            //
+            // Remote (SSH) sessions write JSONL on the other machine, so the
+            // local path is unreachable — fall back to the empty set. The
+            // visible impact is bounded: replayed turns self-clean because
+            // the CLI re-emits each historic `result`, which freezes any
+            // still-running rows and the following `message_start` clears
+            // them. The residual flicker is limited to the *last* incomplete
+            // turn's bg Agent rows — they stay "running" until the user's
+            // next input triggers a fresh `message_start`. A proper fix
+            // would need an SSH round-trip to snapshot the remote JSONL at
+            // spawn time; deferred, since the current trade-off is small.
             //
             // The read runs off the main actor so a multi-MB session doesn't
             // stall the sidebar's click-to-open. The CLI needs several hundred
