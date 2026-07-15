@@ -389,6 +389,44 @@ enum SidebarLogicProbe {
         record("historic ids: short fragment rejected",
                !ShimProcess.extractToolUseIds(fromText: "prefix toolu_short suffix").contains(where: { $0.hasPrefix("toolu_") }))
 
+        // Regex length-boundary contract. The gate `historicToolUseIds`
+        // trades correctness for a load-bearing assumption: whatever the
+        // extractor emits must be the EXACT id the io_message stream will
+        // carry. A future CLI id-shape change that lands overlong ids
+        // (say 44 chars) can't be silently truncated to a 40-char prefix,
+        // or `detectBackgroundTaskLaunch` will look up the full id, miss
+        // the prefix in the set, and let the ghost hourglass return.
+        let idMax = "toolu_" + String(repeating: "A", count: 40)
+        record("historic ids: 40-char id captured whole",
+               ShimProcess.extractToolUseIds(fromText: idMax).contains(idMax))
+        let idOver = "toolu_" + String(repeating: "A", count: 44)
+        let overIds = ShimProcess.extractToolUseIds(fromText: idOver)
+        // Either accept whole or reject — never truncate. Widening the
+        // regex to accept longer ids is fine; silently truncating is not.
+        record("historic ids: over-length id not truncated",
+               overIds.isEmpty || overIds.contains(idOver))
+        record("historic ids: 15-char id rejected (below min)",
+               ShimProcess.extractToolUseIds(fromText: "toolu_" + String(repeating: "A", count: 15)).isEmpty)
+
+        // Multiple ids on a single line — regex must iterate, not
+        // short-circuit on first hit. Regression class: a future switch to
+        // `firstMatch(in:)` would silently drop every id after the first.
+        let multiIds = ShimProcess.extractToolUseIds(
+            fromText: "prefix toolu_01AAAAAAAAAAAAAAAAAA middle toolu_01BBBBBBBBBBBBBBBBBB suffix"
+        )
+        record("historic ids: multiple hits on one line",
+               multiIds.count == 2)
+
+        // jsonlPath: pure static resolver. Cheap to lock the two nil
+        // branches without any filesystem setup.
+        record("jsonlPath: empty sessionId → nil",
+               ShimProcess.jsonlPath(sessionId: "", workingDirectory: URL(fileURLWithPath: "/tmp/probe")) == nil)
+        record("jsonlPath: unknown cwd → nil",
+               ShimProcess.jsonlPath(
+                   sessionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                   workingDirectory: URL(fileURLWithPath: "/definitely/not/here-xyz")
+               ) == nil)
+
         // Title-generation context: prompt extraction from session JSONL
         // (resume seeding) and first-prompt pinning (anti-drift). Noise
         // fixtures mirror the real records the CLI writes — a slash-command
