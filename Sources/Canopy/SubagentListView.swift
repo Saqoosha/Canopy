@@ -24,6 +24,11 @@ struct SubagentListView: View {
         }
     }
 
+    /// Matches the CC extension's chat-column max width so the CLI-style
+    /// task list lines up visually with the input area instead of sprawling
+    /// edge-to-edge across a wide window.
+    private static let contentMaxWidth: CGFloat = 720
+
     @ViewBuilder
     private func listContent(now: Date) -> some View {
         let rows = VStack(alignment: .leading, spacing: 3) {
@@ -31,11 +36,11 @@ struct SubagentListView: View {
                 row(agent, now: now)
             }
         }
+        .frame(maxWidth: Self.contentMaxWidth, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .background(.white)
-        .overlay(alignment: .top) { Divider() }
 
         // Cap height so a huge fan-out of Agent calls can't eat the webview.
         if data.subagents.count > 8 {
