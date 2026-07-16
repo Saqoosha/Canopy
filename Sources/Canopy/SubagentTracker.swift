@@ -21,12 +21,25 @@ struct SubagentInfo: Identifiable, Equatable {
     private(set) var tokens: Int = 0
     /// `input.run_in_background == true` at launch. Bg Agent's initial
     /// `tool_result` is just an ack ("Command running in background with
-    /// ID: …"), NOT completion — the real completion goes to the JSONL
-    /// as a `<task-notification>` that the CLI does not re-emit through
-    /// io_message. Rows with this flag therefore don't finish on
-    /// `tool_result`; they stay running until the turn's `result` freezes
-    /// everything. Foreground rows (the common case) finish on
-    /// `tool_result` as usual.
+    /// ID: …"), NOT completion. The real completion arrives via one of
+    /// two disjoint transports, both wired through
+    /// `ShimProcess.completeIfPresent`:
+    ///
+    /// - **Natural completion**: written to the session JSONL as
+    ///   `<tool-use-id>toolu_…</tool-use-id>`. The CLI does NOT re-emit
+    ///   this through io_message, so `ShimProcess` picks it up on the
+    ///   `isWorking: false→true` wake-up JSONL scan
+    ///   (`clearCompletedBackgroundTasksOnWake` → `applyBgReconcile`).
+    /// - **TaskStop kill**: does NOT write any JSONL `<tool-use-id>`
+    ///   marker (verified against the MA-Whatsan session referenced in
+    ///   `ShimProcess.bgTaskIdMap`'s docstring), but DOES flow through
+    ///   io_message as an `assistant` `tool_use` block — caught by
+    ///   `detectTaskStopLaunch` + the safety net in
+    ///   `processUserToolResults`, both routing to `purgePendingByTaskId`.
+    ///
+    /// Rows with this flag therefore don't finish on `tool_result` and
+    /// are also skipped by the turn's `result` freeze. Foreground rows
+    /// (the common case) finish on `tool_result` as usual.
     let runInBackground: Bool
 
     var isRunning: Bool { finishedAt == nil }
@@ -125,12 +138,17 @@ struct SubagentTracker {
             // the whole list. Only the untagged main-conversation `result`
             // ends the turn.
             guard !(ioMsg["parent_tool_use_id"] is String) else { return false }
-            // Turn ended — freeze anything still marked running (user pressed
-            // Stop, or a background agent's tool_result never came back this
-            // turn). A stuck spinner is worse than an early "done".
+            // Turn ended — freeze foreground rows still marked running
+            // (user pressed Stop, or a tool_result never came back). Bg
+            // rows (`runInBackground`) stay `isRunning` past this point:
+            // their real completion comes from `completeIfPresent(id:at:)`
+            // when ShimProcess observes a JSONL `<tool-use-id>` marker or
+            // a TaskStop (see issue #91). `turnEnded` still flips so the
+            // next-turn `message_start` can clear finished/foreground rows
+            // while preserving running bg rows for the async wake path.
             turnEnded = true
             var changed = false
-            for i in rows.indices where rows[i].finishedAt == nil {
+            for i in rows.indices where rows[i].finishedAt == nil && !rows[i].runInBackground {
                 rows[i].finish(at: now)
                 changed = true
             }
@@ -139,6 +157,18 @@ struct SubagentTracker {
         case "stream_event":
             // First main-conversation message_start after a result = new turn.
             // Subagent stream_events carry parent_tool_use_id — ignore those.
+            // Foreground rows (and finished bg rows) still get cleared —
+            // that's the visible per-turn reset users expect. Running bg
+            // rows are exempted so a later async `completeIfPresent`
+            // (triggered by JSONL `<tool-use-id>` marker via
+            // `applyBgReconcile`, or by TaskStop via `purgePendingByTaskId`)
+            // can find them and finish them properly. Without this
+            // exemption, the async wake path structurally always loses a
+            // race against the synchronous per-turn clear — the row gets
+            // wiped on the same tick that fires the wake, before
+            // `applyBgReconcile` lands on a later tick. Stuck-forever
+            // backstop is now `ShimProcess`'s bulk-clear paths (no-JSONL /
+            // read-failed), plus `resetActivityState()` on crash/reconnect.
             guard turnEnded,
                   !(ioMsg["parent_tool_use_id"] is String),
                   let event = ioMsg["event"] as? [String: Any],
@@ -146,8 +176,9 @@ struct SubagentTracker {
             else { return false }
             turnEnded = false
             guard !rows.isEmpty else { return false }
-            rows = []
-            return true
+            let before = rows.count
+            rows.removeAll { !($0.runInBackground && $0.isRunning) }
+            return rows.count != before
 
         default:
             // Unknown io_message type — usually a CLI protocol extension we
@@ -219,6 +250,28 @@ struct SubagentTracker {
         return before - rows.count
     }
 
+    /// Finish the row for this launch id if it's currently running. Idempotent
+    /// (reuses `finish(at:)`), so `ShimProcess` can call it from multiple
+    /// completion signals — natural JSONL `<tool-use-id>` marker, TaskStop,
+    /// or the init-time historic race-window reconcile — without needing to
+    /// de-duplicate signals. Returns true when a row transitioned; the caller
+    /// uses that to decide whether to refresh `statusBarData?.subagents`.
+    ///
+    /// No-op (returns false) for ids we never launched into `rows` —
+    /// `ShimProcess`'s bulk paths pass every pending toolu id through here,
+    /// but the tracker only observes `Agent` / `Task` tool_use blocks (bg
+    /// Bash launches never enter `rows`, so their toolu ids no-op cleanly).
+    /// Also returns false for Agent ids that already finished on a
+    /// `tool_result` in the foreground path or via a prior signal. See
+    /// issue #91.
+    @discardableResult
+    mutating func completeIfPresent(id: String, at date: Date) -> Bool {
+        guard let idx = rows.firstIndex(where: { $0.id == id && $0.finishedAt == nil })
+        else { return false }
+        rows[idx].finish(at: date)
+        return true
+    }
+
     private mutating func updateTokens(parentId: String, ioMsg: [String: Any]) -> Bool {
         guard let idx = rows.firstIndex(where: { $0.id == parentId }),
               let msg = ioMsg["message"] as? [String: Any],
@@ -273,9 +326,10 @@ struct SubagentTracker {
                    rows[idx].finishedAt == nil,
                    // Bg Agent's initial `tool_result` is an ack ("Command
                    // running in background with ID: …"), not completion —
-                   // the real end signal is a `<task-notification>` that
-                   // never flows through io_message. Leave bg rows running
-                   // until the turn's `result` freezes them.
+                   // the real end signal never flows through this branch:
+                   // natural completion goes to the JSONL and TaskStop goes
+                   // to `detectTaskStopLaunch`; both route to
+                   // `completeIfPresent`. Leave bg rows running.
                    !rows[idx].runInBackground
                 {
                     rows[idx].finish(at: now)

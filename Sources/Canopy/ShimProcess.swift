@@ -387,17 +387,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         // current shim's own turns are, by construction,
                         // NOT in `ids` (they were written after `bound`).
                         var purged = 0
+                        var subagentTransitioned = false
                         for id in Array(self.pendingBackgroundTaskIds.keys)
                         where ids.contains(id)
                         {
                             self.pendingBackgroundTaskIds.removeValue(forKey: id)
                             self.bgTaskIdMap.removeValue(forKey: id)
+                            if self.subagentTracker.completeIfPresent(id: id, at: Date()) {
+                                subagentTransitioned = true
+                            }
                             purged += 1
                         }
                         if purged > 0 {
                             self.refreshWaitingState()
                         }
-                        logger.info("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) purged=\(purged, privacy: .public) subagentPurged=\(subagentPurged, privacy: .public) bound=\(bound, privacy: .public) path=\(path, privacy: .public)")
+                        if subagentTransitioned {
+                            self.statusBarData?.subagents = self.subagentTracker.rows
+                        }
+                        logger.info("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) purged=\(purged, privacy: .public) subagentPurged=\(subagentPurged, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public) bound=\(bound, privacy: .public) path=\(path, privacy: .public)")
                     }
                 }
             }
@@ -1635,10 +1642,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func clearCompletedBackgroundTasksOnWake() {
         let minOffset = pendingBackgroundTaskIds.values.min() ?? 0
         guard let path = sessionJSONLPath() else {
-            let count = pendingBackgroundTaskIds.count
+            // Bulk-clear branch — pendingBackgroundTaskIds gets nuked because
+            // we can't reconcile against a JSONL scan (no path). Sweep the
+            // tracker too so running bg rows finish here rather than
+            // persisting past the F1 exemption into a stuck spinner.
+            let ids = Array(pendingBackgroundTaskIds.keys)
+            let count = ids.count
             pendingBackgroundTaskIds.removeAll()
             bgTaskIdMap.removeAll()
-            logger.info("[bg] wake bulk-cleared (no JSONL access) count=\(count, privacy: .public)")
+            var subagentTransitioned = false
+            let now = Date()
+            for id in ids where subagentTracker.completeIfPresent(id: id, at: now) {
+                subagentTransitioned = true
+            }
+            if subagentTransitioned {
+                statusBarData?.subagents = subagentTracker.rows
+            }
+            logger.info("[bg] wake bulk-cleared (no JSONL access) count=\(count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
             refreshWaitingState()
             return
         }
@@ -1663,11 +1683,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard let read else {
             // Read failed (I/O error during seek/readToEnd, file vanished
             // between our path probe and the open). Bulk-clear preserves
-            // the documented contract of the offline path.
-            let count = pendingBackgroundTaskIds.count
+            // the documented contract of the offline path. Sweep the
+            // tracker too so running bg rows finish here rather than
+            // persisting past the F1 exemption into a stuck spinner.
+            let ids = Array(pendingBackgroundTaskIds.keys)
+            let count = ids.count
             pendingBackgroundTaskIds.removeAll()
             bgTaskIdMap.removeAll()
-            logger.info("[bg] wake bulk-cleared (read failed) count=\(count, privacy: .public)")
+            var subagentTransitioned = false
+            let now = Date()
+            for id in ids where subagentTracker.completeIfPresent(id: id, at: now) {
+                subagentTransitioned = true
+            }
+            if subagentTransitioned {
+                statusBarData?.subagents = subagentTracker.rows
+            }
+            logger.info("[bg] wake bulk-cleared (read failed) count=\(count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
             refreshWaitingState()
             return
         }
@@ -1675,16 +1706,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // from the dictionary is unsupported and can trap or silently
         // skip elements. The `Array(...)` copy is cheap (id strings only).
         var removed: [String] = []
+        var subagentTransitioned = false
         for id in Array(pendingBackgroundTaskIds.keys)
         where Self.jsonlTailHasCompletion(tail: read.text, taskId: id)
         {
             pendingBackgroundTaskIds.removeValue(forKey: id)
             bgTaskIdMap.removeValue(forKey: id)
+            if subagentTracker.completeIfPresent(id: id, at: Date()) {
+                subagentTransitioned = true
+            }
             removed.append(id)
         }
         if !removed.isEmpty {
-            logger.info("[bg] wake jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) bytes=\(read.endOffset - minOffset, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+            logger.info("[bg] wake jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) bytes=\(read.endOffset - minOffset, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
             refreshWaitingState()
+        }
+        if subagentTransitioned {
+            statusBarData?.subagents = subagentTracker.rows
         }
         // Advance every still-pending id to the read's end: their marker
         // wasn't in the bytes we just scanned (we just verified), so any
@@ -2126,11 +2164,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Reverse-lookup `bgTaskIdMap` for `taskId` and drop the matching
-    /// entry from both the map and `pendingBackgroundTaskIds`. No-op (debug
-    /// log) when no mapping exists — expected for TaskStops of tasks this
-    /// shim never launched, or launches whose ack arrived before we started
-    /// tracking. Always refreshes waiting state on a successful purge so the
-    /// hourglass drops in the same turn as the kill.
+    /// entry from both the map and `pendingBackgroundTaskIds`. Also finishes
+    /// a matching bg-Agent subagent row via `completeIfPresent` so the
+    /// activity list checkmark lands on the kill, not the parent turn's
+    /// `result` (see issue #91). No-op (debug log) when no mapping exists —
+    /// expected for TaskStops of tasks this shim never launched, or launches
+    /// whose ack arrived before we started tracking. Always refreshes waiting
+    /// state on a successful purge so the hourglass drops in the same turn
+    /// as the kill.
     private func purgePendingByTaskId(_ taskId: String, reason: String) {
         guard let entry = bgTaskIdMap.first(where: { $0.value == taskId }) else {
             logger.debug("[bg] TaskStop no-mapping taskId=\(taskId, privacy: .public) reason=\(reason, privacy: .public)")
@@ -2139,7 +2180,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let toolUseId = entry.key
         bgTaskIdMap.removeValue(forKey: toolUseId)
         pendingBackgroundTaskIds.removeValue(forKey: toolUseId)
-        logger.info("[bg] TaskStop purged taskId=\(taskId, privacy: .public) toolUseId=\(toolUseId, privacy: .public) reason=\(reason, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+        let subagentTransitioned = subagentTracker.completeIfPresent(id: toolUseId, at: Date())
+        if subagentTransitioned {
+            statusBarData?.subagents = subagentTracker.rows
+        }
+        logger.info("[bg] TaskStop purged taskId=\(taskId, privacy: .public) toolUseId=\(toolUseId, privacy: .public) reason=\(reason, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
         refreshWaitingState()
     }
 
