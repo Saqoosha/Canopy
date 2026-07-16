@@ -824,11 +824,13 @@ enum SidebarLogicProbe {
         record("subagent: bg Agent ack tool_result does NOT finish the row",
                !bgAckChanged && bgTracker.rows.count == 1 && bgTracker.rows[0].isRunning,
                "changed=\(bgAckChanged) running=\(bgTracker.rows.first?.isRunning ?? false)")
-        // But main-conversation `result` still freezes the bg row (better
-        // than a stuck spinner post-turn).
+        // Main-conversation `result` must NOT freeze bg rows either —
+        // their real completion is `completeIfPresent` (JSONL marker /
+        // TaskStop). Covered in depth by the issue #91 section below;
+        // keep a one-liner here so the subagent MARK stays self-contained.
         let bgResultChanged = bgTracker.observe(["type": "result"], now: t0)
-        record("subagent: bg row freezes on turn `result`",
-               bgResultChanged && !bgTracker.rows[0].isRunning)
+        record("subagent: bg row stays running past turn `result`",
+               !bgResultChanged && bgTracker.rows[0].isRunning)
 
         // Subagent-originated `result` (has parent_tool_use_id) must NOT
         // freeze main-conversation rows — otherwise a sibling subagent
@@ -1040,6 +1042,187 @@ enum SidebarLogicProbe {
         record("bg lifecycle: extractToolResultText text block missing text field skips",
                ShimProcess.extractToolResultText(missingTextField) == "kept",
                "got=\(ShimProcess.extractToolResultText(missingTextField))")
+
+        // MARK: - Bg Agent completion timing (issue #91)
+        // Pure SubagentTracker state machine: bg rows must stay running past
+        // the parent turn's `result`, and finish only via `completeIfPresent`
+        // (wired from ShimProcess on JSONL marker / TaskStop / historic
+        // reconcile). ShimProcess-side wire-up is not probe-visible — same
+        // limitation as the TaskStop mapping probes under issue #90.
+        do {
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            let t1 = Date(timeIntervalSince1970: 1_700_000_042)
+            let bgId = "toolu_BG91"
+            let fgId = "toolu_FG91"
+            let bgLaunch: [String: Any] = [
+                "type": "assistant",
+                "message": [
+                    "role": "assistant",
+                    "content": [
+                        [
+                            "type": "tool_use",
+                            "name": "Agent",
+                            "id": bgId,
+                            "input": [
+                                "description": "bg review",
+                                "subagent_type": "general-purpose",
+                                "run_in_background": true,
+                                "prompt": "x",
+                            ],
+                        ],
+                    ] as [[String: Any]],
+                ] as [String: Any],
+            ]
+            let fgLaunch: [String: Any] = [
+                "type": "assistant",
+                "message": [
+                    "role": "assistant",
+                    "content": [
+                        [
+                            "type": "tool_use",
+                            "name": "Agent",
+                            "id": fgId,
+                            "input": [
+                                "description": "fg review",
+                                "subagent_type": "Explore",
+                                "prompt": "y",
+                            ],
+                        ],
+                    ] as [[String: Any]],
+                ] as [String: Any],
+            ]
+
+            // T1: bg Agent + main-conv result → row stays isRunning
+            var t1Tracker = SubagentTracker()
+            _ = t1Tracker.observe(bgLaunch, now: t0)
+            let t1ResultChanged = t1Tracker.observe(["type": "result"], now: t0)
+            record("bg complete #91 T1: result leaves bg row running",
+                   !t1ResultChanged
+                       && t1Tracker.rows.count == 1
+                       && t1Tracker.rows[0].isRunning
+                       && t1Tracker.rows[0].id == bgId,
+                   "changed=\(t1ResultChanged) running=\(t1Tracker.rows.first?.isRunning ?? false)")
+
+            // T2: completeIfPresent after result → finishedAt == t1
+            var t2Tracker = SubagentTracker()
+            _ = t2Tracker.observe(bgLaunch, now: t0)
+            _ = t2Tracker.observe(["type": "result"], now: t0)
+            let t2Transitioned = t2Tracker.completeIfPresent(id: bgId, at: t1)
+            record("bg complete #91 T2: completeIfPresent finishes bg row",
+                   t2Transitioned
+                       && !t2Tracker.rows[0].isRunning
+                       && t2Tracker.rows[0].finishedAt == t1,
+                   "transitioned=\(t2Transitioned) finishedAt=\(String(describing: t2Tracker.rows.first?.finishedAt))")
+
+            // T3: foreground row still freezes on result
+            var t3Tracker = SubagentTracker()
+            _ = t3Tracker.observe(fgLaunch, now: t0)
+            let t3Changed = t3Tracker.observe(["type": "result"], now: t0)
+            record("bg complete #91 T3: foreground still freezes on result",
+                   t3Changed
+                       && t3Tracker.rows.count == 1
+                       && !t3Tracker.rows[0].isRunning
+                       && t3Tracker.rows[0].finishedAt == t0,
+                   "changed=\(t3Changed) running=\(t3Tracker.rows.first?.isRunning ?? true)")
+
+            // T4: unknown id → false, no mutation
+            var t4Tracker = SubagentTracker()
+            _ = t4Tracker.observe(bgLaunch, now: t0)
+            let beforeT4 = t4Tracker.rows
+            let t4Result = t4Tracker.completeIfPresent(id: "toolu_UNKNOWN", at: t1)
+            record("bg complete #91 T4: unknown id → false, rows untouched",
+                   !t4Result && t4Tracker.rows == beforeT4,
+                   "result=\(t4Result) count=\(t4Tracker.rows.count)")
+
+            // T5: already-finished → false, preserves earlier finishedAt
+            var t5Tracker = SubagentTracker()
+            _ = t5Tracker.observe(bgLaunch, now: t0)
+            _ = t5Tracker.completeIfPresent(id: bgId, at: t0)
+            let t5Second = t5Tracker.completeIfPresent(id: bgId, at: t1)
+            record("bg complete #91 T5: already-finished is idempotent",
+                   !t5Second
+                       && t5Tracker.rows[0].finishedAt == t0,
+                   "second=\(t5Second) finishedAt=\(String(describing: t5Tracker.rows.first?.finishedAt))")
+
+            // T6: mixed bg + foreground → result freezes only foreground
+            let mixedLaunch: [String: Any] = [
+                "type": "assistant",
+                "message": [
+                    "role": "assistant",
+                    "content": [
+                        [
+                            "type": "tool_use",
+                            "name": "Agent",
+                            "id": bgId,
+                            "input": [
+                                "description": "bg review",
+                                "subagent_type": "general-purpose",
+                                "run_in_background": true,
+                                "prompt": "x",
+                            ],
+                        ],
+                        [
+                            "type": "tool_use",
+                            "name": "Agent",
+                            "id": fgId,
+                            "input": [
+                                "description": "fg review",
+                                "subagent_type": "Explore",
+                                "prompt": "y",
+                            ],
+                        ],
+                    ] as [[String: Any]],
+                ] as [String: Any],
+            ]
+            var t6Tracker = SubagentTracker()
+            _ = t6Tracker.observe(mixedLaunch, now: t0)
+            let t6Changed = t6Tracker.observe(["type": "result"], now: t0)
+            let t6Bg = t6Tracker.rows.first(where: { $0.id == bgId })
+            let t6Fg = t6Tracker.rows.first(where: { $0.id == fgId })
+            record("bg complete #91 T6: mixed batch freezes only foreground",
+                   t6Changed
+                       && (t6Bg?.isRunning == true)
+                       && (t6Fg?.isRunning == false),
+                   "changed=\(t6Changed) bgRunning=\(t6Bg?.isRunning ?? false) fgRunning=\(t6Fg?.isRunning ?? true)")
+
+            // T7/T8 regress-guard the F1 race-fix: running bg rows must
+            // survive next-turn `message_start` so a later async
+            // `completeIfPresent` can still find them. If the exemption is
+            // ever removed, both tests fail loudly.
+            let nextTurnClear: [String: Any] = [
+                "type": "stream_event",
+                "event": ["type": "message_start"] as [String: Any],
+            ]
+
+            // T7: after result + next-turn message_start, running bg rows
+            // are preserved; foreground rows in the batch are cleared.
+            var t7Tracker = SubagentTracker()
+            _ = t7Tracker.observe(mixedLaunch, now: t0)
+            _ = t7Tracker.observe(["type": "result"], now: t0)
+            let t7Changed = t7Tracker.observe(nextTurnClear, now: t1)
+            let t7Bg = t7Tracker.rows.first(where: { $0.id == bgId })
+            let t7Fg = t7Tracker.rows.first(where: { $0.id == fgId })
+            record("bg complete #91 T7: message_start preserves running bg, clears fg",
+                   t7Changed
+                       && t7Tracker.rows.count == 1
+                       && (t7Bg?.isRunning == true)
+                       && t7Fg == nil,
+                   "changed=\(t7Changed) count=\(t7Tracker.rows.count) bgRunning=\(t7Bg?.isRunning ?? false) fgGone=\(t7Fg == nil)")
+
+            // T8: race-safe path — bg survives message_start, then
+            // completeIfPresent finishes it with the post-clear timestamp.
+            var t8Tracker = SubagentTracker()
+            _ = t8Tracker.observe(bgLaunch, now: t0)
+            _ = t8Tracker.observe(["type": "result"], now: t0)
+            _ = t8Tracker.observe(nextTurnClear, now: t1)
+            let t8Transitioned = t8Tracker.completeIfPresent(id: bgId, at: t1)
+            record("bg complete #91 T8: completeIfPresent after message_start finishes bg",
+                   t8Transitioned
+                       && t8Tracker.rows.count == 1
+                       && !t8Tracker.rows[0].isRunning
+                       && t8Tracker.rows[0].finishedAt == t1,
+                   "transitioned=\(t8Transitioned) finishedAt=\(String(describing: t8Tracker.rows.first?.finishedAt))")
+        }
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
