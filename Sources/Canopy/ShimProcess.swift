@@ -189,6 +189,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// sticks forever. The offset-tracked approach above is the fix.
     private var pendingBackgroundTaskIds: [BackgroundTaskID: JSONLByteOffset] = [:]
 
+    /// Maps a pending bg launch's `toolu_…` id to the CLI-side opaque
+    /// `task_id` (e.g. `b5nt1jeth`) captured from the launch's initial
+    /// `tool_result` ack ("Command running in background with ID: <task_id>.
+    /// Output is being written to..."). The CLI's `<task-notification>`
+    /// completion path uses `task_id` as the primary key AND emits
+    /// `<tool-use-id>toolu_…</tool-use-id>` markers on natural completion.
+    /// But `TaskStop`-triggered kills DO NOT emit any `<task-notification>`
+    /// (verified against a live trace of three consecutive `wrangler dev`
+    /// TaskStops, zero completion markers), and the TaskStop tool_use's
+    /// own `toolu_…` id identifies the TaskStop call, not the launch it
+    /// targets; the only field on TaskStop that points at the original
+    /// launch is `input.task_id` (CLI-side opaque id) — hence the
+    /// reverse-lookup map. Without it every `wrangler dev` restart would
+    /// leave the hourglass on until Canopy restart. See issue #90.
+    ///
+    /// Cleared alongside `pendingBackgroundTaskIds` in
+    /// `resetActivityState()` so shim crash / SSH reconnect can't leak
+    /// stale mappings into the next session.
+    private var bgTaskIdMap: [BackgroundTaskID: String] = [:]
+
     /// Every `toolu_…` id that already existed in the session JSONL when this
     /// shim spawned. On `--resume`, the CLI re-emits historical `assistant`
     /// io_messages through the same io_message stream that carries live
@@ -371,6 +391,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         where ids.contains(id)
                         {
                             self.pendingBackgroundTaskIds.removeValue(forKey: id)
+                            self.bgTaskIdMap.removeValue(forKey: id)
                             purged += 1
                         }
                         if purged > 0 {
@@ -1545,6 +1566,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
+        bgTaskIdMap.removeAll()
         subagentTracker = SubagentTracker()
         statusBarData?.subagents = []
         refreshAskingState()
@@ -1615,6 +1637,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard let path = sessionJSONLPath() else {
             let count = pendingBackgroundTaskIds.count
             pendingBackgroundTaskIds.removeAll()
+            bgTaskIdMap.removeAll()
             logger.info("[bg] wake bulk-cleared (no JSONL access) count=\(count, privacy: .public)")
             refreshWaitingState()
             return
@@ -1643,6 +1666,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // the documented contract of the offline path.
             let count = pendingBackgroundTaskIds.count
             pendingBackgroundTaskIds.removeAll()
+            bgTaskIdMap.removeAll()
             logger.info("[bg] wake bulk-cleared (read failed) count=\(count, privacy: .public)")
             refreshWaitingState()
             return
@@ -1655,6 +1679,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         where Self.jsonlTailHasCompletion(tail: read.text, taskId: id)
         {
             pendingBackgroundTaskIds.removeValue(forKey: id)
+            bgTaskIdMap.removeValue(forKey: id)
             removed.append(id)
         }
         if !removed.isEmpty {
@@ -1846,6 +1871,71 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         isAsciiAlnum(c) || c == 0x5F // _
     }
 
+    /// Pull the `[A-Za-z0-9]+` run that immediately follows `prefix` in
+    /// `text`. Returns nil when the prefix is absent or the run is empty.
+    /// Shared by `extractLaunchAckTaskId` / `extractStoppedTaskId` so a
+    /// CLI wording change only needs one scanner to update. Kept as a
+    /// byte-scan rather than `NSRegularExpression` for stylistic
+    /// consistency with `extractToolUseIds(fromText:)`. The current
+    /// callers run on the main thread via `handleShimMessage`, so the
+    /// Tahoe libdispatch crash (bg-queue-only, per CLAUDE.md) doesn't
+    /// strictly apply here — the scanner is future-proofing if either
+    /// helper moves off-main.
+    private static func extractAlnumAfterPrefix(_ text: String, prefix: String) -> String? {
+        guard let prefixRange = text.range(of: prefix) else { return nil }
+        let rest = text[prefixRange.upperBound...]
+        var end = rest.startIndex
+        while end < rest.endIndex {
+            guard let ascii = rest[end].asciiValue, isAsciiAlnum(ascii) else { break }
+            end = rest.index(after: end)
+        }
+        let id = String(rest[rest.startIndex..<end])
+        return id.isEmpty ? nil : id
+    }
+
+    /// CLI bg-launch ack pattern (verbatim, Bash/Agent with
+    /// `run_in_background:true`):
+    /// `"Command running in background with ID: <task_id>. Output is being written to: …"`.
+    /// Captures the opaque CLI-side `task_id` (e.g. `b5nt1jeth`) so
+    /// `bgTaskIdMap` can reverse-lookup from a later `TaskStop`'s
+    /// `input.task_id` back to the Swift-side `toolu_…` we track in
+    /// `pendingBackgroundTaskIds`. Returns nil on no match, empty match,
+    /// or a non-alphanumeric-only run. Probe-callable (`static`) so a CLI
+    /// wording change goes red here instead of leaving the hourglass stuck.
+    static func extractLaunchAckTaskId(_ text: String) -> String? {
+        extractAlnumAfterPrefix(text, prefix: "Command running in background with ID: ")
+    }
+
+    /// CLI TaskStop result pattern (verbatim): content is a JSON-object
+    /// *string* whose `message` field starts with
+    /// `"Successfully stopped task: <task_id> …"`. Captures `<task_id>` so
+    /// `processUserToolResults` can purge even if the corresponding
+    /// `TaskStop` tool_use was missed (shim replay race). Same nil-on-
+    /// empty / non-alnum rules as `extractLaunchAckTaskId`.
+    static func extractStoppedTaskId(_ text: String) -> String? {
+        extractAlnumAfterPrefix(text, prefix: "Successfully stopped task: ")
+    }
+
+    /// Flatten a `tool_result` block's `content` into plain text. The CLI
+    /// emits two shapes: (1) a plain `String` (bg-launch ack, TaskStop
+    /// result JSON string); (2) an array of `{type:"text", text:"…"}`
+    /// sub-blocks (joined with `\n`). Anything else returns `""` so
+    /// callers can treat "no usable text" and "empty content" the same.
+    static func extractToolResultText(_ block: [String: Any]) -> String {
+        if let s = block["content"] as? String {
+            return s
+        }
+        guard let parts = block["content"] as? [[String: Any]] else { return "" }
+        var texts: [String] = []
+        for part in parts {
+            guard part["type"] as? String == "text",
+                  let t = part["text"] as? String
+            else { continue }
+            texts.append(t)
+        }
+        return texts.joined(separator: "\n")
+    }
+
     /// Read a JSONL file from `offset` to EOF and return the lossy-decoded
     /// text alongside the byte offset where the read ended (start + bytes-
     /// actually-read). The end offset is the *byte* count, so it can be
@@ -2005,6 +2095,105 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Detect `TaskStop` tool_use blocks and purge the matching pending bg
+    /// launch. The CLI's kill path does NOT emit a `<task-notification>` /
+    /// `<tool-use-id>` completion marker (natural completion does), so the
+    /// JSONL reconcile in `clearCompletedBackgroundTasksOnWake` never sees
+    /// these — without this live-stream path the hourglass sticks until
+    /// Canopy restart. Mirrors `detectBackgroundTaskLaunch`: only the final
+    /// `assistant` io_message is inspected (`stream_event` content_block_start
+    /// typically has empty `input`, so `task_id` isn't observable there).
+    /// Like `detectBackgroundTaskLaunch`, does not gate on
+    /// `parent_tool_use_id` — TaskStops from any turn (including a
+    /// subagent) must clear the matching pending launch.
+    private func detectTaskStopLaunch(in ioMsg: [String: Any]) {
+        guard ioMsg["type"] as? String == "assistant",
+              let assistantMsg = ioMsg["message"] as? [String: Any],
+              let content = assistantMsg["content"] as? [[String: Any]]
+        else { return }
+
+        for block in content {
+            guard block["type"] as? String == "tool_use",
+                  block["name"] as? String == "TaskStop"
+            else { continue }
+            let input = block["input"] as? [String: Any] ?? [:]
+            guard let taskId = input["task_id"] as? String, !taskId.isEmpty else {
+                logger.warning("[bg] TaskStop tool_use missing/empty task_id — CLI shape drift? keys=\(Array(input.keys).joined(separator: ","), privacy: .public)")
+                continue
+            }
+            purgePendingByTaskId(taskId, reason: "TaskStop tool_use")
+        }
+    }
+
+    /// Reverse-lookup `bgTaskIdMap` for `taskId` and drop the matching
+    /// entry from both the map and `pendingBackgroundTaskIds`. No-op (debug
+    /// log) when no mapping exists — expected for TaskStops of tasks this
+    /// shim never launched, or launches whose ack arrived before we started
+    /// tracking. Always refreshes waiting state on a successful purge so the
+    /// hourglass drops in the same turn as the kill.
+    private func purgePendingByTaskId(_ taskId: String, reason: String) {
+        guard let entry = bgTaskIdMap.first(where: { $0.value == taskId }) else {
+            logger.debug("[bg] TaskStop no-mapping taskId=\(taskId, privacy: .public) reason=\(reason, privacy: .public)")
+            return
+        }
+        let toolUseId = entry.key
+        bgTaskIdMap.removeValue(forKey: toolUseId)
+        pendingBackgroundTaskIds.removeValue(forKey: toolUseId)
+        logger.info("[bg] TaskStop purged taskId=\(taskId, privacy: .public) toolUseId=\(toolUseId, privacy: .public) reason=\(reason, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+        refreshWaitingState()
+    }
+
+    /// Process top-level `user` io_messages that carry `tool_result` blocks.
+    /// Two jobs: (1) capture the CLI `task_id` from a bg-launch ack so
+    /// `bgTaskIdMap` can reverse-lookup later TaskStops; (2) safety-net
+    /// purge on TaskStop tool_result text in case the tool_use observation
+    /// was lost (shim replay race). Subagent-scope tool_results are
+    /// ignored: the reverse-lookup map is load-bearing only for
+    /// `TaskStop` kills (whose completion markers never appear in the
+    /// JSONL, unlike natural completion), and TaskStops from subagents
+    /// are rare enough that adding subagent-side ack seeding here would
+    /// just churn state for no observed use case. If a subagent-issued
+    /// TaskStop ever reproduces the sticky-hourglass symptom, drop this
+    /// gate then. Plain-string `message.content` (a normal user prompt)
+    /// is also a no-op: only the array-of-blocks shape carries
+    /// tool_results.
+    private func processUserToolResults(_ ioMsg: [String: Any]) {
+        // JSON `null` deserializes as NSNull — use `is String` so a top-level
+        // message carrying `"parent_tool_use_id": null` is not skipped.
+        if ioMsg["parent_tool_use_id"] is String { return }
+        guard let userMsg = ioMsg["message"] as? [String: Any],
+              let content = userMsg["content"] as? [[String: Any]]
+        else { return }
+
+        for block in content {
+            guard block["type"] as? String == "tool_result" else { continue }
+            let text = Self.extractToolResultText(block)
+
+            // Launch-ack path: only map ids we already tracked as pending
+            // bg launches. A tool_result for an unrelated tool_use that
+            // happens to contain similar wording must not seed the map.
+            if let toolUseId = block["tool_use_id"] as? String,
+               pendingBackgroundTaskIds[toolUseId] != nil {
+                if let taskId = Self.extractLaunchAckTaskId(text) {
+                    let previous = bgTaskIdMap[toolUseId]
+                    if previous != taskId {
+                        bgTaskIdMap[toolUseId] = taskId
+                        logger.info("[bg] ack-mapped toolUseId=\(toolUseId, privacy: .public) taskId=\(taskId, privacy: .public)")
+                    }
+                } else {
+                    logger.warning("[bg] pending launch tool_result missing ack task_id — CLI wording drift? toolUseId=\(toolUseId, privacy: .public) textPrefix=\(text.prefix(80), privacy: .public)")
+                }
+            }
+
+            // TaskStop-result safety net — redundant with
+            // `detectTaskStopLaunch` in the common case, but survives a
+            // lost tool_use observation.
+            if let stoppedId = Self.extractStoppedTaskId(text) {
+                purgePendingByTaskId(stoppedId, reason: "TaskStop tool_result")
+            }
+        }
+    }
+
     /// True if `block` is a `tool_use` for `Bash` or `Agent` whose input
     /// has `run_in_background:true`. Static so `_SidebarLogicProbe` can test
     /// the predicate without spawning a shim.
@@ -2077,7 +2266,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "assistant", "stream_event":
             detectAskUserQuestion(in: ioMsg)
             detectBackgroundTaskLaunch(in: ioMsg)
+            detectTaskStopLaunch(in: ioMsg)
             isWorking = true
+        case "user":
+            processUserToolResults(ioMsg)
         case "result":
             if isWorking {
                 isWorking = false

@@ -962,6 +962,85 @@ enum SidebarLogicProbe {
                !unknownTracker.observe(["type": "future_extension"], now: t0)
                    && unknownTracker.rows.isEmpty)
 
+        // MARK: - Background task lifecycle (issue #90)
+        // Pure static helpers only — pendingBackgroundTaskIds lives on
+        // ShimProcess and isn't probe-visible without spawning a shim.
+        let launchAck =
+            "Command running in background with ID: b5nt1jeth. Output is being written to: /tmp/foo.output."
+        record("bg lifecycle: extractLaunchAckTaskId finds id",
+               ShimProcess.extractLaunchAckTaskId(launchAck) == "b5nt1jeth",
+               "got=\(ShimProcess.extractLaunchAckTaskId(launchAck) ?? "nil")")
+        record("bg lifecycle: extractLaunchAckTaskId unrelated → nil",
+               ShimProcess.extractLaunchAckTaskId("hello") == nil)
+        record("bg lifecycle: extractLaunchAckTaskId empty → nil",
+               ShimProcess.extractLaunchAckTaskId("") == nil)
+        record("bg lifecycle: extractLaunchAckTaskId prefix-only → nil",
+               ShimProcess.extractLaunchAckTaskId("Command running in background with ID: ") == nil)
+
+        let stopResult =
+            #"{"message":"Successfully stopped task: b5nt1jeth (pkill -f 'wrangler dev' 2>/dev/null; sleep 1\nsh -c 'exec node_modules/.bin/wrangler dev --remote --port 8791 2>&1')","task_id":"b5nt1jeth","task_type":"local_bash","command":"..."}"#
+        record("bg lifecycle: extractStoppedTaskId finds id in TaskStop JSON",
+               ShimProcess.extractStoppedTaskId(stopResult) == "b5nt1jeth",
+               "got=\(ShimProcess.extractStoppedTaskId(stopResult) ?? "nil")")
+        record("bg lifecycle: extractStoppedTaskId unrelated → nil",
+               ShimProcess.extractStoppedTaskId("hello") == nil)
+        record("bg lifecycle: extractStoppedTaskId empty → nil",
+               ShimProcess.extractStoppedTaskId("") == nil)
+        record("bg lifecycle: extractStoppedTaskId prefix-only → nil",
+               ShimProcess.extractStoppedTaskId("Successfully stopped task: ") == nil)
+        record("bg lifecycle: extractLaunchAckTaskId non-alnum id truncates at first non-alnum",
+               ShimProcess.extractLaunchAckTaskId("Command running in background with ID: abc-def.") == "abc")
+
+        let plainBlock: [String: Any] = [
+            "type": "tool_result",
+            "tool_use_id": "toolu_x",
+            "content": launchAck,
+        ]
+        record("bg lifecycle: extractToolResultText plain String",
+               ShimProcess.extractToolResultText(plainBlock) == launchAck)
+        let arrayBlock: [String: Any] = [
+            "type": "tool_result",
+            "tool_use_id": "toolu_y",
+            "content": [
+                ["type": "text", "text": "line one"],
+                ["type": "text", "text": "line two"],
+                ["type": "image", "text": "ignored"],
+            ] as [[String: Any]],
+        ]
+        record("bg lifecycle: extractToolResultText array-of-text joins",
+               ShimProcess.extractToolResultText(arrayBlock) == "line one\nline two",
+               "got=\(ShimProcess.extractToolResultText(arrayBlock))")
+        let missingContent: [String: Any] = ["type": "tool_result", "tool_use_id": "toolu_z"]
+        record("bg lifecycle: extractToolResultText missing content → empty",
+               ShimProcess.extractToolResultText(missingContent) == "")
+        let nullContent: [String: Any] = [
+            "type": "tool_result", "tool_use_id": "toolu_n", "content": NSNull(),
+        ]
+        record("bg lifecycle: extractToolResultText NSNull content → empty",
+               ShimProcess.extractToolResultText(nullContent) == "")
+        let emptyArray: [String: Any] = [
+            "type": "tool_result", "tool_use_id": "toolu_e",
+            "content": [] as [[String: Any]],
+        ]
+        record("bg lifecycle: extractToolResultText empty array → empty",
+               ShimProcess.extractToolResultText(emptyArray) == "")
+        let imageOnly: [String: Any] = [
+            "type": "tool_result", "tool_use_id": "toolu_i",
+            "content": [["type": "image"]] as [[String: Any]],
+        ]
+        record("bg lifecycle: extractToolResultText image-only blocks → empty",
+               ShimProcess.extractToolResultText(imageOnly) == "")
+        let missingTextField: [String: Any] = [
+            "type": "tool_result", "tool_use_id": "toolu_m",
+            "content": [
+                ["type": "text"],
+                ["type": "text", "text": "kept"],
+            ] as [[String: Any]],
+        ]
+        record("bg lifecycle: extractToolResultText text block missing text field skips",
+               ShimProcess.extractToolResultText(missingTextField) == "kept",
+               "got=\(ShimProcess.extractToolResultText(missingTextField))")
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return lines.joined(separator: "\n")
