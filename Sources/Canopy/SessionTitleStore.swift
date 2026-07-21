@@ -26,6 +26,19 @@ enum SessionTitleStore {
         all()[sessionId]
     }
 
+    /// Re-key a stored title when a session's id changes (placeholder
+    /// `--resume` id → the CLI's real session id). A title generated before
+    /// the first `update_session_state` is saved under the placeholder;
+    /// without this the reopened session would lose its AI title. No-op
+    /// when nothing is stored under the old id.
+    static func migrate(fromSessionId stale: String, toSessionId sessionId: String) {
+        guard stale != sessionId, UUID(uuidString: sessionId) != nil else { return }
+        var titles = all()
+        guard let title = titles.removeValue(forKey: stale) else { return }
+        titles[sessionId] = title
+        UserDefaults.standard.set(titles, forKey: key)
+    }
+
     /// All stored titles.
     private static func all() -> [String: String] {
         UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]

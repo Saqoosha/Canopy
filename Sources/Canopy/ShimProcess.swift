@@ -775,6 +775,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // Track session ID for title persistence.
                 if let sid = request["sessionId"] as? String, UUID(uuidString: sid) != nil {
                     activeSessionId = sid
+                    backfillResumeId(sid)
                     // Save any title that was generated before we had a session ID.
                     if let pending = pendingGeneratedTitle {
                         SessionTitleStore.save(title: pending, forSessionId: sid)
@@ -810,6 +811,29 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         sendToShim(["type": "webview_message", "message": dict])
         if let titleRequestDescriptionAfterForward {
             requestSessionTitle(description: titleRequestDescriptionAfterForward)
+        }
+    }
+
+    /// The CLI ignores a `--resume` id that has no JSONL on disk (launcher-born
+    /// sessions pass a freshly generated UUID) and picks its own session id.
+    /// Called whenever the webview reports a session id (`update_session_state`
+    /// or `rename_tab` — both carry `sessionId` through the same handler).
+    /// Sync the real id back onto the owning OpenSession so the sidebar's
+    /// open-vs-recents dedup and `openLocal`'s already-open check compare
+    /// against the JSONL that actually exists — otherwise the same session
+    /// shows twice (Open + Recents) and can be opened twice.
+    private func backfillResumeId(_ sid: String) {
+        guard let session = boundSession, session.resumeId != sid else { return }
+        let stale = session.resumeId
+        session.resumeId = sid
+        logger.info("backfillResumeId \(stale, privacy: .public) -> \(sid, privacy: .public)")
+        // A title generated before this first session-id report was saved
+        // under the placeholder id (`activeSessionId ?? resumeSessionId`
+        // fell through to the placeholder) — carry it over to the real id.
+        SessionTitleStore.migrate(fromSessionId: stale, toSessionId: sid)
+        if let store = SessionStore.shared, store.lastActiveResumeId == stale {
+            store.lastActiveResumeId = sid
+            SessionStorePersistence.saveLastActiveResumeId(sid)
         }
     }
 
