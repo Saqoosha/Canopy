@@ -498,4 +498,58 @@ final class SessionStore {
         cloudPollTask?.cancel()
         cloudPollTask = nil
     }
+
+    // MARK: - Open-session reorder
+
+    /// Pure core of drag-to-reorder. `visible` is the subset of `master`
+    /// the sidebar is actually showing (filter-applied), in master order.
+    /// The move (`fromOffsets`/`toOffset`, both in visible coordinates —
+    /// SwiftUI `.onMove` semantics) is applied to the visible ids, then the
+    /// new visible order is written back into the visible slots of `master`.
+    /// Hidden ids never change position.
+    static func reorderPreservingHidden<T: Hashable>(
+        master: [T],
+        visible: [T],
+        fromOffsets: IndexSet,
+        toOffset: Int
+    ) -> [T] {
+        // UI-supplied offsets: reject out-of-range input instead of letting
+        // Array.move trap. (IndexSet can't hold negatives, so max() covers
+        // the from side.)
+        guard (fromOffsets.max() ?? -1) < visible.count,
+              toOffset >= 0, toOffset <= visible.count else {
+            return master
+        }
+        var newVisible = visible
+        newVisible.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        guard newVisible != visible else { return master }
+        let visibleSet = Set(visible)
+        var iterator = newVisible.makeIterator()
+        return master.map { id in
+            visibleSet.contains(id) ? (iterator.next() ?? id) : id
+        }
+    }
+
+    /// Handle a drag-reorder from the sidebar's Open section. Offsets are
+    /// in visible-row coordinates (the filter may be hiding some open
+    /// rows); `reorderPreservingHidden` maps them onto `openSessions`.
+    /// Selection is untouched — only row positions (and thus Cmd+1..9
+    /// indices) change, matching browser-tab behaviour.
+    func moveOpenSessions(fromOffsets: IndexSet, toOffset: Int) {
+        let visibleIds = visibleRows.compactMap { row -> UUID? in
+            if case .open(let s) = row { return s.id }
+            return nil
+        }
+        let masterIds = openSessions.map(\.id)
+        let newOrder = Self.reorderPreservingHidden(
+            master: masterIds,
+            visible: visibleIds,
+            fromOffsets: fromOffsets,
+            toOffset: toOffset
+        )
+        guard newOrder != masterIds else { return }
+        let byId = Dictionary(uniqueKeysWithValues: openSessions.map { ($0.id, $0) })
+        openSessions = newOrder.compactMap { byId[$0] }
+        logger.info("moveOpenSessions from=\(fromOffsets.map(String.init).joined(separator: ","), privacy: .public) to=\(toOffset)")
+    }
 }

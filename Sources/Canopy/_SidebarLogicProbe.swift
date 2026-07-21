@@ -620,6 +620,39 @@ enum SidebarLogicProbe {
                    for: GitWorktree.worktreesRoot
                        .appendingPathComponent("Other/../Canopy/fix-foo")) == "Canopy · fix-foo")
 
+        // --- Open-session reorder (drag & drop) ---
+        // Pure mapping: a move expressed against the visible (filtered) open
+        // rows is applied to the master array; hidden rows keep their slots.
+        record("reorder: full visible, move first to end",
+               SessionStore.reorderPreservingHidden(
+                   master: ["A", "B", "C"], visible: ["A", "B", "C"],
+                   fromOffsets: IndexSet(integer: 0), toOffset: 3)
+                   == ["B", "C", "A"])
+        record("reorder: full visible, move last to front",
+               SessionStore.reorderPreservingHidden(
+                   master: ["A", "B", "C"], visible: ["A", "B", "C"],
+                   fromOffsets: IndexSet(integer: 2), toOffset: 0)
+                   == ["C", "A", "B"])
+        record("reorder: hidden interior rows keep their slots",
+               SessionStore.reorderPreservingHidden(
+                   master: ["A", "h1", "B", "h2", "C"], visible: ["A", "B", "C"],
+                   fromOffsets: IndexSet(integer: 2), toOffset: 0)
+                   == ["C", "h1", "A", "h2", "B"])
+        record("reorder: no-op move returns master unchanged",
+               SessionStore.reorderPreservingHidden(
+                   master: ["A", "h1", "B"], visible: ["A", "B"],
+                   fromOffsets: IndexSet(integer: 1), toOffset: 1)
+                   == ["A", "h1", "B"])
+        record("reorder: out-of-range offsets return master unchanged",
+               SessionStore.reorderPreservingHidden(
+                   master: ["A", "B", "C"], visible: ["A", "B", "C"],
+                   fromOffsets: IndexSet(integer: 5), toOffset: 0)
+                   == ["A", "B", "C"]
+               && SessionStore.reorderPreservingHidden(
+                   master: ["A", "B", "C"], visible: ["A", "B", "C"],
+                   fromOffsets: IndexSet(integer: 0), toOffset: 7)
+                   == ["A", "B", "C"])
+
         // --- SubagentTracker ---
         // Pure value-type probe: feed io_message dicts and assert the CLI-style
         // task-list rows (launch / dedupe / tokens / finish / clear).
