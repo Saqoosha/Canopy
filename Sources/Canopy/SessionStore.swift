@@ -159,9 +159,11 @@ final class SessionStore {
         let title = sessionTitle ?? "Untitled"
         let project = remoteHost.map { "\($0):\(directory.lastPathComponent)" }
             ?? GitWorktree.projectDisplayName(for: directory)
-        // CC sessions need a resumeId so the JSONL filename is stable; if the
-        // caller didn't supply one we let the CLI pick on first message and
-        // backfill via update_session_state.
+        // The CLI ignores a --resume id that has no JSONL on disk, so for a
+        // brand-new session this UUID is only a placeholder; ShimProcess's
+        // backfillResumeId swaps in the CLI's real session id once the
+        // webview reports it via update_session_state (or rename_tab —
+        // both carry sessionId through the same handler).
         let session = OpenSession(
             origin: origin,
             resumeId: resumeId ?? UUID().uuidString,
