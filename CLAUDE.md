@@ -207,6 +207,7 @@ To update theme CSS:
 - `update_appcast.sh` — Fetches release notes from GitHub, generates appcast with Sparkle's `generate_appcast`, pushes to gh-pages
 - Appcast URL: `https://saqoosha.github.io/Canopy/appcast.xml`
 - EdDSA signing key stored in macOS Keychain (shared with Sessylph)
+- **Time Machine notarize hang**: `xcrun notarytool submit` hangs indefinitely at "Conducting pre-submission checks..." (25+ min, no Submission ID printed, `xcrun notarytool history` confirms it never reached Apple) when Time Machine is actively backing up (`tmutil status` → `Running=1`, `BackupPhase=Copying`) — backupd appears to hold an I/O lock on files under `~/Documents/`, so notarytool's `xar_open_digest_verify` gets stuck in the `open()` syscall (verify with `sample <pid>` — stack shows `xar_open_digest_verify → open → __open` in kernel wait; `xar -t -f <dmg>` in the same dir also hangs at ~5s timeout, a fast proxy check). Fix: `cp build/Canopy-X.Y.Z.dmg /tmp/`, notarize + staple from `/tmp/`, then `cp` back — same signed DMG, no rebuild, Apple accepts in ~1 min. Long-term fix candidate: make `package_dmg.sh` build/notarize in a `/tmp` workdir instead of `build/`
 
 ## SSH Remote
 - Toggle "SSH Remote" in launcher, enter hostname (e.g. `mbp`, `user@server`)
