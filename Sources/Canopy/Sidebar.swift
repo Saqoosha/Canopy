@@ -90,6 +90,8 @@ struct Sidebar: View {
             .background {
                 ListScrollToTop(trigger: store.openSessions.count)
             }
+
+            SidebarAccountSection()
         }
         .overlay(alignment: .bottom) {
             if let err = store.teleportError {
