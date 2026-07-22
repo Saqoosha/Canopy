@@ -13,7 +13,8 @@ import SwiftUI
 ///   - .open + Cmd       → openInNewPane (or bounce/focus existing)
 ///   - .closedLocal + plain → openLocal (select → openInFocusedPane)
 ///   - .closedLocal + Cmd   → openLocal, then openInNewPane
-///   - .closedCloud         → openCloud (Cmd+click pane routing is Task 11)
+///   - .closedCloud + plain → openCloud(.focused)
+///   - .closedCloud + Cmd   → openCloud(.newPane)
 ///   - × (Open rows only) → stop the shim, drop the session, select the next
 ///     most-recent open or fall back to launcher
 struct Sidebar: View {
@@ -321,10 +322,7 @@ struct Sidebar: View {
         case .closedLocal(let entry):
             _ = store.openLocal(entry, target: addNewPane ? .newPane : .focused)
         case .closedCloud(let cloud):
-            // Cmd+click on a cloud row: teleport into a new pane. The teleport
-            // completes asynchronously; the sizer runs when the new OpenSession
-            // is appended and openInNewPane fires. See Task 11 for the hook.
-            store.openCloud(cloud)   // Task 11 makes this pane-aware
+            store.openCloud(cloud, target: addNewPane ? .newPane : .focused)
         }
     }
 

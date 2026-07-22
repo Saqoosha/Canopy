@@ -262,9 +262,11 @@ final class SessionStore {
     /// via `teleportError`. Phase A keeps this simpler than LauncherView's
     /// dialog-based flow; PR 4 polish can re-introduce a confirmation if
     /// users want it.
-    func openCloud(_ session: RemoteSession, permissionMode: PermissionMode? = nil) {
+    func openCloud(_ session: RemoteSession,
+                   permissionMode: PermissionMode? = nil,
+                   target: PaneTarget = .focused) {
         let mode = permissionMode ?? CanopySettings.shared.defaultPermissionMode
-        Task { await openCloudAsync(session, permissionMode: mode) }
+        Task { await openCloudAsync(session, permissionMode: mode, target: target) }
     }
 
     /// Most recent teleport error message, if any. Sidebar surfaces it via
@@ -308,7 +310,9 @@ final class SessionStore {
 
     func dismissTeleportError() { teleportError = nil }
 
-    private func openCloudAsync(_ session: RemoteSession, permissionMode: PermissionMode) async {
+    private func openCloudAsync(_ session: RemoteSession,
+                                permissionMode: PermissionMode,
+                                target: PaneTarget = .focused) async {
         guard teleporting == nil else {
             logger.info("openCloudAsync: a teleport is already in progress, ignoring")
             return
@@ -408,7 +412,13 @@ final class SessionStore {
         // Drop the cloud row immediately so the sidebar reflects the new
         // state without waiting for the next /v1/sessions poll.
         cloud.removeAll { $0.id == session.id }
-        select(.session(opened.id))
+        switch target {
+        case .focused: openInFocusedPane(opened.id)
+        case .newPane:
+            if !openInNewPane(opened.id) {
+                openInFocusedPane(opened.id)   // e.g. cap reached — degrade gracefully
+            }
+        }
         // Refresh recents + teleportedFromMap so the new local JSONL is
         // picked up correctly (the JSONL was just written by the extension).
         await refreshRecents()
