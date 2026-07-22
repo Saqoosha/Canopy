@@ -13,6 +13,13 @@ DMG_NAME="Canopy-${VERSION}"
 
 DMG_ROOT="${BUILD_DIR}/dmg-root"
 OUT_DMG="${BUILD_DIR}/${DMG_NAME}.dmg"
+# Create/sign/notarize/staple the DMG in /tmp, then copy the finished file
+# into build/. Time Machine holds I/O locks on ~/Documents while backing up,
+# which hangs notarytool's xar_open_digest_verify on files there; /tmp is
+# never backed up. See CLAUDE.md "Time Machine notarize hang".
+TMP_WORK=$(mktemp -d /tmp/canopy-dmg.XXXXXX)
+trap 'rm -rf "$TMP_WORK"' EXIT INT TERM
+TMP_DMG="${TMP_WORK}/${DMG_NAME}.dmg"
 
 DEVELOPER_ID="Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
 KEYCHAIN_PROFILE="notarytool-profile"
@@ -36,22 +43,24 @@ find "${DMG_ROOT}" -name "*.sh" -exec xattr -c {} \;
 ln -s /Applications "${DMG_ROOT}/Applications"
 
 echo "=== Creating DMG ==="
-rm -f "${OUT_DMG}"
 hdiutil create \
   -volname "${VOL_NAME}" \
   -srcfolder "${DMG_ROOT}" \
   -ov \
   -format UDZO \
-  "${OUT_DMG}"
+  "${TMP_DMG}"
 
 echo "=== Notarizing DMG ==="
-codesign --force --sign "$DEVELOPER_ID" "${OUT_DMG}"
+codesign --force --sign "$DEVELOPER_ID" "${TMP_DMG}"
 
-xcrun notarytool submit "${OUT_DMG}" \
+xcrun notarytool submit "${TMP_DMG}" \
   --keychain-profile "$KEYCHAIN_PROFILE" \
   --wait
 
-xcrun stapler staple "${OUT_DMG}"
+xcrun stapler staple "${TMP_DMG}"
+
+rm -f "${OUT_DMG}"
+cp "${TMP_DMG}" "${OUT_DMG}"
 
 echo "=== Done ==="
 echo "Created notarized DMG:"

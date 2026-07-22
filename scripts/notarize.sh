@@ -14,7 +14,12 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 APP_NAME=$(basename "$APP_PATH" .app)
-WORK_DIR=$(dirname "$APP_PATH")
+# Submit from a /tmp workdir, NOT from the repo: when Time Machine is mid-
+# backup it holds I/O locks on files under ~/Documents, and notarytool's
+# xar_open_digest_verify blocks forever in open() on the submitted file.
+# /tmp is excluded from backups, so submission is immune to TM state.
+WORK_DIR=$(mktemp -d /tmp/canopy-notarize.XXXXXX)
+trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
 ZIP_PATH="${WORK_DIR}/${APP_NAME}.zip"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTITLEMENTS="${SCRIPT_DIR}/../Sources/Canopy/Canopy.entitlements"
