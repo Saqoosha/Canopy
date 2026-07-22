@@ -32,65 +32,80 @@ struct StatusBarView: View {
     @ViewBuilder
     private func statusBar(now _: Date) -> some View {
         let w = data.chatInputWidth ?? .infinity  // no probe yet → assume wide
-        Group {
-            if w < CollapseThreshold.popoverFallback {
-                popoverBar
-            } else {
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
+        ZStack {
+            Group {
+                if w < CollapseThreshold.popoverFallback {
+                    popoverBar
+                } else {
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
 
-                    // Remote host — always shown when present (not in collapse priority).
-                    if let remote = data.remoteHost {
-                        pill(remote, icon: "network", color: .orange)
-                            .help("SSH remote: \(remote)")
-                        separator
-                    }
-
-                    // Model + Version (model never dropped)
-                    HStack(spacing: 5) {
-                        modelBadgeBlock
-                        if w >= CollapseThreshold.cliVersionIcon {
-                            cliVersionText
-                        } else if !data.cliVersion.isEmpty {
-                            cliVersionIcon
+                        // Remote host — always shown when present (not in collapse priority).
+                        if let remote = data.remoteHost {
+                            pill(remote, icon: "network", color: .orange)
+                                .help("SSH remote: \(remote)")
+                            separator
                         }
-                    }
 
-                    // VCS branch
-                    if !data.gitBranch.isEmpty {
-                        separator
-                        if w >= CollapseThreshold.branchIcon {
-                            branchPill
-                        } else {
-                            branchIconOnly
-                        }
-                    }
-
-                    // Context usage — numeric + bar share a single HStack + tooltip
-                    // to preserve the original 5pt spacing between numeric label
-                    // and bar, and so hovering the numeric label also surfaces
-                    // contextTooltip() (not just the bar).
-                    if data.contextMax > 0 {
-                        separator
+                        // Model + Version (model never dropped)
                         HStack(spacing: 5) {
-                            if w >= CollapseThreshold.dropContextNumeric {
-                                contextNumericLabel
+                            modelBadgeBlock
+                            if w >= CollapseThreshold.cliVersionIcon {
+                                cliVersionText
+                            } else if !data.cliVersion.isEmpty {
+                                cliVersionIcon
                             }
-                            contextBar
                         }
-                        .help(contextTooltip())
-                    }
 
-                    // Session usage (message count)
-                    if w >= CollapseThreshold.dropSessionUsage, data.messageCount > 0 {
-                        separator
-                        sessionUsageBadge
-                    }
+                        // VCS branch
+                        if !data.gitBranch.isEmpty {
+                            separator
+                            if w >= CollapseThreshold.branchIcon {
+                                branchPill
+                            } else {
+                                branchIconOnly
+                            }
+                        }
 
-                    Spacer()
+                        // Context usage — numeric + bar share a single HStack + tooltip
+                        // to preserve the original 5pt spacing between numeric label
+                        // and bar, and so hovering the numeric label also surfaces
+                        // contextTooltip() (not just the bar).
+                        if data.contextMax > 0 {
+                            separator
+                            HStack(spacing: 5) {
+                                if w >= CollapseThreshold.dropContextNumeric {
+                                    contextNumericLabel
+                                }
+                                contextBar
+                            }
+                            .help(contextTooltip())
+                        }
+
+                        // Session usage (message count)
+                        if w >= CollapseThreshold.dropSessionUsage, data.messageCount > 0 {
+                            separator
+                            sessionUsageBadge
+                        }
+
+                        Spacer()
+                    }
                 }
             }
+            .opacity(data.transientHint == nil ? 1 : 0)
+
+            if let hint = data.transientHint {
+                HStack {
+                    Spacer(minLength: 0)
+                    Text(hint)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .padding(.trailing, 12)
+                }
+                .transition(.opacity)
+            }
         }
+        .animation(.easeInOut(duration: 0.15), value: data.transientHint)
         .font(.system(size: 11))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 10)
