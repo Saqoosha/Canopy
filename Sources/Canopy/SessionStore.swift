@@ -689,7 +689,7 @@ final class SessionStore {
         if panes.isEmpty {
             panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
             focusedPaneIndex = 0
-            selection = .session(sessionId)
+            syncSelectionToFocusedPane()
             schedulePaneResize()
             return
         }
@@ -697,11 +697,11 @@ final class SessionStore {
         // duplicating (one session, one pane invariant).
         if let idx = paneIndex(forSession: sessionId) {
             focusedPaneIndex = idx
-            selection = .session(sessionId)
+            syncSelectionToFocusedPane()
             return
         }
         panes[focusedPaneIndex].content = .session(sessionId)
-        selection = .session(sessionId)
+        syncSelectionToFocusedPane()
     }
 
     /// Replace focused pane's content with the launcher. Used by Cmd+N in
@@ -712,7 +712,7 @@ final class SessionStore {
             return
         }
         panes[focusedPaneIndex].content = .launcher
-        selection = .launcher
+        syncSelectionToFocusedPane()
     }
 
     /// Append a new pane for `sessionId`. Returns false if bounced (already
