@@ -20,8 +20,13 @@ struct PaneDivider: View {
             if hovering { NSCursor.resizeLeftRight.push() }
             else { NSCursor.pop() }
         }
+        // Use .global coordinate space so translation reflects the mouse's
+        // absolute movement, independent of the HStack's re-layout as
+        // panes' preferredWidth changes on each onChanged. Local
+        // coordinate space would race the re-layout and produce jitter /
+        // "divider not under the mouse" behavior.
         .gesture(
-            DragGesture(minimumDistance: 1)
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { drag in
                     guard store.panes.indices.contains(leftIndex),
                           store.panes.indices.contains(leftIndex + 1) else { return }

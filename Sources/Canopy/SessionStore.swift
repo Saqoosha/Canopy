@@ -105,22 +105,55 @@ final class SessionStore {
     /// frame multiple times in one run-loop turn.
     private var pendingResizeTask: Task<Void, Never>?
 
+    /// Recompute each pane's preferredWidth so it equals the pane's current
+    /// on-screen visual width. Called before appending a new pane so the
+    /// existing panes' visual widths don't shift when the ratios change.
+    private func normalizePaneWeightsToVisualWidths() {
+        guard !panes.isEmpty else { return }
+        guard let window = NSApp.windows.first(where: { $0.isVisible && isCanopyWindow($0) })
+                          ?? NSApp.windows.first(where: { isCanopyWindow($0) }) else { return }
+        guard let root = window.contentView else { return }
+        var queue: [NSView] = [root]
+        var sidebarW: CGFloat = PaneWindowSizer.assumedSidebarWidth
+        while let view = queue.first {
+            queue.removeFirst()
+            if let split = view as? NSSplitView, let sidebar = split.arrangedSubviews.first {
+                if split.frame.width > 0 && sidebar.frame.width > 50 {
+                    sidebarW = sidebar.frame.width
+                }
+                break
+            }
+            queue.append(contentsOf: view.subviews)
+        }
+        let detailW = max(0, window.frame.width - sidebarW)
+        let visualWidths = PaneLayoutMetrics.paneWidths(
+            detailWidth: detailW,
+            weights: panes.map(\.preferredWidth),
+            dividerWidth: Self.paneDividerWidth,
+            minimumWidth: Self.paneMinDragWidth
+        )
+        for i in panes.indices where i < visualWidths.count {
+            let w = visualWidths[i]
+            if w > 0 {
+                panes[i].preferredWidth = w
+            }
+        }
+    }
+
     private func schedulePaneResize() {
-        // Extend the observer suspend gate up front so SwiftUI's synchronous
-        // content-driven window resize (which fires didResize before this
-        // task's sizer sets the sizer-internal suppress flag) does not feed
-        // back through the observer as a manual drag. 16 ms debounce +
-        // ~200 ms animation + 100 ms margin covers the whole sequence.
+        let paneWidths = panes.map { Int($0.preferredWidth) }
+        logger.info("[Pane] schedulePaneResize called: panes=\(paneWidths) focused=\(self.focusedPaneIndex)")
         if let appDelegate = NSApp.delegate as? AppDelegate {
             appDelegate.suspendResizeObserver(for: 0.35)
         }
         pendingResizeTask?.cancel()
-        pendingResizeTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(16))
-            if !Task.isCancelled, let self {
-                PaneWindowSizer.applyForCurrentPanes(store: self)
-            }
-        }
+        // Run the sizer synchronously in the same runloop tick as the pane
+        // mutation. Any debounced Task.sleep would let SwiftUI reflow the
+        // detail column *before* the window grew, and the first pane
+        // would visibly shrink to half its width (and its embedded
+        // WKWebView's scroll position would drift) before snapping back
+        // once the sizer expanded the window.
+        PaneWindowSizer.applyForCurrentPanes(store: self)
     }
 
     /// Surface the "Maximum 5 panes" hint on the focused session's status
@@ -695,10 +728,14 @@ final class SessionStore {
     func openInFocusedPane(_ sessionId: OpenSession.ID) {
         guard openSessions.contains(where: { $0.id == sessionId }) else { return }
         if panes.isEmpty {
+            // Do NOT call schedulePaneResize here — the single pane uses
+            // .frame(maxWidth: .infinity) in Detail.swift, so it fills
+            // whatever detail column width the user already has. Running
+            // the sizer would force-shrink a manually-widened window down
+            // to paneDefaultWidth on plain-click session open.
             panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
             focusedPaneIndex = 0
             syncSelectionToFocusedPane()
-            schedulePaneResize()
             return
         }
         // If this session already lives in a pane, focus that one instead of
@@ -735,6 +772,11 @@ final class SessionStore {
             return false
         }
         guard panes.count < Self.paneAbsoluteCap else { return false }
+        // Freeze the existing panes at their actual on-screen widths before
+        // appending. Otherwise WeightedPaneLayout's ratio math redistributes
+        // detail-column space equally by weight, visibly shrinking the
+        // existing pane(s) before the sizer grows the window.
+        normalizePaneWeightsToVisualWidths()
         let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
         panes.append(PaneSlot(content: .session(sessionId), preferredWidth: width))
         focusedPaneIndex = panes.count - 1
@@ -751,6 +793,7 @@ final class SessionStore {
     @discardableResult
     func openLauncherInNewPane() -> Bool {
         guard panes.count < Self.paneAbsoluteCap else { return false }
+        normalizePaneWeightsToVisualWidths()
         let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
         panes.append(PaneSlot(content: .launcher, preferredWidth: width))
         focusedPaneIndex = panes.count - 1
@@ -795,15 +838,21 @@ final class SessionStore {
     /// floor) stays on the window edge as a small gap. Opposite direction
     /// of `PaneWindowSizer` (which sizes the window from pane widths).
     func distributePaneWidths(deltaTotal: CGFloat) {
-        guard !panes.isEmpty, abs(deltaTotal) > 0.5 else { return }
+        guard !panes.isEmpty, abs(deltaTotal) > 0.5 else {
+            logger.info("[Pane] distributePaneWidths skipped: delta=\(deltaTotal) panes=\(self.panes.count)")
+            return
+        }
         let weights = panes.map(\.preferredWidth)
         let total = weights.reduce(0, +)
         guard total > 0 else { return }
         let floor = Self.paneMinDragWidth
+        let before = panes.map { Int($0.preferredWidth) }
         for i in panes.indices {
             let proposed = panes[i].preferredWidth + deltaTotal * (panes[i].preferredWidth / total)
             panes[i].preferredWidth = max(floor, proposed)
         }
+        let after = panes.map { Int($0.preferredWidth) }
+        logger.info("[Pane] distributePaneWidths delta=\(Int(deltaTotal)) before=\(before) after=\(after)")
     }
 
     /// Move focus by delta. wrap=true (default) → Cmd+Opt+← from leftmost

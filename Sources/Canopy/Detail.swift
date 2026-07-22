@@ -21,27 +21,54 @@ struct Detail: View {
                 // first pane is created via SessionStore.openInFocusedPane.
                 DetailLauncher(store: store)
             } else {
-                HStack(spacing: 0) {
+                // Custom Layout: preferredWidth is a weight, divider drag
+                // changes the ratio, window resize scales all panes
+                // proportionally, per-pane minimum 100 pt.
+                //
+                // Each subview is one (paneCell + trailing PaneDivider)
+                // bundle. WeightedPaneLayout places them with exact
+                // pane-widths + divider-widths, and its sizeThatFits
+                // returns the parent's proposed width verbatim so
+                // NavigationSplitView doesn't try to grow the window to
+                // fit an "ideal" content width — that was the runaway
+                // feedback source.
+                WeightedPaneLayout(
+                    weights: store.panes.map(\.preferredWidth),
+                    dividerWidth: SessionStore.paneDividerWidth,
+                    minimumWidth: SessionStore.paneMinDragWidth
+                ) {
                     ForEach(Array(store.panes.enumerated()), id: \.element.id) { index, pane in
-                        if index > 0 {
-                            PaneDivider(store: store, leftIndex: index - 1)
-                        }
-                        // Single-pane mode fills the whole detail column
-                        // (matches pre-multi-pane behavior and avoids the
-                        // gap on windows wider than one pane's preferredWidth).
-                        // Multi-pane keeps each pane at its explicit width.
-                        if store.panes.count == 1 {
+                        HStack(spacing: 0) {
                             paneCell(pane: pane, index: index)
-                                .frame(maxWidth: .infinity)
-                        } else {
-                            paneCell(pane: pane, index: index)
-                                .frame(width: pane.preferredWidth)
+                                .frame(maxWidth: .infinity,
+                                       maxHeight: .infinity,
+                                       alignment: .topLeading)
+                            if index < store.panes.count - 1 {
+                                PaneDivider(store: store, leftIndex: index)
+                                    .frame(width: SessionStore.paneDividerWidth)
+                            }
                         }
+                        // Flush pane headers: each pane extends up into the
+                        // hidden-title-bar strip so PaneHeaderStrip sits
+                        // level with the traffic lights. This MUST be on
+                        // the layout's CHILDREN, not on any ancestor of
+                        // WeightedPaneLayout: a safe-area-ignoring
+                        // container above a custom Layout freezes child
+                        // geometry commits during live window resize
+                        // (macOS 26 SwiftUI bug — layout passes run with
+                        // the new bounds but the WKWebView host and even
+                        // native Texts keep their old frames; only pane
+                        // add/close refreshed). Child-level ignore keeps
+                        // the reclaim AND normal resize propagation.
+                        .ignoresSafeArea(edges: .top)
                     }
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Align to top-leading so multi-pane HStack sits flush against the
+        // sidebar edge instead of getting centered horizontally. Overflow
+        // (window wider than the panes) stays on the trailing edge.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay {
             if let progress = store.teleporting {
                 TeleportOverlay(progress: progress)
@@ -51,6 +78,10 @@ struct Detail: View {
         .animation(.easeInOut(duration: 0.2), value: store.teleporting)
         .navigationTitle(windowTitle)
         .navigationSubtitle(windowSubtitle)
+        // Keep the toolbar's title item out of the reclaimed strip; the
+        // window title (Mission Control / window lists) still comes from
+        // navigationTitle.
+        .toolbar(removing: .title)
     }
 
     @ViewBuilder
@@ -60,6 +91,10 @@ struct Detail: View {
             case .session(let sessionId):
                 if let session = store.openSessions.first(where: { $0.id == sessionId }) {
                     VStack(spacing: 0) {
+                        // Always show the pane header — one bar per pane,
+                        // regardless of count. Duplication with the window
+                        // title bar is avoided by keeping the title bar
+                        // generic ("Canopy") in `windowTitle`.
                         PaneHeaderStrip(
                             title: session.title.isEmpty ? "Untitled" : session.title,
                             project: session.project,
@@ -102,6 +137,10 @@ struct Detail: View {
     }
 
     private var windowTitle: String {
+        // Multi-pane: pane headers already carry each pane's title, so
+        // duplicating one in the title bar reads as noise. Keep the bar
+        // generic and let the pane strips do the identification.
+        if store.panes.count > 1 { return "Canopy" }
         guard let pane = store.focusedPane else { return "Canopy" }
         switch pane.content {
         case .session(let id):
@@ -114,6 +153,7 @@ struct Detail: View {
     }
 
     private var windowSubtitle: String {
+        if store.panes.count > 1 { return "" }
         guard let pane = store.focusedPane else { return "" }
         if case .session(let id) = pane.content,
            let session = store.openSessions.first(where: { $0.id == id }) {
