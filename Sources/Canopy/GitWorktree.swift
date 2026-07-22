@@ -22,19 +22,21 @@ enum GitWorktree {
         return dir.standardizedFileURL.lastPathComponent
     }
 
-    /// True when `dir` is a Canopy-recognized worktree (managed root or the
-    /// legacy `<repo>-worktrees` sibling layout). Callers use this to keep
-    /// worktrees out of launcher Recents — the plain folder name ("work-…")
-    /// carries no project context, and the session is discoverable via the
-    /// sidebar's closed-session row anyway.
+    /// True when `dir` is a Canopy-recognized worktree — the managed root
+    /// (`~/.claude/worktrees/<repo>/<branch>`) or the sibling
+    /// `<repo>-worktrees/<branch>` layout used by external tooling. Path
+    /// shape only; no filesystem check. Currently the Recents filter (both
+    /// `.add` and `.load` in `RecentDirectories`) is the only caller.
     static func isManagedWorktree(_ dir: URL) -> Bool {
         worktreeParts(for: dir) != nil
     }
 
-    // Lexical normalization ("..", ".") so cwd-derived paths still match
-    // the layout checks. Symlink resolution is deliberately skipped — this
-    // runs per sidebar-row render, and a miss only degrades to the plain
-    // folder name.
+    // Purely lexical: standardizes the URL ("..", ".") then string-matches
+    // the two known worktree layouts. Symlink resolution is skipped so this
+    // stays cheap enough to call per sidebar-row render; false negatives are
+    // acceptable at both call sites (a display label falls back to the plain
+    // folder name; a worktree that briefly evades the Recents filter is
+    // harmless).
     private static func worktreeParts(for dir: URL) -> (repo: String, branch: String)? {
         let standardized = dir.standardizedFileURL
         let name = standardized.lastPathComponent

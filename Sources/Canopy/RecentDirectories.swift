@@ -8,13 +8,18 @@ enum RecentDirectories {
         guard let paths = UserDefaults.standard.stringArray(forKey: key) else { return [] }
         return paths.compactMap { URL(fileURLWithPath: $0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
+            // Also filter on read: worktree entries persisted by pre-guard
+            // builds are masked (not physically scrubbed) here, and any
+            // subsequent `add(_:)` rewrites the filtered list back to disk.
             .filter { !GitWorktree.isManagedWorktree($0) }
     }
 
     static func add(_ url: URL) {
-        // Worktrees carry no project context in their folder name ("work-…")
-        // and are re-openable from the sidebar's closed-session row, so keep
-        // them out of Recents entirely. Callers don't need to gate.
+        // Worktree folder names are branch-derived and carry no project
+        // context, so the launcher dropdown would show meaningless entries.
+        // Sessions inside a worktree remain reachable via the sidebar's
+        // Recents/closed rows, so nothing is lost by skipping the write.
+        // Callers don't need to gate.
         guard !GitWorktree.isManagedWorktree(url) else { return }
         var dirs = load()
         dirs.removeAll { $0 == url }

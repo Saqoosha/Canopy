@@ -630,6 +630,56 @@ enum SidebarLogicProbe {
                !GitWorktree.isManagedWorktree(URL(fileURLWithPath: "/repos/Canopy")))
         record("isManagedWorktree: bare '-worktrees' folder → false",
                !GitWorktree.isManagedWorktree(URL(fileURLWithPath: "/repos/-worktrees/x")))
+        record("isManagedWorktree: '..'-laden path still recognized",
+               GitWorktree.isManagedWorktree(
+                   GitWorktree.worktreesRoot
+                       .appendingPathComponent("Other/../Canopy/fix-foo")))
+
+        // --- RecentDirectories worktree filter (add + load) ---
+        // Uses real UserDefaults + real temp/managed-root directories, then
+        // restores the prior state explicitly — Swift `defer` does NOT run
+        // when `runIfRequested` finishes via `exit()`.
+        do {
+            let key = "recentDirectories"
+            let priorStored = UserDefaults.standard.stringArray(forKey: key)
+            let tmp = FileManager.default.temporaryDirectory
+            let normalDir = tmp.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let repoName = "ProbeRepo-\(UUID().uuidString)"
+            let worktreeParent = GitWorktree.worktreesRoot
+                .appendingPathComponent(repoName, isDirectory: true)
+            let worktreeDir = worktreeParent.appendingPathComponent("branch", isDirectory: true)
+            try? FileManager.default.createDirectory(at: normalDir, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: worktreeDir, withIntermediateDirectories: true)
+
+            // add() short-circuits on a worktree URL — UserDefaults must not change.
+            UserDefaults.standard.set([normalDir.path], forKey: key)
+            RecentDirectories.add(worktreeDir)
+            record("RecentDirectories.add: worktree URL is not persisted",
+                   UserDefaults.standard.stringArray(forKey: key) == [normalDir.path])
+
+            // load() drops an already-persisted worktree entry — the passive
+            // migration path for users upgrading from pre-guard Canopy builds.
+            UserDefaults.standard.set([normalDir.path, worktreeDir.path], forKey: key)
+            record("RecentDirectories.load: existing worktree entry is filtered",
+                   RecentDirectories.load().map(\.path) == [normalDir.path])
+
+            // add() still persists a normal directory (guard doesn't over-reject).
+            UserDefaults.standard.set([], forKey: key)
+            RecentDirectories.add(normalDir)
+            record("RecentDirectories.add: normal dir persists as before",
+                   UserDefaults.standard.stringArray(forKey: key) == [normalDir.path])
+
+            // Restore the pre-probe UserDefaults key + synchronize (exit()
+            // skips the run-loop flush) + best-effort tmp cleanup.
+            if let priorStored {
+                UserDefaults.standard.set(priorStored, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            UserDefaults.standard.synchronize()
+            try? FileManager.default.removeItem(at: normalDir)
+            try? FileManager.default.removeItem(at: worktreeParent)
+        }
 
         // --- Open-session reorder (drag & drop) ---
         // Pure mapping: a move expressed against the visible (filtered) open
