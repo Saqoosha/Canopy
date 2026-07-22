@@ -763,7 +763,7 @@ enum PaneWindowSizer {
             return
         }
 
-        let sidebar = measuredSidebarWidth(in: window)
+        let sidebar = measuredSidebarWidthTrustingCollapse(in: window)
         let dividers = CGFloat(max(0, store.panes.count - 1)) * SessionStore.paneDividerWidth
         let sumPaneW = store.panes.reduce(0) { $0 + $1.preferredWidth }
         let target = sidebar + sumPaneW + dividers
@@ -801,39 +801,27 @@ enum PaneWindowSizer {
         window.setFrame(newFrame, display: true)
     }
 
-    /// Sidebar width for runtime hit-testing and weight normalization —
-    /// the click monitor, quit-time frame normalization, and
-    /// `SessionStore.normalizePaneWeightsToVisualWidths`. Unlike
-    /// `measuredSidebarWidth` (the sizer's startup-hardened variant), this
-    /// trusts any laid-out split view verbatim: a measured 0 here means
-    /// the user really collapsed the sidebar, and treating it as 280
-    /// would shift every pane hit-test right by the phantom sidebar
-    /// (click pane N → focus pane N−1, Cmd+W closes the wrong pane).
-    /// These call sites run on live user interaction, when the split view
-    /// is guaranteed laid out, so the startup zero-width false positive
-    /// can't occur — only fall back when layout hasn't happened at all.
+    /// The single sidebar-width measurement shared by ALL consumers — the
+    /// sizer (`applyForCurrentPanes`), the click monitor's hit-testing,
+    /// quit-time frame normalization, and
+    /// `SessionStore.normalizePaneWeightsToVisualWidths`. Trusts any
+    /// laid-out split view verbatim: a measured 0 means the user really
+    /// collapsed the sidebar, and treating it as 280 would shift pane
+    /// hit-tests right by the phantom sidebar (click pane N → focus pane
+    /// N−1, Cmd+W closes the wrong pane) or inflate the sizer's window
+    /// target by 280 pt per pane operation. The `split.frame.width > 0`
+    /// guard covers the startup false positive (split view not yet laid
+    /// out reads as zero-width — sizing from that once caused a window
+    /// grow/shrink loop back when a didResize observer fed pane state;
+    /// that observer is gone, but the guard stays cheap and correct).
+    /// All consumers MUST share one measurement: an earlier iteration
+    /// where the sizer distrusted a collapsed sidebar (assumed 280) while
+    /// weight normalization trusted it made every pane add/close drift
+    /// the window ~280 pt wider whenever the sidebar was collapsed.
     @MainActor
     static func measuredSidebarWidthTrustingCollapse(in window: NSWindow) -> CGFloat {
         guard let split = findSplitView(in: window), split.frame.width > 0,
               let sidebar = split.arrangedSubviews.first
-        else { return assumedSidebarWidth }
-        return sidebar.frame.width
-    }
-
-    /// Sidebar width for the window sizer. Only trusts the measurement
-    /// when the split view is laid out AND the sidebar is plausibly
-    /// expanded (> 50 pt): during startup the split view's subviews are
-    /// momentarily zero-width, and sizing the window from that phantom
-    /// "collapsed" reading made the sizer target a window smaller than
-    /// SwiftUI's actual content, which grew the window back and looped
-    /// forever. The cost: a genuinely collapsed sidebar makes the sizer
-    /// assume 280 pt — the window comes out slightly wide on pane
-    /// add/close, which is harmless next to the startup loop.
-    @MainActor
-    private static func measuredSidebarWidth(in window: NSWindow) -> CGFloat {
-        guard let split = findSplitView(in: window),
-              let sidebar = split.arrangedSubviews.first,
-              split.frame.width > 0, sidebar.frame.width > 50
         else { return assumedSidebarWidth }
         return sidebar.frame.width
     }
