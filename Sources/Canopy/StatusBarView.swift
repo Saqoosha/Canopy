@@ -2,10 +2,9 @@ import SwiftUI
 
 struct StatusBarView: View {
     let data: StatusBarData
-    private var rateLimit: SharedRateLimitData { SharedRateLimitData.shared }
 
     var body: some View {
-        // TimelineView ticks every 60s so rate-limit reset countdowns stay fresh.
+        // TimelineView ticks every 60s so any countdown labels stay fresh.
         TimelineView(.periodic(from: .now, by: 60)) { context in
             statusBar(now: context.date)
         }
@@ -59,20 +58,6 @@ struct StatusBarView: View {
                     }
                 }
                 .help(contextTooltip())
-            }
-
-            // 5hr + weekly rate limits — only shown for Anthropic models
-            if data.model.lowercased().contains("claude") {
-                if rateLimit.sessionResetDate != nil {
-                    separator
-                    rateLimitSegment(label: "5hr", pct: rateLimit.sessionPct, resetDate: rateLimit.sessionResetDate)
-                }
-
-                let weeklyResetDate = rateLimit.effectiveWeeklyResetDate(for: data.model)
-                if weeklyResetDate != nil {
-                    separator
-                    rateLimitSegment(label: "Wk", pct: rateLimit.effectiveWeeklyPct(for: data.model), resetDate: weeklyResetDate)
-                }
             }
 
             // Message count
@@ -135,38 +120,6 @@ struct StatusBarView: View {
                     .frame(width: max(barHeight, fill), height: barHeight)
             }
         }
-    }
-
-    private func rateLimitSegment(label: String, pct: Int, resetDate: Date?) -> some View {
-        let reset = SharedRateLimitData.formatResetTime(resetDate)
-        let absoluteReset = SharedRateLimitData.formatAbsoluteResetTime(resetDate)
-        return HStack(spacing: 5) {
-            Text(label)
-                .foregroundStyle(.tertiary)
-            thinBar(pct: pct)
-            Text("\(pct)%")
-                .foregroundStyle(pctColor(pct))
-            if !reset.isEmpty {
-                Text(reset)
-                    .font(.system(size: 10, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .help(rateLimitTooltip(label: label, pct: pct, reset: reset, absoluteReset: absoluteReset))
-    }
-
-    private func rateLimitTooltip(label: String, pct: Int, reset: String, absoluteReset: String) -> String {
-        let fullLabel = label == "5hr" ? "5-hour session" : (label == "Wk" ? "Weekly" : label)
-        var lines = ["\(fullLabel) usage: \(pct)%"]
-        if !absoluteReset.isEmpty {
-            if !reset.isEmpty {
-                lines.append("Resets \(absoluteReset) (in \(reset))")
-            } else {
-                lines.append("Resets \(absoluteReset)")
-            }
-        }
-        return lines.joined(separator: "\n")
     }
 
     // MARK: - Helpers
