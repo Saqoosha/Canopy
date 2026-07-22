@@ -36,7 +36,11 @@ struct CanopyApp: App {
             // by the empty `.saveItem` / `.printItem` replacements below.
             CommandGroup(replacing: .newItem) {
                 Button("New Session") {
-                    sidebarStore.select(.launcher)
+                    if sidebarStore.panes.isEmpty {
+                        sidebarStore.select(.launcher)
+                    } else {
+                        sidebarStore.openLauncherInFocusedPane()
+                    }
                 }
                 .keyboardShortcut("n")
                 Button("Open Folder…") {
@@ -48,6 +52,7 @@ struct CanopyApp: App {
                 // of selection state. The actual handler is the keyDown monitor
                 // (handleCloseShortcut here is only reached on mouse click);
                 // both fall back to closing the window when no session is open.
+                // Multi-pane: Cmd+W / this button closes the focused pane.
                 Button("Close Session") {
                     handleCloseShortcut()
                 }
@@ -74,13 +79,27 @@ struct CanopyApp: App {
                 }
                 .keyboardShortcut("0", modifiers: .command)
                 Divider()
-                // Cmd+1..9 — switch to N-th open session (closed rows skipped).
+                // Cmd+1..9 — N-th visible open row: focus its pane if already
+                // shown, otherwise replace the focused pane's session.
                 ForEach(1...9, id: \.self) { idx in
                     Button("Switch to Open Session \(idx)") {
                         jumpToRow(at: idx - 1)
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
                 }
+            }
+            CommandMenu("Panes") {
+                Button("Focus Previous Pane") {
+                    sidebarStore.moveFocus(delta: -1, wrap: true)
+                }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .disabled(sidebarStore.panes.count < 2)
+
+                Button("Focus Next Pane") {
+                    sidebarStore.moveFocus(delta: +1, wrap: true)
+                }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                .disabled(sidebarStore.panes.count < 2)
             }
         }
 
@@ -92,11 +111,19 @@ struct CanopyApp: App {
     // MARK: - Sidebar shell helpers
 
     private func jumpToRow(at index: Int) {
-        // Cmd+1..9 switches among open sessions only; closed rows are ignored.
-        let openRows = sidebarStore.visibleRows.filter(\.isOpen)
-        guard index < openRows.count,
-              case .open(let s) = openRows[index] else { return }
-        sidebarStore.select(.session(s.id))
+        // Cmd+1..9: N-th visible open row. Already in a pane → focus jump;
+        // otherwise replace the focused pane's session. Closed rows ignored.
+        let visibleOpen = sidebarStore.visibleRows.compactMap { row -> UUID? in
+            if case .open(let s) = row { return s.id }
+            return nil
+        }
+        guard visibleOpen.indices.contains(index) else { return }
+        let target = visibleOpen[index]
+        if let idx = sidebarStore.paneIndex(forSession: target) {
+            sidebarStore.setFocusedPaneIndex(idx)
+        } else {
+            sidebarStore.openInFocusedPane(target)
+        }
     }
 
     private func closeActiveSession() {
@@ -105,10 +132,21 @@ struct CanopyApp: App {
         }
     }
 
-    /// Cmd+W behaviour (browser-style): close the focused non-main window
+    /// Cmd+W behaviour (browser-style): with 2+ panes, close the focused
+    /// pane; otherwise fall through to the single-pane legacy path
+    /// (non-main window → active session → main window).
+    private func handleCloseShortcut() {
+        if sidebarStore.panes.count > 1 {
+            sidebarStore.closePane(at: sidebarStore.focusedPaneIndex)
+        } else {
+            legacyCloseAction()
+        }
+    }
+
+    /// Single-pane / no-pane Cmd+W: close the focused non-main window
     /// first (Settings, Sparkle alert), otherwise close the active session,
     /// otherwise close the main window itself.
-    private func handleCloseShortcut() {
+    private func legacyCloseAction() {
         if let key = NSApp.keyWindow, !isCanopyWindow(key) {
             key.performClose(nil)
             return
@@ -310,7 +348,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             logger.debug("Cmd+W intercepted (pre-performClose)")
-            if let store = SessionStore.shared, let active = store.activeSession {
+            if let store = SessionStore.shared, store.panes.count > 1 {
+                logger.debug("  → closing focused pane at \(store.focusedPaneIndex)")
+                store.closePane(at: store.focusedPaneIndex)
+            } else if let store = SessionStore.shared, let active = store.activeSession {
                 logger.debug("  → closing active session id=\(active.id.uuidString, privacy: .public)")
                 store.closeSession(active.id)
             } else {
