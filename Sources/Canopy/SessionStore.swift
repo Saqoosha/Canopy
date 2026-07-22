@@ -756,10 +756,6 @@ final class SessionStore {
     /// in openSessions — closing a pane does not close the session.
     func closePane(at index: Int) {
         guard panes.indices.contains(index) else { return }
-        // Browser-tab convention (matches closeSession): only shift focus when
-        // the closed pane WAS the focused one. Closing a non-focused pane
-        // keeps focus on the same underlying pane; we just adjust the index
-        // if the removal shifted it down.
         let wasFocused = index == focusedPaneIndex
         panes.remove(at: index)
         if panes.isEmpty {
@@ -773,10 +769,7 @@ final class SessionStore {
         } else if index < focusedPaneIndex {
             focusedPaneIndex -= 1
         }
-        switch panes[focusedPaneIndex].content {
-        case .session(let id): selection = .session(id)
-        case .launcher: selection = .launcher
-        }
+        syncSelectionToFocusedPane()
         schedulePaneResize()
     }
 
