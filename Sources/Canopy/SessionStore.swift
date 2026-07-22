@@ -187,7 +187,8 @@ final class SessionStore {
         effortLevel: String? = nil,
         permissionMode: PermissionMode = .acceptEdits,
         remoteHost: String? = nil,
-        customApi: ModelProvider? = nil
+        customApi: ModelProvider? = nil,
+        target: PaneTarget = .focused
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -218,7 +219,10 @@ final class SessionStore {
         // sessions go to the bottom of the Open list, preserving the
         // muscle-memory positions of earlier-opened sessions.
         openSessions.append(session)
-        select(.session(session.id))
+        switch target {
+        case .focused: select(.session(session.id))
+        case .newPane: _ = openInNewPane(session.id)
+        }
         logger.info("openNew dir=\(directory.path, privacy: .public) resume=\(resumeId ?? "new", privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")
         return session
     }
@@ -227,10 +231,13 @@ final class SessionStore {
     /// existing JSONL. If `permissionMode` is nil, falls back to the global
     /// default in `CanopySettings.defaultPermissionMode`.
     @discardableResult
-    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil) -> OpenSession {
-        // If this session is already open, just select it.
+    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil, target: PaneTarget = .focused) -> OpenSession {
+        // If this session is already open, honor target (focused vs new pane).
         if let existing = openSessions.first(where: { $0.resumeId == entry.id }) {
-            select(.session(existing.id))
+            switch target {
+            case .focused: select(.session(existing.id))
+            case .newPane: _ = openInNewPane(existing.id)
+            }
             return existing
         }
         return openNew(
@@ -238,7 +245,8 @@ final class SessionStore {
             resumeId: entry.id,
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,
-            customApi: ModelProviderStore.selectedProvider()
+            customApi: ModelProviderStore.selectedProvider(),
+            target: target
         )
     }
 
@@ -590,6 +598,8 @@ final class SessionStore {
     }
 
     // MARK: - Panes
+
+    enum PaneTarget: Equatable { case focused, newPane }
 
     /// Replace focused pane's content with the given session. If panes is
     /// empty (fresh launch, no selection yet) create the first pane at
