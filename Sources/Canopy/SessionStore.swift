@@ -203,6 +203,24 @@ final class SessionStore {
     func setFocusedPaneIndex(_ idx: Int) {
         guard panes.indices.contains(idx) else { return }
         focusedPaneIndex = idx
+        syncSelectionToFocusedPane()
+    }
+
+    /// Update selection + lastActiveResumeId from the currently focused pane's content.
+    /// Called from setFocusedPaneIndex and moveFocus so tap-to-focus and Cmd+Opt+arrow
+    /// keep sidebar highlight, activeSession, and persistence in sync.
+    private func syncSelectionToFocusedPane() {
+        guard let pane = focusedPane else { return }
+        switch pane.content {
+        case .session(let id):
+            selection = .session(id)
+            if let open = openSessions.first(where: { $0.id == id }) {
+                lastActiveResumeId = open.resumeId
+                SessionStorePersistence.saveLastActiveResumeId(open.resumeId)
+            }
+        case .launcher:
+            selection = .launcher
+        }
     }
 
     // MARK: - Open / close
@@ -778,10 +796,7 @@ final class SessionStore {
         let raw = focusedPaneIndex + delta
         let next = wrap ? ((raw % n) + n) % n : max(0, min(n - 1, raw))
         focusedPaneIndex = next
-        switch panes[next].content {
-        case .session(let id): selection = .session(id)
-        case .launcher: selection = .launcher
-        }
+        syncSelectionToFocusedPane()
     }
 
     /// Update two adjacent panes' preferred widths from a divider drag.
