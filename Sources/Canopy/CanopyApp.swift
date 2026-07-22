@@ -594,3 +594,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return rect
     }
 }
+
+/// Resizes the main window to fit the current pane layout, applying the
+/// "grow on add / shrink on close" contract from the spec. Falls back to
+/// equal-share across all panes when the desired width exceeds the current
+/// screen.
+enum PaneWindowSizer {
+    /// Bottom-line assumption for sidebar width in points. NavigationSplitView
+    /// exposes it dynamically but we don't have a direct hook; a fixed
+    /// estimate is close enough — the fallback branch tolerates being off
+    /// by a few points either way.
+    static let assumedSidebarWidth: CGFloat = 240
+
+    @MainActor
+    static func applyForCurrentPanes(store: SessionStore) {
+        guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isMainWindow }) ?? NSApp.windows.first,
+              let screen = window.screen ?? NSScreen.main else { return }
+
+        let sidebar = assumedSidebarWidth
+        let dividers = CGFloat(max(0, store.panes.count - 1)) * SessionStore.paneDividerWidth
+        let sumPaneW = store.panes.reduce(0) { $0 + $1.preferredWidth }
+        let target = sidebar + sumPaneW + dividers
+        let screenMax = screen.visibleFrame.width
+
+        var newFrame = window.frame
+        if target <= screenMax {
+            newFrame.size.width = target
+        } else {
+            // Fallback: cap at screen and equal-share the detail column.
+            let detailBudget = max(0, screenMax - sidebar - dividers)
+            let share = store.panes.isEmpty ? 0 : detailBudget / CGFloat(store.panes.count)
+            for i in store.panes.indices {
+                store.forceSetPaneWidth(at: i, to: share)
+            }
+            newFrame.size.width = screenMax
+        }
+
+        // Anchor origin.y (topLeftPoint) so the window doesn't jump down.
+        let topY = window.frame.origin.y + window.frame.height
+        newFrame.origin.y = topY - newFrame.height
+
+        // Clamp origin.x so the wider window doesn't shoot off-screen.
+        if newFrame.maxX > screen.visibleFrame.maxX {
+            newFrame.origin.x = max(screen.visibleFrame.minX, screen.visibleFrame.maxX - newFrame.width)
+        }
+
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.20
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().setFrame(newFrame, display: true)
+        }
+    }
+}

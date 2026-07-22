@@ -600,6 +600,7 @@ final class SessionStore {
             panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
             focusedPaneIndex = 0
             selection = .session(sessionId)
+            Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
             return
         }
         // If this session already lives in a pane, focus that one instead of
@@ -640,6 +641,7 @@ final class SessionStore {
         panes.append(PaneSlot(content: .session(sessionId), preferredWidth: width))
         focusedPaneIndex = panes.count - 1
         selection = .session(sessionId)
+        Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
         return true
     }
 
@@ -651,6 +653,7 @@ final class SessionStore {
         panes.append(PaneSlot(content: .launcher, preferredWidth: width))
         focusedPaneIndex = panes.count - 1
         selection = .launcher
+        Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
         return true
     }
 
@@ -668,6 +671,7 @@ final class SessionStore {
         if panes.isEmpty {
             focusedPaneIndex = 0
             selection = .launcher
+            Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
             return
         }
         if wasFocused {
@@ -679,6 +683,15 @@ final class SessionStore {
         case .session(let id): selection = .session(id)
         case .launcher: selection = .launcher
         }
+        Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
+    }
+
+    /// Bypasses the divider-drag floor. Used only by PaneWindowSizer's
+    /// equal-share fallback where the mathematics might land just under
+    /// 100 pt on tiny screens.
+    func forceSetPaneWidth(at index: Int, to width: CGFloat) {
+        guard panes.indices.contains(index) else { return }
+        panes[index].preferredWidth = max(1, width)
     }
 
     /// Move focus by delta. wrap=true (default) → Cmd+Opt+← from leftmost
