@@ -398,15 +398,18 @@ Wait for user approval. Phase 0 complete — the app is now usable at any pane w
 
 **Interfaces:**
 - Produces:
-  - `struct PaneSlot: Equatable, Identifiable { let id: UUID; var sessionId: OpenSession.ID; var preferredWidth: CGFloat }`
+  - `enum PaneContent: Equatable { case session(OpenSession.ID); case launcher }`
+  - `struct PaneSlot: Equatable, Identifiable { let id: UUID; var content: PaneContent; var preferredWidth: CGFloat }`
   - `SessionStore.panes: [PaneSlot]` (read-write from mutation helpers only)
   - `SessionStore.focusedPaneIndex: Int` (read-write)
   - `SessionStore.focusedPane: PaneSlot?` (computed)
-  - `SessionStore.openInFocusedPane(_ id: OpenSession.ID)` — replaces focused pane's session with `id`
-  - `SessionStore.openInNewPane(_ id: OpenSession.ID) -> Bool` — appends, returns false if bounced (already in a pane / cap reached)
+  - `SessionStore.openInFocusedPane(_ id: OpenSession.ID)` — replaces focused pane's content with `.session(id)`
+  - `SessionStore.openLauncherInFocusedPane()` — replaces focused pane's content with `.launcher` (used by Cmd+N in multi-pane)
+  - `SessionStore.openInNewPane(_ id: OpenSession.ID) -> Bool` — appends `.session(id)`, returns false if bounced (already in a pane / cap reached)
+  - `SessionStore.openLauncherInNewPane() -> Bool` — appends `.launcher`, returns false if cap reached
   - `SessionStore.closePane(at index: Int)` — removes pane, shifts focus
   - `SessionStore.moveFocus(delta: Int, wrap: Bool = true)` — Cmd+Opt+←/→
-  - `SessionStore.paneIndex(forSession id: OpenSession.ID) -> Int?`
+  - `SessionStore.paneIndex(forSession id: OpenSession.ID) -> Int?` — returns index of the pane holding `.session(id)`, nil for `.launcher` or missing
 - Constants: `SessionStore.paneAbsoluteCap = 5`, `SessionStore.paneDividerWidth: CGFloat = 1`, `SessionStore.paneDefaultWidth: CGFloat = 800`, `SessionStore.paneMinDragWidth: CGFloat = 100`
 
 - [ ] **Step 1: Create `PaneSlot.swift`**
@@ -414,18 +417,28 @@ Wait for user approval. Phase 0 complete — the app is now usable at any pane w
 ```swift
 import Foundation
 
-/// One horizontal pane in the detail column. Points at an OpenSession
-/// (identity of the shim + webview living in SessionStore.openSessions)
-/// and remembers the pane's currently-preferred width. Layout in
-/// Detail.swift reads preferredWidth; divider drag mutates it.
+/// What a pane is currently showing.
+enum PaneContent: Equatable {
+    /// Session view for the given OpenSession.
+    case session(OpenSession.ID)
+    /// Launcher view (new-session flow). Reached via Cmd+N or Cmd+click
+    /// the Launcher row in the sidebar.
+    case launcher
+}
+
+/// One horizontal pane in the detail column. Points at either an
+/// OpenSession (identity of the shim + webview living in
+/// SessionStore.openSessions) or the launcher, and remembers the pane's
+/// currently-preferred width. Layout in Detail.swift reads preferredWidth;
+/// divider drag mutates it.
 struct PaneSlot: Equatable, Identifiable {
     let id: UUID
-    var sessionId: OpenSession.ID   // typealias for UUID today
+    var content: PaneContent
     var preferredWidth: CGFloat
 
-    init(id: UUID = UUID(), sessionId: OpenSession.ID, preferredWidth: CGFloat) {
+    init(id: UUID = UUID(), content: PaneContent, preferredWidth: CGFloat) {
         self.id = id
-        self.sessionId = sessionId
+        self.content = content
         self.preferredWidth = preferredWidth
     }
 }
@@ -456,7 +469,7 @@ var focusedPane: PaneSlot? {
 }
 
 func paneIndex(forSession id: OpenSession.ID) -> Int? {
-    panes.firstIndex { $0.sessionId == id }
+    panes.firstIndex { if case .session(let sid) = $0.content { return sid == id } else { return false } }
 }
 ```
 
@@ -467,12 +480,13 @@ Add these methods in a new `// MARK: - Panes` section, after the `moveOpenSessio
 ```swift
 // MARK: - Panes
 
-/// Replace focused pane's session. If panes is empty (fresh launch, no
-/// selection yet) create the first pane at paneDefaultWidth.
+/// Replace focused pane's content with the given session. If panes is
+/// empty (fresh launch, no selection yet) create the first pane at
+/// paneDefaultWidth.
 func openInFocusedPane(_ sessionId: OpenSession.ID) {
     guard openSessions.contains(where: { $0.id == sessionId }) else { return }
     if panes.isEmpty {
-        panes = [PaneSlot(sessionId: sessionId, preferredWidth: Self.paneDefaultWidth)]
+        panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
         focusedPaneIndex = 0
         selection = .session(sessionId)
         return
@@ -484,8 +498,19 @@ func openInFocusedPane(_ sessionId: OpenSession.ID) {
         selection = .session(sessionId)
         return
     }
-    panes[focusedPaneIndex].sessionId = sessionId
+    panes[focusedPaneIndex].content = .session(sessionId)
     selection = .session(sessionId)
+}
+
+/// Replace focused pane's content with the launcher. Used by Cmd+N in
+/// multi-pane mode; single-pane Cmd+N routes through select(.launcher).
+func openLauncherInFocusedPane() {
+    if panes.isEmpty {
+        selection = .launcher
+        return
+    }
+    panes[focusedPaneIndex].content = .launcher
+    selection = .launcher
 }
 
 /// Append a new pane for `sessionId`. Returns false if bounced (already
@@ -501,9 +526,20 @@ func openInNewPane(_ sessionId: OpenSession.ID) -> Bool {
     }
     guard panes.count < Self.paneAbsoluteCap else { return false }
     let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
-    panes.append(PaneSlot(sessionId: sessionId, preferredWidth: width))
+    panes.append(PaneSlot(content: .session(sessionId), preferredWidth: width))
     focusedPaneIndex = panes.count - 1
     selection = .session(sessionId)
+    return true
+}
+
+/// Append a new launcher pane. Returns false only when the cap is reached.
+@discardableResult
+func openLauncherInNewPane() -> Bool {
+    guard panes.count < Self.paneAbsoluteCap else { return false }
+    let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
+    panes.append(PaneSlot(content: .launcher, preferredWidth: width))
+    focusedPaneIndex = panes.count - 1
+    selection = .launcher
     return true
 }
 
@@ -536,7 +572,9 @@ func moveFocus(delta: Int, wrap: Bool = true) {
 /// Called by closeSession(_:) after the session is removed from
 /// openSessions. Drops any pane pointing at the closed session.
 private func removePanesForClosedSession(_ id: OpenSession.ID) {
-    let matching = panes.enumerated().filter { $0.element.sessionId == id }.map { $0.offset }
+    let matching = panes.enumerated().compactMap { (i, slot) -> Int? in
+        if case .session(let sid) = slot.content, sid == id { return i } else { return nil }
+    }
     // Remove from the highest index down so earlier indices stay valid.
     for idx in matching.reversed() { closePane(at: idx) }
 }
@@ -566,13 +604,18 @@ do {
     store.openInFocusedPane(openA.id)
     record("openInFocusedPane on empty seeds first pane",
            store.panes.count == 1 && store.focusedPaneIndex == 0
-           && store.panes[0].sessionId == openA.id
+           && store.panes[0].content == .session(openA.id)
            && store.panes[0].preferredWidth == SessionStore.paneDefaultWidth)
 
     let addedB = store.openInNewPane(openB.id)
     record("openInNewPane appends and focuses new",
            addedB && store.panes.count == 2 && store.focusedPaneIndex == 1
-           && store.panes[1].sessionId == openB.id)
+           && store.panes[1].content == .session(openB.id))
+
+    store.openLauncherInFocusedPane()
+    record("openLauncherInFocusedPane sets focused to .launcher",
+           store.panes[store.focusedPaneIndex].content == .launcher)
+    store.openInFocusedPane(openB.id)   // restore session content for next tests
 
     let addedBAgain = store.openInNewPane(openB.id)
     record("openInNewPane on already-in-pane bounces + focuses",
@@ -586,7 +629,7 @@ do {
     store.closePane(at: 1)
     record("closePane shifts focus left",
            store.panes.count == 1 && store.focusedPaneIndex == 0
-           && store.panes[0].sessionId == openA.id)
+           && store.panes[0].content == .session(openA.id))
 
     // Cap
     let store2 = SessionStore()
@@ -636,7 +679,7 @@ Wait for user approval.
 - Create: `Sources/Canopy/PaneHeaderStrip.swift`
 
 **Interfaces:**
-- Produces: `struct PaneHeaderStrip: View { let session: OpenSession; let showCloseButton: Bool; let onClose: () -> Void; ... }`
+- Produces: `struct PaneHeaderStrip: View { let title: String; let project: String; let showCloseButton: Bool; let onClose: () -> Void; ... }`
 
 - [ ] **Step 1: Create `PaneHeaderStrip.swift`**
 
@@ -647,23 +690,29 @@ import SwiftUI
 /// can only hold one string; with N panes visible we need per-pane title
 /// display. Also carries the pane's close X (hover-only, hidden when
 /// showCloseButton is false — i.e. when panes.count == 1).
+///
+/// Takes plain strings rather than an OpenSession so it can also render
+/// a launcher pane (title "New Session", empty project).
 struct PaneHeaderStrip: View {
-    let session: OpenSession
+    let title: String
+    let project: String
     let showCloseButton: Bool
     let onClose: () -> Void
     @State private var hovered: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(session.title.isEmpty ? "Untitled" : session.title)
+            Text(title)
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Text(session.project)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if !project.isEmpty {
+                Text(project)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             Spacer(minLength: 4)
             if showCloseButton && hovered {
                 Button(action: onClose) {
@@ -760,27 +809,43 @@ var body: some View {
 
 @ViewBuilder
 private func paneCell(pane: PaneSlot, index: Int) -> some View {
-    if let session = store.openSessions.first(where: { $0.id == pane.sessionId }) {
-        VStack(spacing: 0) {
-            PaneHeaderStrip(
-                session: session,
-                showCloseButton: store.panes.count > 1,
-                onClose: { store.closePane(at: index) }
-            )
-            SessionContainer(session: session) { _ in
-                store.closeSession(session.id)
+    Group {
+        switch pane.content {
+        case .session(let sessionId):
+            if let session = store.openSessions.first(where: { $0.id == sessionId }) {
+                VStack(spacing: 0) {
+                    PaneHeaderStrip(
+                        title: session.title.isEmpty ? "Untitled" : session.title,
+                        project: session.project,
+                        showCloseButton: store.panes.count > 1,
+                        onClose: { store.closePane(at: index) }
+                    )
+                    SessionContainer(session: session) { _ in
+                        store.closeSession(session.id)
+                    }
+                    .id(session.id)
+                }
+            } else {
+                // Session was closed under us; pane should have been auto-removed
+                // via removePanesForClosedSession. Render an empty placeholder
+                // rather than crashing.
+                Color(nsColor: .windowBackgroundColor)
             }
-            .id(session.id)
+        case .launcher:
+            VStack(spacing: 0) {
+                PaneHeaderStrip(
+                    title: "New Session",
+                    project: "",
+                    showCloseButton: store.panes.count > 1,
+                    onClose: { store.closePane(at: index) }
+                )
+                DetailLauncher(store: store)
+            }
         }
-        .overlay(focusBorder(active: index == store.focusedPaneIndex))
-        .contentShape(Rectangle())
-        .onTapGesture { store.focusedPaneIndex = index }
-    } else {
-        // Session was closed under us; pane should have been auto-removed
-        // via removePanesForClosedSession. Render an empty placeholder
-        // rather than crashing.
-        Color(nsColor: .windowBackgroundColor)
     }
+    .overlay(focusBorder(active: index == store.focusedPaneIndex))
+    .contentShape(Rectangle())
+    .onTapGesture { store.focusedPaneIndex = index }
 }
 
 private func focusBorder(active: Bool) -> some View {
@@ -791,16 +856,24 @@ private func focusBorder(active: Bool) -> some View {
 }
 
 private var windowTitle: String {
-    guard let pane = store.focusedPane,
-          let session = store.openSessions.first(where: { $0.id == pane.sessionId }),
-          !session.title.isEmpty else { return "Canopy" }
-    return session.title
+    guard let pane = store.focusedPane else { return "Canopy" }
+    switch pane.content {
+    case .session(let id):
+        guard let session = store.openSessions.first(where: { $0.id == id }),
+              !session.title.isEmpty else { return "Canopy" }
+        return session.title
+    case .launcher:
+        return "New Session"
+    }
 }
 
 private var windowSubtitle: String {
-    guard let pane = store.focusedPane,
-          let session = store.openSessions.first(where: { $0.id == pane.sessionId }) else { return "" }
-    return session.project
+    guard let pane = store.focusedPane else { return "" }
+    if case .session(let id) = pane.content,
+       let session = store.openSessions.first(where: { $0.id == id }) {
+        return session.project
+    }
+    return ""
 }
 ```
 
@@ -1311,23 +1384,27 @@ Button("Switch to Session \(n)") {
 .keyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: .command)
 ```
 
-- [ ] **Step 5: Route Cmd+N to focused pane**
+- [ ] **Step 5: Route Cmd+N to focused pane (launcher content)**
 
-The current Cmd+N handler selects `.launcher`. Because `SessionStore.select(_:)` was extended in Task 6 Step 2 to bridge selection through `openInFocusedPane`, `.launcher` selection needs handling. Since `.launcher` isn't a session, it needs its own path:
+The current Cmd+N handler selects `.launcher`. Task 6's paneCell already
+handles `.launcher` content (added in the plan revision), so this becomes
+a direct call:
 
 ```swift
-func selectLauncherInFocusedPane() {
-    selection = .launcher
-    // Do NOT touch panes[] here — Detail.swift falls back to DetailLauncher
-    // when panes is empty. When panes is non-empty, .launcher selection
-    // means "show launcher in focused pane" — but the current Detail
-    // render always shows panes when they exist. So .launcher only really
-    // fires in the panes-empty case for now. Route via existing select().
-    select(.launcher)
+Button("New Session") {
+    if store.panes.isEmpty {
+        store.select(.launcher)         // single-pane path
+    } else {
+        store.openLauncherInFocusedPane()
+    }
 }
+.keyboardShortcut("n", modifiers: .command)
 ```
 
-For v1 keep Cmd+N as "if no panes, show launcher; if panes exist, do nothing" — or wire it to focused pane replacement with launcher content. Detail.swift's `paneCell` currently expects a session; adding a "launcher pane" variant is meaningful work. **Defer full "launcher pane" mode to a follow-up**; for v1 make Cmd+N a no-op when `panes.count > 0` and note it in the release comment.
+Do the same for Cmd+O (open folder). After NSOpenPanel returns a URL,
+route the resulting `openNew` through the existing selection flow — no
+separate "launcher pane" needed for Cmd+O since it goes straight to a
+session.
 
 - [ ] **Step 6: Build + smoke test**
 
@@ -1491,21 +1568,20 @@ Update the bounce path from Task 9:
 
 ```swift
 private func bouncePane(forSessionId sessionId: OpenSession.ID) {
+    // Already open in a pane → focus it.
     if let idx = store.paneIndex(forSession: sessionId) {
         store.focusedPaneIndex = idx
-    } else if store.panes.count >= SessionStore.paneAbsoluteCap {
-        store.focusedPane
-            .flatMap { store.openSessions.first { $0.id == $0.sessionId ? true : $0.id == $0.sessionId } }
-            .map { _ in }
-        if let focused = store.focusedPane,
-           let session = store.openSessions.first(where: { $0.id == focused.sessionId }) {
-            session.statusBar.showHint("Maximum 5 panes")
-        }
+        return
+    }
+    // Cap reached → hint on the focused session's status bar (if any).
+    if store.panes.count >= SessionStore.paneAbsoluteCap,
+       let focused = store.focusedPane,
+       case .session(let id) = focused.content,
+       let session = store.openSessions.first(where: { $0.id == id }) {
+        session.statusBar.showHint("Maximum 5 panes")
     }
 }
 ```
-
-(Trim the accidental cruft in the sample — the intent is: when the cap is what caused the bounce, call `focusedSession.statusBar.showHint("Maximum 5 panes")`.)
 
 - [ ] **Step 4: Build + smoke test**
 
