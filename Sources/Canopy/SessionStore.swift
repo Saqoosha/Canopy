@@ -100,31 +100,19 @@ final class SessionStore {
     private var cloudPollTask: Task<Void, Never>?
     private let cloudPollInterval: Duration = .seconds(30)
 
-    /// Coalesces rapid PaneWindowSizer dispatches (open/close/cap churn)
-    /// into a single ~16 ms deferred apply so we don't animate the window
-    /// frame multiple times in one run-loop turn.
-    private var pendingResizeTask: Task<Void, Never>?
-
     /// Recompute each pane's preferredWidth so it equals the pane's current
-    /// on-screen visual width. Called before appending a new pane so the
-    /// existing panes' visual widths don't shift when the ratios change.
-    private func normalizePaneWeightsToVisualWidths() {
+    /// on-screen visual width. Manual window resizes never touch the
+    /// weights (WeightedPaneLayout scales visually from the bounds), so
+    /// the stored weights drift from the on-screen pt widths. Call this
+    /// before ANY consumer that treats preferredWidth as absolute pt:
+    /// pane-list mutation (append / close / auto-close, whose sizer sums
+    /// the weights into a window width) and divider-drag start (whose
+    /// pt delta is applied directly to the weights).
+    func normalizePaneWeightsToVisualWidths() {
         guard !panes.isEmpty else { return }
         guard let window = NSApp.windows.first(where: { $0.isVisible && isCanopyWindow($0) })
                           ?? NSApp.windows.first(where: { isCanopyWindow($0) }) else { return }
-        guard let root = window.contentView else { return }
-        var queue: [NSView] = [root]
-        var sidebarW: CGFloat = PaneWindowSizer.assumedSidebarWidth
-        while let view = queue.first {
-            queue.removeFirst()
-            if let split = view as? NSSplitView, let sidebar = split.arrangedSubviews.first {
-                if split.frame.width > 0 && sidebar.frame.width > 50 {
-                    sidebarW = sidebar.frame.width
-                }
-                break
-            }
-            queue.append(contentsOf: view.subviews)
-        }
+        let sidebarW = PaneWindowSizer.measuredSidebarWidthTrustingCollapse(in: window)
         let detailW = max(0, window.frame.width - sidebarW)
         let visualWidths = PaneLayoutMetrics.paneWidths(
             detailWidth: detailW,
@@ -143,10 +131,6 @@ final class SessionStore {
     private func schedulePaneResize() {
         let paneWidths = panes.map { Int($0.preferredWidth) }
         logger.info("[Pane] schedulePaneResize called: panes=\(paneWidths) focused=\(self.focusedPaneIndex)")
-        if let appDelegate = NSApp.delegate as? AppDelegate {
-            appDelegate.suspendResizeObserver(for: 0.35)
-        }
-        pendingResizeTask?.cancel()
         // Run the sizer synchronously in the same runloop tick as the pane
         // mutation. Any debounced Task.sleep would let SwiftUI reflow the
         // detail column *before* the window grew, and the first pane
@@ -602,8 +586,13 @@ final class SessionStore {
             if openSessions.isEmpty {
                 selection = .launcher
             } else {
+                // The closed session held the only pane. Put the next open
+                // session INTO a pane, not just into `selection` — Detail
+                // renders the Launcher whenever `panes` is empty, so a
+                // selection-only update would show the Launcher while the
+                // sidebar highlights a live session.
                 let target = idx < openSessions.count ? idx : openSessions.count - 1
-                selection = .session(openSessions[target].id)
+                openInFocusedPane(openSessions[target].id)
             }
         }
 
@@ -728,11 +717,12 @@ final class SessionStore {
     func openInFocusedPane(_ sessionId: OpenSession.ID) {
         guard openSessions.contains(where: { $0.id == sessionId }) else { return }
         if panes.isEmpty {
-            // Do NOT call schedulePaneResize here — the single pane uses
-            // .frame(maxWidth: .infinity) in Detail.swift, so it fills
-            // whatever detail column width the user already has. Running
-            // the sizer would force-shrink a manually-widened window down
-            // to paneDefaultWidth on plain-click session open.
+            // Do NOT call schedulePaneResize here — WeightedPaneLayout
+            // gives a single pane the whole detail column regardless of
+            // its weight, so it fills whatever width the user already
+            // has. Running the sizer would force-shrink a manually-
+            // widened window down to paneDefaultWidth on plain-click
+            // session open.
             panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
             focusedPaneIndex = 0
             syncSelectionToFocusedPane()
@@ -807,6 +797,11 @@ final class SessionStore {
     /// in openSessions — closing a pane does not close the session.
     func closePane(at index: Int) {
         guard panes.indices.contains(index) else { return }
+        // Freeze surviving panes at their actual on-screen widths before
+        // removal — the sizer below sums preferredWidth as absolute pt,
+        // and after a manual window resize the stored weights are stale
+        // (window would jump to the pre-resize widths otherwise).
+        normalizePaneWeightsToVisualWidths()
         let wasFocused = index == focusedPaneIndex
         panes.remove(at: index)
         if panes.isEmpty {
@@ -830,29 +825,6 @@ final class SessionStore {
     func forceSetPaneWidth(at index: Int, to width: CGFloat) {
         guard panes.indices.contains(index) else { return }
         panes[index].preferredWidth = max(1, width)
-    }
-
-    /// Distributes a manual window-width delta across pane `preferredWidth`s
-    /// proportionally (`delta × paneW_i / Σ paneW_i`). Floor is
-    /// `paneMinDragWidth`; delta that can't be absorbed (narrowing into the
-    /// floor) stays on the window edge as a small gap. Opposite direction
-    /// of `PaneWindowSizer` (which sizes the window from pane widths).
-    func distributePaneWidths(deltaTotal: CGFloat) {
-        guard !panes.isEmpty, abs(deltaTotal) > 0.5 else {
-            logger.info("[Pane] distributePaneWidths skipped: delta=\(deltaTotal) panes=\(self.panes.count)")
-            return
-        }
-        let weights = panes.map(\.preferredWidth)
-        let total = weights.reduce(0, +)
-        guard total > 0 else { return }
-        let floor = Self.paneMinDragWidth
-        let before = panes.map { Int($0.preferredWidth) }
-        for i in panes.indices {
-            let proposed = panes[i].preferredWidth + deltaTotal * (panes[i].preferredWidth / total)
-            panes[i].preferredWidth = max(floor, proposed)
-        }
-        let after = panes.map { Int($0.preferredWidth) }
-        logger.info("[Pane] distributePaneWidths delta=\(Int(deltaTotal)) before=\(before) after=\(after)")
     }
 
     /// Move focus by delta. wrap=true (default) → Cmd+Opt+← from leftmost
@@ -895,6 +867,9 @@ final class SessionStore {
             if case .session(let sid) = slot.content, sid == id { return i } else { return nil }
         }
         guard !matching.isEmpty else { return }
+        // Same rationale as closePane: sync weights to visual widths before
+        // the sizer sums the survivors into the new window width.
+        normalizePaneWeightsToVisualWidths()
         for idx in matching.reversed() {
             let wasFocused = idx == focusedPaneIndex
             panes.remove(at: idx)

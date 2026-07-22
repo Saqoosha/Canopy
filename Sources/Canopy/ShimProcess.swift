@@ -1361,11 +1361,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// from-extension, same as titles (see extractTitle).
     private func extractRawUsage(_ message: [String: Any]) {
         func handle(_ response: [String: Any], requestId: String?) {
-            guard let requestId, requestId.hasPrefix("canopy-getusage-"),
-                  response["type"] as? String == "get_usage_response",
+            guard let requestId, requestId.hasPrefix("canopy-getusage-") else { return }
+            // Past this point the response is OURS, and any shape mismatch
+            // means the CLI/extension changed the payload (or answered
+            // with an error). These responses are also swallowed before
+            // reaching the webview (isCanopyOwnedResponse), so a silent
+            // return here would make the per-model usage rows disappear
+            // with zero diagnostics anywhere — always log the mismatch.
+            guard response["type"] as? String == "get_usage_response",
                   let usage = response["usage"] as? [String: Any],
                   let rateLimits = usage["rate_limits"] as? [String: Any]
-            else { return }
+            else {
+                let respType = (response["type"] as? String) ?? "?"
+                let keys = response.keys.sorted().joined(separator: ",")
+                logger.warning("get_usage response shape mismatch: type=\(respType, privacy: .public) keys=\(keys, privacy: .public)")
+                return
+            }
             SharedRateLimitData.shared.updateFromRawUsage(rateLimits)
         }
         if let response = message["response"] as? [String: Any] {

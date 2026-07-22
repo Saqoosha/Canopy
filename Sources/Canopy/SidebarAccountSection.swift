@@ -41,7 +41,7 @@ struct SidebarAccountSection: View {
                 }
                 // Per-model weekly buckets (e.g. "Weekly Fable") from the
                 // raw get_usage payload — one row per model, same columns.
-                ForEach(data.modelScoped, id: \.displayName) { scoped in
+                ForEach(data.modelScoped) { scoped in
                     limitRow(label: scoped.displayName,
                              percent: Double(scoped.pct) / 100.0,
                              reset: SharedRateLimitData.formatResetTime(scoped.resetDate))

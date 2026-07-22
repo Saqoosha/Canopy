@@ -1,18 +1,9 @@
 import SwiftUI
 
-/// Weight-based proportional multi-pane layout.
-///
-/// - `sizeThatFits` returns the parent's proposed width verbatim. This is
-///   what prevents the "SwiftUI grows the window to fit the HStack's
-///   intrinsic width" feedback loop — the layout never asks for more space
-///   than the parent offered.
-/// - `placeSubviews` computes each pane's actual width via the CSS-flex
-///   style iterative pin-to-floor algorithm in `PaneLayoutMetrics`, then
-///   places each subview at its computed width.
-///
-/// Callers pass one subview per pane (paneCell + trailing PaneDivider
-/// bundled inside), and the layout uses column-width = pane-width + (its
-/// trailing divider width if any).
+/// Pure width math shared by `WeightedPaneLayout` (the visible layout)
+/// and AppDelegate's pane-focus click monitor (hit-testing) — the single
+/// source of truth that keeps the click map and the rendered panes in
+/// agreement.
 enum PaneLayoutMetrics {
     /// Weight-based proportional pane widths with a per-pane minimum.
     /// Uses the CSS flex-grow algorithm: distribute by weight; any pane
@@ -71,6 +62,19 @@ enum PaneLayoutMetrics {
     }
 }
 
+/// Weight-based proportional multi-pane layout.
+///
+/// - `sizeThatFits` returns the parent's proposed width verbatim. This is
+///   what prevents the "SwiftUI grows the window to fit the content's
+///   intrinsic width" feedback loop — the layout never asks for more space
+///   than the parent offered.
+/// - `placeSubviews` computes each pane's actual width via the CSS-flex
+///   style iterative pin-to-floor algorithm in `PaneLayoutMetrics`, then
+///   places each subview at its computed width.
+///
+/// Callers pass one subview per pane (paneCell + trailing PaneDivider
+/// bundled inside), and the layout uses column-width = pane-width + (its
+/// trailing divider width if any).
 struct WeightedPaneLayout: Layout {
     typealias Cache = ()
 

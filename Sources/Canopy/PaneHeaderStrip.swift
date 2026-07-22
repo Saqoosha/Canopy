@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Title-bar-style header at the top of a pane: bold session title with
-/// the project as a smaller gray subtitle beneath — the same two-line
-/// look the window's unified title bar had before `.hiddenTitleBar`.
+/// Title-bar-style header at the top of a pane: 13pt semibold session
+/// title with the project as a smaller gray subtitle beneath — the same
+/// two-line look the window's unified title bar had before
+/// `.hiddenTitleBar`.
 /// The window's navigationTitle can only hold one string; with N panes
 /// visible we need per-pane title display. Also carries the pane's
 /// close X (hover-only, hidden when showCloseButton is false — i.e.

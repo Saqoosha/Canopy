@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 
 /// The detail pane of the single-window shell. Renders N horizontal panes
-/// (HStack of PaneHeaderStrip + SessionContainer / DetailLauncher). When
-/// `store.panes` is empty, falls through to the launcher (fresh launch).
+/// (WeightedPaneLayout of PaneHeaderStrip + SessionContainer /
+/// DetailLauncher bundles). When `store.panes` is empty, falls through to
+/// the launcher (fresh launch).
 ///
 /// Only the focused pane's session drives the window title / subtitle.
 /// WebViewContainer wraps a host NSView and swaps the WKWebView subview
@@ -65,9 +66,9 @@ struct Detail: View {
                 }
             }
         }
-        // Align to top-leading so multi-pane HStack sits flush against the
-        // sidebar edge instead of getting centered horizontally. Overflow
-        // (window wider than the panes) stays on the trailing edge.
+        // Align to top-leading so the multi-pane layout sits flush against
+        // the sidebar edge instead of getting centered horizontally.
+        // Overflow (window wider than the panes) stays on the trailing edge.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay {
             if let progress = store.teleporting {

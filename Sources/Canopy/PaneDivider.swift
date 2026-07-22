@@ -31,6 +31,13 @@ struct PaneDivider: View {
                     guard store.panes.indices.contains(leftIndex),
                           store.panes.indices.contains(leftIndex + 1) else { return }
                     if dragStartLeft == 0 {
+                        // Sync weights to on-screen pt widths first: the
+                        // drag delta below is in pt, but after a manual
+                        // window resize the stored weights are stale
+                        // (larger or smaller than the visual widths), so
+                        // applying a pt delta to them would move the
+                        // divider slower/faster than the mouse.
+                        store.normalizePaneWeightsToVisualWidths()
                         dragStartLeft = store.panes[leftIndex].preferredWidth
                         dragStartRight = store.panes[leftIndex + 1].preferredWidth
                     }
