@@ -788,6 +788,23 @@ final class SessionStore {
         panes[index].preferredWidth = max(1, width)
     }
 
+    /// Distributes a manual window-width delta across pane `preferredWidth`s
+    /// proportionally (`delta × paneW_i / Σ paneW_i`). Floor is
+    /// `paneMinDragWidth`; delta that can't be absorbed (narrowing into the
+    /// floor) stays on the window edge as a small gap. Opposite direction
+    /// of `PaneWindowSizer` (which sizes the window from pane widths).
+    func distributePaneWidths(deltaTotal: CGFloat) {
+        guard !panes.isEmpty, abs(deltaTotal) > 0.5 else { return }
+        let weights = panes.map(\.preferredWidth)
+        let total = weights.reduce(0, +)
+        guard total > 0 else { return }
+        let floor = Self.paneMinDragWidth
+        for i in panes.indices {
+            let proposed = panes[i].preferredWidth + deltaTotal * (panes[i].preferredWidth / total)
+            panes[i].preferredWidth = max(floor, proposed)
+        }
+    }
+
     /// Move focus by delta. wrap=true (default) → Cmd+Opt+← from leftmost
     /// jumps to rightmost, and vice versa. No-op when panes has 0 or 1.
     func moveFocus(delta: Int, wrap: Bool = true) {

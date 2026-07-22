@@ -314,6 +314,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// keyDown here keeps the title bar still.
     private var cmdWMonitor: Any?
 
+    /// Prior Canopy window width for proportional pane redistribution on
+    /// manual resize. Nil until the first observed frame (avoids treating
+    /// the initial width as a full-window delta).
+    var lastKnownCanopyWindowWidth: CGFloat?
+
+    /// When true, the window-resize observer only records width and does
+    /// not call `distributePaneWidths`. Set around `PaneWindowSizer`'s
+    /// animated `setFrame` so intermediate animation frames don't feed
+    /// back into pane preferredWidths.
+    var suppressPaneResizeObserver = false
+
+    private var windowResizeObserver: NSObjectProtocol?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
         SidebarLogicProbe.runIfRequested()
@@ -327,6 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         installCmdWMonitor()
+        installWindowResizeMonitor()
 
         // SwiftUI may make the first window main before our observer is
         // registered, in which case `didBecomeMainNotification` fires
@@ -357,6 +371,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Distributes manual window-width deltas across pane preferredWidths.
+    /// Skips when panes are empty (sidebar-only collapse) and while
+    /// `PaneWindowSizer` is animating the frame.
+    private func installWindowResizeMonitor() {
+        guard windowResizeObserver == nil else { return }
+        windowResizeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let window = note.object as? NSWindow, isCanopyWindow(window) else { return }
+            Task { @MainActor in
+                guard let self else { return }
+                let current = window.frame.width
+                defer { self.lastKnownCanopyWindowWidth = current }
+
+                guard !self.suppressPaneResizeObserver,
+                      let store = SessionStore.shared,
+                      !store.panes.isEmpty,
+                      let prior = self.lastKnownCanopyWindowWidth
+                else { return }
+
+                let delta = current - prior
+                if abs(delta) > 0.5 {
+                    store.distributePaneWidths(deltaTotal: delta)
+                }
+            }
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -365,6 +409,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let monitor = cmdWMonitor {
             NSEvent.removeMonitor(monitor)
             cmdWMonitor = nil
+        }
+        if let windowResizeObserver {
+            NotificationCenter.default.removeObserver(windowResizeObserver)
+            self.windowResizeObserver = nil
         }
     }
 
@@ -678,11 +726,24 @@ enum PaneWindowSizer {
             newFrame.origin.x = max(screen.visibleFrame.minX, screen.visibleFrame.maxX - newFrame.width)
         }
 
-        NSAnimationContext.runAnimationGroup { ctx in
+        // Suppress the manual-resize observer for the whole animation: option-1
+        // (pre-set lastKnown to the target) alone is insufficient because
+        // animator().setFrame emits intermediate didResize notifications.
+        let appDelegate = NSApp.delegate as? AppDelegate
+        appDelegate?.suppressPaneResizeObserver = true
+        appDelegate?.lastKnownCanopyWindowWidth = newFrame.size.width
+
+        NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.20
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().setFrame(newFrame, display: true)
-        }
+        }, completionHandler: {
+            Task { @MainActor in
+                guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+                appDelegate.lastKnownCanopyWindowWidth = window.frame.width
+                appDelegate.suppressPaneResizeObserver = false
+            }
+        })
     }
 
     /// NavigationSplitView is backed by an NSSplitView on macOS; find it and read
