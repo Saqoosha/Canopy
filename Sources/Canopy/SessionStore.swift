@@ -46,7 +46,8 @@ final class SessionStore {
     private(set) var focusedPaneIndex: Int = 0
 
     static let paneAbsoluteCap: Int = 5
-    static let paneDividerWidth: CGFloat = 1
+    /// Includes the 8pt drag target from PaneDivider's ZStack; the 1pt visible line is centered inside.
+    static let paneDividerWidth: CGFloat = 8
     static let paneDefaultWidth: CGFloat = 800
     static let paneMinDragWidth: CGFloat = 100
 
@@ -791,10 +792,13 @@ final class SessionStore {
         guard panes.indices.contains(leftIndex), panes.indices.contains(rightIndex) else { return }
         let floor = Self.paneMinDragWidth
         let sum = leftWidth + rightWidth
-        // Snap: never go below floor on either side; reflect overflow to the other.
+        // Both sides need floor; if the sum can't afford both, reject the whole write.
+        guard sum >= 2 * floor else {
+            logger.warning("setAdjacentPaneWidths: sum \(sum) below 2*floor (\(2 * floor)); rejecting")
+            return
+        }
         let clampedLeft = min(max(floor, leftWidth), sum - floor)
         let clampedRight = sum - clampedLeft
-        guard clampedRight >= floor else { return }
         panes[leftIndex].preferredWidth = clampedLeft
         panes[rightIndex].preferredWidth = clampedRight
     }

@@ -347,17 +347,12 @@ struct Sidebar: View {
     }
 
     private func bouncePane(forSessionId sessionId: OpenSession.ID) {
-        // Already open in a pane → focus it.
         if let idx = store.paneIndex(forSession: sessionId) {
             store.setFocusedPaneIndex(idx)
             return
         }
-        // Cap reached → hint on the focused session's status bar (if any).
-        if store.panes.count >= SessionStore.paneAbsoluteCap,
-           let focused = store.focusedPane,
-           case .session(let id) = focused.content,
-           let session = store.openSessions.first(where: { $0.id == id }) {
-            session.statusBar.showHint("Maximum 5 panes")
+        if store.panes.count >= SessionStore.paneAbsoluteCap {
+            store.showCapReachedHintOnFocusedPane()
         }
     }
 

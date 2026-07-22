@@ -644,14 +644,17 @@ enum PaneWindowSizer {
     @MainActor
     static func applyForCurrentPanes(store: SessionStore) {
         guard let window = NSApp.windows.first(where: { $0.isVisible && isCanopyWindow($0) })
-                          ?? NSApp.mainWindow,
-              let screen = window.screen ?? NSScreen.main else { return }
+                          ?? NSApp.windows.first(where: { isCanopyWindow($0) }),
+              let screen = window.screen ?? NSScreen.main else {
+            logger.info("PaneWindowSizer: no Canopy window found; skipping resize")
+            return
+        }
         // Empty panes → leave the window alone. Resizing to sidebar-only
         // would collapse the frame while closeSession is still settling
         // selection onto the next open session / launcher.
         guard !store.panes.isEmpty else { return }
 
-        let sidebar = assumedSidebarWidth
+        let sidebar = measuredSidebarWidth(in: window)
         let dividers = CGFloat(max(0, store.panes.count - 1)) * SessionStore.paneDividerWidth
         let sumPaneW = store.panes.reduce(0) { $0 + $1.preferredWidth }
         let target = sidebar + sumPaneW + dividers
@@ -663,7 +666,7 @@ enum PaneWindowSizer {
         } else {
             // Fallback: cap at screen and equal-share the detail column.
             let detailBudget = max(0, screenMax - sidebar - dividers)
-            let share = store.panes.isEmpty ? 0 : detailBudget / CGFloat(store.panes.count)
+            let share = detailBudget / CGFloat(store.panes.count)
             for i in store.panes.indices {
                 store.forceSetPaneWidth(at: i, to: share)
             }
@@ -680,5 +683,24 @@ enum PaneWindowSizer {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().setFrame(newFrame, display: true)
         }
+    }
+
+    /// NavigationSplitView is backed by an NSSplitView on macOS; find it and read
+    /// the first arranged subview's width. Robust to view-hierarchy churn: if the
+    /// shape doesn't match, fall back to assumedSidebarWidth (280pt).
+    @MainActor
+    private static func measuredSidebarWidth(in window: NSWindow) -> CGFloat {
+        guard let root = window.contentView else { return assumedSidebarWidth }
+        // BFS for an NSSplitView.
+        var queue: [NSView] = [root]
+        while let view = queue.first {
+            queue.removeFirst()
+            if let split = view as? NSSplitView, let sidebar = split.arrangedSubviews.first {
+                let w = sidebar.frame.width
+                return w > 0 ? w : assumedSidebarWidth
+            }
+            queue.append(contentsOf: view.subviews)
+        }
+        return assumedSidebarWidth
     }
 }

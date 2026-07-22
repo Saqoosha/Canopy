@@ -1443,6 +1443,25 @@ enum SidebarLogicProbe {
                    storeSnap.panes[0].preferredWidth == 900
                    && storeSnap.panes[1].preferredWidth == 100)
 
+            // setAdjacentPaneWidths: reject when sum < 2*floor (writes would
+            // otherwise land a sub-floor / negative preferredWidth on the left).
+            let storeReject = SessionStore()
+            let rejectA = OpenSession(origin: .local(cwd), resumeId: "reject-A", title: "A", project: "p", status: .live)
+            let rejectB = OpenSession(origin: .local(cwd), resumeId: "reject-B", title: "B", project: "p", status: .live)
+            storeReject._probeSeedOpenSessions([rejectA, rejectB])
+            _ = storeReject.openInNewPane(rejectA.id)
+            _ = storeReject.openInNewPane(rejectB.id)
+            storeReject.forceSetPaneWidth(at: 0, to: 50)
+            storeReject.forceSetPaneWidth(at: 1, to: 50)
+            storeReject.setAdjacentPaneWidths(leftIndex: 0, leftWidth: 30, rightWidth: 70)
+            record("setAdjacentPaneWidths rejects sum below 2*floor",
+                   storeReject.panes[0].preferredWidth == 50
+                   && storeReject.panes[1].preferredWidth == 50)
+            storeReject.setAdjacentPaneWidths(leftIndex: 0, leftWidth: -20, rightWidth: 120)
+            record("setAdjacentPaneWidths rejects negative-width sum below 2*floor",
+                   storeReject.panes[0].preferredWidth == 50
+                   && storeReject.panes[1].preferredWidth == 50)
+
             // openInFocusedPane already-in-pane branch: jump focus, don't duplicate
             let storeJump = SessionStore()
             let jumpA = OpenSession(origin: .local(cwd), resumeId: "jump-A", title: "A", project: "p", status: .live)
