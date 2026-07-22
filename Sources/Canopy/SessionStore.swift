@@ -36,6 +36,29 @@ final class SessionStore {
     /// What the detail pane is showing right now. Defaults to launcher.
     var selection: SessionSelection = .launcher
 
+    /// Horizontal panes in the detail column. Left-to-right order. Every
+    /// entry's sessionId must be present in openSessions; the store enforces
+    /// this via closePane / auto-close on session drop.
+    private(set) var panes: [PaneSlot] = []
+
+    /// Index into `panes` for the currently focused pane. Always a valid
+    /// index when panes is non-empty. Undefined (0) while panes is empty.
+    private(set) var focusedPaneIndex: Int = 0
+
+    static let paneAbsoluteCap: Int = 5
+    static let paneDividerWidth: CGFloat = 1
+    static let paneDefaultWidth: CGFloat = 800
+    static let paneMinDragWidth: CGFloat = 100
+
+    var focusedPane: PaneSlot? {
+        guard panes.indices.contains(focusedPaneIndex) else { return nil }
+        return panes[focusedPaneIndex]
+    }
+
+    func paneIndex(forSession id: OpenSession.ID) -> Int? {
+        panes.firstIndex { if case .session(let sid) = $0.content { return sid == id } else { return false } }
+    }
+
     /// Local JSONL history, refreshed via `refreshRecents()`.
     private(set) var recents: [SessionEntry] = []
 
@@ -427,6 +450,7 @@ final class SessionStore {
         session.shim = nil
         session.webView = nil
         openSessions.remove(at: idx)
+        removePanesForClosedSession(id)
 
         if case .session(let sel) = selection, sel == id {
             // Browser-tab convention: focus the row that took the closed
@@ -552,4 +576,128 @@ final class SessionStore {
         openSessions = newOrder.compactMap { byId[$0] }
         logger.info("moveOpenSessions from=\(fromOffsets.map(String.init).joined(separator: ","), privacy: .public) to=\(toOffset)")
     }
+
+    // MARK: - Panes
+
+    /// Replace focused pane's content with the given session. If panes is
+    /// empty (fresh launch, no selection yet) create the first pane at
+    /// paneDefaultWidth.
+    func openInFocusedPane(_ sessionId: OpenSession.ID) {
+        guard openSessions.contains(where: { $0.id == sessionId }) else { return }
+        if panes.isEmpty {
+            panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
+            focusedPaneIndex = 0
+            selection = .session(sessionId)
+            return
+        }
+        // If this session already lives in a pane, focus that one instead of
+        // duplicating (one session, one pane invariant).
+        if let idx = paneIndex(forSession: sessionId) {
+            focusedPaneIndex = idx
+            selection = .session(sessionId)
+            return
+        }
+        panes[focusedPaneIndex].content = .session(sessionId)
+        selection = .session(sessionId)
+    }
+
+    /// Replace focused pane's content with the launcher. Used by Cmd+N in
+    /// multi-pane mode; single-pane Cmd+N routes through select(.launcher).
+    func openLauncherInFocusedPane() {
+        if panes.isEmpty {
+            selection = .launcher
+            return
+        }
+        panes[focusedPaneIndex].content = .launcher
+        selection = .launcher
+    }
+
+    /// Append a new pane for `sessionId`. Returns false if bounced (already
+    /// in a pane — caller should visually flash the existing pane — or cap
+    /// reached — caller should show the "Maximum 5 panes" hint).
+    @discardableResult
+    func openInNewPane(_ sessionId: OpenSession.ID) -> Bool {
+        guard openSessions.contains(where: { $0.id == sessionId }) else { return false }
+        if let existing = paneIndex(forSession: sessionId) {
+            focusedPaneIndex = existing
+            selection = .session(sessionId)
+            return false
+        }
+        guard panes.count < Self.paneAbsoluteCap else { return false }
+        let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
+        panes.append(PaneSlot(content: .session(sessionId), preferredWidth: width))
+        focusedPaneIndex = panes.count - 1
+        selection = .session(sessionId)
+        return true
+    }
+
+    /// Append a new launcher pane. Returns false only when the cap is reached.
+    @discardableResult
+    func openLauncherInNewPane() -> Bool {
+        guard panes.count < Self.paneAbsoluteCap else { return false }
+        let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
+        panes.append(PaneSlot(content: .launcher, preferredWidth: width))
+        focusedPaneIndex = panes.count - 1
+        selection = .launcher
+        return true
+    }
+
+    /// Close the pane at `index`. Focus shifts to the left neighbor (or 0
+    /// if the closed pane was leftmost). The underlying OpenSession stays
+    /// in openSessions — closing a pane does not close the session.
+    func closePane(at index: Int) {
+        guard panes.indices.contains(index) else { return }
+        // Browser-tab convention (matches closeSession): only shift focus when
+        // the closed pane WAS the focused one. Closing a non-focused pane
+        // keeps focus on the same underlying pane; we just adjust the index
+        // if the removal shifted it down.
+        let wasFocused = index == focusedPaneIndex
+        panes.remove(at: index)
+        if panes.isEmpty {
+            focusedPaneIndex = 0
+            selection = .launcher
+            return
+        }
+        if wasFocused {
+            focusedPaneIndex = max(0, min(index - 1, panes.count - 1))
+        } else if index < focusedPaneIndex {
+            focusedPaneIndex -= 1
+        }
+        switch panes[focusedPaneIndex].content {
+        case .session(let id): selection = .session(id)
+        case .launcher: selection = .launcher
+        }
+    }
+
+    /// Move focus by delta. wrap=true (default) → Cmd+Opt+← from leftmost
+    /// jumps to rightmost, and vice versa. No-op when panes has 0 or 1.
+    func moveFocus(delta: Int, wrap: Bool = true) {
+        guard panes.count > 1 else { return }
+        let n = panes.count
+        let raw = focusedPaneIndex + delta
+        let next = wrap ? ((raw % n) + n) % n : max(0, min(n - 1, raw))
+        focusedPaneIndex = next
+        switch panes[next].content {
+        case .session(let id): selection = .session(id)
+        case .launcher: selection = .launcher
+        }
+    }
+
+    /// Called by closeSession(_:) after the session is removed from
+    /// openSessions. Drops any pane pointing at the closed session.
+    private func removePanesForClosedSession(_ id: OpenSession.ID) {
+        let matching = panes.enumerated().compactMap { (i, slot) -> Int? in
+            if case .session(let sid) = slot.content, sid == id { return i } else { return nil }
+        }
+        // Remove from the highest index down so earlier indices stay valid.
+        for idx in matching.reversed() { closePane(at: idx) }
+    }
+
+    #if DEBUG
+    /// Probe-only seeding helper. `openSessions` is `private(set)` (setter
+    /// file-private), so `_SidebarLogicProbe` cannot assign it directly.
+    func _probeSeedOpenSessions(_ sessions: [OpenSession]) {
+        openSessions = sessions
+    }
+    #endif
 }

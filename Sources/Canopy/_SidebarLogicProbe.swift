@@ -1318,6 +1318,87 @@ enum SidebarLogicProbe {
                    "transitioned=\(t8Transitioned) finishedAt=\(String(describing: t8Tracker.rows.first?.finishedAt))")
         }
 
+        // MARK: - Panes
+        do {
+            // Brief names openA / openB / recentAsOpen; only openA/openB are
+            // fabricated above. Build a third OpenSession here for the seed.
+            let recentAsOpen = OpenSession(
+                origin: .local(cwd),
+                resumeId: "open-recent",
+                title: "Recent as open",
+                project: "ProjectRecent",
+                status: .live,
+                lastActiveAt: now.addingTimeInterval(-oneHour * 2)
+            )
+            let store = SessionStore()
+            store._probeSeedOpenSessions([openA, openB, recentAsOpen])
+            record("panes: empty by default", store.panes.isEmpty)
+
+            store.openInFocusedPane(openA.id)
+            record("openInFocusedPane on empty seeds first pane",
+                   store.panes.count == 1 && store.focusedPaneIndex == 0
+                   && store.panes[0].content == .session(openA.id)
+                   && store.panes[0].preferredWidth == SessionStore.paneDefaultWidth)
+
+            let addedB = store.openInNewPane(openB.id)
+            record("openInNewPane appends and focuses new",
+                   addedB && store.panes.count == 2 && store.focusedPaneIndex == 1
+                   && store.panes[1].content == .session(openB.id))
+
+            store.openLauncherInFocusedPane()
+            record("openLauncherInFocusedPane sets focused to .launcher",
+                   store.panes[store.focusedPaneIndex].content == .launcher)
+            store.openInFocusedPane(openB.id)   // restore session content for next tests
+
+            let addedBAgain = store.openInNewPane(openB.id)
+            record("openInNewPane on already-in-pane bounces + focuses",
+                   !addedBAgain && store.panes.count == 2 && store.focusedPaneIndex == 1)
+
+            store.moveFocus(delta: -1)
+            record("moveFocus(-1) moves left", store.focusedPaneIndex == 0)
+            store.moveFocus(delta: -1)
+            record("moveFocus wraps", store.focusedPaneIndex == 1)
+
+            store.closePane(at: 1)
+            record("closePane shifts focus left",
+                   store.panes.count == 1 && store.focusedPaneIndex == 0
+                   && store.panes[0].content == .session(openA.id))
+
+            // Closing a non-focused pane must keep focus on the same
+            // underlying pane (index just shifts left if removal was before it).
+            let openC = OpenSession(
+                origin: .local(cwd),
+                resumeId: "open-C",
+                title: "Open C",
+                project: "ProjectC",
+                status: .live,
+                lastActiveAt: now.addingTimeInterval(-oneHour * 3)
+            )
+            let storeKeepFocus = SessionStore()
+            storeKeepFocus._probeSeedOpenSessions([openA, openB, openC])
+            _ = storeKeepFocus.openInNewPane(openA.id)
+            _ = storeKeepFocus.openInNewPane(openB.id)
+            _ = storeKeepFocus.openInNewPane(openC.id)
+            // openInNewPane focuses the newly appended pane → index 2
+            // (focusedPaneIndex is private(set); cannot assign directly).
+            storeKeepFocus.closePane(at: 0)
+            record("closePane keeps focus when non-focused pane closed",
+                   storeKeepFocus.panes.count == 2
+                   && storeKeepFocus.focusedPaneIndex == 1
+                   && storeKeepFocus.panes[1].content == .session(openC.id))
+
+            // Cap
+            let store2 = SessionStore()
+            let sessions = (0..<6).map { i in
+                OpenSession(origin: .local(cwd), resumeId: "s\(i)", title: "s\(i)", project: "p", status: .live)
+            }
+            store2._probeSeedOpenSessions(sessions)
+            for s in sessions.prefix(5) { _ = store2.openInNewPane(s.id) }
+            record("cap reached at 5", store2.panes.count == 5)
+            let sixth = store2.openInNewPane(sessions[5].id)
+            record("cap bounces sixth add", !sixth && store2.panes.count == 5)
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return lines.joined(separator: "\n")
