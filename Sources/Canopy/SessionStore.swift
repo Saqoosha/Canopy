@@ -695,6 +695,17 @@ final class SessionStore {
         }
     }
 
+    /// Update two adjacent panes' preferred widths from a divider drag.
+    /// Sum is preserved by the caller; floor is enforced here.
+    func setAdjacentPaneWidths(leftIndex: Int, leftWidth: CGFloat, rightWidth: CGFloat) {
+        let rightIndex = leftIndex + 1
+        guard panes.indices.contains(leftIndex), panes.indices.contains(rightIndex) else { return }
+        let floor = Self.paneMinDragWidth
+        guard leftWidth >= floor, rightWidth >= floor else { return }
+        panes[leftIndex].preferredWidth = leftWidth
+        panes[rightIndex].preferredWidth = rightWidth
+    }
+
     /// Called by closeSession(_:) after the session is removed from
     /// openSessions. Drops any pane pointing at the closed session.
     private func removePanesForClosedSession(_ id: OpenSession.ID) {

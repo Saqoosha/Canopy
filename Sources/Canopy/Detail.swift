@@ -114,15 +114,6 @@ struct Detail: View {
 
 }
 
-/// Temporary stub so Task 6 builds. Task 7 replaces this with a real
-/// drag-to-resize divider.
-// TODO(Task 7): replace stub
-struct PaneDivider: View {
-    @Bindable var store: SessionStore
-    let leftIndex: Int
-    var body: some View { Divider().frame(width: 1) }
-}
-
 /// Full-pane overlay shown while a cloud session is being teleported. The
 /// flow takes 2–10 s (shim spawn + JSONL download + optional `git checkout`)
 /// and the underlying selection doesn't change until it completes, so without
