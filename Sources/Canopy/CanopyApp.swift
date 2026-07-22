@@ -747,8 +747,9 @@ enum PaneWindowSizer {
     }
 
     /// NavigationSplitView is backed by an NSSplitView on macOS; find it and read
-    /// the first arranged subview's width. Robust to view-hierarchy churn: if the
-    /// shape doesn't match, fall back to assumedSidebarWidth (280pt).
+    /// the first arranged subview's width. 0 means the sidebar is collapsed — that
+    /// IS the correct width. Only fall back to assumedSidebarWidth when the view
+    /// hierarchy has no NSSplitView at all.
     @MainActor
     private static func measuredSidebarWidth(in window: NSWindow) -> CGFloat {
         guard let root = window.contentView else { return assumedSidebarWidth }
@@ -757,8 +758,7 @@ enum PaneWindowSizer {
         while let view = queue.first {
             queue.removeFirst()
             if let split = view as? NSSplitView, let sidebar = split.arrangedSubviews.first {
-                let w = sidebar.frame.width
-                return w > 0 ? w : assumedSidebarWidth
+                return sidebar.frame.width   // 0 when collapsed; that IS the correct sidebar width
             }
             queue.append(contentsOf: view.subviews)
         }
