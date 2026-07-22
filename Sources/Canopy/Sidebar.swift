@@ -36,10 +36,17 @@ struct Sidebar: View {
 
             Divider()
 
-            // No `selection:` binding — we paint our own active-row
-            // background so we control the contrast and never end up
-            // with the system's gray-on-white when the app loses focus.
-            List {
+            // The `selection:` binding exists ONLY to receive clicks on open
+            // rows: any tap gesture on a row (even .simultaneousGesture)
+            // claims mouse-down and kills List's .onMove row dragging on
+            // macOS (FB7367473 family), so open rows must be click-handled
+            // through native selection instead. The binding always reads
+            // nil so the system never paints its own selection highlight —
+            // we keep painting the active row ourselves for contrast
+            // control. Closed rows are .selectionDisabled and keep a plain
+            // tap gesture (they don't drag, and routing them through
+            // selection would also fire on right-click).
+            List(selection: rowClickBinding) {
                 let rows = store.visibleRows
                 let openRows = rows.filter(\.isOpen)
                 let closedRows = rows.filter { !$0.isOpen }
@@ -49,6 +56,9 @@ struct Sidebar: View {
                     Section("Open") {
                         ForEach(openRows, id: \.id) { row in
                             rowView(row)
+                        }
+                        .onMove { from, to in
+                            store.moveOpenSessions(fromOffsets: from, toOffset: to)
                         }
                     }
                 }
@@ -196,6 +206,20 @@ struct Sidebar: View {
         )
     }
 
+    /// Click receiver for open rows. Always reads nil (no system selection
+    /// highlight ever sticks); a write means "the user clicked this row".
+    private var rowClickBinding: Binding<String?> {
+        Binding(
+            get: { nil },
+            set: { clickedId in
+                guard let clickedId,
+                      let row = store.visibleRows.first(where: { $0.id == clickedId })
+                else { return }
+                handleClick(row)
+            }
+        )
+    }
+
     @ViewBuilder
     private func rowView(_ row: SidebarRow) -> some View {
         SidebarRowView(
@@ -216,7 +240,11 @@ struct Sidebar: View {
         .id(row.id)
         .onHover { h in hoveredRowId = h ? row.id : nil }
         .contentShape(Rectangle())
-        .onTapGesture { handleClick(row) }
+        // Closed rows: plain tap to open. Open rows: NO gesture — any tap
+        // gesture here (even simultaneous) blocks .onMove dragging; their
+        // clicks arrive via the List's rowClickBinding instead.
+        .gesture(row.isOpen ? nil : TapGesture().onEnded { handleClick(row) })
+        .selectionDisabled(!row.isOpen)
         .contextMenu { rowMenu(for: row) }
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)

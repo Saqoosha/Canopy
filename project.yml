@@ -58,8 +58,15 @@ targets:
       SWIFT_STRICT_CONCURRENCY: complete
       configs:
         Debug:
-          CODE_SIGN_STYLE: Automatic
-          CODE_SIGN_IDENTITY: "Apple Development"
+          # Same Developer ID identity as Release, NOT "Apple Development":
+          # TCC keys folder grants by (bundle id + designated requirement),
+          # so a Debug build signed with a different cert fights the
+          # installed /Applications copy over the same TCC row — every
+          # prod↔debug switch re-prompts "access your Documents folder".
+          # Matching identities → identical designated requirement → one
+          # grant covers both builds forever.
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
         Release:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: "Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
