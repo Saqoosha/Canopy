@@ -192,7 +192,15 @@ struct Sidebar: View {
 
     private var newSessionButton: some View {
         Button {
-            store.select(.launcher)
+            // Mirror Cmd+N (CanopyApp File > New Session). Cmd+click opens
+            // a launcher in a new pane (spec parity with sidebar row Cmd+click).
+            if NSEvent.modifierFlags.contains(.command) {
+                _ = store.openLauncherInNewPane()
+            } else if store.panes.isEmpty {
+                store.select(.launcher)
+            } else {
+                store.openLauncherInFocusedPane()
+            }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "plus")

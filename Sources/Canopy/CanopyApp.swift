@@ -126,38 +126,6 @@ struct CanopyApp: App {
         }
     }
 
-    private func closeActiveSession() {
-        if let active = sidebarStore.activeSession {
-            sidebarStore.closeSession(active.id)
-        }
-    }
-
-    /// Cmd+W behaviour (browser-style): with 2+ panes, close the focused
-    /// pane; otherwise fall through to the single-pane legacy path
-    /// (non-main window → active session → main window).
-    private func handleCloseShortcut() {
-        if sidebarStore.panes.count > 1 {
-            sidebarStore.closePane(at: sidebarStore.focusedPaneIndex)
-        } else {
-            legacyCloseAction()
-        }
-    }
-
-    /// Single-pane / no-pane Cmd+W: close the focused non-main window
-    /// first (Settings, Sparkle alert), otherwise close the active session,
-    /// otherwise close the main window itself.
-    private func legacyCloseAction() {
-        if let key = NSApp.keyWindow, !isCanopyWindow(key) {
-            key.performClose(nil)
-            return
-        }
-        if sidebarStore.activeSession != nil {
-            closeActiveSession()
-        } else if let key = NSApp.keyWindow, isCanopyWindow(key) {
-            windowCloseOnly(key)
-        }
-    }
-
     private func showMainWindow() {
         if let main = NSApp.windows.first(where: { isCanopyWindow($0) }) {
             main.makeKeyAndOrderFront(nil)
@@ -191,6 +159,52 @@ struct CanopyApp: App {
 }
 
 // MARK: - Window close interception
+
+/// Cmd+W behaviour (browser-style): with 2+ panes, close the focused
+/// pane; otherwise fall through to the single-pane legacy path
+/// (non-main window → active session → main window).
+/// Shared by the SwiftUI File > Close Session menu button and the
+/// AppDelegate keyDown monitor so both paths stay in lockstep.
+@MainActor
+func handleCloseShortcut() {
+    // Non-Canopy window (Settings, Sparkle alert): close it first — the
+    // keyDown monitor must handle this because File > Close is suppressed.
+    if let key = NSApp.keyWindow, !isCanopyWindow(key) {
+        logger.debug("Cmd+W: non-Canopy window, performClose")
+        key.performClose(nil)
+        return
+    }
+    guard let store = SessionStore.shared else {
+        if let key = NSApp.keyWindow, isCanopyWindow(key) {
+            windowCloseOnly(key)
+        }
+        return
+    }
+    if store.panes.count > 1 {
+        logger.debug("Cmd+W: closing focused pane at \(store.focusedPaneIndex)")
+        store.closePane(at: store.focusedPaneIndex)
+    } else {
+        legacyCloseAction()
+    }
+}
+
+/// Single-pane / no-pane Cmd+W: close the focused non-main window
+/// first (Settings, Sparkle alert), otherwise close the active session,
+/// otherwise close the main window itself.
+@MainActor
+func legacyCloseAction() {
+    if let key = NSApp.keyWindow, !isCanopyWindow(key) {
+        key.performClose(nil)
+        return
+    }
+    if let store = SessionStore.shared, let active = store.activeSession {
+        logger.debug("Cmd+W: closing active session id=\(active.id.uuidString, privacy: .public)")
+        store.closeSession(active.id)
+    } else if let key = NSApp.keyWindow, isCanopyWindow(key) {
+        logger.debug("Cmd+W: no active session, windowCloseOnly")
+        windowCloseOnly(key)
+    }
+}
 
 /// Whether a window is a Canopy app window (not a panel, settings, etc.).
 /// SwiftUI's `WindowGroup(id: "main")` doesn't always preserve the literal
@@ -335,29 +349,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard modifiers == .command,
                   event.charactersIgnoringModifiers?.lowercased() == "w"
             else { return event }
-            guard let key = NSApp.keyWindow else { return event }
-
-            // Non-Canopy window (Settings, Sparkle alert): close it normally.
-            // We also have to handle this here because removing the auto File
-            // > Close item from the menu would otherwise leave Cmd+W with no
-            // handler in those windows.
-            if !isCanopyWindow(key) {
-                logger.debug("Cmd+W: non-Canopy window, performClose")
-                key.performClose(nil)
-                return nil
-            }
+            guard NSApp.keyWindow != nil else { return event }
 
             logger.debug("Cmd+W intercepted (pre-performClose)")
-            if let store = SessionStore.shared, store.panes.count > 1 {
-                logger.debug("  → closing focused pane at \(store.focusedPaneIndex)")
-                store.closePane(at: store.focusedPaneIndex)
-            } else if let store = SessionStore.shared, let active = store.activeSession {
-                logger.debug("  → closing active session id=\(active.id.uuidString, privacy: .public)")
-                store.closeSession(active.id)
-            } else {
-                logger.debug("  → no active session, windowCloseOnly")
-                windowCloseOnly(key)
-            }
+            handleCloseShortcut()
             return nil // consume — no flash
         }
     }
@@ -651,6 +646,10 @@ enum PaneWindowSizer {
     static func applyForCurrentPanes(store: SessionStore) {
         guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isMainWindow }) ?? NSApp.windows.first,
               let screen = window.screen ?? NSScreen.main else { return }
+        // Empty panes → leave the window alone. Resizing to sidebar-only
+        // would collapse the frame while closeSession is still settling
+        // selection onto the next open session / launcher.
+        guard !store.panes.isEmpty else { return }
 
         let sidebar = assumedSidebarWidth
         let dividers = CGFloat(max(0, store.panes.count - 1)) * SessionStore.paneDividerWidth

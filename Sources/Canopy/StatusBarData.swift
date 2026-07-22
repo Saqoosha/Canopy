@@ -88,6 +88,9 @@ final class StatusBarData {
         remoteHost = nil
         subagents = []
         chatInputWidth = nil
+        hintClearTask?.cancel()
+        hintClearTask = nil
+        transientHint = nil
     }
 
     /// Post a self-clearing status-bar hint. Cancels any in-flight clear

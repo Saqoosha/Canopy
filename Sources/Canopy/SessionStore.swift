@@ -221,7 +221,10 @@ final class SessionStore {
         openSessions.append(session)
         switch target {
         case .focused: select(.session(session.id))
-        case .newPane: _ = openInNewPane(session.id)
+        case .newPane:
+            if !openInNewPane(session.id) {
+                openInFocusedPane(session.id)   // e.g. cap reached — degrade gracefully
+            }
         }
         logger.info("openNew dir=\(directory.path, privacy: .public) resume=\(resumeId ?? "new", privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")
         return session
@@ -741,12 +744,26 @@ final class SessionStore {
 
     /// Called by closeSession(_:) after the session is removed from
     /// openSessions. Drops any pane pointing at the closed session.
+    /// Does NOT call `closePane` — that mutates `selection`, which would
+    /// overwrite the browser-tab fallback `closeSession` is about to apply.
     private func removePanesForClosedSession(_ id: OpenSession.ID) {
         let matching = panes.enumerated().compactMap { (i, slot) -> Int? in
             if case .session(let sid) = slot.content, sid == id { return i } else { return nil }
         }
         // Remove from the highest index down so earlier indices stay valid.
-        for idx in matching.reversed() { closePane(at: idx) }
+        for idx in matching.reversed() {
+            panes.remove(at: idx)
+            if focusedPaneIndex >= panes.count && !panes.isEmpty {
+                focusedPaneIndex = panes.count - 1
+            } else if idx < focusedPaneIndex {
+                focusedPaneIndex -= 1
+            }
+        }
+        if panes.isEmpty {
+            focusedPaneIndex = 0
+            return
+        }
+        Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
     }
 
     #if DEBUG
