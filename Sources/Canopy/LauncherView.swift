@@ -964,8 +964,6 @@ struct LauncherView: View {
                 let worktree = try await Task.detached(priority: .userInitiated) {
                     try GitWorktree.createWorktree(repo: repo, branch: branchName)
                 }.value
-                RecentDirectories.add(worktree)
-                recentDirectories = RecentDirectories.load()
                 launchLocal(worktree, remoteHost: nil,
                             model: selectedModel, effort: selectedEffort, permission: selectedPermission)
             } catch {
