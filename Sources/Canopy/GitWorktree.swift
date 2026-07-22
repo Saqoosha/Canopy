@@ -16,25 +16,41 @@ enum GitWorktree {
     /// worktree FOLDER name, i.e. the branch with `/` flattened to `-`).
     /// Worktrees anywhere else fall back to the plain folder name by design.
     static func projectDisplayName(for dir: URL) -> String {
-        // Lexical normalization ("..", ".") so cwd-derived paths still match
-        // the layout checks. Symlink resolution is deliberately skipped — this
-        // runs per sidebar-row render, and a miss only degrades to the plain
-        // folder name.
+        if let parts = worktreeParts(for: dir) {
+            return "\(parts.repo) · \(parts.branch)"
+        }
+        return dir.standardizedFileURL.lastPathComponent
+    }
+
+    /// True when `dir` is a Canopy-recognized worktree (managed root or the
+    /// legacy `<repo>-worktrees` sibling layout). Callers use this to keep
+    /// worktrees out of launcher Recents — the plain folder name ("work-…")
+    /// carries no project context, and the session is discoverable via the
+    /// sidebar's closed-session row anyway.
+    static func isManagedWorktree(_ dir: URL) -> Bool {
+        worktreeParts(for: dir) != nil
+    }
+
+    // Lexical normalization ("..", ".") so cwd-derived paths still match
+    // the layout checks. Symlink resolution is deliberately skipped — this
+    // runs per sidebar-row render, and a miss only degrades to the plain
+    // folder name.
+    private static func worktreeParts(for dir: URL) -> (repo: String, branch: String)? {
         let standardized = dir.standardizedFileURL
         let name = standardized.lastPathComponent
         let parent = standardized.deletingLastPathComponent()
         // Managed layout: ~/.claude/worktrees/<repo>/<branch>
         if parent.deletingLastPathComponent().path == worktreesRoot.path {
-            return "\(parent.lastPathComponent) · \(name)"
+            return (parent.lastPathComponent, name)
         }
         // Sibling layout (<repoParent>/<repo>-worktrees/<branch>): used by
         // pre-release Canopy builds and common external tooling conventions.
         let parentName = parent.lastPathComponent
         let suffix = "-worktrees"
         if parentName.hasSuffix(suffix), parentName.count > suffix.count {
-            return "\(String(parentName.dropLast(suffix.count))) · \(name)"
+            return (String(parentName.dropLast(suffix.count)), name)
         }
-        return name
+        return nil
     }
 
     static func isGitRepo(_ dir: URL) -> Bool {

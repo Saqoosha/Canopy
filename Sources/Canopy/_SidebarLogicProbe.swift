@@ -620,6 +620,17 @@ enum SidebarLogicProbe {
                    for: GitWorktree.worktreesRoot
                        .appendingPathComponent("Other/../Canopy/fix-foo")) == "Canopy · fix-foo")
 
+        record("isManagedWorktree: managed layout → true",
+               GitWorktree.isManagedWorktree(
+                   GitWorktree.worktreesRoot.appendingPathComponent("Canopy/fix-foo")))
+        record("isManagedWorktree: legacy sibling layout → true",
+               GitWorktree.isManagedWorktree(
+                   URL(fileURLWithPath: "/repos/Canopy-worktrees/work-123")))
+        record("isManagedWorktree: normal dir → false",
+               !GitWorktree.isManagedWorktree(URL(fileURLWithPath: "/repos/Canopy")))
+        record("isManagedWorktree: bare '-worktrees' folder → false",
+               !GitWorktree.isManagedWorktree(URL(fileURLWithPath: "/repos/-worktrees/x")))
+
         // --- Open-session reorder (drag & drop) ---
         // Pure mapping: a move expressed against the visible (filtered) open
         // rows is applied to the master array; hidden rows keep their slots.
