@@ -21,7 +21,7 @@ struct SidebarAccountSection: View {
             VStack(alignment: .leading, spacing: 6) {
                 Divider()
                     .padding(.bottom, 2)
-                Text("Account")
+                Text("Usage")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
@@ -39,20 +39,32 @@ struct SidebarAccountSection: View {
                              percent: weeklyPercent,
                              reset: weeklyResetLabel)
                 }
+                // Per-model weekly buckets (e.g. "Weekly Fable") from the
+                // raw get_usage payload — one row per model, same columns.
+                ForEach(data.modelScoped, id: \.displayName) { scoped in
+                    limitRow(label: scoped.displayName,
+                             percent: Double(scoped.pct) / 100.0,
+                             reset: SharedRateLimitData.formatResetTime(scoped.resetDate))
+                }
             }
             .padding(.bottom, 8)
         }
     }
 
     private func limitRow(label: String, percent: Double, reset: String) -> some View {
+        // Every column except the bar has a fixed width so the bars in all
+        // rows share the same start AND end x (the earlier free-width reset
+        // label made each bar end wherever its reset text happened to be).
         HStack(spacing: 8) {
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .frame(width: 24, alignment: .leading)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 34, alignment: .leading)
             ProgressView(value: percent)
                 .progressViewStyle(.linear)
-                .tint(percent >= 0.8 ? .orange : .accentColor)
+                .tint(barColor(percent))
             Text("\(Int(percent * 100))%")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -63,9 +75,18 @@ struct SidebarAccountSection: View {
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
                 .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+                .minimumScaleFactor(0.75)
+                .frame(width: 44, alignment: .leading)
         }
         .padding(.horizontal, 12)
+    }
+
+    /// Same thresholds the per-pane status bar's usage indicators use:
+    /// calm gray while comfortable, orange from 50%, red from 80%.
+    private func barColor(_ percent: Double) -> Color {
+        if percent >= 0.8 { return .red }
+        if percent >= 0.5 { return .orange }
+        return .secondary
     }
 
     // SharedRateLimitData has no hasSnapshot — show when either reset date

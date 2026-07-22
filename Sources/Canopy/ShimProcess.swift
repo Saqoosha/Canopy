@@ -978,6 +978,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             trackPermissionState(stdoutMessage: msg)
             extractStatusData(innerMessage)
             extractTitle(innerMessage)
+            extractRawUsage(innerMessage)
             if Self.isCanopyOwnedResponse(innerMessage) {
                 return
             }
@@ -1332,6 +1333,51 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 ] as [String: Any],
             ] as [String: Any],
         ])
+        // Also ask the CLI for the RAW usage payload (get_usage). The
+        // extension's usage_update transform drops `model_scoped` — the
+        // per-model weekly buckets (e.g. "Weekly Fable") that the sidebar
+        // Usage section renders. The raw response keeps them. The response
+        // is swallowed by isCanopyOwnedResponse so the webview never sees
+        // an unmatched requestId. channelId is required (the extension
+        // routes get_usage to a per-channel CLI query).
+        if let channelId {
+            sendToShim([
+                "type": "webview_message",
+                "message": [
+                    "type": "request",
+                    "channelId": channelId,
+                    "requestId": "canopy-getusage-\(UUID().uuidString.prefix(8))",
+                    "request": [
+                        "type": "get_usage",
+                    ] as [String: Any],
+                ] as [String: Any],
+            ])
+        }
+    }
+
+    /// Capture the raw get_usage response requested above and feed the
+    /// snake_case rate_limits payload (incl. model_scoped) to
+    /// SharedRateLimitData. Responses may arrive unwrapped or wrapped in
+    /// from-extension, same as titles (see extractTitle).
+    private func extractRawUsage(_ message: [String: Any]) {
+        func handle(_ response: [String: Any], requestId: String?) {
+            guard let requestId, requestId.hasPrefix("canopy-getusage-"),
+                  response["type"] as? String == "get_usage_response",
+                  let usage = response["usage"] as? [String: Any],
+                  let rateLimits = usage["rate_limits"] as? [String: Any]
+            else { return }
+            SharedRateLimitData.shared.updateFromRawUsage(rateLimits)
+        }
+        if let response = message["response"] as? [String: Any] {
+            handle(response, requestId: message["requestId"] as? String)
+            return
+        }
+        if message["type"] as? String == "from-extension",
+           let nested = message["message"] as? [String: Any],
+           let response = nested["response"] as? [String: Any]
+        {
+            handle(response, requestId: nested["requestId"] as? String)
+        }
     }
 
     /// Send a synthetic generate_session_title request to the extension via shim.
@@ -1453,7 +1499,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     private static func isCanopyOwnedRequestId(_ requestId: String) -> Bool {
-        requestId.hasPrefix("canopy-title-") || requestId.hasPrefix("canopy-usage-")
+        requestId.hasPrefix("canopy-title-")
+            || requestId.hasPrefix("canopy-usage-")
+            || requestId.hasPrefix("canopy-getusage-")
     }
 
     private func applyTitleFromResponse(_ response: [String: Any], requestId: String? = nil) {

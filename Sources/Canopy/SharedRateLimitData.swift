@@ -21,6 +21,17 @@ final class SharedRateLimitData {
     var weeklyPctSonnet: Int = 0
     var weeklyResetDateSonnet: Date?
 
+    /// Per-model weekly buckets from the raw usage payload's `model_scoped`
+    /// array (e.g. "Weekly Fable"). Only the raw CLI `get_usage` path fills
+    /// this — the extension's usage_update transform drops the field.
+    struct ModelScopedLimit: Equatable {
+        let displayName: String
+        let pct: Int
+        let resetDate: Date?
+    }
+
+    var modelScoped: [ModelScopedLimit] = []
+
     // Throttle: only one tab needs to request usage updates
     private var lastUsageUpdateTime: Date = .distantPast
     private static let updateInterval: TimeInterval = 60
@@ -51,6 +62,39 @@ final class SharedRateLimitData {
         } else {
             weeklyPctSonnet = 0
             weeklyResetDateSonnet = nil
+        }
+    }
+
+    /// Update from the RAW `/api/oauth/usage` shape (snake_case), delivered
+    /// via the CLI's `get_usage` response. Unlike `update(from:)` (the
+    /// extension's camelCase usage_update) this includes `model_scoped`.
+    /// Shape: { five_hour: {utilization, resets_at}, seven_day: {...},
+    ///          seven_day_sonnet: {...}, model_scoped: [{display_name,
+    ///          utilization, resets_at}, ...] }
+    func updateFromRawUsage(_ rateLimits: [String: Any]) {
+        if let entry = rateLimits["five_hour"] as? [String: Any] {
+            sessionPct = entry["utilization"].map { Self.parseUtilization($0) } ?? 0
+            sessionResetDate = (entry["resets_at"] as? String).flatMap { Self.parseISO8601($0) }
+        }
+        if let entry = rateLimits["seven_day"] as? [String: Any] {
+            weeklyPct = entry["utilization"].map { Self.parseUtilization($0) } ?? 0
+            weeklyResetDate = (entry["resets_at"] as? String).flatMap { Self.parseISO8601($0) }
+        }
+        if let entry = rateLimits["seven_day_sonnet"] as? [String: Any] {
+            weeklyPctSonnet = entry["utilization"].map { Self.parseUtilization($0) } ?? 0
+            weeklyResetDateSonnet = (entry["resets_at"] as? String).flatMap { Self.parseISO8601($0) }
+        }
+        if let scoped = rateLimits["model_scoped"] as? [[String: Any]] {
+            modelScoped = scoped.compactMap { entry in
+                guard let name = entry["display_name"] as? String, !name.isEmpty else { return nil }
+                return ModelScopedLimit(
+                    displayName: name,
+                    pct: entry["utilization"].map { Self.parseUtilization($0) } ?? 0,
+                    resetDate: (entry["resets_at"] as? String).flatMap { Self.parseISO8601($0) }
+                )
+            }
+        } else {
+            modelScoped = []
         }
     }
 
