@@ -61,7 +61,9 @@ struct SidebarAccountSection: View {
             Text(reset)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-                .frame(width: 32, alignment: .trailing)
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 12)
     }

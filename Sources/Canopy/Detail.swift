@@ -26,8 +26,17 @@ struct Detail: View {
                         if index > 0 {
                             PaneDivider(store: store, leftIndex: index - 1)
                         }
-                        paneCell(pane: pane, index: index)
-                            .frame(width: pane.preferredWidth)
+                        // Single-pane mode fills the whole detail column
+                        // (matches pre-multi-pane behavior and avoids the
+                        // gap on windows wider than one pane's preferredWidth).
+                        // Multi-pane keeps each pane at its explicit width.
+                        if store.panes.count == 1 {
+                            paneCell(pane: pane, index: index)
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            paneCell(pane: pane, index: index)
+                                .frame(width: pane.preferredWidth)
+                        }
                     }
                 }
             }
