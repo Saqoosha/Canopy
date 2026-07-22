@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The detail pane of the single-window shell. Renders N horizontal panes
@@ -163,6 +164,8 @@ private struct DetailLauncher: View {
                 // it flips to .session we hand off to the SessionStore, which
                 // creates a fresh OpenSession with the same params.
                 if localAppState.screen == .session {
+                    let target: SessionStore.PaneTarget =
+                        NSEvent.modifierFlags.contains(.command) ? .newPane : .focused
                     store.openNew(
                         directory: localAppState.workingDirectory,
                         resumeId: localAppState.resumeSessionId,
@@ -171,7 +174,8 @@ private struct DetailLauncher: View {
                         effortLevel: localAppState.effortLevel,
                         permissionMode: localAppState.permissionMode,
                         remoteHost: localAppState.remoteHost,
-                        customApi: localAppState.customApi
+                        customApi: localAppState.customApi,
+                        target: target
                     )
                     // Reset the local appState so the next Start works again
                     localAppState.backToLauncher()
