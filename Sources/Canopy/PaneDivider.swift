@@ -16,7 +16,10 @@ struct PaneDivider: View {
             Divider().frame(width: 1)      // visible line
         }
         .contentShape(Rectangle())
-        .onHover { NSCursor.resizeLeftRight.set(); _ = $0 }
+        .onHover { hovering in
+            if hovering { NSCursor.resizeLeftRight.push() }
+            else { NSCursor.pop() }
+        }
         .gesture(
             DragGesture(minimumDistance: 1)
                 .onChanged { drag in

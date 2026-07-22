@@ -99,6 +99,37 @@ final class SessionStore {
     private var cloudPollTask: Task<Void, Never>?
     private let cloudPollInterval: Duration = .seconds(30)
 
+    /// Coalesces rapid PaneWindowSizer dispatches (open/close/cap churn)
+    /// into a single ~16 ms deferred apply so we don't animate the window
+    /// frame multiple times in one run-loop turn.
+    private var pendingResizeTask: Task<Void, Never>?
+
+    private func schedulePaneResize() {
+        pendingResizeTask?.cancel()
+        pendingResizeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(16))
+            if !Task.isCancelled, let self {
+                PaneWindowSizer.applyForCurrentPanes(store: self)
+            }
+        }
+    }
+
+    /// Surface the "Maximum 5 panes" hint on the focused session's status
+    /// bar. Called by openNew / openCloud / Sidebar when a `.newPane`
+    /// request hits the absolute cap. Launcher-focused panes have no
+    /// status bar, so the hint is logged and dropped.
+    func showCapReachedHintOnFocusedPane() {
+        guard let focused = focusedPane else { return }
+        if case .session(let id) = focused.content,
+           let session = openSessions.first(where: { $0.id == id }) {
+            session.statusBar.showHint("Maximum 5 panes")
+            return
+        }
+        // Launcher-focused case: no session status bar to display on; hint is lost.
+        // Log so it's diagnosable.
+        logger.info("showCapReachedHint: panes at cap; focused pane is launcher; hint dropped")
+    }
+
     /// Sorted, de-duplicated, filtered rows the sidebar should render.
     var visibleRows: [SidebarRow] {
         // Drop any closed local row whose JSONL id is also currently open —
@@ -223,7 +254,11 @@ final class SessionStore {
         case .focused: select(.session(session.id))
         case .newPane:
             if !openInNewPane(session.id) {
-                openInFocusedPane(session.id)   // e.g. cap reached — degrade gracefully
+                // If cap reached, hint on focused pane BEFORE the fallback overwrites content.
+                if panes.count >= Self.paneAbsoluteCap {
+                    showCapReachedHintOnFocusedPane()
+                }
+                openInFocusedPane(session.id)
             }
         }
         logger.info("openNew dir=\(directory.path, privacy: .public) resume=\(resumeId ?? "new", privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")
@@ -419,7 +454,11 @@ final class SessionStore {
         case .focused: openInFocusedPane(opened.id)
         case .newPane:
             if !openInNewPane(opened.id) {
-                openInFocusedPane(opened.id)   // e.g. cap reached — degrade gracefully
+                // If cap reached, hint on focused pane BEFORE the fallback overwrites content.
+                if panes.count >= Self.paneAbsoluteCap {
+                    showCapReachedHintOnFocusedPane()
+                }
+                openInFocusedPane(opened.id)
             }
         }
         // Refresh recents + teleportedFromMap so the new local JSONL is
@@ -485,12 +524,14 @@ final class SessionStore {
         openSessions.remove(at: idx)
         removePanesForClosedSession(id)
 
-        if case .session(let sel) = selection, sel == id {
-            // Browser-tab convention: focus the row that took the closed
-            // tab's slot (i.e. what was just to its right), or the new
-            // last row if we closed the rightmost. `lastActiveAt` would
-            // jump to whichever was opened most recently regardless of
-            // proximity, which feels random when closing the active row.
+        // Derive selection from panes when possible; only fall back to the
+        // browser-tab convention on openSessions when panes went empty.
+        if !panes.isEmpty {
+            switch panes[focusedPaneIndex].content {
+            case .session(let sid): selection = .session(sid)
+            case .launcher: selection = .launcher
+            }
+        } else if case .session(let sel) = selection, sel == id {
             if openSessions.isEmpty {
                 selection = .launcher
             } else {
@@ -623,7 +664,7 @@ final class SessionStore {
             panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
             focusedPaneIndex = 0
             selection = .session(sessionId)
-            Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
+            schedulePaneResize()
             return
         }
         // If this session already lives in a pane, focus that one instead of
@@ -664,7 +705,11 @@ final class SessionStore {
         panes.append(PaneSlot(content: .session(sessionId), preferredWidth: width))
         focusedPaneIndex = panes.count - 1
         selection = .session(sessionId)
-        Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
+        if let session = openSessions.first(where: { $0.id == sessionId }) {
+            lastActiveResumeId = session.resumeId
+            SessionStorePersistence.saveLastActiveResumeId(session.resumeId)
+        }
+        schedulePaneResize()
         return true
     }
 
@@ -676,7 +721,7 @@ final class SessionStore {
         panes.append(PaneSlot(content: .launcher, preferredWidth: width))
         focusedPaneIndex = panes.count - 1
         selection = .launcher
-        Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
+        schedulePaneResize()
         return true
     }
 
@@ -694,7 +739,7 @@ final class SessionStore {
         if panes.isEmpty {
             focusedPaneIndex = 0
             selection = .launcher
-            Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
+            schedulePaneResize()
             return
         }
         if wasFocused {
@@ -706,7 +751,7 @@ final class SessionStore {
         case .session(let id): selection = .session(id)
         case .launcher: selection = .launcher
         }
-        Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
+        schedulePaneResize()
     }
 
     /// Bypasses the divider-drag floor. Used only by PaneWindowSizer's
@@ -732,38 +777,39 @@ final class SessionStore {
     }
 
     /// Update two adjacent panes' preferred widths from a divider drag.
-    /// Sum is preserved by the caller; floor is enforced here.
+    /// Sum is preserved; values below the floor snap up and the overflow
+    /// is reflected onto the other side.
     func setAdjacentPaneWidths(leftIndex: Int, leftWidth: CGFloat, rightWidth: CGFloat) {
         let rightIndex = leftIndex + 1
         guard panes.indices.contains(leftIndex), panes.indices.contains(rightIndex) else { return }
         let floor = Self.paneMinDragWidth
-        guard leftWidth >= floor, rightWidth >= floor else { return }
-        panes[leftIndex].preferredWidth = leftWidth
-        panes[rightIndex].preferredWidth = rightWidth
+        let sum = leftWidth + rightWidth
+        // Snap: never go below floor on either side; reflect overflow to the other.
+        let clampedLeft = min(max(floor, leftWidth), sum - floor)
+        let clampedRight = sum - clampedLeft
+        guard clampedRight >= floor else { return }
+        panes[leftIndex].preferredWidth = clampedLeft
+        panes[rightIndex].preferredWidth = clampedRight
     }
 
     /// Called by closeSession(_:) after the session is removed from
     /// openSessions. Drops any pane pointing at the closed session.
-    /// Does NOT call `closePane` — that mutates `selection`, which would
-    /// overwrite the browser-tab fallback `closeSession` is about to apply.
+    /// Does NOT mutate `selection` — `closeSession` derives it from the
+    /// surviving focused pane (or falls back to openSessions order when
+    /// panes went empty).
     private func removePanesForClosedSession(_ id: OpenSession.ID) {
         let matching = panes.enumerated().compactMap { (i, slot) -> Int? in
             if case .session(let sid) = slot.content, sid == id { return i } else { return nil }
         }
-        // Remove from the highest index down so earlier indices stay valid.
+        guard !matching.isEmpty else { return }
         for idx in matching.reversed() {
+            let wasFocused = idx == focusedPaneIndex
             panes.remove(at: idx)
-            if focusedPaneIndex >= panes.count && !panes.isEmpty {
-                focusedPaneIndex = panes.count - 1
-            } else if idx < focusedPaneIndex {
-                focusedPaneIndex -= 1
-            }
+            if panes.isEmpty { focusedPaneIndex = 0 }
+            else if wasFocused { focusedPaneIndex = max(0, min(idx - 1, panes.count - 1)) }
+            else if idx < focusedPaneIndex { focusedPaneIndex -= 1 }
         }
-        if panes.isEmpty {
-            focusedPaneIndex = 0
-            return
-        }
-        Task { @MainActor in PaneWindowSizer.applyForCurrentPanes(store: self) }
+        schedulePaneResize()
     }
 
     #if DEBUG

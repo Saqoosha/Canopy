@@ -7,7 +7,7 @@ struct StatusBarView: View {
     /// Per-pane width thresholds (from `data.chatInputWidth`) at which
     /// status-bar items collapse. Defaults are educated first guesses;
     /// retune after a manual narrow-pane smoke test.
-    private enum CollapseThreshold {
+    fileprivate enum CollapseThreshold {
         /// Below this, drop the session-usage counter (message count).
         static let dropSessionUsage: CGFloat = 620
         /// Below this, collapse CLI version to icon-only with tooltip.
@@ -311,3 +311,16 @@ struct StatusBarView: View {
     }
 
 }
+
+#if DEBUG
+private let _validateCollapseThresholds: Void = {
+    assert(StatusBarView.CollapseThreshold.dropSessionUsage
+         > StatusBarView.CollapseThreshold.cliVersionIcon
+         && StatusBarView.CollapseThreshold.cliVersionIcon
+         > StatusBarView.CollapseThreshold.branchIcon
+         && StatusBarView.CollapseThreshold.branchIcon
+         > StatusBarView.CollapseThreshold.dropContextNumeric
+         && StatusBarView.CollapseThreshold.dropContextNumeric
+         > StatusBarView.CollapseThreshold.popoverFallback)
+}()
+#endif

@@ -195,7 +195,9 @@ struct Sidebar: View {
             // Mirror Cmd+N (CanopyApp File > New Session). Cmd+click opens
             // a launcher in a new pane (spec parity with sidebar row Cmd+click).
             if NSEvent.modifierFlags.contains(.command) {
-                _ = store.openLauncherInNewPane()
+                if !store.openLauncherInNewPane() {
+                    store.showCapReachedHintOnFocusedPane()
+                }
             } else if store.panes.isEmpty {
                 store.select(.launcher)
             } else {
@@ -328,9 +330,19 @@ struct Sidebar: View {
                 store.openInFocusedPane(session.id)
             }
         case .closedLocal(let entry):
-            _ = store.openLocal(entry, target: addNewPane ? .newPane : .focused)
+            if addNewPane && store.panes.count >= SessionStore.paneAbsoluteCap {
+                store.showCapReachedHintOnFocusedPane()
+                _ = store.openLocal(entry, target: .focused)  // deliberate: user still gets the session, just in focused
+            } else {
+                _ = store.openLocal(entry, target: addNewPane ? .newPane : .focused)
+            }
         case .closedCloud(let cloud):
-            store.openCloud(cloud, target: addNewPane ? .newPane : .focused)
+            if addNewPane && store.panes.count >= SessionStore.paneAbsoluteCap {
+                store.showCapReachedHintOnFocusedPane()
+                store.openCloud(cloud, target: .focused)
+            } else {
+                store.openCloud(cloud, target: addNewPane ? .newPane : .focused)
+            }
         }
     }
 

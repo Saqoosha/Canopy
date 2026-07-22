@@ -23,7 +23,7 @@ struct Detail: View {
                 HStack(spacing: 0) {
                     ForEach(Array(store.panes.enumerated()), id: \.element.id) { index, pane in
                         if index > 0 {
-                            PaneDivider(store: store, leftIndex: index - 1)   // Task 7
+                            PaneDivider(store: store, leftIndex: index - 1)
                         }
                         paneCell(pane: pane, index: index)
                             .frame(width: pane.preferredWidth)
@@ -81,7 +81,7 @@ struct Detail: View {
         }
         .overlay(focusBorder(active: index == store.focusedPaneIndex))
         .contentShape(Rectangle())
-        .onTapGesture { store.setFocusedPaneIndex(index) }
+        .simultaneousGesture(TapGesture().onEnded { store.setFocusedPaneIndex(index) })
     }
 
     private func focusBorder(active: Bool) -> some View {

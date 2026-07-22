@@ -22,6 +22,6 @@ struct PaneSlot: Equatable, Identifiable {
     init(id: UUID = UUID(), content: PaneContent, preferredWidth: CGFloat) {
         self.id = id
         self.content = content
-        self.preferredWidth = preferredWidth
+        self.preferredWidth = max(1, preferredWidth)
     }
 }

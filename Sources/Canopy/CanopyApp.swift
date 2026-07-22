@@ -670,10 +670,6 @@ enum PaneWindowSizer {
             newFrame.size.width = screenMax
         }
 
-        // Anchor origin.y (topLeftPoint) so the window doesn't jump down.
-        let topY = window.frame.origin.y + window.frame.height
-        newFrame.origin.y = topY - newFrame.height
-
         // Clamp origin.x so the wider window doesn't shoot off-screen.
         if newFrame.maxX > screen.visibleFrame.maxX {
             newFrame.origin.x = max(screen.visibleFrame.minX, screen.visibleFrame.maxX - newFrame.width)
