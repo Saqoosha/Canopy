@@ -325,6 +325,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// back into pane preferredWidths.
     var suppressPaneResizeObserver = false
 
+    /// Time-gated suspend on the observer. Any pane mutation extends this
+    /// past the animation's completion — protects against SwiftUI's own
+    /// content-driven window resize (which fires didResize before the
+    /// scheduled sizer's suppress flag is set) being mistaken for a
+    /// manual drag by the observer. See `suspendResizeObserver(for:)`.
+    var suppressPaneResizeObserverUntil: Date = .distantPast
+
+    /// Extend the observer suspend gate by `duration` seconds from now.
+    /// Called from `SessionStore.schedulePaneResize` so that the pane
+    /// mutation, SwiftUI's synchronous reflow, and the sizer's animated
+    /// setFrame all fall inside one suppress window.
+    func suspendResizeObserver(for duration: TimeInterval) {
+        let until = Date().addingTimeInterval(duration)
+        if until > suppressPaneResizeObserverUntil {
+            suppressPaneResizeObserverUntil = until
+        }
+    }
+
     private var windowResizeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -388,6 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 defer { self.lastKnownCanopyWindowWidth = current }
 
                 guard !self.suppressPaneResizeObserver,
+                      Date() >= self.suppressPaneResizeObserverUntil,
                       let store = SessionStore.shared,
                       !store.panes.isEmpty,
                       let prior = self.lastKnownCanopyWindowWidth
@@ -758,7 +777,15 @@ enum PaneWindowSizer {
         while let view = queue.first {
             queue.removeFirst()
             if let split = view as? NSSplitView, let sidebar = split.arrangedSubviews.first {
-                return sidebar.frame.width   // 0 when collapsed; that IS the correct sidebar width
+                // Only trust the measurement when the split view itself has been
+                // laid out. Split-not-yet-sized returns 0 during startup; using
+                // that as "sidebar collapsed" would make the sizer set the
+                // window smaller than SwiftUI's actual content, which then feeds
+                // back through the resize observer as an infinite widening loop.
+                if split.frame.width > 0 && sidebar.frame.width > 50 {
+                    return sidebar.frame.width
+                }
+                return assumedSidebarWidth
             }
             queue.append(contentsOf: view.subviews)
         }

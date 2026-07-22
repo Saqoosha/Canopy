@@ -24,11 +24,12 @@ Full chat with Claude works via vscode-shim. **Single-window sidebar shell** (Ar
 
 ## Build Commands
 ```bash
-xcodegen generate
-xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
+./scripts/build_debug_stable.sh   # signs with Apple Development cert, stable TCC grants
 open build/Build/Products/Debug/Canopy.app
 ```
-- Debug signs with the same Developer ID identity as Release (see project.yml comment — keeps TCC folder grants shared with the installed /Applications copy). On a machine WITHOUT that certificate, override per-build instead of editing project.yml: `xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY="Apple Development"`
+- **`scripts/build_debug_stable.sh`** is the interactive-dev default. Signs Debug with `Apple Development: Tomohiko Koyama (CH29255Y7T)` cert (team `G5G54TCH8W`) and bundle ID `sh.saqoo.Canopy.debug` — separate from Release so TCC entries don't collide. Grant Documents/Desktop/etc. once; the designated requirement stays stable across rebuilds, so grants persist.
+- **NEVER** fall back to `CODE_SIGN_IDENTITY="-" CODE_SIGNING_ALLOWED=NO` for interactive dev — that ad-hoc/linker-signed path re-triggers the TCC dialog on every launch. Only acceptable for one-shot CI without keychain access.
+- Debug signs with the same Developer ID identity as Release when that cert exists (project.yml is set up for that flow; on this machine we override via the script above because the Developer ID cert is not present).
 
 ## Architecture
 

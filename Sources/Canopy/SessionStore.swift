@@ -106,6 +106,14 @@ final class SessionStore {
     private var pendingResizeTask: Task<Void, Never>?
 
     private func schedulePaneResize() {
+        // Extend the observer suspend gate up front so SwiftUI's synchronous
+        // content-driven window resize (which fires didResize before this
+        // task's sizer sets the sizer-internal suppress flag) does not feed
+        // back through the observer as a manual drag. 16 ms debounce +
+        // ~200 ms animation + 100 ms margin covers the whole sequence.
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.suspendResizeObserver(for: 0.35)
+        }
         pendingResizeTask?.cancel()
         pendingResizeTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(16))
