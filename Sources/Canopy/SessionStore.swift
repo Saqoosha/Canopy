@@ -156,9 +156,21 @@ final class SessionStore {
             // The open block's order is fixed at insertion time (newest at
             // the bottom via `openSessions.append(_:)` in openNew /
             // openCloud — browser-tab convention).
+            if let idx = paneIndex(forSession: id) {
+                focusedPaneIndex = idx
+            } else {
+                openInFocusedPane(id)   // seeds first pane on cold launch
+            }
             lastActiveResumeId = open.resumeId
             SessionStorePersistence.saveLastActiveResumeId(open.resumeId)
         }
+    }
+
+    /// Public setter for `focusedPaneIndex` (which is `private(set)`). Used by
+    /// Detail's per-pane tap gesture to move focus without exposing a raw write.
+    func setFocusedPaneIndex(_ idx: Int) {
+        guard panes.indices.contains(idx) else { return }
+        focusedPaneIndex = idx
     }
 
     // MARK: - Open / close

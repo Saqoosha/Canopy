@@ -1,41 +1,34 @@
 import SwiftUI
 
-/// The detail pane of the single-window shell. Renders one of:
-///   - LauncherView (when selection == .launcher)
-///   - SessionContainer for the selected open session
+/// The detail pane of the single-window shell. Renders N horizontal panes
+/// (HStack of PaneHeaderStrip + SessionContainer / DetailLauncher). When
+/// `store.panes` is empty, falls through to the launcher (fresh launch).
 ///
-/// Only the active SessionContainer is mounted. WebViewContainer wraps a
-/// host NSView and swaps the WKWebView subview in-place when its bound
-/// OpenSession changes (~10–30 ms), so DOM state survives across switches
-/// without a SwiftUI re-mount.
+/// Only the focused pane's session drives the window title / subtitle.
+/// WebViewContainer wraps a host NSView and swaps the WKWebView subview
+/// in-place when its bound OpenSession changes (~10–30 ms), so DOM state
+/// survives across switches without a SwiftUI re-mount.
 struct Detail: View {
     @Bindable var store: SessionStore
 
     @ViewBuilder
     var body: some View {
-        // No ZStack around the launcher/session swap: WKWebView's NSView
-        // could otherwise end up alongside the launcher in the same
-        // NSHostingView and steal clicks on resize. The teleport overlay
-        // sits in a separate `.overlay` so it never co-mounts with the
-        // WebView host.
         Group {
-            if case .session(let id) = store.selection,
-               let session = store.openSessions.first(where: { $0.id == id }) {
-                SessionContainer(session: session) { _ in
-                    store.closeSession(session.id)
-                }
-                // `.id(session.id)` forces SwiftUI to re-mount the
-                // SessionContainer when the active session changes. We
-                // tried omitting it — `updateNSView` was supposed to
-                // swap the WebView in place — but SwiftUI silently
-                // refused to call `updateNSView` after the second
-                // `openNew`, so sessions 2..N stayed invisible. The
-                // `OpenSession.shim` / `OpenSession.webView` cache plus
-                // `WebViewContainer.buildWebView`'s reuse path keep the
-                // re-mount cheap (no shim restart, no HTML reload).
-                .id(session.id)
-            } else {
+            if store.panes.isEmpty {
+                // No pane yet: fall through to the launcher (fresh launch,
+                // nothing selected). Once the user picks a session the
+                // first pane is created via SessionStore.openInFocusedPane.
                 DetailLauncher(store: store)
+            } else {
+                HStack(spacing: 0) {
+                    ForEach(Array(store.panes.enumerated()), id: \.element.id) { index, pane in
+                        if index > 0 {
+                            PaneDivider(store: store, leftIndex: index - 1)   // Task 7
+                        }
+                        paneCell(pane: pane, index: index)
+                            .frame(width: pane.preferredWidth)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -50,22 +43,84 @@ struct Detail: View {
         .navigationSubtitle(windowSubtitle)
     }
 
-    /// Window title tracks the active session's title; falls back to "Canopy"
-    /// when the launcher is selected. NavigationSplitView's detail column
-    /// title automatically becomes the window title on macOS.
-    private var windowTitle: String {
-        if let active = store.activeSession, !active.title.isEmpty {
-            return active.title
+    @ViewBuilder
+    private func paneCell(pane: PaneSlot, index: Int) -> some View {
+        Group {
+            switch pane.content {
+            case .session(let sessionId):
+                if let session = store.openSessions.first(where: { $0.id == sessionId }) {
+                    VStack(spacing: 0) {
+                        PaneHeaderStrip(
+                            title: session.title.isEmpty ? "Untitled" : session.title,
+                            project: session.project,
+                            showCloseButton: store.panes.count > 1,
+                            onClose: { store.closePane(at: index) }
+                        )
+                        SessionContainer(session: session) { _ in
+                            store.closeSession(session.id)
+                        }
+                        .id(session.id)
+                    }
+                } else {
+                    // Session was closed under us; pane should have been auto-removed
+                    // via removePanesForClosedSession. Render an empty placeholder
+                    // rather than crashing.
+                    Color(nsColor: .windowBackgroundColor)
+                }
+            case .launcher:
+                VStack(spacing: 0) {
+                    PaneHeaderStrip(
+                        title: "New Session",
+                        project: "",
+                        showCloseButton: store.panes.count > 1,
+                        onClose: { store.closePane(at: index) }
+                    )
+                    DetailLauncher(store: store)
+                }
+            }
         }
-        return "Canopy"
+        .overlay(focusBorder(active: index == store.focusedPaneIndex))
+        .contentShape(Rectangle())
+        .onTapGesture { store.setFocusedPaneIndex(index) }
     }
 
-    /// Subtitle = project name. Renders as the secondary text in the title
-    /// bar (smaller, dimmed) on macOS, e.g. "My session — Canopy".
+    private func focusBorder(active: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 0)
+            .strokeBorder(active ? Color.accentColor : Color.clear, lineWidth: 2)
+            .animation(.easeInOut(duration: 0.1), value: active)
+            .allowsHitTesting(false)
+    }
+
+    private var windowTitle: String {
+        guard let pane = store.focusedPane else { return "Canopy" }
+        switch pane.content {
+        case .session(let id):
+            guard let session = store.openSessions.first(where: { $0.id == id }),
+                  !session.title.isEmpty else { return "Canopy" }
+            return session.title
+        case .launcher:
+            return "New Session"
+        }
+    }
+
     private var windowSubtitle: String {
-        store.activeSession?.project ?? ""
+        guard let pane = store.focusedPane else { return "" }
+        if case .session(let id) = pane.content,
+           let session = store.openSessions.first(where: { $0.id == id }) {
+            return session.project
+        }
+        return ""
     }
 
+}
+
+/// Temporary stub so Task 6 builds. Task 7 replaces this with a real
+/// drag-to-resize divider.
+// TODO(Task 7): replace stub
+struct PaneDivider: View {
+    @Bindable var store: SessionStore
+    let leftIndex: Int
+    var body: some View { Divider().frame(width: 1) }
 }
 
 /// Full-pane overlay shown while a cloud session is being teleported. The
