@@ -126,6 +126,7 @@ struct StatusBarView: View {
             }
             .buttonStyle(.plain)
             .help("More status")
+            .onDisappear { showPopover = false }
             .popover(isPresented: $showPopover, arrowEdge: .top) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let remote = data.remoteHost {

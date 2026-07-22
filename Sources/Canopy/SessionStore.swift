@@ -273,8 +273,15 @@ final class SessionStore {
         // If this session is already open, honor target (focused vs new pane).
         if let existing = openSessions.first(where: { $0.resumeId == entry.id }) {
             switch target {
-            case .focused: select(.session(existing.id))
-            case .newPane: _ = openInNewPane(existing.id)
+            case .focused:
+                select(.session(existing.id))
+            case .newPane:
+                if !openInNewPane(existing.id) {
+                    if panes.count >= Self.paneAbsoluteCap {
+                        showCapReachedHintOnFocusedPane()
+                    }
+                    openInFocusedPane(existing.id)
+                }
             }
             return existing
         }

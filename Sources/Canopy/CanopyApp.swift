@@ -636,15 +636,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// equal-share across all panes when the desired width exceeds the current
 /// screen.
 enum PaneWindowSizer {
-    /// Bottom-line assumption for sidebar width in points. NavigationSplitView
-    /// exposes it dynamically but we don't have a direct hook; a fixed
-    /// estimate is close enough — the fallback branch tolerates being off
-    /// by a few points either way.
-    static let assumedSidebarWidth: CGFloat = 240
+    /// Matches the ideal from navigationSplitViewColumnWidth(min:220, ideal:280, max:360)
+    /// in CanopyApp.swift's NavigationSplitView; the fallback branch tolerates
+    /// drift at min/max ranges.
+    static let assumedSidebarWidth: CGFloat = 280
 
     @MainActor
     static func applyForCurrentPanes(store: SessionStore) {
-        guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isMainWindow }) ?? NSApp.windows.first,
+        guard let window = NSApp.windows.first(where: { $0.isVisible && isCanopyWindow($0) })
+                          ?? NSApp.mainWindow,
               let screen = window.screen ?? NSScreen.main else { return }
         // Empty panes → leave the window alone. Resizing to sidebar-only
         // would collapse the frame while closeSession is still settling
