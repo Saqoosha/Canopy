@@ -125,16 +125,8 @@ struct Detail: View {
                 }
             }
         }
-        .overlay(focusBorder(active: index == store.focusedPaneIndex))
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded { store.setFocusedPaneIndex(index) })
-    }
-
-    private func focusBorder(active: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 0)
-            .strokeBorder(active ? Color.accentColor : Color.clear, lineWidth: 2)
-            .animation(.easeInOut(duration: 0.1), value: active)
-            .allowsHitTesting(false)
     }
 
     private var windowTitle: String {
