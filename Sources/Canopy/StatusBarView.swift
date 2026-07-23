@@ -10,8 +10,6 @@ struct StatusBarView: View {
     fileprivate enum CollapseThreshold {
         /// Below this, drop the session-usage counter (message count).
         static let dropSessionUsage: CGFloat = 620
-        /// Below this, collapse CLI version to icon-only with tooltip.
-        static let cliVersionIcon: CGFloat = 560
         /// Below this, collapse branch to icon-only with tooltip.
         static let branchIcon: CGFloat = 500
         /// Below this, drop the numeric "132K/923K" and keep just the bar + %.
@@ -32,6 +30,17 @@ struct StatusBarView: View {
     @ViewBuilder
     private func statusBar(now _: Date) -> some View {
         let w = data.chatInputWidth ?? .infinity  // no probe yet → assume wide
+        // Compute what's visible up front so each leading separator can
+        // check "was anything actually rendered to my left?" instead of
+        // trusting a hard-coded predecessor. Fixes two related bugs
+        // (double separators when e.g. remote is present but model is
+        // empty, and orphan leading separator when model is empty and
+        // branch is the first visible item).
+        let hasRemote = data.remoteHost != nil
+        let hasModel = !data.model.isEmpty
+        let hasBranch = !data.gitBranch.isEmpty
+        let hasContext = data.contextMax > 0
+        let hasMessages = w >= CollapseThreshold.dropSessionUsage && data.messageCount > 0
         ZStack {
             Group {
                 if w < CollapseThreshold.popoverFallback {
@@ -44,22 +53,17 @@ struct StatusBarView: View {
                         if let remote = data.remoteHost {
                             pill(remote, icon: "network", color: .orange)
                                 .help("SSH remote: \(remote)")
-                            separator
                         }
 
-                        // Model + Version (model never dropped)
-                        HStack(spacing: 5) {
+                        // Model (extension version moved to sidebar footer).
+                        if hasModel {
+                            if hasRemote { separator }
                             modelBadgeBlock
-                            if w >= CollapseThreshold.cliVersionIcon {
-                                cliVersionText
-                            } else if !data.cliVersion.isEmpty {
-                                cliVersionIcon
-                            }
                         }
 
                         // VCS branch
-                        if !data.gitBranch.isEmpty {
-                            separator
+                        if hasBranch {
+                            if hasRemote || hasModel { separator }
                             if w >= CollapseThreshold.branchIcon {
                                 branchPill
                             } else {
@@ -71,8 +75,8 @@ struct StatusBarView: View {
                         // to preserve the original 5pt spacing between numeric label
                         // and bar, and so hovering the numeric label also surfaces
                         // contextTooltip() (not just the bar).
-                        if data.contextMax > 0 {
-                            separator
+                        if hasContext {
+                            if hasRemote || hasModel || hasBranch { separator }
                             HStack(spacing: 5) {
                                 if w >= CollapseThreshold.dropContextNumeric {
                                     contextNumericLabel
@@ -83,8 +87,8 @@ struct StatusBarView: View {
                         }
 
                         // Session usage (message count)
-                        if w >= CollapseThreshold.dropSessionUsage, data.messageCount > 0 {
-                            separator
+                        if hasMessages {
+                            if hasRemote || hasModel || hasBranch || hasContext { separator }
                             sessionUsageBadge
                         }
 
@@ -133,7 +137,6 @@ struct StatusBarView: View {
                         pill(remote, icon: "network", color: .orange)
                             .help("SSH remote: \(remote)")
                     }
-                    cliVersionText
                     if !data.gitBranch.isEmpty { branchPill }
                     if data.contextMax > 0 {
                         HStack(spacing: 5) {
@@ -158,22 +161,6 @@ struct StatusBarView: View {
             pill(shortModelName(data.model), color: .purple)
                 .help(data.model)
         }
-    }
-
-    @ViewBuilder
-    private var cliVersionText: some View {
-        if !data.cliVersion.isEmpty {
-            Text("v\(data.cliVersion)")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    private var cliVersionIcon: some View {
-        Image(systemName: "terminal")
-            .font(.system(size: 10))
-            .foregroundStyle(.tertiary)
-            .help("v\(data.cliVersion)")
     }
 
     private var branchPill: some View {
@@ -316,8 +303,6 @@ struct StatusBarView: View {
 #if DEBUG
 private let _validateCollapseThresholds: Void = {
     assert(StatusBarView.CollapseThreshold.dropSessionUsage
-         > StatusBarView.CollapseThreshold.cliVersionIcon
-         && StatusBarView.CollapseThreshold.cliVersionIcon
          > StatusBarView.CollapseThreshold.branchIcon
          && StatusBarView.CollapseThreshold.branchIcon
          > StatusBarView.CollapseThreshold.dropContextNumeric
