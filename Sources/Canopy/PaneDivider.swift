@@ -174,10 +174,11 @@ private struct ResizeCursorArea: NSViewRepresentable {
 /// instance is kept; discarded instances have `pushed == false` and
 /// their deinit early-returns.
 /// `@unchecked Sendable` because we manage thread safety manually:
-/// `pushed` / `interruptObserver` / `globalMouseUpMonitor` are only
-/// mutated from `@MainActor` methods (engage/release), and deinit
-/// (which runs when the last reference drops) synchronously hops back
-/// to main via `MainActor.assumeIsolated` before touching any of them.
+/// `pushed` / `interruptObserver` / `localMouseUpMonitor` /
+/// `globalMouseUpMonitor` are only mutated from `@MainActor` methods
+/// (engage/release), and deinit (which runs when the last reference
+/// drops) synchronously hops back to main via `MainActor.assumeIsolated`
+/// before touching any of them.
 /// Marking the class Sendable lets `[weak self]` closures in the
 /// notification/monitor callbacks compile cleanly under Swift 6.
 private final class DragCursorLock: @unchecked Sendable {
