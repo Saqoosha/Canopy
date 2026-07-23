@@ -31,13 +31,13 @@ enum ScrollPreserveScript {
     /// off-by-one on message-append.
     private static let bottomThreshold = 20
 
-    /// How many periodic rescans to do after load; combined with the
-    /// scroll-event fallback this is more than enough to catch late-
-    /// mounted containers (auth flow, Monaco overlay) without hammering
-    /// the DOM.
-    private static let maxScanAttempts = 30
-
-    /// Interval between periodic rescans (ms).
+    /// Interval between periodic rescans (ms). The scan is idempotent
+    /// (WeakSet.has short-circuits already-known elements) so we do not
+    /// cap the number of attempts — a MAX_SCANS cap would silently drop
+    /// late-mounting scroll containers that never receive a user-driven
+    /// scroll event (e.g. an auto-scrolling log modal that opens hours
+    /// into the session). A single `querySelectorAll('*')` per second is
+    /// trivially cheap even in a React-heavy DOM.
     private static let scanIntervalMs = 1000
 
     static let javascript: String = """
@@ -45,7 +45,6 @@ enum ScrollPreserveScript {
         'use strict';
 
         var THRESHOLD = \(bottomThreshold);
-        var MAX_SCANS = \(maxScanAttempts);
         var SCAN_MS = \(scanIntervalMs);
 
         var known = new WeakSet();
@@ -57,7 +56,11 @@ enum ScrollPreserveScript {
                     console.warn('[canopy-scroll-preserve] ' + msg,
                                  err && err.message ? err.message : (err || ''));
                 }
-            } catch (e) {}
+            } catch (e) {
+                // Intentional: this IS the error reporter of last resort.
+                // If console.warn itself throws (WebKit teardown, DOM
+                // detach mid-log), there is nowhere higher to escalate to.
+            }
         }
 
         function checkAtBottom(el) {
@@ -65,6 +68,12 @@ enum ScrollPreserveScript {
         }
 
         function pinToBottom(el) {
+            // Guard against detach between the ResizeObserver callback
+            // and this rAF (React unmount two ticks later): reading
+            // scrollHeight/clientHeight on a detached element returns 0,
+            // which would silently clamp scrollTop to 0 — the opposite
+            // of the user's intent.
+            if (!el.isConnected) return;
             // Setting scrollTop to scrollHeight is clamped by the browser
             // to (scrollHeight - clientHeight); explicit form kept for
             // clarity and to survive future spec quirks.
@@ -75,8 +84,17 @@ enum ScrollPreserveScript {
             if (!(el instanceof Element)) return false;
             if (el.scrollHeight <= el.clientHeight + 1) return false;
             var style;
-            try { style = getComputedStyle(el); }
-            catch (e) { return false; }
+            try {
+                style = getComputedStyle(el);
+            } catch (e) {
+                // getComputedStyle throws on detached elements caught
+                // mid-reconcile, or in rare SecurityError paths. Warn
+                // so a candidate silently dropped from consideration
+                // shows up in the log — the failure mode otherwise
+                // looks identical to a genuine "not scrollable" element.
+                warn('getComputedStyle failed for candidate scroll container', e);
+                return false;
+            }
             var oy = style.overflowY;
             return oy === 'auto' || oy === 'scroll';
         }
@@ -93,11 +111,12 @@ enum ScrollPreserveScript {
             try {
                 var ro = new ResizeObserver(function() {
                     if (!atBottom.get(el)) return;
-                    // Two rAFs: first lets the browser commit the new
-                    // layout (borderBoxSize etc. are already up-to-date
-                    // in the ResizeObserver callback, but React children
-                    // may still be reconciling); second reads the final
-                    // scrollHeight and pins scrollTop.
+                    // Double rAF: a single rAF isn't always sufficient
+                    // for scrollHeight to stabilize on WebKit after a
+                    // ResizeObserver callback — the second rAF is a
+                    // defensive post-layout-read pattern that handles
+                    // both the box-metric update and any late child
+                    // reconciliation on top of it.
                     requestAnimationFrame(function() {
                         requestAnimationFrame(function() {
                             pinToBottom(el);
@@ -106,7 +125,14 @@ enum ScrollPreserveScript {
                 });
                 ro.observe(el);
             } catch (e) {
-                warn('ResizeObserver attach failed', e);
+                // Scroll listener above is already attached, so
+                // atBottom-tracking keeps working — but the RESIZE-
+                // triggered pin never fires for this element. From the
+                // user's perspective the scroll-preserve fix silently
+                // no-ops for this container. Warn so a future report
+                // of "scroll doesn't stay at bottom" can be diagnosed
+                // from the log rather than mistaken for a regression.
+                warn('ScrollPreserveScript: ResizeObserver unavailable — scroll-anchoring disabled for this container', e);
             }
         }
 
@@ -131,15 +157,12 @@ enum ScrollPreserveScript {
 
         function startScanning() {
             scan();
-            var attempts = 0;
-            var timer = setInterval(function() {
-                attempts++;
-                if (attempts >= MAX_SCANS) {
-                    clearInterval(timer);
-                    return;
-                }
-                scan();
-            }, SCAN_MS);
+            // No cap: see the SCAN_MS docstring on the Swift side.
+            // querySelectorAll('*') + WeakSet.has short-circuit is
+            // cheap enough to run forever and catches late-mounting
+            // scroll containers (auth flow → chat, modal log surfaces)
+            // that a capped scan would silently drop.
+            setInterval(scan, SCAN_MS);
         }
 
         if (document.readyState === 'loading') {
