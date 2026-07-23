@@ -18,10 +18,10 @@ struct SidebarAccountSection: View {
 
     @ViewBuilder
     private var content: some View {
-        if hasAnyData {
-            VStack(alignment: .leading, spacing: 6) {
-                Divider()
-                    .padding(.bottom, 2)
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+                .padding(.bottom, 2)
+            if hasAnyData {
                 // Render each row only when its own reset date is present.
                 // The API's `update(from:)` can populate one window (5hr /
                 // weekly) without the other; showing "0%, resets whenever"
@@ -54,9 +54,48 @@ struct SidebarAccountSection: View {
                              windowDuration: 0)
                 }
             }
-            .padding(.bottom, 8)
-            .padding(.top, 4)
+            versionFooter
         }
+        .padding(.bottom, 8)
+        .padding(.top, 4)
+    }
+
+    /// Canopy + CC extension version, always shown. Used to be a
+    /// per-pane `cliVersion` pill in `StatusBarView` — but the CC
+    /// extension is bundled once by Canopy and shared by every pane, so
+    /// N-copies of "v2.1.218" across panes was pure duplication. One
+    /// sidebar footer covers everything.
+    private var versionFooter: some View {
+        HStack(spacing: 6) {
+            if let canopy = canopyVersion {
+                Text("Canopy \(canopy)")
+            }
+            if canopyVersion != nil, ccExtensionVersion != nil {
+                Text("·")
+                    .foregroundStyle(.quaternary)
+            }
+            if let cc = ccExtensionVersion {
+                Text("CC \(cc)")
+                    .help("Bundled Claude Code extension version")
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
+        .padding(.horizontal, 12)
+        .padding(.top, 2)
+    }
+
+    private var canopyVersion: String? {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// Reads from the bundled CC extension's package.json on every
+    /// TimelineView tick. Cheap — one tiny plist read every 60s — and
+    /// keeps the label fresh if `ExtensionUpdater` swaps the extension
+    /// out at runtime.
+    private var ccExtensionVersion: String? {
+        CCExtension.extensionVersion()
     }
 
     private func limitRow(label: String, percent: Double, reset: String,
