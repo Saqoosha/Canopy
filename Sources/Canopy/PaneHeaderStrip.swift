@@ -12,9 +12,20 @@ import SwiftUI
 /// Takes plain strings rather than an OpenSession so it can also render
 /// a launcher pane (title "New Session", empty project).
 struct PaneHeaderStrip: View {
+    /// Fixed leading padding every pane header uses. Kept as a shared constant
+    /// so `PaneHeaderChromeAvoidanceProbe` (in `Detail.swift`) can subtract the
+    /// same value when computing how much extra inset the leftmost pane needs
+    /// to clear the traffic-light cluster.
+    static let baseLeadingPadding: CGFloat = 12
+
     let title: String
     let project: String
     let showCloseButton: Bool
+    /// Extra leading inset the *leftmost* pane header takes so its title stays
+    /// clear of the traffic-light cluster + collapsed-sidebar toggle. Panes at
+    /// index > 0 MUST pass 0 (the default) — a non-zero value on a non-leftmost
+    /// pane visibly misaligns the header title.
+    var leadingChromeAvoidance: CGFloat = 0
     let onClose: () -> Void
     @State private var hovered: Bool = false
 
@@ -46,7 +57,8 @@ struct PaneHeaderStrip: View {
                 .help("Close pane (⌘W)")
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, Self.baseLeadingPadding + leadingChromeAvoidance)
+        .padding(.trailing, 12)
         .frame(height: 48)
         .background(Color(nsColor: .windowBackgroundColor))
         .overlay(Divider(), alignment: .bottom)

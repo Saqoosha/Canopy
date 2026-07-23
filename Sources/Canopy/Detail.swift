@@ -12,6 +12,7 @@ import SwiftUI
 /// survives across switches without a SwiftUI re-mount.
 struct Detail: View {
     @Bindable var store: SessionStore
+    @State private var leftPaneHeaderChromeAvoidance: CGFloat = 0
 
     @ViewBuilder
     var body: some View {
@@ -70,6 +71,9 @@ struct Detail: View {
         // the sidebar edge instead of getting centered horizontally.
         // Overflow (window wider than the panes) stays on the trailing edge.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background {
+            PaneHeaderChromeAvoidanceProbe(leadingInset: $leftPaneHeaderChromeAvoidance)
+        }
         .overlay {
             if let progress = store.teleporting {
                 TeleportOverlay(progress: progress)
@@ -100,6 +104,7 @@ struct Detail: View {
                             title: session.title.isEmpty ? "Untitled" : session.title,
                             project: session.project,
                             showCloseButton: store.panes.count > 1,
+                            leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,
                             onClose: { store.closePane(at: index) }
                         )
                         SessionContainer(session: session) { _ in
@@ -119,6 +124,7 @@ struct Detail: View {
                         title: "New Session",
                         project: "",
                         showCloseButton: store.panes.count > 1,
+                        leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,
                         onClose: { store.closePane(at: index) }
                     )
                     DetailLauncher(store: store)
@@ -155,6 +161,186 @@ struct Detail: View {
         return ""
     }
 
+}
+
+/// Observes the window's standard buttons + this-window layout updates and
+/// publishes the extra leading inset the *leftmost* pane header needs so its
+/// title never sits under the traffic-light cluster + collapsed-sidebar
+/// toggle. Threaded to `PaneHeaderStrip.leadingChromeAvoidance` from
+/// `Detail.paneCell` only when `index == 0` — passing the same value to
+/// non-leftmost panes would visibly misalign them.
+///
+/// Attach as a `.background { }` of the detail column so the probe view's
+/// frame equals the detail column's frame (used as `paneMinX`). Placing it
+/// in an `.overlay` or on a smaller/larger container would silently return
+/// the wrong leading inset.
+///
+/// Mechanism: observes `NSWindow.didResize` / `didBecomeKey` / `didUpdate`
+/// on this window only, coalesces multiple signals into one main-queue
+/// recompute per runloop tick, and republishes via the binding — rounded up
+/// and dead-banded at 0.5pt to prevent SwiftUI update storms.
+private struct PaneHeaderChromeAvoidanceProbe: NSViewRepresentable {
+    @Binding var leadingInset: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(leadingInset: $leadingInset)
+    }
+
+    func makeNSView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.coordinator = context.coordinator
+        context.coordinator.probeView = view
+        return view
+    }
+
+    func updateNSView(_ nsView: ProbeView, context: Context) {
+        context.coordinator.leadingInset = $leadingInset
+        context.coordinator.probeView = nsView
+        context.coordinator.attach(to: nsView.window)
+    }
+
+    final class ProbeView: NSView {
+        weak var coordinator: Coordinator?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            coordinator?.attach(to: window)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var leadingInset: Binding<CGFloat>
+
+        weak var probeView: NSView?
+        private weak var window: NSWindow?
+        private var recomputeScheduled = false
+
+        // Shared source of truth with PaneHeaderStrip so this probe's math
+        // stays in lockstep with the header's actual padding.
+        private static var headerBaseLeadingPadding: CGFloat { PaneHeaderStrip.baseLeadingPadding }
+        private static let buttonTrailingMargin: CGFloat = 12
+        // Empirical clearance the NavigationSplitView sidebar-toggle button
+        // needs to the right of the traffic lights when the sidebar is
+        // collapsed. If macOS changes toggle geometry, re-measure this.
+        private static let collapsedSidebarToggleClearance: CGFloat = 64
+
+        init(leadingInset: Binding<CGFloat>) {
+            self.leadingInset = leadingInset
+            super.init()
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        func attach(to newWindow: NSWindow?) {
+            if window === newWindow {
+                scheduleRecompute()
+                return
+            }
+
+            NotificationCenter.default.removeObserver(self)
+            window = newWindow
+
+            guard let newWindow else {
+                publish(0)
+                return
+            }
+
+            let center = NotificationCenter.default
+            center.addObserver(
+                self,
+                selector: #selector(observedChromeDidChange(_:)),
+                name: NSWindow.didResizeNotification,
+                object: newWindow
+            )
+            center.addObserver(
+                self,
+                selector: #selector(observedChromeDidChange(_:)),
+                name: NSWindow.didBecomeKeyNotification,
+                object: newWindow
+            )
+            // didUpdateNotification is scoped to this window and fires on any
+            // subview layout change (including NavigationSplitView's internal
+            // NSSplitView resize), so we avoid the cross-window fan-out an
+            // `object: nil` NSSplitView observer would produce.
+            center.addObserver(
+                self,
+                selector: #selector(observedChromeDidChange(_:)),
+                name: NSWindow.didUpdateNotification,
+                object: newWindow
+            )
+
+            scheduleRecompute()
+        }
+
+        @objc private func observedChromeDidChange(_ notification: Notification) {
+            scheduleRecompute()
+        }
+
+        private func scheduleRecompute() {
+            guard !recomputeScheduled else { return }
+            recomputeScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.recomputeScheduled = false
+                self.recompute()
+            }
+        }
+
+        private func recompute() {
+            guard let window, let probeView else {
+                publish(0)
+                return
+            }
+            publish(Self.chromeAvoidance(window: window, probeView: probeView))
+        }
+
+        private func publish(_ value: CGFloat) {
+            let rounded = value.rounded(.up)
+            guard abs(leadingInset.wrappedValue - rounded) > 0.5 else { return }
+            leadingInset.wrappedValue = rounded
+        }
+
+        private static func chromeAvoidance(window: NSWindow, probeView: NSView) -> CGFloat {
+            let buttonMaxX = [
+                NSWindow.ButtonType.closeButton,
+                .miniaturizeButton,
+                .zoomButton
+            ]
+                .compactMap { buttonFrameInContentCoordinates(window: window, type: $0)?.maxX }
+                .max()
+
+            guard let buttonMaxX, buttonMaxX > 0,
+                  let contentView = window.contentView
+            else { return 0 }
+
+            let paneMinX = probeView.convert(probeView.bounds, to: contentView).minX
+            return max(
+                0,
+                buttonMaxX
+                    + collapsedSidebarToggleClearance
+                    + buttonTrailingMargin
+                    - paneMinX
+                    - headerBaseLeadingPadding
+            )
+        }
+
+        private static func buttonFrameInContentCoordinates(
+            window: NSWindow,
+            type: NSWindow.ButtonType
+        ) -> CGRect? {
+            guard let button = window.standardWindowButton(type),
+                  !button.isHidden,
+                  let superview = button.superview,
+                  let contentView = window.contentView
+            else { return nil }
+
+            let frameInWindow = superview.convert(button.frame, to: nil)
+            return contentView.convert(frameInWindow, from: nil)
+        }
+    }
 }
 
 /// Full-pane overlay shown while a cloud session is being teleported. The
