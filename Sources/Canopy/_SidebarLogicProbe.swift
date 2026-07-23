@@ -317,8 +317,8 @@ enum SidebarLogicProbe {
         """
         // Simulate the real-world failure mode: cwd is set early, relocation
         // happens after the 128KB head window, but is within the 32KB tail.
-        // Pad with ~140KB of filler entries so the relocated line lives past
-        // the head but survives the tail scan.
+        // Pad with filler well past the 128KB head window so the relocated
+        // marker lives in the tail scan region.
         let relocatedFiller = String(repeating:
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"" +
             String(repeating: "x", count: 512) +
@@ -361,6 +361,23 @@ enum SidebarLogicProbe {
             + String(repeating: "x", count: headPadCount) + "\n"
             + boundaryRelocated
             + String(repeating: "z", count: zPadCount)
+        // Mid-line case: byte at tailStart-1 is NOT `\n`, so the first tail
+        // "line" is a truncated fragment and must be dropped (start = 1);
+        // the real relocated event on the next line still wins.
+        let midlineFirst =
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"cwd\":\"/tmp/probe/main\"}\n"
+        let midlineFragment = "truncated-json-fragment-no-newline-in-head"
+        let midlineRelocated =
+            "{\"type\":\"relocated\",\"sessionId\":\"probe\",\"relocatedCwd\":\"/tmp/probe/midline-wt\"}\n"
+        let midlineHeadPad = headSize - midlineFirst.utf8.count
+        precondition(midlineHeadPad > 0, "midline fixture first line exceeds headSize")
+        let midlineTailBody = midlineFragment + "\n" + midlineRelocated
+        let midlineTailPad = max(0, tailSize - midlineTailBody.utf8.count)
+        let midlineJSONL =
+            midlineFirst
+            + String(repeating: "x", count: midlineHeadPad)
+            + midlineTailBody
+            + String(repeating: "z", count: midlineTailPad)
         let plainCwdPath = writeProbeJSONL(plainCwdJSONL)
         let relocatedInHeadPath = writeProbeJSONL(relocatedInHeadJSONL)
         let multipleRelocationsPath = writeProbeJSONL(multipleRelocationsJSONL)
@@ -369,11 +386,12 @@ enum SidebarLogicProbe {
         let emptyRelocatedCwdPath = writeProbeJSONL(emptyRelocatedCwdJSONL)
         let relocatedNoisePath = writeProbeJSONL(relocatedNoiseJSONL)
         let boundaryPath = writeProbeJSONL(boundaryJSONL)
+        let midlinePath = writeProbeJSONL(midlineJSONL)
         defer {
             for path in [
                 plainCwdPath, relocatedInHeadPath, multipleRelocationsPath,
                 relocatedInTailPath, multipleInTailPath, emptyRelocatedCwdPath,
-                relocatedNoisePath, boundaryPath,
+                relocatedNoisePath, boundaryPath, midlinePath,
             ] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
@@ -405,7 +423,88 @@ enum SidebarLogicProbe {
         record("cwd: relocated at exact tailStart boundary preserved",
                boundaryOffsetOK
                && boundaryPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/boundary-wt")
+        // Sanity: fixture really starts the tail mid-line (byte before
+        // tailStart is not `\n`), and the truncated first line is skipped.
+        let midlineOffsetOK: Bool = {
+            guard let path = midlinePath,
+                  let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+            else { return false }
+            guard data.count == headSize + tailSize else { return false }
+            guard data[headSize - 1] != 0x0A else { return false }
+            return data[headSize..<(headSize + midlineFragment.utf8.count)]
+                == Data(midlineFragment.utf8)
+        }()
+        record("cwd: mid-line tail start drops truncated fragment",
+               midlineOffsetOK
+               && midlinePath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/midline-wt")
 
+        // resolveProjectPath truth table — the loadAllSessions encoded-folder
+        // verification path, extracted so sidebar discovery can't silently
+        // drop sessions when encodePath and the CLI's on-disk folder disagree.
+        // Directory names stay alphanumeric: `decodePath`'s greedy walk only
+        // joins up to 6 hyphen-split tokens, so a UUID-with-hyphens folder
+        // would fail to round-trip and poison the middle-gap case.
+        let fm = FileManager.default
+        let stamp = String(UUID().uuidString.filter(\.isHexDigit))
+        let resolveBase = fm.temporaryDirectory
+            .appendingPathComponent("canopyproberesolve\(stamp)", isDirectory: true)
+        let agreeDir = resolveBase.appendingPathComponent("agreecwd", isDirectory: true)
+        let staleDir = resolveBase.appendingPathComponent("stalelaunch", isDirectory: true)
+        let relocatedDir = resolveBase.appendingPathComponent("actualwt", isDirectory: true)
+        let driftDir = resolveBase
+            .appendingPathComponent("canopyprobeencodingreal", isDirectory: true)
+            .appendingPathComponent("exists", isDirectory: true)
+        do {
+            try fm.createDirectory(at: agreeDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: staleDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: relocatedDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: driftDir, withIntermediateDirectories: true)
+        } catch {
+            record("resolveProjectPath: temp dirs created", false, String(describing: error))
+        }
+        defer { try? fm.removeItem(at: resolveBase) }
+
+        let agreeEncoded = ClaudeSessionHistory.encodePath(agreeDir.path)
+        record("resolveProjectPath: agreement returns extracted cwd",
+               ClaudeSessionHistory.resolveProjectPath(
+                   extractedCwd: agreeDir.path,
+                   projectEncoded: agreeEncoded
+               ) == agreeDir.path)
+
+        let relocatedEncoded = ClaudeSessionHistory.encodePath(relocatedDir.path)
+        precondition(
+            !ClaudeSessionHistory.encodedFolderCandidates(for: staleDir.path)
+                .contains(relocatedEncoded),
+            "stale and relocated encodings must differ for middle-gap case"
+        )
+        record("resolveProjectPath: middle-gap relocation prefers decoded folder",
+               ClaudeSessionHistory.resolveProjectPath(
+                   extractedCwd: staleDir.path,
+                   projectEncoded: relocatedEncoded
+               ) == relocatedDir.path)
+
+        let bogusEncoded = "-a-bogus-folder-name-that-decodes-to-nothing"
+        let bogusDecoded = ClaudeSessionHistory.decodePath(bogusEncoded)
+        precondition(
+            !fm.fileExists(atPath: bogusDecoded),
+            "bogus decodePath result must not exist on disk"
+        )
+        precondition(
+            !ClaudeSessionHistory.encodedFolderCandidates(for: driftDir.path)
+                .contains(bogusEncoded),
+            "real cwd encoding must disagree with bogus projectEncoded"
+        )
+        record("resolveProjectPath: encoding drift falls back to extracted cwd",
+               ClaudeSessionHistory.resolveProjectPath(
+                   extractedCwd: driftDir.path,
+                   projectEncoded: bogusEncoded
+               ) == driftDir.path)
+
+        record("resolveProjectPath: nil extracted cwd returns decodePath",
+               ClaudeSessionHistory.resolveProjectPath(
+                   extractedCwd: nil,
+                   projectEncoded: bogusEncoded
+               ) == bogusDecoded)
         // background-task launch detection (drives sidebar "waiting" icon)
         let bashBg: [String: Any] = [
             "type": "tool_use",

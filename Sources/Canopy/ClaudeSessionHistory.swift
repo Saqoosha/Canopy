@@ -177,29 +177,16 @@ enum ClaudeSessionHistory {
         candidates.sort { $0.modDate > $1.modDate }
         let topCandidates = candidates.prefix(maxSessionsToParse)
 
-        // Phase 3: prefer the `cwd` field written by the CLI over `decodePath`.
-        // The encoded form collapses spaces and dots into `-`, so round-tripping
-        // a name like "Canopy Companion" by walking the filesystem is lossy.
+        // Phase 3: resolve each session's on-disk project dir via
+        // `resolveProjectPath` (extracted cwd vs storage-folder encoding).
         var entries: [SessionEntry] = []
         for candidate in topCandidates {
             let metadata = extractMetadata(fromPath: candidate.path)
             guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { continue }
-            // Extracted cwd is only trusted when its encoded form matches the
-            // JSONL's storage folder. For files > 160KB, `extractMetadata`'s
-            // head+tail windows leave a middle gap unscanned — a `relocated`
-            // event that lands only there would otherwise return the stale
-            // launch cwd, and `--resume` would spawn the CLI in the wrong dir
-            // (CLI then creates a fresh empty session). The CLI writes each
-            // JSONL under its *current* encoded cwd, so `projectEncoded` is
-            // the authoritative signal when the extracted cwd disagrees.
-            let projectPath: String
-            if let cwd = metadata.cwd,
-               encodedFolderCandidates(for: cwd).contains(candidate.projectEncoded)
-            {
-                projectPath = cwd
-            } else {
-                projectPath = decodePath(candidate.projectEncoded)
-            }
+            let projectPath = resolveProjectPath(
+                extractedCwd: metadata.cwd,
+                projectEncoded: candidate.projectEncoded
+            )
             guard fm.fileExists(atPath: projectPath) else { continue }
             let projectDirectory = URL(fileURLWithPath: projectPath)
             let title = SessionTitleStore.title(forSessionId: candidate.sessionId)
@@ -490,9 +477,43 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).cwd
     }
 
+    /// Resolve the on-disk project directory for a session, given the extracted
+    /// cwd (may be stale after middle-gap relocations, or encoding-drifted for
+    /// non-ASCII paths) and the JSONL's storage folder (authoritative for the
+    /// CLI's current resume location). Exposed for the sidebar logic probe.
+    ///
+    /// Agreement (extracted cwd's encoded form matches `projectEncoded`) trusts
+    /// the extracted cwd. Mismatch covers two cases: a middle-gap relocation
+    /// the head+tail scan missed, or CLI encoding that disagrees with our
+    /// `encodePath` (e.g. non-ASCII Unicode normalization drift). Prefer the
+    /// decoded storage folder when it resolves on disk (relocation); otherwise
+    /// fall back to the extracted cwd — a real path is better than a
+    /// synthesized decode that no longer exists.
+    static func resolveProjectPath(
+        extractedCwd: String?,
+        projectEncoded: String,
+        fileManager: FileManager = .default
+    ) -> String {
+        if let cwd = extractedCwd,
+           encodedFolderCandidates(for: cwd).contains(projectEncoded)
+        {
+            return cwd
+        }
+        let decoded = decodePath(projectEncoded)
+        if fileManager.fileExists(atPath: decoded) {
+            return decoded
+        }
+        if let cwd = extractedCwd {
+            return cwd
+        }
+        return decoded
+    }
+
     /// Read up to 128KB so large base64 image attachments don't push `ai-title`
     /// past our window. Returns the cwd too so session discovery can skip
-    /// decoding the folder name.
+    /// decoding the folder name. When the file is larger than 128KB, also scans
+    /// the last 32KB for `type: "relocated"` events so a session moved into a
+    /// git worktree mid-way resolves to its current cwd, not the launch cwd.
     ///
     /// `isAutomated` flags non-interactive `claude -p` / SDK-driven runs
     /// (memory observers, sub-agents from `/ship-it`, plugin background
@@ -586,6 +607,7 @@ enum ClaudeSessionHistory {
         // On I/O failure we keep head-only data; `loadAllSessions`'s
         // encoded-folder verification still protects against a stale cwd.
         if !isBackgroundScheduled {
+            var stage = "seekToEnd"
             do {
                 let fileSize = try handle.seekToEnd()
                 if fileSize > UInt64(headSize) {
@@ -595,14 +617,18 @@ enum ClaudeSessionHistory {
                     // mid-line. If the previous byte is `\n`, the first line
                     // is complete — dropping it would lose a `relocated`
                     // event that begins exactly at the window boundary.
-                    var startsAtLineBoundary = tailStart == 0
+                    var startsAtLineBoundary = false
                     if tailStart > 0 {
+                        stage = "seek to tailStart-1"
                         try handle.seek(toOffset: tailStart - 1)
+                        stage = "read boundary byte"
                         if let probe = try handle.read(upToCount: 1), probe == Data([0x0A]) {
                             startsAtLineBoundary = true
                         }
                     }
+                    stage = "seek to tailStart"
                     try handle.seek(toOffset: tailStart)
+                    stage = "readToEnd"
                     let tailData = try handle.readToEnd() ?? Data()
                     let tailText = String(decoding: tailData, as: UTF8.self)
                     let tailLines = tailText.split(separator: "\n", omittingEmptySubsequences: true)
@@ -622,7 +648,7 @@ enum ClaudeSessionHistory {
                     }
                 }
             } catch {
-                logger.error("extractMetadata: tail scan I/O failed for \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+                logger.error("extractMetadata: tail scan I/O failed at \(stage, privacy: .public) for \(path, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
 
