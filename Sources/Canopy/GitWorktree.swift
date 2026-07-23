@@ -11,7 +11,8 @@ enum GitWorktree {
         .appendingPathComponent(".claude/worktrees", isDirectory: true)
 
     /// Display label for a session directory. Recognized worktree layouts
-    /// (managed root + `<repo>-worktrees` sibling) surface the repository the
+    /// (managed root, `<repo>-worktrees` sibling, and in-repo
+    /// `<repo>/.claude/worktrees/<branch>`) surface the repository the
     /// worktree belongs to ("Canopy · fix-foo" — the second part is the
     /// worktree FOLDER name, i.e. the branch with `/` flattened to `-`).
     /// Worktrees anywhere else fall back to the plain folder name by design.
@@ -51,6 +52,21 @@ enum GitWorktree {
         let suffix = "-worktrees"
         if parentName.hasSuffix(suffix), parentName.count > suffix.count {
             return (String(parentName.dropLast(suffix.count)), name)
+        }
+        // In-repo layout (<repo>/.claude/worktrees/<branch>): used when the
+        // worktree sits under the parent repo's own `.claude/worktrees/` dir
+        // (common for Claude Code sessions that spawn a worktree in place).
+        if parentName == "worktrees",
+           parent.deletingLastPathComponent().lastPathComponent == ".claude"
+        {
+            let repoRoot = parent.deletingLastPathComponent().deletingLastPathComponent()
+            let repoName = repoRoot.lastPathComponent
+            // Reject when `.claude` is at the filesystem root (`/.claude/…`):
+            // there is no real repo name to surface, and `lastPathComponent`
+            // on `/` returns `/`.
+            if !repoName.isEmpty, repoName != "/", repoRoot.path != "/" {
+                return (repoName, name)
+            }
         }
         return nil
     }

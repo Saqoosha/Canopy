@@ -467,6 +467,14 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).isAutomated
     }
 
+    /// The session's *current* cwd — the directory the CLI would resume into.
+    /// Prefers the latest `relocated` event's `relocatedCwd` over the initial
+    /// `cwd` field so sessions that were moved into a git worktree resolve to
+    /// the right project folder. Exposed for the sidebar logic probe.
+    static func cwd(atPath path: String) -> String? {
+        extractMetadata(fromPath: path).cwd
+    }
+
     /// Read up to 128KB so large base64 image attachments don't push `ai-title`
     /// past our window. Returns the cwd too so session discovery can skip
     /// decoding the folder name.
@@ -484,12 +492,14 @@ enum ClaudeSessionHistory {
         // Use lossy UTF-8 decoding so a 128KB boundary landing inside a
         // multibyte sequence (e.g. Japanese content) doesn't drop the whole
         // buffer and fall back to lossy path decoding.
-        let data = handle.readData(ofLength: 131_072)
+        let headSize = 131_072
+        let data = handle.readData(ofLength: headSize)
         let text = String(decoding: data, as: UTF8.self)
 
         var aiTitle: String?
         var firstUserMessage: String?
-        var cwd: String?
+        var firstCwd: String?
+        var lastRelocatedCwd: String?
         var isBackgroundScheduled = false
         var entrypoint: String?
 
@@ -499,8 +509,8 @@ enum ClaudeSessionHistory {
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
             else { continue }
 
-            if cwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
-                cwd = value
+            if firstCwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
+                firstCwd = value
             }
 
             if entrypoint == nil, let value = json["entrypoint"] as? String, !value.isEmpty {
@@ -508,6 +518,17 @@ enum ClaudeSessionHistory {
             }
 
             guard let type = json["type"] as? String else { continue }
+
+            // `type: "relocated"` is the CLI's own signal that the session
+            // moved to a new project folder (typically a git worktree). The
+            // JSONL is stored under the encoded *relocated* cwd, so this
+            // must beat the stale launch cwd captured above. Later entries
+            // override earlier ones.
+            if type == "relocated",
+               let value = json["relocatedCwd"] as? String, !value.isEmpty
+            {
+                lastRelocatedCwd = value
+            }
 
             if !isBackgroundScheduled,
                type == "queue-operation",
@@ -540,6 +561,40 @@ enum ClaudeSessionHistory {
             if isBackgroundScheduled { break }
         }
 
+        // Sessions can be `relocated` many MB into the JSONL (e.g. a long
+        // LSE-Core session that later cd into `.claude/worktrees/…`). The
+        // head chunk misses that; the CLI still stores the JSONL under the
+        // current encoded cwd, so returning the stale launch cwd here would
+        // make `--resume` spawn the CLI in the wrong dir → CLI can't find
+        // the JSONL → empty session with a fresh id (see `backfillResumeId`
+        // in logs). Scan the tail for the latest relocation event.
+        let fileSize = (try? handle.seekToEnd()) ?? 0
+        if !isBackgroundScheduled, fileSize > UInt64(headSize) {
+            let tailSize: UInt64 = 32_768
+            let tailStart = max(UInt64(headSize), fileSize - min(tailSize, fileSize))
+            try? handle.seek(toOffset: tailStart)
+            if let tailData = try? handle.readToEnd() {
+                let tailText = String(decoding: tailData, as: UTF8.self)
+                let tailLines = tailText.split(separator: "\n", omittingEmptySubsequences: true)
+                // Skip the (partial) first line whenever we didn't start at 0.
+                let start = tailStart == 0 ? 0 : 1
+                if start < tailLines.count {
+                    // Reversed: the last relocated in the tail wins on first hit.
+                    for line in tailLines[start...].reversed() {
+                        guard line.contains("relocated"),
+                              let lineData = line.data(using: .utf8),
+                              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                              json["type"] as? String == "relocated",
+                              let value = json["relocatedCwd"] as? String, !value.isEmpty
+                        else { continue }
+                        lastRelocatedCwd = value
+                        break
+                    }
+                }
+            }
+        }
+
+        let cwd = lastRelocatedCwd ?? firstCwd
         let title = aiTitle ?? firstUserMessage ?? "Untitled"
         return (title, cwd, isBackgroundScheduled, entrypoint?.hasPrefix("sdk-") == true)
     }

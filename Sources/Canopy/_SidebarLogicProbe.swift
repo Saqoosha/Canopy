@@ -300,6 +300,52 @@ enum SidebarLogicProbe {
         record("automated: sdk-py entrypoint flagged",
                sdkPyPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
 
+        // cwd resolution: `relocated` events (session moved into a git worktree)
+        // must override the stale initial cwd; otherwise `--resume` spawns the
+        // CLI in the wrong project folder and the CLI creates an empty session.
+        let plainCwdJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe"}
+        """
+        let relocatedInHeadJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/worktree"}
+        """
+        let multipleRelocationsJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/wt1"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/wt2"}
+        """
+        // Simulate the real-world failure mode: cwd is set early, relocation
+        // happens after the 128KB head window, but is within the 32KB tail.
+        // Pad with ~140KB of filler entries so the relocated line lives past
+        // the head but survives the tail scan.
+        let relocatedFiller = String(repeating:
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"" +
+            String(repeating: "x", count: 512) +
+            "\"}}\n", count: 300)
+        let relocatedInTailJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        \(relocatedFiller){"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/late-worktree"}
+        {"type":"user","message":{"role":"user","content":"bye"},"cwd":"/tmp/probe/late-worktree"}
+        """
+        let plainCwdPath = writeProbeJSONL(plainCwdJSONL)
+        let relocatedInHeadPath = writeProbeJSONL(relocatedInHeadJSONL)
+        let multipleRelocationsPath = writeProbeJSONL(multipleRelocationsJSONL)
+        let relocatedInTailPath = writeProbeJSONL(relocatedInTailJSONL)
+        defer {
+            for path in [plainCwdPath, relocatedInHeadPath, multipleRelocationsPath, relocatedInTailPath] {
+                if let path { try? FileManager.default.removeItem(atPath: path) }
+            }
+        }
+        record("cwd: no relocation returns initial cwd",
+               plainCwdPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe")
+        record("cwd: relocated in head wins over initial cwd",
+               relocatedInHeadPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/worktree")
+        record("cwd: last relocated wins on multiple relocations",
+               multipleRelocationsPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/wt2")
+        record("cwd: relocated past head window recovered from tail",
+               relocatedInTailPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/late-worktree")
+
         // background-task launch detection (drives sidebar "waiting" icon)
         let bashBg: [String: Any] = [
             "type": "tool_use",
@@ -619,6 +665,13 @@ enum SidebarLogicProbe {
                GitWorktree.projectDisplayName(
                    for: GitWorktree.worktreesRoot
                        .appendingPathComponent("Other/../Canopy/fix-foo")) == "Canopy · fix-foo")
+        record("projectDisplayName: in-repo .claude/worktrees layout → repo · branch",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/LSE-Core/.claude/worktrees/harfbuzz-palt-fix"))
+                   == "LSE-Core · harfbuzz-palt-fix")
+        record("projectDisplayName: bare .claude/worktrees (no repo) falls back to folder name",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/.claude/worktrees/orphan")) == "orphan")
 
         record("isManagedWorktree: managed layout → true",
                GitWorktree.isManagedWorktree(
