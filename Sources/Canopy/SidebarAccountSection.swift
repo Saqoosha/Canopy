@@ -46,7 +46,14 @@ struct SidebarAccountSection: View {
                 // rows already carry the "burning too fast" signal, and per-
                 // model buckets are noisy under bursty usage — showing a red
                 // tick on every model row would drown out the signal.
-                ForEach(data.modelScoped) { scoped in
+                //
+                // Filter on `isFresh`: `updateFromRawUsage` deliberately
+                // keeps previous state when a payload lacks `model_scoped`
+                // (anti-flicker for the intermittent server omission), so
+                // this render-time filter is the mechanism that eventually
+                // hides a row once its weekly window has elapsed. The
+                // enclosing TimelineView's 60s tick re-evaluates it.
+                ForEach(data.modelScoped.filter { $0.isFresh }) { scoped in
                     limitRow(label: scoped.displayName,
                              percent: Double(scoped.pct) / 100.0,
                              reset: SharedRateLimitData.formatResetTime(scoped.resetDate),
