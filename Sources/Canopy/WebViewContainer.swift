@@ -332,6 +332,12 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
+        ucc.addUserScript(WKUserScript(
+            source: ScrollPreserveScript.javascript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
 
