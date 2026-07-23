@@ -109,24 +109,27 @@ struct CanopyApp: App {
                     sidebarStore.cycleFocusedPaneSession(delta: -1)
                 }
                 .keyboardShortcut("[", modifiers: [.command, .shift])
-                .disabled(sidebarStore.panes.isEmpty)
+                .disabled(!sidebarStore.canCycleFocusedPaneSession)
 
                 Button("Load Next Session") {
                     sidebarStore.cycleFocusedPaneSession(delta: +1)
                 }
                 .keyboardShortcut("]", modifiers: [.command, .shift])
-                .disabled(sidebarStore.panes.isEmpty)
+                .disabled(!sidebarStore.canCycleFocusedPaneSession)
 
                 Divider()
 
-                // Cmd+Ctrl+1..9 — load the N-th visible open row into the
-                // focused pane. If that session already lives in another
-                // pane, focus jumps to it (openInFocusedPane fallback).
+                // Cmd+Ctrl+1..9 — show the N-th visible open row: load it
+                // into the focused pane, OR (if the session already lives
+                // in another pane, honoring the one-session-one-pane
+                // invariant) jump focus to that other pane. Menu label
+                // says "Show …" rather than "Load … into Pane" so the
+                // focus-jump case doesn't read as broken.
                 // Cmd+Shift+3..6 conflict with macOS screenshot shortcuts,
                 // and Cmd+Opt+arrows already move pane focus, so Cmd+Ctrl
                 // is the cleanest unused modifier here.
                 ForEach(1...9, id: \.self) { idx in
-                    Button("Load Session \(idx) into Pane") {
+                    Button("Show Session \(idx)") {
                         loadSessionIntoFocusedPane(sidebarIndex: idx - 1)
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: [.command, .control])
@@ -150,7 +153,7 @@ struct CanopyApp: App {
     }
 
     /// Sidebar's visible open session IDs, in the order they appear. Drives
-    /// Cmd+Shift+1..9's target lookup and per-item enable state.
+    /// Cmd+Ctrl+1..9's target lookup and per-item enable state.
     private var visibleOpenSessionIds: [UUID] {
         sidebarStore.visibleRows.compactMap { row in
             if case .open(let s) = row { return s.id } else { return nil }
@@ -158,8 +161,10 @@ struct CanopyApp: App {
     }
 
     private func loadSessionIntoFocusedPane(sidebarIndex: Int) {
-        // Cmd+Shift+1..9: swap the focused pane's content to the N-th visible
-        // open row. Out-of-range is a no-op (also disabled at the menu).
+        // Cmd+Ctrl+1..9: show the N-th visible open row — load into the
+        // focused pane, OR jump focus to whichever pane already hosts it
+        // (openInFocusedPane's one-session-one-pane fallback). Out-of-range
+        // is a no-op (also disabled at the menu).
         guard !sidebarStore.panes.isEmpty,
               visibleOpenSessionIds.indices.contains(sidebarIndex) else { return }
         sidebarStore.openInFocusedPane(visibleOpenSessionIds[sidebarIndex])
