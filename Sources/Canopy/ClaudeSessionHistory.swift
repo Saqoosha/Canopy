@@ -177,14 +177,16 @@ enum ClaudeSessionHistory {
         candidates.sort { $0.modDate > $1.modDate }
         let topCandidates = candidates.prefix(maxSessionsToParse)
 
-        // Phase 3: prefer the `cwd` field written by the CLI over `decodePath`.
-        // The encoded form collapses spaces and dots into `-`, so round-tripping
-        // a name like "Canopy Companion" by walking the filesystem is lossy.
+        // Phase 3: resolve each session's on-disk project dir via
+        // `resolveProjectPath` (extracted cwd vs storage-folder encoding).
         var entries: [SessionEntry] = []
         for candidate in topCandidates {
             let metadata = extractMetadata(fromPath: candidate.path)
             guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { continue }
-            let projectPath = metadata.cwd ?? decodePath(candidate.projectEncoded)
+            let projectPath = resolveProjectPath(
+                extractedCwd: metadata.cwd,
+                projectEncoded: candidate.projectEncoded
+            )
             guard fm.fileExists(atPath: projectPath) else { continue }
             let projectDirectory = URL(fileURLWithPath: projectPath)
             let title = SessionTitleStore.title(forSessionId: candidate.sessionId)
@@ -467,9 +469,51 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).isAutomated
     }
 
+    /// The session's *current* cwd — the directory the CLI would resume into.
+    /// Prefers the latest `relocated` event's `relocatedCwd` over the initial
+    /// `cwd` field so sessions that were moved into a git worktree resolve to
+    /// the right project folder. Exposed for the sidebar logic probe.
+    static func cwd(atPath path: String) -> String? {
+        extractMetadata(fromPath: path).cwd
+    }
+
+    /// Resolve the on-disk project directory for a session, given the extracted
+    /// cwd (may be stale after middle-gap relocations, or encoding-drifted for
+    /// non-ASCII paths) and the JSONL's storage folder (authoritative for the
+    /// CLI's current resume location). Exposed for the sidebar logic probe.
+    ///
+    /// Agreement (extracted cwd's encoded form matches `projectEncoded`) trusts
+    /// the extracted cwd. Mismatch covers two cases: a middle-gap relocation
+    /// the head+tail scan missed, or CLI encoding that disagrees with our
+    /// `encodePath` (e.g. non-ASCII Unicode normalization drift). Prefer the
+    /// decoded storage folder when it resolves on disk (relocation); otherwise
+    /// fall back to the extracted cwd — a real path is better than a
+    /// synthesized decode that no longer exists.
+    static func resolveProjectPath(
+        extractedCwd: String?,
+        projectEncoded: String,
+        fileManager: FileManager = .default
+    ) -> String {
+        if let cwd = extractedCwd,
+           encodedFolderCandidates(for: cwd).contains(projectEncoded)
+        {
+            return cwd
+        }
+        let decoded = decodePath(projectEncoded)
+        if fileManager.fileExists(atPath: decoded) {
+            return decoded
+        }
+        if let cwd = extractedCwd {
+            return cwd
+        }
+        return decoded
+    }
+
     /// Read up to 128KB so large base64 image attachments don't push `ai-title`
     /// past our window. Returns the cwd too so session discovery can skip
-    /// decoding the folder name.
+    /// decoding the folder name. When the file is larger than 128KB, also scans
+    /// the last 32KB for `type: "relocated"` events so a session moved into a
+    /// git worktree mid-way resolves to its current cwd, not the launch cwd.
     ///
     /// `isAutomated` flags non-interactive `claude -p` / SDK-driven runs
     /// (memory observers, sub-agents from `/ship-it`, plugin background
@@ -484,12 +528,14 @@ enum ClaudeSessionHistory {
         // Use lossy UTF-8 decoding so a 128KB boundary landing inside a
         // multibyte sequence (e.g. Japanese content) doesn't drop the whole
         // buffer and fall back to lossy path decoding.
-        let data = handle.readData(ofLength: 131_072)
+        let headSize = 131_072
+        let data = handle.readData(ofLength: headSize)
         let text = String(decoding: data, as: UTF8.self)
 
         var aiTitle: String?
         var firstUserMessage: String?
-        var cwd: String?
+        var firstCwd: String?
+        var lastRelocatedCwd: String?
         var isBackgroundScheduled = false
         var entrypoint: String?
 
@@ -499,8 +545,8 @@ enum ClaudeSessionHistory {
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
             else { continue }
 
-            if cwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
-                cwd = value
+            if firstCwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
+                firstCwd = value
             }
 
             if entrypoint == nil, let value = json["entrypoint"] as? String, !value.isEmpty {
@@ -508,6 +554,17 @@ enum ClaudeSessionHistory {
             }
 
             guard let type = json["type"] as? String else { continue }
+
+            // `type: "relocated"` is the CLI's own signal that the session
+            // moved to a new project folder (typically a git worktree). The
+            // JSONL is stored under the encoded *relocated* cwd, so this
+            // must beat the stale launch cwd captured above. Later entries
+            // override earlier ones.
+            if type == "relocated",
+               let value = json["relocatedCwd"] as? String, !value.isEmpty
+            {
+                lastRelocatedCwd = value
+            }
 
             if !isBackgroundScheduled,
                type == "queue-operation",
@@ -540,6 +597,62 @@ enum ClaudeSessionHistory {
             if isBackgroundScheduled { break }
         }
 
+        // Sessions can be `relocated` many MB into the JSONL (e.g. a long
+        // LSE-Core session that later cd into `.claude/worktrees/…`). The
+        // head chunk misses that; the CLI still stores the JSONL under the
+        // current encoded cwd, so returning the stale launch cwd here would
+        // make `--resume` spawn the CLI in the wrong dir → CLI can't find
+        // the JSONL → empty session with a fresh id (see `backfillResumeId`
+        // in logs). Scan the tail for the latest relocation event.
+        // On I/O failure we keep head-only data; `loadAllSessions`'s
+        // encoded-folder verification still protects against a stale cwd.
+        if !isBackgroundScheduled {
+            var stage = "seekToEnd"
+            do {
+                let fileSize = try handle.seekToEnd()
+                if fileSize > UInt64(headSize) {
+                    let tailSize: UInt64 = 32_768
+                    let tailStart = max(UInt64(headSize), fileSize - min(tailSize, fileSize))
+                    // Only drop the first tail line when `tailStart` lands
+                    // mid-line. If the previous byte is `\n`, the first line
+                    // is complete — dropping it would lose a `relocated`
+                    // event that begins exactly at the window boundary.
+                    var startsAtLineBoundary = false
+                    if tailStart > 0 {
+                        stage = "seek to tailStart-1"
+                        try handle.seek(toOffset: tailStart - 1)
+                        stage = "read boundary byte"
+                        if let probe = try handle.read(upToCount: 1), probe == Data([0x0A]) {
+                            startsAtLineBoundary = true
+                        }
+                    }
+                    stage = "seek to tailStart"
+                    try handle.seek(toOffset: tailStart)
+                    stage = "readToEnd"
+                    let tailData = try handle.readToEnd() ?? Data()
+                    let tailText = String(decoding: tailData, as: UTF8.self)
+                    let tailLines = tailText.split(separator: "\n", omittingEmptySubsequences: true)
+                    let start = startsAtLineBoundary ? 0 : 1
+                    if start < tailLines.count {
+                        // Reversed: the last relocated in the tail wins on first hit.
+                        for line in tailLines[start...].reversed() {
+                            guard line.contains("relocated"),
+                                  let lineData = line.data(using: .utf8),
+                                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                                  json["type"] as? String == "relocated",
+                                  let value = json["relocatedCwd"] as? String, !value.isEmpty
+                            else { continue }
+                            lastRelocatedCwd = value
+                            break
+                        }
+                    }
+                }
+            } catch {
+                logger.error("extractMetadata: tail scan I/O failed at \(stage, privacy: .public) for \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
+
+        let cwd = lastRelocatedCwd ?? firstCwd
         let title = aiTitle ?? firstUserMessage ?? "Untitled"
         return (title, cwd, isBackgroundScheduled, entrypoint?.hasPrefix("sdk-") == true)
     }

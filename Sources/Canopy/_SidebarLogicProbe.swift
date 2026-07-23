@@ -300,6 +300,211 @@ enum SidebarLogicProbe {
         record("automated: sdk-py entrypoint flagged",
                sdkPyPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
 
+        // cwd resolution: `relocated` events (session moved into a git worktree)
+        // must override the stale initial cwd; otherwise `--resume` spawns the
+        // CLI in the wrong project folder and the CLI creates an empty session.
+        let plainCwdJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe"}
+        """
+        let relocatedInHeadJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/worktree"}
+        """
+        let multipleRelocationsJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/wt1"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/wt2"}
+        """
+        // Simulate the real-world failure mode: cwd is set early, relocation
+        // happens after the 128KB head window, but is within the 32KB tail.
+        // Pad with filler well past the 128KB head window so the relocated
+        // marker lives in the tail scan region.
+        let relocatedFiller = String(repeating:
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"" +
+            String(repeating: "x", count: 512) +
+            "\"}}\n", count: 300)
+        let relocatedInTailJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        \(relocatedFiller){"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/late-worktree"}
+        {"type":"user","message":{"role":"user","content":"bye"},"cwd":"/tmp/probe/late-worktree"}
+        """
+        // Two relocations both past the head window — last-in-tail wins.
+        let multipleInTailJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        \(relocatedFiller){"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/wt-early"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/wt-late"}
+        """
+        // Empty relocatedCwd must not override the initial cwd (!value.isEmpty).
+        let emptyRelocatedCwdJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":""}
+        """
+        // Substring "relocated" + relocatedCwd on a non-relocated type must be ignored.
+        let relocatedNoiseJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        \(relocatedFiller){"type":"user","message":{"role":"user","content":"we relocated the repo"},"relocatedCwd":"/tmp/probe/fake"}
+        """
+        // Boundary case: file size == headSize + tailSize so tailStart == headSize,
+        // and the byte before tailStart is `\n` — the relocated line begins
+        // exactly at the window edge and must NOT be dropped.
+        let headSize = 131_072
+        let tailSize = 32_768
+        let boundaryFirst =
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"cwd\":\"/tmp/probe/main\"}\n"
+        let boundaryRelocated =
+            "{\"type\":\"relocated\",\"sessionId\":\"probe\",\"relocatedCwd\":\"/tmp/probe/boundary-wt\"}\n"
+        let headPadCount = headSize - boundaryFirst.utf8.count - 1
+        precondition(headPadCount > 0, "boundary fixture first line exceeds headSize")
+        let zPadCount = max(0, tailSize - boundaryRelocated.utf8.count)
+        let boundaryJSONL =
+            boundaryFirst
+            + String(repeating: "x", count: headPadCount) + "\n"
+            + boundaryRelocated
+            + String(repeating: "z", count: zPadCount)
+        // Mid-line case: byte at tailStart-1 is NOT `\n`, so the first tail
+        // "line" is a truncated fragment and must be dropped (start = 1);
+        // the real relocated event on the next line still wins.
+        let midlineFirst =
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"cwd\":\"/tmp/probe/main\"}\n"
+        let midlineFragment = "truncated-json-fragment-no-newline-in-head"
+        let midlineRelocated =
+            "{\"type\":\"relocated\",\"sessionId\":\"probe\",\"relocatedCwd\":\"/tmp/probe/midline-wt\"}\n"
+        let midlineHeadPad = headSize - midlineFirst.utf8.count
+        precondition(midlineHeadPad > 0, "midline fixture first line exceeds headSize")
+        let midlineTailBody = midlineFragment + "\n" + midlineRelocated
+        let midlineTailPad = max(0, tailSize - midlineTailBody.utf8.count)
+        let midlineJSONL =
+            midlineFirst
+            + String(repeating: "x", count: midlineHeadPad)
+            + midlineTailBody
+            + String(repeating: "z", count: midlineTailPad)
+        let plainCwdPath = writeProbeJSONL(plainCwdJSONL)
+        let relocatedInHeadPath = writeProbeJSONL(relocatedInHeadJSONL)
+        let multipleRelocationsPath = writeProbeJSONL(multipleRelocationsJSONL)
+        let relocatedInTailPath = writeProbeJSONL(relocatedInTailJSONL)
+        let multipleInTailPath = writeProbeJSONL(multipleInTailJSONL)
+        let emptyRelocatedCwdPath = writeProbeJSONL(emptyRelocatedCwdJSONL)
+        let relocatedNoisePath = writeProbeJSONL(relocatedNoiseJSONL)
+        let boundaryPath = writeProbeJSONL(boundaryJSONL)
+        let midlinePath = writeProbeJSONL(midlineJSONL)
+        defer {
+            for path in [
+                plainCwdPath, relocatedInHeadPath, multipleRelocationsPath,
+                relocatedInTailPath, multipleInTailPath, emptyRelocatedCwdPath,
+                relocatedNoisePath, boundaryPath, midlinePath,
+            ] {
+                if let path { try? FileManager.default.removeItem(atPath: path) }
+            }
+        }
+        record("cwd: no relocation returns initial cwd",
+               plainCwdPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe")
+        record("cwd: relocated in head wins over initial cwd",
+               relocatedInHeadPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/worktree")
+        record("cwd: last relocated wins on multiple relocations",
+               multipleRelocationsPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/wt2")
+        record("cwd: relocated past head window recovered from tail",
+               relocatedInTailPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/late-worktree")
+        record("cwd: last relocated in tail wins on multiple past head",
+               multipleInTailPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/wt-late")
+        record("cwd: empty relocatedCwd falls back to first cwd",
+               emptyRelocatedCwdPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/main")
+        record("cwd: substring relocated noise ignored",
+               relocatedNoisePath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/main")
+        // Sanity: fixture really puts the relocated line on the tail boundary.
+        let boundaryOffsetOK: Bool = {
+            guard let path = boundaryPath,
+                  let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+            else { return false }
+            guard data.count == headSize + tailSize else { return false }
+            guard data[headSize - 1] == 0x0A else { return false }
+            let prefix = Data(boundaryRelocated.utf8.dropLast()) // without trailing \n
+            return data[headSize..<(headSize + prefix.count)] == prefix
+        }()
+        record("cwd: relocated at exact tailStart boundary preserved",
+               boundaryOffsetOK
+               && boundaryPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/boundary-wt")
+        // Sanity: fixture really starts the tail mid-line (byte before
+        // tailStart is not `\n`), and the truncated first line is skipped.
+        let midlineOffsetOK: Bool = {
+            guard let path = midlinePath,
+                  let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+            else { return false }
+            guard data.count == headSize + tailSize else { return false }
+            guard data[headSize - 1] != 0x0A else { return false }
+            return data[headSize..<(headSize + midlineFragment.utf8.count)]
+                == Data(midlineFragment.utf8)
+        }()
+        record("cwd: mid-line tail start drops truncated fragment",
+               midlineOffsetOK
+               && midlinePath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/midline-wt")
+
+        // resolveProjectPath truth table — the loadAllSessions encoded-folder
+        // verification path, extracted so sidebar discovery can't silently
+        // drop sessions when encodePath and the CLI's on-disk folder disagree.
+        // Directory names stay alphanumeric: `decodePath`'s greedy walk only
+        // joins up to 6 hyphen-split tokens, so a UUID-with-hyphens folder
+        // would fail to round-trip and poison the middle-gap case.
+        let fm = FileManager.default
+        let stamp = String(UUID().uuidString.filter(\.isHexDigit))
+        let resolveBase = fm.temporaryDirectory
+            .appendingPathComponent("canopyproberesolve\(stamp)", isDirectory: true)
+        let agreeDir = resolveBase.appendingPathComponent("agreecwd", isDirectory: true)
+        let staleDir = resolveBase.appendingPathComponent("stalelaunch", isDirectory: true)
+        let relocatedDir = resolveBase.appendingPathComponent("actualwt", isDirectory: true)
+        let driftDir = resolveBase
+            .appendingPathComponent("canopyprobeencodingreal", isDirectory: true)
+            .appendingPathComponent("exists", isDirectory: true)
+        do {
+            try fm.createDirectory(at: agreeDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: staleDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: relocatedDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: driftDir, withIntermediateDirectories: true)
+        } catch {
+            record("resolveProjectPath: temp dirs created", false, String(describing: error))
+        }
+        defer { try? fm.removeItem(at: resolveBase) }
+
+        let agreeEncoded = ClaudeSessionHistory.encodePath(agreeDir.path)
+        record("resolveProjectPath: agreement returns extracted cwd",
+               ClaudeSessionHistory.resolveProjectPath(
+                   extractedCwd: agreeDir.path,
+                   projectEncoded: agreeEncoded
+               ) == agreeDir.path)
+
+        let relocatedEncoded = ClaudeSessionHistory.encodePath(relocatedDir.path)
+        precondition(
+            !ClaudeSessionHistory.encodedFolderCandidates(for: staleDir.path)
+                .contains(relocatedEncoded),
+            "stale and relocated encodings must differ for middle-gap case"
+        )
+        record("resolveProjectPath: middle-gap relocation prefers decoded folder",
+               ClaudeSessionHistory.resolveProjectPath(
+                   extractedCwd: staleDir.path,
+                   projectEncoded: relocatedEncoded
+               ) == relocatedDir.path)
+
+        let bogusEncoded = "-a-bogus-folder-name-that-decodes-to-nothing"
+        let bogusDecoded = ClaudeSessionHistory.decodePath(bogusEncoded)
+        precondition(
+            !fm.fileExists(atPath: bogusDecoded),
+            "bogus decodePath result must not exist on disk"
+        )
+        precondition(
+            !ClaudeSessionHistory.encodedFolderCandidates(for: driftDir.path)
+                .contains(bogusEncoded),
+            "real cwd encoding must disagree with bogus projectEncoded"
+        )
+        record("resolveProjectPath: encoding drift falls back to extracted cwd",
+               ClaudeSessionHistory.resolveProjectPath(
+                   extractedCwd: driftDir.path,
+                   projectEncoded: bogusEncoded
+               ) == driftDir.path)
+
+        record("resolveProjectPath: nil extracted cwd returns decodePath",
+               ClaudeSessionHistory.resolveProjectPath(
+                   extractedCwd: nil,
+                   projectEncoded: bogusEncoded
+               ) == bogusDecoded)
         // background-task launch detection (drives sidebar "waiting" icon)
         let bashBg: [String: Any] = [
             "type": "tool_use",
@@ -619,6 +824,21 @@ enum SidebarLogicProbe {
                GitWorktree.projectDisplayName(
                    for: GitWorktree.worktreesRoot
                        .appendingPathComponent("Other/../Canopy/fix-foo")) == "Canopy · fix-foo")
+        record("projectDisplayName: in-repo .claude/worktrees layout → repo · branch",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/LSE-Core/.claude/worktrees/harfbuzz-palt-fix"))
+                   == "LSE-Core · harfbuzz-palt-fix")
+        record("projectDisplayName: bare .claude/worktrees (no repo) falls back to folder name",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/.claude/worktrees/orphan")) == "orphan")
+        record("projectDisplayName: in-repo layout with extra depth → folder name",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/LSE-Core/.claude/worktrees/harfbuzz/nested"))
+                   == "nested")
+        record("projectDisplayName: ~/.claude/worktrees/<branch> not treated as in-repo",
+               GitWorktree.projectDisplayName(
+                   for: GitWorktree.worktreesRoot.appendingPathComponent("orphan-branch"))
+                   == "orphan-branch")
 
         record("isManagedWorktree: managed layout → true",
                GitWorktree.isManagedWorktree(
@@ -634,6 +854,12 @@ enum SidebarLogicProbe {
                GitWorktree.isManagedWorktree(
                    GitWorktree.worktreesRoot
                        .appendingPathComponent("Other/../Canopy/fix-foo")))
+        record("isManagedWorktree: in-repo layout → true",
+               GitWorktree.isManagedWorktree(
+                   URL(fileURLWithPath: "/repos/LSE-Core/.claude/worktrees/harfbuzz")))
+        record("isManagedWorktree: ~/.claude/worktrees/<branch> → false",
+               !GitWorktree.isManagedWorktree(
+                   GitWorktree.worktreesRoot.appendingPathComponent("orphan-branch")))
 
         // --- RecentDirectories worktree filter (add + load) ---
         // Uses real UserDefaults + real temp/managed-root directories, then
