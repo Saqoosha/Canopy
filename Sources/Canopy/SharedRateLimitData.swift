@@ -32,8 +32,16 @@ final class SharedRateLimitData {
     /// transform drops the field, so `update(from:)` deliberately leaves
     /// it untouched. If the raw path ever stops responding, the 5hr/weekly
     /// bars keep updating while these rows silently freeze at their last
-    /// value; `extractRawUsage`'s shape-mismatch warning in ShimProcess is
-    /// the discovery signal for that failure.
+    /// value; watch `log show --predicate 'subsystem == "sh.saqoo.Canopy"
+    /// AND category == "RateLimit"'` for `extractRawUsage`'s shape-mismatch
+    /// warning in ShimProcess — that is the discovery signal for that
+    /// failure. Persistent well-formed omission of the `model_scoped` key
+    /// alone is detected separately (see `updateFromRawUsage`'s absence
+    /// counter). Also: raw responses that arrive WITHOUT the `model_scoped`
+    /// key deliberately keep the last value (see the semantics block in
+    /// `updateFromRawUsage`); stale rows are hidden at render time by
+    /// `SidebarAccountSection`'s resetDate filter once their reset time
+    /// passes.
     struct ModelScopedLimit: Equatable, Identifiable {
         let displayName: String
         let pct: Int
@@ -48,13 +56,50 @@ final class SharedRateLimitData {
         /// reset) inside the type instead of at the call site.
         init?(json: [String: Any]) {
             guard let name = json["display_name"] as? String, !name.isEmpty else { return nil }
+            // Match applyRawWindow's "malformed → keep previous" promise:
+            // a stateless value type can't carry "previous", so instead of
+            // silently synthesizing 0% (indistinguishable from a real
+            // no-usage row) we drop the entry and log. The row disappears
+            // for one tick; the next well-formed payload rebuilds it.
+            guard let parsedPct = SharedRateLimitData.parseUtilizationStrict(json["utilization"]) else {
+                logger.warning("model_scoped entry '\(name, privacy: .public)': unparseable utilization (\(String(describing: json["utilization"]), privacy: .public)); dropping row")
+                return nil
+            }
             displayName = name
-            pct = SharedRateLimitData.parseUtilizationStrict(json["utilization"]) ?? 0
-            resetDate = (json["resets_at"] as? String).flatMap { SharedRateLimitData.parseISO8601($0) }
+            pct = parsedPct
+            if let iso = json["resets_at"] as? String {
+                if let parsedDate = SharedRateLimitData.parseISO8601(iso) {
+                    resetDate = parsedDate
+                } else {
+                    logger.warning("model_scoped entry '\(name, privacy: .public)': unparseable resets_at '\(iso, privacy: .public)'; treating as nil")
+                    resetDate = nil
+                }
+            } else {
+                resetDate = nil
+            }
+        }
+
+        /// SidebarAccountSection's render-time filter. Hides rows whose
+        /// weekly window has already elapsed — the "keep previous on
+        /// absent" branch in `updateFromRawUsage` intentionally leaves
+        /// dropped-by-server buckets in place, and this is the mechanism
+        /// that lets them fall off once their reset date passes.
+        var isFresh: Bool {
+            guard let resetDate else { return true }
+            return resetDate > Date()
         }
     }
 
     var modelScoped: [ModelScopedLimit] = []
+
+    /// Counter for consecutive `updateFromRawUsage` ticks in which the
+    /// payload was well-formed but simply lacked the `model_scoped` key.
+    /// Warns once when the streak crosses the threshold so a persistent
+    /// server-side drop (as opposed to the intermittent transient the
+    /// "absent → keep previous" branch is tuned for) is discoverable.
+    /// Reset by any tick where model_scoped is present in any form.
+    private var consecutiveModelScopedAbsences: Int = 0
+    private static let modelScopedAbsenceWarnThreshold = 10
 
     // Throttle: only one tab needs to request usage updates
     private var lastUsageUpdateTime: Date = .distantPast
@@ -102,30 +147,87 @@ final class SharedRateLimitData {
     /// malformed raw payload must not zero a bar or blank the whole
     /// sidebar Usage section (whose visibility keys off the reset dates).
     func updateFromRawUsage(_ rateLimits: [String: Any]) {
+        // five_hour and seven_day: always-present windows for authenticated
+        // accounts. If the outer type ever drifts (server ships a null or
+        // wrong shape) the bars silently keep their last value forever with
+        // no discoverable signal — warn on wrong-type so the drift is
+        // findable via the RateLimit log category.
         if let entry = rateLimits["five_hour"] as? [String: Any] {
             applyRawWindow(entry, label: "five_hour", pct: &sessionPct, reset: &sessionResetDate)
+        } else if let value = rateLimits["five_hour"], !(value is NSNull) {
+            logger.warning("raw usage five_hour: unexpected type (\(String(describing: value), privacy: .public)); keeping previous")
         }
         if let entry = rateLimits["seven_day"] as? [String: Any] {
             applyRawWindow(entry, label: "seven_day", pct: &weeklyPct, reset: &weeklyResetDate)
+        } else if let value = rateLimits["seven_day"], !(value is NSNull) {
+            logger.warning("raw usage seven_day: unexpected type (\(String(describing: value), privacy: .public)); keeping previous")
         }
+        // seven_day_sonnet: absent OR explicit null both mean "account no
+        // longer has this bucket" — clear so the two update paths (raw +
+        // extension transform) don't disagree based on response ordering.
+        // A wrong-type payload is a schema drift signal, not a plan change:
+        // keep previous and warn instead of masking the drift as a plan
+        // downgrade.
         if let entry = rateLimits["seven_day_sonnet"] as? [String: Any] {
             applyRawWindow(entry, label: "seven_day_sonnet", pct: &weeklyPctSonnet, reset: &weeklyResetDateSonnet)
+        } else if let value = rateLimits["seven_day_sonnet"], !(value is NSNull) {
+            logger.warning("raw usage seven_day_sonnet: unexpected type (\(String(describing: value), privacy: .public)); keeping previous")
         } else {
-            // Mirror update(from:): an absent Sonnet bucket means the
-            // account no longer has one — clear it so the two update
-            // paths can't disagree based on response ordering.
             weeklyPctSonnet = 0
             weeklyResetDateSonnet = nil
         }
+        // model_scoped semantics differ from the 5hr/weekly/sonnet windows.
+        // Anthropic's `/api/oauth/usage` has been observed omitting the
+        // `model_scoped` key on some responses even when per-model usage
+        // is unchanged; the old "absent → wipe" branch made the per-model
+        // rows (e.g. Weekly Fable) flicker in and out on every ~60s tick.
+        // Treat absent as "unknown, keep previous" rather than "empty" and
+        // rely on `SidebarAccountSection`'s render-time resetDate filter to
+        // hide stale rows once their reset window elapses.
+        //   - present as [[String: Any]] → apply (may clear on [])
+        //   - present as NSNull → clear (server says "no per-model data")
+        //   - absent → keep previous (bump absence counter; see below)
+        //   - present as some other type → keep previous + warn
         if let scoped = rateLimits["model_scoped"] as? [[String: Any]] {
+            consecutiveModelScopedAbsences = 0
+            let parsed = scoped.compactMap { ModelScopedLimit(json: $0) }
+            // If any entry was dropped by `ModelScopedLimit.init?` (each
+            // dropped row already logged its own reason), treat the whole
+            // array as malformed and keep previous state rather than
+            // partially overwriting. Two failure modes this guards against:
+            //   1. All entries invalid → `compactMap` returns [] → without
+            //      this guard, would clear modelScoped as if the server
+            //      had sent an explicit empty array (semantically wrong —
+            //      an all-invalid non-empty array is NOT "server says
+            //      empty", it's payload corruption).
+            //   2. Some valid + some invalid → without this guard, the
+            //      previously-fresh state for the invalid rows would be
+            //      overwritten with only the valid subset, silently
+            //      dropping known-good buckets.
+            guard parsed.count == scoped.count else {
+                logger.warning("raw usage model_scoped: \(scoped.count - parsed.count, privacy: .public) of \(scoped.count, privacy: .public) entries malformed; keeping previous")
+                return
+            }
             // Dedupe on displayName (the ForEach identity) — server-owned
             // values carry no uniqueness guarantee, and duplicate IDs are
             // undefined behavior for SwiftUI's ForEach.
             var seen = Set<String>()
-            modelScoped = scoped.compactMap { ModelScopedLimit(json: $0) }
-                .filter { seen.insert($0.displayName).inserted }
-        } else {
+            modelScoped = parsed.filter { seen.insert($0.displayName).inserted }
+        } else if rateLimits["model_scoped"] is NSNull {
             modelScoped = []
+            consecutiveModelScopedAbsences = 0
+        } else if rateLimits["model_scoped"] != nil {
+            logger.warning("raw usage model_scoped: unexpected type (\(String(describing: rateLimits["model_scoped"]), privacy: .public)); keeping previous")
+            consecutiveModelScopedAbsences = 0
+        } else {
+            // Absent from an otherwise well-formed payload. Anti-flicker
+            // branch — but a persistent server-side drop would freeze
+            // per-model rows with no discoverable trace. `== threshold`
+            // (not `>=`) so the warning fires exactly once per streak.
+            consecutiveModelScopedAbsences += 1
+            if consecutiveModelScopedAbsences == Self.modelScopedAbsenceWarnThreshold {
+                logger.warning("raw usage model_scoped: absent for \(Self.modelScopedAbsenceWarnThreshold, privacy: .public) consecutive updates (~\(Self.modelScopedAbsenceWarnThreshold, privacy: .public)min at 60s throttle); per-model rows may be stale")
+            }
         }
     }
 
