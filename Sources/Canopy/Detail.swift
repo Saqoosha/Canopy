@@ -261,21 +261,27 @@ private struct PaneHeaderChromeAvoidanceProbe: NSViewRepresentable {
                 name: NSWindow.didBecomeKeyNotification,
                 object: newWindow
             )
-            // didUpdateNotification is scoped to this window and fires on any
-            // subview layout change (including NavigationSplitView's internal
-            // NSSplitView resize), so we avoid the cross-window fan-out an
-            // `object: nil` NSSplitView observer would produce.
+            // Sidebar toggle / drag runs through NSSplitView.didResizeSubviewsNotification.
+            // NSWindow.didUpdateNotification alone missed these because updateWindows
+            // ticks only when the app processes an event — so during a pure sidebar
+            // animation the header stayed stale until the user moved the mouse. We
+            // register with `object: nil` (the split view isn't guaranteed to be in
+            // the view hierarchy at attach time) and filter cross-window notifications
+            // in the handler via `split.window === self.window`.
             center.addObserver(
                 self,
                 selector: #selector(observedChromeDidChange(_:)),
-                name: NSWindow.didUpdateNotification,
-                object: newWindow
+                name: NSSplitView.didResizeSubviewsNotification,
+                object: nil
             )
 
             scheduleRecompute()
         }
 
         @objc private func observedChromeDidChange(_ notification: Notification) {
+            if let split = notification.object as? NSSplitView, split.window !== window {
+                return
+            }
             scheduleRecompute()
         }
 
