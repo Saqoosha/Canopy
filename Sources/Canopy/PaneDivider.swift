@@ -126,26 +126,38 @@ private struct ResizeCursorArea: NSViewRepresentable {
 /// is deallocated, which happens when the divider view is torn down
 /// (pane close) — not when a live view's gesture is merely cancelled.
 ///
-/// The recovery mechanism is a pair of listeners installed at `engage`
-/// and torn down at `release`:
+/// The recovery mechanism is a set of three listeners installed at
+/// `engage` and torn down at `release`:
 ///
 ///   - `NSApplication.didResignActiveNotification`: fires the moment
 ///     Canopy loses active status (Cmd+Tab, Mission Control, etc.).
+///   - `NSEvent.addLocalMonitorForEvents(.leftMouseUp)`: catches the
+///     mouse-up that gesture arbitration swallowed. `Detail.swift`
+///     installs a `.simultaneousGesture(TapGesture())` on the pane
+///     container above the divider; when that arbitration wins after
+///     the drag has already engaged the lock, `onEnded` never fires
+///     but the mouse-up is still delivered inside Canopy.
 ///   - `NSEvent.addGlobalMonitorForEvents(.leftMouseUp)`: fires when
-///     the user releases the mouse button in *any* application,
-///     including one Canopy has been switched away from.
+///     the user releases the mouse button in *another* application
+///     (Cmd+Tab away mid-drag, then release there). Global monitor
+///     explicitly does NOT fire for events routed to Canopy itself
+///     — that gap is what the local monitor covers.
 ///
 /// # Race protection
 ///
-/// `deinit` cannot touch AppKit APIs directly under Swift 6 strict
-/// concurrency (the class is not `@MainActor`; deinit runs on the last
-/// releaser thread), so it dispatches enablement to main asynchronously.
-/// If a *fresh* `DragCursorLock` engages between the deinit dispatch and
-/// its execution, the async block would silently undo the fresh lock's
-/// disable — the exact "cursor flickers back to default during drag"
-/// symptom we exist to prevent. Guard: `Self.active` weakly points at
-/// the currently-engaged lock; the deinit only re-enables cursor rects
-/// when `Self.active === nil`, i.e. no successor is holding the lock.
+/// `deinit` runs on the thread that drops the last reference —
+/// nonisolated under Swift 6. It hops to main via
+/// `MainActor.assumeIsolated` (synchronous; traps loudly if the
+/// assumed isolation is ever violated) before touching AppKit APIs.
+/// Even without an async gap, a race is still possible: SwiftUI may
+/// tear down the old divider view and instantiate its replacement on
+/// the same run loop, so a fresh `DragCursorLock.engage()` can run
+/// *before* the old lock's final ARC release drops through to deinit.
+/// Guard: `Self.active` weakly points at the currently-engaged lock;
+/// the deinit only re-enables cursor rects when `Self.active === nil`
+/// — i.e. no successor has taken over the lock. Otherwise the old
+/// lock's cleanup would silently undo the successor's disable and
+/// reintroduce the exact cursor flicker this class exists to prevent.
 ///
 /// # Type isolation
 ///
@@ -177,6 +189,7 @@ private final class DragCursorLock: @unchecked Sendable {
 
     nonisolated(unsafe) private var pushed = false
     nonisolated(unsafe) private var interruptObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var localMouseUpMonitor: Any?
     nonisolated(unsafe) private var globalMouseUpMonitor: Any?
 
     @MainActor
@@ -237,10 +250,27 @@ private final class DragCursorLock: @unchecked Sendable {
                 self?.release()
             }
         }
-        // Cross-app mouse-up: local monitor catches events routed to
-        // Canopy; global monitor catches events routed to OTHER apps
-        // (e.g. user Cmd+Tabbed away then released the mouse). Together
-        // they cover every mouse-up regardless of which app is active.
+        // Mouse-up coverage: local + global together catch every mouse-up
+        // regardless of which app the release lands in. Local monitor
+        // returns the event unmodified so downstream handlers still see
+        // it (we're only piggybacking on the event flow, not consuming
+        // it).
+        localMouseUpMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseUp]
+        ) { [weak self] event in
+            MainActor.assumeIsolated {
+                logger.info("release triggered by local mouseUp (gesture arbitration cancel)")
+                self?.release()
+            }
+            return event
+        }
+        if localMouseUpMonitor == nil {
+            // Sandboxing / event-mask rejection would leave this path
+            // silently blind; log so a future stuck-cursor report is
+            // diagnosable from unified log rather than looking like a
+            // code bug.
+            logger.warning("local mouseUp monitor install returned nil — gesture-arbitration cancel path uncovered")
+        }
         globalMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseUp]
         ) { [weak self] _ in
@@ -254,6 +284,9 @@ private final class DragCursorLock: @unchecked Sendable {
                 self?.release()
             }
         }
+        if globalMouseUpMonitor == nil {
+            logger.warning("global mouseUp monitor install returned nil — cross-app release path uncovered")
+        }
     }
 
     @MainActor
@@ -261,6 +294,10 @@ private final class DragCursorLock: @unchecked Sendable {
         if let observer = interruptObserver {
             NotificationCenter.default.removeObserver(observer)
             interruptObserver = nil
+        }
+        if let monitor = localMouseUpMonitor {
+            NSEvent.removeMonitor(monitor)
+            localMouseUpMonitor = nil
         }
         if let monitor = globalMouseUpMonitor {
             NSEvent.removeMonitor(monitor)
@@ -296,6 +333,9 @@ private final class DragCursorLock: @unchecked Sendable {
             }
             if let observer = interruptObserver {
                 NotificationCenter.default.removeObserver(observer)
+            }
+            if let monitor = localMouseUpMonitor {
+                NSEvent.removeMonitor(monitor)
             }
             if let monitor = globalMouseUpMonitor {
                 NSEvent.removeMonitor(monitor)

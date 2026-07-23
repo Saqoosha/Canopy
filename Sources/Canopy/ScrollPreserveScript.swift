@@ -110,13 +110,16 @@ enum ScrollPreserveScript {
 
             try {
                 var ro = new ResizeObserver(function() {
-                    // ResizeObserver holds a STRONG reference to the
+                    // ResizeObserver holds a STRONG reference to every
                     // observed element, so `attach`'s WeakSet/WeakMap
                     // alone can't release a container React unmounts.
                     // Long chat sessions churn scroll containers (code
-                    // blocks re-render, sub-trees fold) and the observer
-                    // would keep firing on detached nodes forever
-                    // without this self-eviction check.
+                    // blocks re-render, sub-trees fold) and every stale
+                    // container would stay retained for the life of
+                    // the page without this self-eviction. The
+                    // isConnected check also prevents the observer's
+                    // final post-detach callback from calling
+                    // pinToBottom on a dead node.
                     if (!el.isConnected) {
                         ro.disconnect();
                         return;
