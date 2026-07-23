@@ -122,18 +122,25 @@ struct CanopyApp: App {
                 // Cmd+Ctrl+1..9 — show the N-th visible open row: load it
                 // into the focused pane, OR (if the session already lives
                 // in another pane, honoring the one-session-one-pane
-                // invariant) jump focus to that other pane. Menu label
-                // says "Show …" rather than "Load … into Pane" so the
-                // focus-jump case doesn't read as broken.
+                // invariant) jump focus to that other pane, OR (if there
+                // is no focused pane yet — user just closed the last one)
+                // seed the first pane via openInFocusedPane's empty-panes
+                // branch. Menu label says "Show …" rather than "Load …
+                // into Pane" so the focus-jump case doesn't read as broken.
                 // Cmd+Shift+3..6 conflict with macOS screenshot shortcuts,
                 // and Cmd+Opt+arrows already move pane focus, so Cmd+Ctrl
                 // is the cleanest unused modifier here.
+                //
+                // `visible` cached once so the 9-item ForEach doesn't walk
+                // visibleRows (recents + cloud + dedupe + sort + filter)
+                // per menu re-evaluation × 9.
+                let visible = visibleOpenSessionIds
                 ForEach(1...9, id: \.self) { idx in
                     Button("Show Session \(idx)") {
                         loadSessionIntoFocusedPane(sidebarIndex: idx - 1)
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: [.command, .control])
-                    .disabled(sidebarStore.panes.isEmpty || !visibleOpenSessionIds.indices.contains(idx - 1))
+                    .disabled(!visible.indices.contains(idx - 1))
                 }
             }
         }
@@ -162,12 +169,14 @@ struct CanopyApp: App {
 
     private func loadSessionIntoFocusedPane(sidebarIndex: Int) {
         // Cmd+Ctrl+1..9: show the N-th visible open row — load into the
-        // focused pane, OR jump focus to whichever pane already hosts it
-        // (openInFocusedPane's one-session-one-pane fallback). Out-of-range
-        // is a no-op (also disabled at the menu).
-        guard !sidebarStore.panes.isEmpty,
-              visibleOpenSessionIds.indices.contains(sidebarIndex) else { return }
-        sidebarStore.openInFocusedPane(visibleOpenSessionIds[sidebarIndex])
+        // focused pane, OR jump focus to whichever pane already hosts it,
+        // OR seed the first pane if the user closed the last one. All
+        // three cases are `openInFocusedPane`'s branches; we don't guard
+        // panes.isEmpty here so the seed path stays keyboard-reachable.
+        // Out-of-range sidebar index is a no-op (menu is also disabled).
+        let visible = visibleOpenSessionIds
+        guard visible.indices.contains(sidebarIndex) else { return }
+        sidebarStore.openInFocusedPane(visible[sidebarIndex])
     }
 
     private func showMainWindow() {
