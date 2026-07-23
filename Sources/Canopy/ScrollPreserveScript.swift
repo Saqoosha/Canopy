@@ -110,6 +110,17 @@ enum ScrollPreserveScript {
 
             try {
                 var ro = new ResizeObserver(function() {
+                    // ResizeObserver holds a STRONG reference to the
+                    // observed element, so `attach`'s WeakSet/WeakMap
+                    // alone can't release a container React unmounts.
+                    // Long chat sessions churn scroll containers (code
+                    // blocks re-render, sub-trees fold) and the observer
+                    // would keep firing on detached nodes forever
+                    // without this self-eviction check.
+                    if (!el.isConnected) {
+                        ro.disconnect();
+                        return;
+                    }
                     if (!atBottom.get(el)) return;
                     // Double rAF: a single rAF isn't always sufficient
                     // for scrollHeight to stabilize on WebKit after a
