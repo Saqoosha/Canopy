@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+import os.log
+
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "RateLimit")
 
 /// Account-level rate limit data shared across all tabs.
 /// Rate limits (5hr session, weekly) are per-account, not per-session,
@@ -20,6 +23,38 @@ final class SharedRateLimitData {
     // 7-day Sonnet-only rate limit
     var weeklyPctSonnet: Int = 0
     var weeklyResetDateSonnet: Date?
+
+    /// Per-model weekly buckets from the raw usage payload's `model_scoped`
+    /// array (e.g. "Weekly Fable").
+    ///
+    /// Staleness caveat: ONLY the raw CLI `get_usage` path
+    /// (`updateFromRawUsage`) writes this — the extension's usage_update
+    /// transform drops the field, so `update(from:)` deliberately leaves
+    /// it untouched. If the raw path ever stops responding, the 5hr/weekly
+    /// bars keep updating while these rows silently freeze at their last
+    /// value; `extractRawUsage`'s shape-mismatch warning in ShimProcess is
+    /// the discovery signal for that failure.
+    struct ModelScopedLimit: Equatable, Identifiable {
+        let displayName: String
+        let pct: Int
+        let resetDate: Date?
+
+        /// SidebarAccountSection's ForEach identity. The server owns the
+        /// names, so `updateFromRawUsage` also dedupes on this.
+        var id: String { displayName }
+
+        /// Validating construction from one raw `model_scoped` entry —
+        /// keeps the parse rules (non-empty name, clamped pct, ISO8601
+        /// reset) inside the type instead of at the call site.
+        init?(json: [String: Any]) {
+            guard let name = json["display_name"] as? String, !name.isEmpty else { return nil }
+            displayName = name
+            pct = SharedRateLimitData.parseUtilizationStrict(json["utilization"]) ?? 0
+            resetDate = (json["resets_at"] as? String).flatMap { SharedRateLimitData.parseISO8601($0) }
+        }
+    }
+
+    var modelScoped: [ModelScopedLimit] = []
 
     // Throttle: only one tab needs to request usage updates
     private var lastUsageUpdateTime: Date = .distantPast
@@ -51,6 +86,68 @@ final class SharedRateLimitData {
         } else {
             weeklyPctSonnet = 0
             weeklyResetDateSonnet = nil
+        }
+    }
+
+    /// Update from the RAW `/api/oauth/usage` shape (snake_case), delivered
+    /// via the CLI's `get_usage` response. Unlike `update(from:)` (the
+    /// extension's camelCase usage_update) this includes `model_scoped`.
+    /// Shape: { five_hour: {utilization, resets_at}, seven_day: {...},
+    ///          seven_day_sonnet: {...}, model_scoped: [{display_name,
+    ///          utilization, resets_at}, ...] }
+    ///
+    /// Two writers race into the same fields every ~60 s (this raw path +
+    /// the extension's transform), so a present-but-unparseable field
+    /// keeps the previous value instead of degrading to 0/nil — one
+    /// malformed raw payload must not zero a bar or blank the whole
+    /// sidebar Usage section (whose visibility keys off the reset dates).
+    func updateFromRawUsage(_ rateLimits: [String: Any]) {
+        if let entry = rateLimits["five_hour"] as? [String: Any] {
+            applyRawWindow(entry, label: "five_hour", pct: &sessionPct, reset: &sessionResetDate)
+        }
+        if let entry = rateLimits["seven_day"] as? [String: Any] {
+            applyRawWindow(entry, label: "seven_day", pct: &weeklyPct, reset: &weeklyResetDate)
+        }
+        if let entry = rateLimits["seven_day_sonnet"] as? [String: Any] {
+            applyRawWindow(entry, label: "seven_day_sonnet", pct: &weeklyPctSonnet, reset: &weeklyResetDateSonnet)
+        } else {
+            // Mirror update(from:): an absent Sonnet bucket means the
+            // account no longer has one — clear it so the two update
+            // paths can't disagree based on response ordering.
+            weeklyPctSonnet = 0
+            weeklyResetDateSonnet = nil
+        }
+        if let scoped = rateLimits["model_scoped"] as? [[String: Any]] {
+            // Dedupe on displayName (the ForEach identity) — server-owned
+            // values carry no uniqueness guarantee, and duplicate IDs are
+            // undefined behavior for SwiftUI's ForEach.
+            var seen = Set<String>()
+            modelScoped = scoped.compactMap { ModelScopedLimit(json: $0) }
+                .filter { seen.insert($0.displayName).inserted }
+        } else {
+            modelScoped = []
+        }
+    }
+
+    /// Apply one raw rate-limit window in place. Present-but-malformed
+    /// fields keep the previous value (with a log); a genuinely absent
+    /// `resets_at` clears the date (the window really has no reset).
+    private func applyRawWindow(_ entry: [String: Any], label: String, pct: inout Int, reset: inout Date?) {
+        if let parsed = Self.parseUtilizationStrict(entry["utilization"]) {
+            pct = parsed
+        } else {
+            logger.warning("raw usage \(label, privacy: .public): unparseable utilization (\(String(describing: entry["utilization"]), privacy: .public)); keeping previous")
+        }
+        if let iso = entry["resets_at"] as? String {
+            if let date = Self.parseISO8601(iso) {
+                reset = date
+            } else {
+                logger.warning("raw usage \(label, privacy: .public): unparseable resets_at '\(iso, privacy: .public)'; keeping previous")
+            }
+        } else if entry["resets_at"] == nil {
+            reset = nil
+        } else {
+            logger.warning("raw usage \(label, privacy: .public): non-string resets_at; keeping previous")
         }
     }
 
@@ -95,24 +192,35 @@ final class SharedRateLimitData {
 
     // MARK: - Parsing helpers
 
-    private static func parseUtilization(_ value: Any) -> Int {
+    private nonisolated static func parseUtilization(_ value: Any) -> Int {
+        parseUtilizationStrict(value) ?? 0
+    }
+
+    /// nil when the value is missing or not numeric — lets raw-payload
+    /// callers distinguish "malformed" (keep previous value) from a real 0.
+    /// nonisolated: also called from ModelScopedLimit.init?(json:), which
+    /// does not inherit the class's MainActor isolation.
+    private nonisolated static func parseUtilizationStrict(_ value: Any?) -> Int? {
         if let intVal = value as? Int {
             return min(100, max(0, intVal))
         } else if let doubleVal = value as? Double {
             let pct = doubleVal <= 1.0 ? doubleVal * 100 : doubleVal
             return Int(min(100, max(0, pct)))
         }
-        return 0
+        return nil
     }
 
-    private static let isoFormatterWithFractional: ISO8601DateFormatter = {
+    // ISO8601DateFormatter is documented thread-safe; nonisolated(unsafe)
+    // lets the nonisolated parse helpers (used by ModelScopedLimit's init)
+    // share the cached instances.
+    private nonisolated(unsafe) static let isoFormatterWithFractional: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
-    private static let isoFormatterStandard = ISO8601DateFormatter()
+    private nonisolated(unsafe) static let isoFormatterStandard = ISO8601DateFormatter()
 
-    private static func parseISO8601(_ isoString: String) -> Date? {
+    private nonisolated static func parseISO8601(_ isoString: String) -> Date? {
         if let date = isoFormatterWithFractional.date(from: isoString) { return date }
         return isoFormatterStandard.date(from: isoString)
     }

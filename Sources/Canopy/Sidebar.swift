@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Sidebar list with switchable grouping mode (segmented picker):
@@ -8,9 +9,12 @@ import SwiftUI
 /// Grouping mode persists across launches via UserDefaults.
 ///
 /// Click semantics:
-///   - .open       → select that session
-///   - .closedLocal → spawn a shim with --resume, then select
-///   - .closedCloud → run the teleport flow, then select the resulting open row
+///   - .open + plain     → openInFocusedPane (replace focused pane)
+///   - .open + Cmd       → openInNewPane (or bounce/focus existing)
+///   - .closedLocal + plain → openLocal (select → openInFocusedPane)
+///   - .closedLocal + Cmd   → openLocal, then openInNewPane
+///   - .closedCloud + plain → openCloud(.focused)
+///   - .closedCloud + Cmd   → openCloud(.newPane)
 ///   - × (Open rows only) → stop the shim, drop the session, select the next
 ///     most-recent open or fall back to launcher
 struct Sidebar: View {
@@ -90,6 +94,8 @@ struct Sidebar: View {
             .background {
                 ListScrollToTop(trigger: store.openSessions.count)
             }
+
+            SidebarAccountSection()
         }
         .overlay(alignment: .bottom) {
             if let err = store.teleportError {
@@ -186,7 +192,17 @@ struct Sidebar: View {
 
     private var newSessionButton: some View {
         Button {
-            store.select(.launcher)
+            // Mirror Cmd+N (CanopyApp File > New Session). Cmd+click opens
+            // a launcher in a new pane (spec parity with sidebar row Cmd+click).
+            if NSEvent.modifierFlags.contains(.command) {
+                if !store.openLauncherInNewPane() {
+                    store.showCapReachedHintOnFocusedPane()
+                }
+            } else if store.panes.isEmpty {
+                store.select(.launcher)
+            } else {
+                store.openLauncherInFocusedPane()
+            }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "plus")
@@ -208,14 +224,15 @@ struct Sidebar: View {
 
     /// Click receiver for open rows. Always reads nil (no system selection
     /// highlight ever sticks); a write means "the user clicked this row".
+    /// Cmd is read atomically here — it may be released before any follow-up.
     private var rowClickBinding: Binding<String?> {
         Binding(
             get: { nil },
-            set: { clickedId in
-                guard let clickedId,
-                      let row = store.visibleRows.first(where: { $0.id == clickedId })
-                else { return }
-                handleClick(row)
+            set: { newValue in
+                guard let id = newValue,
+                      let row = store.visibleRows.first(where: { $0.id == id }) else { return }
+                let cmdHeld = NSEvent.modifierFlags.contains(.command)
+                handleRowClick(row: row, addNewPane: cmdHeld)
             }
         )
     }
@@ -231,7 +248,8 @@ struct Sidebar: View {
         )
         .background(
             // Inline so the padding actually shows. `.listRowBackground` stretches
-            // its content to fill the cell, eating any inset modifiers.
+            // its content to fill the cell, eating any inset modifiers. Hover
+            // pill only — pane highlight lives on listRowBackground below.
             RoundedRectangle(cornerRadius: 9)
                 .fill(rowBackgroundFill(for: row))
                 .padding(.horizontal, 3)
@@ -243,28 +261,40 @@ struct Sidebar: View {
         // Closed rows: plain tap to open. Open rows: NO gesture — any tap
         // gesture here (even simultaneous) blocks .onMove dragging; their
         // clicks arrive via the List's rowClickBinding instead.
-        .gesture(row.isOpen ? nil : TapGesture().onEnded { handleClick(row) })
+        .gesture(row.isOpen ? nil : TapGesture().onEnded {
+            let cmdHeld = NSEvent.modifierFlags.contains(.command)
+            handleRowClick(row: row, addNewPane: cmdHeld)
+        })
         .selectionDisabled(!row.isOpen)
         .contextMenu { rowMenu(for: row) }
-        .listRowBackground(Color.clear)
+        .listRowBackground(
+            Group {
+                switch highlight(for: row) {
+                case .none: Color.clear
+                case .weak: Color.accentColor.opacity(0.12)
+                case .strong: Color.accentColor.opacity(0.35)
+                }
+            }
+        )
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
     }
 
     @ViewBuilder
     private func rowMenu(for row: SidebarRow) -> some View {
-        switch row {
-        case .open(let s):
+        if case .open(let s) = row {
             Button("Close session") { store.closeSession(s.id) }
-        case .closedLocal, .closedCloud:
-            Button("Hide from sidebar") {
-                store.hideClosedSession(rowId: row.id)
-            }
         }
+        Button("Hide from sidebar") {
+            store.hideClosedSession(rowId: row.id)
+        }
+        .disabled({
+            if case .open = row { return true } else { return false }
+        }())
     }
 
+    /// Hover pill only. Pane membership highlight is on `.listRowBackground`.
     private func rowBackgroundFill(for row: SidebarRow) -> Color {
-        if isActive(row) { return Color.primary.opacity(0.07) }
         if hoveredRowId == row.id { return Color.primary.opacity(0.04) }
         return Color.clear
     }
@@ -282,15 +312,47 @@ struct Sidebar: View {
         return s.id == id
     }
 
+    private enum PaneHighlightLevel { case none, weak, strong }
 
-    private func handleClick(_ row: SidebarRow) {
+    private func highlight(for row: SidebarRow) -> PaneHighlightLevel {
+        guard case .open(let session) = row,
+              let idx = store.paneIndex(forSession: session.id) else { return .none }
+        return idx == store.focusedPaneIndex ? .strong : .weak
+    }
+
+    private func handleRowClick(row: SidebarRow, addNewPane: Bool) {
         switch row {
-        case .open(let s):
-            store.select(.session(s.id))
+        case .open(let session):
+            if addNewPane {
+                let added = store.openInNewPane(session.id)
+                if !added { bouncePane(forSessionId: session.id) }
+            } else {
+                store.openInFocusedPane(session.id)
+            }
         case .closedLocal(let entry):
-            store.openLocal(entry)
-        case .closedCloud(let session):
-            store.openCloud(session)
+            if addNewPane && store.panes.count >= SessionStore.paneAbsoluteCap {
+                store.showCapReachedHintOnFocusedPane()
+                _ = store.openLocal(entry, target: .focused)  // deliberate: user still gets the session, just in focused
+            } else {
+                _ = store.openLocal(entry, target: addNewPane ? .newPane : .focused)
+            }
+        case .closedCloud(let cloud):
+            if addNewPane && store.panes.count >= SessionStore.paneAbsoluteCap {
+                store.showCapReachedHintOnFocusedPane()
+                store.openCloud(cloud, target: .focused)
+            } else {
+                store.openCloud(cloud, target: addNewPane ? .newPane : .focused)
+            }
+        }
+    }
+
+    private func bouncePane(forSessionId sessionId: OpenSession.ID) {
+        if let idx = store.paneIndex(forSession: sessionId) {
+            store.setFocusedPaneIndex(idx)
+            return
+        }
+        if store.panes.count >= SessionStore.paneAbsoluteCap {
+            store.showCapReachedHintOnFocusedPane()
         }
     }
 

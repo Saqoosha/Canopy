@@ -39,6 +39,11 @@ final class StatusBarData {
         }
     }
 
+    /// Transient status-bar message (e.g. "Maximum 5 panes"). Cleared
+    /// automatically by `showHint(_:forSeconds:)` after the timeout.
+    var transientHint: String? = nil
+    private var hintClearTask: Task<Void, Never>?
+
     enum VCSType { case unknown, git, jj }
 
     /// Effective context window matching CC extension's pie chart: contextWindow - maxOutputTokens - 13000.
@@ -83,6 +88,23 @@ final class StatusBarData {
         remoteHost = nil
         subagents = []
         chatInputWidth = nil
+        hintClearTask?.cancel()
+        hintClearTask = nil
+        transientHint = nil
+    }
+
+    /// Post a self-clearing status-bar hint. Cancels any in-flight clear
+    /// so rapid re-fires restart the timer.
+    @MainActor
+    func showHint(_ text: String, forSeconds: TimeInterval = 1.5) {
+        transientHint = text
+        hintClearTask?.cancel()
+        hintClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(forSeconds))
+            if !Task.isCancelled {
+                await MainActor.run { self?.transientHint = nil }
+            }
+        }
     }
 
 }

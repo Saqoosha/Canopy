@@ -1318,6 +1318,188 @@ enum SidebarLogicProbe {
                    "transitioned=\(t8Transitioned) finishedAt=\(String(describing: t8Tracker.rows.first?.finishedAt))")
         }
 
+        // MARK: - Panes
+        do {
+            // Brief names openA / openB / recentAsOpen; only openA/openB are
+            // fabricated above. Build a third OpenSession here for the seed.
+            let recentAsOpen = OpenSession(
+                origin: .local(cwd),
+                resumeId: "open-recent",
+                title: "Recent as open",
+                project: "ProjectRecent",
+                status: .live,
+                lastActiveAt: now.addingTimeInterval(-oneHour * 2)
+            )
+            let store = SessionStore()
+            store._probeSeedOpenSessions([openA, openB, recentAsOpen])
+            record("panes: empty by default", store.panes.isEmpty)
+
+            store.openInFocusedPane(openA.id)
+            record("openInFocusedPane on empty seeds first pane",
+                   store.panes.count == 1 && store.focusedPaneIndex == 0
+                   && store.panes[0].content == .session(openA.id)
+                   && store.panes[0].preferredWidth == SessionStore.paneDefaultWidth)
+
+            let addedB = store.openInNewPane(openB.id)
+            record("openInNewPane appends and focuses new",
+                   addedB && store.panes.count == 2 && store.focusedPaneIndex == 1
+                   && store.panes[1].content == .session(openB.id))
+
+            store.openLauncherInFocusedPane()
+            record("openLauncherInFocusedPane sets focused to .launcher",
+                   store.panes[store.focusedPaneIndex].content == .launcher)
+            store.openInFocusedPane(openB.id)   // restore session content for next tests
+
+            let addedBAgain = store.openInNewPane(openB.id)
+            record("openInNewPane on already-in-pane bounces + focuses",
+                   !addedBAgain && store.panes.count == 2 && store.focusedPaneIndex == 1)
+
+            store.moveFocus(delta: -1)
+            record("moveFocus(-1) moves left", store.focusedPaneIndex == 0)
+            store.moveFocus(delta: -1)
+            record("moveFocus wraps", store.focusedPaneIndex == 1)
+
+            store.closePane(at: 1)
+            record("closePane shifts focus left",
+                   store.panes.count == 1 && store.focusedPaneIndex == 0
+                   && store.panes[0].content == .session(openA.id))
+
+            // Closing a non-focused pane must keep focus on the same
+            // underlying pane (index just shifts left if removal was before it).
+            let openC = OpenSession(
+                origin: .local(cwd),
+                resumeId: "open-C",
+                title: "Open C",
+                project: "ProjectC",
+                status: .live,
+                lastActiveAt: now.addingTimeInterval(-oneHour * 3)
+            )
+            let storeKeepFocus = SessionStore()
+            storeKeepFocus._probeSeedOpenSessions([openA, openB, openC])
+            _ = storeKeepFocus.openInNewPane(openA.id)
+            _ = storeKeepFocus.openInNewPane(openB.id)
+            _ = storeKeepFocus.openInNewPane(openC.id)
+            // openInNewPane focuses the newly appended pane → index 2
+            // (focusedPaneIndex is private(set); cannot assign directly).
+            storeKeepFocus.closePane(at: 0)
+            record("closePane keeps focus when non-focused pane closed",
+                   storeKeepFocus.panes.count == 2
+                   && storeKeepFocus.focusedPaneIndex == 1
+                   && storeKeepFocus.panes[1].content == .session(openC.id))
+
+            // Cap
+            let store2 = SessionStore()
+            let sessions = (0..<6).map { i in
+                OpenSession(origin: .local(cwd), resumeId: "s\(i)", title: "s\(i)", project: "p", status: .live)
+            }
+            store2._probeSeedOpenSessions(sessions)
+            for s in sessions.prefix(5) { _ = store2.openInNewPane(s.id) }
+            record("cap reached at 5", store2.panes.count == 5)
+            let sixth = store2.openInNewPane(sessions[5].id)
+            record("cap bounces sixth add", !sixth && store2.panes.count == 5)
+
+            // closeSession → removePanesForClosedSession selection derivation.
+            // panes=[A,C] with C focused; closing A (non-focused) must leave
+            // focus on C and selection=.session(C), not the openSessions-order
+            // neighbor (which would be B).
+            let closeSelA = OpenSession(origin: .local(cwd), resumeId: "close-sel-A", title: "A", project: "p", status: .live)
+            let closeSelB = OpenSession(origin: .local(cwd), resumeId: "close-sel-B", title: "B", project: "p", status: .live)
+            let closeSelC = OpenSession(origin: .local(cwd), resumeId: "close-sel-C", title: "C", project: "p", status: .live)
+            let storeCloseSel = SessionStore()
+            storeCloseSel._probeSeedOpenSessions([closeSelA, closeSelB, closeSelC])
+            _ = storeCloseSel.openInNewPane(closeSelA.id)
+            _ = storeCloseSel.openInNewPane(closeSelC.id)
+            // openInNewPane focuses newly appended → index 1 (C)
+            record("closeSession pre: panes=[A,C] C focused",
+                   storeCloseSel.panes.count == 2
+                   && storeCloseSel.focusedPaneIndex == 1
+                   && storeCloseSel.panes[1].content == .session(closeSelC.id))
+            storeCloseSel.closeSession(closeSelA.id)
+            record("closeSession derives selection from panes (not openSessions order)",
+                   storeCloseSel.panes.count == 1
+                   && storeCloseSel.focusedPaneIndex == 0
+                   && storeCloseSel.panes[0].content == .session(closeSelC.id)
+                   && storeCloseSel.selection == .session(closeSelC.id))
+
+            // setAdjacentPaneWidths snap-to-floor
+            let storeSnap = SessionStore()
+            let snapA = OpenSession(origin: .local(cwd), resumeId: "snap-A", title: "A", project: "p", status: .live)
+            let snapB = OpenSession(origin: .local(cwd), resumeId: "snap-B", title: "B", project: "p", status: .live)
+            storeSnap._probeSeedOpenSessions([snapA, snapB])
+            _ = storeSnap.openInNewPane(snapA.id)
+            _ = storeSnap.openInNewPane(snapB.id)
+            storeSnap.forceSetPaneWidth(at: 0, to: 500)
+            storeSnap.forceSetPaneWidth(at: 1, to: 500)
+            storeSnap.setAdjacentPaneWidths(leftIndex: 0, leftWidth: 50, rightWidth: 950)
+            record("setAdjacentPaneWidths snaps left below floor",
+                   storeSnap.panes[0].preferredWidth == 100
+                   && storeSnap.panes[1].preferredWidth == 900)
+            storeSnap.setAdjacentPaneWidths(leftIndex: 0, leftWidth: 100, rightWidth: 900)
+            record("setAdjacentPaneWidths exact at floor",
+                   storeSnap.panes[0].preferredWidth == 100
+                   && storeSnap.panes[1].preferredWidth == 900)
+            storeSnap.setAdjacentPaneWidths(leftIndex: 0, leftWidth: 950, rightWidth: 50)
+            record("setAdjacentPaneWidths snaps right below floor",
+                   storeSnap.panes[0].preferredWidth == 900
+                   && storeSnap.panes[1].preferredWidth == 100)
+
+            // setAdjacentPaneWidths: reject when sum < 2*floor (writes would
+            // otherwise land a sub-floor / negative preferredWidth on the left).
+            let storeReject = SessionStore()
+            let rejectA = OpenSession(origin: .local(cwd), resumeId: "reject-A", title: "A", project: "p", status: .live)
+            let rejectB = OpenSession(origin: .local(cwd), resumeId: "reject-B", title: "B", project: "p", status: .live)
+            storeReject._probeSeedOpenSessions([rejectA, rejectB])
+            _ = storeReject.openInNewPane(rejectA.id)
+            _ = storeReject.openInNewPane(rejectB.id)
+            storeReject.forceSetPaneWidth(at: 0, to: 50)
+            storeReject.forceSetPaneWidth(at: 1, to: 50)
+            storeReject.setAdjacentPaneWidths(leftIndex: 0, leftWidth: 30, rightWidth: 70)
+            record("setAdjacentPaneWidths rejects sum below 2*floor",
+                   storeReject.panes[0].preferredWidth == 50
+                   && storeReject.panes[1].preferredWidth == 50)
+            storeReject.setAdjacentPaneWidths(leftIndex: 0, leftWidth: -20, rightWidth: 120)
+            record("setAdjacentPaneWidths rejects negative-width sum below 2*floor",
+                   storeReject.panes[0].preferredWidth == 50
+                   && storeReject.panes[1].preferredWidth == 50)
+
+            // openInFocusedPane already-in-pane branch: jump focus, don't duplicate
+            let storeJump = SessionStore()
+            let jumpA = OpenSession(origin: .local(cwd), resumeId: "jump-A", title: "A", project: "p", status: .live)
+            let jumpB = OpenSession(origin: .local(cwd), resumeId: "jump-B", title: "B", project: "p", status: .live)
+            let jumpC = OpenSession(origin: .local(cwd), resumeId: "jump-C", title: "C", project: "p", status: .live)
+            storeJump._probeSeedOpenSessions([jumpA, jumpB, jumpC])
+            _ = storeJump.openInNewPane(jumpA.id)
+            _ = storeJump.openInNewPane(jumpB.id)
+            // focus at 1 (B)
+            storeJump.openInFocusedPane(jumpA.id)
+            record("openInFocusedPane already-in-pane jumps focus",
+                   storeJump.focusedPaneIndex == 0
+                   && storeJump.panes[0].content == .session(jumpA.id)
+                   && storeJump.panes.count == 2)
+
+            // openLauncherInNewPane cap-reached and normal
+            let storeLaunchCap = SessionStore()
+            let launchSessions = (0..<5).map { i in
+                OpenSession(origin: .local(cwd), resumeId: "launch-cap-\(i)", title: "s\(i)", project: "p", status: .live)
+            }
+            storeLaunchCap._probeSeedOpenSessions(launchSessions)
+            for s in launchSessions { _ = storeLaunchCap.openInNewPane(s.id) }
+            let launchCapResult = storeLaunchCap.openLauncherInNewPane()
+            record("openLauncherInNewPane at cap returns false",
+                   !launchCapResult && storeLaunchCap.panes.count == 5)
+
+            let storeLaunchOk = SessionStore()
+            let launchOkA = OpenSession(origin: .local(cwd), resumeId: "launch-ok-A", title: "A", project: "p", status: .live)
+            storeLaunchOk._probeSeedOpenSessions([launchOkA])
+            _ = storeLaunchOk.openInNewPane(launchOkA.id)
+            let launchOkResult = storeLaunchOk.openLauncherInNewPane()
+            record("openLauncherInNewPane appends launcher pane",
+                   launchOkResult
+                   && storeLaunchOk.panes.count == 2
+                   && storeLaunchOk.panes[1].content == .launcher
+                   && storeLaunchOk.focusedPaneIndex == 1)
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return lines.joined(separator: "\n")

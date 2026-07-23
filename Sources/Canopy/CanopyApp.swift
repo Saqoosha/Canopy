@@ -22,7 +22,7 @@ struct CanopyApp: App {
             }
             .navigationSplitViewStyle(.balanced)
         }
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 800)
         .restorationBehavior(.disabled)
         .commands {
@@ -36,7 +36,11 @@ struct CanopyApp: App {
             // by the empty `.saveItem` / `.printItem` replacements below.
             CommandGroup(replacing: .newItem) {
                 Button("New Session") {
-                    sidebarStore.select(.launcher)
+                    if sidebarStore.panes.isEmpty {
+                        sidebarStore.select(.launcher)
+                    } else {
+                        sidebarStore.openLauncherInFocusedPane()
+                    }
                 }
                 .keyboardShortcut("n")
                 Button("Open Folder…") {
@@ -48,6 +52,7 @@ struct CanopyApp: App {
                 // of selection state. The actual handler is the keyDown monitor
                 // (handleCloseShortcut here is only reached on mouse click);
                 // both fall back to closing the window when no session is open.
+                // Multi-pane: Cmd+W / this button closes the focused pane.
                 Button("Close Session") {
                     handleCloseShortcut()
                 }
@@ -74,13 +79,27 @@ struct CanopyApp: App {
                 }
                 .keyboardShortcut("0", modifiers: .command)
                 Divider()
-                // Cmd+1..9 — switch to N-th open session (closed rows skipped).
+                // Cmd+1..9 — N-th visible open row: focus its pane if already
+                // shown, otherwise replace the focused pane's session.
                 ForEach(1...9, id: \.self) { idx in
                     Button("Switch to Open Session \(idx)") {
                         jumpToRow(at: idx - 1)
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
                 }
+            }
+            CommandMenu("Panes") {
+                Button("Focus Previous Pane") {
+                    sidebarStore.moveFocus(delta: -1, wrap: true)
+                }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .disabled(sidebarStore.panes.count < 2)
+
+                Button("Focus Next Pane") {
+                    sidebarStore.moveFocus(delta: +1, wrap: true)
+                }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                .disabled(sidebarStore.panes.count < 2)
             }
         }
 
@@ -92,31 +111,18 @@ struct CanopyApp: App {
     // MARK: - Sidebar shell helpers
 
     private func jumpToRow(at index: Int) {
-        // Cmd+1..9 switches among open sessions only; closed rows are ignored.
-        let openRows = sidebarStore.visibleRows.filter(\.isOpen)
-        guard index < openRows.count,
-              case .open(let s) = openRows[index] else { return }
-        sidebarStore.select(.session(s.id))
-    }
-
-    private func closeActiveSession() {
-        if let active = sidebarStore.activeSession {
-            sidebarStore.closeSession(active.id)
+        // Cmd+1..9: N-th visible open row. Already in a pane → focus jump;
+        // otherwise replace the focused pane's session. Closed rows ignored.
+        let visibleOpen = sidebarStore.visibleRows.compactMap { row -> UUID? in
+            if case .open(let s) = row { return s.id }
+            return nil
         }
-    }
-
-    /// Cmd+W behaviour (browser-style): close the focused non-main window
-    /// first (Settings, Sparkle alert), otherwise close the active session,
-    /// otherwise close the main window itself.
-    private func handleCloseShortcut() {
-        if let key = NSApp.keyWindow, !isCanopyWindow(key) {
-            key.performClose(nil)
-            return
-        }
-        if sidebarStore.activeSession != nil {
-            closeActiveSession()
-        } else if let key = NSApp.keyWindow, isCanopyWindow(key) {
-            windowCloseOnly(key)
+        guard visibleOpen.indices.contains(index) else { return }
+        let target = visibleOpen[index]
+        if let idx = sidebarStore.paneIndex(forSession: target) {
+            sidebarStore.setFocusedPaneIndex(idx)
+        } else {
+            sidebarStore.openInFocusedPane(target)
         }
     }
 
@@ -153,6 +159,52 @@ struct CanopyApp: App {
 }
 
 // MARK: - Window close interception
+
+/// Cmd+W behaviour (browser-style): with 2+ panes, close the focused
+/// pane; otherwise fall through to the single-pane legacy path
+/// (non-main window → active session → main window).
+/// Shared by the SwiftUI File > Close Session menu button and the
+/// AppDelegate keyDown monitor so both paths stay in lockstep.
+@MainActor
+func handleCloseShortcut() {
+    // Non-Canopy window (Settings, Sparkle alert): close it first — the
+    // keyDown monitor must handle this because File > Close is suppressed.
+    if let key = NSApp.keyWindow, !isCanopyWindow(key) {
+        logger.debug("Cmd+W: non-Canopy window, performClose")
+        key.performClose(nil)
+        return
+    }
+    guard let store = SessionStore.shared else {
+        if let key = NSApp.keyWindow, isCanopyWindow(key) {
+            windowCloseOnly(key)
+        }
+        return
+    }
+    if store.panes.count > 1 {
+        logger.debug("Cmd+W: closing focused pane at \(store.focusedPaneIndex)")
+        store.closePane(at: store.focusedPaneIndex)
+    } else {
+        legacyCloseAction()
+    }
+}
+
+/// Single-pane / no-pane Cmd+W: close the focused non-main window
+/// first (Settings, Sparkle alert), otherwise close the active session,
+/// otherwise close the main window itself.
+@MainActor
+func legacyCloseAction() {
+    if let key = NSApp.keyWindow, !isCanopyWindow(key) {
+        key.performClose(nil)
+        return
+    }
+    if let store = SessionStore.shared, let active = store.activeSession {
+        logger.debug("Cmd+W: closing active session id=\(active.id.uuidString, privacy: .public)")
+        store.closeSession(active.id)
+    } else if let key = NSApp.keyWindow, isCanopyWindow(key) {
+        logger.debug("Cmd+W: no active session, windowCloseOnly")
+        windowCloseOnly(key)
+    }
+}
 
 /// Whether a window is a Canopy app window (not a panel, settings, etc.).
 /// SwiftUI's `WindowGroup(id: "main")` doesn't always preserve the literal
@@ -261,6 +313,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// even when we end up just closing the active session. Catching the
     /// keyDown here keeps the title bar still.
     private var cmdWMonitor: Any?
+    private var paneFocusClickMonitor: Any?
+
+    // NOTE: there is deliberately NO app-wide didResizeNotification observer
+    // feeding pane state. An earlier iteration distributed manual window-
+    // resize deltas into pane preferredWidths from such an observer, which
+    // produced a runaway growth feedback loop (distribute grows panes,
+    // SwiftUI grows the window to fit, observer sees the growth as a manual
+    // drag, distributes again, forever). WeightedPaneLayout derives visual
+    // pane widths from the proposed bounds, so manual resize needs no state
+    // change; weights are re-synced to visual widths at every pane-list
+    // mutation and at divider-drag start via
+    // SessionStore.normalizePaneWeightsToVisualWidths(). The per-window
+    // frame-persistence observer in configureCanopyWindow is separate and
+    // only saves the frame.
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
@@ -275,6 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         installCmdWMonitor()
+        installPaneFocusClickMonitor()
 
         // SwiftUI may make the first window main before our observer is
         // registered, in which case `didBecomeMainNotification` fires
@@ -297,27 +364,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard modifiers == .command,
                   event.charactersIgnoringModifiers?.lowercased() == "w"
             else { return event }
-            guard let key = NSApp.keyWindow else { return event }
-
-            // Non-Canopy window (Settings, Sparkle alert): close it normally.
-            // We also have to handle this here because removing the auto File
-            // > Close item from the menu would otherwise leave Cmd+W with no
-            // handler in those windows.
-            if !isCanopyWindow(key) {
-                logger.debug("Cmd+W: non-Canopy window, performClose")
-                key.performClose(nil)
-                return nil
-            }
+            guard NSApp.keyWindow != nil else { return event }
 
             logger.debug("Cmd+W intercepted (pre-performClose)")
-            if let store = SessionStore.shared, let active = store.activeSession {
-                logger.debug("  → closing active session id=\(active.id.uuidString, privacy: .public)")
-                store.closeSession(active.id)
-            } else {
-                logger.debug("  → no active session, windowCloseOnly")
-                windowCloseOnly(key)
-            }
+            handleCloseShortcut()
             return nil // consume — no flash
+        }
+    }
+
+    /// Distributes manual window-width deltas across pane preferredWidths.
+    /// Route left-mouse-down clicks inside the detail column to pane focus.
+    /// WKWebView eats mouse events entirely, so the SwiftUI
+    /// `.simultaneousGesture(TapGesture())` on `paneCell` never fires when
+    /// the user clicks the chat input or any webview surface. A local
+    /// NSEvent monitor intercepts the event before AppKit dispatch: we
+    /// look at the click's window-space x, subtract sidebar width, and
+    /// pick which pane owns that x range. Pass the event through
+    /// unchanged so WKWebView still
+    /// receives it.
+    private func installPaneFocusClickMonitor() {
+        guard paneFocusClickMonitor == nil else { return }
+        paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            guard let window = event.window, isCanopyWindow(window),
+                  let store = SessionStore.shared,
+                  store.panes.count > 1 else { return event }
+
+            // Click location in window coordinates (bottom-left origin).
+            let loc = event.locationInWindow
+            let contentHeight = window.contentView?.bounds.height ?? window.frame.height
+            let clickX = loc.x
+            let clickYFromTop = contentHeight - loc.y
+
+            // Only route clicks inside the detail column area.
+            let sidebar = PaneWindowSizer.measuredSidebarWidthTrustingCollapse(in: window)
+            guard clickX > sidebar else { return event }
+
+            // Skip the title bar so window-drag clicks don't move focus.
+            let titleBarHeight: CGFloat = 28
+            guard clickYFromTop > titleBarHeight else { return event }
+
+            // preferredWidth is a weight. Use the same layout algorithm
+            // (WeightedPaneLayout via PaneLayoutMetrics) as Detail.swift
+            // so click hit-testing exactly matches the visual layout.
+            let contentWidth = window.contentView?.bounds.width ?? window.frame.width
+            let detailW = max(0, contentWidth - sidebar)
+            let widths = PaneLayoutMetrics.paneWidths(
+                detailWidth: detailW,
+                weights: store.panes.map(\.preferredWidth),
+                dividerWidth: SessionStore.paneDividerWidth,
+                minimumWidth: SessionStore.paneMinDragWidth
+            )
+            var xCursor = sidebar
+            for index in store.panes.indices {
+                let paneW = index < widths.count ? widths[index] : 0
+                let paneEnd = xCursor + paneW
+                if clickX >= xCursor && clickX < paneEnd {
+                    if index != store.focusedPaneIndex {
+                        store.setFocusedPaneIndex(index)
+                    }
+                    break
+                }
+                xCursor = paneEnd + SessionStore.paneDividerWidth
+            }
+            return event
         }
     }
 
@@ -326,10 +435,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        normalizeSavedFrameForSinglePane()
         if let monitor = cmdWMonitor {
             NSEvent.removeMonitor(monitor)
             cmdWMonitor = nil
         }
+        if let paneFocusClickMonitor {
+            NSEvent.removeMonitor(paneFocusClickMonitor)
+            self.paneFocusClickMonitor = nil
+        }
+    }
+
+    /// Quitting with 2+ panes leaves the multi-pane window width in the
+    /// saved frame, but panes are NOT restored on launch (Phase A: no
+    /// auto-spawn) — so the next session would open as one giant pane
+    /// spanning the whole multi-pane-wide window. Rewrite the saved width
+    /// to sidebar + the focused pane's current visual width, i.e. the
+    /// window the user would get by closing the other panes before quit.
+    private func normalizeSavedFrameForSinglePane() {
+        guard let store = SessionStore.shared,
+              store.panes.count > 1,
+              let window = NSApp.windows.first(where: { isCanopyWindow($0) })
+        else { return }
+        let sidebar = PaneWindowSizer.measuredSidebarWidthTrustingCollapse(in: window)
+        let detailW = max(0, window.frame.width - sidebar)
+        let widths = PaneLayoutMetrics.paneWidths(
+            detailWidth: detailW,
+            weights: store.panes.map(\.preferredWidth),
+            dividerWidth: SessionStore.paneDividerWidth,
+            minimumWidth: SessionStore.paneMinDragWidth
+        )
+        let focusedW = widths.indices.contains(store.focusedPaneIndex)
+            ? widths[store.focusedPaneIndex]
+            : (widths.first ?? SessionStore.paneDefaultWidth)
+        var frame = window.frame
+        frame.size.width = sidebar + focusedW
+        logger.info("normalizeSavedFrameForSinglePane: \(Int(window.frame.width)) → \(Int(frame.size.width)) (sidebar=\(Int(sidebar)) focusedPane=\(Int(focusedW)))")
+        saveWindowFrame(frame)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -592,5 +734,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rect.origin.y = min(max(rect.origin.y, visible.minY), visible.maxY - clampedH)
         }
         return rect
+    }
+}
+
+/// Resizes the main window to fit the current pane layout, applying the
+/// "grow on add / shrink on close" contract from the spec. Falls back to
+/// equal-share across all panes when the desired width exceeds the current
+/// screen.
+enum PaneWindowSizer {
+    /// Matches the ideal from navigationSplitViewColumnWidth(min:220, ideal:280, max:360)
+    /// in CanopyApp.swift's NavigationSplitView; the fallback branch tolerates
+    /// drift at min/max ranges.
+    static let assumedSidebarWidth: CGFloat = 280
+
+    @MainActor
+    static func applyForCurrentPanes(store: SessionStore) {
+        guard let window = NSApp.windows.first(where: { $0.isVisible && isCanopyWindow($0) })
+                          ?? NSApp.windows.first(where: { isCanopyWindow($0) }),
+              let screen = window.screen ?? NSScreen.main else {
+            logger.info("PaneWindowSizer: no Canopy window found; skipping resize")
+            return
+        }
+        // Empty panes → leave the window alone. Resizing to sidebar-only
+        // would collapse the frame while closeSession is still settling
+        // selection onto the next open session / launcher.
+        guard !store.panes.isEmpty else {
+            logger.info("[Pane] Sizer: panes empty; skipping resize")
+            return
+        }
+
+        let sidebar = measuredSidebarWidthTrustingCollapse(in: window)
+        let dividers = CGFloat(max(0, store.panes.count - 1)) * SessionStore.paneDividerWidth
+        let sumPaneW = store.panes.reduce(0) { $0 + $1.preferredWidth }
+        let target = sidebar + sumPaneW + dividers
+        let screenMax = screen.visibleFrame.width
+        let currentW = window.frame.width
+
+        let paneWidths = store.panes.map { Int($0.preferredWidth) }
+        logger.info("[Pane] Sizer.apply: panes=\(paneWidths) sidebar=\(Int(sidebar)) sumPaneW=\(Int(sumPaneW)) dividers=\(Int(dividers)) target=\(Int(target)) screenMax=\(Int(screenMax)) currentWindowW=\(Int(currentW))")
+
+        var newFrame = window.frame
+        if target <= screenMax {
+            newFrame.size.width = target
+            logger.info("[Pane] Sizer: target fits (\(Int(target))<=\(Int(screenMax))); setting window width to target")
+        } else {
+            // Fallback: cap at screen and equal-share the detail column.
+            let detailBudget = max(0, screenMax - sidebar - dividers)
+            let share = detailBudget / CGFloat(store.panes.count)
+            logger.warning("[Pane] Sizer FALLBACK: target=\(Int(target))>screenMax=\(Int(screenMax)); equal-share each pane to \(Int(share))pt")
+            for i in store.panes.indices {
+                store.forceSetPaneWidth(at: i, to: share)
+            }
+            newFrame.size.width = screenMax
+        }
+
+        // Clamp origin.x so the wider window doesn't shoot off-screen.
+        if newFrame.maxX > screen.visibleFrame.maxX {
+            newFrame.origin.x = max(screen.visibleFrame.minX, screen.visibleFrame.maxX - newFrame.width)
+        }
+
+        // Non-animated: setFrame(_:display:) grows/shrinks the window in
+        // a single frame. Animation caused the embedded WKWebView's
+        // scroll position to drift while intermediate frames sized the
+        // web content column mid-flight.
+        logger.info("[Pane] Sizer: resizing window \(Int(currentW)) → \(Int(newFrame.size.width))")
+        window.setFrame(newFrame, display: true)
+    }
+
+    /// The single sidebar-width measurement shared by ALL consumers — the
+    /// sizer (`applyForCurrentPanes`), the click monitor's hit-testing,
+    /// quit-time frame normalization, and
+    /// `SessionStore.normalizePaneWeightsToVisualWidths`. Trusts any
+    /// laid-out split view verbatim: a measured 0 means the user really
+    /// collapsed the sidebar, and treating it as 280 would shift pane
+    /// hit-tests right by the phantom sidebar (click pane N → focus pane
+    /// N−1, Cmd+W closes the wrong pane) or inflate the sizer's window
+    /// target by 280 pt per pane operation. The `split.frame.width > 0`
+    /// guard covers the startup false positive (split view not yet laid
+    /// out reads as zero-width — sizing from that once caused a window
+    /// grow/shrink loop back when a didResize observer fed pane state;
+    /// that observer is gone, but the guard stays cheap and correct).
+    /// All consumers MUST share one measurement: an earlier iteration
+    /// where the sizer distrusted a collapsed sidebar (assumed 280) while
+    /// weight normalization trusted it made every pane add/close drift
+    /// the window ~280 pt wider whenever the sidebar was collapsed.
+    @MainActor
+    static func measuredSidebarWidthTrustingCollapse(in window: NSWindow) -> CGFloat {
+        guard let split = findSplitView(in: window), split.frame.width > 0,
+              let sidebar = split.arrangedSubviews.first
+        else { return assumedSidebarWidth }
+        return sidebar.frame.width
+    }
+
+    /// NavigationSplitView is backed by an NSSplitView on macOS; BFS the
+    /// content view for it.
+    @MainActor
+    private static func findSplitView(in window: NSWindow) -> NSSplitView? {
+        guard let root = window.contentView else { return nil }
+        var queue: [NSView] = [root]
+        while let view = queue.first {
+            queue.removeFirst()
+            if let split = view as? NSSplitView { return split }
+            queue.append(contentsOf: view.subviews)
+        }
+        return nil
     }
 }

@@ -36,6 +36,30 @@ final class SessionStore {
     /// What the detail pane is showing right now. Defaults to launcher.
     var selection: SessionSelection = .launcher
 
+    /// Horizontal panes in the detail column. Left-to-right order. Every
+    /// entry's sessionId must be present in openSessions; the store enforces
+    /// this via closePane / auto-close on session drop.
+    private(set) var panes: [PaneSlot] = []
+
+    /// Index into `panes` for the currently focused pane. Always a valid
+    /// index when panes is non-empty. Undefined (0) while panes is empty.
+    private(set) var focusedPaneIndex: Int = 0
+
+    static let paneAbsoluteCap: Int = 5
+    /// Includes the 8pt drag target from PaneDivider's ZStack; the 1pt visible line is centered inside.
+    static let paneDividerWidth: CGFloat = 8
+    static let paneDefaultWidth: CGFloat = 800
+    static let paneMinDragWidth: CGFloat = 100
+
+    var focusedPane: PaneSlot? {
+        guard panes.indices.contains(focusedPaneIndex) else { return nil }
+        return panes[focusedPaneIndex]
+    }
+
+    func paneIndex(forSession id: OpenSession.ID) -> Int? {
+        panes.firstIndex { if case .session(let sid) = $0.content { return sid == id } else { return false } }
+    }
+
     /// Local JSONL history, refreshed via `refreshRecents()`.
     private(set) var recents: [SessionEntry] = []
 
@@ -75,6 +99,62 @@ final class SessionStore {
     /// sidebar is visible.
     private var cloudPollTask: Task<Void, Never>?
     private let cloudPollInterval: Duration = .seconds(30)
+
+    /// Recompute each pane's preferredWidth so it equals the pane's current
+    /// on-screen visual width. Manual window resizes never touch the
+    /// weights (WeightedPaneLayout scales visually from the bounds), so
+    /// the stored weights drift from the on-screen pt widths. Call this
+    /// before ANY consumer that treats preferredWidth as absolute pt:
+    /// pane-list mutation (append / close / auto-close, whose sizer sums
+    /// the weights into a window width) and divider-drag start (whose
+    /// pt delta is applied directly to the weights).
+    func normalizePaneWeightsToVisualWidths() {
+        guard !panes.isEmpty else { return }
+        guard let window = NSApp.windows.first(where: { $0.isVisible && isCanopyWindow($0) })
+                          ?? NSApp.windows.first(where: { isCanopyWindow($0) }) else { return }
+        let sidebarW = PaneWindowSizer.measuredSidebarWidthTrustingCollapse(in: window)
+        let detailW = max(0, window.frame.width - sidebarW)
+        let visualWidths = PaneLayoutMetrics.paneWidths(
+            detailWidth: detailW,
+            weights: panes.map(\.preferredWidth),
+            dividerWidth: Self.paneDividerWidth,
+            minimumWidth: Self.paneMinDragWidth
+        )
+        for i in panes.indices where i < visualWidths.count {
+            let w = visualWidths[i]
+            if w > 0 {
+                panes[i].preferredWidth = w
+            }
+        }
+    }
+
+    private func schedulePaneResize() {
+        let paneWidths = panes.map { Int($0.preferredWidth) }
+        logger.info("[Pane] schedulePaneResize called: panes=\(paneWidths) focused=\(self.focusedPaneIndex)")
+        // Run the sizer synchronously in the same runloop tick as the pane
+        // mutation. Any debounced Task.sleep would let SwiftUI reflow the
+        // detail column *before* the window grew, and the first pane
+        // would visibly shrink to half its width (and its embedded
+        // WKWebView's scroll position would drift) before snapping back
+        // once the sizer expanded the window.
+        PaneWindowSizer.applyForCurrentPanes(store: self)
+    }
+
+    /// Surface the "Maximum 5 panes" hint on the focused session's status
+    /// bar. Called by openNew / openCloud / Sidebar when a `.newPane`
+    /// request hits the absolute cap. Launcher-focused panes have no
+    /// status bar, so the hint is logged and dropped.
+    func showCapReachedHintOnFocusedPane() {
+        guard let focused = focusedPane else { return }
+        if case .session(let id) = focused.content,
+           let session = openSessions.first(where: { $0.id == id }) {
+            session.statusBar.showHint("Maximum 5 panes")
+            return
+        }
+        // Launcher-focused case: no session status bar to display on; hint is lost.
+        // Log so it's diagnosable.
+        logger.info("showCapReachedHint: panes at cap; focused pane is launcher; hint dropped")
+    }
 
     /// Sorted, de-duplicated, filtered rows the sidebar should render.
     var visibleRows: [SidebarRow] {
@@ -133,8 +213,38 @@ final class SessionStore {
             // The open block's order is fixed at insertion time (newest at
             // the bottom via `openSessions.append(_:)` in openNew /
             // openCloud — browser-tab convention).
+            if let idx = paneIndex(forSession: id) {
+                focusedPaneIndex = idx
+            } else {
+                openInFocusedPane(id)   // seeds first pane on cold launch
+            }
             lastActiveResumeId = open.resumeId
             SessionStorePersistence.saveLastActiveResumeId(open.resumeId)
+        }
+    }
+
+    /// Public setter for `focusedPaneIndex` (which is `private(set)`). Used by
+    /// Detail's per-pane tap gesture to move focus without exposing a raw write.
+    func setFocusedPaneIndex(_ idx: Int) {
+        guard panes.indices.contains(idx) else { return }
+        focusedPaneIndex = idx
+        syncSelectionToFocusedPane()
+    }
+
+    /// Update selection + lastActiveResumeId from the currently focused pane's content.
+    /// Called from setFocusedPaneIndex and moveFocus so tap-to-focus and Cmd+Opt+arrow
+    /// keep sidebar highlight, activeSession, and persistence in sync.
+    private func syncSelectionToFocusedPane() {
+        guard let pane = focusedPane else { return }
+        switch pane.content {
+        case .session(let id):
+            selection = .session(id)
+            if let open = openSessions.first(where: { $0.id == id }) {
+                lastActiveResumeId = open.resumeId
+                SessionStorePersistence.saveLastActiveResumeId(open.resumeId)
+            }
+        case .launcher:
+            selection = .launcher
         }
     }
 
@@ -152,7 +262,8 @@ final class SessionStore {
         effortLevel: String? = nil,
         permissionMode: PermissionMode = .acceptEdits,
         remoteHost: String? = nil,
-        customApi: ModelProvider? = nil
+        customApi: ModelProvider? = nil,
+        target: PaneTarget = .focused
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -183,7 +294,17 @@ final class SessionStore {
         // sessions go to the bottom of the Open list, preserving the
         // muscle-memory positions of earlier-opened sessions.
         openSessions.append(session)
-        select(.session(session.id))
+        switch target {
+        case .focused: select(.session(session.id))
+        case .newPane:
+            if !openInNewPane(session.id) {
+                // If cap reached, hint on focused pane BEFORE the fallback overwrites content.
+                if panes.count >= Self.paneAbsoluteCap {
+                    showCapReachedHintOnFocusedPane()
+                }
+                openInFocusedPane(session.id)
+            }
+        }
         logger.info("openNew dir=\(directory.path, privacy: .public) resume=\(resumeId ?? "new", privacy: .public) remote=\(remoteHost ?? "local", privacy: .public)")
         return session
     }
@@ -192,10 +313,20 @@ final class SessionStore {
     /// existing JSONL. If `permissionMode` is nil, falls back to the global
     /// default in `CanopySettings.defaultPermissionMode`.
     @discardableResult
-    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil) -> OpenSession {
-        // If this session is already open, just select it.
+    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil, target: PaneTarget = .focused) -> OpenSession {
+        // If this session is already open, honor target (focused vs new pane).
         if let existing = openSessions.first(where: { $0.resumeId == entry.id }) {
-            select(.session(existing.id))
+            switch target {
+            case .focused:
+                select(.session(existing.id))
+            case .newPane:
+                if !openInNewPane(existing.id) {
+                    if panes.count >= Self.paneAbsoluteCap {
+                        showCapReachedHintOnFocusedPane()
+                    }
+                    openInFocusedPane(existing.id)
+                }
+            }
             return existing
         }
         return openNew(
@@ -203,7 +334,8 @@ final class SessionStore {
             resumeId: entry.id,
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,
-            customApi: ModelProviderStore.selectedProvider()
+            customApi: ModelProviderStore.selectedProvider(),
+            target: target
         )
     }
 
@@ -219,9 +351,11 @@ final class SessionStore {
     /// via `teleportError`. Phase A keeps this simpler than LauncherView's
     /// dialog-based flow; PR 4 polish can re-introduce a confirmation if
     /// users want it.
-    func openCloud(_ session: RemoteSession, permissionMode: PermissionMode? = nil) {
+    func openCloud(_ session: RemoteSession,
+                   permissionMode: PermissionMode? = nil,
+                   target: PaneTarget = .focused) {
         let mode = permissionMode ?? CanopySettings.shared.defaultPermissionMode
-        Task { await openCloudAsync(session, permissionMode: mode) }
+        Task { await openCloudAsync(session, permissionMode: mode, target: target) }
     }
 
     /// Most recent teleport error message, if any. Sidebar surfaces it via
@@ -265,7 +399,9 @@ final class SessionStore {
 
     func dismissTeleportError() { teleportError = nil }
 
-    private func openCloudAsync(_ session: RemoteSession, permissionMode: PermissionMode) async {
+    private func openCloudAsync(_ session: RemoteSession,
+                                permissionMode: PermissionMode,
+                                target: PaneTarget = .focused) async {
         guard teleporting == nil else {
             logger.info("openCloudAsync: a teleport is already in progress, ignoring")
             return
@@ -365,7 +501,17 @@ final class SessionStore {
         // Drop the cloud row immediately so the sidebar reflects the new
         // state without waiting for the next /v1/sessions poll.
         cloud.removeAll { $0.id == session.id }
-        select(.session(opened.id))
+        switch target {
+        case .focused: openInFocusedPane(opened.id)
+        case .newPane:
+            if !openInNewPane(opened.id) {
+                // If cap reached, hint on focused pane BEFORE the fallback overwrites content.
+                if panes.count >= Self.paneAbsoluteCap {
+                    showCapReachedHintOnFocusedPane()
+                }
+                openInFocusedPane(opened.id)
+            }
+        }
         // Refresh recents + teleportedFromMap so the new local JSONL is
         // picked up correctly (the JSONL was just written by the extension).
         await refreshRecents()
@@ -427,18 +573,26 @@ final class SessionStore {
         session.shim = nil
         session.webView = nil
         openSessions.remove(at: idx)
+        removePanesForClosedSession(id)
 
-        if case .session(let sel) = selection, sel == id {
-            // Browser-tab convention: focus the row that took the closed
-            // tab's slot (i.e. what was just to its right), or the new
-            // last row if we closed the rightmost. `lastActiveAt` would
-            // jump to whichever was opened most recently regardless of
-            // proximity, which feels random when closing the active row.
+        // Derive selection from panes when possible; only fall back to the
+        // browser-tab convention on openSessions when panes went empty.
+        if !panes.isEmpty {
+            switch panes[focusedPaneIndex].content {
+            case .session(let sid): selection = .session(sid)
+            case .launcher: selection = .launcher
+            }
+        } else if case .session(let sel) = selection, sel == id {
             if openSessions.isEmpty {
                 selection = .launcher
             } else {
+                // The closed session held the only pane. Put the next open
+                // session INTO a pane, not just into `selection` — Detail
+                // renders the Launcher whenever `panes` is empty, so a
+                // selection-only update would show the Launcher while the
+                // sidebar highlights a live session.
                 let target = idx < openSessions.count ? idx : openSessions.count - 1
-                selection = .session(openSessions[target].id)
+                openInFocusedPane(openSessions[target].id)
             }
         }
 
@@ -552,4 +706,185 @@ final class SessionStore {
         openSessions = newOrder.compactMap { byId[$0] }
         logger.info("moveOpenSessions from=\(fromOffsets.map(String.init).joined(separator: ","), privacy: .public) to=\(toOffset)")
     }
+
+    // MARK: - Panes
+
+    enum PaneTarget: Equatable { case focused, newPane }
+
+    /// Replace focused pane's content with the given session. If panes is
+    /// empty (fresh launch, no selection yet) create the first pane at
+    /// paneDefaultWidth.
+    func openInFocusedPane(_ sessionId: OpenSession.ID) {
+        guard openSessions.contains(where: { $0.id == sessionId }) else { return }
+        if panes.isEmpty {
+            // Do NOT call schedulePaneResize here — WeightedPaneLayout
+            // gives a single pane the whole detail column regardless of
+            // its weight, so it fills whatever width the user already
+            // has. Running the sizer would force-shrink a manually-
+            // widened window down to paneDefaultWidth on plain-click
+            // session open.
+            panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
+            focusedPaneIndex = 0
+            syncSelectionToFocusedPane()
+            return
+        }
+        // If this session already lives in a pane, focus that one instead of
+        // duplicating (one session, one pane invariant).
+        if let idx = paneIndex(forSession: sessionId) {
+            focusedPaneIndex = idx
+            syncSelectionToFocusedPane()
+            return
+        }
+        panes[focusedPaneIndex].content = .session(sessionId)
+        syncSelectionToFocusedPane()
+    }
+
+    /// Replace focused pane's content with the launcher. Used by Cmd+N in
+    /// multi-pane mode; single-pane Cmd+N routes through select(.launcher).
+    func openLauncherInFocusedPane() {
+        if panes.isEmpty {
+            selection = .launcher
+            return
+        }
+        panes[focusedPaneIndex].content = .launcher
+        syncSelectionToFocusedPane()
+    }
+
+    /// Append a new pane for `sessionId`. Returns false if bounced (already
+    /// in a pane — caller should visually flash the existing pane — or cap
+    /// reached — caller should show the "Maximum 5 panes" hint).
+    @discardableResult
+    func openInNewPane(_ sessionId: OpenSession.ID) -> Bool {
+        guard openSessions.contains(where: { $0.id == sessionId }) else { return false }
+        if let existing = paneIndex(forSession: sessionId) {
+            focusedPaneIndex = existing
+            selection = .session(sessionId)
+            return false
+        }
+        guard panes.count < Self.paneAbsoluteCap else { return false }
+        // Freeze the existing panes at their actual on-screen widths before
+        // appending. Otherwise WeightedPaneLayout's ratio math redistributes
+        // detail-column space equally by weight, visibly shrinking the
+        // existing pane(s) before the sizer grows the window.
+        normalizePaneWeightsToVisualWidths()
+        let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
+        panes.append(PaneSlot(content: .session(sessionId), preferredWidth: width))
+        focusedPaneIndex = panes.count - 1
+        selection = .session(sessionId)
+        if let session = openSessions.first(where: { $0.id == sessionId }) {
+            lastActiveResumeId = session.resumeId
+            SessionStorePersistence.saveLastActiveResumeId(session.resumeId)
+        }
+        schedulePaneResize()
+        return true
+    }
+
+    /// Append a new launcher pane. Returns false only when the cap is reached.
+    @discardableResult
+    func openLauncherInNewPane() -> Bool {
+        guard panes.count < Self.paneAbsoluteCap else { return false }
+        normalizePaneWeightsToVisualWidths()
+        let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
+        panes.append(PaneSlot(content: .launcher, preferredWidth: width))
+        focusedPaneIndex = panes.count - 1
+        selection = .launcher
+        schedulePaneResize()
+        return true
+    }
+
+    /// Close the pane at `index`. Focus shifts to the left neighbor (or 0
+    /// if the closed pane was leftmost). The underlying OpenSession stays
+    /// in openSessions — closing a pane does not close the session.
+    func closePane(at index: Int) {
+        guard panes.indices.contains(index) else { return }
+        // Freeze surviving panes at their actual on-screen widths before
+        // removal — the sizer below sums preferredWidth as absolute pt,
+        // and after a manual window resize the stored weights are stale
+        // (window would jump to the pre-resize widths otherwise).
+        normalizePaneWeightsToVisualWidths()
+        let wasFocused = index == focusedPaneIndex
+        panes.remove(at: index)
+        if panes.isEmpty {
+            focusedPaneIndex = 0
+            selection = .launcher
+            schedulePaneResize()
+            return
+        }
+        if wasFocused {
+            focusedPaneIndex = max(0, min(index - 1, panes.count - 1))
+        } else if index < focusedPaneIndex {
+            focusedPaneIndex -= 1
+        }
+        syncSelectionToFocusedPane()
+        schedulePaneResize()
+    }
+
+    /// Bypasses the divider-drag floor. Used only by PaneWindowSizer's
+    /// equal-share fallback where the mathematics might land just under
+    /// 100 pt on tiny screens.
+    func forceSetPaneWidth(at index: Int, to width: CGFloat) {
+        guard panes.indices.contains(index) else { return }
+        panes[index].preferredWidth = max(1, width)
+    }
+
+    /// Move focus by delta. wrap=true (default) → Cmd+Opt+← from leftmost
+    /// jumps to rightmost, and vice versa. No-op when panes has 0 or 1.
+    func moveFocus(delta: Int, wrap: Bool = true) {
+        guard panes.count > 1 else { return }
+        let n = panes.count
+        let raw = focusedPaneIndex + delta
+        let next = wrap ? ((raw % n) + n) % n : max(0, min(n - 1, raw))
+        focusedPaneIndex = next
+        syncSelectionToFocusedPane()
+    }
+
+    /// Update two adjacent panes' preferred widths from a divider drag.
+    /// Sum is preserved; values below the floor snap up and the overflow
+    /// is reflected onto the other side.
+    func setAdjacentPaneWidths(leftIndex: Int, leftWidth: CGFloat, rightWidth: CGFloat) {
+        let rightIndex = leftIndex + 1
+        guard panes.indices.contains(leftIndex), panes.indices.contains(rightIndex) else { return }
+        let floor = Self.paneMinDragWidth
+        let sum = leftWidth + rightWidth
+        // Both sides need floor; if the sum can't afford both, reject the whole write.
+        guard sum >= 2 * floor else {
+            logger.warning("setAdjacentPaneWidths: sum \(sum) below 2*floor (\(2 * floor)); rejecting")
+            return
+        }
+        let clampedLeft = min(max(floor, leftWidth), sum - floor)
+        let clampedRight = sum - clampedLeft
+        panes[leftIndex].preferredWidth = clampedLeft
+        panes[rightIndex].preferredWidth = clampedRight
+    }
+
+    /// Called by closeSession(_:) after the session is removed from
+    /// openSessions. Drops any pane pointing at the closed session.
+    /// Does NOT mutate `selection` — `closeSession` derives it from the
+    /// surviving focused pane (or falls back to openSessions order when
+    /// panes went empty).
+    private func removePanesForClosedSession(_ id: OpenSession.ID) {
+        let matching = panes.enumerated().compactMap { (i, slot) -> Int? in
+            if case .session(let sid) = slot.content, sid == id { return i } else { return nil }
+        }
+        guard !matching.isEmpty else { return }
+        // Same rationale as closePane: sync weights to visual widths before
+        // the sizer sums the survivors into the new window width.
+        normalizePaneWeightsToVisualWidths()
+        for idx in matching.reversed() {
+            let wasFocused = idx == focusedPaneIndex
+            panes.remove(at: idx)
+            if panes.isEmpty { focusedPaneIndex = 0 }
+            else if wasFocused { focusedPaneIndex = max(0, min(idx - 1, panes.count - 1)) }
+            else if idx < focusedPaneIndex { focusedPaneIndex -= 1 }
+        }
+        schedulePaneResize()
+    }
+
+    #if DEBUG
+    /// Probe-only seeding helper. `openSessions` is `private(set)` (setter
+    /// file-private), so `_SidebarLogicProbe` cannot assign it directly.
+    func _probeSeedOpenSessions(_ sessions: [OpenSession]) {
+        openSessions = sessions
+    }
+    #endif
 }
