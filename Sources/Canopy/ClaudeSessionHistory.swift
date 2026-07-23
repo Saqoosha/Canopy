@@ -184,7 +184,22 @@ enum ClaudeSessionHistory {
         for candidate in topCandidates {
             let metadata = extractMetadata(fromPath: candidate.path)
             guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { continue }
-            let projectPath = metadata.cwd ?? decodePath(candidate.projectEncoded)
+            // Extracted cwd is only trusted when its encoded form matches the
+            // JSONL's storage folder. For files > 160KB, `extractMetadata`'s
+            // head+tail windows leave a middle gap unscanned — a `relocated`
+            // event that lands only there would otherwise return the stale
+            // launch cwd, and `--resume` would spawn the CLI in the wrong dir
+            // (CLI then creates a fresh empty session). The CLI writes each
+            // JSONL under its *current* encoded cwd, so `projectEncoded` is
+            // the authoritative signal when the extracted cwd disagrees.
+            let projectPath: String
+            if let cwd = metadata.cwd,
+               encodedFolderCandidates(for: cwd).contains(candidate.projectEncoded)
+            {
+                projectPath = cwd
+            } else {
+                projectPath = decodePath(candidate.projectEncoded)
+            }
             guard fm.fileExists(atPath: projectPath) else { continue }
             let projectDirectory = URL(fileURLWithPath: projectPath)
             let title = SessionTitleStore.title(forSessionId: candidate.sessionId)
@@ -568,29 +583,46 @@ enum ClaudeSessionHistory {
         // make `--resume` spawn the CLI in the wrong dir → CLI can't find
         // the JSONL → empty session with a fresh id (see `backfillResumeId`
         // in logs). Scan the tail for the latest relocation event.
-        let fileSize = (try? handle.seekToEnd()) ?? 0
-        if !isBackgroundScheduled, fileSize > UInt64(headSize) {
-            let tailSize: UInt64 = 32_768
-            let tailStart = max(UInt64(headSize), fileSize - min(tailSize, fileSize))
-            try? handle.seek(toOffset: tailStart)
-            if let tailData = try? handle.readToEnd() {
-                let tailText = String(decoding: tailData, as: UTF8.self)
-                let tailLines = tailText.split(separator: "\n", omittingEmptySubsequences: true)
-                // Skip the (partial) first line whenever we didn't start at 0.
-                let start = tailStart == 0 ? 0 : 1
-                if start < tailLines.count {
-                    // Reversed: the last relocated in the tail wins on first hit.
-                    for line in tailLines[start...].reversed() {
-                        guard line.contains("relocated"),
-                              let lineData = line.data(using: .utf8),
-                              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                              json["type"] as? String == "relocated",
-                              let value = json["relocatedCwd"] as? String, !value.isEmpty
-                        else { continue }
-                        lastRelocatedCwd = value
-                        break
+        // On I/O failure we keep head-only data; `loadAllSessions`'s
+        // encoded-folder verification still protects against a stale cwd.
+        if !isBackgroundScheduled {
+            do {
+                let fileSize = try handle.seekToEnd()
+                if fileSize > UInt64(headSize) {
+                    let tailSize: UInt64 = 32_768
+                    let tailStart = max(UInt64(headSize), fileSize - min(tailSize, fileSize))
+                    // Only drop the first tail line when `tailStart` lands
+                    // mid-line. If the previous byte is `\n`, the first line
+                    // is complete — dropping it would lose a `relocated`
+                    // event that begins exactly at the window boundary.
+                    var startsAtLineBoundary = tailStart == 0
+                    if tailStart > 0 {
+                        try handle.seek(toOffset: tailStart - 1)
+                        if let probe = try handle.read(upToCount: 1), probe == Data([0x0A]) {
+                            startsAtLineBoundary = true
+                        }
+                    }
+                    try handle.seek(toOffset: tailStart)
+                    let tailData = try handle.readToEnd() ?? Data()
+                    let tailText = String(decoding: tailData, as: UTF8.self)
+                    let tailLines = tailText.split(separator: "\n", omittingEmptySubsequences: true)
+                    let start = startsAtLineBoundary ? 0 : 1
+                    if start < tailLines.count {
+                        // Reversed: the last relocated in the tail wins on first hit.
+                        for line in tailLines[start...].reversed() {
+                            guard line.contains("relocated"),
+                                  let lineData = line.data(using: .utf8),
+                                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                                  json["type"] as? String == "relocated",
+                                  let value = json["relocatedCwd"] as? String, !value.isEmpty
+                            else { continue }
+                            lastRelocatedCwd = value
+                            break
+                        }
                     }
                 }
+            } catch {
+                logger.error("extractMetadata: tail scan I/O failed for \(path, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
 

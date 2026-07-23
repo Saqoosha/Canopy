@@ -24,16 +24,17 @@ enum GitWorktree {
     }
 
     /// True when `dir` is a Canopy-recognized worktree — the managed root
-    /// (`~/.claude/worktrees/<repo>/<branch>`) or the sibling
-    /// `<repo>-worktrees/<branch>` layout used by external tooling. Path
-    /// shape only; no filesystem check. Currently the Recents filter (both
-    /// `.add` and `.load` in `RecentDirectories`) is the only caller.
+    /// (`~/.claude/worktrees/<repo>/<branch>`), the sibling
+    /// `<repo>-worktrees/<branch>` layout, or the in-repo
+    /// `<repo>/.claude/worktrees/<branch>` layout. Path shape only; no
+    /// filesystem check. Currently the Recents filter (both `.add` and
+    /// `.load` in `RecentDirectories`) is the only caller.
     static func isManagedWorktree(_ dir: URL) -> Bool {
         worktreeParts(for: dir) != nil
     }
 
     // Purely lexical: standardizes the URL ("..", ".") then string-matches
-    // the two known worktree layouts. Symlink resolution is skipped so this
+    // the three known worktree layouts. Symlink resolution is skipped so this
     // stays cheap enough to call per sidebar-row render; false negatives are
     // acceptable at both call sites (a display label falls back to the plain
     // folder name; a worktree that briefly evades the Recents filter is
@@ -53,9 +54,9 @@ enum GitWorktree {
         if parentName.hasSuffix(suffix), parentName.count > suffix.count {
             return (String(parentName.dropLast(suffix.count)), name)
         }
-        // In-repo layout (<repo>/.claude/worktrees/<branch>): used when the
-        // worktree sits under the parent repo's own `.claude/worktrees/` dir
-        // (common for Claude Code sessions that spawn a worktree in place).
+        // In-repo layout (<repo>/.claude/worktrees/<branch>): observed in
+        // practice for repos that keep worktrees under their own
+        // .claude/worktrees/ dir; path shape only, no filesystem check.
         if parentName == "worktrees",
            parent.deletingLastPathComponent().lastPathComponent == ".claude"
         {
@@ -64,7 +65,13 @@ enum GitWorktree {
             // Reject when `.claude` is at the filesystem root (`/.claude/…`):
             // there is no real repo name to surface, and `lastPathComponent`
             // on `/` returns `/`.
-            if !repoName.isEmpty, repoName != "/", repoRoot.path != "/" {
+            // Also reject when this IS the managed root itself
+            // (`~/.claude/worktrees/<branch>` — one level under worktreesRoot):
+            // that path shape matches in-repo layout lexically but would
+            // falsely attribute the home-dir basename as the "repo".
+            if !repoName.isEmpty, repoName != "/", repoRoot.path != "/",
+               parent.path != worktreesRoot.path
+            {
                 return (repoName, name)
             }
         }

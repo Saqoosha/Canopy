@@ -328,12 +328,53 @@ enum SidebarLogicProbe {
         \(relocatedFiller){"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/late-worktree"}
         {"type":"user","message":{"role":"user","content":"bye"},"cwd":"/tmp/probe/late-worktree"}
         """
+        // Two relocations both past the head window — last-in-tail wins.
+        let multipleInTailJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        \(relocatedFiller){"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/wt-early"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/wt-late"}
+        """
+        // Empty relocatedCwd must not override the initial cwd (!value.isEmpty).
+        let emptyRelocatedCwdJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":""}
+        """
+        // Substring "relocated" + relocatedCwd on a non-relocated type must be ignored.
+        let relocatedNoiseJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/main"}
+        \(relocatedFiller){"type":"user","message":{"role":"user","content":"we relocated the repo"},"relocatedCwd":"/tmp/probe/fake"}
+        """
+        // Boundary case: file size == headSize + tailSize so tailStart == headSize,
+        // and the byte before tailStart is `\n` — the relocated line begins
+        // exactly at the window edge and must NOT be dropped.
+        let headSize = 131_072
+        let tailSize = 32_768
+        let boundaryFirst =
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"cwd\":\"/tmp/probe/main\"}\n"
+        let boundaryRelocated =
+            "{\"type\":\"relocated\",\"sessionId\":\"probe\",\"relocatedCwd\":\"/tmp/probe/boundary-wt\"}\n"
+        let headPadCount = headSize - boundaryFirst.utf8.count - 1
+        precondition(headPadCount > 0, "boundary fixture first line exceeds headSize")
+        let zPadCount = max(0, tailSize - boundaryRelocated.utf8.count)
+        let boundaryJSONL =
+            boundaryFirst
+            + String(repeating: "x", count: headPadCount) + "\n"
+            + boundaryRelocated
+            + String(repeating: "z", count: zPadCount)
         let plainCwdPath = writeProbeJSONL(plainCwdJSONL)
         let relocatedInHeadPath = writeProbeJSONL(relocatedInHeadJSONL)
         let multipleRelocationsPath = writeProbeJSONL(multipleRelocationsJSONL)
         let relocatedInTailPath = writeProbeJSONL(relocatedInTailJSONL)
+        let multipleInTailPath = writeProbeJSONL(multipleInTailJSONL)
+        let emptyRelocatedCwdPath = writeProbeJSONL(emptyRelocatedCwdJSONL)
+        let relocatedNoisePath = writeProbeJSONL(relocatedNoiseJSONL)
+        let boundaryPath = writeProbeJSONL(boundaryJSONL)
         defer {
-            for path in [plainCwdPath, relocatedInHeadPath, multipleRelocationsPath, relocatedInTailPath] {
+            for path in [
+                plainCwdPath, relocatedInHeadPath, multipleRelocationsPath,
+                relocatedInTailPath, multipleInTailPath, emptyRelocatedCwdPath,
+                relocatedNoisePath, boundaryPath,
+            ] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
         }
@@ -345,6 +386,25 @@ enum SidebarLogicProbe {
                multipleRelocationsPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/wt2")
         record("cwd: relocated past head window recovered from tail",
                relocatedInTailPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/late-worktree")
+        record("cwd: last relocated in tail wins on multiple past head",
+               multipleInTailPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/wt-late")
+        record("cwd: empty relocatedCwd falls back to first cwd",
+               emptyRelocatedCwdPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/main")
+        record("cwd: substring relocated noise ignored",
+               relocatedNoisePath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/main")
+        // Sanity: fixture really puts the relocated line on the tail boundary.
+        let boundaryOffsetOK: Bool = {
+            guard let path = boundaryPath,
+                  let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+            else { return false }
+            guard data.count == headSize + tailSize else { return false }
+            guard data[headSize - 1] == 0x0A else { return false }
+            let prefix = Data(boundaryRelocated.utf8.dropLast()) // without trailing \n
+            return data[headSize..<(headSize + prefix.count)] == prefix
+        }()
+        record("cwd: relocated at exact tailStart boundary preserved",
+               boundaryOffsetOK
+               && boundaryPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/boundary-wt")
 
         // background-task launch detection (drives sidebar "waiting" icon)
         let bashBg: [String: Any] = [
@@ -672,6 +732,14 @@ enum SidebarLogicProbe {
         record("projectDisplayName: bare .claude/worktrees (no repo) falls back to folder name",
                GitWorktree.projectDisplayName(
                    for: URL(fileURLWithPath: "/.claude/worktrees/orphan")) == "orphan")
+        record("projectDisplayName: in-repo layout with extra depth → folder name",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/LSE-Core/.claude/worktrees/harfbuzz/nested"))
+                   == "nested")
+        record("projectDisplayName: ~/.claude/worktrees/<branch> not treated as in-repo",
+               GitWorktree.projectDisplayName(
+                   for: GitWorktree.worktreesRoot.appendingPathComponent("orphan-branch"))
+                   == "orphan-branch")
 
         record("isManagedWorktree: managed layout → true",
                GitWorktree.isManagedWorktree(
@@ -687,6 +755,12 @@ enum SidebarLogicProbe {
                GitWorktree.isManagedWorktree(
                    GitWorktree.worktreesRoot
                        .appendingPathComponent("Other/../Canopy/fix-foo")))
+        record("isManagedWorktree: in-repo layout → true",
+               GitWorktree.isManagedWorktree(
+                   URL(fileURLWithPath: "/repos/LSE-Core/.claude/worktrees/harfbuzz")))
+        record("isManagedWorktree: ~/.claude/worktrees/<branch> → false",
+               !GitWorktree.isManagedWorktree(
+                   GitWorktree.worktreesRoot.appendingPathComponent("orphan-branch")))
 
         // --- RecentDirectories worktree filter (add + load) ---
         // Uses real UserDefaults + real temp/managed-root directories, then
