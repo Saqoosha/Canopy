@@ -229,11 +229,26 @@ final class SessionStore {
         guard panes.indices.contains(idx) else { return }
         focusedPaneIndex = idx
         syncSelectionToFocusedPane()
+        makeFocusedPaneKeyResponder()
+    }
+
+    /// Hand keyboard first-responder status to the focused pane's WKWebView so
+    /// keystrokes land in the chat input immediately. Mouse clicks give the
+    /// webview firstResponder naturally via AppKit; keyboard-driven focus
+    /// changes (Cmd+1..9, Cmd+Opt+←/→) don't, so we do it manually. Launcher
+    /// panes and mid-mount webviews are skipped harmlessly.
+    private func makeFocusedPaneKeyResponder() {
+        guard let pane = focusedPane,
+              case .session(let id) = pane.content,
+              let webView = openSessions.first(where: { $0.id == id })?.webView,
+              let window = webView.window
+        else { return }
+        window.makeFirstResponder(webView)
     }
 
     /// Update selection + lastActiveResumeId from the currently focused pane's content.
-    /// Called from setFocusedPaneIndex and moveFocus so tap-to-focus and Cmd+Opt+arrow
-    /// keep sidebar highlight, activeSession, and persistence in sync.
+    /// Called from setFocusedPaneIndex and moveFocus so tap-to-focus, Cmd+Opt+arrow,
+    /// and Cmd+1..9 keep sidebar highlight, activeSession, and persistence in sync.
     private func syncSelectionToFocusedPane() {
         guard let pane = focusedPane else { return }
         switch pane.content {
@@ -496,7 +511,7 @@ final class SessionStore {
         )
         // Append (don't insert at top): match openNew's browser-tab
         // convention so cloud reopens don't push existing Open rows
-        // around (and don't shift the Cmd+1..9 row indices).
+        // around.
         openSessions.append(opened)
         // Drop the cloud row immediately so the sidebar reflects the new
         // state without waiting for the next /v1/sessions poll.
@@ -687,8 +702,8 @@ final class SessionStore {
     /// Handle a drag-reorder from the sidebar's Open section. Offsets are
     /// in visible-row coordinates (the filter may be hiding some open
     /// rows); `reorderPreservingHidden` maps them onto `openSessions`.
-    /// Selection is untouched — only row positions (and thus Cmd+1..9
-    /// indices) change, matching browser-tab behaviour.
+    /// Selection is untouched — only row positions change, matching
+    /// browser-tab behaviour.
     func moveOpenSessions(fromOffsets: IndexSet, toOffset: Int) {
         let visibleIds = visibleRows.compactMap { row -> UUID? in
             if case .open(let s) = row { return s.id }
@@ -733,10 +748,47 @@ final class SessionStore {
         if let idx = paneIndex(forSession: sessionId) {
             focusedPaneIndex = idx
             syncSelectionToFocusedPane()
+            makeFocusedPaneKeyResponder()
             return
         }
         panes[focusedPaneIndex].content = .session(sessionId)
         syncSelectionToFocusedPane()
+        makeFocusedPaneKeyResponder()
+    }
+
+    /// Cycle the focused pane's session to the prev/next entry in the
+    /// sidebar's visible open rows. Sessions currently in another pane
+    /// are skipped (one-session-one-pane invariant would otherwise turn
+    /// cycle into a focus-jump — the "cycle inside this pane" mental
+    /// model breaks). No-op when no eligible target exists.
+    func cycleFocusedPaneSession(delta: Int) {
+        guard !panes.isEmpty else { return }
+        let visibleOpenIds = visibleRows.compactMap { row -> UUID? in
+            if case .open(let s) = row { return s.id } else { return nil }
+        }
+        let occupiedElsewhere: Set<UUID> = Set(panes.enumerated().compactMap { pair in
+            let (idx, slot) = pair
+            guard idx != focusedPaneIndex,
+                  case .session(let sid) = slot.content else { return nil }
+            return sid
+        })
+        let currentSid: UUID? = {
+            if case .session(let id) = focusedPane?.content { return id }
+            return nil
+        }()
+        let available = visibleOpenIds.filter { id in
+            !occupiedElsewhere.contains(id) || id == currentSid
+        }
+        guard !available.isEmpty else { return }
+        let start = currentSid.flatMap { available.firstIndex(of: $0) } ?? -1
+        let n = available.count
+        let next: Int
+        if start < 0 {
+            next = delta > 0 ? 0 : n - 1
+        } else {
+            next = ((start + delta) % n + n) % n
+        }
+        openInFocusedPane(available[next])
     }
 
     /// Replace focused pane's content with the launcher. Used by Cmd+N in
@@ -817,6 +869,11 @@ final class SessionStore {
         }
         syncSelectionToFocusedPane()
         schedulePaneResize()
+        // Hand keyboard first-responder to the surviving pane's webview so
+        // the user can keep typing without a click. The Cmd+W keystroke
+        // consumed firstResponder up to the window itself; without this the
+        // surviving webview stays highlighted but keystrokes beep.
+        makeFocusedPaneKeyResponder()
     }
 
     /// Bypasses the divider-drag floor. Used only by PaneWindowSizer's
@@ -836,6 +893,7 @@ final class SessionStore {
         let next = wrap ? ((raw % n) + n) % n : max(0, min(n - 1, raw))
         focusedPaneIndex = next
         syncSelectionToFocusedPane()
+        makeFocusedPaneKeyResponder()
     }
 
     /// Update two adjacent panes' preferred widths from a divider drag.

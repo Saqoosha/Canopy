@@ -270,8 +270,8 @@ struct WebViewContainer: NSViewRepresentable {
         context.coordinator.linkHandler = nil
         attachWebView(to: host, coordinator: context.coordinator)
         context.coordinator.lastBoundSessionId = newId
-        // After a swap (e.g. via Cmd+1..9 / sidebar click), the menu's
-        // key-event consumed first-responder status. The new WKWebView's
+        // After a swap (e.g. via sidebar click into the focused pane), the
+        // menu's key-event consumed first-responder status. The new WKWebView's
         // CSS caret keeps blinking from prior focus state, but AppKit
         // routes keystrokes to whoever is currently first responder
         // (often the window itself), so the user gets a beep until they
