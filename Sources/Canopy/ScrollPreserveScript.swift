@@ -28,8 +28,9 @@ enum ScrollPreserveScript {
     /// Distance (px) from the bottom that still counts as "at the bottom".
     /// Small enough to distinguish deliberate scroll-up from Retina
     /// sub-pixel drift; loose enough to survive React's occasional
-    /// off-by-one on message-append.
-    private static let bottomThreshold = 20
+    /// off-by-one on message-append. Not private: ImagePreviewScript
+    /// shares this threshold for its own bottom-detection heuristic.
+    static let bottomThreshold = 20
 
     /// Interval between periodic rescans (ms). The scan is idempotent
     /// (WeakSet.has short-circuits already-known elements) so we do not
