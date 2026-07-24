@@ -46,6 +46,65 @@ enum ImagePreviewScript {
         var hasImages = false;
         var scanScheduled = false;
         var failedKeys = new Set(); // thumbnails whose <img> failed to load — never retried
+        var BOTTOM_THRESHOLD = \(ScrollPreserveScript.bottomThreshold);
+        // container -> scrollTop last set by pinIfWasAtBottom (or its value
+        // at snapshot time, before any pin). Distinguishes "the pin already
+        // moved this" from "the user scrolled since we snapshotted" —
+        // without it, a manual scroll-up during the async image-decode
+        // window would get silently overridden by the deferred pin.
+        var lastPinnedScrollTop = new WeakMap();
+
+        // Thumbnails are inserted directly into the DOM outside React, and
+        // their real height isn't known until the async `load` event fires.
+        // Neither the CC extension's own auto-scroll (React-driven only) nor
+        // ScrollPreserveScript's ResizeObserver (watches the scroll
+        // container's own clientHeight, not content growth inside it) sees
+        // this height change, so a chat pinned to the bottom silently stops
+        // following once an image lands. Fix: snapshot "was at bottom"
+        // before insertion, then re-pin on load/error once the image's real
+        // size (or its removal, on failure) has changed scrollHeight.
+        //
+        // Deliberately does NOT require scrollHeight > clientHeight (unlike
+        // ScrollPreserveScript's isScrollable): the container may not be
+        // overflowing yet at snapshot time precisely because this image is
+        // about to be the thing that makes it overflow (e.g. the first
+        // image in a fresh, short session) — overflow-y alone identifies
+        // the right container regardless of its current fill state.
+        function warnScrollAncestor(msg, err) {
+            try {
+                if (window.console && console.warn) {
+                    console.warn('[Canopy ImagePreview] ' + msg, err && err.message ? err.message : (err || ''));
+                }
+            } catch (e) {
+                // Intentional: this IS the error reporter of last resort
+                // for the getComputedStyle catch below — console.warn
+                // itself can throw during the same teardown/detach
+                // conditions that make getComputedStyle throw, and there's
+                // nowhere higher to escalate to.
+            }
+        }
+
+        function findScrollAncestor(el) {
+            var node = el.parentElement;
+            while (node) {
+                var oy;
+                try {
+                    oy = getComputedStyle(node).overflowY;
+                } catch (e) {
+                    // A candidate silently skipped here is otherwise
+                    // indistinguishable from "no scroll ancestor exists" —
+                    // warn so a "auto-scroll stopped working" report is
+                    // diagnosable, and keep walking so one bad node doesn't
+                    // hide a genuine scroll container further up the chain.
+                    warnScrollAncestor('getComputedStyle failed while walking for scroll ancestor', e);
+                    node = node.parentElement;
+                    continue;
+                }
+                if (oy === 'auto' || oy === 'scroll') return node;
+                node = node.parentElement;
+            }
+            return null;
+        }
 
         function noteToolUse(block) {
             if (!block || block.type !== 'tool_use' || block.name !== 'Read' ||
@@ -179,18 +238,61 @@ enum ImagePreviewScript {
             if (!wrap || !wrap.hasAttribute('data-canopy-images')) {
                 wrap = document.createElement('div');
                 wrap.setAttribute('data-canopy-images', '');
-                wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 2px 22px;';
+                // overflow-anchor:none — without it, the browser's own CSS
+                // scroll anchoring can silently correct scrollTop when an
+                // off-screen (scrolled-past) thumbnail's size resolves,
+                // which pinIfWasAtBottom would then misread as a deliberate
+                // user scroll (via the lastPinnedScrollTop mismatch) and
+                // wrongly skip the pin.
+                wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 2px 22px;overflow-anchor:none;';
                 summary.insertAdjacentElement('afterend', wrap);
             }
+            // Computed once per tool_result rather than per image: reading
+            // scrollTop fresh for every image in a multi-image result would
+            // let an earlier image's own (still-loading, near-zero-height)
+            // insertion skew the "was at bottom" read for images after it.
+            var container = findScrollAncestor(wrap);
+            var wasAtBottom = !!container &&
+                (container.scrollHeight - container.clientHeight - container.scrollTop) <= BOTTOM_THRESHOLD;
+            // Refresh (not just seed) the baseline whenever we're at bottom,
+            // so a later batch's legitimate pin isn't compared against a
+            // stale scrollTop left over from turns/scrolling in between —
+            // WeakMap keys the long-lived chat container, so a set-once
+            // guard here would freeze the baseline for the rest of the
+            // session after the very first image.
+            if (container && wasAtBottom) {
+                lastPinnedScrollTop.set(container, container.scrollTop);
+            }
             for (var j = 0; j < rec.urls.length; j++) {
-                addThumbnail(wrap, id + ':' + j, rec.urls[j], rec.file);
+                addThumbnail(wrap, id + ':' + j, rec.urls[j], rec.file, container, wasAtBottom);
             }
         }
 
-        function addThumbnail(wrap, key, url, file) {
+        function addThumbnail(wrap, key, url, file, container, wasAtBottom) {
             if (failedKeys.has(key)) return;
             for (var i = 0; i < wrap.children.length; i++) {
                 if (wrap.children[i].getAttribute('data-canopy-key') === key) return;
+            }
+            function pinIfWasAtBottom() {
+                if (!wasAtBottom || !container || !container.isConnected) return;
+                requestAnimationFrame(function() {
+                    requestAnimationFrame(function() {
+                        // Re-check isConnected here too (not just at the top
+                        // of pinIfWasAtBottom): React can unmount the
+                        // container in the two ticks this waits on, same
+                        // race ScrollPreserveScript's pinToBottom guards
+                        // against for the same reason.
+                        if (!container.isConnected) return;
+                        // Base64 images can decode fast enough that this
+                        // still races a manual scroll, so re-check: only
+                        // pin if scrollTop is still where our own last pin
+                        // (or the pre-insertion snapshot) left it. If it
+                        // moved, the user scrolled deliberately — respect it.
+                        if (container.scrollTop !== lastPinnedScrollTop.get(container)) return;
+                        container.scrollTop = container.scrollHeight - container.clientHeight;
+                        lastPinnedScrollTop.set(container, container.scrollTop);
+                    });
+                });
             }
             var img = document.createElement('img');
             img.src = url;
@@ -202,10 +304,12 @@ enum ImagePreviewScript {
             img.style.cssText = 'max-width:280px;max-height:180px;border-radius:6px;'
                 + 'border:1px solid var(--vscode-widget-border, rgba(0,0,0,0.12));'
                 + 'cursor:zoom-in;display:block;';
+            img.addEventListener('load', pinIfWasAtBottom);
             img.addEventListener('error', function() {
                 console.warn('[Canopy ImagePreview] thumbnail failed to load: ' + file);
                 failedKeys.add(key); // stop the remove -> observer -> re-add retry loop
                 img.remove();
+                pinIfWasAtBottom(); // removal also changes scrollHeight
             });
             img.addEventListener('click', function(ev) {
                 ev.stopPropagation();
