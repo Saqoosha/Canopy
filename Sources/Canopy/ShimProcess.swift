@@ -2461,6 +2461,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 requestUsageUpdate()
             }
 
+            // Neither `message_start` block in this branch is gated on
+            // `isMainConversationMessage`, unlike the `assistant` branch
+            // below. The CLI's stream-json writer hardcodes
+            // `parent_tool_use_id: null` on every `stream_event` frame, and
+            // subagent traffic is routed out as `assistant` / `user` frames
+            // instead — a subagent-tagged `stream_event` does not exist
+            // (verified in CLI 2.1.217). A guard here would be inert.
+            //
+            // Do not add one "for safety". The failure it would create is
+            // worse than the one it prevents: if a future CLI stamped a
+            // non-null `parent_tool_use_id` on MAIN-loop `stream_event` frames
+            // too, the guard would reject every `message_start` and
+            // `contextUsed` would stop updating — while the `result` branch
+            // keeps writing `contextMax`, so `StatusBarView`'s `hasContext`
+            // stays true and the bar renders a frozen, plausible-looking
+            // number instead of failing visibly. See issue #106.
             if eventType == "message_start",
                let msg = event["message"] as? [String: Any]
             {
@@ -2519,10 +2535,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             data.messageCount += 1
             requestUsageUpdate()
             // Update contextUsed to include output_tokens (matches CC popup: input + cache_creation + cache_read + output)
-            let parentToolUseId = ioMsg["parent_tool_use_id"]
-            if let msg = ioMsg["message"] as? [String: Any],
-               let usage = msg["usage"] as? [String: Any],
-               parentToolUseId == nil || parentToolUseId is NSNull
+            if Self.isMainConversationMessage(ioMsg),
+               let msg = ioMsg["message"] as? [String: Any],
+               let usage = msg["usage"] as? [String: Any]
             {
                 let input = usage["input_tokens"] as? Int ?? 0
                 let cacheCreate = usage["cache_creation_input_tokens"] as? Int ?? 0
@@ -2537,6 +2552,33 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         default:
             break
         }
+    }
+
+    /// True when an io_message belongs to the main conversation rather than a
+    /// subagent's or skill's nested turn. These reach us as the CLI's
+    /// `agent_progress` / `skill_progress` events, which its stream-json writer
+    /// re-emits as `assistant` / `user` frames with `parent_tool_use_id` set —
+    /// NOT via the `--forward-subagent-text` flag, which Canopy does not pass
+    /// (don't conclude the guard is dead from that flag's absence). Such a
+    /// frame's `usage` describes the SUBAGENT's context, so letting it reach
+    /// the status bar would make the meter dive mid-turn and snap back at turn
+    /// end.
+    ///
+    /// Not `stream_event` (hardcoded `null` there — see the comment in that
+    /// branch) and not `result` (the emitted frame has no such field at all,
+    /// so a subagent-tagged `result` cannot exist).
+    ///
+    /// The key is absent on some frames and present-but-JSON-`null` on others,
+    /// and `null` bridges to `NSNull` rather than `nil` — hence two checks.
+    ///
+    /// `messageCount` and `requestUsageUpdate()` are left outside the guard:
+    /// they count all traffic, subagent included.
+    ///
+    /// Static so `_SidebarLogicProbe` can test the predicate without spawning
+    /// a shim.
+    static func isMainConversationMessage(_ ioMsg: [String: Any]) -> Bool {
+        let parentToolUseId = ioMsg["parent_tool_use_id"]
+        return parentToolUseId == nil || parentToolUseId is NSNull
     }
 
     private func postTaskCompletedNotification() {
