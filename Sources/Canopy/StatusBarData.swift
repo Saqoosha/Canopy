@@ -46,10 +46,60 @@ final class StatusBarData {
 
     enum VCSType { case unknown, git, jj }
 
-    /// Effective context window matching CC extension's pie chart: contextWindow - maxOutputTokens - 13000.
     private static let compactionBuffer = 13_000
+    private static let outputReserveCap = 20_000
+
+    /// Effective context window, matching the `compact` level the Claude Code
+    /// CLI's own context meter counts against:
+    /// `contextMax - min(maxOutputTokens, 20000) - 13000`.
+    ///
+    /// The CLI caps the output reserve at 20,000 for every model, then
+    /// subtracts a 13,000 compaction buffer. Verified against CLI 2.1.217 by
+    /// reading the shipped bundle — the binary embeds readable minified JS, so
+    /// use `grep -a` (plain `grep` treats it as binary and prints nothing).
+    /// The symbol names change every release, so they are not cited here;
+    /// re-derive from the 20000 / 13000 literals if this needs rechecking.
+    ///
+    /// The CC extension's pie subtracts the FULL `maxOutputTokens` instead, so
+    /// for models with a bigger output budget (Opus 5: 64,000) it reads 100%
+    /// about 44,000 tokens before anything actually happens. We deliberately
+    /// diverge from the extension's pie — the meter should track the CLI. See
+    /// issue #106.
+    ///
+    /// The claim is about the DENOMINATOR, and it is the CLI's *meter* level —
+    /// NOT a promise about the moment compaction happens. Cases we don't
+    /// model, each making the meter approximate:
+    /// - On a local run with an unclamped (default) window the CLI skips its
+    ///   proactive check entirely. What replaces it depends on a server gate:
+    ///   with precomputed compaction ON it compacts off a threshold roughly a
+    ///   fifth below this line (the fraction is itself server-tunable and is
+    ///   taken off the pre-buffer window, so the gap against this line is
+    ///   smaller on smaller windows), landing well before the meter reads
+    ///   100%; with it OFF compaction is reactive and lands after.
+    /// - The CLI can clamp its window below the model's context window
+    ///   (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, the `autoCompactWindow` setting,
+    ///   server-pushed clientdata, an experiment gate, or a per-model
+    ///   default) — then it compacts earlier than we show. `modelUsage`
+    ///   reports the RAW window, so `contextMax` is structurally blind to
+    ///   every one of these.
+    /// - With auto-compact disabled the CLI drops the 13,000 subtraction, so
+    ///   the meter reads pessimistically by that much.
+    /// - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` below 20,000 shrinks the CLI's
+    ///   reserve, while `maxOutputTokens` here comes from the `result` event's
+    ///   `modelUsage`, which reports the model default.
+    /// - The CLI's warn and hard-block lines sit at other offsets; this
+    ///   tracks the compact level only.
+    ///
+    /// Falls back to the raw `contextMax` when the subtractions would go
+    /// non-positive. Usually that is the pre-`result` state where `contextMax`
+    /// is still 0 — `contextPct` then returns 0 through its own `window > 0`
+    /// guard, and `StatusBarView` hides the meter entirely while
+    /// `contextMax == 0`. It is also reachable with a POPULATED `contextMax`
+    /// below ~33,000, where it reports a denominator wider than the real
+    /// budget; the probe's `tiny` case pins that branch.
     var compactionWindow: Int {
-        let effective = contextMax - maxOutputTokens - Self.compactionBuffer
+        let reserve = min(maxOutputTokens, Self.outputReserveCap)
+        let effective = contextMax - reserve - Self.compactionBuffer
         return effective > 0 ? effective : contextMax
     }
 

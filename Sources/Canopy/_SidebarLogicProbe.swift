@@ -1544,6 +1544,124 @@ enum SidebarLogicProbe {
                    "transitioned=\(t8Transitioned) finishedAt=\(String(describing: t8Tracker.rows.first?.finishedAt))")
         }
 
+        // MARK: - Context meter (issue #106)
+        do {
+            // Why these numbers: see `StatusBarData.compactionWindow`, which
+            // owns the rationale for tracking the CLI meter's compact level
+            // instead of the CC extension's pie. 923,000 is not arbitrary —
+            // it is exactly the extension's old denominator (1M − 64K − 13K),
+            // i.e. the point where the meter used to pin at 100%.
+            let opus = StatusBarData()
+            opus.contextMax = 1_000_000
+            opus.maxOutputTokens = 64_000
+            opus.contextUsed = 923_000
+            record("context #106: 1M/64K window is 967,000 (CLI meter's compact level)",
+                   opus.compactionWindow == 967_000,
+                   "window=\(opus.compactionWindow)")
+            record("context #106: old 100% point now reads 95%",
+                   opus.contextPct == 95, "pct=\(opus.contextPct)")
+
+            // One token above the cap must still reserve exactly the cap.
+            // Pre-fix this gave 966,999, so it is the only case that catches
+            // the cap being dropped or applied to the wrong side. A fixture at
+            // exactly 20,000 is deliberately omitted: against `min` it is
+            // indistinguishable from any `>` / `>=` spelling, so it could
+            // never go red.
+            let justOverCap = StatusBarData()
+            justOverCap.contextMax = 1_000_000
+            justOverCap.maxOutputTokens = 20_001
+            record("context #106: 20,001 still reserves exactly 20,000",
+                   justOverCap.compactionWindow == 967_000,
+                   "window=\(justOverCap.compactionWindow)")
+
+            // A model whose output budget is already under the cap keeps the
+            // full subtraction — min() is a no-op there.
+            let small = StatusBarData()
+            small.contextMax = 200_000
+            small.maxOutputTokens = 8_000
+            record("context #106: sub-cap maxOutputTokens subtracted verbatim",
+                   small.compactionWindow == 179_000,
+                   "window=\(small.compactionWindow)")
+
+            // Reachable in production: `contextMax` and `maxOutputTokens`
+            // restore from two independent UserDefaults keys under separate
+            // `> 0` guards, and the maxOutputTokens key is the newer of the
+            // two — a cache written by an older build yields this state until
+            // the first `result` lands.
+            let noReserve = StatusBarData()
+            noReserve.contextMax = 1_000_000
+            noReserve.maxOutputTokens = 0
+            record("context #106: zero maxOutputTokens reserves nothing",
+                   noReserve.compactionWindow == 987_000,
+                   "window=\(noReserve.compactionWindow)")
+
+            // Pre-`result` state (contextMax still 0) must not produce a
+            // negative or nonsensical denominator. Split from the pct check so
+            // a failure names which half broke.
+            let empty = StatusBarData()
+            record("context #106: unpopulated data yields zero window",
+                   empty.compactionWindow == 0, "window=\(empty.compactionWindow)")
+            record("context #106: unpopulated data yields 0%",
+                   empty.contextPct == 0, "pct=\(empty.contextPct)")
+
+            // The `effective > 0 ? effective : contextMax` fallback with a
+            // POPULATED contextMax — the branch that returns a denominator
+            // wider than the real budget. The `empty` case above can't pin it:
+            // there the fallback's answer (0) is identical to the arithmetic
+            // path's. Pins that a negative denominator never escapes into
+            // `contextUsed * 100 / window`.
+            let tiny = StatusBarData()
+            tiny.contextMax = 10_000
+            tiny.maxOutputTokens = 8_000
+            tiny.contextUsed = 5_000
+            record("context #106: non-positive window falls back to contextMax",
+                   tiny.compactionWindow == 10_000, "window=\(tiny.compactionWindow)")
+            record("context #106: fallback window still yields a sane pct",
+                   tiny.contextPct == 50, "pct=\(tiny.contextPct)")
+
+            // contextPct clamps at 100 and StatusBarView's bar fill
+            // (`width * pct / 100`) has no clamp of its own, so an unclamped
+            // pct would overflow the capsule track and widen the status bar.
+            // Separate instances rather than one reassigned fixture: inserting
+            // a case into a shared-and-mutated block silently changes every
+            // assertion after it.
+            let belowLine = StatusBarData()
+            belowLine.contextMax = 1_000_000
+            belowLine.maxOutputTokens = 64_000
+            belowLine.contextUsed = 966_999
+            record("context #106: one token below the line is 99%",
+                   belowLine.contextPct == 99, "pct=\(belowLine.contextPct)")
+
+            let atLine = StatusBarData()
+            atLine.contextMax = 1_000_000
+            atLine.maxOutputTokens = 64_000
+            atLine.contextUsed = 967_000
+            record("context #106: exactly at the compact level is 100%",
+                   atLine.contextPct == 100, "pct=\(atLine.contextPct)")
+
+            let pastLine = StatusBarData()
+            pastLine.contextMax = 1_000_000
+            pastLine.maxOutputTokens = 64_000
+            pastLine.contextUsed = 1_000_000
+            record("context #106: past the level clamps to 100%",
+                   pastLine.contextPct == 100, "pct=\(pastLine.contextPct)")
+
+            // `extractStatusData` is a private instance method on a live
+            // ShimProcess and isn't probe-reachable, so this locks the
+            // predicate it gates on rather than the routing itself. The live
+            // gate is the `assistant` branch; the `stream_event` branch is
+            // deliberately ungated (see the comment there).
+            record("context #106: main-turn message (null parent) accepted",
+                   ShimProcess.isMainConversationMessage(["type": "assistant", "parent_tool_use_id": NSNull()]),
+                   "got=\(ShimProcess.isMainConversationMessage(["type": "assistant", "parent_tool_use_id": NSNull()]))")
+            record("context #106: absent parent_tool_use_id accepted",
+                   ShimProcess.isMainConversationMessage(["type": "assistant"]),
+                   "got=\(ShimProcess.isMainConversationMessage(["type": "assistant"]))")
+            record("context #106: subagent-tagged message rejected",
+                   !ShimProcess.isMainConversationMessage(["type": "assistant", "parent_tool_use_id": "toolu_A"]),
+                   "got=\(ShimProcess.isMainConversationMessage(["type": "assistant", "parent_tool_use_id": "toolu_A"]))")
+        }
+
         // MARK: - Panes
         do {
             // Brief names openA / openB / recentAsOpen; only openA/openB are

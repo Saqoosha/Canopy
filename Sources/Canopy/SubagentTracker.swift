@@ -130,6 +130,14 @@ struct SubagentTracker {
             return handleUserMessage(ioMsg: ioMsg, now: now)
 
         case "result":
+            // NOTE (issue #106): this guard is defensive, not load-bearing —
+            // the CLI's emitted `result` frame has no `parent_tool_use_id`
+            // field at all (verified in 2.1.217), so the tagged shape below
+            // does not currently occur. Kept because the cost is one type
+            // check and the failure it guards against is severe. See
+            // `ShimProcess.isMainConversationMessage` for where the CLI does
+            // stamp the field.
+            //
             // Subagents run their own Agent-SDK loop and emit their own
             // `result` event tagged with `parent_tool_use_id`. Freezing
             // main-conversation rows on that would mark every sibling
@@ -157,6 +165,12 @@ struct SubagentTracker {
         case "stream_event":
             // First main-conversation message_start after a result = new turn.
             // Subagent stream_events carry parent_tool_use_id — ignore those.
+            // NOTE (issue #106): also defensive today. The CLI hardcodes
+            // `parent_tool_use_id: null` on every outbound `stream_event`
+            // frame (verified in 2.1.217), so no tagged stream_event arrives.
+            // Do NOT copy this shape to the status-bar path — see the comment
+            // in `ShimProcess.extractStatusData`'s `stream_event` branch for
+            // why a guard there is actively harmful.
             // Foreground rows (and finished bg rows) still get cleared —
             // that's the visible per-turn reset users expect. Running bg
             // rows are exempted so a later async `completeIfPresent`
