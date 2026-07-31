@@ -215,8 +215,13 @@ struct SidebarAccountSection: View {
         .frame(height: barHeight)
     }
 
-    /// Same thresholds the per-pane status bar's usage indicators use:
-    /// calm gray while comfortable, orange from 50%, red from 80%.
+    /// Percent-of-quota thresholds for the rate-limit bars: calm gray while
+    /// comfortable, orange from 50%, red from 80%. Deliberately NOT shared
+    /// with `StatusBarView`'s context meter, which colours from the CLI's own
+    /// warn/compact/blocked levels instead (issue #110) — the two used to
+    /// match, and re-aligning them would put back the hand-picked cutoffs
+    /// that mapped to no real CLI state. These are a genuine fraction of a
+    /// known quota, so round numbers are the right model here.
     private func barColor(_ percent: Double) -> Color {
         if percent >= 0.8 { return .red.opacity(0.75) }
         if percent >= 0.5 { return .orange.opacity(0.8) }

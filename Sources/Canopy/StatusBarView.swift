@@ -177,10 +177,43 @@ struct StatusBarView: View {
     }
 
     private var contextBar: some View {
-        HStack(spacing: 5) {
-            thinBar(pct: data.contextPct)
-            Text("\(data.contextPct)%")
-                .foregroundStyle(pctColor(data.contextPct))
+        let level = data.contextLevel
+        let pct = data.contextPct
+        return HStack(spacing: 5) {
+            thinBar(pct: pct, level: level)
+            // `blocked` is the only state where the NEXT action fails, and
+            // `compact` is already red — so weight alone is too weak a channel
+            // to carry the distinction (at a 1M window the two differ by one
+            // percentage point). It gets a glyph as well.
+            Text("\(pct)%")
+                .foregroundStyle(levelColor(level, pct: pct))
+                .fontWeight(level == .blocked ? .bold : .regular)
+                .monospacedDigit()
+                // Crossing 100 adds a digit and the weight switch changes
+                // metrics; the context block sits between two Spacers, so
+                // either would shift the whole bar without a width floor.
+                .frame(minWidth: 30, alignment: .trailing)
+            // One reserved slot, always laid out. Showing/hiding a glyph at
+            // the compact→blocked boundary would shift the whole bar at the
+            // one transition that matters most, undoing the frame above.
+            // `.unknown` gets its own mark once the percentage is high enough
+            // to look alarming, so an orange bar can't be mistaken for a real
+            // warn level.
+            Group {
+                if level == .blocked {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("Context limit reached")
+                } else if level == .unknown, pct >= 50 {
+                    Image(systemName: "questionmark.circle")
+                        .foregroundStyle(levelColor(level, pct: pct))
+                        .accessibilityLabel("Context thresholds unavailable")
+                } else {
+                    Color.clear
+                }
+            }
+            .font(.system(size: 9))
+            .frame(width: 10)
             if data.didCompact {
                 Text("↻")
                     .foregroundStyle(.blue)
@@ -227,17 +260,20 @@ struct StatusBarView: View {
         .foregroundStyle(color)
     }
 
-    private func thinBar(pct: Int, width: CGFloat = 40) -> some View {
+    private func thinBar(pct: Int, level: StatusBarData.ContextLevel, width: CGFloat = 40) -> some View {
         let barHeight: CGFloat = 4
-        let fill = width * CGFloat(pct) / 100
+        // Clamping lives in `barFillWidth` so it is probe-reachable — this
+        // view isn't. `contextPct` is unclamped by design (issue #110), and an
+        // unclamped fill would overrun the track and widen the status bar.
+        let fill = StatusBarData.barFillWidth(pct: pct, track: width, minimum: barHeight)
         return ZStack(alignment: .leading) {
             Capsule()
                 .fill(Color.secondary.opacity(0.15))
                 .frame(width: width, height: barHeight)
             if fill > 0 {
                 Capsule()
-                    .fill(pctColor(pct))
-                    .frame(width: max(barHeight, fill), height: barHeight)
+                    .fill(levelColor(level, pct: pct))
+                    .frame(width: fill, height: barHeight)
             }
         }
     }
@@ -258,16 +294,50 @@ struct StatusBarView: View {
             "Context: \(used) / \(window) tokens (\(data.contextPct)%)",
             "Maximum window: \(maxTokens) tokens",
         ]
+        // Name the state in words. The percentage alone can't say whether
+        // 101% means "auto-compact is due" or "the next request is refused".
+        // Wording tracks the CLI's *meter level*, not the moment compaction
+        // runs — `compactionWindow`'s doc lists why those differ.
+        switch data.contextLevel {
+        case .unknown:
+            lines.append("Thresholds unavailable until the first response completes — the real budget may be narrower than shown")
+        case .ok:
+            break
+        case .warn:
+            lines.append("Approaching the CLI's compact level")
+        case .compact:
+            lines.append("Past the CLI's compact level")
+        case .blocked:
+            lines.append("Over the limit — the next request will be refused unless the context is compacted first")
+        }
+        // Only shown past a level, deliberately. An earlier revision showed it
+        // whenever it was known, which surfaced a confidently wrong absolute
+        // number in the one state it is most wrong: `contextMax` is the widest
+        // window across every model in the session (issue #108), so a small
+        // main model with a large-window subagent reads `.ok` at 19% while
+        // this line would claim a refusal point five times too high. Gating on
+        // the level keeps it hidden exactly there.
+        if data.contextLevel != .ok, data.contextLevel != .unknown,
+           let blocked = data.blockedThreshold
+        {
+            let n = Self.numberFormatter.string(from: NSNumber(value: blocked)) ?? "\(blocked)"
+            lines.append("Requests refused at: \(n) tokens")
+        }
         if data.didCompact {
             lines.append("Recently compacted")
         }
         return lines.joined(separator: "\n")
     }
 
-    private func pctColor(_ pct: Int) -> Color {
-        if pct >= 80 { return .red }
-        if pct >= 50 { return .orange }
-        return .secondary
+    /// Thin adapter over `StatusBarData.tint(for:pct:)` — the decision lives
+    /// on the model so the probe can reach it; only the `Color` vocabulary is
+    /// the view's. Do not reintroduce a switch over `ContextLevel` here.
+    private func levelColor(_ level: StatusBarData.ContextLevel, pct: Int) -> Color {
+        switch StatusBarData.tint(for: level, pct: pct) {
+        case .calm: .secondary
+        case .warn: .orange
+        case .alert: .red
+        }
     }
 
     private func shortModelName(_ model: String) -> String {
