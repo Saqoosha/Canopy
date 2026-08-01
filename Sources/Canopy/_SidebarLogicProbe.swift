@@ -2141,8 +2141,8 @@ enum SidebarLogicProbe {
         // the one `catch` that records, in the resolveProjectPath block, and
         // the three `else { … "write failed" }` twins — so a green run is
         // four short of the call-site count. Deliberately no totals here:
-        // they went stale within a day the first time, when #108 merged nine
-        // assertions in. Run the probe and read its last line.
+        // they went stale within a day the first time, when #115 merged nine
+        // of issue #108's assertions in. Run the probe, read its last line.
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
     }

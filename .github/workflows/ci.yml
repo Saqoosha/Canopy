@@ -52,31 +52,44 @@ jobs:
       # or every `it()` becoming `it.skip()`, would pass. `spec` goes to the
       # log for humans; `tap` goes to a file because its `# pass N` summary
       # is plain ASCII and stable, unlike the spec reporter's `ℹ pass N`.
-      # The reporter emits its counts block exactly once, for the whole run
-      # — subtests emit `# Subtest:` lines and never their own `# pass` — so
-      # `^# pass ` matches at most one line. (Indentation is NOT what makes
-      # that true: top-level `# Subtest:` lines are unindented too. What
-      # rules out forgery is that the TAP reporter escapes `#` in a test's
-      # captured stdout, so `console.log('# pass 999')` reaches the log as
-      # `# \# pass 999`. That is reporter-specific, and it is a second
-      # reason the counts are read from `tap` rather than from `spec`:
-      # measured, `spec` passes the same line through unescaped.)
+      # Both counts are read as the LAST match, never the first, and that
+      # is a correctness requirement rather than a style. The counts block
+      # is the final thing the reporter emits, and everything a test writes
+      # to stdout is captured and echoed BEFORE it with a `# ` prefix the
+      # reporter adds itself. So one `console.log('pass 999')` anywhere in
+      # the suite — no `#` needed, the reporter supplies it — puts a line
+      # matching `^# pass [0-9]+$` ahead of the real one. Measured: a
+      # first-match extractor reads 999 against a true count of 1, and the
+      # same vector fakes `# duration_ms` low enough to disable the ceiling.
+      # A false green in the check that exists to prevent false greens.
       #
-      # Counts are extracted with `awk '... { print $N; exit }'`, not `sed
-      # -n p`, and the difference is load-bearing rather than stylistic. `sed`
+      # (The reporter does escape a leading `#` the test itself writes —
+      # `console.log('# pass 999')` arrives as `# \# pass 999`, and `spec`
+      # does not escape it. Real, and a fair reason to read counts from
+      # `tap` rather than `spec` alongside the ASCII stability, but it is
+      # NOT a forgery guarantee: it only guards a spelling no forger needs.
+      # An earlier revision of this comment claimed otherwise and picked
+      # first-match on the strength of it.)
+      #
+      # Counts are extracted with `awk`, not `sed -n p`, and that
+      # difference is load-bearing rather than stylistic too. `sed`
       # prints EVERY match, so a second matching line would make `passed`
       # multi-line — and `[ "$passed" -lt N ]` on a non-integer exits 2,
       # which `if` reads as false, skipping the error branch and letting
       # the step reach its final `echo` and exit 0. That is a false green
       # inside the very check that exists to prevent false greens. `awk`
-      # with `exit` yields exactly one digit-run or nothing, and nothing is
-      # already handled below. Note this hardens only the LEFT operand: an
+      # keeping one value and printing it in `END` yields exactly one
+      # digit-run or nothing, and nothing is already handled below — which
+      # is why the extractor is written that way rather than with `exit`:
+      # it has to pick the last match anyway, and that shape gives both
+      # properties at once. Note this hardens only the LEFT operand: an
       # `EXPECTED_*` that was not a plain integer would fail open the same
       # way. It cannot be one today — both are literals a few lines up —
       # but that stops being true the moment either is sourced from a
-      # `vars.*` expression, and the obvious `awk` rewrite does not help
-      # (an empty operand degenerates to a string compare that returns
-      # true, i.e. also open). Validate both operands if that day comes.
+      # `vars.*` expression. Rewriting the comparison in `awk` only half
+      # helps: a non-numeric operand does then fail closed, but an EMPTY
+      # one is not a strnum, so the compare goes lexical and lands open
+      # again. Validate both operands explicitly if that day comes.
       #
       # EXPECTED_TESTS is a floor, not an equality: adding tests never turns
       # this red, removing one always does. That is the intended trade — a
@@ -91,12 +104,13 @@ jobs:
       # above 60 s, so nothing notices. That 60 s is not a coincidence — it
       # is `Resources/vscode-shim/notifications.js`'s own timeout constant,
       # so this ceiling only detects that leak while the constant stays
-      # above it. Headroom, measured rather than estimated: ~90 ms locally
-      # (~330x) and 174–193 ms across this PR's own runs on the ubuntu
-      # runner (~155–170x) — runner timing varies ~10% run to run, so
-      # treat those as a range, not a constant. Against the leak it is half
-      # of 60 s, not "far below": raising the ceiling much further would
-      # start eating into the thing it detects.
+      # above it. Headroom, measured on the runner rather than estimated:
+      # 174/189/193 ms across this PR's own runs, i.e. ~155–172x, with
+      # ~10% run-to-run spread — a range, not a constant. Deliberately no
+      # local figure: it depends on the developer's machine and node
+      # version, and the runner is what actually has to clear the bar.
+      # Against the leak the ceiling is half of 60 s, not "far below":
+      # raising it much further would start eating into what it detects.
       - name: Run shim unit tests
         env:
           EXPECTED_TESTS: 101
@@ -106,7 +120,7 @@ jobs:
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/tap.log" \
             test/shim-unit.test.js
-          passed=$(awk '/^# pass [0-9]+$/ { print $3; exit }' "$RUNNER_TEMP/tap.log")
+          passed=$(awk '/^# pass [0-9]+$/ { v = $3 } END { if (v != "") print v }' "$RUNNER_TEMP/tap.log")
           if [ -z "$passed" ]; then
             echo "::error::no '# pass N' line in the TAP output. A failing or missing test file exits non-zero and the step's implicit 'bash -e' aborts before this line, so neither is the cause here: look for the reporter's summary format changing, or tap.log being written empty."
             exit 1
@@ -115,9 +129,9 @@ jobs:
             echo "::error::only $passed tests passed, expected at least $EXPECTED_TESTS. If tests were removed on purpose, lower EXPECTED_TESTS in .github/workflows/ci.yml in the same commit."
             exit 1
           fi
-          duration=$(awk '/^# duration_ms [0-9.]+$/ { print $3; exit }' "$RUNNER_TEMP/tap.log")
+          duration=$(awk '/^# duration_ms [0-9.]+$/ { v = $3 } END { if (v != "") print v }' "$RUNNER_TEMP/tap.log")
           if ! awk -v d="$duration" -v max="$MAX_DURATION_MS" 'BEGIN { exit !(d > 0 && d < max) }'; then
-            echo "::error::suite duration '${duration}' is not under ${MAX_DURATION_MS}ms. The suite runs in ~200ms today, so a large number here is almost certainly something holding the event loop open after the tests finish — a timer that lost its .unref() is the known case. If it is blank, the duration line could not be parsed."
+            echo "::error::suite duration '${duration}' is not under ${MAX_DURATION_MS}ms. The suite runs in ~200ms on this runner today, so a large number here is almost certainly something holding the event loop open after the tests finish — a timer that lost its .unref() is the known case. If it is blank, the duration line could not be parsed."
             exit 1
           fi
           echo "$passed tests passed in ${duration}ms (floor $EXPECTED_TESTS, ceiling ${MAX_DURATION_MS}ms)"
@@ -245,22 +259,24 @@ jobs:
       # removing one always costs an edit here.
       #
       # The cost of that asymmetry is real and was observed on this very
-      # PR: #108 merged nine assertions into main while this branch was
+      # PR: #115 merged nine of issue #108's assertions into main while
+      # this branch was
       # open, so the floor sat nine below actual and nine could have gone
       # missing unnoticed. Nothing warns about that — a floor only ratchets
       # when a human raises it. So when you add assertions, raise this
       # number in the same commit even though CI will not make you.
       #
       # Same reason for `awk` over
-      # `sed -n p` — see that step's comment; a multi-line capture would
-      # turn the floor check into a no-op that still exits 0. The extractor
-      # itself differs though: LAST match, not first. The shim job can take
-      # the first because TAP escapes `#` in captured output, so no line
-      # before the counts block can impersonate one. This stream has no
-      # such guarantee — it is the app's raw merged stdout+stderr — while
-      # the summary is unconditionally the last thing the probe writes
-      # before `exit()`. So last-match is the safe end here and first-match
-      # is the safe end there; they are not interchangeable.
+      # `sed -n p`, and LAST match rather than first — see that step's
+      # comment, both points apply here for the same reasons. If anything
+      # this stream needs it more: it is the app's raw merged stdout+stderr
+      # with no reporter between, so any line at all could precede the
+      # summary, while the summary is the last thing the probe writes
+      # before `exit()`. One caveat on that: stdout is fully buffered when
+      # piped, so a stdout write made BEFORE the stderr summary would be
+      # flushed at `exit()` and land after it. Nothing in Sources/ writes
+      # to stdout today — the probe reports via stderr and os_log — but
+      # that, not write order, is what makes last-match safe here.
       - name: Run logic probe
         timeout-minutes: 5
         env:
@@ -277,7 +293,7 @@ jobs:
             exit 1
           fi
           if [ "$status" -ne 0 ]; then
-            echo "::error::probe reported failing assertions (exit $status) — grep the log above for lines starting with '  FAIL '."
+            echo "::error::probe exited $status after printing its summary — most likely failing assertions, so grep the log above for lines starting with '  FAIL '. If there are none, the probe was killed after writing the summary, or tee failed."
             exit "$status"
           fi
           if [ "$passed" -lt "$EXPECTED_ASSERTIONS" ]; then
