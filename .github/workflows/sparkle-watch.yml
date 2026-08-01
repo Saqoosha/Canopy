@@ -1,0 +1,141 @@
+# Watches for Sparkle releases that the pin in project.yml has not picked up.
+#
+# Issue #114 pinned Sparkle with `exactVersion` to stop "every build may link
+# a different 2.x". That fixed one failure mode and created its mirror: the
+# version can no longer float, so nothing surfaces a new Sparkle release
+# either, and nothing in the repo or in CI watched upstream (issue #118).
+#
+# Not hypothetical for this dependency. #116 measured the frozen case: main
+# resolved Sparkle 2.9.1 on 2026-03-30 and stayed there, and every Canopy
+# release through 2.10.3 shipped it — past 2.9.2 (2026-05-17), which carried
+# two security fixes, one of them the delta-update symlink guard that is on
+# the path Canopy actually uses. Four months, invisible.
+#
+# Dependabot is the obvious answer and does not work on this repo as it
+# stands: its Swift fetcher needs a tracked `Package.swift`, or a tracked
+# `.xcodeproj` carrying `Package.resolved`. Canopy declares the dependency in
+# `project.yml` (xcodegen, which Dependabot has no support for) and gitignores
+# `Canopy.xcodeproj/`. Enabling it therefore means committing
+# `Package.resolved` behind a `.gitignore` carve-out — a real option, and the
+# only one that also closes the tag-vs-revision gap (`exactVersion` fixes a
+# TAG, so an upstream retag changes the linked bits with no diff here). It was
+# weighed against this file and deferred: this covers the four-month freeze,
+# which is the failure that actually happened, without the gitignore ladder or
+# a second file to keep coherent with project.yml. If a second SPM dependency
+# ever lands, revisit — this watches Sparkle and only Sparkle.
+name: Sparkle upstream watch
+
+# Scheduled runs only ever execute the copy of this file on the DEFAULT
+# branch, so editing it on a PR branch changes nothing until merge — hence
+# workflow_dispatch, which is the only way to exercise it beforehand.
+# Two more scheduler facts worth not rediscovering: cron is UTC (this is
+# Monday 18:00 JST), and GitHub disables scheduled workflows after 60 days
+# with no repository activity.
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+# `issues: write` is the only write this needs. It reads sparkle-project's
+# releases with the same token, which needs nothing beyond public read.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Compare pin against upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # `$latest` is third-party text: it comes from a release tag in a repo
+      # nobody here controls. It is validated against a version shape before
+      # it reaches an issue body, and it is only ever handled as a quoted
+      # shell variable — never through a `${{ }}` expression, which would
+      # splice it into the script before bash ever sees it.
+      - name: Compare pinned Sparkle against the latest upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: "Sparkle upstream is ahead of the pin in project.yml"
+        run: |
+          set -o pipefail
+
+          # Anchored to the Sparkle block rather than grepping the file for
+          # `exactVersion`, because project.yml's own comments say the word
+          # several times — a plain grep reads a comment line as the pin.
+          pinned=$(awk '
+            /^  Sparkle:$/ { in_pkg = 1; next }
+            in_pkg && /^  [^ ]/ { in_pkg = 0 }
+            in_pkg && $1 == "exactVersion:" { print $2; exit }
+          ' project.yml)
+          latest=$(gh release view --repo sparkle-project/Sparkle --json tagName -q .tagName)
+
+          # Both operands are validated, and for different reasons. A blank
+          # or reshaped `pinned` means project.yml's package block moved and
+          # this awk is now silently reading nothing — which would otherwise
+          # compare "" against a real tag and open an issue every week. A
+          # malformed `latest` means the upstream tag convention changed
+          # (today: bare `2.9.4`, no `v` prefix, matching project.yml
+          # verbatim), and comparing against it would be meaningless.
+          for pair in "pinned:$pinned" "latest:$latest"; do
+            name=${pair%%:*}
+            value=${pair#*:}
+            case "$value" in
+              *[!0-9.]* | "" | *..* | .* | *.)
+                echo "::error::$name version '$value' is not a plain dotted number. If it is empty, the extractor stopped matching: check project.yml's package block for 'pinned', or sparkle-project's tag convention for 'latest'."
+                exit 1
+                ;;
+            esac
+          done
+
+          if [ "$pinned" = "$latest" ]; then
+            echo "Sparkle pin is current: $pinned"
+            exit 0
+          fi
+
+          # Direction matters. Pin newer than the latest RELEASE is a real
+          # state (a prerelease tag, or a release yanked upstream) and is not
+          # an issue worth filing — `gh release view` reports the latest
+          # non-prerelease, non-draft release, so upstream can legitimately
+          # sit behind. Only "upstream moved past us" gets an issue.
+          newest=$(printf '%s\n%s\n' "$pinned" "$latest" | sort -V | tail -1)
+          if [ "$newest" != "$latest" ]; then
+            echo "::warning::project.yml pins Sparkle $pinned, which is NEWER than the latest upstream release ($latest). Expected if the pin is a prerelease or upstream withdrew a release; otherwise the pin points at something that is not a published release."
+            exit 0
+          fi
+
+          echo "::warning::Sparkle $latest is available; project.yml pins $pinned."
+
+          body=$(cat <<EOF
+          \`project.yml\` pins Sparkle \`$pinned\`. The latest upstream release is [\`$latest\`](https://github.com/sparkle-project/Sparkle/releases/tag/$latest).
+
+          Read that release's notes before bumping — Canopy ships **delta updates**, so anything touching the delta or installer path matters here specifically. CLAUDE.md carries a **2.9.2 security floor** that is deliberately independent of the pin: do not raise it to match a bump.
+
+          To bump: edit the \`exactVersion\` line in \`project.yml\` and nothing else. \`xcodegen generate\` does not re-resolve — SwiftPM does that on the next build. Its own commit, so the diff says which Sparkle a release links.
+
+          Opened by [\`.github/workflows/sparkle-watch.yml\`](.github/workflows/sparkle-watch.yml) (issue #118). This body is rewritten on every run, so it always reflects the current upstream version; close it once the pin is bumped or the bump is deliberately declined.
+          EOF
+          )
+          # Dedupe on an exact title match over the open issues rather than
+          # on `--search`: the search index is eventually consistent, so a
+          # run soon after the previous one could miss its own issue and file
+          # a second. The title is fixed and the body carries the version, so
+          # this stays one issue across successive Sparkle releases.
+          #
+          # `first` inside the jq rather than a `| head -1` after it: with
+          # pipefail set, head closing the pipe early would SIGPIPE gh (exit
+          # 141) and abort the step, which is only reachable once two issues
+          # somehow share the title — i.e. exactly when this needs to keep
+          # working.
+          existing=$(gh issue list --state open --limit 200 --json number,title \
+            -q '[.[] | select(.title == env.ISSUE_TITLE) | .number] | first // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+            echo "updated existing issue #$existing"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body "$body"
+          fi

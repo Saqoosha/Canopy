@@ -37,6 +37,39 @@ jobs:
         with:
           node-version: "20"
 
+      # The step below names ONE file, so a `test/foo.test.js` added with 40
+      # tests in it would never run, never be counted, and never turn this
+      # red — `# pass N` stays where it was and the floor is still met
+      # (issue #119). That is the #113 shape one level up: the count floor
+      # only watches the contents of the file it was told about, not the
+      # suite.
+      #
+      # A `test/*.test.js` glob is not the fix, because it would sweep in
+      # shim-integration.test.js, which is excluded on purpose (see the next
+      # step's comment). So assert the SET instead: whoever adds a test file
+      # has to come here and say whether CI runs it. The exclusion survives,
+      # the silent miss does not.
+      #
+      # Fails closed in the case that matters most: when the glob matches
+      # nothing bash leaves the pattern unexpanded, so `found` is the
+      # literal `test/*.test.js`, which never equals the expected list.
+      # Measured, along with the added / removed / exact-match cases.
+      # LC_ALL=C on both sorts so the comparison cannot hinge on the
+      # runner's collation; `$KNOWN_TEST_FILES` is deliberately unquoted —
+      # word-splitting it into lines is the point.
+      - name: Assert the test file set
+        env:
+          KNOWN_TEST_FILES: "test/shim-unit.test.js test/shim-integration.test.js"
+        run: |
+          found=$(printf '%s\n' test/*.test.js | LC_ALL=C sort | tr '\n' ' ')
+          # shellcheck disable=SC2086  # splitting the list into words is the point
+          expected=$(printf '%s\n' $KNOWN_TEST_FILES | LC_ALL=C sort | tr '\n' ' ')
+          if [ "$found" != "$expected" ]; then
+            echo "::error::test/*.test.js is [$found], expected [$expected]. A new test file is NOT run by CI just by existing — the step below names its files explicitly. Add it there if it can run on ubuntu without the CC extension, then list it in KNOWN_TEST_FILES. If it cannot (like shim-integration.test.js), list it here anyway so the set stays asserted."
+            exit 1
+          fi
+          echo "test file set matches: $found"
+
       # Pure-logic tests over the shim modules: every filesystem path is
       # passed in by the test (mkdtemp under os.tmpdir()), never defaulted
       # by the module, so they need neither macOS nor the CC extension.
@@ -97,6 +130,21 @@ jobs:
       # to the current count rather than comfortably below it; slack is
       # exactly as many tests as can then disappear unnoticed.
       #
+      # A floor only ratchets when a human raises it, so slack accumulates
+      # silently — and the drift `::warning::` below is what makes it
+      # visible (issue #120). Not a hypothetical: during #117 the probe's
+      # floor sat NINE below actual for hours, because #115 merged nine
+      # assertions into main while that PR was open. Actions builds the
+      # merge ref, so the gap opened without anyone editing anything, in
+      # nobody's PR, and was found only by coincidence.
+      #
+      # It warns rather than fails on purpose: "adding tests is always
+      # green" is the whole design, and a PR that legitimately adds one
+      # must not be blocked on also editing this file. The cost is that
+      # such a PR shows a warning annotation on a green build. Accepted as
+      # the cheaper half of the trade — #117 tried asking humans in a
+      # comment instead, and the very next merge disproved it.
+      #
       # MAX_DURATION_MS catches a second exit-0 regression, measured during
       # PR #112: deleting the `timer.unref()` in the shim leaves a live
       # timer holding the event loop open, and the run goes from ~90 ms to
@@ -128,6 +176,9 @@ jobs:
           if [ "$passed" -lt "$EXPECTED_TESTS" ]; then
             echo "::error::only $passed tests passed, expected at least $EXPECTED_TESTS. If tests were removed on purpose, lower EXPECTED_TESTS in .github/workflows/ci.yml in the same commit."
             exit 1
+          fi
+          if [ "$passed" -gt "$EXPECTED_TESTS" ]; then
+            echo "::warning::EXPECTED_TESTS is $((passed - EXPECTED_TESTS)) below the actual count ($passed vs floor $EXPECTED_TESTS). Those tests are ungated — they can be deleted later and this job stays green. Raise EXPECTED_TESTS to $passed in .github/workflows/ci.yml."
           fi
           duration=$(awk '/^# duration_ms [0-9.]+$/ { v = $3 } END { if (v != "") print v }' "$RUNNER_TEMP/tap.log")
           if ! awk -v d="$duration" -v max="$MAX_DURATION_MS" 'BEGIN { exit !(d > 0 && d < max) }'; then
@@ -272,13 +323,22 @@ jobs:
       # equal to the current count, adding assertions is always green,
       # removing one always costs an edit here.
       #
-      # The cost of that asymmetry is real and was observed on this very
-      # PR: #115 merged nine of issue #108's assertions into main while
-      # this branch was
-      # open, so the floor sat nine below actual and nine could have gone
-      # missing unnoticed. Nothing warns about that — a floor only ratchets
-      # when a human raises it. So when you add assertions, raise this
-      # number in the same commit even though CI will not make you.
+      # The cost of that asymmetry is real and was observed on #117 itself:
+      # #115 merged nine of issue #108's assertions into main while that
+      # branch was open, so the floor sat nine below actual and nine could
+      # have gone missing unnoticed. Actions builds the merge ref, so the
+      # gap opened with no edit, in nobody's PR, and surfaced only by
+      # coincidence — a local-vs-CI count mismatch noticed for an unrelated
+      # reason.
+      #
+      # #117 responded by asking humans here to raise the number in the
+      # same commit. That request had already failed by the time it was
+      # written: #115's author had no way to know this floor existed. So
+      # the drift is now reported by the job instead (issue #120) — still a
+      # `::warning::`, because "adding assertions is always green" is the
+      # design and must not become a blocking edit. Raising it in the same
+      # commit is still the right habit; it is just no longer the only
+      # thing standing between slack and silence.
       #
       # Same reason for `awk` over
       # `sed -n p`, and LAST match rather than first — see that step's
@@ -313,5 +373,8 @@ jobs:
           if [ "$passed" -lt "$EXPECTED_ASSERTIONS" ]; then
             echo "::error::probe ran only $passed assertions, expected at least $EXPECTED_ASSERTIONS. If assertions were removed on purpose, lower EXPECTED_ASSERTIONS in .github/workflows/ci.yml in the same commit."
             exit 1
+          fi
+          if [ "$passed" -gt "$EXPECTED_ASSERTIONS" ]; then
+            echo "::warning::EXPECTED_ASSERTIONS is $((passed - EXPECTED_ASSERTIONS)) below the actual count ($passed vs floor $EXPECTED_ASSERTIONS). Those assertions are ungated — they can be deleted later and this job stays green. Raise EXPECTED_ASSERTIONS to $passed in .github/workflows/ci.yml. If this fires on a PR that added none, the gap came in via main (Actions builds the merge ref) — that is issue #120's exact accident."
           fi
           echo "$passed assertions passed (floor $EXPECTED_ASSERTIONS)"
