@@ -6,9 +6,35 @@ options:
   minimumXcodeGenVersion: "2.42.0"
 
 packages:
+  # exactVersion, not `from:`. `Package.resolved` is written inside
+  # `Canopy.xcodeproj/`, which is gitignored, so with an open range nothing
+  # in the repo constrained a resolve or recorded what it picked. Sparkle
+  # downloads and installs signed updates for the shipped app, so "which
+  # build is this" needs an answer here. See issue #114.
+  #
+  # Two failure modes, both measured before this pin landed (2026-08-01).
+  # Wherever a `Package.resolved` survived, the version FROZE: xcodegen
+  # does not rewrite that file (checked on 2.46.0) and an existing pin
+  # already satisfies a `from:` range, so the main checkout had been on
+  # 2.9.1 since 2026-03-30 and every Canopy release through 2.10.3 shipped
+  # it — straight past 2.9.2's security fixes. Wherever none existed — CI,
+  # a fresh clone, a new worktree — the resolve floated to whatever 2.x was
+  # newest, and then froze there in turn.
+  #
+  # `exactVersion` fixes a TAG, so an upstream retag would still change the
+  # linked bits. `revision:` and committing `Package.resolved` each close
+  # that and stay available (the latter needs a .gitignore carve-out git
+  # can descend into).
+  #
+  # Bumps are manual: edit this line only — CLAUDE.md quotes a 2.9.2
+  # security floor that is deliberately independent of the pin, so do not
+  # raise it to match. Own commit, so the diff says which Sparkle a release
+  # links. `xcodegen generate` writes the requirement into the pbxproj and
+  # touches nothing outside it — notably not `Package.resolved`; SwiftPM
+  # re-resolves on the next build.
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    from: 2.9.0
+    exactVersion: 2.9.4
 
 settings:
   base:

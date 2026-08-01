@@ -83,14 +83,28 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      # Sparkle is the only SPM dependency. project.yml records only its
-      # *minimum* version (`from: 2.9.0`), and Package.resolved lives
-      # inside the gitignored Canopy.xcodeproj, so nothing in the repo
-      # pins the resolved version — this cache makes builds faster, not
-      # reproducible. What it saves is the clone, not the resolution:
-      # xcodegen regenerates the project every run, so SwiftPM resolves
-      # every run regardless. restore-keys means an edited project.yml
-      # still restores the previous checkout rather than re-cloning.
+      # Sparkle is the only SPM dependency, and project.yml now pins it to
+      # an exact version (issue #114), so this cache no longer decides
+      # which Sparkle *version* resolves. It does still supply the bits:
+      # Sparkle is a binaryTarget, and the cached directory holds the
+      # already-extracted xcframework. SwiftPM's checksum covers the
+      # downloaded zip, which is gone after extraction, so a cache hit is
+      # not a verification boundary at all — the bytes are simply trusted.
+      # GitHub's cache scoping bounds who can write one (a PR branch reads
+      # main's cache, never writes into it —
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching),
+      # and nothing else does; cache contents are not signed. Accepted,
+      # because `-clonedSourcePackagesDirPath .spm-cache` appears only in
+      # this job — no release script uses it, so this cache cannot reach a
+      # shipped build.
+      #
+      # What it saves is the clone and the artifact download, not a pin:
+      # the checkout carries no Package.resolved (that lives in the
+      # gitignored Canopy.xcodeproj), so SwiftPM re-resolves against the
+      # pbxproj requirement every run. Any project.yml edit misses the
+      # exact key and falls through to restore-keys — and the key cannot
+      # single out a Sparkle bump, since release.sh rewrites
+      # MARKETING_VERSION in the same file on every release.
       - name: Cache SwiftPM checkouts
         uses: actions/cache@v6
         with:
