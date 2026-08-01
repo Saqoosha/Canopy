@@ -10,11 +10,9 @@ packages:
   # gitignored Canopy.xcodeproj and xcodegen regenerates that directory
   # every run, so the resolved revision never survives a checkout — with an
   # open range this line was the ONLY constraint and a cold resolve took
-  # whatever 2.x was newest that day. Local builds sat on 2.9.1 (resolved
-  # 2026-03-30, what every release through 2.10.3 shipped) while CI, which
-  # resolves cold on every run, would have taken 2.9.4. Sparkle is what
-  # downloads and installs signed updates for the shipped app, so "which
-  # build is this" has to have an answer in the repo. See issue #114.
+  # whatever 2.x was newest that day. Sparkle is what downloads and
+  # installs signed updates for the shipped app, so "which build is this"
+  # has to have an answer in the repo. See issue #114.
   #
   # Cost of the pin: patch updates are a manual bump of this one line.
   # When bumping, do it as its own commit so the diff says which Sparkle a
@@ -22,7 +20,7 @@ packages:
   # and re-verifies the binary artifact's checksum on download.
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    exactVersion: 2.9.1
+    exactVersion: 2.9.4
 
 settings:
   base:
