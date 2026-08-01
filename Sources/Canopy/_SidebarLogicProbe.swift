@@ -1825,6 +1825,123 @@ enum SidebarLogicProbe {
             record("context #106: subagent-tagged message rejected",
                    !ShimProcess.isMainConversationMessage(["type": "assistant", "parent_tool_use_id": "toolu_A"]),
                    "got=\(ShimProcess.isMainConversationMessage(["type": "assistant", "parent_tool_use_id": "toolu_A"]))")
+
+            // #108. These maps are `result.modelUsage` payloads from runs of
+            // `claude -p --output-format stream-json --verbose
+            // --include-partial-messages` against CLI 2.1.217, reduced to the
+            // two fields `mainModelUsage` reads. Capture conditions are named
+            // per map because they turned out to be load-bearing: the first
+            // revision of this block came entirely from runs that passed
+            // `--model`, which hid the default-configuration bug that
+            // `defaultOpusMain` now pins.
+            //
+            // These cannot detect CLI drift, and no comment here should imply
+            // they can: the maps are literals, so a CLI that renamed
+            // `contextWindow` would break production while leaving every case
+            // below green. Re-capture by hand when the `result` schema moves.
+
+            // `--model haiku`, one Opus subagent. The #108 regression.
+            let haikuMainOpusSubagent: [String: Any] = [
+                "claude-haiku-4-5-20251001": ["contextWindow": 200_000, "maxOutputTokens": 32_000],
+                "claude-opus-4-8[1m]": ["contextWindow": 1_000_000, "maxOutputTokens": 64_000],
+            ]
+            // `--model opus`, CLAUDE_CODE_DISABLE_1M_CONTEXT unset. Bare key,
+            // 1M window — the suffix tracks the resolved tier, not the role.
+            let opusMain: [String: Any] = [
+                "claude-opus-4-8": ["contextWindow": 1_000_000, "maxOutputTokens": 64_000],
+                "claude-haiku-4-5-20251001": ["contextWindow": 200_000, "maxOutputTokens": 32_000],
+            ]
+            // No `--model` at all — what Canopy's launcher sends by default.
+            // Here `init.model` was `claude-opus-4-8[1m]` and matches, while
+            // `message_start.model` was bare `claude-opus-4-8` and does not.
+            // The launcher's explicit `opus[1m]` option produced the same
+            // three strings, so this row covers two reachable selections.
+            let defaultOpusMain: [String: Any] = [
+                "claude-opus-4-8[1m]": ["contextWindow": 1_000_000, "maxOutputTokens": 64_000],
+            ]
+
+            // The regression itself: widest-wins returned 1,000,000 here.
+            let narrowMain = ShimProcess.mainModelUsage(
+                modelUsage: haikuMainOpusSubagent, mainModel: "claude-haiku-4-5-20251001"
+            )
+            record("context #108: a subagent's wider window is not adopted",
+                   narrowMain?.contextWindow == 200_000 && narrowMain?.maxOutputTokens == 32_000,
+                   "got=\(String(describing: narrowMain))")
+
+            // The case widest-wins got right, which must keep working.
+            let wideMain = ShimProcess.mainModelUsage(
+                modelUsage: opusMain, mainModel: "claude-opus-4-8"
+            )
+            record("context #108: main model that IS the widest still resolves",
+                   wideMain?.contextWindow == 1_000_000 && wideMain?.maxOutputTokens == 64_000,
+                   "got=\(String(describing: wideMain))")
+
+            // A miss must not degrade into the old heuristic. If this ever
+            // starts returning the 1,000,000 entry, the fix has been undone.
+            record("context #108: unknown main model yields nil, not the widest entry",
+                   ShimProcess.mainModelUsage(
+                       modelUsage: haikuMainOpusSubagent, mainModel: "claude-sonnet-5"
+                   ) == nil,
+                   "got=\(String(describing: ShimProcess.mainModelUsage(modelUsage: haikuMainOpusSubagent, mainModel: "claude-sonnet-5")))")
+
+            // The default-configuration regression, both directions. With no
+            // `--model`, `message_start.model` is bare and misses while
+            // `init.model` carries `[1m]` and hits. Feeding the bare string
+            // here reproduces exactly what the first revision of #108 shipped:
+            // a permanent miss, so `contextMax` is never written — which
+            // hides the meter outright on a directory with no cached pair,
+            // and leaves a previous model's numbers standing on one that has.
+            record("context #108: a bare model id does not match a [1m] key (the default-config miss)",
+                   ShimProcess.mainModelUsage(
+                       modelUsage: defaultOpusMain, mainModel: "claude-opus-4-8"
+                   ) == nil,
+                   "expected nil")
+            let resolvedDefault = ShimProcess.mainModelUsage(
+                modelUsage: defaultOpusMain, mainModel: "claude-opus-4-8[1m]"
+            )
+            record("context #108: the CLI's resolved [1m] id is what resolves",
+                   resolvedDefault?.contextWindow == 1_000_000
+                       && resolvedDefault?.maxOutputTokens == 64_000,
+                   "got=\(String(describing: resolvedDefault))")
+
+            // Before the first `system`/`init`, `cliResolvedModel` is "".
+            record("context #108: empty main model yields nil",
+                   ShimProcess.mainModelUsage(modelUsage: opusMain, mainModel: "") == nil,
+                   "expected nil")
+
+            record("context #108: entry without a usable contextWindow yields nil",
+                   ShimProcess.mainModelUsage(
+                       modelUsage: ["m": ["maxOutputTokens": 32_000]], mainModel: "m"
+                   ) == nil
+                       && ShimProcess.mainModelUsage(
+                           modelUsage: ["m": ["contextWindow": 0]], mainModel: "m"
+                       ) == nil,
+                   "expected nil for both the missing and the zero case")
+
+            // Mirrors the pre-#108 `?? 0`; `hasTrustedThresholds` is what
+            // refuses to derive levels from the zero, not this function.
+            record("context #108: missing maxOutputTokens degrades to 0, not to a nil result",
+                   ShimProcess.mainModelUsage(
+                       modelUsage: ["m": ["contextWindow": 200_000]], mainModel: "m"
+                   )?.maxOutputTokens == 0,
+                   "got=\(String(describing: ShimProcess.mainModelUsage(modelUsage: ["m": ["contextWindow": 200_000]], mainModel: "m")))")
+
+            // The `.v2` infix is the whole of the cache migration, and it is
+            // spelled independently in two functions, so this pins the
+            // spelling. It does NOT pin the adjacent trap, which is worth
+            // documenting anyway because there is nowhere better: the retired
+            // v1 strings are still hardcoded at the restore site, so "DRY that
+            // up" by swapping in these helpers would delete the v2 key the
+            // line above just read. The restore has already happened by then
+            // and every successful `result` rewrites the pair, so the damage
+            // is bounded: any session ending before its first completed turn
+            // leaves the next launch with no warm start. This case would stay
+            // green through all of it.
+            let probeDir = URL(fileURLWithPath: "/probe/dir")
+            record("context #108: cache keys carry .v2, are distinct, and are not the retired keys",
+                   ShimProcess.contextMaxKey(probeDir) == "statusBar.contextMax.v2./probe/dir"
+                       && ShimProcess.maxOutputTokensKey(probeDir) == "statusBar.maxOutputTokens.v2./probe/dir",
+                   "ctx=\(ShimProcess.contextMaxKey(probeDir)) out=\(ShimProcess.maxOutputTokensKey(probeDir))")
         }
 
         // MARK: - Panes
