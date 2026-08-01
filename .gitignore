@@ -10,3 +10,4 @@ firebase-debug.log
 Resources/prism/
 tmp/
 .claude/scheduled_tasks.lock
+.spm-cache/

@@ -297,4 +297,11 @@ node --test test/shim-unit.test.js
 
 # Integration tests (needs CC extension installed, slow ~60s)
 node --test --test-timeout 120000 test/shim-integration.test.js
+
+# Swift logic probe (~210 pure-logic assertions; needs a DEBUG build)
+CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy
 ```
+
+`.github/workflows/ci.yml` runs the shim unit tests (ubuntu) and the logic probe (macos-15) on every push to `main` and every PR. The probe half builds Debug **ad-hoc signed** — CI has no keychain for the Developer ID identity `project.yml` pins, and ad-hoc rather than `CODE_SIGNING_ALLOWED=NO` because arm64 refuses to execute a wholly unsigned binary. That works only because the probe exits inside `applicationDidFinishLaunching`, before anything TCC-gated or entitlement-dependent runs. The integration tests are deliberately not in CI: they spawn the real `extension.js` from `~/.vscode/extensions`, which no runner has.
+
+`SidebarLogicProbe.runIfRequested` exits on the **failure counter**, never on a substring of the rendered report — the report interpolates test names and detail strings, so a `summary.contains("FAIL")` check turns any future case that merely mentions the word into a red build with no red line in it.

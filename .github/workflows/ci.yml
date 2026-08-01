@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shim-tests:
+    name: vscode-shim unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Pure-logic tests over the shim modules — every path they touch is
+      # injected (os.tmpdir()), so they need neither macOS nor the CC
+      # extension. test/shim-integration.test.js deliberately is NOT run
+      # here: it spawns the real extension.js from ~/.vscode/extensions,
+      # which no runner has.
+      - name: Run shim unit tests
+        run: node --test test/shim-unit.test.js
+
+  logic-probe:
+    name: Swift logic probe
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # Sparkle is the only SPM dependency; keyed on project.yml so a
+      # version bump busts the cache.
+      - name: Cache SwiftPM checkouts
+        uses: actions/cache@v4
+        with:
+          path: .spm-cache
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # Ad-hoc signing ("Sign to Run Locally"). project.yml pins the
+      # Developer ID identity so Debug and Release share one TCC row on a
+      # dev machine — CI has no keychain, and the probe exits inside
+      # applicationDidFinishLaunching before touching any TCC-gated path,
+      # so it needs no entitlement grants. Ad-hoc rather than
+      # CODE_SIGNING_ALLOWED=NO because arm64 refuses to execute a wholly
+      # unsigned binary.
+      - name: Build (Debug, ad-hoc signed)
+        run: |
+          xcodebuild \
+            -project Canopy.xcodeproj \
+            -scheme Canopy \
+            -configuration Debug \
+            -derivedDataPath build/ci-derived \
+            -clonedSourcePackagesDirPath .spm-cache \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="-" \
+            DEVELOPMENT_TEAM="" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp=none" \
+            build
+
+      # The probe runs at applicationDidFinishLaunching and exits with the
+      # failure count — no window is ever shown. Run the executable
+      # directly, not `open`, so the exit code reaches the shell.
+      - name: Run logic probe
+        timeout-minutes: 5
+        run: |
+          CANOPY_RUN_LOGIC_PROBE=1 \
+            ./build/ci-derived/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy

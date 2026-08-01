@@ -16,13 +16,18 @@ enum SidebarLogicProbe {
 
     static func runIfRequested() {
         guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] == "1" else { return }
-        let summary = runAllTests()
-        logger.info("\(summary, privacy: .public)")
-        FileHandle.standardError.write(Data((summary + "\n").utf8))
-        exit(summary.contains("FAIL") ? 1 : 0)
+        let result = runAllTests()
+        logger.info("\(result.summary, privacy: .public)")
+        FileHandle.standardError.write(Data((result.summary + "\n").utf8))
+        // Exit on the counter, never on a substring of the rendered report.
+        // The report interpolates test names and detail strings, so scanning
+        // it for "FAIL" makes any future case that merely *mentions* the word
+        // fail the whole run with everything green — a red CI build with no
+        // red line in it.
+        exit(result.failures == 0 ? 0 : 1)
     }
 
-    static func runAllTests() -> String {
+    static func runAllTests() -> (summary: String, failures: Int) {
         var pass = 0
         var fail = 0
         var lines: [String] = ["=== Sidebar logic probe ==="]
@@ -2007,7 +2012,7 @@ enum SidebarLogicProbe {
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
-        return lines.joined(separator: "\n")
+        return (lines.joined(separator: "\n"), fail)
     }
 
     private static func writeProbeJSONL(_ contents: String) -> String? {
