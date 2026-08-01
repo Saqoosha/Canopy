@@ -7,32 +7,30 @@ options:
 
 packages:
   # exactVersion, not `from:`. `Package.resolved` is written inside
-  # `Canopy.xcodeproj/`, which is gitignored — so a fresh clone has none,
-  # no diff ever records which Sparkle a commit links, and with an open
-  # range this line was the only constraint a cold resolve had. Sparkle is
-  # what downloads and installs signed updates for the shipped app, so
-  # "which build is this" needs an answer in the repo. See issue #114.
+  # `Canopy.xcodeproj/`, which is gitignored, so with an open range nothing
+  # in the repo constrained a resolve or recorded what it picked. Sparkle
+  # downloads and installs signed updates for the shipped app, so "which
+  # build is this" needs an answer here. See issue #114.
   #
-  # xcodegen does NOT rewrite that file — measured with 2.46.0: `xcodegen
-  # generate` rewrites project.pbxproj and leaves
-  # project.xcworkspace/xcshareddata/swiftpm/ untouched, and does not
-  # resolve at all. So the failure this pin fixes was a silent freeze, not
-  # drift: this machine resolved once on 2026-03-30 and never again — the
-  # installed Canopy 2.10.3 still bundles Sparkle 2.9.1, straight through
-  # 2.9.2's two security fixes. CI, whose checkout has no Package.resolved
-  # at all, would have taken 2.9.4 instead.
+  # Two failure modes, both measured. Wherever a `Package.resolved`
+  # survived, the version FROZE: xcodegen does not rewrite that file
+  # (checked on 2.46.0) and an existing pin already satisfies a `from:`
+  # range, so the main checkout has resolved 2.9.1 since 2026-03-30 and the
+  # installed 2.10.3 still bundles it — straight past 2.9.2's security
+  # fixes. Wherever none existed — CI, a fresh clone, a new worktree — the
+  # resolve floated to whatever 2.x was newest.
   #
-  # What the pin does not buy: `exactVersion` fixes a TAG, not a revision,
-  # so an upstream retag would change the linked bits with no diff here.
-  # Committing Package.resolved is the stronger fix and stays available —
-  # it does survive xcodegen — but needs a .gitignore carve-out git can
-  # descend into, since `Canopy.xcodeproj/` excludes the whole directory.
+  # `exactVersion` fixes a TAG, so an upstream retag would still change the
+  # linked bits. `revision:` and committing `Package.resolved` each close
+  # that and stay available (the latter needs a .gitignore carve-out git
+  # can descend into).
   #
-  # Cost of the pin: bumps are manual — this line, plus the floor quoted in
-  # CLAUDE.md. Do it as its own commit so the diff says which Sparkle a
-  # release links. `xcodegen generate` only rewrites the requirement in the
-  # pbxproj; SwiftPM re-resolves on the next build, and that download is
-  # where the binary artifact's checksum is verified.
+  # Bumps are manual: edit this line only — CLAUDE.md quotes a 2.9.2
+  # security floor that is deliberately independent of the pin, so do not
+  # raise it to match. Own commit, so the diff says which Sparkle a release
+  # links. `xcodegen generate` rewrites the requirement in the pbxproj and
+  # nothing else; SwiftPM re-resolves on the next build, which is where the
+  # artifact checksum is verified.
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.9.4
