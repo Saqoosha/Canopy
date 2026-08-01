@@ -2009,7 +2009,13 @@ enum SidebarLogicProbe {
                    && storeLaunchOk.focusedPaneIndex == 1)
         }
 
-        // Summary
+        // Summary. CI parses this line and fails the job when `pass` drops
+        // below `EXPECTED_ASSERTIONS` in .github/workflows/ci.yml — the exit
+        // code cannot tell "every assertion passed" from "half of them never
+        // ran", and this function is long enough that a dropped block is a
+        // realistic way to lose coverage silently. Removing assertions on
+        // purpose means lowering that number in the same commit; adding them
+        // needs no change. Keep the format in step with the sed there.
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
     }

@@ -45,8 +45,53 @@ jobs:
       # test/shim-integration.test.js deliberately is NOT run here: it
       # spawns the real extension.js from ~/.vscode/extensions, which no
       # runner has.
+      #
+      # Two reporters, because the exit code alone gates nothing: `node
+      # --test` exits 0 over a file containing zero tests (measured on node
+      # 20 — only a *missing* file exits 1), so emptying shim-unit.test.js,
+      # or every `it()` becoming `it.skip()`, would pass. `spec` goes to the
+      # log for humans; `tap` goes to a file because its `# pass N` summary
+      # is plain ASCII and stable, unlike the spec reporter's `ℹ pass N`.
+      # Only the top-level summary is unindented, so `^# pass ` cannot match
+      # a subtest's.
+      #
+      # EXPECTED_TESTS is a floor, not an equality: adding tests never turns
+      # this red, removing one always does. That is the intended trade — a
+      # deliberate removal is supposed to cost an edit here. Keep it equal
+      # to the current count rather than comfortably below it; slack is
+      # exactly as many tests as can then disappear unnoticed.
+      #
+      # MAX_DURATION_MS catches a second exit-0 regression, measured during
+      # PR #112: deleting the `timer.unref()` in the shim leaves a live
+      # timer holding the event loop open, and the run goes from ~90 ms to
+      # ~60 s while still exiting 0. The job's timeout-minutes sits far
+      # above 60 s, so nothing notices. The ceiling is deliberately ~300x
+      # the local runtime and still well under that 60 s signature — a
+      # loaded runner cannot reach it, a leaked timer always does.
       - name: Run shim unit tests
-        run: node --test test/shim-unit.test.js
+        env:
+          EXPECTED_TESTS: 101
+          MAX_DURATION_MS: 30000
+        run: |
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/tap.log" \
+            test/shim-unit.test.js
+          passed=$(sed -n 's/^# pass \([0-9][0-9]*\)$/\1/p' "$RUNNER_TEMP/tap.log")
+          if [ -z "$passed" ]; then
+            echo "::error::node --test printed no TAP summary — the runner never finished. This is not a failing test; look above for a crash or a missing file."
+            exit 1
+          fi
+          if [ "$passed" -lt "$EXPECTED_TESTS" ]; then
+            echo "::error::only $passed tests passed, expected at least $EXPECTED_TESTS. If tests were removed on purpose, lower EXPECTED_TESTS in .github/workflows/ci.yml in the same commit."
+            exit 1
+          fi
+          duration=$(sed -n 's/^# duration_ms \([0-9.]*\)$/\1/p' "$RUNNER_TEMP/tap.log")
+          if ! awk -v d="$duration" -v max="$MAX_DURATION_MS" 'BEGIN { exit !(d > 0 && d < max) }'; then
+            echo "::error::suite took ${duration}ms, ceiling ${MAX_DURATION_MS}ms — the tests themselves are fast, so this is the event loop being held open after they finish (a timer that lost its .unref())."
+            exit 1
+          fi
+          echo "$passed tests passed in ${duration}ms (floor $EXPECTED_TESTS, ceiling ${MAX_DURATION_MS}ms)"
 
   logic-probe:
     name: Swift logic probe
@@ -140,8 +185,42 @@ jobs:
       # every assertion passed, 1 when any failed — no window is ever
       # shown. Run the executable directly, not `open`, so the exit code
       # reaches the shell.
+      #
+      # The exit code alone is not a gate, for two separate reasons.
+      # (1) runAllTests is one ~2000-line straight-line function, so a
+      # future early `return`, a `#if` that excludes a block, or a merge
+      # that drops a section all yield `failures == 0` → exit 0 → green
+      # with a fraction of the assertions run. The floor below is what
+      # makes "the context-meter block silently disappeared" red.
+      # (2) exit 1 is ambiguous between "assertions failed" and "the app
+      # never launched" (DEBUG not defined, WindowServer unavailable, a
+      # crash before the probe). Checking for the summary line first
+      # separates them, so the two do not read identically in the log.
+      #
+      # Floor semantics are the same as EXPECTED_TESTS on the shim job:
+      # equal to the current count, adding assertions is always green,
+      # removing one always costs an edit here.
       - name: Run logic probe
         timeout-minutes: 5
+        env:
+          EXPECTED_ASSERTIONS: 210
         run: |
+          set -o pipefail
+          status=0
           CANOPY_RUN_LOGIC_PROBE=1 \
-            ./build/ci-derived/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy
+            ./build/ci-derived/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy \
+            2>&1 | tee "$RUNNER_TEMP/probe.log" || status=$?
+          passed=$(sed -n 's/^--- \([0-9][0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/probe.log")
+          if [ -z "$passed" ]; then
+            echo "::error::probe printed no summary line (exit $status) — it never reached the end of runAllTests. Not an assertion failure: look above for a launch failure or a crash."
+            exit 1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "::error::probe reported failing assertions (exit $status) — grep the log above for lines starting with '  FAIL '."
+            exit "$status"
+          fi
+          if [ "$passed" -lt "$EXPECTED_ASSERTIONS" ]; then
+            echo "::error::probe ran only $passed assertions, expected at least $EXPECTED_ASSERTIONS. If assertions were removed on purpose, lower EXPECTED_ASSERTIONS in .github/workflows/ci.yml in the same commit."
+            exit 1
+          fi
+          echo "$passed assertions passed (floor $EXPECTED_ASSERTIONS)"
