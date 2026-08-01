@@ -24,7 +24,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # persist-credentials: false — neither job runs git after checkout,
+      # so there is no reason to leave the token in .git/config where a
+      # later step (or a cached artifact) could pick it up.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
@@ -56,6 +61,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # Printed so a future image bump that moves the default Xcode is
       # diagnosable from the log rather than from 20 confusing errors.
