@@ -6,8 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Neither job uses GITHUB_TOKEN for anything; without this block they would
-# inherit whatever the repository default is.
+# Only actions/checkout needs the token, to fetch. Nothing here writes.
+# Without this block both jobs would inherit whatever the repository
+# default is.
 permissions:
   contents: read
 
@@ -24,9 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # persist-credentials: false — neither job runs git after checkout,
-      # so there is no reason to leave the token in .git/config where a
-      # later step (or a cached artifact) could pick it up.
+      # persist-credentials: false — neither job runs git against THIS repo
+      # after checkout (SwiftPM does clone Sparkle, but into its own
+      # working copy), so there is no reason to leave the token in
+      # .git/config where a later step or a cached artifact could pick it up.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -48,15 +50,22 @@ jobs:
 
   logic-probe:
     name: Swift logic probe
-    # macos-26, NOT macos-15. The macos-15 image ships Xcode 16.4, under
-    # which this codebase does not compile at all: ~20 strict-concurrency
-    # errors of the "main actor-isolated X can not be referenced from a
-    # Sendable closure" family, across ShimProcess / CanopyApp /
+    # macos-26 because macos-15 DEFAULTS to Xcode 16.4, under which this
+    # codebase does not compile at all: exactly 20 main-actor-isolation
+    # errors (mostly "call to main actor-isolated X in a synchronous
+    # nonisolated context"), across ShimProcess / CanopyApp /
     # WebViewContainer / ContentViewer / InputWidthProbe. They are not
-    # defects — Swift 6.2 (Xcode 26) infers @MainActor isolation for the
-    # AppKit callback closures that raise them, and the whole app is
-    # written against that inference. Xcode 26 is the floor, so the runner
-    # has to be the macOS 26 image.
+    # defects — the failing sites are ordinary Foundation callback
+    # closures (NotificationCenter, FileHandle.readabilityHandler, Timer,
+    # a DispatchQueue.global block) that the newer toolchain accepts and
+    # the older one does not.
+    #
+    # Not the only fix available: the macos-15 image also carries Xcode 26
+    # builds, so DEVELOPER_DIR / xcode-select would work too. This is the
+    # simplest way to get a toolchain that compiles, not the required one.
+    # Tested pairs only: Xcode 16.4 / Swift 6.1.2 fails, Xcode 26.6 /
+    # Swift 6.3.3 passes (both here and on the runner). Nothing between
+    # has been built.
     runs-on: macos-26
     timeout-minutes: 30
     steps:
@@ -78,8 +87,10 @@ jobs:
       # *minimum* version (`from: 2.9.0`), and Package.resolved lives
       # inside the gitignored Canopy.xcodeproj, so nothing in the repo
       # pins the resolved version — this cache makes builds faster, not
-      # reproducible. restore-keys means an edited project.yml still
-      # restores the previous checkout rather than re-resolving.
+      # reproducible. What it saves is the clone, not the resolution:
+      # xcodegen regenerates the project every run, so SwiftPM resolves
+      # every run regardless. restore-keys means an edited project.yml
+      # still restores the previous checkout rather than re-cloning.
       - name: Cache SwiftPM checkouts
         uses: actions/cache@v6
         with:
@@ -91,10 +102,11 @@ jobs:
         run: xcodegen generate
 
       # `-configuration Debug` is load-bearing, not just faster:
-      # SidebarLogicProbe is `#if DEBUG`. A Release build compiles the
-      # probe out entirely, so the app would launch normally, show a
-      # window, never call exit(), and sit there until the next step's
-      # timeout — five red minutes whose message says nothing about why.
+      # SidebarLogicProbe is `#if DEBUG`, so a Release build compiles the
+      # probe out entirely and the app launches for real instead of
+      # exiting. (Changing only this flag fails fast, because the next
+      # step hardcodes Products/Debug; change both and you get five red
+      # minutes at the step timeout with no hint of why.)
       #
       # Ad-hoc signing ("Sign to Run Locally") because CI has no keychain
       # holding the Developer ID identity project.yml pins for both Debug
@@ -105,9 +117,10 @@ jobs:
       # That override means this job exercises a THIRD signing
       # configuration: project.yml pins Developer ID, scripts/
       # build_debug_stable.sh overrides to Apple Development +
-      # sh.saqoo.Canopy.debug, and this overrides to ad-hoc + the release
-      # bundle id. A green run here says nothing about whether
-      # build_debug_stable.sh or release.sh still sign correctly.
+      # sh.saqoo.Canopy.debug, and this overrides to ad-hoc while leaving
+      # the project's default bundle id. A green run here says nothing
+      # about whether build_debug_stable.sh or release.sh still sign
+      # correctly.
       - name: Build (Debug, ad-hoc signed)
         run: |
           xcodebuild \
