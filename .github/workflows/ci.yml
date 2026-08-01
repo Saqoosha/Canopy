@@ -6,9 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Only actions/checkout needs the token, to fetch. Nothing here writes.
-# Without this block both jobs would inherit whatever the repository
-# default is.
+# Nothing here writes; the token is only used to fetch (actions/checkout
+# and actions/setup-node both take it). Without this block both jobs
+# would inherit whatever the repository default is.
 permissions:
   contents: read
 
@@ -51,21 +51,21 @@ jobs:
   logic-probe:
     name: Swift logic probe
     # macos-26 because macos-15 DEFAULTS to Xcode 16.4, under which this
-    # codebase does not compile at all: exactly 20 main-actor-isolation
-    # errors (mostly "call to main actor-isolated X in a synchronous
-    # nonisolated context"), across ShimProcess / CanopyApp /
-    # WebViewContainer / ContentViewer / InputWidthProbe. They are not
-    # defects — the failing sites are ordinary Foundation callback
-    # closures (NotificationCenter, FileHandle.readabilityHandler, Timer,
-    # a DispatchQueue.global block) that the newer toolchain accepts and
-    # the older one does not.
+    # codebase does not compile at all: ~20 errors, all but one about
+    # actor isolation, spread across ShimProcess / CanopyApp /
+    # WebViewContainer / ContentViewer / InputWidthProbe (that file list
+    # is exact). They are not defects — the sites are callback and
+    # nonisolated contexts that the newer toolchain accepts and the older
+    # one rejects. Read the failing run for the actual list rather than
+    # trusting a summary here; earlier attempts to characterise the set
+    # in one sentence were wrong twice.
     #
     # Not the only fix available: the macos-15 image also carries Xcode 26
     # builds, so DEVELOPER_DIR / xcode-select would work too. This is the
     # simplest way to get a toolchain that compiles, not the required one.
-    # Tested pairs only: Xcode 16.4 / Swift 6.1.2 fails, Xcode 26.6 /
-    # Swift 6.3.3 passes (both here and on the runner). Nothing between
-    # has been built.
+    # Only two pairs have been built: Xcode 16.4 / Swift 6.1.2 fails (on
+    # the runner), Xcode 26.6 / Swift 6.3.3 passes (runner and dev
+    # machine). Nothing between has been tried.
     runs-on: macos-26
     timeout-minutes: 30
     steps:
