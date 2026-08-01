@@ -2015,7 +2015,13 @@ enum SidebarLogicProbe {
         // ran", and this function is long enough that a dropped block is a
         // realistic way to lose coverage silently. Removing assertions on
         // purpose means lowering that number in the same commit; adding them
-        // needs no change. Keep the format in step with the sed there.
+        // needs no change. Keep the format in step with the awk there.
+        //
+        // Counting `record(` in this file will NOT give you that number, and
+        // the gap is expected: 214 call sites, of which four run only when
+        // something failed (the `catch` and the three `else { … "write
+        // failed" }` twins), so a green run reports 210. Run the probe to
+        // get the figure; don't derive it by grep.
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
     }
