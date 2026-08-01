@@ -56,18 +56,27 @@ jobs:
       # — subtests emit `# Subtest:` lines and never their own `# pass` — so
       # `^# pass ` matches at most one line. (Indentation is NOT what makes
       # that true: top-level `# Subtest:` lines are unindented too. What
-      # rules out forgery is that node escapes `#` in a test's captured
-      # stdout, so `console.log('# pass 999')` reaches the log as `# \#`.)
+      # rules out forgery is that the TAP reporter escapes `#` in a test's
+      # captured stdout, so `console.log('# pass 999')` reaches the log as
+      # `# \# pass 999`. That is reporter-specific, and it is a second
+      # reason the counts are read from `tap` rather than from `spec`:
+      # measured, `spec` passes the same line through unescaped.)
       #
-      # Counts are extracted with `awk '... { print; exit }'`, not `sed -n
-      # p`, and the difference is load-bearing rather than stylistic. `sed`
+      # Counts are extracted with `awk '... { print $N; exit }'`, not `sed
+      # -n p`, and the difference is load-bearing rather than stylistic. `sed`
       # prints EVERY match, so a second matching line would make `passed`
       # multi-line — and `[ "$passed" -lt N ]` on a non-integer exits 2,
       # which `if` reads as false, skipping the error branch and letting
       # the step reach its final `echo` and exit 0. That is a false green
       # inside the very check that exists to prevent false greens. `awk`
       # with `exit` yields exactly one digit-run or nothing, and nothing is
-      # already handled below.
+      # already handled below. Note this hardens only the LEFT operand: an
+      # `EXPECTED_*` that was not a plain integer would fail open the same
+      # way. It cannot be one today — both are literals a few lines up —
+      # but that stops being true the moment either is sourced from a
+      # `vars.*` expression, and the obvious `awk` rewrite does not help
+      # (an empty operand degenerates to a string compare that returns
+      # true, i.e. also open). Validate both operands if that day comes.
       #
       # EXPECTED_TESTS is a floor, not an equality: adding tests never turns
       # this red, removing one always does. That is the intended trade — a
@@ -82,10 +91,12 @@ jobs:
       # above 60 s, so nothing notices. That 60 s is not a coincidence — it
       # is `Resources/vscode-shim/notifications.js`'s own timeout constant,
       # so this ceiling only detects that leak while the constant stays
-      # above it. The ceiling sits at ~300x the observed runtime (90 ms
-      # local, 193 ms on the ubuntu runner) and at half the 60 s signature.
-      # Half, not "far below": raising it much further would start eating
-      # into the thing it detects.
+      # above it. Headroom, measured rather than estimated: ~90 ms locally
+      # (~330x) and 174–193 ms across this PR's own runs on the ubuntu
+      # runner (~155–170x) — runner timing varies ~10% run to run, so
+      # treat those as a range, not a constant. Against the leak it is half
+      # of 60 s, not "far below": raising the ceiling much further would
+      # start eating into the thing it detects.
       - name: Run shim unit tests
         env:
           EXPECTED_TESTS: 101
@@ -97,7 +108,7 @@ jobs:
             test/shim-unit.test.js
           passed=$(awk '/^# pass [0-9]+$/ { print $3; exit }' "$RUNNER_TEMP/tap.log")
           if [ -z "$passed" ]; then
-            echo "::error::no '# pass N' line in the TAP output. A failing or missing test file exits non-zero and never reaches this check, so the likely cause is the reporter's summary format changing, or tap.log not being written."
+            echo "::error::no '# pass N' line in the TAP output. A failing or missing test file exits non-zero and the step's implicit 'bash -e' aborts before this line, so neither is the cause here: look for the reporter's summary format changing, or tap.log being written empty."
             exit 1
           fi
           if [ "$passed" -lt "$EXPECTED_TESTS" ]; then
@@ -106,7 +117,7 @@ jobs:
           fi
           duration=$(awk '/^# duration_ms [0-9.]+$/ { print $3; exit }' "$RUNNER_TEMP/tap.log")
           if ! awk -v d="$duration" -v max="$MAX_DURATION_MS" 'BEGIN { exit !(d > 0 && d < max) }'; then
-            echo "::error::suite duration '${duration}' is not under ${MAX_DURATION_MS}ms. If it is a large number, the tests themselves are fast, so something is holding the event loop open after they finish — a timer that lost its .unref() is the known case. If it is blank, the duration line could not be parsed."
+            echo "::error::suite duration '${duration}' is not under ${MAX_DURATION_MS}ms. The suite runs in ~200ms today, so a large number here is almost certainly something holding the event loop open after the tests finish — a timer that lost its .unref() is the known case. If it is blank, the duration line could not be parsed."
             exit 1
           fi
           echo "$passed tests passed in ${duration}ms (floor $EXPECTED_TESTS, ceiling ${MAX_DURATION_MS}ms)"
@@ -205,29 +216,42 @@ jobs:
       # reaches the shell.
       #
       # The exit code alone is not a gate, for two separate reasons.
-      # (1) runAllTests is one ~2000-line straight-line function, so a
+      # (1) runAllTests is one ~2000-line function with no test registry —
+      # a flat sequence of assertions rather than cases something iterates
+      # over, so nothing notices when a stretch of it stops running. Thus a
       # future early `return`, a `#if` that excludes a block, or a merge
       # that drops a section all yield `failures == 0` → exit 0 → green
       # with a fraction of the assertions run. The floor below is what
       # makes "the context-meter block silently disappeared" red.
-      # (2) exit 1 is ambiguous between "assertions failed" and "the app
-      # never launched" (WindowServer unavailable, a crash before the
-      # probe). Checking for the summary line first separates them, so the
-      # two do not read identically in the log. Note this does NOT cover a
+      # (2) a non-zero exit is ambiguous between "assertions failed" and
+      # "the app never launched" (WindowServer unavailable, a crash before
+      # the probe — which arrives as 128+signal, not 1, hence the checks
+      # below test `-ne 0` rather than `-eq 1`). Checking for the summary
+      # line first separates them, so the two do not read identically in
+      # the log. Note this does NOT cover a
       # Release build: there the probe is compiled out, the app launches
       # for real and never exits, and the step dies at timeout-minutes
       # without reaching any of these checks — see the build step above.
       #
-      # `2>&1` is load-bearing, not noise: the summary is written to
-      # STDERR only (`FileHandle.standardError.write` in the probe).
-      # Dropping it while tidying the pipe makes every run fail with "no
-      # summary line", pointing at a launch failure that did not happen.
+      # `2>&1` is load-bearing, not noise: the summary reaches this pipe
+      # only via stderr (`FileHandle.standardError.write` in the probe).
+      # There is a second copy — `logger.info` — but it goes to the unified
+      # log, which is not piped. Dropping the redirect while tidying makes
+      # every run fail with "no summary line", pointing at a launch failure
+      # that did not happen.
       #
       # Floor semantics are the same as EXPECTED_TESTS on the shim job:
       # equal to the current count, adding assertions is always green,
-      # removing one always costs an edit here. Same `awk … exit` extractor
-      # for the same reason — see that step's comment; a multi-line capture
-      # would turn the floor check into a no-op that still exits 0.
+      # removing one always costs an edit here. Same reason for `awk` over
+      # `sed -n p` — see that step's comment; a multi-line capture would
+      # turn the floor check into a no-op that still exits 0. The extractor
+      # itself differs though: LAST match, not first. The shim job can take
+      # the first because TAP escapes `#` in captured output, so no line
+      # before the counts block can impersonate one. This stream has no
+      # such guarantee — it is the app's raw merged stdout+stderr — while
+      # the summary is unconditionally the last thing the probe writes
+      # before `exit()`. So last-match is the safe end here and first-match
+      # is the safe end there; they are not interchangeable.
       - name: Run logic probe
         timeout-minutes: 5
         env:
@@ -238,9 +262,9 @@ jobs:
           CANOPY_RUN_LOGIC_PROBE=1 \
             ./build/ci-derived/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy \
             2>&1 | tee "$RUNNER_TEMP/probe.log" || status=$?
-          passed=$(awk '/^--- [0-9]+ passed/ { print $2; exit }' "$RUNNER_TEMP/probe.log")
+          passed=$(awk '/^--- [0-9]+ passed/ { v = $2 } END { if (v != "") print v }' "$RUNNER_TEMP/probe.log")
           if [ -z "$passed" ]; then
-            echo "::error::no '--- N passed' line in the probe output (exit $status). Not an assertion failure: either the probe never reached the end of runAllTests (look above for a launch failure or a crash), or its summary format no longer matches this awk."
+            echo "::error::no '--- N passed' line in the probe output (exit $status). Not a recorded assertion failure: either the probe never reached the end of runAllTests (look above for a launch failure, a tripped precondition, or a crash), or its summary format no longer matches this awk."
             exit 1
           fi
           if [ "$status" -ne 0 ]; then
