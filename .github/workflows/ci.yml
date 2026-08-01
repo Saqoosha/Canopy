@@ -86,11 +86,12 @@ jobs:
       # Sparkle is the only SPM dependency, and project.yml now pins it to
       # an exact version (issue #114), so this cache no longer decides
       # which Sparkle *version* resolves. It does still supply the bits:
-      # Sparkle is a binaryTarget, and the cached directory holds both the
-      # xcframework and the checksum that vouches for it, so a hit skips
-      # the download where SwiftPM would verify it — a tampered cache
-      # carries its own alibi. GitHub's cache scoping bounds who can write
-      # one (a PR branch reads main's cache, never writes into it —
+      # Sparkle is a binaryTarget, and the cached directory holds the
+      # already-extracted xcframework. SwiftPM's checksum covers the
+      # downloaded zip, which is gone after extraction, so a cache hit is
+      # not a verification boundary at all — the bytes are simply trusted.
+      # GitHub's cache scoping bounds who can write one (a PR branch reads
+      # main's cache, never writes into it —
       # https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching),
       # and nothing else does; cache contents are not signed. Accepted,
       # because `-clonedSourcePackagesDirPath .spm-cache` appears only in
