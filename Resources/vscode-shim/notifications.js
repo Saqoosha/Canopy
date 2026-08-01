@@ -19,6 +19,14 @@ function createNotificationHandler() {
         pending.delete(requestId);
         resolve(undefined); // 60s timeout = cancel
       }, 60_000);
+      // Don't let a pending notification hold the event loop open. This
+      // cannot affect the shim itself: while stdin is open its reader
+      // refs the loop, and on EOF index.js calls process.exit(0) outright.
+      // It matters only to in-process consumers of these modules — the
+      // motivation was `node --test`, where one notification nobody
+      // answers kept the whole suite alive for the full 60s after the
+      // last assertion.
+      timer.unref();
 
       pending.set(requestId, { resolve, timer });
 
