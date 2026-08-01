@@ -83,14 +83,19 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      # Sparkle is the only SPM dependency. project.yml records only its
-      # *minimum* version (`from: 2.9.0`), and Package.resolved lives
-      # inside the gitignored Canopy.xcodeproj, so nothing in the repo
-      # pins the resolved version — this cache makes builds faster, not
-      # reproducible. What it saves is the clone, not the resolution:
-      # xcodegen regenerates the project every run, so SwiftPM resolves
-      # every run regardless. restore-keys means an edited project.yml
-      # still restores the previous checkout rather than re-cloning.
+      # Sparkle is the only SPM dependency, and project.yml now pins it to
+      # an exact version (#114), so the cache can only make this job
+      # faster — it can no longer decide which Sparkle gets linked. What it
+      # saves is the clone, not the resolution: xcodegen regenerates the
+      # project every run, so SwiftPM resolves every run regardless.
+      # Keying on project.yml means a version bump misses the key and
+      # re-downloads, which is also where SwiftPM verifies the binary
+      # artifact's checksum; restore-keys lets an unrelated project.yml
+      # edit reuse the existing checkout instead of re-cloning. Accepted
+      # consequence: a cache hit skips that download and therefore the
+      # checksum verification, so integrity rests on GitHub's cache
+      # scoping (a PR branch cannot write into main's scope) rather than
+      # on re-verifying every run.
       - name: Cache SwiftPM checkouts
         uses: actions/cache@v6
         with:
