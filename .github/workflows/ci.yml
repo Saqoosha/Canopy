@@ -6,9 +6,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Neither job uses GITHUB_TOKEN for anything; without this block they would
+# inherit whatever the repository default is.
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs, but never a push to main — otherwise two
+  # merges in quick succession leave the first commit on main with no
+  # completed CI run.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   shim-tests:
@@ -16,27 +24,41 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
 
-      # Pure-logic tests over the shim modules — every path they touch is
-      # injected (os.tmpdir()), so they need neither macOS nor the CC
-      # extension. test/shim-integration.test.js deliberately is NOT run
-      # here: it spawns the real extension.js from ~/.vscode/extensions,
-      # which no runner has.
+      # Pure-logic tests over the shim modules: every filesystem path is
+      # passed in by the test (mkdtemp under os.tmpdir()), never defaulted
+      # by the module, so they need neither macOS nor the CC extension.
+      # Keep it that way and this job can stay on ubuntu.
+      #
+      # test/shim-integration.test.js deliberately is NOT run here: it
+      # spawns the real extension.js from ~/.vscode/extensions, which no
+      # runner has.
       - name: Run shim unit tests
         run: node --test test/shim-unit.test.js
 
   logic-probe:
     name: Swift logic probe
-    runs-on: macos-15
+    # macos-26, NOT macos-15. The macos-15 image ships Xcode 16.4, under
+    # which this codebase does not compile at all: ~20 strict-concurrency
+    # errors of the "main actor-isolated X can not be referenced from a
+    # Sendable closure" family, across ShimProcess / CanopyApp /
+    # WebViewContainer / ContentViewer / InputWidthProbe. They are not
+    # defects — Swift 6.2 (Xcode 26) infers @MainActor isolation for the
+    # AppKit callback closures that raise them, and the whole app is
+    # written against that inference. Xcode 26 is the floor, so the runner
+    # has to be the macOS 26 image.
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
+      # Printed so a future image bump that moves the default Xcode is
+      # diagnosable from the log rather than from 20 confusing errors.
       - name: Show toolchain
         run: |
           xcodebuild -version
@@ -45,10 +67,14 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      # Sparkle is the only SPM dependency; keyed on project.yml so a
-      # version bump busts the cache.
+      # Sparkle is the only SPM dependency. project.yml records only its
+      # *minimum* version (`from: 2.9.0`), and Package.resolved lives
+      # inside the gitignored Canopy.xcodeproj, so nothing in the repo
+      # pins the resolved version — this cache makes builds faster, not
+      # reproducible. restore-keys means an edited project.yml still
+      # restores the previous checkout rather than re-resolving.
       - name: Cache SwiftPM checkouts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .spm-cache
           key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
@@ -57,30 +83,43 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      # Ad-hoc signing ("Sign to Run Locally"). project.yml pins the
-      # Developer ID identity so Debug and Release share one TCC row on a
-      # dev machine — CI has no keychain, and the probe exits inside
-      # applicationDidFinishLaunching before touching any TCC-gated path,
-      # so it needs no entitlement grants. Ad-hoc rather than
-      # CODE_SIGNING_ALLOWED=NO because arm64 refuses to execute a wholly
-      # unsigned binary.
+      # `-configuration Debug` is load-bearing, not just faster:
+      # SidebarLogicProbe is `#if DEBUG`. A Release build compiles the
+      # probe out entirely, so the app would launch normally, show a
+      # window, never call exit(), and sit there until the next step's
+      # timeout — five red minutes whose message says nothing about why.
+      #
+      # Ad-hoc signing ("Sign to Run Locally") because CI has no keychain
+      # holding the Developer ID identity project.yml pins for both Debug
+      # and Release. CLAUDE.md sanctions ad-hoc for one-shot CI; the probe
+      # exits inside applicationDidFinishLaunching before reaching any
+      # TCC-gated path, so no folder grants are needed.
+      #
+      # That override means this job exercises a THIRD signing
+      # configuration: project.yml pins Developer ID, scripts/
+      # build_debug_stable.sh overrides to Apple Development +
+      # sh.saqoo.Canopy.debug, and this overrides to ad-hoc + the release
+      # bundle id. A green run here says nothing about whether
+      # build_debug_stable.sh or release.sh still sign correctly.
       - name: Build (Debug, ad-hoc signed)
         run: |
           xcodebuild \
             -project Canopy.xcodeproj \
             -scheme Canopy \
             -configuration Debug \
+            -destination 'platform=macOS' \
             -derivedDataPath build/ci-derived \
             -clonedSourcePackagesDirPath .spm-cache \
+            -quiet \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="-" \
             DEVELOPMENT_TEAM="" \
-            OTHER_CODE_SIGN_FLAGS="--timestamp=none" \
             build
 
-      # The probe runs at applicationDidFinishLaunching and exits with the
-      # failure count — no window is ever shown. Run the executable
-      # directly, not `open`, so the exit code reaches the shell.
+      # The probe runs at applicationDidFinishLaunching and exits 0 when
+      # every assertion passed, 1 when any failed — no window is ever
+      # shown. Run the executable directly, not `open`, so the exit code
+      # reaches the shell.
       - name: Run logic probe
         timeout-minutes: 5
         run: |

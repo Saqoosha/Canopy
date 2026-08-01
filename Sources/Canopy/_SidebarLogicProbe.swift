@@ -22,8 +22,7 @@ enum SidebarLogicProbe {
         // Exit on the counter, never on a substring of the rendered report.
         // The report interpolates test names and detail strings, so scanning
         // it for "FAIL" makes any future case that merely *mentions* the word
-        // fail the whole run with everything green — a red CI build with no
-        // red line in it.
+        // fail the whole run — a red CI build with every assertion passing.
         exit(result.failures == 0 ? 0 : 1)
     }
 

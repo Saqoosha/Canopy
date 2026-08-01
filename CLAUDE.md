@@ -18,6 +18,7 @@ Full chat with Claude works via vscode-shim. **Single-window sidebar shell** (Ar
 
 ## Tech Stack
 - macOS 15.0+, Swift 6
+- **Xcode 26 (Swift 6.2) is the build floor**, even though the deployment target is macOS 15. Under Xcode 16.4 the app does not compile at all — ~20 strict-concurrency errors of the "main actor-isolated X can not be referenced from a Sendable closure" family across `ShimProcess` / `CanopyApp` / `WebViewContainer` / `ContentViewer` / `InputWidthProbe`. They aren't defects: Swift 6.2 infers `@MainActor` isolation for the AppKit callback closures that raise them, and the code is written against that inference. This is why CI runs on the `macos-26` image
 - WKWebView hosting CC extension's React webview
 - Node.js >= 18 (for vscode-shim, runs extension.js natively)
 - Sparkle 2.9+ for auto-update
@@ -125,7 +126,7 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `stubs.js` — Proxy-based unknown API detection, module assembly
 
 ### Tests (test/)
-- `shim-unit.test.js` — 97 unit tests for all shim modules
+- `shim-unit.test.js` — 101 unit tests for all shim modules
 - `shim-integration.test.js` — 7 integration tests with real extension.js via stdio
 - `helpers.js` — Test harness (spawnShim, waitFor, sendRequest)
 
@@ -298,10 +299,12 @@ node --test test/shim-unit.test.js
 # Integration tests (needs CC extension installed, slow ~60s)
 node --test --test-timeout 120000 test/shim-integration.test.js
 
-# Swift logic probe (~210 pure-logic assertions; needs a DEBUG build)
+# Swift logic probe (needs a DEBUG build; prints its own pass/fail count)
 CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy
 ```
 
-`.github/workflows/ci.yml` runs the shim unit tests (ubuntu) and the logic probe (macos-15) on every push to `main` and every PR. The probe half builds Debug **ad-hoc signed** — CI has no keychain for the Developer ID identity `project.yml` pins, and ad-hoc rather than `CODE_SIGNING_ALLOWED=NO` because arm64 refuses to execute a wholly unsigned binary. That works only because the probe exits inside `applicationDidFinishLaunching`, before anything TCC-gated or entitlement-dependent runs. The integration tests are deliberately not in CI: they spawn the real `extension.js` from `~/.vscode/extensions`, which no runner has.
+The probe writes the real `recentDirectories` UserDefaults key and creates directories under `~/.claude/worktrees/` before restoring them. `runIfRequested` ends in `exit()`, so `defer` never runs — a trap partway through that block leaves a developer's real recent-directories list clobbered. Ephemeral on CI, worth knowing locally.
 
-`SidebarLogicProbe.runIfRequested` exits on the **failure counter**, never on a substring of the rendered report — the report interpolates test names and detail strings, so a `summary.contains("FAIL")` check turns any future case that merely mentions the word into a red build with no red line in it.
+`.github/workflows/ci.yml` runs the shim unit tests (ubuntu) and the logic probe (macos-26) on every push to `main`, every PR, and on `workflow_dispatch`. Two things about the probe job are load-bearing and easy to "simplify" wrongly: it must build **Debug**, because the probe is `#if DEBUG` and a Release build launches the app for real and hangs until the step timeout; and it builds **ad-hoc signed**, because CI has no keychain holding the Developer ID identity `project.yml` pins — sanctioned by the Build Commands carve-out above, and safe only because the probe exits inside `applicationDidFinishLaunching` before reaching any TCC-gated path. The runner must be the macOS 26 image (see the Xcode floor under Tech Stack). The integration tests are deliberately not in CI: they spawn the real `extension.js` from `~/.vscode/extensions`, which no runner has.
+
+The probe's exit code comes from its **failure counter**, never from a substring of the rendered report — the reasoning lives on `SidebarLogicProbe.runIfRequested`, which is where anyone about to change it will be looking.
