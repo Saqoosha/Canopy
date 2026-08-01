@@ -312,11 +312,23 @@ struct StatusBarView: View {
         }
         // Only shown past a level, deliberately. An earlier revision showed it
         // whenever it was known, which surfaced a confidently wrong absolute
-        // number in the one state it is most wrong: `contextMax` is the widest
-        // window across every model in the session (issue #108), so a small
-        // main model with a large-window subagent reads `.ok` at 19% while
-        // this line would claim a refusal point five times too high. Gating on
-        // the level keeps it hidden exactly there.
+        // number in the state it was most wrong: BEFORE #108, `contextMax` was
+        // the widest window across every model in the session, so a small main
+        // model with a large-window subagent read `.ok` at 19% while this line
+        // claimed a refusal point five times too high.
+        //
+        // #108 fixed that source — `contextMax` is now looked up by the main
+        // model's name — and the gate stays, but be clear about what it does
+        // and does not buy now. The surviving hazard is the restore cache,
+        // keyed by directory rather than by model, so a previous model's
+        // window can still be standing here. The gate only suppresses the
+        // TOO-WIDE direction, where the level reads `.ok`. Reversed — a
+        // Haiku-cached directory reopened on 1M Opus, with the lookup
+        // persistently missing — the stale narrow window inflates the level,
+        // this gate OPENS, and the line prints a refusal point far too low.
+        // Closing that would mean requiring `contextMax` to have been
+        // confirmed by a `result` this session; deliberately not done in #108.
+        // See `ShimProcess.mainModelUsage` and `ShimProcess.contextMaxKey`.
         if data.contextLevel != .ok, data.contextLevel != .unknown,
            let blocked = data.blockedThreshold
         {
