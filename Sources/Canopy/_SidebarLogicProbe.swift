@@ -1582,6 +1582,14 @@ enum SidebarLogicProbe {
             record("context #106: sub-cap maxOutputTokens subtracted verbatim",
                    small.compactionWindow == 179_000,
                    "window=\(small.compactionWindow)")
+            // The refusal line must use the SAME capped reserve. Swapping
+            // `outputReserve` for the bare cap inside `blockedThreshold` is
+            // invisible to every over-cap fixture — that would reintroduce
+            // #106's exact bug shape (subtracting more reserve than the CLI
+            // does) in the new threshold.
+            record("context #110: sub-cap reserve is subtracted verbatim from the refusal line too",
+                   small.blockedThreshold == 189_000,
+                   "blocked=\(String(describing: small.blockedThreshold))")
 
             // Reachable in production: `contextMax` and `maxOutputTokens`
             // restore from two independent UserDefaults keys under separate
@@ -1594,6 +1602,12 @@ enum SidebarLogicProbe {
             record("context #106: zero maxOutputTokens reserves nothing",
                    noReserve.compactionWindow == 987_000,
                    "window=\(noReserve.compactionWindow)")
+            // …but the THRESHOLDS must refuse to guess in that state. A 20,000
+            // error in the denominator is ~2% and tolerable; the same error in
+            // a refusal line printed as an absolute token count is not.
+            record("context #110: zero maxOutputTokens yields no trustworthy level",
+                   noReserve.contextLevel == .unknown && noReserve.blockedThreshold == nil,
+                   "level=\(noReserve.contextLevel) blocked=\(String(describing: noReserve.blockedThreshold))")
 
             // Pre-`result` state (contextMax still 0) must not produce a
             // negative or nonsensical denominator. Split from the pct check so
@@ -1619,9 +1633,6 @@ enum SidebarLogicProbe {
             record("context #106: fallback window still yields a sane pct",
                    tiny.contextPct == 50, "pct=\(tiny.contextPct)")
 
-            // contextPct clamps at 100 and StatusBarView's bar fill
-            // (`width * pct / 100`) has no clamp of its own, so an unclamped
-            // pct would overflow the capsule track and widen the status bar.
             // Separate instances rather than one reassigned fixture: inserting
             // a case into a shared-and-mutated block silently changes every
             // assertion after it.
@@ -1639,12 +1650,162 @@ enum SidebarLogicProbe {
             record("context #106: exactly at the compact level is 100%",
                    atLine.contextPct == 100, "pct=\(atLine.contextPct)")
 
+            // #110 flipped this: contextPct is deliberately unclamped now, so
+            // the whole actionable band past the compact level is legible
+            // instead of a flat 100%. `StatusBarView.thinBar` routes its fill
+            // through `barFillWidth`, so the capsule can't overrun its track.
             let pastLine = StatusBarData()
             pastLine.contextMax = 1_000_000
             pastLine.maxOutputTokens = 64_000
             pastLine.contextUsed = 1_000_000
-            record("context #106: past the level clamps to 100%",
-                   pastLine.contextPct == 100, "pct=\(pastLine.contextPct)")
+            record("context #110: past the level keeps counting, unclamped",
+                   pastLine.contextPct == 103, "pct=\(pastLine.contextPct)")
+
+            // Levels (issue #110). For 1M/64K the three lines sit at
+            // warn 947,000 / compact 967,000 / blocked 977,000. Note blocked
+            // is 10,000 ABOVE compact, not below — the CLI's refusal guard
+            // subtracts 3,000 from the budget WITHOUT the 13,000 compaction
+            // buffer, a different base. Boundaries are asserted on both sides
+            // so an off-by-one in either direction goes red.
+            func level(_ used: Int, max: Int = 1_000_000, out: Int = 64_000) -> StatusBarData.ContextLevel {
+                let d = StatusBarData()
+                d.contextMax = max
+                d.maxOutputTokens = out
+                d.contextUsed = used
+                return d.contextLevel
+            }
+            record("context #110: below the warn line is ok",
+                   level(946_999) == .ok, "got=\(level(946_999))")
+            record("context #110: at the warn line is warn",
+                   level(947_000) == .warn, "got=\(level(947_000))")
+            record("context #110: one below compact is still warn",
+                   level(966_999) == .warn, "got=\(level(966_999))")
+            record("context #110: at the compact level is compact",
+                   level(967_000) == .compact, "got=\(level(967_000))")
+            record("context #110: one below blocked is still compact",
+                   level(976_999) == .compact, "got=\(level(976_999))")
+            record("context #110: at the refusal line is blocked",
+                   level(977_000) == .blocked, "got=\(level(977_000))")
+
+            // A second window class. Every case above shares 1M/64K, where
+            // `outputReserve` is the capped branch; 200K/8K exercises the
+            // verbatim branch through the level ladder, and is the config
+            // where the compact→blocked band is actually several points wide.
+            record("context #110: 200K/8K reaches compact at its own line",
+                   level(179_000, max: 200_000, out: 8_000) == .compact,
+                   "got=\(level(179_000, max: 200_000, out: 8_000))")
+            record("context #110: 200K/8K reaches blocked at its own line",
+                   level(189_000, max: 200_000, out: 8_000) == .blocked,
+                   "got=\(level(189_000, max: 200_000, out: 8_000))")
+
+            let blockedAt = StatusBarData()
+            blockedAt.contextMax = 1_000_000
+            blockedAt.maxOutputTokens = 64_000
+            record("context #110: refusal threshold is 977,000, i.e. 10,000 above compact",
+                   blockedAt.blockedThreshold == 977_000
+                       && (blockedAt.blockedThreshold ?? 0) - blockedAt.compactionWindow == 10_000,
+                   "blocked=\(String(describing: blockedAt.blockedThreshold)) compact=\(blockedAt.compactionWindow)")
+
+            // With no trustworthy threshold the level must be `.unknown`, not
+            // `.ok` — the two render differently (`StatusBarView` falls back to
+            // the raw-percentage heuristic for `.unknown`) and mean different
+            // things. Without the guard `tiny`'s refusal line would compute to
+            // -1,000 and its 5,000 used tokens would mis-fire as `.blocked`.
+            record("context #110: fallback window reports unknown, not ok",
+                   tiny.contextLevel == .unknown && tiny.blockedThreshold == nil,
+                   "level=\(tiny.contextLevel) blocked=\(String(describing: tiny.blockedThreshold))")
+            record("context #110: unpopulated data reports unknown, not ok",
+                   empty.contextLevel == .unknown && empty.blockedThreshold == nil,
+                   "level=\(empty.contextLevel) blocked=\(String(describing: empty.blockedThreshold))")
+
+            // Exactly at the fallback boundary. Nothing else makes the compact
+            // arithmetic land on 0, so a `> 0` → `>= 0` slip would otherwise
+            // survive — in either of its two shapes: flipped only in the level
+            // gate it desynchronises that gate from `compactionWindow` and
+            // puts the refusal line below the compact line (10,000 vs 33,000);
+            // flipped in both it makes the compact level 0.
+            let atFallbackEdge = StatusBarData()
+            atFallbackEdge.contextMax = 33_000
+            atFallbackEdge.maxOutputTokens = 20_000
+            atFallbackEdge.contextUsed = 5_000
+            record("context #110: exactly-zero derived window is still the fallback",
+                   atFallbackEdge.blockedThreshold == nil
+                       && atFallbackEdge.contextLevel == .unknown
+                       && atFallbackEdge.compactionWindow == 33_000,
+                   "blocked=\(String(describing: atFallbackEdge.blockedThreshold)) window=\(atFallbackEdge.compactionWindow)")
+
+            // A window too narrow for the 20,000 warn offset has no warn band.
+            // Claiming `.ok` there would be calm all the way to 99% of the
+            // compact level, so it reports `.unknown` and lets the percentage
+            // heuristic carry the signal. `warnAtZero` sits exactly ON that
+            // boundary (window 20,000, warn line 0) — nothing else pins the
+            // guard's `>` against `>=`.
+            let warnAtZero = StatusBarData()
+            warnAtZero.contextMax = 53_000
+            warnAtZero.maxOutputTokens = 20_000
+            record("context #110: a zero warn line is not a warn band",
+                   warnAtZero.contextLevel == .unknown,
+                   "got=\(warnAtZero.contextLevel) window=\(warnAtZero.compactionWindow)")
+
+            // Separate instances, per the convention stated above.
+            let narrowIdle = StatusBarData()
+            narrowIdle.contextMax = 50_000
+            narrowIdle.maxOutputTokens = 20_000
+            narrowIdle.contextUsed = 0
+            record("context #110: sub-warn-offset window reports unknown, not ok",
+                   narrowIdle.contextLevel == .unknown,
+                   "got=\(narrowIdle.contextLevel) window=\(narrowIdle.compactionWindow)")
+
+            let narrowFull = StatusBarData()
+            narrowFull.contextMax = 50_000
+            narrowFull.maxOutputTokens = 20_000
+            narrowFull.contextUsed = 27_000
+            record("context #110: a narrow but derived window still reaches blocked",
+                   narrowFull.contextLevel == .blocked, "got=\(narrowFull.contextLevel)")
+
+            // The tint mapping. It lives on StatusBarData for the same reason
+            // `barFillWidth` does — `StatusBarView.levelColor` is not
+            // probe-reachable, and "`.unknown` at 150% must be ALERT, not
+            // calm" is the entire reason `.unknown` exists. Collapsing that
+            // case back to calm compiles and would otherwise stay green.
+            record("context #110: unknown at a high percentage still alerts",
+                   StatusBarData.tint(for: .unknown, pct: 150) == .alert,
+                   "got=\(StatusBarData.tint(for: .unknown, pct: 150))")
+            record("context #110: unknown just below the alert cutoff warns",
+                   StatusBarData.tint(for: .unknown, pct: 79) == .warn,
+                   "got=\(StatusBarData.tint(for: .unknown, pct: 79))")
+            record("context #110: unknown below the warn cutoff is calm",
+                   StatusBarData.tint(for: .unknown, pct: 49) == .calm,
+                   "got=\(StatusBarData.tint(for: .unknown, pct: 49))")
+            // The counterpart, and the actual regression assertion: a real
+            // `.ok` stays calm no matter how high the percentage climbs, which
+            // is exactly why `.unknown` must not be folded into it.
+            record("context #110: ok stays calm at any percentage",
+                   StatusBarData.tint(for: .ok, pct: 150) == .calm,
+                   "got=\(StatusBarData.tint(for: .ok, pct: 150))")
+            record("context #110: real levels ignore the percentage",
+                   StatusBarData.tint(for: .warn, pct: 0) == .warn
+                       && StatusBarData.tint(for: .compact, pct: 0) == .alert
+                       && StatusBarData.tint(for: .blocked, pct: 0) == .alert,
+                   "warn=\(StatusBarData.tint(for: .warn, pct: 0)) compact=\(StatusBarData.tint(for: .compact, pct: 0))")
+
+            // The fill clamp. It lives on StatusBarData precisely so it is
+            // reachable from here — `StatusBarView.thinBar` is not.
+            record("context #110: fill clamps at the track width past 100%",
+                   StatusBarData.barFillWidth(pct: 2_000_000, track: 40, minimum: 4) == 40,
+                   "fill=\(StatusBarData.barFillWidth(pct: 2_000_000, track: 40, minimum: 4))")
+            record("context #110: fill scales linearly below 100%",
+                   StatusBarData.barFillWidth(pct: 50, track: 40, minimum: 4) == 20,
+                   "fill=\(StatusBarData.barFillWidth(pct: 50, track: 40, minimum: 4))")
+            record("context #110: a sliver of usage still draws the minimum",
+                   StatusBarData.barFillWidth(pct: 1, track: 40, minimum: 4) == 4,
+                   "fill=\(StatusBarData.barFillWidth(pct: 1, track: 40, minimum: 4))")
+            record("context #110: zero usage draws nothing",
+                   StatusBarData.barFillWidth(pct: 0, track: 40, minimum: 4) == 0,
+                   "fill=\(StatusBarData.barFillWidth(pct: 0, track: 40, minimum: 4))")
+            record("context #110: the minimum never overruns a narrower track",
+                   StatusBarData.barFillWidth(pct: 1, track: 2, minimum: 4) == 2,
+                   "fill=\(StatusBarData.barFillWidth(pct: 1, track: 2, minimum: 4))")
 
             // `extractStatusData` is a private instance method on a live
             // ShimProcess and isn't probe-reachable, so this locks the
