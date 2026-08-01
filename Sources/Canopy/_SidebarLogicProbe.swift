@@ -2126,7 +2126,23 @@ enum SidebarLogicProbe {
                    && storeLaunchOk.focusedPaneIndex == 1)
         }
 
-        // Summary
+        // Summary. CI parses this line and fails the job when `pass` drops
+        // below `EXPECTED_ASSERTIONS` in .github/workflows/ci.yml — the exit
+        // code cannot tell "every assertion passed" from "half of them never
+        // ran", and this function is long enough that a dropped block is a
+        // realistic way to lose coverage silently. Removing assertions on
+        // purpose means lowering that number in the same commit; adding them
+        // needs no change. Keep the format in step with the awk there.
+        //
+        // Counting `record(` in this file will NOT give you that number, and
+        // the gap has two parts. A bare grep over-counts: it also matches the
+        // `func record(` definition above and this comment's own mentions.
+        // And of the real call sites, four run only when something failed —
+        // the one `catch` that records, in the resolveProjectPath block, and
+        // the three `else { … "write failed" }` twins — so a green run is
+        // four short of the call-site count. Deliberately no totals here:
+        // they went stale within a day the first time, when #115 merged nine
+        // of issue #108's assertions in. Run the probe, read its last line.
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
     }
