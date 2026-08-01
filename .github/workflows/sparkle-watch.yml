@@ -31,9 +31,13 @@
 # that trade is argued and is the copy to edit.
 #
 # This file is also itself coupled to project.yml's layout — the `packages:`
-# and `Sparkle:` anchors, the key name, the bare-tag format. That coupling is
+# and `Sparkle:` anchors, the key name, the four-space indent of the
+# `exactVersion:` line, and the bare unquoted tag format. That coupling is
 # why the `pinned` validation exists: to make a layout change loud rather
-# than silently yield the wrong version.
+# than silently yield the wrong version. Quoting the value the way
+# `MARKETING_VERSION: "2.10.4"` is quoted a few blocks down in the same file
+# is the most plausible such edit, and it fails loudly on the dotted-number
+# check rather than at the comparison.
 name: Sparkle upstream watch
 
 # Scheduled runs only ever execute the copy of this file on the DEFAULT
@@ -107,22 +111,33 @@ jobs:
           #
           # First match, unlike ci.yml's count extractors: there the input is
           # an append-only log where a forged line can precede the real one,
-          # so last wins. Here it is a structured document and the anchors
-          # admit one block. (Not a repo-wide rule either way —
-          # scripts/auto-adopt.sh takes `.[0]` from `gh list` in two places.)
+          # so last wins. Here it is a structured document, and on any input
+          # xcodegen would actually accept as unambiguous the anchors admit
+          # one block (the exception is the duplicate-key case below).
+          # (Not a repo-wide rule either way — scripts/auto-adopt.sh takes
+          # `.[0]` from `gh list` in two places.)
           #
-          # `exactVersion:` is depth-anchored to four spaces so a key nested
-          # deeper inside the Sparkle block cannot be read as the pin: awk
-          # field-splits on whitespace, so `$1 ==` alone is depth-blind and a
-          # six-space `exactVersion:` under a sub-map won, silently, at a
-          # plausible-looking version. Measured. `$1 ==` is still what
-          # excludes comment lines — that, not the anchoring, is what
-          # defeats project.yml's own several mentions of the word.
+          # `exactVersion:` is depth-anchored to four spaces, and that anchor
+          # is doing BOTH jobs. It stops a key nested deeper inside the
+          # Sparkle block from being read as the pin — the earlier
+          # `$1 == "exactVersion:"` form was depth-blind, because awk
+          # field-splits on whitespace, so a six-space key under a sub-map
+          # won silently at a plausible-looking version. And it is what
+          # excludes project.yml's own several mentions of the word, since a
+          # `#` at column 5 cannot be `exactVersion:` at column 5. Both
+          # measured. Do not "restore" `$1 ==` for the comment-exclusion
+          # property: the anchor already has it, and `$1 ==` brings the
+          # depth-blindness back with it.
           #
-          # Still returns a wrong value rather than empty on one constructed
-          # input: two top-level `packages:` keys with a decoy first. Real
-          # YAML forbids duplicate keys and xcodegen would not load it, so
-          # this is recorded as a known bound rather than guarded.
+          # One constructed input still yields a wrong value rather than
+          # empty: two top-level `packages:` keys with a decoy first. YAML
+          # 1.2 requires unique keys — but xcodegen loads such a file
+          # without complaint (measured, exit 0) and resolves the LAST
+          # block, while this `exit` takes the first, so the watcher and the
+          # build would disagree about the pin in silence. Left as a
+          # recorded bound rather than guarded because no plausible edit
+          # produces it; it is the one input where the validation below
+          # cannot make a layout problem loud.
           pinned=$(awk '
             /^packages:$/ { in_packages = 1; next }
             /^[^ ]/ { in_packages = 0; in_pkg = 0 }
@@ -227,6 +242,13 @@ jobs:
           # `gh issue list`'s newest-first ordering and got overwritten in
           # place of the real one. Measured. `first` keeps the lookup a
           # single command with no pipefail interaction to reason about.
+          #
+          # The trade runs one way and is taken deliberately: if a human
+          # prepends a line above the marker, the lookup misses and a
+          # duplicate is filed weekly. That failure is VISIBLE — a second
+          # issue appears — whereas the one `contains` allowed was silent
+          # destruction of someone's issue. Hence the body telling readers
+          # to reply in a comment rather than edit it.
           #
           # `--limit 200` is a real ceiling: newest-first, so once 200 open
           # issues are NEWER than the watcher's own, it ages off the page,

@@ -40,9 +40,10 @@ jobs:
     env:
       CI_TEST_FILES: "test/shim-unit.test.js"
       EXCLUDED_TEST_FILES: "test/shim-integration.test.js"
-      # Not a test: a harness the suites import. Node 20 would still DISCOVER
-      # it (see the assert step) — it is listed so that fact is recorded
-      # rather than left to look like an oversight.
+      # Not a test: a harness, imported only by the integration suite — so
+      # nothing this job runs touches it. Node WOULD still discover it (see
+      # the assert step), which is why it has to be listed rather than left
+      # looking like an oversight.
       NON_TEST_FILES: "test/helpers.js"
     steps:
       # persist-credentials: false — neither job runs git against THIS repo
@@ -58,11 +59,11 @@ jobs:
           node-version: "20"
 
       # The "Run shim unit tests" step below runs exactly CI_TEST_FILES, so a
-      # test file that reaches neither list would never run, never be
-      # counted, and never turn this red — `# pass N` stays where it was and
-      # the floor is still met (issue #119). That is the #113 shape one level
-      # up: the count floor watches the contents of the files it was told
-      # about, not the suite.
+      # test file that reaches none of the three lists would never run, never
+      # be counted, and never turn this red — `# pass N` stays where it was
+      # and the floor is still met (issue #119). That is the #113 shape one
+      # level up: the count floor watches the contents of the files it was
+      # told about, not the suite.
       #
       # So assert the SET: every JS file under `test/` must appear in one of
       # the three lists. Adding one is then a decision, and — because the run
@@ -70,22 +71,32 @@ jobs:
       # makes it run. There is no separate place to forget.
       #
       # The predicate is every `.js` / `.mjs` / `.cjs` under `test/`, and
-      # that breadth is deliberate rather than lazy. Node 20's own discovery
-      # includes `**/test/**/*.?(c|m)js` — EVERY such file under a directory
+      # that breadth is deliberate rather than lazy. Node's own discovery
+      # includes `**/test/**/*.?(c|m)js` — every such file under a directory
       # named `test`, whatever it is called. The first revision listed
       # node's *name* patterns instead (`*.test.js`, `*-test.js`, …) and was
       # wrong twice over: it missed the `.mjs`/`.cjs` spellings of those
       # names, and it missed the directory rule entirely, so `test/foo.js`
       # and `test/unit/nested.js` were invisible to it while node would have
-      # run both. Measured on 20.18.1, the runner's version. Matching the
-      # directory rule instead of the name list also retires the obligation
-      # to track node's naming conventions as they change.
+      # run both. Measured on node 20.18.1 locally and re-checked on 24, so
+      # the rule outlives the runner moving off 20; `node-version: "20"`
+      # resolves whatever 20.x the image carries, which is not pinned here.
+      # Matching the directory rule also retires the obligation to track
+      # node's naming conventions as they change.
       #
-      # Two bounds this does NOT cover, stated because two earlier revisions
+      # Not exactly node's set: node skips `node_modules`, this does not, so
+      # the assertion is BROADER. That direction is safe — an extra file
+      # turns the step red until someone classifies it — but "identical to
+      # node's discovery" is not a property to carry forward.
+      #
+      # Three bounds it does NOT cover, stated because two earlier revisions
       # of this comment overclaimed and CLAUDE.md repeated the overclaim: it
       # looks only under `test/`, so a test colocated beside the module it
-      # covers is invisible to it, and it asserts which files EXIST, never
-      # that a listed file still contains tests. `find` failing — `test/`
+      # covers is invisible to it; it asserts which files EXIST, never that
+      # a listed file still contains tests; and NON_TEST_FILES /
+      # EXCLUDED_TEST_FILES are unverified claims, so a real test parked in
+      # either is ungated exactly as before. That last one is why the error
+      # message spells out what each list means. `find` failing — `test/`
       # missing — aborts the step under `-e` + `pipefail` rather than
       # yielding an empty set; measured, and the `pipefail` is what makes
       # that true rather than a silent `found=[]`.
