@@ -278,6 +278,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     weak var delegate: ShimProcessDelegate?
     private var isIntentionalStop = false
 
+    /// The model string the CLI resolved for this session, taken from the
+    /// `system` / `init` event. This is the key space `result.modelUsage` is
+    /// keyed by, which is why the context-meter lookup uses it rather than
+    /// `StatusBarData.model`. See `mainModelUsage` for the measurements.
+    ///
+    /// Empty until the first `init` arrives. The CLI re-emits `init` on a
+    /// mid-session `/model` switch (measured), so this tracks the current
+    /// model rather than only the launch one.
+    private var cliResolvedModel: String = ""
+
     @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil) {
         self.workingDirectory = workingDirectory
@@ -326,10 +336,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
         }
         // Restore cached context limits for immediate display on session resume
-        let cachedMax = UserDefaults.standard.integer(forKey: "statusBar.contextMax.\(workingDirectory.path)")
+        let cachedMax = UserDefaults.standard.integer(forKey: Self.contextMaxKey(workingDirectory))
         if cachedMax > 0 { statusBarData?.contextMax = cachedMax }
-        let cachedMaxOutput = UserDefaults.standard.integer(forKey: "statusBar.maxOutputTokens.\(workingDirectory.path)")
+        let cachedMaxOutput = UserDefaults.standard.integer(forKey: Self.maxOutputTokensKey(workingDirectory))
         if cachedMaxOutput > 0 { statusBarData?.maxOutputTokens = cachedMaxOutput }
+        // Drop the retired pre-#108 keys for this directory as we pass them.
+        // Nothing reads them any more. This only reaches directories that get
+        // opened again, so one never revisited keeps its dead pair regardless
+        // — the sweep is opportunistic, not a migration.
+        UserDefaults.standard.removeObject(forKey: "statusBar.contextMax.\(workingDirectory.path)")
+        UserDefaults.standard.removeObject(forKey: "statusBar.maxOutputTokens.\(workingDirectory.path)")
         if let sessionId = resumeSessionId {
             statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
                 sessionId: sessionId, directory: workingDirectory
@@ -2450,6 +2466,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         switch ioType {
+        case "system":
+            // `subtype` and a non-empty `model` are both required because the
+            // CLI emits `system` frames under several subtypes (status,
+            // hook_started, task_notification, …) and only `init` carries the
+            // resolved model. Canopy also synthesises a `subtype: "status"`
+            // frame of its own when it patches `launch_claude` — that one
+            // travels outbound via `sendToWebView` and cannot reach this
+            // branch, so it is precedent for the shape rather than a hazard
+            // this guard defends against.
+            //
+            // NOTE: nothing probe-tests that the CLI's `init` frame actually
+            // arrives here — the probe only reaches the pure
+            // `mainModelUsage`. The dependency is real: if it never arrives,
+            // `cliResolvedModel` stays empty and every lookup misses. The
+            // evidence it does is the CLI's documented event list (`system`
+            // is one of the types the extension forwards verbatim as
+            // io_message, see the Protocol notes in CLAUDE.md) plus the
+            // captures on `mainModelUsage`.
+            if ioMsg["subtype"] as? String == "init",
+               let model = ioMsg["model"] as? String, !model.isEmpty
+            {
+                cliResolvedModel = model
+            }
+
         case "stream_event":
             guard let event = ioMsg["event"] as? [String: Any],
                   let eventType = event["type"] as? String
@@ -2477,6 +2517,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // keeps writing `contextMax`, so `StatusBarView`'s `hasContext`
             // stays true and the bar renders a frozen, plausible-looking
             // number instead of failing visibly. See issue #106.
+            //
+            // The `data.model` write below feeds the status bar's model label
+            // only. #108 deliberately does NOT read it for the context-meter
+            // lookup — see `mainModelUsage` — so this branch and the `result`
+            // branch stay independent, and the frozen-number reasoning above
+            // still describes what a guard here would actually cause.
             if eventType == "message_start",
                let msg = event["message"] as? [String: Any]
             {
@@ -2494,24 +2540,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
 
         case "result":
-            // Use the model with the largest contextWindow (main model); take its maxOutputTokens too
             if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
-                var largestCW = 0
-                var maxOutput = 0
-                for (_, value) in modelUsage {
-                    if let info = value as? [String: Any],
-                       let cw = info["contextWindow"] as? Int,
-                       cw > largestCW
-                    {
-                        largestCW = cw
-                        maxOutput = info["maxOutputTokens"] as? Int ?? 0
-                    }
-                }
-                if largestCW > 0 {
-                    data.contextMax = largestCW
-                    data.maxOutputTokens = maxOutput
-                    UserDefaults.standard.set(largestCW, forKey: "statusBar.contextMax.\(workingDirectory.path)")
-                    UserDefaults.standard.set(maxOutput, forKey: "statusBar.maxOutputTokens.\(workingDirectory.path)")
+                if let usage = Self.mainModelUsage(modelUsage: modelUsage, mainModel: cliResolvedModel) {
+                    data.contextMax = usage.contextWindow
+                    data.maxOutputTokens = usage.maxOutputTokens
+                    UserDefaults.standard.set(usage.contextWindow, forKey: Self.contextMaxKey(workingDirectory))
+                    UserDefaults.standard.set(usage.maxOutputTokens, forKey: Self.maxOutputTokensKey(workingDirectory))
+                } else {
+                    // Leaving the previous values in place is the deliberate
+                    // choice — see `mainModelUsage`, which also records what
+                    // it costs. Warn so a silent CLI rename is discoverable in
+                    // the unified log rather than only as a percentage
+                    // climbing against a stale denominator (or, on a directory
+                    // with no cache, a meter that never appears).
+                    //
+                    // "no usable entry" covers every way the lookup returns
+                    // nil — model not yet known, key absent, value not a
+                    // dictionary, no positive `contextWindow`. Naming only
+                    // the key-absent case would contradict the key list
+                    // printed beside it in the others.
+                    //
+                    // Scope of the claim above: this catches a renamed model
+                    // id or a renamed `contextWindow`. Two renames stay
+                    // silent — `modelUsage` ITSELF (falls out of the
+                    // enclosing `if let`) and `maxOutputTokens` (the `?? 0`
+                    // returns a hit, and the only symptom is every threshold
+                    // degrading to `.unknown`). Both gaps are unaddressed.
+                    logger.warning(
+                        "no usable modelUsage entry for main model \"\(self.cliResolvedModel, privacy: .public)\"; context limits left unchanged (keys: \(modelUsage.keys.sorted().joined(separator: ", "), privacy: .public))"
+                    )
                 }
             }
             // Refresh VCS branch (user may have switched branches during session)
@@ -2579,6 +2636,153 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     static func isMainConversationMessage(_ ioMsg: [String: Any]) -> Bool {
         let parentToolUseId = ioMsg["parent_tool_use_id"]
         return parentToolUseId == nil || parentToolUseId is NSNull
+    }
+
+    /// The `result` event's `modelUsage` entry for the main conversation's
+    /// model, or `nil` when the map has no usable entry under that name.
+    ///
+    /// `modelUsage` is a process-global accumulator in the CLI: it carries an
+    /// entry for every model the session touched, subagents included. The
+    /// previous implementation took the widest `contextWindow` in the map,
+    /// which is only correct while the main model is the widest thing in the
+    /// session. Measured against CLI 2.1.217 — a Haiku main session
+    /// (`--model haiku`) with one Opus subagent produces:
+    ///
+    ///     claude-haiku-4-5-20251001   contextWindow 200_000    maxOutputTokens 32_000
+    ///     claude-opus-4-8[1m]         contextWindow 1_000_000  maxOutputTokens 64_000
+    ///
+    /// Both models cap to the same 20,000 output reserve, so the error is
+    /// carried entirely by the window: `compactionWindow` became 967,000
+    /// against a true 167,000. The meter read 5.8× optimistic — ~17% at a true
+    /// 100% of the CLI's compact level. (100% of that level is not a promise
+    /// that compaction is imminent; `StatusBarData.compactionWindow` lists the
+    /// cases where the two diverge.) Issue #108.
+    ///
+    /// **`mainModel` must be the CLI's own resolved model string — the
+    /// `system` / `init` event's `model`, tracked in `cliResolvedModel` — and
+    /// NOT `StatusBarData.model`.** The two are different strings in the
+    /// configuration Canopy ships by default, and only the first one keys
+    /// `modelUsage`. Measured across nine captures against CLI 2.1.217 (the
+    /// two rows below are the disagreements; the other seven agreed). These
+    /// are capture-harness invocations — a local Canopy session writes the
+    /// model into `~/.claude/settings.json` rather than passing `--model`, so
+    /// read the first row as "no model selected":
+    ///
+    ///                             init.model            message_start.model  modelUsage key
+    ///     no --model (default)    claude-opus-4-8[1m]   claude-opus-4-8      claude-opus-4-8[1m]
+    ///     --model 'opus[1m]'      claude-opus-4-8[1m]   claude-opus-4-8      claude-opus-4-8[1m]
+    ///
+    /// `init.model` matched the key in 9 of 9; `message_start.model` in 7 of
+    /// 9. Neither miss is exotic: `LauncherView` offers an empty model
+    /// selection AND an explicit `opus[1m]`, and the spawn code only sets
+    /// `CLAUDE_CODE_DISABLE_1M_CONTEXT` when `customApi == nil` AND a model
+    /// was explicitly chosen AND it contains "opus" AND it lacks `[1m]` — so
+    /// both of those selections go down the `[1m]` path, and the lookup would
+    /// miss on every turn. On a directory with no cached pair that hides the
+    /// meter completely; on one with a cache, see the degradation note below.
+    ///
+    /// What the suffix means is settled only in the negative: it does NOT
+    /// mark "this entry is a subagent's". An earlier revision claimed exactly
+    /// that, inferred from captures that all happened to pass `--model`, and
+    /// it was wrong. Do not replace it with the equally tempting "it marks a
+    /// resolved 1M tier" — the `opusMain` fixture in the probe is a bare key
+    /// at a 1,000,000 window, which refutes that too. The captures establish
+    /// which string to use; they do not explain the CLI's naming rule.
+    ///
+    /// `init` is also not a launch-only snapshot: the CLI re-emits it on a
+    /// mid-session `/model` switch (measured — a `/model sonnet` turn emitted
+    /// a second `init` carrying `claude-sonnet-5`, and `modelUsage` keyed the
+    /// same), so this tracks the current model, which was the one property
+    /// `message_start` was originally picked for. It tracks with a one-turn
+    /// lag, though: `cliResolvedModel` moves at the new `init` while
+    /// `contextMax` only moves at the following `result`, so the intervening
+    /// turn is measured against the previous model's window.
+    ///
+    /// **Exact string match, deliberately — do not add suffix normalisation.**
+    /// Stripping a trailing `[…]` tag would collapse `claude-opus-4-8` and
+    /// `claude-opus-4-8[1m]` onto one bucket, and both can be present at once
+    /// with different windows, so something would have to pick between them —
+    /// exactly the widest-wins guess this function exists to remove. The bare
+    /// id is not even a stable width on its own: it measured 1,000,000 with
+    /// `CLAUDE_CODE_DISABLE_1M_CONTEXT` unset and 200,000 with it set, which
+    /// is a second reason no rule over the string's shape can be trusted.
+    /// With `init.model` as the source the normalisation is not needed in the
+    /// first place: the string already carries whatever the CLI resolved.
+    ///
+    /// Returning `nil` writes nothing. On a directory opened for the first
+    /// time that means `contextMax` stays `0` and `StatusBarView` hides the
+    /// meter — the intended degradation, per #110: an absent meter is merely
+    /// missing, while a wrong absolute token count presented as the line where
+    /// requests fail is a lie.
+    ///
+    /// **That is not the whole picture, and the gap is known rather than
+    /// overlooked.** On any directory that already has a cached pair, the
+    /// restore in `init` has populated both values before the first `result`
+    /// arrives, so a *persistent* miss leaves the previous model's numbers
+    /// standing — and because the miss path also skips the cache write, they
+    /// survive relaunches. Worse, the stale pair can be NARROWER than the
+    /// truth (a directory last used on Haiku, reopened on 1M Opus), and that
+    /// direction is not covered by the tooltip's level gate — see
+    /// `StatusBarView.contextTooltip()`.
+    ///
+    /// Scoping the cache by model would close it, but `init` restores before
+    /// any `system` / `init` frame has been seen, so no *resolved* name exists
+    /// at that point — the launcher's requested model does exist, and is not
+    /// the same thing (it is nil for the default selection, and `opus[1m]`
+    /// where the resolved name is `claude-opus-4-8[1m]`). Validating rather than
+    /// keying — cache the name alongside the pair and drop the restore once
+    /// the first `init` disagrees — would preserve the eager restore and is
+    /// the better shape; it is left out of #108 only because it is new
+    /// behaviour rather than a fix to the reported bug. Hence a warning here.
+    ///
+    /// With `init.model` as the key source, none of the nine captures taken
+    /// for #108 (2026-08-01, CLI 2.1.217) produced a miss. That is a stated
+    /// sample, not a proof: nothing in the repo re-runs it, and exactly the
+    /// same was believed of `message_start.model` until the default
+    /// configuration was actually tried. Custom `ModelProvider` sessions were
+    /// not among the nine and are the likeliest place for the two strings to
+    /// disagree, since a third-party gateway canonicalises ids its own way.
+    ///
+    /// Static so `_SidebarLogicProbe` can test it without spawning a shim.
+    static func mainModelUsage(
+        modelUsage: [String: Any],
+        mainModel: String
+    ) -> (contextWindow: Int, maxOutputTokens: Int)? {
+        guard !mainModel.isEmpty,
+              let info = modelUsage[mainModel] as? [String: Any],
+              let contextWindow = info["contextWindow"] as? Int,
+              contextWindow > 0
+        else { return nil }
+        // `?? 0` matches the pre-#108 behaviour. Zero is handled downstream:
+        // `StatusBarData.hasTrustedThresholds` refuses to derive levels from
+        // it rather than treating it as "this model reserves no output".
+        return (contextWindow, info["maxOutputTokens"] as? Int ?? 0)
+    }
+
+    /// Per-working-directory cache of the last known context limits, restored
+    /// on launch so the meter has something to show before the session's first
+    /// `result` arrives.
+    ///
+    /// The `.v2` infix retires the pre-#108 keys, which were written by the
+    /// widest-wins picker and so may hold a subagent's window. Without the
+    /// bump every existing install would restore its poisoned number on launch
+    /// and keep showing it until the first turn completed.
+    ///
+    /// The infix only guarantees nothing reads the old pair again; the actual
+    /// deletion is the opportunistic sweep in `init`. Neither changes the
+    /// key's *scope*.
+    ///
+    /// These are still keyed by directory rather than by model, so a value
+    /// cached by a different model in the same directory is still restored as
+    /// if it applied. Unchanged by #108 — see `mainModelUsage` for why a
+    /// model-scoped key is not a drop-in replacement.
+    static func contextMaxKey(_ directory: URL) -> String {
+        "statusBar.contextMax.v2.\(directory.path)"
+    }
+
+    /// See `contextMaxKey` — the two are written and read as a pair.
+    static func maxOutputTokensKey(_ directory: URL) -> String {
+        "statusBar.maxOutputTokens.v2.\(directory.path)"
     }
 
     private func postTaskCompletedNotification() {

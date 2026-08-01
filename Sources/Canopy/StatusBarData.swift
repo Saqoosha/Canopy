@@ -72,8 +72,10 @@ final class StatusBarData {
     /// - `maxOutputTokens > 0`. Zero does not mean "this model reserves no
     ///   output", it means "we haven't been told yet" — reachable on launch,
     ///   because `contextMax` and `maxOutputTokens` restore from two
-    ///   independent UserDefaults keys under separate `> 0` guards and the
-    ///   `maxOutputTokens` key is the newer of the two. Letting it through
+    ///   independent UserDefaults keys under separate `> 0` guards, and a
+    ///   `result` whose `modelUsage` entry omits `maxOutputTokens` caches a
+    ///   `0` (the `?? 0` in `ShimProcess.mainModelUsage`) that the restore
+    ///   guard then skips, leaving the pair half-populated. Letting it through
     ///   would print a refusal threshold up to 20,000 tokens too high as
     ///   fact, which is exactly the confidently-wrong failure this level
     ///   exists to avoid. `compactionWindow` deliberately does NOT gate on
