@@ -84,18 +84,26 @@ jobs:
         run: brew install xcodegen
 
       # Sparkle is the only SPM dependency, and project.yml now pins it to
-      # an exact version (#114), so the cache can only make this job
-      # faster — it can no longer decide which Sparkle gets linked. What it
-      # saves is the clone, not the resolution: xcodegen regenerates the
-      # project every run, so SwiftPM resolves every run regardless.
-      # Keying on project.yml means a version bump misses the key and
-      # re-downloads, which is also where SwiftPM verifies the binary
-      # artifact's checksum; restore-keys lets an unrelated project.yml
-      # edit reuse the existing checkout instead of re-cloning. Accepted
-      # consequence: a cache hit skips that download and therefore the
-      # checksum verification, so integrity rests on GitHub's cache
-      # scoping (a PR branch cannot write into main's scope) rather than
-      # on re-verifying every run.
+      # an exact version (issue #114), so this cache can no longer decide
+      # which Sparkle *version* gets resolved. It does still decide the
+      # bits: Sparkle is a binaryTarget, so what gets linked is the
+      # xcframework under .spm-cache/artifacts/, and the checksum vouching
+      # for it sits in the same cached directory — a tampered cache would
+      # carry its own alibi. Integrity therefore rests on GitHub's cache
+      # scoping (a PR branch can read main's cache but never write into it
+      # — https://docs.github.com/en/actions/reference/dependency-caching-reference)
+      # rather than on re-verifying every run. Accepted, not overlooked.
+      #
+      # What the cache saves is the clone and the artifact download, never
+      # the resolution: the checkout carries no Package.resolved (it lives
+      # in the gitignored Canopy.xcodeproj), so SwiftPM resolves every run
+      # regardless. The key cannot single out a Sparkle bump —
+      # hashFiles('project.yml') also changes on every release, since
+      # release.sh rewrites MARKETING_VERSION there — so any edit misses
+      # the exact key and falls through to restore-keys. What actually
+      # forces a download after a Sparkle bump is that the restored cache
+      # holds no artifact for the new version, and that download is where
+      # SwiftPM verifies the checksum.
       - name: Cache SwiftPM checkouts
         uses: actions/cache@v6
         with:
