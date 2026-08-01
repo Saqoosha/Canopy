@@ -2135,13 +2135,14 @@ enum SidebarLogicProbe {
         // needs no change. Keep the format in step with the awk there.
         //
         // Counting `record(` in this file will NOT give you that number, and
-        // both steps of the gap are expected. A bare grep matches 216 — the
-        // `func record(` definition at the top of this function, plus this
-        // sentence — leaving 214 call sites. Four of those run only when
-        // something failed: the one `catch` that records (in the
-        // resolveProjectPath block) and the three `else { … "write failed" }`
-        // twins. 214 − 4 = 210 on a green run. Run the probe to get the
-        // figure; don't derive it by grep.
+        // the gap has two parts. A bare grep over-counts: it also matches the
+        // `func record(` definition above and this comment's own mentions.
+        // And of the real call sites, four run only when something failed —
+        // the one `catch` that records, in the resolveProjectPath block, and
+        // the three `else { … "write failed" }` twins — so a green run is
+        // four short of the call-site count. Deliberately no totals here:
+        // they went stale within a day the first time, when #108 merged nine
+        // assertions in. Run the probe and read its last line.
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
     }

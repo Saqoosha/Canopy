@@ -242,7 +242,16 @@ jobs:
       #
       # Floor semantics are the same as EXPECTED_TESTS on the shim job:
       # equal to the current count, adding assertions is always green,
-      # removing one always costs an edit here. Same reason for `awk` over
+      # removing one always costs an edit here.
+      #
+      # The cost of that asymmetry is real and was observed on this very
+      # PR: #108 merged nine assertions into main while this branch was
+      # open, so the floor sat nine below actual and nine could have gone
+      # missing unnoticed. Nothing warns about that — a floor only ratchets
+      # when a human raises it. So when you add assertions, raise this
+      # number in the same commit even though CI will not make you.
+      #
+      # Same reason for `awk` over
       # `sed -n p` — see that step's comment; a multi-line capture would
       # turn the floor check into a no-op that still exits 0. The extractor
       # itself differs though: LAST match, not first. The shim job can take
@@ -255,7 +264,7 @@ jobs:
       - name: Run logic probe
         timeout-minutes: 5
         env:
-          EXPECTED_ASSERTIONS: 210
+          EXPECTED_ASSERTIONS: 219
         run: |
           set -o pipefail
           status=0
