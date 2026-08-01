@@ -24,6 +24,23 @@ jobs:
     name: vscode-shim unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # These two lists are the job's single source of truth for which test
+    # files exist and which of them run. They live at job level because two
+    # steps read them, and the whole point is that neither can drift from
+    # the other: the assert step compares their UNION against what is on
+    # disk, and the run step passes CI_TEST_FILES to `node --test` verbatim.
+    # The first revision of this job hardcoded the run list a second time,
+    # which meant listing a new file satisfied the gate without running it —
+    # #119's own failure mode, reproduced inside #119's fix. Six reviewers
+    # found it independently.
+    #
+    # So: a file that should run goes in CI_TEST_FILES and therefore runs.
+    # A file that must not run goes in EXCLUDED_TEST_FILES, which is a
+    # visibly different act than the one that makes it run, rather than the
+    # same append to one list.
+    env:
+      CI_TEST_FILES: "test/shim-unit.test.js"
+      EXCLUDED_TEST_FILES: "test/shim-integration.test.js"
     steps:
       # persist-credentials: false — neither job runs git against THIS repo
       # after checkout (SwiftPM does clone Sparkle, but into its own
@@ -37,35 +54,55 @@ jobs:
         with:
           node-version: "20"
 
-      # The step below names ONE file, so a `test/foo.test.js` added with 40
-      # tests in it would never run, never be counted, and never turn this
-      # red — `# pass N` stays where it was and the floor is still met
-      # (issue #119). That is the #113 shape one level up: the count floor
-      # only watches the contents of the file it was told about, not the
-      # suite.
+      # The "Run shim unit tests" step below runs exactly CI_TEST_FILES, so a
+      # test file that reaches neither list would never run, never be
+      # counted, and never turn this red — `# pass N` stays where it was and
+      # the floor is still met (issue #119). That is the #113 shape one level
+      # up: the count floor watches the contents of the files it was told
+      # about, not the suite.
       #
-      # A `test/*.test.js` glob is not the fix, because it would sweep in
-      # shim-integration.test.js, which is excluded on purpose (see the next
-      # step's comment). So assert the SET instead: whoever adds a test file
-      # has to come here and say whether CI runs it. The exclusion survives,
-      # the silent miss does not.
+      # So assert the SET: everything on disk that node would treat as a test
+      # must appear in CI_TEST_FILES or EXCLUDED_TEST_FILES. Adding a file is
+      # then a decision, and — because the run step is driven by the same
+      # variable — putting it in the run list is what makes it run. There is
+      # no third place to forget.
       #
-      # Fails closed in the case that matters most: when the glob matches
-      # nothing bash leaves the pattern unexpanded, so `found` is the
-      # literal `test/*.test.js`, which never equals the expected list.
-      # Measured, along with the added / removed / exact-match cases.
-      # LC_ALL=C on both sorts so the comparison cannot hinge on the
-      # runner's collation; `$KNOWN_TEST_FILES` is deliberately unquoted —
-      # word-splitting it into lines is the point.
+      # Discovery is `find`, not a shell glob, and the difference is the
+      # finding that motivated it: `test/*.test.js` matched one directory
+      # level and one suffix, so `test/unit/foo.test.js`, `foo.test.mjs`, and
+      # `foo.spec.js` all passed the assertion silently while node's own
+      # discovery would have picked every one of them up. Measured, all
+      # three. The name list below is node's conventions; keep it in step if
+      # node's grow.
+      #
+      # Two bounds this does NOT cover, stated because the previous comment
+      # overclaimed and CLAUDE.md repeated the overclaim: it looks only under
+      # `test/` (a test colocated in `Resources/vscode-shim/` is invisible to
+      # it), and it asserts which files EXIST, never that a listed file
+      # contains anything. `find` failing — `test/` missing — aborts the step
+      # under `-e` + `pipefail` rather than yielding an empty set.
+      #
+      # `set -f` is load-bearing, not tidiness. The list expansions below are
+      # deliberately unquoted so they word-split, and unquoted expansion in
+      # bash also globs — so a list written as `test/*.test.js` would expand
+      # to exactly what `found` found, making the comparison `X == X` and the
+      # gate permanently green. Measured: it passes with an unlisted file
+      # present. That spelling is the one a future maintainer is most likely
+      # to reach for, because the comment above has just told them a glob was
+      # considered. LC_ALL=C on both sorts so the comparison cannot hinge on
+      # the runner's collation.
       - name: Assert the test file set
-        env:
-          KNOWN_TEST_FILES: "test/shim-unit.test.js test/shim-integration.test.js"
         run: |
-          found=$(printf '%s\n' test/*.test.js | LC_ALL=C sort | tr '\n' ' ')
-          # shellcheck disable=SC2086  # splitting the list into words is the point
-          expected=$(printf '%s\n' $KNOWN_TEST_FILES | LC_ALL=C sort | tr '\n' ' ')
+          set -f -o pipefail
+          found=$(find test -type f \
+            \( -name '*.test.js'  -o -name '*.test.mjs'  -o -name '*.test.cjs' \
+            -o -name '*.spec.js'  -o -name '*.spec.mjs'  -o -name '*.spec.cjs' \
+            -o -name '*-test.js'  -o -name '*_test.js'   -o -name 'test-*.js' \) \
+            | LC_ALL=C sort | tr '\n' ' ')
+          # shellcheck disable=SC2086  # splitting the lists into words is the point
+          expected=$(printf '%s\n' $CI_TEST_FILES $EXCLUDED_TEST_FILES | LC_ALL=C sort | tr '\n' ' ')
           if [ "$found" != "$expected" ]; then
-            echo "::error::test/*.test.js is [$found], expected [$expected]. A new test file is NOT run by CI just by existing — the step below names its files explicitly. Add it there if it can run on ubuntu without the CC extension, then list it in KNOWN_TEST_FILES. If it cannot (like shim-integration.test.js), list it here anyway so the set stays asserted."
+            echo "::error::test files on disk are [$found], but CI_TEST_FILES + EXCLUDED_TEST_FILES is [$expected]. A new test file is NOT run by CI just by existing. Add it to CI_TEST_FILES (job-level env, near the top of this file) and it runs and is counted. Add it to EXCLUDED_TEST_FILES only if it genuinely cannot run on ubuntu without the CC extension, like shim-integration.test.js — that is a deliberate exclusion, not a shortcut to green."
             exit 1
           fi
           echo "test file set matches: $found"
@@ -77,7 +114,9 @@ jobs:
       #
       # test/shim-integration.test.js deliberately is NOT run here: it
       # spawns the real extension.js from ~/.vscode/extensions, which no
-      # runner has.
+      # runner has. That exclusion is expressed once, as EXCLUDED_TEST_FILES
+      # at job level — this step runs CI_TEST_FILES and knows nothing about
+      # what was left out.
       #
       # Two reporters, because the exit code alone gates nothing: `node
       # --test` exits 0 over a file containing zero tests (measured on node
@@ -131,19 +170,16 @@ jobs:
       # exactly as many tests as can then disappear unnoticed.
       #
       # A floor only ratchets when a human raises it, so slack accumulates
-      # silently — and the drift `::warning::` below is what makes it
-      # visible (issue #120). Not a hypothetical: during #117 the probe's
-      # floor sat NINE below actual for hours, because #115 merged nine
-      # assertions into main while that PR was open. Actions builds the
-      # merge ref, so the gap opened without anyone editing anything, in
-      # nobody's PR, and was found only by coincidence.
+      # silently, and the drift `::warning::` below is what makes it visible
+      # (issue #120). The probe job's floor comment carries the full account
+      # — the measured accident, and why this warns instead of failing — and
+      # is the copy to edit; the same story told twice in one file is how the
+      # two copies came to contradict each other on when it happened.
       #
-      # It warns rather than fails on purpose: "adding tests is always
-      # green" is the whole design, and a PR that legitimately adds one
-      # must not be blocked on also editing this file. The cost is that
-      # such a PR shows a warning annotation on a green build. Accepted as
-      # the cheaper half of the trade — #117 tried asking humans in a
-      # comment instead, and the very next merge disproved it.
+      # Worth stating once here because it is the ongoing cost rather than
+      # the rationale: once slack exists the warning fires on EVERY later
+      # run, on main and on unrelated PRs, until someone raises the number.
+      # That persistence is the mechanism, not a side effect of it.
       #
       # MAX_DURATION_MS catches a second exit-0 regression, measured during
       # PR #112: deleting the `timer.unref()` in the shim leaves a live
@@ -164,10 +200,15 @@ jobs:
           EXPECTED_TESTS: 101
           MAX_DURATION_MS: 30000
         run: |
+          # Unquoted on purpose: CI_TEST_FILES is a space-separated list and
+          # word-splitting it is how more than one file would ever be passed.
+          # It is the same variable the assert step compared against disk, so
+          # "listed" and "run" cannot diverge.
+          # shellcheck disable=SC2086
           node --test \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/tap.log" \
-            test/shim-unit.test.js
+            $CI_TEST_FILES
           passed=$(awk '/^# pass [0-9]+$/ { v = $3 } END { if (v != "") print v }' "$RUNNER_TEMP/tap.log")
           if [ -z "$passed" ]; then
             echo "::error::no '# pass N' line in the TAP output. A failing or missing test file exits non-zero and the step's implicit 'bash -e' aborts before this line, so neither is the cause here: look for the reporter's summary format changing, or tap.log being written empty."
@@ -178,7 +219,7 @@ jobs:
             exit 1
           fi
           if [ "$passed" -gt "$EXPECTED_TESTS" ]; then
-            echo "::warning::EXPECTED_TESTS is $((passed - EXPECTED_TESTS)) below the actual count ($passed vs floor $EXPECTED_TESTS). Those tests are ungated — they can be deleted later and this job stays green. Raise EXPECTED_TESTS to $passed in .github/workflows/ci.yml."
+            echo "::warning::EXPECTED_TESTS is $((passed - EXPECTED_TESTS)) below the actual count ($passed vs floor $EXPECTED_TESTS). Those tests are ungated — they can be deleted later and this job stays green. Raise EXPECTED_TESTS to $passed in .github/workflows/ci.yml. If this fires on a PR that added none, the gap came in via main (Actions builds the merge ref) — that is issue #120's exact accident, and $passed counts main plus this branch."
           fi
           duration=$(awk '/^# duration_ms [0-9.]+$/ { v = $3 } END { if (v != "") print v }' "$RUNNER_TEMP/tap.log")
           if ! awk -v d="$duration" -v max="$MAX_DURATION_MS" 'BEGIN { exit !(d > 0 && d < max) }'; then
@@ -331,10 +372,14 @@ jobs:
       # coincidence — a local-vs-CI count mismatch noticed for an unrelated
       # reason.
       #
-      # #117 responded by asking humans here to raise the number in the
-      # same commit. That request had already failed by the time it was
-      # written: #115's author had no way to know this floor existed. So
-      # the drift is now reported by the job instead (issue #120) — still a
+      # #117 responded by asking humans here to raise the number in the same
+      # commit. That request cannot reach the case that produced the gap:
+      # #115 merged before this floor existed, and more generally a merge-ref
+      # gap belongs to no PR, so there is no author it could be addressed to.
+      # (It is not that the request was tried and failed — nothing between
+      # #117 and this change added an assertion. The claim is about who the
+      # request can reach, not about an observed violation of it.) So the
+      # drift is now reported by the job instead (issue #120) — still a
       # `::warning::`, because "adding assertions is always green" is the
       # design and must not become a blocking edit. Raising it in the same
       # commit is still the right habit; it is just no longer the only
