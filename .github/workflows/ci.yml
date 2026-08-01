@@ -24,23 +24,26 @@ jobs:
     name: vscode-shim unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # These two lists are the job's single source of truth for which test
-    # files exist and which of them run. They live at job level because two
-    # steps read them, and the whole point is that neither can drift from
-    # the other: the assert step compares their UNION against what is on
-    # disk, and the run step passes CI_TEST_FILES to `node --test` verbatim.
-    # The first revision of this job hardcoded the run list a second time,
-    # which meant listing a new file satisfied the gate without running it —
-    # #119's own failure mode, reproduced inside #119's fix. Six reviewers
-    # found it independently.
+    # These three lists classify every JS file under test/, and together they
+    # are the job's single source of truth. They sit at job level because the
+    # assert step needs all three and the run step needs CI_TEST_FILES — and
+    # the point of that sharing is that "listed" and "run" cannot drift: the
+    # assert step compares the UNION against disk, the run step passes
+    # CI_TEST_FILES to `node --test`. The first revision hardcoded the run
+    # list a second time, so listing a new file satisfied the gate without
+    # running it — #119's own failure mode inside #119's fix.
     #
-    # So: a file that should run goes in CI_TEST_FILES and therefore runs.
-    # A file that must not run goes in EXCLUDED_TEST_FILES, which is a
-    # visibly different act than the one that makes it run, rather than the
-    # same append to one list.
+    # A file that should run goes in CI_TEST_FILES and therefore runs. A file
+    # that must not run goes in EXCLUDED_TEST_FILES. A file under test/ that
+    # is not a test at all goes in NON_TEST_FILES. Three visibly different
+    # acts rather than one append that could mean any of them.
     env:
       CI_TEST_FILES: "test/shim-unit.test.js"
       EXCLUDED_TEST_FILES: "test/shim-integration.test.js"
+      # Not a test: a harness the suites import. Node 20 would still DISCOVER
+      # it (see the assert step) — it is listed so that fact is recorded
+      # rather than left to look like an oversight.
+      NON_TEST_FILES: "test/helpers.js"
     steps:
       # persist-credentials: false — neither job runs git against THIS repo
       # after checkout (SwiftPM does clone Sparkle, but into its own
@@ -61,48 +64,56 @@ jobs:
       # up: the count floor watches the contents of the files it was told
       # about, not the suite.
       #
-      # So assert the SET: everything on disk that node would treat as a test
-      # must appear in CI_TEST_FILES or EXCLUDED_TEST_FILES. Adding a file is
-      # then a decision, and — because the run step is driven by the same
-      # variable — putting it in the run list is what makes it run. There is
-      # no third place to forget.
+      # So assert the SET: every JS file under `test/` must appear in one of
+      # the three lists. Adding one is then a decision, and — because the run
+      # step is driven by CI_TEST_FILES — putting it in the run list is what
+      # makes it run. There is no separate place to forget.
       #
-      # Discovery is `find`, not a shell glob, and the difference is the
-      # finding that motivated it: `test/*.test.js` matched one directory
-      # level and one suffix, so `test/unit/foo.test.js`, `foo.test.mjs`, and
-      # `foo.spec.js` all passed the assertion silently while node's own
-      # discovery would have picked every one of them up. Measured, all
-      # three. The name list below is node's conventions; keep it in step if
-      # node's grow.
+      # The predicate is every `.js` / `.mjs` / `.cjs` under `test/`, and
+      # that breadth is deliberate rather than lazy. Node 20's own discovery
+      # includes `**/test/**/*.?(c|m)js` — EVERY such file under a directory
+      # named `test`, whatever it is called. The first revision listed
+      # node's *name* patterns instead (`*.test.js`, `*-test.js`, …) and was
+      # wrong twice over: it missed the `.mjs`/`.cjs` spellings of those
+      # names, and it missed the directory rule entirely, so `test/foo.js`
+      # and `test/unit/nested.js` were invisible to it while node would have
+      # run both. Measured on 20.18.1, the runner's version. Matching the
+      # directory rule instead of the name list also retires the obligation
+      # to track node's naming conventions as they change.
       #
-      # Two bounds this does NOT cover, stated because the previous comment
-      # overclaimed and CLAUDE.md repeated the overclaim: it looks only under
-      # `test/` (a test colocated in `Resources/vscode-shim/` is invisible to
-      # it), and it asserts which files EXIST, never that a listed file
-      # contains anything. `find` failing — `test/` missing — aborts the step
-      # under `-e` + `pipefail` rather than yielding an empty set.
+      # Two bounds this does NOT cover, stated because two earlier revisions
+      # of this comment overclaimed and CLAUDE.md repeated the overclaim: it
+      # looks only under `test/`, so a test colocated beside the module it
+      # covers is invisible to it, and it asserts which files EXIST, never
+      # that a listed file still contains tests. `find` failing — `test/`
+      # missing — aborts the step under `-e` + `pipefail` rather than
+      # yielding an empty set; measured, and the `pipefail` is what makes
+      # that true rather than a silent `found=[]`.
+      #
+      # `-L` so a symlinked test is followed rather than skipped by
+      # `-type f`: node's discovery follows it, so a gate that did not would
+      # be a hole shaped exactly like the ones above.
       #
       # `set -f` is load-bearing, not tidiness. The list expansions below are
       # deliberately unquoted so they word-split, and unquoted expansion in
-      # bash also globs — so a list written as `test/*.test.js` would expand
-      # to exactly what `found` found, making the comparison `X == X` and the
-      # gate permanently green. Measured: it passes with an unlisted file
-      # present. That spelling is the one a future maintainer is most likely
-      # to reach for, because the comment above has just told them a glob was
-      # considered. LC_ALL=C on both sorts so the comparison cannot hinge on
-      # the runner's collation.
+      # bash also globs — so a list written as `test/*.js` would expand
+      # against the same tree `found` scanned, collapsing the comparison
+      # toward `X == X`. Measured on today's flat tree: the gate passes with
+      # an unlisted file present. That spelling is the one a future
+      # maintainer is most likely to reach for, having just been told a glob
+      # was considered. LC_ALL=C on both sorts so the comparison cannot hinge
+      # on the runner's collation.
       - name: Assert the test file set
         run: |
           set -f -o pipefail
-          found=$(find test -type f \
-            \( -name '*.test.js'  -o -name '*.test.mjs'  -o -name '*.test.cjs' \
-            -o -name '*.spec.js'  -o -name '*.spec.mjs'  -o -name '*.spec.cjs' \
-            -o -name '*-test.js'  -o -name '*_test.js'   -o -name 'test-*.js' \) \
+          found=$(find -L test -type f \
+            \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
             | LC_ALL=C sort | tr '\n' ' ')
           # shellcheck disable=SC2086  # splitting the lists into words is the point
-          expected=$(printf '%s\n' $CI_TEST_FILES $EXCLUDED_TEST_FILES | LC_ALL=C sort | tr '\n' ' ')
+          expected=$(printf '%s\n' $CI_TEST_FILES $EXCLUDED_TEST_FILES $NON_TEST_FILES \
+            | LC_ALL=C sort | tr '\n' ' ')
           if [ "$found" != "$expected" ]; then
-            echo "::error::test files on disk are [$found], but CI_TEST_FILES + EXCLUDED_TEST_FILES is [$expected]. A new test file is NOT run by CI just by existing. Add it to CI_TEST_FILES (job-level env, near the top of this file) and it runs and is counted. Add it to EXCLUDED_TEST_FILES only if it genuinely cannot run on ubuntu without the CC extension, like shim-integration.test.js — that is a deliberate exclusion, not a shortcut to green."
+            echo "::error::JS files under test/ are [$found], but CI_TEST_FILES + EXCLUDED_TEST_FILES + NON_TEST_FILES is [$expected]. A new test file is NOT run by CI just by existing. Put it in CI_TEST_FILES (job-level env, near the top of this file) and it runs and is counted. EXCLUDED_TEST_FILES is only for a suite that genuinely cannot run on ubuntu without the CC extension, like shim-integration.test.js. NON_TEST_FILES is only for something that is not a test at all, like a shared harness. Each is a different claim; none of them is a shortcut to green."
             exit 1
           fi
           echo "test file set matches: $found"
@@ -200,10 +211,17 @@ jobs:
           EXPECTED_TESTS: 101
           MAX_DURATION_MS: 30000
         run: |
+          # `set -f` here for the same reason the assert step has it, and
+          # because without it the two steps expand the SAME variable under
+          # different rules — which is the only way "listed" and "run" could
+          # still diverge. Measured: with a bracket-glob filename listed, the
+          # assert step (globbing off) matched disk and went green while this
+          # step (globbing on) expanded the entry to a different file and
+          # never ran the listed one. Contrived filename, real divergence.
+          #
           # Unquoted on purpose: CI_TEST_FILES is a space-separated list and
-          # word-splitting it is how more than one file would ever be passed.
-          # It is the same variable the assert step compared against disk, so
-          # "listed" and "run" cannot diverge.
+          # word-splitting it is how more than one file is ever passed.
+          set -f
           # shellcheck disable=SC2086
           node --test \
             --test-reporter=spec --test-reporter-destination=stdout \

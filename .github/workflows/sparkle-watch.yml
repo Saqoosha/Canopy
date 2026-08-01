@@ -62,9 +62,11 @@ permissions:
 
 # The dedupe below is check-then-act: list issues, then create or edit. A
 # manual dispatch overlapping the Monday cron can put both runs past the
-# check before either writes, filing two issues. Never cancel in progress —
-# a half-run that has listed but not yet written is the one state where
-# cancelling produces the duplicate rather than preventing it.
+# check before either writes, filing two issues. The GROUP is what prevents
+# that. `cancel-in-progress: false` only decides whose work is discarded,
+# and false is right because a cancelled run is a weekly check that silently
+# did not happen — which is this file's whole subject. Queuing also means
+# the second run sees the first one's issue.
 concurrency:
   group: sparkle-watch
   cancel-in-progress: false
@@ -103,24 +105,30 @@ jobs:
           # issue every week. `/^[^ ]/` is what closes the section; the
           # sibling-key reset alone never fires on a column-0 key.
           #
-          # This is the one extractor in the repo that takes the FIRST match
-          # rather than the last, and that is deliberate rather than an
-          # oversight of the doctrine in ci.yml: there, matches come from an
-          # append-only log where a forged line can precede the real one, so
-          # last wins. Here the input is a structured document and the two
-          # anchors admit exactly one block, so first and last are the same
-          # match — and `exit` on the first keeps it that way if the file
-          # ever grows a second `exactVersion:` outside that block.
+          # First match, unlike ci.yml's count extractors: there the input is
+          # an append-only log where a forged line can precede the real one,
+          # so last wins. Here it is a structured document and the anchors
+          # admit one block. (Not a repo-wide rule either way —
+          # scripts/auto-adopt.sh takes `.[0]` from `gh list` in two places.)
           #
-          # `$1 == "exactVersion:"` already excludes comment lines, which is
-          # what actually defeats project.yml's own several mentions of the
-          # word; the anchoring is about other packages, not comments.
+          # `exactVersion:` is depth-anchored to four spaces so a key nested
+          # deeper inside the Sparkle block cannot be read as the pin: awk
+          # field-splits on whitespace, so `$1 ==` alone is depth-blind and a
+          # six-space `exactVersion:` under a sub-map won, silently, at a
+          # plausible-looking version. Measured. `$1 ==` is still what
+          # excludes comment lines — that, not the anchoring, is what
+          # defeats project.yml's own several mentions of the word.
+          #
+          # Still returns a wrong value rather than empty on one constructed
+          # input: two top-level `packages:` keys with a decoy first. Real
+          # YAML forbids duplicate keys and xcodegen would not load it, so
+          # this is recorded as a known bound rather than guarded.
           pinned=$(awk '
             /^packages:$/ { in_packages = 1; next }
             /^[^ ]/ { in_packages = 0; in_pkg = 0 }
             in_packages && /^  Sparkle:$/ { in_pkg = 1; next }
             in_pkg && /^  [^ ]/ { in_pkg = 0 }
-            in_pkg && $1 == "exactVersion:" { print $2; exit }
+            in_pkg && /^    exactVersion:/ { print $2; exit }
           ' project.yml)
           latest=$(gh release view --repo sparkle-project/Sparkle --json tagName -q .tagName)
 
@@ -177,14 +185,10 @@ jobs:
 
           echo "::warning::Sparkle $latest is available; project.yml pins $pinned."
 
-          # The heredoc works only because YAML strips the block scalar's
-          # common indentation before bash sees any of it: every line here
-          # sits at the same depth, so `EOF` lands in column 0 and the body
-          # lands unindented (indented body lines would render as a Markdown
-          # code block). Reindenting this step relative to its neighbours
-          # breaks both at once, and `<<-EOF` would not rescue it — that
-          # strips TABS, not spaces. Verified by parsing this file and
-          # running the extracted script.
+          # Every line here must stay at this step's indent: YAML strips it,
+          # which is what puts `EOF` in column 0 and the body unindented (an
+          # indented body would render as a Markdown code block). `<<-EOF`
+          # would not rescue a reindent — it strips tabs, not spaces.
           #
           # Backticks are backslash-escaped because the heredoc is unquoted:
           # it has to interpolate $pinned and $latest, which also leaves
@@ -208,31 +212,28 @@ jobs:
 
           Opened by [\`.github/workflows/sparkle-watch.yml\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/.github/workflows/sparkle-watch.yml) (issue #118). This body is rewritten on every run, so it always reflects the current upstream version.
 
-          **Closing this without bumping the pin does not settle it** — the dedupe below looks at OPEN issues only, so a closed one is refiled next Monday. To decline a bump, leave this open, or drop the schedule.
+          **Closing this without bumping the pin does not settle it** — the workflow only looks at OPEN issues, so a closed one is refiled next Monday. To decline a bump, leave this open and put the reasoning in a **comment**: this body is regenerated weekly and anything written into it is erased without notice.
           EOF
           )
           # Dedupe over the open issues rather than via `--search`: the search
           # index is eventually consistent, so a run soon after the previous
-          # one could miss its own issue and file a second. The title is fixed
-          # and the body carries the version, so this stays one issue across
-          # successive Sparkle releases.
+          # one could miss its own issue and file a second. MARKER is what
+          # makes it one issue across successive Sparkle releases; the title
+          # does not participate.
           #
-          # `first` inside the jq rather than a `| head -1` after it, because
-          # then the whole lookup is one command and there is no pipefail
-          # interaction to reason about. An earlier revision of this comment
-          # justified it with SIGPIPE killing `gh` at exit 141; that was
-          # wrong, and measured to be wrong — SIGPIPE needs the producer to
-          # still be writing after the reader exits, which takes output on
-          # the order of the pipe buffer (~200k lines in the measurement),
-          # while this emits a few bytes. The shape is still the better one;
-          # only the reason was invented.
+          # `startswith`, not `contains`. The marker is the body's first
+          # line, and a substring test matched any issue that merely QUOTED
+          # it — an issue discussing this workflow, say — which then won on
+          # `gh issue list`'s newest-first ordering and got overwritten in
+          # place of the real one. Measured. `first` keeps the lookup a
+          # single command with no pipefail interaction to reason about.
           #
-          # `--limit 200` is a real ceiling: `gh issue list` returns newest
-          # first, so once this repo carries 200 open issues the watcher's own
-          # ages off the page, `existing` comes back empty, and a duplicate is
-          # filed weekly with nothing to signal it. Three open today.
+          # `--limit 200` is a real ceiling: newest-first, so once 200 open
+          # issues are NEWER than the watcher's own, it ages off the page,
+          # `existing` comes back empty, and a duplicate is filed weekly with
+          # nothing to signal it. Nowhere near that today.
           existing=$(gh issue list --state open --limit 200 --json number,body \
-            -q '[.[] | select(.body != null and (.body | contains(env.MARKER))) | .number] | first // empty')
+            -q '[.[] | select(.body != null and (.body | startswith(env.MARKER))) | .number] | first // empty')
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --body "$body"
             echo "updated existing issue #$existing"
