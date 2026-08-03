@@ -73,6 +73,8 @@ enum RecapScript {
         if (window.__canopyRecap) return;
 
         var ELEMENT_ID = 'canopy-recap-row';
+        var RETRY_INTERVAL_MS = 500;
+        var MAX_RETRY_ATTEMPTS = 10;   // 5 s — long enough to outlast a first paint
 
         var currentText = null;
         var el = null;
@@ -83,6 +85,55 @@ enum RecapScript {
                     console.warn('[canopy-recap] ' + msg);
                 }
             } catch (e) {}
+        }
+
+        function reportError(msg) {
+            try {
+                if (window.console && console.error) {
+                    console.error('[canopy-recap] ' + msg);
+                }
+            } catch (e) {}
+        }
+
+        // Bounded retry for a recap that arrived before an anchor existed.
+        //
+        // The MutationObserver alone is not enough: it only fires on DOM
+        // change, and the session a recap targets has by definition been idle
+        // for minutes. Once the first paint settles, a webview that stops
+        // mutating never retries, so the text sits in `currentText` forever
+        // behind a single warn — a recap that was generated and paid for and
+        // is nowhere on screen.
+        //
+        // Deliberately bounded and self-cancelling: it stops on the first
+        // successful mount, on `clear()`, and after the cap. `mount()` is a
+        // no-op when the row is already correctly placed, so a tick that
+        // fires against a healthy page cannot disturb it.
+        var retryTimer = null;
+        var retryAttempts = 0;
+
+        function stopRetry() {
+            if (retryTimer != null) {
+                clearInterval(retryTimer);
+                retryTimer = null;
+            }
+            retryAttempts = 0;
+        }
+
+        function startRetry() {
+            if (retryTimer != null) return;
+            retryAttempts = 0;
+            retryTimer = setInterval(function() {
+                if (currentText == null) { stopRetry(); return; }
+                retryAttempts++;
+                if (mount()) { stopRetry(); return; }
+                if (retryAttempts >= MAX_RETRY_ATTEMPTS) {
+                    stopRetry();
+                    // Error, not warn: this is the terminal state where a
+                    // generated recap is lost with no surface showing it.
+                    reportError('gave up mounting after ' + MAX_RETRY_ATTEMPTS
+                        + ' attempts — recap generated but not shown');
+                }
+            }, RETRY_INTERVAL_MS);
         }
 
         // --- anchor discovery (mirrors InputWidthProbe; see its doc comment)
@@ -271,13 +322,15 @@ enum RecapScript {
                 }
                 currentText = text;
                 if (!mount()) {
-                    // Not an error: the extension may still be painting. The
-                    // observer below retries on the next DOM change.
+                    // Not an error yet: the extension may still be painting.
+                    // Both the observer and the bounded timer will retry.
                     warn('no input anchor yet — recap queued');
+                    startRetry();
                 }
             },
             clear: function() {
                 currentText = null;
+                stopRetry();
                 remove();
             }
         };
@@ -292,7 +345,7 @@ enum RecapScript {
             // `mount()` already owns the real invariant (`el.nextSibling ===
             // card`) and returns without touching the DOM when it holds, so
             // calling it unconditionally is both correct and cheap.
-            mount();
+            if (mount()) { stopRetry(); }
         });
         observer.observe(document.body || document.documentElement,
                          { childList: true, subtree: true });
