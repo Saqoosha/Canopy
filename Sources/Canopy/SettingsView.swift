@@ -55,6 +55,12 @@ private struct GeneralSettingsTab: View {
             } footer: {
                 SettingsFooter(text: "Applies immediately to @-mention file search.")
             }
+
+            Section {
+                Toggle("Show session recap after being away", isOn: $settings.recapEnabled)
+            } footer: {
+                SettingsFooter(text: "After Canopy sits in the background for 3 minutes, each visible pane summarises where its session left off. Costs a small model call per pane.")
+            }
         }
         .formStyle(.grouped)
     }

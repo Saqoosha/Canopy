@@ -395,6 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         installCmdWMonitor()
         installPaneFocusClickMonitor()
+        RecapCoordinator.shared.start()
 
         // SwiftUI may make the first window main before our observer is
         // registered, in which case `didBecomeMainNotification` fires
