@@ -1,0 +1,301 @@
+import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "RecapScript")
+
+/// Renders the session recap as a row inside the CC extension's webview,
+/// immediately above the chat input card — the same position the Claude Code
+/// CLI prints its `away_summary` line, and where the eye already goes when
+/// returning to a session.
+///
+/// Canopy owns the text (see `ShimProcess.requestRecap`) but not the DOM, so
+/// this injects a node the extension knows nothing about and defends it
+/// against React re-renders:
+///
+///   1. Locate the chat input by SHAPE, never by class name — the extension's
+///      hashed class names (`inputContainer_cKsPxg`) churn every release.
+///      Reuses `InputWidthProbe`'s heuristic: `textarea,
+///      [contenteditable="true"], [role="textbox"]` filtered to the bottom
+///      half of the viewport, then walk up to the nearest ancestor rendered
+///      as a rounded card (`border-radius > 0`, narrower than the viewport).
+///   2. Insert the recap element as the card's immediately-preceding sibling,
+///      so it inherits the chat column's width and centering for free rather
+///      than needing its own layout math.
+///   3. Re-insert on every `MutationObserver` hit where the node lost its
+///      anchor. React owns this subtree and will discard foreign children on
+///      re-render; re-attaching is the only stable contract available.
+///
+/// State lives on `window.__canopyRecap` so `set` calls that arrive before
+/// the input mounts (recap captured while the auth screen is up, or during
+/// the extension's first paint) are replayed once an anchor appears — rather
+/// than being dropped and leaving the user with no recap at all.
+///
+/// Every failure path warns through `console.warn`, which Canopy's
+/// `ConsoleLogHandler` funnels into the unified log. There is deliberately
+/// no native fallback UI: a silent selector regression should show up as a
+/// grep-able warning, not as a second, differently-styled strip appearing
+/// out of nowhere.
+enum RecapScript {
+    /// A bare call EXPRESSION, deliberately without a `window.__canopyRecap &&`
+    /// guard of its own. `ShimProcess.showRecapInWebView` wraps it in a ternary
+    /// that reports whether the bridge existed — a guard here as well would
+    /// make that wrapper malformed, and short-circuiting to `false` with no JS
+    /// error is exactly the silent drop the wrapper was added to detect.
+    static func setCall(text: String) -> String {
+        "window.__canopyRecap.set(\(jsStringLiteral(text)))"
+    }
+
+    static var clearCall: String {
+        "window.__canopyRecap.clear()"
+    }
+
+    /// Escape a Swift string into a JS string literal for `evaluateJavaScript`.
+    /// `JSONSerialization` is used rather than hand-rolled escaping so quotes,
+    /// backslashes, newlines, and lone surrogates in model output can't break
+    /// out of the literal.
+    private static func jsStringLiteral(_ value: String) -> String {
+        // `.fragmentsAllowed` lets a bare string encode without wrapping it in
+        // an array. On the (unreachable) encode failure, fall back to an empty
+        // literal: showing nothing beats injecting malformed JS that would
+        // throw inside the extension's own page.
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
+              let literal = String(data: data, encoding: .utf8)
+        else {
+            logger.error("failed to encode recap text as a JS literal")
+            return "\"\""
+        }
+        return literal
+    }
+
+    static let javascript: String = """
+    (function() {
+        'use strict';
+        if (window.__canopyRecap) return;
+
+        var ELEMENT_ID = 'canopy-recap-row';
+
+        var currentText = null;
+        var el = null;
+
+        function warn(msg) {
+            try {
+                if (window.console && console.warn) {
+                    console.warn('[canopy-recap] ' + msg);
+                }
+            } catch (e) {}
+        }
+
+        // --- anchor discovery (mirrors InputWidthProbe; see its doc comment)
+
+        function findInputEl() {
+            var vh = window.innerHeight || document.documentElement.clientHeight;
+            var candidates = document.querySelectorAll(
+                'textarea, [contenteditable="true"], [role="textbox"]'
+            );
+            for (var i = 0; i < candidates.length; i++) {
+                var rect = candidates[i].getBoundingClientRect();
+                if (rect.bottom > vh * 0.5 && rect.width > 0) return candidates[i];
+            }
+            if (candidates.length > 0) {
+                warn('findInputEl: no bottom-half candidate — falling back to first of ' + candidates.length);
+            }
+            return candidates[0] || null;
+        }
+
+        /// Nearest opaque background above `node`, so the row matches the
+        /// surface it sits on instead of hard-coding a colour that would be
+        /// wrong the moment the theme changes. Falls back to the CC
+        /// extension's editor-background variable, then white.
+        function resolveBackground(node) {
+            var el = node;
+            while (el && el !== document.documentElement) {
+                var bg = getComputedStyle(el).backgroundColor;
+                if (bg && bg !== 'transparent') {
+                    // rgba(...) with a zero alpha is "no background" for our
+                    // purposes — keep climbing.
+                    var alpha = bg.match(/^rgba\\(.*,\\s*([\\d.]+)\\)$/);
+                    if (!alpha || parseFloat(alpha[1]) > 0.95) return bg;
+                }
+                el = el.parentElement;
+            }
+            var themed = getComputedStyle(document.documentElement)
+                .getPropertyValue('--vscode-editor-background');
+            return (themed && themed.trim()) || '#ffffff';
+        }
+
+        // Deliberately has NO minimum-width gate, unlike InputWidthProbe's
+        // otherwise-identical walk. The probe reports a measurement, so it
+        // must reject implausibly narrow candidates; this only needs a node
+        // to insert before. Copying the probe's 300pt floor made the recap
+        // invisible in exactly the layout it was built for — panes have a
+        // 100pt floor, so a 3–5 pane window has columns well under 300 and
+        // no ancestor ever qualified. The recap was generated, paid for, and
+        // never shown.
+        function findInputCard(input) {
+            var vw = document.documentElement.clientWidth;
+            var firstConstrained = null;
+            var node = input.parentElement;
+            while (node && node !== document.body) {
+                var rectW = node.getBoundingClientRect().width;
+                var radius = parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0;
+                if (radius > 0 && rectW > 0 && rectW < vw) return node;
+                if (!firstConstrained && rectW > 0 && rectW < vw - 4) {
+                    firstConstrained = node;
+                }
+                node = node.parentElement;
+            }
+            if (!firstConstrained) {
+                warn('findInputCard: no plausible ancestor for input el');
+            } else {
+                warn('findInputCard: no rounded card — using first constrained ancestor');
+            }
+            return firstConstrained;
+        }
+
+        // --- element
+
+        function build() {
+            var row = document.createElement('div');
+            row.id = ELEMENT_ID;
+            row.setAttribute('data-canopy', 'recap');
+            // Inline styles only: the extension's stylesheet is not ours to
+            // extend, and a <style> block would be one more node React could
+            // drop independently of the row itself.
+            row.style.cssText = [
+                'display:flex',
+                'align-items:baseline',
+                'gap:6px',
+                // The breathing room below the text is PADDING, not margin:
+                // a margin would be transparent, and the transcript scrolls
+                // underneath this whole area — so a margin reads as a strip
+                // of chat content wedged between the recap and the input.
+                // Padding keeps the same visual gap while the background
+                // runs unbroken down to the input card.
+                'margin:0',
+                'padding:6px 10px 10px 10px',
+                // Bottom corners stay square for the same reason: rounding
+                // them against a card the row now touches would punch two
+                // transparent notches back out.
+                'border-radius:6px 6px 0 0',
+                'font-size:11px',
+                'line-height:1.5',
+                'user-select:text',
+                '-webkit-user-select:text',
+                // The input area sits over the scrolling transcript in a
+                // transparent container, so a background-less row lets chat
+                // content show straight through it (observed: recap text
+                // overlapping a tool-output block). An opaque background plus
+                // a stacking context puts the row cleanly on top.
+                'position:relative',
+                'z-index:5'
+            ].join(';');
+            // Opacity would make the background translucent too, defeating
+            // the point — dim the text instead, per element.
+            row.style.color = 'inherit';
+
+            var mark = document.createElement('span');
+            mark.textContent = '\\u203B'; // ※ — the glyph the CLI uses
+            mark.style.cssText = 'flex:0 0 auto;opacity:0.45';
+
+            var label = document.createElement('span');
+            label.textContent = 'recap:';
+            label.style.cssText = 'flex:0 0 auto;font-weight:600;opacity:0.55';
+
+            var body = document.createElement('span');
+            body.setAttribute('data-canopy', 'recap-text');
+            body.style.cssText = 'font-style:italic;min-width:0;opacity:0.65';
+
+            row.appendChild(mark);
+            row.appendChild(label);
+            row.appendChild(body);
+            return row;
+        }
+
+        /// Place (or replace) the row directly before the input card. Returns
+        /// false when no anchor exists yet — the caller keeps `currentText`
+        /// so a later mutation can retry.
+        function mount() {
+            if (currentText == null) return true;
+            var input = findInputEl();
+            if (!input) return false;
+            var card = findInputCard(input);
+            if (!card || !card.parentElement) return false;
+
+            if (!el) el = build();
+            var body = el.querySelector('[data-canopy="recap-text"]');
+            if (!body) {
+                // Children stripped by an outer re-render. Rebuild rather than
+                // throwing out of the MutationObserver callback, which would
+                // fire on every subsequent DOM mutation and never recover.
+                warn('recap row lost its body span — rebuilding');
+                remove();
+                el = build();
+                body = el.querySelector('[data-canopy="recap-text"]');
+            }
+            // Write only on change. `textContent` always does "replace all",
+            // emitting a childList record — and the MutationObserver below now
+            // calls mount() unconditionally, so an unguarded write re-enters
+            // this function forever. The doc above claims mount() "returns
+            // without touching the DOM" when nothing moved; this is what makes
+            // that true.
+            if (body.textContent !== currentText) {
+                body.textContent = currentText;
+            }
+            // Re-resolved on every mount, not just on build: a theme switch
+            // re-renders the tree, and a stale light background on a dark
+            // theme is worse than no background at all.
+            var bg = resolveBackground(card);
+            if (el.style.backgroundColor !== bg) {
+                el.style.backgroundColor = bg;
+            }
+
+            // Already correctly positioned — do nothing, so we don't churn
+            // the DOM (and retrigger our own MutationObserver) on every tick.
+            if (el.parentElement === card.parentElement && el.nextSibling === card) {
+                return true;
+            }
+            card.parentElement.insertBefore(el, card);
+            return true;
+        }
+
+        function remove() {
+            if (el && el.parentElement) el.parentElement.removeChild(el);
+            el = null;
+        }
+
+        window.__canopyRecap = {
+            set: function(text) {
+                if (typeof text !== 'string' || text.length === 0) {
+                    this.clear();
+                    return;
+                }
+                currentText = text;
+                if (!mount()) {
+                    // Not an error: the extension may still be painting. The
+                    // observer below retries on the next DOM change.
+                    warn('no input anchor yet — recap queued');
+                }
+            },
+            clear: function() {
+                currentText = null;
+                remove();
+            }
+        };
+
+        var observer = new MutationObserver(function() {
+            if (currentText == null) return;
+            // Deliberately does NOT short-circuit on "the row is still
+            // attached somewhere". React can replace or move the input card
+            // while leaving our row parented to a stale container — the row
+            // stays in the document and passes an attachment test, but is no
+            // longer above the input, and nothing would ever reposition it.
+            // `mount()` already owns the real invariant (`el.nextSibling ===
+            // card`) and returns without touching the DOM when it holds, so
+            // calling it unconditionally is both correct and cheap.
+            mount();
+        });
+        observer.observe(document.body || document.documentElement,
+                         { childList: true, subtree: true });
+    })();
+    """
+}

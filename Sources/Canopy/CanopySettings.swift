@@ -25,6 +25,13 @@ final class CanopySettings {
     var respectGitIgnore: Bool = true {
         didSet { save() }
     }
+    /// Generate a "what were we doing" recap for idle sessions while Canopy
+    /// sits in the background (see `RecapCoordinator`). Mirrors the CLI's
+    /// `awaySummaryEnabled` / `/config` → `recap` preference. Costs one
+    /// small model call per session per return, so it's user-disableable.
+    var recapEnabled: Bool = true {
+        didSet { save() }
+    }
     /// Default permission mode used when the sidebar reopens a recent
     /// session (closed local row or closed cloud / teleport row). The
     /// Launcher view tracks its own per-session selection separately —
@@ -59,6 +66,9 @@ final class CanopySettings {
         if let git = dict["claudeCode.respectGitIgnore"] as? Bool {
             respectGitIgnore = git
         }
+        if let recap = dict["canopy.recapEnabled"] as? Bool {
+            recapEnabled = recap
+        }
         if let raw = dict["canopy.defaultPermissionMode"] as? String,
            let mode = PermissionMode(rawValue: raw)
         {
@@ -86,6 +96,7 @@ final class CanopySettings {
         dict["claudeCode.allowDangerouslySkipPermissions"] = allowDangerouslySkipPermissions
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
         dict["claudeCode.respectGitIgnore"] = respectGitIgnore
+        dict["canopy.recapEnabled"] = recapEnabled
         dict["canopy.defaultPermissionMode"] = defaultPermissionMode.rawValue
         writeDict(dict)
     }

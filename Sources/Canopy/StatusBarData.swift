@@ -21,6 +21,27 @@ final class StatusBarData {
     /// SubagentTracker whenever it changes.
     var subagents: [SubagentInfo] = []
 
+    /// "What were we doing" recap for an idle session the user has come back
+    /// to — Canopy's port of the CLI's `away_summary` (see
+    /// `RecapCoordinator`). Produced by injecting `/recap` into the CLI and
+    /// swallowing the reply before it reaches the webview.
+    ///
+    /// NOT rendered natively: `RecapScript` draws it inside the webview above
+    /// the chat input (see `SessionContainer`). This mirror exists so a future
+    /// native surface — or a test — can observe the text.
+    ///
+    /// Whitespace-only assignments clamp back to `nil`: the CLI answers a
+    /// no-op `/recap` with an empty local-command payload, and an empty
+    /// string would otherwise render as a blank strip that the user can't
+    /// tell apart from a stuck request.
+    var recap: String? {
+        didSet {
+            if let text = recap, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                recap = nil
+            }
+        }
+    }
+
     /// Live width (in AppKit points) of the CC extension's chat-input
     /// column, measured from the webview via `InputWidthProbe`. `nil` until
     /// the probe reports its first value or when the target element can't
@@ -286,6 +307,7 @@ final class StatusBarData {
         didCompact = false
         remoteHost = nil
         subagents = []
+        recap = nil
         chatInputWidth = nil
         hintClearTask?.cancel()
         hintClearTask = nil

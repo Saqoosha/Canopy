@@ -2126,7 +2126,133 @@ enum SidebarLogicProbe {
                    && storeLaunchOk.focusedPaneIndex == 1)
         }
 
-        // Summary. CI parses this line and fails the job when `pass` drops
+        // MARK: - Recap (see RecapGate / ShimProcess recap filters)
+        //
+        // These pin the two failure modes review found in the recap filters:
+        // a substring match that destroyed any message merely QUOTING the
+        // command wrapper, and the ordering rule that decides whether a
+        // slash command's output survives replay. Both are pure functions on
+        // plain dictionaries, so they need no shim, webview, or filesystem.
+        do {
+            func userMsg(_ text: String) -> [String: Any] {
+                ["type": "user", "message": ["role": "user", "content": text] as [String: Any]]
+            }
+            func userBlocks(_ text: String) -> [String: Any] {
+                ["type": "user", "message": [
+                    "role": "user",
+                    "content": [["type": "text", "text": text]],
+                ] as [String: Any]]
+            }
+            let wrapper = "<command-name>/recap</command-name>\n            <command-message>recap</command-message>"
+            let localOut: [String: Any] = ["type": "system", "subtype": "local_command",
+                                           "content": "<local-command-stdout>…</local-command-stdout>"]
+
+            // --- isRecapEcho: matches, in both content shapes
+            record("isRecapEcho matches bare /recap (string content)",
+                   ShimProcess.isRecapEcho(userMsg("/recap")))
+            record("isRecapEcho matches bare /recap (block content)",
+                   ShimProcess.isRecapEcho(userBlocks("  /recap  ")))
+            record("isRecapEcho matches the command-name wrapper",
+                   ShimProcess.isRecapEcho(userMsg(wrapper)))
+
+            // --- isRecapEcho: must NOT match. These are the regressions.
+            record("isRecapEcho ignores a message quoting the wrapper",
+                   !ShimProcess.isRecapEcho(userMsg(
+                       "why does <command-name>/recap</command-name> get stripped?")))
+            record("isRecapEcho ignores /recap mentioned mid-sentence",
+                   !ShimProcess.isRecapEcho(userMsg("run /recap when you get back")))
+            record("isRecapEcho ignores an unrelated slash command",
+                   !ShimProcess.isRecapEcho(userMsg("/cost")))
+            record("isRecapEcho ignores a message with no content key",
+                   !ShimProcess.isRecapEcho(["type": "user", "message": [:] as [String: Any]]))
+            record("isRecapEcho ignores a malformed message",
+                   !ShimProcess.isRecapEcho(["type": "user"]))
+
+            // --- strippingRecapArtifacts: drops the pair, keeps everything else
+            let stripped = ShimProcess.strippingRecapArtifacts([
+                userMsg("first real prompt"), userMsg(wrapper), localOut, userMsg("second real prompt"),
+            ])
+            record("strippingRecapArtifacts drops the command and its output",
+                   stripped.count == 2, "got \(stripped.count)")
+
+            let otherCommand = ShimProcess.strippingRecapArtifacts([userMsg("/cost"), localOut])
+            record("strippingRecapArtifacts keeps another command's output",
+                   otherCommand.count == 2, "got \(otherCommand.count)")
+
+            let noRecap = [userMsg("hello"), userMsg("world")]
+            record("strippingRecapArtifacts returns a recap-free list unchanged",
+                   ShimProcess.strippingRecapArtifacts(noRecap).count == 2)
+
+            let orphan = ShimProcess.strippingRecapArtifacts([
+                userMsg(wrapper), userMsg("typed while it ran"), localOut,
+            ])
+            record("strippingRecapArtifacts only pairs the IMMEDIATELY following entry",
+                   orphan.count == 2, "got \(orphan.count)")
+
+            let consecutive = ShimProcess.strippingRecapArtifacts([
+                userMsg(wrapper), userMsg(wrapper), localOut,
+            ])
+            record("strippingRecapArtifacts handles back-to-back recap commands",
+                   consecutive.isEmpty, "got \(consecutive.count)")
+
+            // --- strippingRecapFromReplay: unwraps both envelope shapes
+            let bare: [String: Any] = ["type": "response",
+                                       "response": ["messages": [userMsg(wrapper), localOut]] as [String: Any]]
+            let bareOut = ShimProcess.strippingRecapFromReplay(bare)
+            let bareCount = ((bareOut["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count
+            record("strippingRecapFromReplay strips a bare response", bareCount == 0,
+                   "got \(String(describing: bareCount))")
+
+            let wrapped: [String: Any] = ["type": "from-extension", "message": bare]
+            let wrappedOut = ShimProcess.strippingRecapFromReplay(wrapped)
+            let wrappedCount = (((wrappedOut["message"] as? [String: Any])?["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count
+            record("strippingRecapFromReplay strips a from-extension response", wrappedCount == 0,
+                   "got \(String(describing: wrappedCount))")
+
+            let unrelated: [String: Any] = ["type": "io_message", "message": ["type": "assistant"]]
+            record("strippingRecapFromReplay leaves an unrelated message untouched",
+                   (ShimProcess.strippingRecapFromReplay(unrelated)["type"] as? String) == "io_message")
+
+            // --- RecapGate: the eligibility rules
+            var gate = RecapGate()
+            record("RecapGate declines a session with no turns",
+                   gate.ineligibilityReason(hasHistoricConversation: false) != nil)
+            record("RecapGate names the remote carve-out",
+                   gate.ineligibilityReason(hasHistoricConversation: false, isRemote: true)?
+                       .contains("remote") == true)
+            record("RecapGate permits a resumed session with history and no new turns",
+                   gate.ineligibilityReason(hasHistoricConversation: true) == nil)
+            gate.noteUserTurn()
+            record("RecapGate permits after one genuine turn",
+                   gate.ineligibilityReason(hasHistoricConversation: false) == nil)
+            gate.recapLanded()
+            record("RecapGate declines a repeat with no new turn",
+                   gate.ineligibilityReason(hasHistoricConversation: false) != nil)
+            record("RecapGate stays declined even with history seeded",
+                   gate.ineligibilityReason(hasHistoricConversation: true) != nil)
+            gate.noteUserTurn()
+            record("RecapGate permits again after a new turn",
+                   gate.ineligibilityReason(hasHistoricConversation: false) == nil)
+
+            // --- synthetic-capture rule: the `/cost`-captured-as-recap fix
+            record("recap claims a synthetic reply when nothing else was submitted",
+                   ShimProcess.mayCaptureSyntheticReply(contended: false))
+            record("recap yields the synthetic reply once the user has submitted",
+                   !ShimProcess.mayCaptureSyntheticReply(contended: true))
+
+            // --- RecapScript escaping: model output is hostile by default
+            record("RecapScript escapes quotes and backslashes",
+                   RecapScript.setCall(text: "he said \"hi\"\\done")
+                       .contains("\\\"hi\\\"") )
+            record("RecapScript escapes newlines rather than breaking the literal",
+                   !RecapScript.setCall(text: "line1\nline2").contains("\n"))
+        }
+
+        // Summary. Note `grep -c 'record('` does NOT equal this count: the
+        // `func record(` definition matches too, and a few call sites only
+        // fire on failure. Read the printed number, don't count the source.
+        //
+        // CI parses this line and fails the job when `pass` drops
         // below `EXPECTED_ASSERTIONS` in .github/workflows/ci.yml — the exit
         // code cannot tell "every assertion passed" from "half of them never
         // ran", and this function is long enough that a dropped block is a
@@ -2134,15 +2260,7 @@ enum SidebarLogicProbe {
         // purpose means lowering that number in the same commit; adding them
         // needs no change. Keep the format in step with the awk there.
         //
-        // Counting `record(` in this file will NOT give you that number, and
-        // the gap has two parts. A bare grep over-counts: it also matches the
-        // `func record(` definition above and this comment's own mentions.
-        // And of the real call sites, four run only when something failed —
-        // the one `catch` that records, in the resolveProjectPath block, and
-        // the three `else { … "write failed" }` twins — so a green run is
-        // four short of the call-site count. Deliberately no totals here:
-        // they went stale within a day the first time, when #115 merged nine
-        // of issue #108's assertions in. Run the probe, read its last line.
+        // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
     }
