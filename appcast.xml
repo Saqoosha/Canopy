@@ -6,6 +6,30 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>2.11.0</title>
+            <pubDate>Mon, 03 Aug 2026 22:51:35 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>80</sparkle:version>
+            <sparkle:shortVersionString>2.11.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Features
+
+- **Session recap.** When you come back to Canopy after being away for a few minutes, a one-line "where we left off" note now appears directly above the chat input for each visible session. It summarizes what the session was doing so you can pick up without re-reading the transcript, and it clears the moment you send your next message.
+  - This mirrors the Claude Code CLI's away-summary behavior, which never reached Canopy on its own.
+  - The recap does not consume your session's context window, and it never appears as a message in the transcript — including after you close and reopen the session.
+- **Settings toggle.** Session recaps can be turned off under Settings → General.
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy-2.11.0.dmg" length="3015875" type="application/octet-stream" sparkle:edSignature="nzguh0xac74rDdk6sHNU4bQej97Hmad0vSD/kof6+Nk/P6siLHDujwzcc5ReKTGjG7ZfF1DukYZzikRhIST2BQ=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-79.delta" sparkle:deltaFrom="79" length="212822" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="pnV5M0nFpyzQz7xD3oYBX91V0kiJGhXnbZ7i65ORMd2xzS2vU5JW9JMCOhS81Uk4xBZVzp+ptgeLAcTft1HZDg=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-78.delta" sparkle:deltaFrom="78" length="331946" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Zk1Qj5bl1ECQo2KjQH+vEGiidwIRWSP763Ez69ENsGfrUvz/bI1aC3B26bp28p2VJYopsrCshFvQk+uDdSa+AQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-77.delta" sparkle:deltaFrom="77" length="340326" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="EWxm58519leIZQcIEpKVSsMqGMiYgepf52jAgkTNVYA9jQcQaLnFrMBlLQV7JbK/yvbuKXkARw4gvRMzrfH2Bw=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-76.delta" sparkle:deltaFrom="76" length="345682" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="VUzXW+ZATGNAUIsb/fo4MQEGc9J4ukUrfmZZNm0Yz1nNevL6J+JtSR/cB/nVnzetZ5JM/TwETVUEm7o+ImtEDg=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-75.delta" sparkle:deltaFrom="75" length="368574" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="zO80w1Mx8Eq/nZHbu0BkUZgTrrQlULXuZdPlu1KYE/VM1tA7zw/9NyLmD5J2yYKdSITyzED+K9F0wKuROZbdDw=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>2.10.4</title>
             <pubDate>Sat, 01 Aug 2026 18:13:25 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -22,7 +46,7 @@
 - Fixed the context meter reading far too optimistically when a subagent ran on a model with a wider context window than the main model. A 200K session with one 1M subagent could show roughly 17% while the context was in fact full.
 - Fixed the context meter reaching 100% early on models whose maximum output budget exceeds the CLI's internal reserve cap, which made sessions look nearly exhausted long before they were.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.4/Canopy-2.10.4.dmg" length="2996228" type="application/octet-stream" sparkle:edSignature="tvauminUPbVPCwFcpIjf5N0d0+Kxj4f3h7mypDM20JOJYa8jTmb34a0JevAPzUqK2hzDqCneTUgh1L/Gk/dXCg=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy-2.10.4.dmg" length="2996208" type="application/octet-stream" sparkle:edSignature="SDLbIPzWwTDwpeMrQ+uK/CT239pNA0bWtN+/TkICAPinLOJpcur0X60VKjeSC9x2c5pCiX4//23uevyhOTVEBw=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.4/Canopy79-78.delta" sparkle:deltaFrom="78" length="258390" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OFPsEHZTApCIPy23mq9q5uF8BwDBmA7AobBZMjDim4u6XJPqVpzBa46XB6mCpn4Zar0c+GB7O68C2Pat7IpkAA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.4/Canopy79-77.delta" sparkle:deltaFrom="77" length="270874" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="2DwAUmKtkiwOrYUyf9YiwI3IAfoelQsnt8hxT8j4/RtXy32cRXIgyRiQQAkX5zx/dDxMMbRZmep7VaQiIVcLDw=="/>
@@ -42,34 +66,13 @@
             <description sparkle:format="markdown"><![CDATA[### Bug Fixes
 - Fixed chat auto-scroll silently stopping when an image thumbnail loaded — the container no longer stays pinned to the bottom once a Read tool result renders an image
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.4/Canopy-2.10.3.dmg" length="2980373" type="application/octet-stream" sparkle:edSignature="7mg0c36mjeg7BCZQTWxqL1f8EhjUdfhU7DKzxXZ3AM/nTIbAJ83HDqwqsUlg7kL9YS0CHrHhzwCZsByiKlRMBg=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy-2.10.3.dmg" length="2980381" type="application/octet-stream" sparkle:edSignature="ijyFt921Z+8PLebWAChC8PBRSRQEgeYs81H8hrpZd/jTaWHP1fA/MXooDEXmfMJx8sH0dyBywYDAGaTFjpoXDQ=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.3/Canopy78-77.delta" sparkle:deltaFrom="77" length="109658" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="+LF0opFNsxD3nGfJCXj0l4lLf121uZMuahvX2+KQVe0gMEf5+6QzsEG8Cys9KglshSakYHDMShah0sawDiXECA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.3/Canopy78-76.delta" sparkle:deltaFrom="76" length="124878" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="uQ9/3oA/a2M42D/xUoBnSJOjHpkkqOJcumCiSm0tNbNi3dRKaz11WcCh0OP2E9LwNTePVFY7IHK3lWdJ2KEDCg=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.3/Canopy78-75.delta" sparkle:deltaFrom="75" length="194878" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="kvPIq/R5bNRj1W33vZyr++z50mDNZjZSe67AINMMQX88lWsRMw7dbMbio83RKtFn7/NveIR0yntlzyL3xC8IDA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.3/Canopy78-74.delta" sparkle:deltaFrom="74" length="233686" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Svd2dzvuJVHZ/wMuKSbqJ+jK1tt4fcbKg/lSUEOevodDeDLVEjWPmhfbjyaq99blg9TmRPsRnovT1r+YdOx7Cw=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.3/Canopy78-72.delta" sparkle:deltaFrom="72" length="418734" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="HpntU2lfr3KT+jaqa3W1T1DmNOCBDSSNYMCoK9jDe13Pqa1P60V04HVfJ2M+6KZ9CjAFRQWhWsqbzVOcEQpWBg=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>2.10.2</title>
-            <pubDate>Thu, 23 Jul 2026 16:33:23 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>77</sparkle:version>
-            <sparkle:shortVersionString>2.10.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Bug Fixes
-
-- Fixed a 2.10.1 regression where toggling the sidebar left the leftmost pane header stuck at the wrong position until the mouse was moved. The header now follows the sidebar collapse/expand animation live.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.4/Canopy-2.10.2.dmg" length="2978203" type="application/octet-stream" sparkle:edSignature="PPt58LZNtYx8UF6p3GBGduLO/VncXlCjw9O6LZdoAIw7jmTmpxaZk0PcPS/LuUidOoschDTUrvt/kJzusjtkAg=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.2/Canopy77-76.delta" sparkle:deltaFrom="76" length="108002" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="k+Axcu2SKYfhisEI1Z7KHzN3S558SEJ/l8u1gpm2JqBCdT0nIvwuCdDJ0pzrrrKTe52BMekZc3pNOvnm5OrYBw=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.2/Canopy77-75.delta" sparkle:deltaFrom="75" length="188610" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="WqfhubLnHJ5GfeVkEi6zfMwO51CEpQIoCbuZtnWVPevoMGjcgG8xczKasivY65nuvnC3FFd9mqvxqOussvHhBQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.2/Canopy77-74.delta" sparkle:deltaFrom="74" length="230666" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="N90zTtTbDOxdRsUbGWXRJ+zWUHECPiGtP55mumeKXih+6lnKQtqRiB5AuE2IRvfso7K1gRdkxkyWAATidOT2DQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.2/Canopy77-72.delta" sparkle:deltaFrom="72" length="423854" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="xsH6owP//xrk3AQpg6VBkKAvPxTN9szdSBvzPMAKfh85t3bAiTUDhogmsxokA/Vwi8J3xSCMoDahF5AHIn2DAw=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.10.2/Canopy77-71.delta" sparkle:deltaFrom="71" length="434422" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="YOC7HGrq5aXcKS/LNhF6tR10yio2emZ0Dr7RSnurhh8WJQBUv6Zd4GDkBzB6uA59zxMkln57gW/5X51Dbfy0Dg=="/>
             </sparkle:deltas>
         </item>
         <item>
