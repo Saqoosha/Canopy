@@ -48,7 +48,7 @@ struct SessionContainer: View {
                 .animation(.easeInOut(duration: 0.3), value: session.connection.isOverlayVisible)
 
                 // The recap is NOT rendered here: it lives inside the webview,
-                // directly above the chat input (see `RecapScript`). Kept as a
+                // at the top of the chat composer (see `RecapScript`). Kept as a
                 // note because the surrounding rows are native and the absence
                 // is otherwise easy to read as an oversight.
                 SubagentListView(data: session.statusBar)

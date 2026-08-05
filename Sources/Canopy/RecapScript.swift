@@ -3,10 +3,12 @@ import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "RecapScript")
 
-/// Renders the session recap as a row inside the CC extension's webview,
-/// immediately above the chat input card — the same position the Claude Code
-/// CLI prints its `away_summary` line, and where the eye already goes when
-/// returning to a session.
+/// Renders the session recap as a row inside the CC extension's webview, at
+/// the top of the chat composer — above the input card AND above the
+/// extension's own notice banners, so nothing the extension raises can bury
+/// it. That is the same position the Claude Code CLI prints its
+/// `away_summary` line, and where the eye already goes when returning to a
+/// session.
 ///
 /// Canopy owns the text (see `ShimProcess.requestRecap`) but not the DOM, so
 /// this injects a node the extension knows nothing about and defends it
@@ -18,9 +20,14 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "RecapScript
 ///      [contenteditable="true"], [role="textbox"]` filtered to the bottom
 ///      half of the viewport, then walk up to the nearest ancestor rendered
 ///      as a rounded card (`border-radius > 0`, narrower than the viewport).
-///   2. Insert the recap element as the card's immediately-preceding sibling,
-///      so it inherits the chat column's width and centering for free rather
-///      than needing its own layout math.
+///   2. From that card, climb to the top of the composer column — the run of
+///      ancestors that keep the card's width — and insert the recap as its
+///      FIRST child. The extension's own notice banners (e.g. Remote
+///      Control, rate-limit warning, Chrome/debugger/Jupyter MCP, settings
+///      errors, session errors) are laid out inside that run, above the
+///      input's `form`, so anchoring to the card itself buried the recap
+///      underneath whichever of them was up. First-child places it above all
+///      of them and inherits the column's layout rather than needing its own.
 ///   3. Re-insert on every `MutationObserver` hit where the node lost its
 ///      anchor. React owns this subtree and will discard foreign children on
 ///      re-render; re-attaching is the only stable contract available.
@@ -30,11 +37,12 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "RecapScript
 /// the extension's first paint) are replayed once an anchor appears — rather
 /// than being dropped and leaving the user with no recap at all.
 ///
-/// Every failure path warns through `console.warn`, which Canopy's
-/// `ConsoleLogHandler` funnels into the unified log. There is deliberately
-/// no native fallback UI: a silent selector regression should show up as a
-/// grep-able warning, not as a second, differently-styled strip appearing
-/// out of nowhere.
+/// `findInputEl` and `findInputCard` warn through `console.warn`, which
+/// Canopy's `ConsoleLogHandler` funnels into the unified log, so a selector
+/// regression there shows up as a grep-able warning. `findComposerColumn`
+/// deliberately does not — see it for why. There is no native fallback UI: a
+/// regression should show up in the log, not as a second, differently-styled
+/// strip appearing out of nowhere.
 enum RecapScript {
     /// A bare call EXPRESSION, deliberately without a `window.__canopyRecap &&`
     /// guard of its own. `ShimProcess.showRecapInWebView` wraps it in a ternary
@@ -203,6 +211,37 @@ enum RecapScript {
             return firstConstrained;
         }
 
+        // The outermost ancestor of the input card that still has the card's
+        // width. Width, not class names — those churn every release.
+        //
+        // Wide panes land on `.inputWrapper`; narrow panes one level up, on
+        // the composer overlay, because `.inputWrapper` is `max-width:680px`
+        // and stops being the narrower box. Both sit above the notice
+        // banners, which is the whole point.
+        //
+        // What keeps the climb out of the scrolling transcript is
+        // `WIDTH_TOLERANCE` staying under the overlay's horizontal inset —
+        // 24 against 32 (`.inputContainer_07S1Yg` is `left:16px;right:16px`,
+        // measured 2026-08 on extension 2.1.222). Raise the tolerance, or let
+        // the extension tighten the inset, and the row can mount off-screen.
+        // Nothing warns: these stops are the NORMAL exit, so logging them
+        // would fire on every healthy mount. MAX_HOPS is a backstop only.
+        function findComposerColumn(card) {
+            var MAX_HOPS = 6;
+            var WIDTH_TOLERANCE = 24;
+            var cardW = card.getBoundingClientRect().width;
+            var best = card;
+            var node = card;
+            for (var hop = 0; hop < MAX_HOPS; hop++) {
+                var parent = node.parentElement;
+                if (!parent || parent === document.body) break;
+                if (Math.abs(parent.getBoundingClientRect().width - cardW) > WIDTH_TOLERANCE) break;
+                best = parent;
+                node = parent;
+            }
+            return best;
+        }
+
         // --- element
 
         function build() {
@@ -220,13 +259,14 @@ enum RecapScript {
                 // a margin would be transparent, and the transcript scrolls
                 // underneath this whole area — so a margin reads as a strip
                 // of chat content wedged between the recap and the input.
-                // Padding keeps the same visual gap while the background
-                // runs unbroken down to the input card.
+                // Padding keeps the same visual gap while the row's own
+                // background stays unbroken across it.
                 'margin:0',
                 'padding:6px 10px 10px 10px',
-                // Bottom corners stay square for the same reason: rounding
-                // them against a card the row now touches would punch two
-                // transparent notches back out.
+                // Bottom corners stay square for the same reason: whatever
+                // sits directly below — a notice banner, a permission
+                // dialog, or the input card — butts against this edge, and
+                // rounding it would punch two transparent notches back out.
                 'border-radius:6px 6px 0 0',
                 'font-size:11px',
                 'line-height:1.5',
@@ -262,15 +302,16 @@ enum RecapScript {
             return row;
         }
 
-        /// Place (or replace) the row directly before the input card. Returns
-        /// false when no anchor exists yet — the caller keeps `currentText`
-        /// so a later mutation can retry.
+        /// Place (or replace) the row at the top of the composer column, above
+        /// the extension's notice banners. Returns false when no anchor exists
+        /// yet — the caller keeps `currentText` so a later mutation can retry.
         function mount() {
             if (currentText == null) return true;
             var input = findInputEl();
             if (!input) return false;
             var card = findInputCard(input);
             if (!card || !card.parentElement) return false;
+            var column = findComposerColumn(card);
 
             if (!el) el = build();
             var body = el.querySelector('[data-canopy="recap-text"]');
@@ -295,17 +336,21 @@ enum RecapScript {
             // Re-resolved on every mount, not just on build: a theme switch
             // re-renders the tree, and a stale light background on a dark
             // theme is worse than no background at all.
-            var bg = resolveBackground(card);
+            //
+            // Resolved from the column, not the card: the card carries the
+            // input's own surface colour, which is not the surface this row
+            // now sits on.
+            var bg = resolveBackground(column);
             if (el.style.backgroundColor !== bg) {
                 el.style.backgroundColor = bg;
             }
 
             // Already correctly positioned — do nothing, so we don't churn
             // the DOM (and retrigger our own MutationObserver) on every tick.
-            if (el.parentElement === card.parentElement && el.nextSibling === card) {
+            if (column.firstChild === el) {
                 return true;
             }
-            card.parentElement.insertBefore(el, card);
+            column.insertBefore(el, column.firstChild);
             return true;
         }
 
@@ -342,10 +387,17 @@ enum RecapScript {
             // while leaving our row parented to a stale container — the row
             // stays in the document and passes an attachment test, but is no
             // longer above the input, and nothing would ever reposition it.
-            // `mount()` already owns the real invariant (`el.nextSibling ===
-            // card`) and returns without touching the DOM when it holds, so
+            // `mount()` already owns the real invariant (`column.firstChild
+            // === el`) and returns without touching the DOM when it holds, so
             // calling it unconditionally is both correct and cheap.
-            if (mount()) { stopRetry(); }
+            // Re-arm on failure, not just disarm on success: the timer is
+            // otherwise only ever armed by `set()`, so a composer torn down
+            // AFTER a successful mount (auth screen, webview reload) leaves
+            // `currentText` set with nothing on screen and no log line.
+            // `startRetry` is idempotent and bounded, so the worst case is a
+            // teardown slower than its 5 s cap logging the terminal error
+            // and then recovering.
+            if (mount()) { stopRetry(); } else { startRetry(); }
         });
         observer.observe(document.body || document.documentElement,
                          { childList: true, subtree: true });
