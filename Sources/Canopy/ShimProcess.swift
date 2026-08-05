@@ -1694,7 +1694,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     static let recapCommand = "/recap"
 
     /// Push the recap into the webview, where `RecapScript` renders it as a
-    /// row directly above the chat input. Passing nil clears it.
+    /// row at the top of the chat composer. Passing nil clears it.
     ///
     /// The webview is the display of record. `statusBarData.recap` is kept in
     /// step purely as observable state for a future native surface or a test;
