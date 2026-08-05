@@ -726,6 +726,11 @@ final class SessionStore {
             if case .open(let s) = row { return s.id }
             return nil
         }
+        // Resolve which sessions were dragged BEFORE the reorder: the
+        // offsets are in pre-drag visible-row coordinates.
+        let draggedIds = fromOffsets.compactMap { off -> UUID? in
+            visibleIds.indices.contains(off) ? visibleIds[off] : nil
+        }
         let masterIds = openSessions.map(\.id)
         let newOrder = Self.reorderPreservingHidden(
             master: masterIds,
@@ -736,7 +741,73 @@ final class SessionStore {
         guard newOrder != masterIds else { return }
         let byId = Dictionary(uniqueKeysWithValues: openSessions.map { ($0.id, $0) })
         openSessions = newOrder.compactMap { byId[$0] }
+        // Apply in final sidebar order so a multi-row drag is deterministic.
+        let draggedSet = Set(draggedIds)
+        movePanesFollowingDrag(
+            draggedIds: openSessions.map(\.id).filter { draggedSet.contains($0) }
+        )
         logger.info("moveOpenSessions from=\(fromOffsets.map(String.init).joined(separator: ","), privacy: .public) to=\(toOffset)")
+    }
+
+    /// Move the just-dragged sessions' panes to follow the new
+    /// `openSessions` order. ONLY the dragged sessions' panes move — there
+    /// is deliberately no global re-sort. A drag must never shuffle a pane
+    /// the user did not touch, and a pane order that has drifted from the
+    /// sidebar (plain-clicking an unpaned session into a pane does that)
+    /// must never snap back on an unrelated drag.
+    ///
+    /// The unit of movement is the whole `PaneSlot`, so `preferredWidth`
+    /// travels with the session: the total is unchanged, the window is not
+    /// resized, and each WKWebView keeps its width and merely shifts x —
+    /// no reflow, no chat scroll drift. Moving the slot (rather than
+    /// swapping `content` between fixed slots) also keeps
+    /// `Detail.swift`'s `SessionContainer(...).id(session.id)` paired with
+    /// the same subtree, so `ForEach` sees a move instead of a teardown.
+    ///
+    /// Launcher panes have no sidebar row, so they hold their slot index;
+    /// session panes permute only among the slots they already occupy.
+    /// `draggedIds` must arrive in final `openSessions` order so a
+    /// multi-row drag is deterministic.
+    private func movePanesFollowingDrag(draggedIds: [OpenSession.ID]) {
+        guard !panes.isEmpty else { return }
+        let focusedSlotId = panes.indices.contains(focusedPaneIndex)
+            ? panes[focusedPaneIndex].id
+            : nil
+
+        // Slot positions session panes occupy, left to right.
+        let sessionSlots = panes.indices.filter {
+            if case .session = panes[$0].content { return true }
+            return false
+        }
+        guard sessionSlots.count > 1 else { return }
+
+        var ordered = sessionSlots.map { panes[$0] }
+        let panedIds: Set<OpenSession.ID> = Set(ordered.compactMap { slot in
+            if case .session(let id) = slot.content { return id }
+            return nil
+        })
+        // Ranks the paned sessions hold in the post-drag sidebar order.
+        let sidebarRanking = openSessions.map(\.id).filter { panedIds.contains($0) }
+
+        for draggedId in draggedIds {
+            guard let from = ordered.firstIndex(where: { $0.content == .session(draggedId) }),
+                  let to = sidebarRanking.firstIndex(of: draggedId),
+                  to != from,
+                  ordered.indices.contains(to)
+            else { continue }
+            let slot = ordered.remove(at: from)
+            ordered.insert(slot, at: to)
+        }
+
+        for (slotPos, slot) in zip(sessionSlots, ordered) {
+            panes[slotPos] = slot
+        }
+
+        // Focus tracks the session, not the slot index.
+        if let focusedSlotId,
+           let newIndex = panes.firstIndex(where: { $0.id == focusedSlotId }) {
+            focusedPaneIndex = newIndex
+        }
     }
 
     // MARK: - Panes

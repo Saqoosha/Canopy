@@ -9,8 +9,8 @@ import SwiftUI
 /// Grouping mode persists across launches via UserDefaults.
 ///
 /// Click semantics:
-///   - .open + plain     → openInFocusedPane (replace focused pane)
-///   - .open + Cmd       → openInNewPane (or bounce/focus existing)
+///   - .open (Cmd or not) → openInFocusedPane. Cmd is deliberately ignored
+///     on open rows; see handleRowClick for why
 ///   - .closedLocal + plain → openLocal (select → openInFocusedPane)
 ///   - .closedLocal + Cmd   → openLocal, then openInNewPane
 ///   - .closedCloud + plain → openCloud(.focused)
@@ -323,12 +323,15 @@ struct Sidebar: View {
     private func handleRowClick(row: SidebarRow, addNewPane: Bool) {
         switch row {
         case .open(let session):
-            if addNewPane {
-                let added = store.openInNewPane(session.id)
-                if !added { bouncePane(forSessionId: session.id) }
-            } else {
-                store.openInFocusedPane(session.id)
-            }
+            // Cmd is deliberately ignored on open rows: Cmd+click behaves
+            // exactly like a plain click. openInFocusedPane already focuses
+            // the session's existing pane when it has one, and loads it into
+            // the focused pane when it does not. Growing a NEW pane from an
+            // already-open row would append it at the right end regardless
+            // of where the row sits, which reads as the sidebar rearranging
+            // itself. Panes are now born only with new sessions, where the
+            // row append and the rightmost pane append coincide.
+            store.openInFocusedPane(session.id)
         case .closedLocal(let entry):
             if addNewPane && store.panes.count >= SessionStore.paneAbsoluteCap {
                 store.showCapReachedHintOnFocusedPane()
@@ -343,16 +346,6 @@ struct Sidebar: View {
             } else {
                 store.openCloud(cloud, target: addNewPane ? .newPane : .focused)
             }
-        }
-    }
-
-    private func bouncePane(forSessionId sessionId: OpenSession.ID) {
-        if let idx = store.paneIndex(forSession: sessionId) {
-            store.setFocusedPaneIndex(idx)
-            return
-        }
-        if store.panes.count >= SessionStore.paneAbsoluteCap {
-            store.showCapReachedHintOnFocusedPane()
         }
     }
 

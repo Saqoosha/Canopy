@@ -2124,6 +2124,104 @@ enum SidebarLogicProbe {
                    && storeLaunchOk.panes.count == 2
                    && storeLaunchOk.panes[1].content == .launcher
                    && storeLaunchOk.focusedPaneIndex == 1)
+
+            // MARK: Pane follows sidebar drag
+            //
+            // Drag is the ONLY thing that moves a pane. Only the dragged
+            // session's pane moves — no global re-sort — so a drag never
+            // shuffles panes the user did not touch, and a drifted pane
+            // order is never snapped back behind the user's back.
+            func dragSession(_ n: String) -> OpenSession {
+                OpenSession(origin: .local(cwd), resumeId: "drag-\(n)", title: n, project: "p", status: .live)
+            }
+
+            // [A][B][C], drag C above B → [A][C][B]
+            let dA = dragSession("A"), dB = dragSession("B"), dC = dragSession("C")
+            let storeDrag = SessionStore()
+            storeDrag._probeSeedOpenSessions([dA, dB, dC])
+            _ = storeDrag.openInNewPane(dA.id)
+            _ = storeDrag.openInNewPane(dB.id)
+            _ = storeDrag.openInNewPane(dC.id)
+            storeDrag.forceSetPaneWidth(at: 0, to: 300)
+            storeDrag.forceSetPaneWidth(at: 1, to: 400)
+            storeDrag.forceSetPaneWidth(at: 2, to: 500)
+            let widthSumBefore = storeDrag.panes.reduce(0) { $0 + $1.preferredWidth }
+            storeDrag.moveOpenSessions(fromOffsets: IndexSet(integer: 2), toOffset: 1)
+            record("drag reorders panes to follow sidebar",
+                   storeDrag.panes.map(\.content)
+                   == [.session(dA.id), .session(dC.id), .session(dB.id)])
+            record("dragged pane carries its width with it",
+                   storeDrag.panes[1].preferredWidth == 500
+                   && storeDrag.panes[2].preferredWidth == 400)
+            record("drag preserves pane count and total width",
+                   storeDrag.panes.count == 3
+                   && storeDrag.panes.reduce(0) { $0 + $1.preferredWidth } == widthSumBefore)
+            record("focus follows the dragged session, not the slot index",
+                   storeDrag.focusedPaneIndex == 1)
+
+            // A(pane) B(no pane) C(pane); drag A below B.
+            // Paned relative order is unchanged → panes must not move.
+            let nA = dragSession("nA"), nB = dragSession("nB"), nC = dragSession("nC")
+            let storeNoop = SessionStore()
+            storeNoop._probeSeedOpenSessions([nA, nB, nC])
+            _ = storeNoop.openInNewPane(nA.id)
+            _ = storeNoop.openInNewPane(nC.id)
+            storeNoop.moveOpenSessions(fromOffsets: IndexSet(integer: 0), toOffset: 2)
+            record("drag across an unpaned row leaves panes alone",
+                   storeNoop.openSessions.map(\.id) == [nB.id, nA.id, nC.id]
+                   && storeNoop.panes.map(\.content)
+                   == [.session(nA.id), .session(nC.id)])
+
+            // Dragging a row that has no pane at all.
+            let uA = dragSession("uA"), uB = dragSession("uB"), uC = dragSession("uC")
+            let storeUnpaned = SessionStore()
+            storeUnpaned._probeSeedOpenSessions([uA, uB, uC])
+            _ = storeUnpaned.openInNewPane(uA.id)
+            _ = storeUnpaned.openInNewPane(uB.id)
+            storeUnpaned.moveOpenSessions(fromOffsets: IndexSet(integer: 2), toOffset: 0)
+            record("dragging an unpaned row never touches panes",
+                   storeUnpaned.panes.map(\.content)
+                   == [.session(uA.id), .session(uB.id)])
+
+            // [A][launcher][B]; drag B above A. The launcher has no sidebar
+            // row, so it must hold its slot index while the sessions swap
+            // around it.
+            let lA = dragSession("lA"), lB = dragSession("lB")
+            let storeLaunch = SessionStore()
+            storeLaunch._probeSeedOpenSessions([lA, lB])
+            _ = storeLaunch.openInNewPane(lA.id)
+            _ = storeLaunch.openLauncherInNewPane()
+            _ = storeLaunch.openInNewPane(lB.id)
+            storeLaunch.moveOpenSessions(fromOffsets: IndexSet(integer: 1), toOffset: 0)
+            record("launcher pane holds its index while sessions reorder",
+                   storeLaunch.panes.map(\.content)
+                   == [.session(lB.id), .launcher, .session(lA.id)])
+
+            // Drift: panes [C][A] while the sidebar reads A, B, C.
+            // Dragging the unpaned B must NOT snap panes into sidebar order.
+            let fA = dragSession("fA"), fB = dragSession("fB"), fC = dragSession("fC")
+            let storeDrift = SessionStore()
+            storeDrift._probeSeedOpenSessions([fA, fB, fC])
+            _ = storeDrift.openInNewPane(fC.id)
+            _ = storeDrift.openInNewPane(fA.id)
+            storeDrift.moveOpenSessions(fromOffsets: IndexSet(integer: 1), toOffset: 3)
+            record("drag never snaps drifted panes into sidebar order",
+                   storeDrift.openSessions.map(\.id) == [fA.id, fC.id, fB.id]
+                   && storeDrift.panes.map(\.content)
+                   == [.session(fC.id), .session(fA.id)])
+
+            // An open row's click — Cmd held or not — routes through
+            // openInFocusedPane. Cmd must never grow a pane from a row
+            // that is already open: that pushes it to the right end, which
+            // reads as the sidebar moving things on its own.
+            let cA = dragSession("cA"), cB = dragSession("cB")
+            let storeCmd = SessionStore()
+            storeCmd._probeSeedOpenSessions([cA, cB])
+            _ = storeCmd.openInNewPane(cA.id)
+            storeCmd.openInFocusedPane(cB.id)
+            record("open-row click replaces the focused pane, never adds one",
+                   storeCmd.panes.count == 1
+                   && storeCmd.panes[0].content == .session(cB.id))
         }
 
         // MARK: - Recap (see RecapGate / ShimProcess recap filters)
