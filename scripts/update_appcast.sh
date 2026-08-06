@@ -11,7 +11,8 @@ set -euo pipefail
 # This script also generates delta updates from previous versions and
 # uploads them to the GitHub Release for faster incremental updates.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build"
 SPARKLE_BIN="${BUILD_DIR}/SourcePackages/artifacts/sparkle/Sparkle/bin"
 APPCAST_DIR="${BUILD_DIR}/appcast"
@@ -19,43 +20,20 @@ APPCAST_DIR="${BUILD_DIR}/appcast"
 # Sparkle's generate_appcast attaches every DMG it inspects for delta
 # generation and does not detach them — they pile up across releases as
 # stealth mounts (no /Volumes/ entry), holding file descriptors on the
-# source DMGs and crowding the /dev/disk* table. Eject anything still
-# attached from $APPCAST_DIR on exit so each run leaves a clean state.
-# Scope is intentionally limited to $APPCAST_DIR — never touch a DMG the
-# developer mounted by hand.
+# source DMGs and crowding the /dev/disk* table. strip_sh_xattrs below attaches
+# them too, and can leave one behind when both of its detach attempts fail.
+# Eject anything still attached from a DMG under $APPCAST_DIR on exit so each
+# run leaves a clean state, including the paths where the script aborts mid-run
+# (issue #127). Scope is $APPCAST_DIR — nothing outside it is touched, which
+# also means the `stripped-*` intermediates strip_sh_xattrs creates directly in
+# $BUILD_DIR are not covered here; package_dmg.sh's wider scan is what would
+# catch one of those.
 cleanup_appcast_mounts() {
-  local devs detached=0 failed=0 dev
-  devs=$(APPCAST_DIR="$APPCAST_DIR" hdiutil info -plist 2>/dev/null | python3 -c "
-import os, plistlib, sys
-appcast_dir = os.environ.get('APPCAST_DIR', '')
-if not appcast_dir:
-    sys.exit(0)
-try:
-    data = plistlib.loads(sys.stdin.buffer.read())
-except (plistlib.InvalidFileException, ValueError, EOFError):
-    sys.exit(0)
-prefix = appcast_dir.rstrip('/') + '/'
-for img in data.get('images', []):
-    path = img.get('image-path', '') or ''
-    if not path.startswith(prefix):
-        continue
-    entries = img.get('system-entities', [])
-    parents = sorted((e.get('dev-entry','') for e in entries if e.get('dev-entry')), key=len)
-    if parents:
-        print(parents[0])
-" 2>/dev/null) || return 0
-  while IFS= read -r dev; do
-    [[ -z "$dev" ]] && continue
-    if hdiutil detach "$dev" -force -quiet 2>/dev/null; then
-      detached=$((detached + 1))
-    else
-      failed=$((failed + 1))
-      echo "  warn: failed to detach leftover appcast mount $dev" >&2
-    fi
-  done <<<"$devs"
-  if (( detached > 0 || failed > 0 )); then
-    echo "Appcast mount cleanup: detached=$detached failed=$failed" >&2
-  fi
+  # `|| true` so this cannot abort the rest of the trap it runs in. It does mean
+  # a mount we could not eject leaves the run green with only the helper's
+  # stderr to show for it — the next release's package_dmg.sh pre-notarize check
+  # is what actually stops anything.
+  "${SCRIPT_DIR}/detach_dmg_mounts.sh" "$APPCAST_DIR" || true
 }
 trap cleanup_appcast_mounts EXIT
 
@@ -120,31 +98,57 @@ for TAG in $RELEASES; do
   fi
 done
 
+# `hdiutil detach` fails transiently while something still holds the volume
+# (Spotlight indexing it, or the find that just walked it). Unguarded under
+# `set -e` that aborts the whole script with the image still attached, which is
+# what hangs the next release's notarization (issue #127). Try force as a second
+# chance, then hand the mount to the EXIT trap rather than dying here.
+detach_mount() {
+  local mount="$1"
+  hdiutil detach "$mount" -quiet 2>/dev/null && return 0
+  hdiutil detach "$mount" -force -quiet 2>/dev/null && return 0
+  echo "  warn: could not detach $mount — the EXIT trap retries, but if that" >&2
+  echo "        also fails this run still exits 0; check 'hdiutil info'" >&2
+  return 1
+}
+
 # Strip code-signed xattrs from shell scripts in local DMG copies before delta generation.
 # codesign adds com.apple.cs.* xattrs to resource files; Sparkle can't diff files with
 # these xattrs. File contents (hashed in CodeResources) are unaffected, so this is safe.
 strip_sh_xattrs() {
   local DMG="$1"
-  local MOUNT TMP_CONTENT
+  local MOUNT TMP_CONTENT REBUILD=0
   MOUNT=$(mktemp -d)
   TMP_CONTENT=$(mktemp -d)
-  hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -quiet -readonly 2>/dev/null || {
-    rm -rf "$MOUNT" "$TMP_CONTENT"; return 0
-  }
+  if ! hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -quiet -readonly 2>/dev/null; then
+    rm -rf "$MOUNT" "$TMP_CONTENT"
+    return 0
+  fi
   # Only rebuild if any .sh has xattrs
   if find "$MOUNT" -name "*.sh" -exec xattr {} \; 2>/dev/null | grep -q .; then
+    REBUILD=1
     cp -Rp "$MOUNT"/* "$TMP_CONTENT/" 2>/dev/null || true
-    hdiutil detach "$MOUNT" -quiet
+  fi
+  # Detach as soon as the read is done (the pre-existing code did this too —
+  # what changed is that both branches now share one call site and a failure no
+  # longer kills the script). When the detach DOES fail we still fall through to
+  # the rebuild below, so the mv can replace the backing file of a live mount;
+  # that is survivable because the mount holds the old inode and the EXIT trap
+  # matches on the recorded image-path, not on the file. Only remove the
+  # mountpoint directory when the detach succeeded — rm -rf on a live mount is
+  # not a cleanup, so the directory is deliberately leaked instead.
+  if detach_mount "$MOUNT"; then
+    rm -rf "$MOUNT"
+  fi
+  if (( REBUILD )); then
     find "$TMP_CONTENT" -name "*.sh" -exec xattr -c {} \;
     local TEMP_DMG; TEMP_DMG=$(mktemp "${BUILD_DIR}/stripped-XXXXXX")
     rm -f "$TEMP_DMG"  # mktemp creates the file; hdiutil create needs it absent
     hdiutil create -srcfolder "$TMP_CONTENT" -format UDZO -volname "Canopy" -o "$TEMP_DMG" -quiet
     mv "${TEMP_DMG}.dmg" "$DMG"
     echo "  Stripped xattrs: $(basename "$DMG")"
-  else
-    hdiutil detach "$MOUNT" -quiet
   fi
-  rm -rf "$MOUNT" "$TMP_CONTENT"
+  rm -rf "$TMP_CONTENT"
 }
 
 echo "Stripping shell script xattrs from local DMG copies..."
@@ -224,9 +228,13 @@ fi
 
 # Push appcast.xml to gh-pages branch
 WORKTREE_DIR=$(mktemp -d)
-# Replaces the earlier cleanup_appcast_mounts-only trap; the new trap must
-# also call cleanup_appcast_mounts so DMG mount cleanup still runs on exit.
-trap 'rm -rf "$WORKTREE_DIR"; cleanup_appcast_mounts' EXIT
+# Mount cleanup goes FIRST. Under `set -e` a failing command in a trap body
+# aborts the rest of the trap (measured: `trap 'false; f' EXIT` never reaches f
+# and exits 1), so an `rm -rf` that hits a permission error or a live mountpoint
+# would silently skip the cleanup this whole script depends on. A leaked mktemp
+# dir costs nothing; a leaked mount costs the next release. The trade is that a
+# detach which HANGS rather than fails now blocks the rm too.
+trap 'cleanup_appcast_mounts; rm -rf "$WORKTREE_DIR"' EXIT
 
 # Check if gh-pages branch exists
 if git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
