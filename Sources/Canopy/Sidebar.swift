@@ -247,13 +247,21 @@ struct Sidebar: View {
             onClose: { handleClose(row) }
         )
         .background(
-            // Inline so the padding actually shows. `.listRowBackground` stretches
-            // its content to fill the cell, eating any inset modifiers. Hover
-            // pill only — pane highlight lives on listRowBackground below.
-            RoundedRectangle(cornerRadius: 9)
-                .fill(rowBackgroundFill(for: row))
-                .padding(.horizontal, 3)
-                .padding(.vertical, 1)
+            // BOTH backgrounds live here, inline, because `.listRowBackground`
+            // stretches its content to fill the cell and eats any inset
+            // modifier — a rounded rect handed to it renders as a full-bleed
+            // square. The pane highlight sits under the hover fill so hovering
+            // a paned row deepens it instead of replacing it, and the shared
+            // padding is what separates adjacent paned rows into distinct
+            // chips rather than one continuous block.
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(paneHighlightFill(for: row))
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(rowBackgroundFill(for: row))
+            }
+            .padding(.horizontal, 3)
+            .padding(.vertical, 1)
         )
         .id(row.id)
         .onHover { h in hoveredRowId = h ? row.id : nil }
@@ -267,15 +275,9 @@ struct Sidebar: View {
         })
         .selectionDisabled(!row.isOpen)
         .contextMenu { rowMenu(for: row) }
-        .listRowBackground(
-            Group {
-                switch highlight(for: row) {
-                case .none: Color.clear
-                case .weak: Color.accentColor.opacity(0.12)
-                case .strong: Color.accentColor.opacity(0.35)
-                }
-            }
-        )
+        // Cleared deliberately: everything visible is drawn by the inline
+        // `.background` above, where insets survive.
+        .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
     }
@@ -293,10 +295,19 @@ struct Sidebar: View {
         }())
     }
 
-    /// Hover pill only. Pane membership highlight is on `.listRowBackground`.
+    /// Hover fill only — the top layer of the inline `.background` ZStack.
+    /// Pane membership is the layer beneath it, `paneHighlightFill(for:)`.
     private func rowBackgroundFill(for row: SidebarRow) -> Color {
         if hoveredRowId == row.id { return Color.primary.opacity(0.04) }
         return Color.clear
+    }
+
+    private func paneHighlightFill(for row: SidebarRow) -> Color {
+        switch highlight(for: row) {
+        case .none: Color.clear
+        case .weak: Color.accentColor.opacity(0.12)
+        case .strong: Color.accentColor.opacity(0.35)
+        }
     }
 
     private func isActive(_ row: SidebarRow) -> Bool {
