@@ -24,6 +24,17 @@ TMP_DMG="${TMP_WORK}/${DMG_NAME}.dmg"
 DEVELOPER_ID="Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
 KEYCHAIN_PROFILE="notarytool-profile"
 
+# A stale DMG mount has preceded every `notarytool submit` hang we have hit, so
+# clear ours before the ~10 min build rather than after it. See CLAUDE.md
+# "notarytool DMG-mount hang" and issue #127. Lives here rather than in
+# release.sh so a standalone package_dmg.sh run is covered too.
+echo "=== Checking for leftover DMG mounts ==="
+if ! "${ROOT_DIR}/scripts/detach_dmg_mounts.sh" "${BUILD_DIR}"; then
+  echo "Error: could not confirm that nothing under ${BUILD_DIR} is attached." >&2
+  echo "Not proceeding — see the error above; 'hdiutil info' lists what is attached." >&2
+  exit 1
+fi
+
 rm -rf "${DMG_ROOT}"
 mkdir -p "${DMG_ROOT}"
 
