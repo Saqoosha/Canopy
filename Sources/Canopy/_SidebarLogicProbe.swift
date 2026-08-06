@@ -2127,10 +2127,26 @@ enum SidebarLogicProbe {
 
             // MARK: Pane follows sidebar drag
             //
-            // Drag is the ONLY thing that moves a pane. Only the dragged
-            // session's pane moves — no global re-sort — so a drag never
-            // shuffles panes the user did not touch, and a drifted pane
-            // order is never snapped back behind the user's back.
+            // Drag is the ONLY thing that moves a pane, and it moves them by
+            // sorting the session panes into their rows' order.
+            //
+            // These are the first probe tests that read `visibleRows`, so they
+            // are the first that a developer's own saved sidebar filter can
+            // break: every `SessionStore()` loads it in its property
+            // initializer, and a saved `status: .closedOnly` or a `project`
+            // other than "p" empties `visibleRows`, making `moveOpenSessions`
+            // a silent no-op. That fails locally while passing on CI's clean
+            // profile — indistinguishable from the stale-base diagnosis
+            // CLAUDE.md describes. Neutralize the persisted value for the
+            // whole block and put the real one back at the end.
+            let savedFilter = SessionStorePersistence.loadFilter()
+            SessionStorePersistence.saveFilter(SidebarFilter())
+            // `defer`, not a statement at the end of the block: a trap or an
+            // early exit partway through would otherwise leave the developer's
+            // real sidebar filtered to whatever a case last persisted, with no
+            // visible cause.
+            defer { SessionStorePersistence.saveFilter(savedFilter) }
+
             func dragSession(_ n: String) -> OpenSession {
                 OpenSession(origin: .local(cwd), resumeId: "drag-\(n)", title: n, project: "p", status: .live)
             }
@@ -2197,18 +2213,35 @@ enum SidebarLogicProbe {
                    storeLaunch.panes.map(\.content)
                    == [.session(lB.id), .launcher, .session(lA.id)])
 
-            // Drift: panes [C][A] while the sidebar reads A, B, C.
-            // Dragging the unpaned B must NOT snap panes into sidebar order.
+            // Cmd+click aims at the ROW, so the row holds still and the new
+            // pane sorts to where that row already sits. Giving fA a pane
+            // while fC already has one puts fA's pane on the LEFT, because
+            // fA's row is above fC's — the rows never move.
             let fA = dragSession("fA"), fB = dragSession("fB"), fC = dragSession("fC")
             let storeDrift = SessionStore()
             storeDrift._probeSeedOpenSessions([fA, fB, fC])
             _ = storeDrift.openInNewPane(fC.id)
             _ = storeDrift.openInNewPane(fA.id)
-            storeDrift.moveOpenSessions(fromOffsets: IndexSet(integer: 1), toOffset: 3)
-            record("drag never snaps drifted panes into sidebar order",
-                   storeDrift.openSessions.map(\.id) == [fA.id, fC.id, fB.id]
+            record("a new pane sorts to its row's position, rows unmoved",
+                   storeDrift.openSessions.map(\.id) == [fA.id, fB.id, fC.id]
                    && storeDrift.panes.map(\.content)
-                   == [.session(fC.id), .session(fA.id)])
+                   == [.session(fA.id), .session(fC.id)])
+            record("focus follows the new pane after it sorts left",
+                   storeDrift.focusedPaneIndex == 0)
+
+            // The reported case: Cmd+click the TOP row while later rows hold
+            // the panes, and the new pane must land leftmost.
+            let tT = dragSession("tT"), tB1 = dragSession("tB1"), tB2 = dragSession("tB2")
+            let storeTop = SessionStore()
+            storeTop._probeSeedOpenSessions([tT, tB1, tB2])
+            _ = storeTop.openInNewPane(tB1.id)
+            _ = storeTop.openInNewPane(tB2.id)
+            _ = storeTop.openInNewPane(tT.id)
+            record("Cmd+click on the top row opens its pane leftmost",
+                   storeTop.panes.map(\.content)
+                   == [.session(tT.id), .session(tB1.id), .session(tB2.id)]
+                   && storeTop.openSessions.map(\.id) == [tT.id, tB1.id, tB2.id]
+                   && storeTop.focusedPaneIndex == 0)
 
             // An open row's click — Cmd held or not — routes through
             // openInFocusedPane. Cmd must never grow a pane from a row
@@ -2222,6 +2255,165 @@ enum SidebarLogicProbe {
             record("open-row click replaces the focused pane, never adds one",
                    storeCmd.panes.count == 1
                    && storeCmd.panes[0].content == .session(cB.id))
+
+            // MARK: Row follows pane assignment
+            //
+            // The mirror image of the drag: when a session enters a pane by a
+            // route that doesn't already place it right, the ROW moves, never
+            // the pane. Reported case — clicking an unpaned session while the
+            // MIDDLE pane is focused left its row at the top, so the sidebar
+            // stopped reading as a map of the pane strip.
+            let rM = dragSession("rM"), rS = dragSession("rS")
+            let rW = dragSession("rW"), rP = dragSession("rP")
+            let storeRow = SessionStore()
+            storeRow._probeSeedOpenSessions([rM, rS, rW, rP])
+            _ = storeRow.openInNewPane(rS.id)
+            _ = storeRow.openInNewPane(rW.id)
+            _ = storeRow.openInNewPane(rP.id)
+            storeRow.setFocusedPaneIndex(1)
+            storeRow.openInFocusedPane(rM.id)
+            record("clicking an unpaned session moves its row to the pane's rank",
+                   storeRow.panes.map(\.content)
+                   == [.session(rS.id), .session(rM.id), .session(rP.id)]
+                   && storeRow.openSessions.map(\.id)
+                   == [rS.id, rM.id, rW.id, rP.id])
+
+            // Leftmost pane: land directly ABOVE the next paned row rather
+            // than on the far side of the unpaned rows in between.
+            let bA = dragSession("bA"), bB = dragSession("bB"), bC = dragSession("bC")
+            let storeLeft = SessionStore()
+            storeLeft._probeSeedOpenSessions([bB, bC, bA])
+            _ = storeLeft.openInNewPane(bB.id)
+            _ = storeLeft.openInNewPane(bC.id)
+            storeLeft.setFocusedPaneIndex(0)
+            storeLeft.openInFocusedPane(bA.id)
+            record("leftmost pane pulls its row directly above the next paned row",
+                   storeLeft.panes.map(\.content)
+                   == [.session(bA.id), .session(bC.id)]
+                   && storeLeft.openSessions.map(\.id) == [bB.id, bA.id, bC.id])
+
+            // Pure selection still moves nothing: a session that already has a
+            // pane takes the focus-only branch, which never touches the rows.
+            let pA = dragSession("pA"), pB = dragSession("pB")
+            let storeSel = SessionStore()
+            storeSel._probeSeedOpenSessions([pA, pB])
+            _ = storeSel.openInNewPane(pA.id)
+            _ = storeSel.openInNewPane(pB.id)
+            storeSel.setFocusedPaneIndex(0)
+            storeSel.openInFocusedPane(pB.id)
+            record("selecting an already-paned session moves no row",
+                   storeSel.openSessions.map(\.id) == [pA.id, pB.id]
+                   && storeSel.focusedPaneIndex == 1)
+
+            // Launcher panes hold no row, so they must not shift the rank a
+            // session pane is compared against.
+            let gX = dragSession("gX"), gA = dragSession("gA"), gB = dragSession("gB")
+            let storeGap = SessionStore()
+            storeGap._probeSeedOpenSessions([gX, gA, gB])
+            _ = storeGap.openInNewPane(gA.id)
+            _ = storeGap.openLauncherInNewPane()
+            _ = storeGap.openInNewPane(gB.id)
+            storeGap.setFocusedPaneIndex(2)
+            storeGap.openInFocusedPane(gX.id)
+            record("launcher panes don't skew the row rank",
+                   storeGap.panes.map(\.content)
+                   == [.session(gA.id), .launcher, .session(gX.id)]
+                   && storeGap.openSessions.map(\.id) == [gA.id, gX.id, gB.id])
+
+            // The rank check earns its keep here: a newly-opened session is
+            // already last in both orders, so opening it in a new pane must
+            // NOT hoist its row above an unpaned row sitting between.
+            let qA = dragSession("qA"), qU = dragSession("qU"), qB = dragSession("qB")
+            let storeQuiet = SessionStore()
+            storeQuiet._probeSeedOpenSessions([qA, qU, qB])
+            _ = storeQuiet.openInNewPane(qA.id)
+            _ = storeQuiet.openInNewPane(qB.id)
+            record("opening a new pane leaves an already-correct row alone",
+                   storeQuiet.openSessions.map(\.id) == [qA.id, qU.id, qB.id])
+
+            // Multi-row drag downward. Lifting EVERY dragged pane out before
+            // re-inserting is what makes this land right — moving them one at
+            // a time turned [A][B][C][D] into [A][B][D][C] because the first
+            // insert shifted the index the second rank was computed against.
+            let mA = dragSession("mA"), mB = dragSession("mB")
+            let mC = dragSession("mC"), mD = dragSession("mD")
+            let storeMulti = SessionStore()
+            storeMulti._probeSeedOpenSessions([mA, mB, mC, mD])
+            for s in [mA, mB, mC, mD] { _ = storeMulti.openInNewPane(s.id) }
+            storeMulti.moveOpenSessions(fromOffsets: IndexSet([1, 2]), toOffset: 4)
+            record("multi-row downward drag lands panes in the sidebar's final order",
+                   storeMulti.openSessions.map(\.id) == [mA.id, mD.id, mB.id, mC.id]
+                   && storeMulti.panes.map(\.content)
+                   == [.session(mA.id), .session(mD.id),
+                       .session(mB.id), .session(mC.id)])
+
+            // Upward multi-row drag — the direction the downward case can't
+            // pin, because it is where a rank could exceed the rebuilt prefix.
+            let uA2 = dragSession("uA2"), uB2 = dragSession("uB2")
+            let uC2 = dragSession("uC2"), uD2 = dragSession("uD2")
+            let storeUp = SessionStore()
+            storeUp._probeSeedOpenSessions([uA2, uB2, uC2, uD2])
+            for s in [uA2, uB2, uC2, uD2] { _ = storeUp.openInNewPane(s.id) }
+            storeUp.moveOpenSessions(fromOffsets: IndexSet([2, 3]), toOffset: 0)
+            record("multi-row upward drag lands panes in the sidebar's final order",
+                   storeUp.panes.map(\.content) == storeUp.openSessions.map {
+                       PaneContent.session($0.id)
+                   })
+
+            // A dragged set mixing a row that has a pane with one that doesn't.
+            let xA = dragSession("xA"), xU = dragSession("xU")
+            let xB = dragSession("xB"), xC = dragSession("xC")
+            let storeMix = SessionStore()
+            storeMix._probeSeedOpenSessions([xA, xU, xB, xC])
+            for s in [xA, xB, xC] { _ = storeMix.openInNewPane(s.id) }
+            storeMix.moveOpenSessions(fromOffsets: IndexSet([1, 2]), toOffset: 0)
+            record("a drag mixing paned and unpaned rows still matches row order",
+                   storeMix.panes.map(\.content)
+                   == storeMix.openSessions
+                       .filter { s in storeMix.paneIndex(forSession: s.id) != nil }
+                       .map { PaneContent.session($0.id) })
+
+            // A paned row the filter is hiding. `reorderPreservingHidden` keeps
+            // its ROW at its master position, and sorting the panes off that
+            // master order reproduces the same placement — no separate pinning
+            // rule. The earlier revision pinned hidden panes by slot instead,
+            // which broke as soon as an unpaned row joined the mix (see the
+            // next case). `filter`'s didSet persists globally; the block-level
+            // save/restore covers it.
+            let hA = dragSession("hA"), hB = dragSession("hB"), hC = dragSession("hC")
+            let hH = OpenSession(origin: .local(cwd), resumeId: "drag-hH",
+                                 title: "hH", project: "hidden", status: .live)
+            let storeHidden = SessionStore()
+            storeHidden._probeSeedOpenSessions([hA, hH, hB, hC])
+            for s in [hA, hH, hB, hC] { _ = storeHidden.openInNewPane(s.id) }
+            storeHidden.filter.project = "p"   // hides hH, whose project is "hidden"
+            storeHidden.moveOpenSessions(fromOffsets: IndexSet(integer: 2), toOffset: 0)
+            record("panes follow row order across a filter-hidden pane",
+                   storeHidden.openSessions.map(\.id)
+                   == [hC.id, hH.id, hA.id, hB.id]
+                   && storeHidden.panes.map(\.content)
+                   == [.session(hC.id), .session(hH.id),
+                       .session(hA.id), .session(hB.id)])
+
+            // The case slot-pinning got wrong: a hidden PANED row plus a
+            // visible UNPANED row. Rows end [C, B, A] with B hidden, so the
+            // paned order is B then A and the panes must invert. Pinning B's
+            // pane at slot 1 left [A][B] — inverted against the rows, and
+            // invisible until the filter cleared.
+            let yA = dragSession("yA"), yC = dragSession("yC")
+            let yB = OpenSession(origin: .local(cwd), resumeId: "drag-yB",
+                                 title: "yB", project: "hidden", status: .live)
+            let storeInvert = SessionStore()
+            storeInvert._probeSeedOpenSessions([yA, yB, yC])
+            _ = storeInvert.openInNewPane(yA.id)
+            _ = storeInvert.openInNewPane(yB.id)
+            storeInvert.filter.project = "p"   // hides yB
+            storeInvert.moveOpenSessions(fromOffsets: IndexSet(integer: 0), toOffset: 2)
+            record("a drag crossing a hidden pane inverts the panes with the rows",
+                   storeInvert.openSessions.map(\.id) == [yC.id, yB.id, yA.id]
+                   && storeInvert.panes.map(\.content)
+                   == [.session(yB.id), .session(yA.id)])
+
         }
 
         // MARK: - Recap (see RecapGate / ShimProcess recap filters)

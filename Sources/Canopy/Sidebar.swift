@@ -81,6 +81,16 @@ struct Sidebar: View {
                     }
                 }
             }
+            // Animate the open block's row order. Rows now move on their own
+            // in one case the user didn't drag — a click pulling a session's
+            // row down to its pane's rank — and an instant jump there reads
+            // as a glitch rather than as the sidebar re-syncing.
+            //
+            // Scoped to the row ORDER on purpose. The panes are deliberately
+            // NOT animated: animating pane geometry drifts the embedded
+            // WKWebView's scroll position, which is why PaneWindowSizer
+            // resizes the window in one synchronous frame instead.
+            .animation(.easeInOut(duration: 0.2), value: store.openSessions.map(\.id))
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             // Compensate for `.listStyle(.sidebar)`'s built-in side
@@ -334,15 +344,23 @@ struct Sidebar: View {
     private func handleRowClick(row: SidebarRow, addNewPane: Bool) {
         switch row {
         case .open(let session):
-            // Cmd is deliberately ignored on open rows: Cmd+click behaves
-            // exactly like a plain click. openInFocusedPane already focuses
-            // the session's existing pane when it has one, and loads it into
-            // the focused pane when it does not. Growing a NEW pane from an
-            // already-open row would append it at the right end regardless
-            // of where the row sits, which reads as the sidebar rearranging
-            // itself. Panes are now born only with new sessions, where the
-            // row append and the rightmost pane append coincide.
-            store.openInFocusedPane(session.id)
+            // Cmd+click gives the row its own pane, and that pane lands at the
+            // row's position — top row, leftmost pane. The gesture points at
+            // the ROW, so the row is what holds still; `openInNewPane` sorts
+            // the new pane into place rather than parking it on the right end.
+            // (A plain click points at the focused PANE instead, so there the
+            // row is what moves. Whichever the user aimed at stays put.)
+            if addNewPane {
+                if store.panes.count >= SessionStore.paneAbsoluteCap,
+                   store.paneIndex(forSession: session.id) == nil {
+                    store.showCapReachedHintOnFocusedPane()
+                }
+                // Falls through to focusing the existing pane when the session
+                // already has one, and to a no-op at the cap.
+                _ = store.openInNewPane(session.id)
+            } else {
+                store.openInFocusedPane(session.id)
+            }
         case .closedLocal(let entry):
             if addNewPane && store.panes.count >= SessionStore.paneAbsoluteCap {
                 store.showCapReachedHintOnFocusedPane()

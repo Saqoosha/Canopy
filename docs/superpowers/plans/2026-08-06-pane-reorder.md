@@ -1,6 +1,6 @@
 # ペイン並べ替え Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **このプランは実行済みで、内容は出荷版より古い。** PR #126 のレビューで設計が変わり、`movePanesFollowingDrag(draggedIds:)` は `syncPaneOrderToRows()`（行順への単純ソート）に置き換わり、`moveRowFollowingPaneAssignment` とサイドバーのアニメーション、ハイライトのチップ化が追加された。**現状を知りたいならこのファイルではなく spec と実コードを読むこと。** 以下は当時の計画としての記録。
 
 **Goal:** サイドバーの open 行をドラッグすると、そのセッションのペインが対応する左右位置へ移動する。
 
@@ -18,8 +18,8 @@
 - ビルド: `./scripts/build_debug_stable.sh`。**Xcode 16.4 ではコンパイルできない**。Xcode 26 が必要
 - プローブ実行: `CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy`
 - ベースライン実測値（main @ d019df1f で計測）: shim unit tests 101 passed / Swift logic probe 246 passed
-- `.github/workflows/ci.yml` の `EXPECTED_ASSERTIONS` は現在 `246`。**推測で書き換えず、プローブの実測値をそのまま入れる**
-- ユーザーのドラッグ以外で行もペインも動かさない。この原則に反する追加実装をしない
+- `.github/workflows/ci.yml` の `EXPECTED_ASSERTIONS` は当時 `246`（現在は 265）。**推測で書き換えず、プローブの実測値をそのまま入れる**
+- ~~ユーザーのドラッグ以外で行もペインも動かさない~~ — **この制約は破棄された。** 実機で破綻し、ペイン割り当て時に行を動かす `moveRowFollowingPaneAssignment` が入った。現行の原則は spec の「原則」節を読むこと
 
 ## File Structure
 
@@ -148,6 +148,11 @@ Expected: ビルド成功、プローブが `FAIL drag reorders panes to follow 
 `moveOpenSessions` は現状ペインに触らないので、順序を変える 3 件（drag reorders / dragged pane carries its width / focus follows）と launcher の 1 件が落ちる。no-op 系の 3 件は現状でも通る（実装後も通り続けることが本来の意味）。
 
 - [ ] **Step 3: helper を実装する**
+
+> **この節のコードは出荷版ではない。** レビュー（PR #126）で 2 つの欠陥が見つかり、実装は書き換わった。**コピー元にしないこと** — 出荷版は行順への単純ソート。`SessionStore.syncPaneOrderToRows` と spec の「変更点 2」を読む。
+>
+> 1. **複数行ドラッグ。** 下のループはドラッグされたペインを 1 つずつ動かすが、最初の挿入が後のランク計算の前提をずらす。`[A][B][C][D]` の行 B,C を D の後ろへ動かすと、行は `A,D,B,C` になるのにペインは `A,B,D,C` になった。次の版はドラッグ対象を全部抜いてから挿し直す形にしたが、それも捨てられた。
+> 2. **フィルタで隠れたペイン。** 下の `sessionSlots` は全 session ペインを対象にするので、行がフィルタで隠れているペインまで動く。行側の `reorderPreservingHidden` は隠れた行を固定するので、両者が非対称になりフィルタを外すと順序のズレが露見した。次の版は隠れたペインを launcher ペインと同じく固定したが、それが逆にペインなし行との組み合わせを壊した。
 
 `Sources/Canopy/SessionStore.swift` の `moveOpenSessions`（740 行の閉じ括弧）の直後に追加する。
 
@@ -427,16 +432,16 @@ jj new
 | 変更点 1（open 行の Cmd+click を単なるクリック扱い） | Task 2 Step 2 |
 | `bouncePane` 削除 | Task 2 Step 3 |
 | 変更点 2（ドラッグでペイン追従） | Task 1 Step 3-4 |
-| ドラッグされたペインだけ動かす | Task 1 Step 3、テストは drift ケース |
+| ~~ドラッグされたペインだけ動かす~~ | **破棄**。出荷版は全 session ペインを行順にソートする |
 | launcher ペインの index 固定 | Task 1 Step 3、テストは launcher ケース |
-| 複数行ドラッグの決定性 | Task 1 Step 4（最終順で適用） |
+| 複数行ドラッグの決定性 | Task 1 Step 4（最終順で適用）。実装はレビューで書き換え — Step 3 の注記参照 |
 | `focusedPaneIndex` がセッション追従 | Task 1 Step 3、テストあり |
 | 幅がスロットごと移動 | Task 1 Step 3、テストあり |
 | `normalizePaneWeightsToVisualWidths` / `schedulePaneResize` を呼ばない | Task 1 Step 3（呼んでいない）、総和不変テストで固定 |
 | 再マウント確認 | Task 1 Step 7（手動） |
 | `EXPECTED_ASSERTIONS` 引き上げ | Task 1 Step 6 / Task 2 Step 6 |
 
-**spec から落としたテスト 1 件:** 「フィルタで一部の open 行が隠れている状態でも、隠れた行がペイン順に影響しない」。`movePanesFollowingDrag` は並べ替え後の `openSessions` しか読まず、可視座標からマスター座標への写像は既存の `reorderPreservingHidden`（プローブに 6 アサーション既存、`_SidebarLogicProbe.swift:918-943`）が担保している。構造上フィルタに依存しないため、新しいテストは重複になる。spec のテスト一覧からこの項目を消すこと。
+**spec から落としたテスト 1 件:** 「フィルタで一部の open 行が隠れている状態でも、隠れた行がペイン順に影響しない」。`movePanesFollowingDrag` は並べ替え後の `openSessions` しか読まず、可視座標からマスター座標への写像は既存の `reorderPreservingHidden`（プローブに 6 アサーション既存、`_SidebarLogicProbe.swift:918-943`）が担保している。……という当時の判断は**誤りだった**。出荷版はフィルタ絡みのテストを 2 件持っている。
 
 **Placeholder scan:** なし。全ステップに実際のコードとコマンドが入っている。
 

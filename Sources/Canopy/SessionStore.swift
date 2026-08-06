@@ -726,11 +726,6 @@ final class SessionStore {
             if case .open(let s) = row { return s.id }
             return nil
         }
-        // Resolve which sessions were dragged BEFORE the reorder: the
-        // offsets are in pre-drag visible-row coordinates.
-        let draggedIds = fromOffsets.compactMap { off -> UUID? in
-            visibleIds.indices.contains(off) ? visibleIds[off] : nil
-        }
         let masterIds = openSessions.map(\.id)
         let newOrder = Self.reorderPreservingHidden(
             master: masterIds,
@@ -741,73 +736,135 @@ final class SessionStore {
         guard newOrder != masterIds else { return }
         let byId = Dictionary(uniqueKeysWithValues: openSessions.map { ($0.id, $0) })
         openSessions = newOrder.compactMap { byId[$0] }
-        // Apply in final sidebar order so a multi-row drag is deterministic.
-        let draggedSet = Set(draggedIds)
-        movePanesFollowingDrag(
-            draggedIds: openSessions.map(\.id).filter { draggedSet.contains($0) }
-        )
+        syncPaneOrderToRows()
         logger.info("moveOpenSessions from=\(fromOffsets.map(String.init).joined(separator: ","), privacy: .public) to=\(toOffset)")
     }
 
-    /// Move the just-dragged sessions' panes to follow the new
-    /// `openSessions` order. ONLY the dragged sessions' panes move — there
-    /// is deliberately no global re-sort. A drag must never shuffle a pane
-    /// the user did not touch, and a pane order that has drifted from the
-    /// sidebar (plain-clicking an unpaned session into a pane does that)
-    /// must never snap back on an unrelated drag.
+    /// Re-order the session panes so their left-to-right order matches the
+    /// order their rows hold in `openSessions`. Launcher panes have no row, so
+    /// they keep their slot index and the session panes permute around them.
     ///
-    /// The unit of movement is the whole `PaneSlot`, so `preferredWidth`
-    /// travels with the session: the total is unchanged, the window is not
-    /// resized, and each WKWebView keeps its width and merely shifts x —
-    /// no reflow, no chat scroll drift. Moving the slot (rather than
-    /// swapping `content` between fixed slots) also keeps
-    /// `Detail.swift`'s `SessionContainer(...).id(session.id)` paired with
-    /// the same subtree, so `ForEach` sees a move instead of a teardown.
+    /// This is a plain sort, not a move of just the dragged pane, and that is
+    /// safe *because* `moveRowFollowingPaneAssignment` keeps the two orders in
+    /// agreement everywhere else — a drag is the only thing that can put them
+    /// out of step, so there is never stale disagreement for a sort to snap
+    /// back. An earlier revision moved only the dragged panes and pinned
+    /// filter-hidden ones by slot; three separate ordering bugs came out of
+    /// that (a multi-row drag, and a drag crossing a hidden pane, both with
+    /// and without an unpaned row in the mix). Sorting has none of those cases
+    /// because it never reasons about indices. Do not "optimise" it back into
+    /// a targeted move without first re-establishing that the orders can drift.
     ///
-    /// Launcher panes have no sidebar row, so they hold their slot index;
-    /// session panes permute only among the slots they already occupy.
-    /// `draggedIds` must arrive in final `openSessions` order so a
-    /// multi-row drag is deterministic.
-    private func movePanesFollowingDrag(draggedIds: [OpenSession.ID]) {
-        guard !panes.isEmpty else { return }
-        let focusedSlotId = panes.indices.contains(focusedPaneIndex)
-            ? panes[focusedPaneIndex].id
-            : nil
-
-        // Slot positions session panes occupy, left to right.
+    /// Filter-hidden rows need no special handling: `reorderPreservingHidden`
+    /// keeps them at their master positions, so reading the order straight off
+    /// `openSessions` already accounts for them. (`_probeSeedOpenSessions` is
+    /// the one writer that can manufacture a disagreeing state — that is what
+    /// it exists for, and it is `#if DEBUG`.)
+    ///
+    /// Focus follows slot IDENTITY rather than slot position, which is also
+    /// why it survives the focused pane being a launcher.
+    private func syncPaneOrderToRows() {
         let sessionSlots = panes.indices.filter {
             if case .session = panes[$0].content { return true }
             return false
         }
         guard sessionSlots.count > 1 else { return }
 
-        var ordered = sessionSlots.map { panes[$0] }
-        let panedIds: Set<OpenSession.ID> = Set(ordered.compactMap { slot in
-            if case .session(let id) = slot.content { return id }
-            return nil
-        })
-        // Ranks the paned sessions hold in the post-drag sidebar order.
-        let sidebarRanking = openSessions.map(\.id).filter { panedIds.contains($0) }
-
-        for draggedId in draggedIds {
-            guard let from = ordered.firstIndex(where: { $0.content == .session(draggedId) }),
-                  let to = sidebarRanking.firstIndex(of: draggedId),
-                  to != from,
-                  ordered.indices.contains(to)
-            else { continue }
-            let slot = ordered.remove(at: from)
-            ordered.insert(slot, at: to)
+        var rowRank: [OpenSession.ID: Int] = [:]
+        for (i, session) in openSessions.enumerated() { rowRank[session.id] = i }
+        let sorted = sessionSlots.map { panes[$0] }.sorted { lhs, rhs in
+            guard case .session(let l) = lhs.content,
+                  case .session(let r) = rhs.content else { return false }
+            // A pane pointing at a session that is no longer open violates an
+            // invariant `removePanesForClosedSession` maintains; park it last
+            // rather than crashing.
+            return (rowRank[l] ?? Int.max) < (rowRank[r] ?? Int.max)
         }
+        guard sorted.map(\.id) != sessionSlots.map({ panes[$0].id }) else { return }
 
-        for (slotPos, slot) in zip(sessionSlots, ordered) {
+        let focusedSlotId = panes.indices.contains(focusedPaneIndex)
+            ? panes[focusedPaneIndex].id
+            : nil
+        for (slotPos, slot) in zip(sessionSlots, sorted) {
             panes[slotPos] = slot
         }
-
-        // Focus tracks the session, not the slot index.
         if let focusedSlotId,
            let newIndex = panes.firstIndex(where: { $0.id == focusedSlotId }) {
             focusedPaneIndex = newIndex
         }
+    }
+
+    /// Move `sessionId`'s row so its rank among paned rows matches its pane's
+    /// rank among session panes. The sidebar reads as a map of the pane strip,
+    /// so when a session enters a pane by a route that doesn't already place it
+    /// correctly — a plain click loading an unpaned session into the focused
+    /// pane, or Cmd+Shift+[/] cycling — **the row is what moves, never the
+    /// pane**. Reordering panes instead would yank the session out of the pane
+    /// the user just put it in, which is the strictly worse surprise.
+    ///
+    /// The rank check is not an optimization, it is what keeps this quiet: it
+    /// makes the call a no-op whenever the two ranks already agree. That covers
+    /// `openInNewPane`, where `openNew` appends the row and the pane append
+    /// coincides with it — without the check the row would jump above any
+    /// unpaned rows sitting below the last paned one on every such open.
+    ///
+    /// It is NOT a no-op for every new session, and the doc used to claim that
+    /// wrongly: `openNew`'s default target is `.focused`, so opening into an
+    /// existing pane (Cmd+O, the launcher's Start without Cmd, a plain click on
+    /// a closed row) does move the fresh row up to that pane's rank whenever
+    /// the focused pane isn't the last one. That is this function working.
+    ///
+    /// Sessions already in a pane are untouched — `openInFocusedPane`'s
+    /// focus-only branch never calls this, so pure selection still moves
+    /// nothing.
+    ///
+    /// Filter-blind, exactly like `syncPaneOrderToRows` — neither reads
+    /// `visibleRows`. Mapping visible offsets onto master ones is
+    /// `moveOpenSessions`' job (`reorderPreservingHidden`), and both helpers
+    /// edit the master order, which is what has to be right once the filter
+    /// clears. So a hidden paned row still counts toward the ranks here and
+    /// can be the anchor the insert lands next to.
+    private func moveRowFollowingPaneAssignment(_ sessionId: OpenSession.ID) {
+        guard let paneIdx = paneIndex(forSession: sessionId) else { return }
+        let sessionSlots = panes.indices.filter {
+            if case .session = panes[$0].content { return true }
+            return false
+        }
+        guard let paneRank = sessionSlots.firstIndex(of: paneIdx) else { return }
+
+        let panedIds: Set<OpenSession.ID> = Set(panes.compactMap { slot in
+            if case .session(let id) = slot.content { return id }
+            return nil
+        })
+        let rowRanking = openSessions.map(\.id).filter { panedIds.contains($0) }
+        guard let rowRank = rowRanking.firstIndex(of: sessionId),
+              rowRank != paneRank,
+              let from = openSessions.firstIndex(where: { $0.id == sessionId })
+        else { return }
+
+        var reordered = openSessions
+        let moved = reordered.remove(at: from)
+        let othersInRowOrder = reordered.map(\.id).filter { panedIds.contains($0) }
+        // Anchor on the paned row this pane sits to the RIGHT of, and land
+        // directly after it (or directly before the first paned row when this
+        // is the leftmost pane). Anchoring on the row that should FOLLOW us
+        // also satisfies the ranking, but lands us on the far side of any
+        // unpaned rows in between — a longer, more visible jump for the same
+        // result. Either way the anchor is a paned row, never an absolute
+        // index, so unpaned rows keep their positions.
+        let insertAt: Int
+        if paneRank == 0 {
+            insertAt = othersInRowOrder.first
+                .flatMap { first in reordered.firstIndex { $0.id == first } } ?? 0
+        } else if paneRank - 1 < othersInRowOrder.count,
+                  let predecessor = reordered.firstIndex(
+                      where: { $0.id == othersInRowOrder[paneRank - 1] }) {
+            insertAt = predecessor + 1
+        } else {
+            insertAt = reordered.count
+        }
+        reordered.insert(moved, at: insertAt)
+        openSessions = reordered
     }
 
     // MARK: - Panes
@@ -849,6 +906,7 @@ final class SessionStore {
             return
         }
         panes[focusedPaneIndex].content = .session(sessionId)
+        moveRowFollowingPaneAssignment(sessionId)
         syncSelectionToFocusedPane()
         makeFocusedPaneKeyResponder()
     }
@@ -941,7 +999,18 @@ final class SessionStore {
         normalizePaneWeightsToVisualWidths()
         let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
         panes.append(PaneSlot(content: .session(sessionId), preferredWidth: width))
-        focusedPaneIndex = panes.count - 1
+        // Sort the new pane to where its ROW already sits, rather than moving
+        // the row to the right end where the append put it. This is the one
+        // assignment route where the user aimed at the row (Cmd+click on a
+        // sidebar row) instead of at a pane, so the row is what holds still —
+        // Cmd+clicking the top row puts its pane on the far left.
+        //
+        // A no-op for a freshly-opened session, which `openNew` appended to the
+        // bottom of the rows just before this: last row, last pane, already in
+        // agreement.
+        syncPaneOrderToRows()
+        // Read the index back: the sort may have moved this pane off the end.
+        focusedPaneIndex = paneIndex(forSession: sessionId) ?? panes.count - 1
         selection = .session(sessionId)
         if let session = openSessions.first(where: { $0.id == sessionId }) {
             lastActiveResumeId = session.resumeId
