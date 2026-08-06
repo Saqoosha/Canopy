@@ -9,8 +9,8 @@ import SwiftUI
 /// Grouping mode persists across launches via UserDefaults.
 ///
 /// Click semantics:
-///   - .open + plain     → openInFocusedPane (replace focused pane)
-///   - .open + Cmd       → openInNewPane (or bounce/focus existing)
+///   - .open (Cmd or not) → openInFocusedPane. Cmd is deliberately ignored
+///     on open rows; see handleRowClick for why
 ///   - .closedLocal + plain → openLocal (select → openInFocusedPane)
 ///   - .closedLocal + Cmd   → openLocal, then openInNewPane
 ///   - .closedCloud + plain → openCloud(.focused)
@@ -81,6 +81,16 @@ struct Sidebar: View {
                     }
                 }
             }
+            // Animate the open block's row order. Rows now move on their own
+            // in one case the user didn't drag — a click pulling a session's
+            // row down to its pane's rank — and an instant jump there reads
+            // as a glitch rather than as the sidebar re-syncing.
+            //
+            // Scoped to the row ORDER on purpose. The panes are deliberately
+            // NOT animated: animating pane geometry drifts the embedded
+            // WKWebView's scroll position, which is why PaneWindowSizer
+            // resizes the window in one synchronous frame instead.
+            .animation(.easeInOut(duration: 0.2), value: store.openSessions.map(\.id))
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             // Compensate for `.listStyle(.sidebar)`'s built-in side
@@ -247,13 +257,21 @@ struct Sidebar: View {
             onClose: { handleClose(row) }
         )
         .background(
-            // Inline so the padding actually shows. `.listRowBackground` stretches
-            // its content to fill the cell, eating any inset modifiers. Hover
-            // pill only — pane highlight lives on listRowBackground below.
-            RoundedRectangle(cornerRadius: 9)
-                .fill(rowBackgroundFill(for: row))
-                .padding(.horizontal, 3)
-                .padding(.vertical, 1)
+            // BOTH backgrounds live here, inline, because `.listRowBackground`
+            // stretches its content to fill the cell and eats any inset
+            // modifier — a rounded rect handed to it renders as a full-bleed
+            // square. The pane highlight sits under the hover fill so hovering
+            // a paned row deepens it instead of replacing it, and the shared
+            // padding is what separates adjacent paned rows into distinct
+            // chips rather than one continuous block.
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(paneHighlightFill(for: row))
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(rowBackgroundFill(for: row))
+            }
+            .padding(.horizontal, 3)
+            .padding(.vertical, 1)
         )
         .id(row.id)
         .onHover { h in hoveredRowId = h ? row.id : nil }
@@ -267,15 +285,9 @@ struct Sidebar: View {
         })
         .selectionDisabled(!row.isOpen)
         .contextMenu { rowMenu(for: row) }
-        .listRowBackground(
-            Group {
-                switch highlight(for: row) {
-                case .none: Color.clear
-                case .weak: Color.accentColor.opacity(0.12)
-                case .strong: Color.accentColor.opacity(0.35)
-                }
-            }
-        )
+        // Cleared deliberately: everything visible is drawn by the inline
+        // `.background` above, where insets survive.
+        .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
     }
@@ -293,10 +305,19 @@ struct Sidebar: View {
         }())
     }
 
-    /// Hover pill only. Pane membership highlight is on `.listRowBackground`.
+    /// Hover fill only — the top layer of the inline `.background` ZStack.
+    /// Pane membership is the layer beneath it, `paneHighlightFill(for:)`.
     private func rowBackgroundFill(for row: SidebarRow) -> Color {
         if hoveredRowId == row.id { return Color.primary.opacity(0.04) }
         return Color.clear
+    }
+
+    private func paneHighlightFill(for row: SidebarRow) -> Color {
+        switch highlight(for: row) {
+        case .none: Color.clear
+        case .weak: Color.accentColor.opacity(0.12)
+        case .strong: Color.accentColor.opacity(0.35)
+        }
     }
 
     private func isActive(_ row: SidebarRow) -> Bool {
@@ -323,9 +344,20 @@ struct Sidebar: View {
     private func handleRowClick(row: SidebarRow, addNewPane: Bool) {
         switch row {
         case .open(let session):
+            // Cmd+click gives the row its own pane, and that pane lands at the
+            // row's position — top row, leftmost pane. The gesture points at
+            // the ROW, so the row is what holds still; `openInNewPane` sorts
+            // the new pane into place rather than parking it on the right end.
+            // (A plain click points at the focused PANE instead, so there the
+            // row is what moves. Whichever the user aimed at stays put.)
             if addNewPane {
-                let added = store.openInNewPane(session.id)
-                if !added { bouncePane(forSessionId: session.id) }
+                if store.panes.count >= SessionStore.paneAbsoluteCap,
+                   store.paneIndex(forSession: session.id) == nil {
+                    store.showCapReachedHintOnFocusedPane()
+                }
+                // Falls through to focusing the existing pane when the session
+                // already has one, and to a no-op at the cap.
+                _ = store.openInNewPane(session.id)
             } else {
                 store.openInFocusedPane(session.id)
             }
@@ -343,16 +375,6 @@ struct Sidebar: View {
             } else {
                 store.openCloud(cloud, target: addNewPane ? .newPane : .focused)
             }
-        }
-    }
-
-    private func bouncePane(forSessionId sessionId: OpenSession.ID) {
-        if let idx = store.paneIndex(forSession: sessionId) {
-            store.setFocusedPaneIndex(idx)
-            return
-        }
-        if store.panes.count >= SessionStore.paneAbsoluteCap {
-            store.showCapReachedHintOnFocusedPane()
         }
     }
 
