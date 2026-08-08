@@ -254,6 +254,7 @@ struct Sidebar: View {
             isHovered: hoveredRowId == row.id,
             isActive: isActive(row),
             isTeleporting: isTeleporting(row),
+            isUnread: isUnread(row),
             onClose: { handleClose(row) }
         )
         .background(
@@ -331,6 +332,11 @@ struct Sidebar: View {
         guard let id = store.teleportingCloudId,
               case .closedCloud(let s) = row else { return false }
         return s.id == id
+    }
+
+    private func isUnread(_ row: SidebarRow) -> Bool {
+        if case .open(let s) = row { return store.unreadSessionIds.contains(s.id) }
+        return false
     }
 
     private enum PaneHighlightLevel { case none, weak, strong }
@@ -470,6 +476,7 @@ private struct SidebarRowView: View {
     let isHovered: Bool
     let isActive: Bool
     let isTeleporting: Bool
+    let isUnread: Bool
     let onClose: () -> Void
 
     var body: some View {
@@ -511,24 +518,12 @@ private struct SidebarRowView: View {
 
     @ViewBuilder
     private var iconView: some View {
-        if isSpawning || isTeleporting {
+        if isTeleporting {
             ProgressView()
                 .controlSize(.small)
                 .scaleEffect(0.7)
-        } else if isAsking {
-            // Asking wins over thinking: AskUserQuestion / permission
-            // prompts pause Claude, the user MUST act, so a static
-            // raised-hand reads as "your turn" louder than the spinner.
-            Image(systemName: "hand.raised.fill")
-                .font(.system(size: 14))
-                .foregroundStyle(SidebarPalette.askingYellow)
-        } else if isThinking {
-            ThinkingFlower()
-        } else if isWaiting {
-            // Claude is idle but a background Bash/Agent task is still
-            // running — surface that so the row reads as "alive but not
-            // your turn" instead of the plain idle dot.
-            WaitingHourglass()
+        } else if case .open(let session) = row {
+            ActivityDot(activity: SessionActivity.of(session, isUnread: isUnread))
         } else {
             Image(systemName: iconName)
                 .symbolRenderingMode(.hierarchical)
@@ -551,29 +546,11 @@ private struct SidebarRowView: View {
         }
     }
 
-    private var isSpawning: Bool {
-        if case .open(let s) = row { return s.status == .spawning }
-        return false
-    }
-
-    private var isThinking: Bool {
-        if case .open(let s) = row { return s.isThinking }
-        return false
-    }
-
-    private var isAsking: Bool {
-        if case .open(let s) = row { return s.isAsking }
-        return false
-    }
-
-    private var isWaiting: Bool {
-        if case .open(let s) = row { return s.isWaiting }
-        return false
-    }
-
     private var iconName: String {
         switch row {
-        case .open: return "circle.fill" // small filled dot — "alive but idle"
+        // Unreachable: `iconView` routes every open row to `ActivityDot`.
+        // Kept so the switch stays exhaustive.
+        case .open: return "circle.fill"
         case .closedLocal: return "desktopcomputer"
         case .closedCloud: return "cloud"
         }
@@ -769,54 +746,3 @@ enum DateGroup: String, Comparable, CaseIterable {
     }
 }
 
-private enum SidebarPalette {
-    /// Matches `--app-claude-orange` in the CC extension's webview CSS.
-    static let claudeOrange = Color(red: 0.85, green: 0.46, blue: 0.34)
-    /// Soft amber for "asking" state — warmer than system yellow, calmer
-    /// than orange. Reads as "your attention please" without screaming.
-    static let askingYellow = Color(red: 0.95, green: 0.74, blue: 0.18)
-    /// Muted blue for "waiting on background task" state. Cool palette so
-    /// it doesn't compete with the warmer thinking/asking colors — the
-    /// session is alive but not demanding attention.
-    static let waitingBlue = Color(red: 0.40, green: 0.58, blue: 0.78)
-}
-
-/// Animated hourglass shown while a background task (Bash run_in_background
-/// or Agent run_in_background) is still running but Claude itself is idle.
-/// Cycles `hourglass.tophalf.filled` ↔ `hourglass.bottomhalf.filled` — sand
-/// pours, then "flips" back. The plain (empty) `hourglass` glyph isn't in
-/// the cycle on purpose: it reads as "no sand", which is the wrong story
-/// for "still running". Slow (~1.2s per frame, ~2.4s round trip) so the icon
-/// ticks quietly without demanding attention.
-private struct WaitingHourglass: View {
-    private static let frames = [
-        "hourglass.tophalf.filled",
-        "hourglass.bottomhalf.filled",
-    ]
-    private static let secondsPerFrame: TimeInterval = 1.2
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: Self.secondsPerFrame)) { context in
-            let idx = Int(context.date.timeIntervalSince1970 / Self.secondsPerFrame)
-                % Self.frames.count
-            Image(systemName: Self.frames[idx])
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(SidebarPalette.waitingBlue)
-        }
-    }
-}
-
-/// Animated 6-petal flower shown while Claude is generating a response.
-/// Cycles through Unicode glyphs (✻ ✺ ✷ ✹ ✶ ❋) at ~6 fps in Claude orange.
-private struct ThinkingFlower: View {
-    private static let frames = ["✻", "✺", "✷", "✹", "✶", "❋"]
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 6.0)) { context in
-            let idx = Int(context.date.timeIntervalSince1970 * 6) % Self.frames.count
-            Text(Self.frames[idx])
-                .font(.system(size: 16))
-                .foregroundStyle(SidebarPalette.claudeOrange)
-        }
-    }
-}

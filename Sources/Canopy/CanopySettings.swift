@@ -32,6 +32,31 @@ final class CanopySettings {
     var recapEnabled: Bool = true {
         didSet { save() }
     }
+    /// Whether the USB MacroPad is adopted when plugged in. Off leaves the
+    /// pad alone (and blanks it if it was already connected).
+    var macroPadEnabled: Bool = true {
+        didSet { save() }
+    }
+    /// Global LED brightness 0–100. The firmware multiplies this into every
+    /// channel, so colors are sent full-scale and this is the only dimming
+    /// knob — pre-dimming a color would dim it twice.
+    ///
+    /// 60 rather than something dimmer because the darkest colour on the pad
+    /// has to survive the multiply — see `SessionActivity.ledColor`, which
+    /// owns that arithmetic. Two things follow that are easy to miss: idle's
+    /// white balance was measured *at this brightness*, so a large change here
+    /// re-opens it; and the firmware has its own reason for the same number
+    /// (a deep pulse runs out of distinct levels near its floor below it).
+    var macroPadBrightness: Int = 60 {
+        didSet {
+            let clamped = min(100, max(0, macroPadBrightness))
+            if clamped != macroPadBrightness {
+                macroPadBrightness = clamped
+                return // the re-entrant didSet saves
+            }
+            save()
+        }
+    }
     /// Default permission mode used when the sidebar reopens a recent
     /// session (closed local row or closed cloud / teleport row). The
     /// Launcher view tracks its own per-session selection separately —
@@ -69,6 +94,8 @@ final class CanopySettings {
         if let recap = dict["canopy.recapEnabled"] as? Bool {
             recapEnabled = recap
         }
+        if let enabled = dict["canopy.macroPadEnabled"] as? Bool { macroPadEnabled = enabled }
+        if let brightness = dict["canopy.macroPadBrightness"] as? Int { macroPadBrightness = min(100, max(0, brightness)) }
         if let raw = dict["canopy.defaultPermissionMode"] as? String,
            let mode = PermissionMode(rawValue: raw)
         {
@@ -97,6 +124,8 @@ final class CanopySettings {
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
         dict["claudeCode.respectGitIgnore"] = respectGitIgnore
         dict["canopy.recapEnabled"] = recapEnabled
+        dict["canopy.macroPadEnabled"] = macroPadEnabled
+        dict["canopy.macroPadBrightness"] = macroPadBrightness
         dict["canopy.defaultPermissionMode"] = defaultPermissionMode.rawValue
         writeDict(dict)
     }

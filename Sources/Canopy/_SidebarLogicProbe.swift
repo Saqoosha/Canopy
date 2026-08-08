@@ -2538,6 +2538,415 @@ enum SidebarLogicProbe {
                    !RecapScript.setCall(text: "line1\nline2").contains("\n"))
         }
 
+        // MARK: - MacroPad wire protocol / SessionActivity / unread tracker
+        //
+        // Pure value-type coverage for the pad's host-side contract. The
+        // serial / IOKit half is intentionally not exercised here — those
+        // need a real device or a mocked fd, and a silent decode bug is the
+        // one that would switch the user's pane or light the wrong color.
+
+        // --- MacroPadLineDecoder.parse: one line at a time
+        record("macropad decode: HELLO 1 4",
+               MacroPadLineDecoder.parse("HELLO 1 4") == .hello(version: 1, keyCount: 4),
+               "got \(String(describing: MacroPadLineDecoder.parse("HELLO 1 4")))")
+        // Zero keys is a connected board with no NeoKey wired, not a broken
+        // line — treating it as invalid is a regression with a real symptom.
+        record("macropad decode: HELLO 1 0 is a valid zero-key board",
+               MacroPadLineDecoder.parse("HELLO 1 0") == .hello(version: 1, keyCount: 0),
+               "got \(String(describing: MacroPadLineDecoder.parse("HELLO 1 0")))")
+        // Every loosening of `K` is a way for garbage to move the user's pane.
+        record("macropad decode: K with trailing junk is dropped",
+               MacroPadLineDecoder.parse("K 3 1 xyz") == nil,
+               "got \(String(describing: MacroPadLineDecoder.parse("K 3 1 xyz")))")
+        record("macropad decode: K with a non-binary state is dropped",
+               MacroPadLineDecoder.parse("K 3 2") == nil,
+               "got \(String(describing: MacroPadLineDecoder.parse("K 3 2")))")
+        record("macropad decode: K with a negative index is dropped",
+               MacroPadLineDecoder.parse("K -1 1") == nil,
+               "got \(String(describing: MacroPadLineDecoder.parse("K -1 1")))")
+        record("macropad decode: PONG 1 6",
+               MacroPadLineDecoder.parse("PONG 1 6") == .pong(version: 1, keyCount: 6),
+               "got \(String(describing: MacroPadLineDecoder.parse("PONG 1 6")))")
+        record("macropad decode: bare PONG",
+               MacroPadLineDecoder.parse("PONG") == .pong(version: nil, keyCount: nil),
+               "got \(String(describing: MacroPadLineDecoder.parse("PONG")))")
+        record("macropad decode: K press",
+               MacroPadLineDecoder.parse("K 2 1") == .key(index: 2, pressed: true),
+               "got \(String(describing: MacroPadLineDecoder.parse("K 2 1")))")
+        record("macropad decode: K release",
+               MacroPadLineDecoder.parse("K 2 0") == .key(index: 2, pressed: false),
+               "got \(String(describing: MacroPadLineDecoder.parse("K 2 0")))")
+        // A partial K must be DROPPED, never defaulted to key 0 — defaulting
+        // would silently switch the user's focused pane.
+        record("macropad decode: partial K dropped",
+               MacroPadLineDecoder.parse("K 2") == nil,
+               "got \(String(describing: MacroPadLineDecoder.parse("K 2")))")
+        record("macropad decode: non-numeric K index dropped",
+               MacroPadLineDecoder.parse("K x 1") == nil,
+               "got \(String(describing: MacroPadLineDecoder.parse("K x 1")))")
+        record("macropad decode: ERR message",
+               MacroPadLineDecoder.parse("ERR unknown Z") == .deviceError("unknown Z"),
+               "got \(String(describing: MacroPadLineDecoder.parse("ERR unknown Z")))")
+        record("macropad decode: unknown verb dropped",
+               MacroPadLineDecoder.parse("MOO") == nil,
+               "got \(String(describing: MacroPadLineDecoder.parse("MOO")))")
+        record("macropad decode: trailing CR tolerated",
+               MacroPadLineDecoder.parse("PONG 1 4\r") == .pong(version: 1, keyCount: 4),
+               "got \(String(describing: MacroPadLineDecoder.parse("PONG 1 4\r")))")
+
+        // --- MacroPadLineDecoder.feed: chunk reassembly + reset
+        do {
+            var d = MacroPadLineDecoder()
+            let first = d.feed(Data("K 1".utf8))
+            let second = d.feed(Data(" 1\nK 0 0\n".utf8))
+            record("macropad feed: split line reassembles",
+                   first.isEmpty
+                       && second == [.key(index: 1, pressed: true), .key(index: 0, pressed: false)],
+                   "first=\(first) second=\(second)")
+
+            var d2 = MacroPadLineDecoder()
+            _ = d2.feed(Data("K 1".utf8))
+            d2.reset()
+            let afterReset = d2.feed(Data("PONG\n".utf8))
+            record("macropad feed: reset drops buffered partial",
+                   afterReset == [.pong(version: nil, keyCount: nil)],
+                   "got \(afterReset)")
+        }
+
+        // --- MacroPadCommand.line / wireBytes
+        record("macropad encode: color",
+               MacroPadCommand.color(index: 0, rgb: 0xFF8000).line == "C 0 ff8000",
+               "got \(MacroPadCommand.color(index: 0, rgb: 0xFF8000).line)")
+        record("macropad encode: color zero-padded",
+               MacroPadCommand.color(index: 3, rgb: 0x000000).line == "C 3 000000",
+               "got \(MacroPadCommand.color(index: 3, rgb: 0x000000).line)")
+        record("macropad encode: breathe",
+               MacroPadCommand.breathe(index: 1, rgb: 0x00FFA0, periodMs: 2000, floorPercent: 40).line
+                   == "S 1 00ffa0 2000 40",
+               "got \(MacroPadCommand.breathe(index: 1, rgb: 0x00FFA0, periodMs: 2000, floorPercent: 40).line)")
+        record("macropad encode: breathe floor clamped",
+               MacroPadCommand.breathe(index: 0, rgb: 0xFF8000, periodMs: 2000, floorPercent: 140).line
+                   == "S 0 ff8000 2000 100",
+               "got \(MacroPadCommand.breathe(index: 0, rgb: 0xFF8000, periodMs: 2000, floorPercent: 140).line)")
+        record("macropad encode: brightness clamped",
+               MacroPadCommand.brightness(percent: 130).line == "B 100"
+                   && MacroPadCommand.brightness(percent: -5).line == "B 0",
+               "got \(MacroPadCommand.brightness(percent: 130).line)/\(MacroPadCommand.brightness(percent: -5).line)")
+        record("macropad encode: ping and reset",
+               MacroPadCommand.ping.line == "P" && MacroPadCommand.reset.line == "R",
+               "got \(MacroPadCommand.ping.line)/\(MacroPadCommand.reset.line)")
+        record("macropad encode: wireBytes ends with newline",
+               MacroPadCommand.ping.wireBytes.last == UInt8(ascii: "\n"),
+               "got \(Array(MacroPadCommand.ping.wireBytes))")
+
+        // --- SessionActivity priority ladder
+        do {
+            let crashed = OpenSession(origin: .local(cwd), resumeId: "act-crash",
+                                      title: "c", project: "P", status: .crashed(exitCode: 1))
+            crashed.isThinking = true
+            record("activity: crashed beats thinking → error",
+                   SessionActivity.of(crashed, isUnread: false) == .error)
+
+            let asking = OpenSession(origin: .local(cwd), resumeId: "act-ask",
+                                     title: "a", project: "P", status: .live)
+            asking.isThinking = true
+            asking.isAsking = true
+            record("activity: asking beats thinking",
+                   SessionActivity.of(asking, isUnread: false) == .asking)
+
+            let spawning = OpenSession(origin: .local(cwd), resumeId: "act-spawn",
+                                       title: "s", project: "P", status: .spawning)
+            record("activity: spawning → working",
+                   SessionActivity.of(spawning, isUnread: false) == .working)
+
+            let waiting = OpenSession(origin: .local(cwd), resumeId: "act-wait",
+                                      title: "w", project: "P", status: .live)
+            waiting.isWaiting = true
+            record("activity: waiting alone → background",
+                   SessionActivity.of(waiting, isUnread: false) == .background)
+
+            let unread = OpenSession(origin: .local(cwd), resumeId: "act-unread",
+                                     title: "u", project: "P", status: .live)
+            record("activity: unread flag alone → unread",
+                   SessionActivity.of(unread, isUnread: true) == .unread)
+
+            let idle = OpenSession(origin: .local(cwd), resumeId: "act-idle",
+                                   title: "i", project: "P", status: .live)
+            record("activity: plain live → idle",
+                   SessionActivity.of(idle, isUnread: false) == .idle)
+
+            // Three states breathe; what must hold is that asking breathes
+            // strictly deeper than any of them. If a second state ever ties
+            // or beats it, the pad can no longer say "this one needs a human"
+            // from peripheral vision.
+            record("activity: asking breathes deepest",
+                   SessionActivity.breathIsOrdered,
+                   "floors \(SessionActivity.allCases.map { ($0, $0.breath?.floorPercent) })")
+            let animated = SessionActivity.allCases.filter { $0.breath != nil }
+            record("activity: only working/background/asking animate",
+                   Set(animated) == Set([.working, .background, .asking]),
+                   "got \(animated)")
+            record("activity: every breath shares one period",
+                   Set(animated.compactMap { $0.breath?.periodMs }).count == 1,
+                   "periods \(animated.compactMap { $0.breath?.periodMs })")
+
+            let colors = Set(SessionActivity.allCases.map(\.ledColor))
+            record("activity: every ledColor is distinct",
+                   colors.count == SessionActivity.allCases.count,
+                   "unique=\(colors.count) cases=\(SessionActivity.allCases.count)")
+        }
+
+        // --- MacroPadUnreadTracker edge detection
+        do {
+            let idA = UUID()
+            let idB = UUID()
+            var tracker = MacroPadUnreadTracker()
+
+            tracker.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            tracker.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            record("unread: finish off-focus becomes unread",
+                   tracker.unread.contains(idA),
+                   "unread=\(tracker.unread)")
+
+            var focused = MacroPadUnreadTracker()
+            focused.update([.init(id: idA, isThinking: true, paneIndex: 0)], focusedPaneIndex: 0, isAppActive: true)
+            focused.update([.init(id: idA, isThinking: false, paneIndex: 0)], focusedPaneIndex: 0, isAppActive: true)
+            record("unread: finish on-focus stays clean",
+                   !focused.unread.contains(idA),
+                   "unread=\(focused.unread)")
+
+            tracker.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 1, isAppActive: true)
+            record("unread: focusing the pane clears it",
+                   !tracker.unread.contains(idA),
+                   "unread=\(tracker.unread)")
+
+            var unmapped = MacroPadUnreadTracker()
+            unmapped.update([.init(id: idB, isThinking: true, paneIndex: nil)], focusedPaneIndex: 0, isAppActive: true)
+            unmapped.update([.init(id: idB, isThinking: false, paneIndex: nil)], focusedPaneIndex: 0, isAppActive: true)
+            record("unread: nil paneIndex finish becomes unread",
+                   unmapped.unread.contains(idB),
+                   "unread=\(unmapped.unread)")
+
+            unmapped.update([], focusedPaneIndex: 0, isAppActive: true)
+            record("unread: disappeared id is pruned",
+                   !unmapped.unread.contains(idB),
+                   "unread=\(unmapped.unread)")
+
+            // A session that vanishes *while thinking* and comes back idle
+            // never had its finish observed within one continuous lifetime,
+            // so it must not be marked. Covers the `wasThinking` pruning that
+            // the test above leaves untouched.
+            var relaunch = MacroPadUnreadTracker()
+            relaunch.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            relaunch.update([], focusedPaneIndex: 0, isAppActive: true)
+            relaunch.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            record("unread: close-and-reopen does not fake a finish",
+                   !relaunch.unread.contains(idA),
+                   "unread=\(relaunch.unread)")
+
+            // Clearing must be per-session, not "wipe the set when the focused
+            // pane's session is present".
+            var pair = MacroPadUnreadTracker()
+            pair.update([.init(id: idA, isThinking: true, paneIndex: 0),
+                         .init(id: idB, isThinking: true, paneIndex: 1)], focusedPaneIndex: 2, isAppActive: true)
+            pair.update([.init(id: idA, isThinking: false, paneIndex: 0),
+                         .init(id: idB, isThinking: false, paneIndex: 1)], focusedPaneIndex: 2, isAppActive: true)
+            let bothMarked = pair.unread.contains(idA) && pair.unread.contains(idB)
+            pair.update([.init(id: idA, isThinking: false, paneIndex: 0),
+                         .init(id: idB, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            record("unread: focusing one pane clears only that session",
+                   bothMarked && !pair.unread.contains(idA) && pair.unread.contains(idB),
+                   "bothMarked=\(bothMarked) unread=\(pair.unread)")
+
+            // `refresh()` runs many times per second; a mark that survived
+            // only one pass would show green for a single frame.
+            var repeated = MacroPadUnreadTracker()
+            repeated.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            // The app being in the background overrides pane focus: this is
+            // the case the pad exists for, and it produced no green at all.
+            var away = MacroPadUnreadTracker()
+            away.update([.init(id: idA, isThinking: true, paneIndex: 0)],
+                        focusedPaneIndex: 0, isAppActive: false)
+            away.update([.init(id: idA, isThinking: false, paneIndex: 0)],
+                        focusedPaneIndex: 0, isAppActive: false)
+            record("unread: finishing in the focused pane while away still marks",
+                   away.unread.contains(idA), "unread=\(away.unread)")
+            away.update([.init(id: idA, isThinking: false, paneIndex: 0)],
+                        focusedPaneIndex: 0, isAppActive: true)
+            record("unread: coming back clears the focused pane",
+                   !away.unread.contains(idA), "unread=\(away.unread)")
+
+            // Returning must not clear a pane the user did not come back to.
+            var elsewhere = MacroPadUnreadTracker()
+            elsewhere.update([.init(id: idB, isThinking: true, paneIndex: 1)],
+                             focusedPaneIndex: 0, isAppActive: false)
+            elsewhere.update([.init(id: idB, isThinking: false, paneIndex: 1)],
+                             focusedPaneIndex: 0, isAppActive: false)
+            elsewhere.update([.init(id: idB, isThinking: false, paneIndex: 1)],
+                             focusedPaneIndex: 0, isAppActive: true)
+            record("unread: coming back leaves other panes marked",
+                   elsewhere.unread.contains(idB), "unread=\(elsewhere.unread)")
+
+            record("unread: mark survives a repeated identical refresh",
+                   repeated.unread.contains(idA),
+                   "unread=\(repeated.unread)")
+        }
+
+        // --- SessionActivity: the SSH rung, and unread's place at the bottom
+        do {
+            let ssh = OpenSession(origin: .local(cwd), resumeId: "act-ssh",
+                                  title: "s", project: "P", status: .live)
+            ssh.connection.status = .reconnectFailed
+            record("activity: reconnectFailed → error",
+                   SessionActivity.of(ssh, isUnread: false) == .error)
+
+            // `unread` firing is already covered; what was not covered is that
+            // it *loses*. Moving `isUnread` up the ladder would leave every
+            // other assertion green while a live background task rendered as
+            // a finished session.
+            let busy = OpenSession(origin: .local(cwd), resumeId: "act-busy",
+                                   title: "b", project: "P", status: .live)
+            busy.isWaiting = true
+            let thinking = OpenSession(origin: .local(cwd), resumeId: "act-think",
+                                       title: "t", project: "P", status: .live)
+            thinking.isThinking = true
+            let prompting = OpenSession(origin: .local(cwd), resumeId: "act-prompt",
+                                        title: "p", project: "P", status: .live)
+            prompting.isAsking = true
+            record("activity: unread loses to background/working/asking",
+                   SessionActivity.of(busy, isUnread: true) == .background
+                       && SessionActivity.of(thinking, isUnread: true) == .working
+                       && SessionActivity.of(prompting, isUnread: true) == .asking)
+
+            record("activity: every ledColor fits 24 bits",
+                   SessionActivity.allCases.allSatisfy { $0.ledColor <= 0x00FF_FFFF },
+                   "\(SessionActivity.allCases.map { String($0.ledColor, radix: 16) })")
+
+            // `.empty` and `.idle` share a dot colour deliberately (the pad
+            // expresses "empty" as black); the rest must stay distinct.
+            let dots = SessionActivity.allCases.filter { $0 != .empty }.map(\.dotRGB)
+            record("activity: dot colours are distinct",
+                   Set(dots.map { "\($0.red),\($0.green),\($0.blue)" }).count == dots.count,
+                   "\(dots)")
+        }
+
+        // --- BreathPhase: the curve both renderers and the firmware share
+        do {
+            let start = Date(timeIntervalSinceReferenceDate: 1000)
+            let breath = SessionActivity.Breath(periodMs: 2000, floorPercent: 10)
+            let atTrough = BreathPhase.level(at: start, since: start, breath: breath)
+            let atPeak = BreathPhase.level(at: start.addingTimeInterval(1), since: start, breath: breath)
+            let afterFull = BreathPhase.level(at: start.addingTimeInterval(2), since: start, breath: breath)
+            record("breath: phase 0 sits at the floor",
+                   abs(atTrough - 0.10) < 0.0001, "got \(atTrough)")
+            record("breath: half a period in reaches full",
+                   abs(atPeak - 1.0) < 0.0001, "got \(atPeak)")
+            record("breath: a whole period returns to the floor",
+                   abs(afterFull - 0.10) < 0.0001, "got \(afterFull)")
+            // Catches a floor/percent mix-up: with no room to move, the level
+            // must be constant regardless of when it is sampled.
+            let flat = SessionActivity.Breath(periodMs: 2000, floorPercent: 100)
+            record("breath: floor 100 is constant",
+                   abs(BreathPhase.level(at: start.addingTimeInterval(0.7), since: start, breath: flat) - 1.0) < 0.0001)
+            // A period in milliseconds read as seconds would run 1000x fast.
+            let slow = SessionActivity.Breath(periodMs: 4000, floorPercent: 0)
+            record("breath: period is milliseconds",
+                   abs(BreathPhase.level(at: start.addingTimeInterval(2), since: start, breath: slow) - 1.0) < 0.0001,
+                   "got \(BreathPhase.level(at: start.addingTimeInterval(2), since: start, breath: slow))")
+        }
+
+        // --- RGBComponents.lerp: a transposed from/to runs every fade backwards
+        do {
+            let black = RGBComponents(red: 0, green: 0, blue: 0)
+            let white = RGBComponents(red: 1, green: 1, blue: 1)
+            record("rgb lerp: t=0 is the start colour",
+                   RGBComponents.lerp(black, white, 0) == black)
+            record("rgb lerp: t=1 is the end colour",
+                   RGBComponents.lerp(black, white, 1) == white)
+            let mid = RGBComponents.lerp(black, white, 0.5)
+            record("rgb lerp: t=0.5 is the midpoint",
+                   abs(mid.red - 0.5) < 0.0001 && abs(mid.green - 0.5) < 0.0001 && abs(mid.blue - 0.5) < 0.0001,
+                   "got \(mid)")
+        }
+
+        // --- Decoder overflow: resync rather than fuse
+        do {
+            var overflow = MacroPadLineDecoder()
+            // A console port spewing bytes with no newline. The trailing text
+            // is chosen to look like a key press: if the decoder kept the tail
+            // and fused it with the next line, this would emit `K 3 1` and
+            // move the user's focused pane.
+            let garbage = Data(repeating: UInt8(ascii: "x"), count: 5000) + Data("K 3 1 trailing".utf8)
+            let duringOverflow = overflow.feed(garbage)
+            let afterOverflow = overflow.feed(Data("\nPONG 3 4\n".utf8))
+            record("macropad feed: overflow emits nothing",
+                   duringOverflow.isEmpty, "got \(duringOverflow)")
+            record("macropad feed: overflow resyncs without forging a key press",
+                   afterOverflow == [.pong(version: 3, keyCount: 4)],
+                   "got \(afterOverflow)")
+        }
+
+        // --- Encoder edges the existing assertions leave open
+        record("macropad encode: breathe floor clamped at zero",
+               MacroPadCommand.breathe(index: 0, rgb: 0x00FF00, periodMs: 2000, floorPercent: -10).line
+                   == "S 0 00ff00 2000 0",
+               "got \(MacroPadCommand.breathe(index: 0, rgb: 0x00FF00, periodMs: 2000, floorPercent: -10).line)")
+        // --- The protocol-version gate. Its whole job is to protect firmware
+        // nobody on the team runs any more, so a regression here is invisible
+        // on current hardware and shows up as dark keys on an old pad.
+        do {
+            let asking = MacroPadController.command(for: .asking, at: 0, protocolVersion: 2)
+            record("macropad gate: v2 breathes",
+                   asking == .breathe(index: 0, rgb: 0xFF8000, periodMs: 2000, floorPercent: 10),
+                   "got \(asking)")
+            record("macropad gate: v1 degrades to a steady colour",
+                   MacroPadController.command(for: .asking, at: 0, protocolVersion: 1)
+                       == .color(index: 0, rgb: 0xFF8000))
+            // An absent version must read as 1, not as current — the firmware
+            // without the field is the firmware without `S`.
+            record("macropad gate: an absent version degrades too",
+                   MacroPadController.command(for: .asking, at: 0, protocolVersion: nil)
+                       == .color(index: 0, rgb: 0xFF8000))
+            record("macropad gate: a static state is never breathed",
+                   MacroPadController.command(for: .idle, at: 3, protocolVersion: 3)
+                       == .color(index: 3, rgb: SessionActivity.idle.ledColor))
+        }
+
+        // --- Reset-loop detection. This never fired at its original window,
+        // and nothing noticed for a whole review round.
+        do {
+            let base = Date(timeIntervalSinceReferenceDate: 0)
+            var loop = MacroPadResetLoopDetector(window: 360, threshold: 3)
+            // The firmware refuses to self-reset inside 60s of boot, so a real
+            // crash loop cycles no faster than ~62s. Three of those must fire.
+            let a = loop.note(at: base)
+            let b = loop.note(at: base.addingTimeInterval(62))
+            let c = loop.note(at: base.addingTimeInterval(124))
+            record("macropad reset loop: fires on a real firmware cycle",
+                   !a && !b && c, "\(a) \(b) \(c)")
+            // The old 120s window could not fit two 62s gaps — the bug.
+            var tooTight = MacroPadResetLoopDetector(window: 120, threshold: 3)
+            _ = tooTight.note(at: base)
+            _ = tooTight.note(at: base.addingTimeInterval(62))
+            record("macropad reset loop: a 120s window could never fire",
+                   !tooTight.note(at: base.addingTimeInterval(124)))
+            // Clearing after a hit: the fourth reconnect must not re-fire.
+            record("macropad reset loop: does not re-fire on the next reconnect",
+                   !loop.note(at: base.addingTimeInterval(186)))
+            // Eviction: spread beyond the window, nothing fires.
+            var slow = MacroPadResetLoopDetector(window: 360, threshold: 3)
+            _ = slow.note(at: base)
+            _ = slow.note(at: base.addingTimeInterval(200))
+            record("macropad reset loop: evicts past the window",
+                   !slow.note(at: base.addingTimeInterval(400)))
+        }
+
+        record("macropad encode: rgb masked to 24 bits",
+               MacroPadCommand.color(index: 0, rgb: 0xFF00_0000).line == "C 0 000000",
+               "got \(MacroPadCommand.color(index: 0, rgb: 0xFF00_0000).line)")
+
         // Summary. Note `grep -c 'record('` does NOT equal this count: the
         // `func record(` definition matches too, and a few call sites only
         // fire on failure. Read the printed number, don't count the source.

@@ -40,11 +40,16 @@ final class OpenSession: Identifiable, Hashable {
     }
 
     enum Status: Equatable, Sendable {
-        /// Shim is starting; show a spinner in the icon slot.
+        /// Shim is starting. Rendered as `SessionActivity.working` — the
+        /// same breathing blue as a session that is generating, because both
+        /// mean "the machine is busy, not your turn".
         case spawning
         /// Shim is up and the webview is mounted.
         case live
-        /// Shim exited unexpectedly; user can click to retry.
+        /// Shim exited unexpectedly. Note that this is effectively a
+        /// transient state today: `Detail.swift`'s crash handler closes the
+        /// session immediately, so the row disappears rather than offering a
+        /// retry.
         case crashed(exitCode: Int32)
     }
 
@@ -70,17 +75,18 @@ final class OpenSession: Identifiable, Hashable {
     var customApi: ModelProvider?
     /// True while Claude is generating a response (assistant / stream_event
     /// messages flowing). Updated by `ShimProcess.boundSession` mirror.
-    /// Drives the animated flower icon in the sidebar.
+    /// Feeds `SessionActivity.of`, which the sidebar dot and the MacroPad
+    /// key both render from.
     var isThinking: Bool = false
 
     /// True while a `tool_permission_request` is in flight — the extension
     /// asked the webview for tool approval and the user hasn't responded
-    /// yet. Drives the "asking" icon in the sidebar (e.g. raised hand).
+    /// yet. Feeds `SessionActivity.of` as the top non-error rung.
     var isAsking: Bool = false
 
     /// True when Claude is idle (no `stream_event`/`assistant` in flight)
     /// but at least one `run_in_background` task (Bash shell or Agent) is
-    /// still running. Drives the sidebar's "waiting" hourglass icon.
+    /// still running. Feeds `SessionActivity.of` as the `background` rung.
     /// Mutually exclusive with `isThinking` — only true between turns.
     var isWaiting: Bool = false
     /// The shim subprocess. Strong reference; nil only between init and start.

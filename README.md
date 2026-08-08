@@ -16,12 +16,14 @@ English | [日本語](README.ja.md)
 
 - **Native macOS window** — Claude Code's full React UI in a WKWebView
 - **Launcher** — directory picker, recent directories, session history, model/effort/permission selectors
-- **Tabs** — Cmd+T for new tabs, Cmd+1–9 to switch
+- **Sidebar shell** — sessions live in a persistent left sidebar; the detail pane swaps the active webview in place
+- **Split view** — up to 5 panes side by side, Cmd+1–9 to focus one, drag the dividers to resize
 - **Session resume** — pick up where you left off with instant history replay
 - **SSH remote** — run Claude CLI on remote machines via SSH
 - **Real-time streaming** — thinking, text, tool use, all streamed live
+- **MacroPad** — optional USB key pad whose LEDs show each pane's activity and whose keys jump to it, so a session waiting on you is visible without looking at the screen (firmware: [Canopy-MacroPad](https://github.com/Saqoosha/Canopy-MacroPad), currently a private repo)
 - **Auto-update** — Sparkle with delta updates
-- **Keyboard shortcuts** — Cmd+N (launcher), Cmd+O (open folder), Cmd+T (new tab)
+- **Keyboard shortcuts** — Cmd+N (new session), Cmd+O (open folder), Cmd+1–9 (focus pane), Cmd+Opt+←/→ (move focus)
 - **Custom styles** — refined typography, code block styling, and syntax highlighting that polish the extension's UI for a native macOS feel
 
 ## Requirements
@@ -73,8 +75,10 @@ xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
 
 ```
 Sources/Canopy/
-  CanopyApp.swift              SwiftUI app entry, tabs, menu commands, Sparkle updater
+  CanopyApp.swift              SwiftUI app entry, panes, menu commands, Sparkle updater
   AppState.swift               Observable state, PermissionMode enum, screen transitions
+  SessionActivity.swift        One activity classification shared by the sidebar dot and the MacroPad LED
+  MacroPad/                    USB key pad: wire protocol, serial device, session-state controller
   ShimProcess.swift            Node.js subprocess manager, NDJSON bridge, auth/permission patching
   NodeDiscovery.swift          Finds Node.js >= 18 (Homebrew, mise, nvm, login shell)
   LauncherView.swift           Launcher: directory picker, recent dirs, session history
