@@ -45,6 +45,32 @@ final class SessionStore {
     /// index when panes is non-empty. Undefined (0) while panes is empty.
     private(set) var focusedPaneIndex: Int = 0
 
+    /// Sessions that finished a turn while the user was looking at a
+    /// different pane. Rendered as the green `SessionActivity.unread` dot in
+    /// the sidebar and as the green LED on the MacroPad.
+    ///
+    /// A session with no pane counts as unfocused, so it is marked on finish
+    /// and stays marked until it is loaded into the focused pane.
+    ///
+    /// The store only *holds* this; the edge detection that produces it lives
+    /// in `MacroPadUnreadTracker`, driven by `MacroPadController`. It lives
+    /// here rather than in the controller because the sidebar and the pad must
+    /// never disagree about what a color means — a green key with no green dot
+    /// would make the pad look broken. The controller runs whether or not a
+    /// pad is plugged in, so the sidebar's dot does not depend on the hardware.
+    ///
+    /// `private(set)` for the same reason as `focusedPaneIndex`: the set has an
+    /// invariant (⊆ `openSessions`) that only the tracker maintains, and a
+    /// second writer would strand a green dot on a session that is gone.
+    private(set) var unreadSessionIds: Set<OpenSession.ID> = []
+
+    /// Sole entry point for `unreadSessionIds`. Called by `MacroPadController`
+    /// after `MacroPadUnreadTracker` has recomputed the set from a complete
+    /// session list.
+    func setUnreadSessionIds(_ ids: Set<OpenSession.ID>) {
+        unreadSessionIds = ids
+    }
+
     static let paneAbsoluteCap: Int = 5
     /// Includes the 8pt drag target from PaneDivider's ZStack; the 1pt visible line is centered inside.
     static let paneDividerWidth: CGFloat = 8

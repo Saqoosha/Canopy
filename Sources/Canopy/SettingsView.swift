@@ -61,6 +61,24 @@ private struct GeneralSettingsTab: View {
             } footer: {
                 SettingsFooter(text: "After Canopy sits in the background for 3 minutes, each visible pane summarises where its session left off. Costs a small model call per pane.")
             }
+
+            Section {
+                Toggle("Enable MacroPad", isOn: $settings.macroPadEnabled)
+                LabeledContent("LED brightness") {
+                    HStack(spacing: 8) {
+                        Slider(value: Binding(get: { Double(settings.macroPadBrightness) },
+                                              set: { settings.macroPadBrightness = Int($0.rounded()) }),
+                               in: 0...100, step: 5)
+                        Text("\(settings.macroPadBrightness)%")
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }
+                .disabled(!settings.macroPadEnabled)
+            } footer: {
+                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Connects automatically when the pad is plugged in; Canopy is unaffected when it isn't.")
+            }
         }
         .formStyle(.grouped)
     }

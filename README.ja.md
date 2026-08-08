@@ -16,12 +16,14 @@
 
 - **ネイティブ macOS ウィンドウ** — Claude Code の React UI を WKWebView で表示
 - **ランチャー** — ディレクトリ選択、最近のディレクトリ、セッション履歴、モデル/エフォート/パーミッション選択
-- **タブ** — Cmd+T で新規タブ、Cmd+1–9 で切り替え
+- **サイドバーシェル** — セッションは左サイドバーに常駐し、詳細ペインがその場で webview を差し替える
+- **分割ビュー** — 最大 5 ペインを横に並べ、Cmd+1–9 でフォーカス、ディバイダのドラッグでリサイズ
 - **セッション再開** — 過去のセッションを履歴の即時リプレイで再開
 - **SSH リモート** — リモートマシン上の Claude CLI を SSH 経由で実行
 - **リアルタイムストリーミング** — 思考、テキスト、ツール使用をライブ表示
 - **自動アップデート** — Sparkle によるデルタアップデート対応
-- **キーボードショートカット** — Cmd+N（ランチャー）、Cmd+O（フォルダを開く）、Cmd+T（新規タブ）
+- **MacroPad** — 各ペインの状態を LED で示し、キーを押すとそのペインへ飛ぶ外付け USB キーパッド（任意）。返事待ちのセッションが画面を見ずに分かる（ファームウェア: [Canopy-MacroPad](https://github.com/Saqoosha/Canopy-MacroPad) — 現在は非公開リポジトリ）
+- **キーボードショートカット** — Cmd+N（新規セッション）、Cmd+O（フォルダを開く）、Cmd+1–9（ペインをフォーカス）、Cmd+Opt+←/→（フォーカス移動）
 - **カスタムスタイル** — タイポグラフィ、コードブロック、シンタックスハイライトを調整し、ネイティブ macOS に馴染む見た目に
 
 ## 必要なもの
@@ -73,7 +75,9 @@ SSH リモートでは、ラッパースクリプトが CLI の起動を置き�
 
 ```
 Sources/Canopy/
-  CanopyApp.swift              SwiftUI アプリエントリ、タブ、メニュー、Sparkle アップデーター
+  CanopyApp.swift              SwiftUI アプリエントリ、ペイン、メニュー、Sparkle アップデーター
+  SessionActivity.swift        サイドバーのドットと MacroPad の LED が共有する状態分類
+  MacroPad/                    USB キーパッド: ワイヤプロトコル、シリアルデバイス、状態コントローラ
   AppState.swift               状態管理、PermissionMode enum、画面遷移
   ShimProcess.swift            Node.js サブプロセス管理、NDJSON ブリッジ、認証パッチ
   NodeDiscovery.swift          Node.js >= 18 の検出 (Homebrew, mise, nvm, login shell)

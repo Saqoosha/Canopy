@@ -21,6 +21,12 @@ struct CanopyApp: App {
                 Detail(store: sidebarStore)
             }
             .navigationSplitViewStyle(.balanced)
+            // Started here rather than in `applicationDidFinishLaunching`
+            // because that runs before SwiftUI has built the scene, so
+            // `SessionStore.shared` may still be nil there — this is the
+            // first point where the store is unambiguously alive. Fires once
+            // per window; `startMacroPad` is idempotent.
+            .task { appDelegate.startMacroPad(store: sidebarStore) }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 800)
@@ -344,6 +350,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var configuredWindows = NSHashTable<NSWindow>.weakObjects()
     private var delegateProxies: [ObjectIdentifier: WindowDelegateProxy] = [:]
 
+    /// Drives the external MacroPad. Created once, on the first window's
+    /// `.task`, and kept for the process lifetime — it also owns the
+    /// unread-session bookkeeping the sidebar dot reads, so it runs whether
+    /// or not a pad is ever plugged in.
+    private var macroPad: MacroPadController?
+
+    @MainActor
+    func startMacroPad(store: SessionStore) {
+        guard macroPad == nil else { return }
+        let controller = MacroPadController(store: store)
+        macroPad = controller
+        controller.start()
+    }
+
     /// UserDefaults key holding the last main-window frame. We persist
     /// this ourselves rather than relying on AppKit's autosave because
     /// SwiftUI's `WindowGroup(id: "main")` assigns each fresh window
@@ -490,6 +510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         normalizeSavedFrameForSinglePane()
+        macroPad?.shutdown()
         if let monitor = cmdWMonitor {
             NSEvent.removeMonitor(monitor)
             cmdWMonitor = nil
