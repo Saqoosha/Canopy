@@ -123,10 +123,13 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// setting, full white needs about 6% off red and blue while this dark
     /// grey needs about 18%. Channel efficiency diverges as drive current
     /// falls, so no single global white balance can be right at both ends. Any
-    /// future colour on the grey axis needs its own measurement; the six
-    /// saturated colours are unaffected because they lean on one channel.
+    /// future colour on the grey axis needs its own measurement. The
+    /// saturated colours were held to be unaffected because they lean on one
+    /// channel; `working` and `background` are the counterexamples that claim
+    /// predates — see the paragraph below, where both are argued.
     ///
-    /// **`working`, `background` and `unread` are tuned as a set.** They used
+    /// **`working` and `unread` are tuned as a pair; `background` used to be
+    /// in that set and is deliberately no longer.** All three used
     /// to be blue, cyan and green — three neighbours on the hue circle, so
     /// moving the middle one off blue moved it onto green by exactly as much.
     /// A cyan (`0x00C0C0`) read as too close to blue then, which forced
@@ -145,13 +148,34 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// as flatly purple through the keycap, `40` still leaned that way, and
     /// `28` reads as blue carrying a violet cast — which is the whole ask,
     /// because the state means "alive, not yours", not "look at me". Below
-    /// about `14` the cast is gone and it is simply blue, so this sits nearer
-    /// that end than it looks. `working` has weaker evidence: it was judged
+    /// about `14` the cast is gone and it is simply blue. `28` is 40/255,
+    /// just under the midpoint of that band — the cast is deliberately
+    /// shallow, and hue is exactly linear in the red channel here, so no
+    /// intuition about the ladder beats reading the numbers off it.
+    ///
+    /// That cast rides on ONE channel at 40/255, so it is the first thing in
+    /// the palette to die — and TWO multipliers eat it, not one. At the
+    /// default `macroPadBrightness` of 60 the red lands on 24 at the breath's
+    /// peak but on 9 at its floor of 40; at brightness 30 the floor is 4,
+    /// which is the exact figure this comment cites above as the reason
+    /// `0x101010` was rejected for `idle`. So the cast is already gone at the
+    /// trough of its own breath, and gone outright below roughly brightness
+    /// 40. Severity is capped only because what is left is plain blue, a hue
+    /// nothing else claims — the state stays legible, the cast does not. Same
+    /// dependency `idle`'s white balance carries; see
+    /// `CanopySettings.macroPadBrightness`.
+    ///
+    /// `working` has weaker evidence: it was judged
     /// beside `background` in that same session and nothing more. An even
     /// two-channel mix is precisely what the "lean on one channel" exemption
     /// above does NOT cover, and since green is the weak channel a nominal
     /// cyan reads blue-shifted — so the perceived gap to `background` is
     /// narrower than the nominal 69.4°.
+    ///
+    /// One consequence worth recording rather than rediscovering: the blue
+    /// slot changed meaning. Old `working` sat at 224.9°, new `background` at
+    /// 249.4° — 24.5° apart. A blue-ish key used to mean "Claude is
+    /// generating" and now means "a background task is running".
     var ledColor: UInt32 {
         switch self {
         case .empty: return 0x00_00_00
