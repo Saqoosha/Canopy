@@ -77,7 +77,7 @@ private struct GeneralSettingsTab: View {
                 }
                 .disabled(!settings.macroPadEnabled)
             } footer: {
-                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Connects automatically when the pad is plugged in; Canopy is unaffected when it isn't.")
+                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Connects automatically when the pad is plugged in. A small indicator at the bottom of the sidebar shows the link state; turning this off hides it.")
             }
         }
         .formStyle(.grouped)

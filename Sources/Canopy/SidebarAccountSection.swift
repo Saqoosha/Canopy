@@ -74,6 +74,12 @@ struct SidebarAccountSection: View {
     /// sidebar footer covers everything.
     private var versionFooter: some View {
         HStack(spacing: 6) {
+            // Leads the footer, ~12pt in from the sidebar's leading edge. It
+            // draws nothing only in `Link.disabled` — chiefly the Settings
+            // toggle, and NOT the no-pad case, since the setting defaults to
+            // on. See `MacroPadIndicator` for why that trade was taken, and
+            // `MacroPadStatus.Link` for the other two causes.
+            MacroPadIndicator()
             if let canopy = canopyVersion {
                 Text("Canopy \(canopy)")
             }
