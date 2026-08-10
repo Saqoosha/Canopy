@@ -2873,19 +2873,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// unhandled; recorded so the survey above is not read as "these are
     /// the only two shapes that ever existed".
     ///
-    /// "It was asked about" is doing real work in that sentence, and the
-    /// gap is measured: across local session JSONLs touched in the 21 days
-    /// to 2026-08-10, 33 of 355 async-agent acks belong to an `Agent`
-    /// `tool_use` carrying NO `run_in_background` key at all (one session:
-    /// 16 of 16). `isBackgroundLaunchBlock` requires that key, so those
-    /// launches never enter `pendingBackgroundTaskIds`, this function is
-    /// never called for them, and they get no hourglass and no purge. They
-    /// do all receive completion markers, so they would reconcile correctly
-    /// if they were tracked. Fixing that is a change to DETECTION, not to
-    /// this parser, and it is deliberately not made here: widening what
-    /// counts as a background launch risks a permanent hourglass on
-    /// anything misclassified, which is a worse failure than the one it
-    /// would fix.
+    /// "It was asked about" used to exclude a large and growing set: the
+    /// Agent tool runs subagents in the background by default, so a caller
+    /// that omits `run_in_background` produces a launch block with no such
+    /// key, and `isBackgroundLaunchBlock` requires one. Measured across
+    /// local session JSONLs: 52 of 2,312 async-agent launches overall, and
+    /// 31 of 167 in the most recent month. Those are now picked up from
+    /// their ack instead — see `isAsyncAgentLaunchAck` — so this function
+    /// IS called for them, one `tool_result` later than for a flagged
+    /// launch. What is still not covered: a launch whose ack never arrives,
+    /// and a launch made by a subagent. That last one is worth stating
+    /// precisely, because the obvious summary is wrong in both directions:
+    /// 66 subagent-made async launches do exist in the corpus (all 2026-03,
+    /// 63 of them flag-carrying), and `detectBackgroundTaskLaunch` has no
+    /// `parent_tool_use_id` gate, so the flagged ones ARE registered today —
+    /// they just never get ack-mapped, because `processUserToolResults`
+    /// returns on that field. The 3 no-key ones are invisible. Not widened
+    /// here: the population is small, entirely historical, and the ack for
+    /// such a launch is addressed to a conversation this map does not model.
     ///
     /// That the agent id is the SAME id space TaskStop uses is measured, not
     /// assumed: live JSONLs hold `"name":"TaskStop","input":{"task_id":
@@ -2893,9 +2898,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// a9109847eff04238e`, i.e. `a`-shaped ids flow through the stop path
     /// exactly like `b`-shaped ones.
     ///
-    /// A prefix this generic is safe only because of where it's read: the
-    /// caller matches `tool_result`s whose `tool_use_id` is already a pending
-    /// bg launch, so no unrelated tool output reaches it.
+    /// A prefix this generic is safe because of where it's read: the caller
+    /// only reaches it for a `tool_use_id` that is a pending bg launch. Note
+    /// that is no longer purely a fact about the launch — an ack-registered
+    /// id became pending moments earlier, from this same text — so the
+    /// non-circular half of the guarantee now lives in
+    /// `isAsyncAgentLaunchAck` (which demands the ack's shape) and in the
+    /// caller's Agent-row corroboration, not in this sentence alone.
     static func extractLaunchAckTaskId(_ text: String) -> String? {
         extractAlnumAfterPrefix(text, prefix: "Command running in background with ID: ")
             ?? extractAlnumAfterPrefix(text, prefix: "agentId: ")
@@ -2916,7 +2925,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// result JSON string); (2) an array of `{type:"text", text:"…"}`
     /// sub-blocks (joined with `\n`). Anything else returns `""` so
     /// callers can treat "no usable text" and "empty content" the same.
-    static func extractToolResultText(_ block: [String: Any]) -> String {
+    nonisolated static func extractToolResultText(_ block: [String: Any]) -> String {
         if let s = block["content"] as? String {
             return s
         }
@@ -3272,9 +3281,72 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let content = userMsg["content"] as? [[String: Any]]
         else { return }
 
+        // Hoisted out of the loop: `refreshWaitingState()` also arms and tears
+        // down the idle backstop, so calling it per block would churn timer
+        // state on a message carrying several acks. Same shape as
+        // `detectBackgroundTaskLaunch`'s `added` flag.
+        var ackRegistered = false
         for block in content {
             guard block["type"] as? String == "tool_result" else { continue }
             let text = Self.extractToolResultText(block)
+
+            // Ack-registration path: an async Agent launched WITHOUT an
+            // explicit `run_in_background` key never reached
+            // `detectBackgroundTaskLaunch`, so this ack is the first and only
+            // notice we get that a background task exists. Register it here,
+            // then fall through to the mapping below as if it had been seen
+            // at launch. See `isAsyncAgentLaunchAck` for why the ack — and
+            // not the absent key — is the signal.
+            //
+            // The offset is captured now rather than at launch, and the
+            // quantity that makes that safe is BYTES, not elapsed time —
+            // bytes are what the margin is denominated in. Measured over
+            // ~2,300 launch→ack pairs, the JSONL written between a launch
+            // line and its ack tops out around 374 KB — median a few KB,
+            // measured twice with slightly different pair endpoints, which
+            // is why only the maximum is quoted — with no sample anywhere
+            // near `bgScanSafetyMarginBytes` (1 MB). Elapsed time is the
+            // wrong bound and has a long tail — median 8 ms, p90 ≈ 2 s,
+            // minutes at worst when a launch waits on a permission prompt —
+            // so a time-based argument here would be reassuring and useless.
+            if let toolUseId = block["tool_use_id"] as? String,
+               pendingBackgroundTaskIds[toolUseId] == nil,
+               Self.isAsyncAgentLaunchAck(text),
+               // **The id must belong to an Agent launch we actually saw.**
+               // The ack text alone is not enough: any tool_result can begin
+               // with that sentence, and three real cases already exist in
+               // local logs — Bash `grep` output quoting it while searching
+               // these very JSONLs. Without this check each one pends an id
+               // that no completion marker will ever clear, i.e. a permanent
+               // hourglass, which is the exact failure the absent-key
+               // approach was rejected for. `SubagentTracker` only ever
+               // creates a row from an `Agent`/`Task` `tool_use`, so asking
+               // it supplies the tool-name check and keeps the two sides
+               // agreeing about which ids exist. (They agree on existence,
+               // not on state: this accepts a finished row, the tracker
+               // refuses to promote one.) It also quietly covers `Task`, the
+               // pre-rename Agent, which `isBackgroundLaunchBlock` rejects
+               // outright but the tracker accepts.
+               //
+               // **This line is untested and a reviewer proved it**: deleting
+               // it leaves the probe fully green, because `processUserToolResults`
+               // is a private instance method needing a live shim. Treat it
+               // the way `BackgroundReconcileTrigger` says to treat the
+               // `allowsBulkClear` guards — as a load-bearing line CI cannot
+               // see removed, not as covered.
+               subagentTracker.rows.contains(where: { $0.id == toolUseId }),
+               // Same historic-replay gate as the launch path: on `--resume`
+               // the CLI re-emits old tool_results, and registering one would
+               // pend an id whose marker sits far below any scan window.
+               !historicToolUseIds.contains(toolUseId)
+            {
+                let rawSize = Self.jsonlFileSize(path: sessionJSONLPath()) ?? 0
+                pendingBackgroundTaskIds[toolUseId] = rawSize > Self.bgScanSafetyMarginBytes
+                    ? rawSize - Self.bgScanSafetyMarginBytes
+                    : 0
+                logger.notice("[bg] ack-registered (async Agent, no run_in_background key) toolUseId=\(toolUseId, privacy: .public) rawSize=\(rawSize, privacy: .public) pending=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+                ackRegistered = true
+            }
 
             // Launch-ack path: only map ids we already tracked as pending
             // bg launches. A tool_result for an unrelated tool_use that
@@ -3299,6 +3371,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 purgePendingByTaskId(stoppedId, reason: "TaskStop tool_result")
             }
         }
+        if ackRegistered { refreshWaitingState() }
     }
 
     /// True if `block` is a `tool_use` for `Bash` or `Agent` whose input
@@ -3310,6 +3383,75 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard name == "Bash" || name == "Agent" else { return false }
         let input = block["input"] as? [String: Any] ?? [:]
         return input["run_in_background"] as? Bool == true
+    }
+
+    /// True when a `tool_result`'s text is the CLI announcing that it just
+    /// started an async Agent. This is the SECOND way a background launch is
+    /// detected, and for a growing share of them the only one.
+    ///
+    /// `isBackgroundLaunchBlock` requires `input.run_in_background == true`,
+    /// but the Agent tool's own description now tells callers that subagents
+    /// run in the background by default and that `run_in_background: false`
+    /// is the opt-out — so a caller that omits the flag still gets a
+    /// background agent, with no such key in the launch block. (That is the
+    /// tool description, not something confirmed against the CLI source; the
+    /// corpus is consistent with it.) Measured 2026-08-10 over the ~2,330
+    /// top-level session JSONLs in `~/.claude/projects`: 52 of ~2,312
+    /// async-agent launches carry no key overall, and 31 of the 167 dated
+    /// 2026-08-01…09. Denominators grow with the corpus — the ratios and the
+    /// direction are what is meant to survive. The versions overlap heavily
+    /// (10 of the 11 that produced a no-key launch also produced key-carrying
+    /// ones), so this is a caller-shape difference no CLI upgrade resolves.
+    /// Those launches got no hourglass, no TaskStop purge, and a subagent row
+    /// that finished the moment its ack arrived.
+    ///
+    /// **The ack is the signal, not the absent key** — and the reason is the
+    /// KIND of evidence, not a ratio. An ack is the CLI stating what it did;
+    /// an absent key is an inference, and it has meant both things: 832
+    /// FOREGROUND Agent launches also have no key, and a foreground agent
+    /// never writes a completion marker, so registering on the absent key
+    /// would hang a permanent hourglass on each. Do not lean on that 16:1
+    /// (launches, not sessions — 10.6:1 there): those foreground launches are
+    /// nearly all pre-July, and since July the same shape has run 37
+    /// background to 2 foreground. The ratio has already inverted once, which
+    /// is why the argument does not rest on it.
+    ///
+    /// Two things the ack is NOT: universal, and self-identifying. A third
+    /// wording, `Spawned successfully.` + `agent_id:`, preceded it on CLI
+    /// 2.1.7x–2.1.9x (52 launches, all key-carrying, so they were tracked
+    /// anyway) — the string has already changed shape twice. And the sentence
+    /// also occurs as ordinary tool DATA: 3 `tool_result`s in the top-level
+    /// corpus begin with it without being an Agent launch (5 counting
+    /// subagent transcripts), and every one of them is a `Bash` grep
+    /// searching these very JSONLs. That is why the caller also corroborates
+    /// the id against an observed Agent row — and why the `agentId:` clause
+    /// above is not redundant with it: the row proves the id is an Agent's,
+    /// never that the text is an ack.
+    /// `nonisolated` because `SubagentTracker` is a plain value type and
+    /// calls this: the class's inferred `@MainActor` isolation covers statics
+    /// too, so a non-isolated caller cannot reach one. `extractToolResultText`
+    /// is `nonisolated` for the same reason. Distinct from the runtime hazard
+    /// on `wholeLinePrefixLength`, which is a closure literal aborting on a
+    /// background queue and deliberately does NOT use this keyword.
+    nonisolated static func isAsyncAgentLaunchAck(_ text: String) -> Bool {
+        // Both halves are required, and the second is not belt-and-braces.
+        // The opening sentence alone is satisfied by an AGENT whose own
+        // report begins with it — an agent asked to analyse this very ack,
+        // which is not hypothetical in a repo whose reviewers read these
+        // logs. That case passes the caller's Agent-row corroboration too,
+        // because it really is an Agent row, and a foreground agent writes
+        // no completion marker: permanent hourglass. The id cannot separate
+        // them either — a launch ack and a final report are both the
+        // `tool_result` for the same `tool_use`. Only the shape can.
+        //
+        // Measured: all 2,318 real acks in the corpus (2,316 `Agent`, 2 the
+        // pre-rename `Task`) carry an `agentId:` line, and the 3 false
+        // positives — Bash greps quoting the sentence — carry none.
+        // Residual, accepted: a report that reproduces the ack *verbatim*,
+        // newline and id line included, still passes. Content-based
+        // detection cannot do better than "quoting it in full is rare".
+        text.hasPrefix("Async agent launched successfully")
+            && text.contains("\nagentId: ")
     }
 
     /// Scan an io_message for `tool_use` blocks named `AskUserQuestion`,

@@ -1221,6 +1221,52 @@ enum SidebarLogicProbe {
         record("subagent: bg Agent ack tool_result does NOT finish the row",
                !bgAckChanged && bgTracker.rows.count == 1 && bgTracker.rows[0].isRunning,
                "changed=\(bgAckChanged) running=\(bgTracker.rows.first?.isRunning ?? false)")
+
+        // An async Agent launched WITHOUT the `run_in_background` key — now
+        // the default shape — arrives as a foreground row, so its ack would
+        // finish it the instant it starts. The ack promotes the row instead.
+        var noKeyTracker = SubagentTracker()
+        _ = noKeyTracker.observe([
+            "type": "assistant",
+            "message": ["role": "assistant", "content": [[
+                "type": "tool_use", "id": "toolu_NOKEY", "name": "Agent",
+                "input": ["description": "review", "subagent_type": "general-purpose"],
+            ]] as [[String: Any]]] as [String: Any],
+        ], now: t0)
+        record("subagent: an Agent with no run_in_background key starts foreground",
+               noKeyTracker.rows.count == 1 && !noKeyTracker.rows[0].runInBackground)
+        _ = noKeyTracker.observe([
+            "type": "user",
+            "message": ["role": "user", "content": [[
+                "type": "tool_result", "tool_use_id": "toolu_NOKEY",
+                "content": "Async agent launched successfully.\nagentId: a1234567890abcdef (internal ID)",
+            ]] as [[String: Any]]] as [String: Any],
+        ], now: t0)
+        record("subagent: the async ack promotes that row instead of finishing it",
+               noKeyTracker.rows.count == 1
+                   && noKeyTracker.rows[0].runInBackground
+                   && noKeyTracker.rows[0].isRunning,
+               "bg=\(noKeyTracker.rows.first?.runInBackground ?? false) running=\(noKeyTracker.rows.first?.isRunning ?? false)")
+        // A foreground Agent's real result must still finish its row — the
+        // promotion must not have widened into "any tool_result keeps a row
+        // alive", which would hang every foreground row forever.
+        var fgTracker = SubagentTracker()
+        _ = fgTracker.observe([
+            "type": "assistant",
+            "message": ["role": "assistant", "content": [[
+                "type": "tool_use", "id": "toolu_FG", "name": "Agent",
+                "input": ["description": "review", "subagent_type": "general-purpose"],
+            ]] as [[String: Any]]] as [String: Any],
+        ], now: t0)
+        _ = fgTracker.observe([
+            "type": "user",
+            "message": ["role": "user", "content": [[
+                "type": "tool_result", "tool_use_id": "toolu_FG",
+                "content": "Here is the report you asked for.",
+            ]] as [[String: Any]]] as [String: Any],
+        ], now: t0)
+        record("subagent: a foreground Agent's result still finishes its row",
+               fgTracker.rows.count == 1 && !fgTracker.rows[0].isRunning)
         // Main-conversation `result` must NOT freeze bg rows either —
         // their real completion is `completeIfPresent` (JSONL marker /
         // TaskStop). Covered in depth by the issue #91 section below;
@@ -1404,6 +1450,70 @@ enum SidebarLogicProbe {
                "got=\(ShimProcess.extractLaunchAckTaskId(agentAckLegacy) ?? "nil")")
         record("bg lifecycle: agentId prefix-only → nil",
                ShimProcess.extractLaunchAckTaskId("agentId: ") == nil)
+        // A launch that omits `run_in_background` is not necessarily
+        // foreground, so the ack closes a gap `isBackgroundLaunchBlock`
+        // cannot. The NEGATIVE assertions are the ones that matter: "no key"
+        // has meant foreground far more often than background, and the ack
+        // sentence also shows up as ordinary tool output. Counts, dates and
+        // the reasoning live on `ShimProcess.isAsyncAgentLaunchAck` — not
+        // copied here, because two copies of a measurement is how they end up
+        // disagreeing (this comment already did, in its first draft: it said
+        // "sessions" where the other said "launches").
+        record("async ack: metadata-clause wording recognised",
+               ShimProcess.isAsyncAgentLaunchAck(agentAckWithMetadataClause))
+        record("async ack: legacy wording recognised",
+               ShimProcess.isAsyncAgentLaunchAck(agentAckLegacy))
+        record("async ack: a foreground Agent's result is NOT an async ack",
+               !ShimProcess.isAsyncAgentLaunchAck("Here is the analysis you asked for."))
+        record("async ack: a Bash bg ack is NOT an async-Agent ack",
+               !ShimProcess.isAsyncAgentLaunchAck(launchAck))
+        record("async ack: empty → no",
+               !ShimProcess.isAsyncAgentLaunchAck(""))
+        // Prefix, not substring: a foreground agent quoting the sentence in
+        // its own report must not register a phantom background task.
+        record("async ack: the phrase quoted mid-text does not count",
+               !ShimProcess.isAsyncAgentLaunchAck(
+                   "The log said \"Async agent launched successfully\" at that point."))
+        // …but a prefix match is NOT sufficient on its own, and this is the
+        // case that proves it: a `Bash` tool_result whose grep output begins
+        // at column zero with the sentence. Three of these exist in local
+        // logs — from searching these very JSONLs — and the ack text alone
+        // would pend a `toolu_…` that no completion marker can ever clear.
+        // The registration path's real defence is requiring a matching
+        // `SubagentTracker` row, which only an Agent/Task launch creates;
+        // this assertion pins that the predicate alone does NOT decide.
+        let bashGrepOutput =
+            "Async agent launched successfully. (This tool result is internal metadata — never quote"
+        record("async ack: a Bash grep echoing the sentence is rejected (no agentId line)",
+               !ShimProcess.isAsyncAgentLaunchAck(bashGrepOutput))
+        // The case the Agent-row corroboration cannot catch, because the row
+        // is real: a FOREGROUND agent whose report opens with the sentence
+        // (an agent asked to analyse this ack — routine in this repo). Only
+        // the required `agentId:` line separates it from a launch.
+        record("async ack: a foreground Agent's report opening with the sentence is rejected",
+               !ShimProcess.isAsyncAgentLaunchAck("""
+               Async agent launched successfully is the string Canopy keys on. \
+               I checked every occurrence and none of them appear outside a \
+               tool_result, so the detector looks sound.
+               """))
+        var bashTracker = SubagentTracker()
+        _ = bashTracker.observe([
+            "type": "assistant",
+            "message": ["role": "assistant", "content": [[
+                "type": "tool_use", "id": "toolu_BASHGREP", "name": "Bash",
+                "input": ["command": "grep -r 'Async agent launched successfully' ."],
+            ]] as [[String: Any]]] as [String: Any],
+        ], now: t0)
+        record("async ack: …and a Bash tool_use makes no subagent row to corroborate it",
+               bashTracker.rows.isEmpty)
+        // The launch-side predicate keeps its meaning: an explicit false is
+        // still foreground, and the absent key is still not enough on its own.
+        record("async ack: absent run_in_background key is still not a launch signal",
+               !ShimProcess.isBackgroundLaunchBlock([
+                   "type": "tool_use", "id": "toolu_nokey", "name": "Agent",
+                   "input": ["prompt": "…", "subagent_type": "general-purpose"],
+               ]))
+
         // Precedence is a decision, not an accident: both scanners match
         // their prefix ANYWHERE in the text, so a text carrying both must
         // resolve to the Bash id. Flipping the `??` operands keeps every

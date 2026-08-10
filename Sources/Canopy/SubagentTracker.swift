@@ -19,13 +19,22 @@ struct SubagentInfo: Identifiable, Equatable {
     /// the subagent works, same as the "↓ Nk tokens" column in the CLI.
     /// Monotonic — enforced by `bumpTokens(to:)`.
     private(set) var tokens: Int = 0
-    /// `input.run_in_background == true` at launch. A bg launch's initial
-    /// `tool_result` is just an ack — `"Async agent launched successfully.…
-    /// agentId: …"` for an Agent, `"Command running in background with ID:
-    /// …"` for a Bash; `ShimProcess.extractLaunchAckTaskId` is the one place
-    /// that knows both — NOT completion. The real completion arrives via one
-    /// of two disjoint transports, both wired through
-    /// `ShimProcess.completeIfPresent`:
+    /// True when this row is known to be a background agent: either
+    /// `input.run_in_background == true` at launch, or promoted from the
+    /// launch ack by `markBackground()` when the launch block carried no such
+    /// key — see `ShimProcess.isAsyncAgentLaunchAck` for why that shape is
+    /// now common. One-way, like `finishedAt`: promotion only, never demotion.
+    ///
+    /// The promotion runs as a first pass over the same `tool_result` block,
+    /// ahead of the finish check below, because it has to reach the row
+    /// before that check does. Keeping it in this type is not about a race
+    /// (the caller side is deterministic): it is what makes the one-way rule
+    /// enforceable with `private(set)`, and what keeps the behaviour
+    /// reachable from `_SidebarLogicProbe` without standing up a shim.
+    ///
+    /// A bg row's initial `tool_result` is an ack, never completion. The real
+    /// completion arrives via one of two disjoint transports, both wired
+    /// through `ShimProcess.completeIfPresent`:
     ///
     /// - **Natural completion**: written to the session JSONL as
     ///   `<tool-use-id>toolu_…</tool-use-id>`. The CLI does NOT re-emit
@@ -40,10 +49,10 @@ struct SubagentInfo: Identifiable, Equatable {
     ///   `detectTaskStopLaunch` + the safety net in
     ///   `processUserToolResults`, both routing to `purgePendingByTaskId`.
     ///
-    /// Rows with this flag therefore don't finish on `tool_result` and
-    /// are also skipped by the turn's `result` freeze. Foreground rows
-    /// (the common case) finish on `tool_result` as usual.
-    let runInBackground: Bool
+    /// Rows with this flag therefore don't finish on `tool_result` and are
+    /// also skipped by the turn's `result` freeze. Foreground rows finish on
+    /// `tool_result` as usual.
+    private(set) var runInBackground: Bool
 
     var isRunning: Bool { finishedAt == nil }
 
@@ -68,6 +77,14 @@ struct SubagentInfo: Identifiable, Equatable {
     /// backdate a main-conversation row's `finishedAt`.
     mutating func finish(at date: Date) {
         if finishedAt == nil { finishedAt = date }
+    }
+
+    /// Promote a row to background. One-way and idempotent, mirroring
+    /// `finish(at:)` — a row that was launched with an explicit
+    /// `run_in_background: true` is already here, and nothing may turn a
+    /// background row back into a foreground one.
+    mutating func markBackground() {
+        runInBackground = true
     }
 
     /// Monotonic token update. Ignores smaller totals so out-of-order streaming
@@ -338,12 +355,32 @@ struct SubagentTracker {
             var changed = false
             for block in content {
                 guard block["type"] as? String == "tool_result" else { continue }
+                // An async Agent whose launch block carried no
+                // `run_in_background` key reaches us as a foreground row, and
+                // this ack would finish it on the spot — showing "done" for an
+                // agent that just started. The ack itself says otherwise, so
+                // promote first and let the guard below leave it running.
+                if let id = block["tool_use_id"] as? String,
+                   let idx = rows.firstIndex(where: { $0.id == id }),
+                   // Only a row this ack could still be about. Promoting an
+                   // already-finished row would flip a completed entry to
+                   // background for a field nothing renders, and it would
+                   // contradict the reason promotion exists — to get in
+                   // ahead of the finish, not to undo one.
+                   rows[idx].finishedAt == nil,
+                   !rows[idx].runInBackground,
+                   ShimProcess.isAsyncAgentLaunchAck(ShimProcess.extractToolResultText(block))
+                {
+                    rows[idx].markBackground()
+                    changed = true
+                }
                 if let id = block["tool_use_id"] as? String,
                    let idx = rows.firstIndex(where: { $0.id == id }),
                    rows[idx].finishedAt == nil,
-                   // Bg Agent's initial `tool_result` is an ack ("Command
-                   // running in background with ID: …"), not completion —
-                   // the real end signal never flows through this branch:
+                   // A bg row's initial `tool_result` is an ack — the
+                   // wording differs per tool and is `isAsyncAgentLaunchAck`'s
+                   // business, not this guard's — never completion. The real
+                   // end signal does not flow through this branch at all:
                    // natural completion goes to the JSONL and TaskStop goes
                    // to `detectTaskStopLaunch`; both route to
                    // `completeIfPresent`. Leave bg rows running.
