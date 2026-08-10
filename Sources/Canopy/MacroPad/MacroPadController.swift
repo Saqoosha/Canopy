@@ -125,6 +125,7 @@ final class MacroPadController {
     private let store: SessionStore
     private let settings: CanopySettings
     private let device: MacroPadDevice
+    private let status: MacroPadStatus
 
     /// A firmware crash more than a minute after boot makes the pad paint
     /// every key red, reboot, and reconnect — the recovery Canopy wants, and
@@ -173,10 +174,12 @@ final class MacroPadController {
 
     init(store: SessionStore,
          settings: CanopySettings = .shared,
-         device: MacroPadDevice = MacroPadDevice()) {
+         device: MacroPadDevice = MacroPadDevice(),
+         status: MacroPadStatus = .shared) {
         self.store = store
         self.settings = settings
         self.device = device
+        self.status = status
     }
 
     func start() {
@@ -223,6 +226,13 @@ final class MacroPadController {
         isConnected = false
         lastSentCommands.removeAll()
         lastBrightness = nil
+        // `.disabled` rather than `.searching`: the subsystem is stopped, not
+        // hunting for a port. It is not a latch — the observation loop above
+        // is still armed, so a `refresh()` before the process actually exits
+        // republishes `.searching`. Accepted because the only caller is
+        // `applicationWillTerminate` and the UI is already going away; a
+        // second caller would need a real terminal state.
+        status.publish(.disabled)
         device.stop(sendingReset: true)
     }
 
@@ -297,6 +307,36 @@ final class MacroPadController {
 
         applyBrightness(brightness)
         pushStates()
+        publishStatus()
+    }
+
+    /// Mirrors the link state out to the sidebar indicator. Driven from
+    /// `refresh()` rather than from the connect/disconnect handlers alone,
+    /// because the Settings toggle is a third input and only `refresh()`
+    /// observes it.
+    ///
+    /// `MacroPadStatus.publish` drops no-op writes, so the common case is
+    /// free. A publish from outside a tracked pass costs one extra `refresh()`
+    /// — see `publish`'s own doc for why the ones from inside do not.
+    ///
+    /// The mapping into `Keys` lives here rather than in `adoptIdentity`
+    /// because it needs `isConnected` as well as the count.
+    private func publishStatus() {
+        guard settings.macroPadEnabled else {
+            status.publish(.disabled)
+            return
+        }
+        guard isConnected else {
+            status.publish(.searching)
+            return
+        }
+        let keys: MacroPadStatus.Keys
+        if let count = keyCount {
+            keys = count == 0 ? .unreachable : .available(count)
+        } else {
+            keys = .counting
+        }
+        status.publish(.connected(keys))
     }
 
     private var effectiveKeyCount: Int { keyCount ?? Self.assumedKeyCount }
@@ -415,6 +455,10 @@ final class MacroPadController {
             protocolVersion = nil
             lastSentCommands.removeAll()
             lastBrightness = nil
+            // The disconnect branch never calls `refresh()`, so this is the
+            // only republish on the path. (Adding a `fullPush()` here would
+            // be inert anyway — it guards on `isConnected`, just cleared.)
+            publishStatus()
         case .event(let event):
             handle(event)
         }
