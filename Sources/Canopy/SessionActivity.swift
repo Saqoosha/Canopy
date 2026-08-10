@@ -129,21 +129,29 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// **`working`, `background` and `unread` are tuned as a set.** They used
     /// to be blue, cyan and green — three neighbours on the hue circle, so
     /// moving the middle one off blue moved it onto green by exactly as much.
-    /// A plain cyan (`0x00C0C0`) read as too close to blue then, which forced
+    /// A cyan (`0x00C0C0`) read as too close to blue then, which forced
     /// `background` out to `0x00FFA0` and `unread` from `0x00FF40` to pure
     /// green to stay clear of it. Moving `background` to blue-violet takes it
-    /// off that arc entirely, which is what frees `working` to be the plain
-    /// cyan that never worked beside a blue. The pair still sharing the arc is
-    /// `working` and `unread`, now 60° apart against the 37° that shipped
-    /// before.
+    /// off that arc entirely, which is what frees `working` to be a cyan again
+    /// — at full scale per the rule above, not the value that lost.
     ///
-    /// `background`'s red channel is the one number here that was A/B'd on a
-    /// real pad rather than reasoned: `A0` and `70` both read as flatly purple
-    /// through the keycap, and `40` still leaned that way. At `28` it reads as
-    /// blue carrying a violet cast — which is the whole ask, because the state
-    /// means "alive, not yours", not "look at me". Below about `14` the cast
-    /// is gone and it is simply blue, so this sits nearer that end than it
-    /// looks.
+    /// The quantity that improved is the *smallest* gap left on the arc, not
+    /// any one pair's: 37.6° (`background`↔`unread`) to 60.0°
+    /// (`working`↔`unread`). Those are different pairs, and the distinction
+    /// matters to anyone checking the claim — `working` and `unread` were
+    /// 104.9° apart before, so that pair actually got closer.
+    ///
+    /// `background`'s red channel was A/B'd on a real pad: `A0` and `70` read
+    /// as flatly purple through the keycap, `40` still leaned that way, and
+    /// `28` reads as blue carrying a violet cast — which is the whole ask,
+    /// because the state means "alive, not yours", not "look at me". Below
+    /// about `14` the cast is gone and it is simply blue, so this sits nearer
+    /// that end than it looks. `working` has weaker evidence: it was judged
+    /// beside `background` in that same session and nothing more. An even
+    /// two-channel mix is precisely what the "lean on one channel" exemption
+    /// above does NOT cover, and since green is the weak channel a nominal
+    /// cyan reads blue-shifted — so the perceived gap to `background` is
+    /// narrower than the nominal 69.4°.
     var ledColor: UInt32 {
         switch self {
         case .empty: return 0x00_00_00
@@ -201,8 +209,11 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// nothing else. The five reporting states are told apart by hue alone
     /// (breath separates three of them), where the icons this replaced used a
     /// distinct SF Symbol per state — so colour is load-bearing here in a way
-    /// it was not before, and a red-green deficiency would collapse the
-    /// working/background/unread trio.
+    /// it was not before, and a red-green deficiency collapses part of the
+    /// set. Which part moved with the palette rather than going away:
+    /// `working` (cyan) and `background` (blue-violet) now both read blue,
+    /// while `unread`'s green separates better than it did against the old
+    /// spring-green `background`.
     ///
     /// That is a decided trade, not an oversight: this app has one user, who
     /// asked for a plain coloured dot knowing what it costs. Recorded so the

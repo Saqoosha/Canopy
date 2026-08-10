@@ -41,7 +41,7 @@ final class OpenSession: Identifiable, Hashable {
 
     enum Status: Equatable, Sendable {
         /// Shim is starting. Rendered as `SessionActivity.working` — the
-        /// same breathing blue as a session that is generating, because both
+        /// same breathing cyan as a session that is generating, because both
         /// mean "the machine is busy, not your turn".
         case spawning
         /// Shim is up and the webview is mounted.
