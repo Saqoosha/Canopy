@@ -6,6 +6,28 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>2.14.2</title>
+            <pubDate>Mon, 10 Aug 2026 18:28:58 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>85</sparkle:version>
+            <sparkle:shortVersionString>2.14.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Bug Fixes
+
+- The sidebar no longer keeps showing the background-task indicator after the task has finished. Previously a session that went quiet right after launching a background task held that state until you typed in it again — in one case for 32 minutes with nothing running. Canopy now re-checks on its own while the session is idle.
+- Background agents are detected again. Agents now run in the background by default, and Canopy was only recognising the ones launched with an explicit flag — so a growing share of them showed no background indicator at all, and their row in the activity list was marked finished the moment it started. Canopy now recognises them from the launch acknowledgement itself.
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.2/Canopy-2.14.2.dmg" length="3130796" type="application/octet-stream" sparkle:edSignature="fz20hox/9Zoa0ALCV7VEklHU+C5sSBM0TrTY/l1HSZFND4QkqHPxIUFvPSTxc0TZvhnDl+P/17Ho85wGv/KfAQ=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.2/Canopy85-84.delta" sparkle:deltaFrom="84" length="177726" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="dOLHJ3lWeW08u9LY6v4jaKqPDQTp1GjxonMoqym1e75Sdqpp/Jc2Gq1R/yJGyvdj6L85KNFB5gvi51lADutgAw=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.2/Canopy85-83.delta" sparkle:deltaFrom="83" length="178474" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="MNN5Dyksnq3kIHkPle+SxiBxdHx8CmqFxNULrXHHkDF4/jIJOye89OranUdpM+04XR6/IBMUVb0AUieKhXJmAw=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.2/Canopy85-82.delta" sparkle:deltaFrom="82" length="219974" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Snnyr8E1YVQum4jpXp+bKLzeMzuA2dnGITMFyxtCsUS76hH+pWAV7XHG6ogTkXMs0kj8nS7zWdJY9Y3DL7nLBg=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.2/Canopy85-81.delta" sparkle:deltaFrom="81" length="346510" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="+Xrk7hXS79s4ZDlAiso1B6fiKKGu8zW1ek5GGfn1kmQay2j3+QE5uCIYqDLZDQNbyyVn3S+UfwLjrwlGoFOLBw=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.2/Canopy85-80.delta" sparkle:deltaFrom="80" length="378366" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="NG4T66+pNJrBGUcmktZMhP/u04rMDw9cON/Dk2c6jlVyf/CsNeTaY05SrIOAiJraK9t+/2Lhw/d1VPUyIC6HDg=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>2.14.1</title>
             <pubDate>Mon, 10 Aug 2026 12:25:03 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -17,7 +39,7 @@
 - The MacroPad's LED colours for two states were retuned. A session that is generating is now **cyan** (was blue), and a session running a background task is now **blue-violet** (was spring green). The matching sidebar dots moved with them, so a key and its row still show the same colour for the same state.
 - The change widens the smallest gap between neighbouring state colours from 38° to 60° on the hue circle, which makes the two "busy but not your turn" states easier to tell apart at a glance.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy-2.14.1.dmg" length="3121142" type="application/octet-stream" sparkle:edSignature="6skFTlTQYgwhdOa6feIeqSF+kW4N8u73NZD1uDAQlvH6c9x9U8s+XHadKRarEIgWOIjh/+VpkU6mIKXAaRt+Dw=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.2/Canopy-2.14.1.dmg" length="3121164" type="application/octet-stream" sparkle:edSignature="KaJ4NDOpaaQ1GOllm4RPITl6GFKDNwNG5OKJOpzC4Qa9i17uXGlwbB4nPjEW3x2NPc9nv7wlocvST+G3rHCPAA=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy84-83.delta" sparkle:deltaFrom="83" length="44290" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OaHXHmV6Md6sewKu5G8SZ1bSONYNJBKklb0cTvahTtwc2jwd9ytl9eO6/DG089nteP6zN57j/gP35yBydA4LBQ=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy84-82.delta" sparkle:deltaFrom="82" length="196222" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="9XPhCcLvSrPSTQ9Qn57wRy+cGjqPqlPZ/yRGSZr0T/o26VhksId120Xm5TSpJinZ3yvIaQEo4VfJV3lb5amBDw=="/>
@@ -41,43 +63,12 @@
 ### Changes
 - Reworded the MacroPad section footer in Settings, which previously said Canopy was unaffected without a pad attached.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy-2.14.0.dmg" length="3121257" type="application/octet-stream" sparkle:edSignature="zThUUldba+ZyKAhIyZbIQBWGVqi43O0nc4DtVO3Ksq9Wd3u5zxTCETWSlG9OczCommgmuSwKfhmaVf3OckDSCw=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.2/Canopy-2.14.0.dmg" length="3121300" type="application/octet-stream" sparkle:edSignature="8imNtPzeSKCAb7srSAv5MW5VsDxaRrf9ahKzHK3tL8viwXwwvqzRIRpf4EdMr+oZqBi0z9yO73FOgi8mD7nGBg=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-82.delta" sparkle:deltaFrom="82" length="195898" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="rUBGcI49f9Y5QPSAt8c/2ktBWQeQ9OKZWz36StgOlmYU7Z77as0hss8cm33Zs0EueBt9FaRaTDki1mTMUYC9Aw=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-81.delta" sparkle:deltaFrom="81" length="337562" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="uDhUu9ZZo9cfdk+KhNLUZqD8N9VBZU/UmmKDC52sylthJrTouEg/0jNiajhW9+kafazIm6T8M87BgshAjGXxCA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-80.delta" sparkle:deltaFrom="80" length="365166" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="LdtXftuOyDgBqz4cGabDpFz4DEo7LnfLDUZmCA0TnjmZ3kdMNjhrAvsQsX9ihVtq3gCJI/EOI6f51GAqci6JAQ=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-79.delta" sparkle:deltaFrom="79" length="395394" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Ji0IMQrCNhIiP3NWOX8Xc5abiQKgFAyzE7Th/bVGJ9wWQ1FobaIgg1pNczOK3RJBYSl/0PZgUkFOEkqb22sQBA=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>2.13.0</title>
-            <pubDate>Sat, 08 Aug 2026 23:25:16 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>82</sparkle:version>
-            <sparkle:shortVersionString>2.13.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[## MacroPad support
-
-Canopy can now drive an external USB key pad ([Canopy-MacroPad](https://github.com/Saqoosha/Canopy-MacroPad) — currently a private repo). Each key shows one pane's activity as a colour, and pressing a key focuses that pane and brings Canopy forward — so a session waiting on you is visible, and reachable, without looking at the screen.
-
-- **Key N is pane N**, the same meaning as Cmd+1–9. The key count comes from the device, so a wider pad needs no update here
-- **Colour is state, breath is urgency.** Working and background-task keys breathe shallowly; a session waiting on your approval breathes deep, and it is the only one that does
-- **Green means "finished while you weren't looking"** — including while Canopy itself was in the background. Coming back clears only the pane you returned to
-- Connects automatically when the pad is plugged in, reconnects when it is unplugged, and blanks the pad when Canopy quits. Nothing changes when no pad is present
-- Serial, not HID: no Input Monitoring permission, and keystrokes cannot leak into other apps
-
-## Sidebar
-
-The per-row activity icons (thinking flower, waiting hourglass, raised hand) are replaced by a **coloured dot** that uses the same colours, curve and timing as the pad — so a glance at the sidebar and a glance at your hand tell the same story.
-
-Enable the pad and set LED brightness in Settings → General.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy-2.13.0.dmg" length="3109523" type="application/octet-stream" sparkle:edSignature="z5o3bO/8prgy5GG50i6As5agS+v57rmLry2TJbfj+hL4xch+6kzTn6V7mubSj6DyicRHvzUc8t0zllxCSNURBQ=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy82-81.delta" sparkle:deltaFrom="81" length="322866" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OjxoQAVBzGhqk6aCZruAqJb5HPo7fn3zivaa49rMHKz4kJMoL5Bb1ACN7fXFFZfNHjwU+abm0cCrFlNQko26DQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy82-80.delta" sparkle:deltaFrom="80" length="354350" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="LGINXAbOIjNLsIPf/9ulwSsr3Hwmkv+2I9ElqmCm0XZ1Ce3euC+aXboIYYnlDCcder8sNWZ9r6XOpZtSkc9eBg=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy82-79.delta" sparkle:deltaFrom="79" length="379602" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="RVjJzd3rAW/aeDRi0ehuRVxmP+JTiqgwZ2lGcpWWFNb9wyMU4Om7sdI3pK56HY92mxB/Rjye+GnuJbQurPikAg=="/>
             </sparkle:deltas>
         </item>
         <item>
