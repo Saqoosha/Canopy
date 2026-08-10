@@ -6,6 +6,27 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>2.14.1</title>
+            <pubDate>Mon, 10 Aug 2026 12:25:03 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>84</sparkle:version>
+            <sparkle:shortVersionString>2.14.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Changes
+- The MacroPad's LED colours for two states were retuned. A session that is generating is now **cyan** (was blue), and a session running a background task is now **blue-violet** (was spring green). The matching sidebar dots moved with them, so a key and its row still show the same colour for the same state.
+- The change widens the smallest gap between neighbouring state colours from 38° to 60° on the hue circle, which makes the two "busy but not your turn" states easier to tell apart at a glance.
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy-2.14.1.dmg" length="3121142" type="application/octet-stream" sparkle:edSignature="6skFTlTQYgwhdOa6feIeqSF+kW4N8u73NZD1uDAQlvH6c9x9U8s+XHadKRarEIgWOIjh/+VpkU6mIKXAaRt+Dw=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy84-83.delta" sparkle:deltaFrom="83" length="44290" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OaHXHmV6Md6sewKu5G8SZ1bSONYNJBKklb0cTvahTtwc2jwd9ytl9eO6/DG089nteP6zN57j/gP35yBydA4LBQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy84-82.delta" sparkle:deltaFrom="82" length="196222" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="9XPhCcLvSrPSTQ9Qn57wRy+cGjqPqlPZ/yRGSZr0T/o26VhksId120Xm5TSpJinZ3yvIaQEo4VfJV3lb5amBDw=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy84-81.delta" sparkle:deltaFrom="81" length="337070" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="YSF+7UCDh9oQvuxnDoYHvoYSP4WvYJ4McBPmexUa+X8kkxci9KTKtPps6rxSE1K0FbVGQA4P/Zsok1ndZmlmBg=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy84-80.delta" sparkle:deltaFrom="80" length="366586" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="L89W2fbk9HFmVYNGCf7Y+yCwKwg4/Qh8X1vSnHgorUQqOBi+0vvAKQNasK8KxtbFjZIGh1LC/x4GdDc70k0LAg=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy84-79.delta" sparkle:deltaFrom="79" length="393902" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Z5jvB/k7Nz1vOTSh5kDsZchfyg+OGkXXMogW72/0LoxKIOJWcS56kQ8uswyAtJWRel+iFO/hAHLdc4qRpVx2Cg=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>2.14.0</title>
             <pubDate>Mon, 10 Aug 2026 11:01:44 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -20,7 +41,7 @@
 ### Changes
 - Reworded the MacroPad section footer in Settings, which previously said Canopy was unaffected without a pad attached.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy-2.14.0.dmg" length="3121268" type="application/octet-stream" sparkle:edSignature="0g9XKSkB8SpcCETfacMLC3IWsbkR7GA5kHbvJxSos3bLsOl09Asck3kxqcSjH4piO5tCmOeYJfeeHec2ah0pDA=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy-2.14.0.dmg" length="3121257" type="application/octet-stream" sparkle:edSignature="zThUUldba+ZyKAhIyZbIQBWGVqi43O0nc4DtVO3Ksq9Wd3u5zxTCETWSlG9OczCommgmuSwKfhmaVf3OckDSCw=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-82.delta" sparkle:deltaFrom="82" length="195898" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="rUBGcI49f9Y5QPSAt8c/2ktBWQeQ9OKZWz36StgOlmYU7Z77as0hss8cm33Zs0EueBt9FaRaTDki1mTMUYC9Aw=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-81.delta" sparkle:deltaFrom="81" length="337562" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="uDhUu9ZZo9cfdk+KhNLUZqD8N9VBZU/UmmKDC52sylthJrTouEg/0jNiajhW9+kafazIm6T8M87BgshAjGXxCA=="/>
@@ -52,41 +73,11 @@ The per-row activity icons (thinking flower, waiting hourglass, raised hand) are
 
 Enable the pad and set LED brightness in Settings → General.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy-2.13.0.dmg" length="3109521" type="application/octet-stream" sparkle:edSignature="ifUNVBSW9N4ufq5h0LonLHVbJcN94/zZ/s0b21WNPx7+jMNt1VsaP2fg/0Iw4XkFLXQEj1XAaOA4l6xJz6GEDQ=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.1/Canopy-2.13.0.dmg" length="3109523" type="application/octet-stream" sparkle:edSignature="z5o3bO/8prgy5GG50i6As5agS+v57rmLry2TJbfj+hL4xch+6kzTn6V7mubSj6DyicRHvzUc8t0zllxCSNURBQ=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy82-81.delta" sparkle:deltaFrom="81" length="322866" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OjxoQAVBzGhqk6aCZruAqJb5HPo7fn3zivaa49rMHKz4kJMoL5Bb1ACN7fXFFZfNHjwU+abm0cCrFlNQko26DQ=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy82-80.delta" sparkle:deltaFrom="80" length="354350" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="LGINXAbOIjNLsIPf/9ulwSsr3Hwmkv+2I9ElqmCm0XZ1Ce3euC+aXboIYYnlDCcder8sNWZ9r6XOpZtSkc9eBg=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy82-79.delta" sparkle:deltaFrom="79" length="379602" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="RVjJzd3rAW/aeDRi0ehuRVxmP+JTiqgwZ2lGcpWWFNb9wyMU4Om7sdI3pK56HY92mxB/Rjye+GnuJbQurPikAg=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>2.12.0</title>
-            <pubDate>Thu, 06 Aug 2026 11:57:07 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>81</sparkle:version>
-            <sparkle:shortVersionString>2.12.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Features
-
-- **Drag a sidebar row to reorder the panes.** The open block now reads as a map of the pane strip: highlighted rows top-to-bottom are the panes left-to-right. Drag a session to move its pane; the row stays where you dropped it and the panes follow.
-- **Cmd+click an open session to give it its own pane, positioned where its row is.** Cmd+click the top row and the pane opens leftmost. Previously a new pane always appeared at the right end regardless of where the row sat.
-- **Clicking a session into a pane pulls its row to that pane's position**, so the sidebar keeps matching the panes. Re-selecting a session that already has a pane still moves nothing.
-
-### Changes
-
-- Pane-membership highlighting is now a rounded chip per row instead of a full-width bar, so adjacent panes read as separate rows. Hovering a highlighted row deepens it rather than replacing the highlight.
-- The sidebar animates row reordering over 0.2s. Panes themselves are deliberately not animated, which keeps chat scroll positions from drifting.
-- Pane widths travel with the session when panes reorder, so the window never resizes and no chat view reloads.
-
-### Bug Fixes
-
-- The session recap no longer renders underneath the extension's notice banners (Remote Control, rate-limit warnings, MCP notices, settings errors). It now sits at the top of the composer where it is always visible.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy-2.12.0.dmg" length="3034914" type="application/octet-stream" sparkle:edSignature="O5i0IJWcOQRpfpZ6RBcXtseTzsua5GH+nIkBUR0DME5hTp8SH79eVyMwr16iRacDN/ZbQAQCYsacYkASlgRIBw=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.12.0/Canopy81-80.delta" sparkle:deltaFrom="80" length="200978" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="3MyNyZk+U9hhFWZPjoyK3HPYCCKbQyCpyYSCdShrAUzst0gwnUDf5ovApO/KaDp/h1M8TSFFS6RDcXgbWN8jBA=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.12.0/Canopy81-79.delta" sparkle:deltaFrom="79" length="261666" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="DnFP757u0iX314xFt596W0ZZQjkZ/Hug6nhBD9ijjhTVBQpjyi8N2rXJB7vE7S0ilbOdfmQi6rnOGdySpG8XDw=="/>
             </sparkle:deltas>
         </item>
         <item>
