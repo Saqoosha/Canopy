@@ -6,6 +6,29 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>2.14.0</title>
+            <pubDate>Mon, 10 Aug 2026 11:01:44 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>83</sparkle:version>
+            <sparkle:shortVersionString>2.14.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Features
+- The sidebar footer now shows a small MacroPad link indicator. It stays a quiet outline while no pad is connected, fills in once one answers, and turns orange when the board is running but its NeoKey is not responding — the one hardware fault the pad's own LEDs cannot report, because there are no LEDs to report it with. Hover for the key count.
+- Turning off **Enable MacroPad** in Settings hides the indicator entirely.
+
+### Changes
+- Reworded the MacroPad section footer in Settings, which previously said Canopy was unaffected without a pad attached.
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy-2.14.0.dmg" length="3121268" type="application/octet-stream" sparkle:edSignature="0g9XKSkB8SpcCETfacMLC3IWsbkR7GA5kHbvJxSos3bLsOl09Asck3kxqcSjH4piO5tCmOeYJfeeHec2ah0pDA=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-82.delta" sparkle:deltaFrom="82" length="195898" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="rUBGcI49f9Y5QPSAt8c/2ktBWQeQ9OKZWz36StgOlmYU7Z77as0hss8cm33Zs0EueBt9FaRaTDki1mTMUYC9Aw=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-81.delta" sparkle:deltaFrom="81" length="337562" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="uDhUu9ZZo9cfdk+KhNLUZqD8N9VBZU/UmmKDC52sylthJrTouEg/0jNiajhW9+kafazIm6T8M87BgshAjGXxCA=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-80.delta" sparkle:deltaFrom="80" length="365166" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="LdtXftuOyDgBqz4cGabDpFz4DEo7LnfLDUZmCA0TnjmZ3kdMNjhrAvsQsX9ihVtq3gCJI/EOI6f51GAqci6JAQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy83-79.delta" sparkle:deltaFrom="79" length="395394" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Ji0IMQrCNhIiP3NWOX8Xc5abiQKgFAyzE7Th/bVGJ9wWQ1FobaIgg1pNczOK3RJBYSl/0PZgUkFOEkqb22sQBA=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>2.13.0</title>
             <pubDate>Sat, 08 Aug 2026 23:25:16 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -29,7 +52,7 @@ The per-row activity icons (thinking flower, waiting hourglass, raised hand) are
 
 Enable the pad and set LED brightness in Settings → General.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy-2.13.0.dmg" length="3109502" type="application/octet-stream" sparkle:edSignature="eamkyekAh8JMPfbIUCKpcUbbh8n0qEU9wAnmN/mnAkOMdtkO12jmzK9kdpHlHOa6csez6D+rtLtPBeC8doaECg=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy-2.13.0.dmg" length="3109521" type="application/octet-stream" sparkle:edSignature="ifUNVBSW9N4ufq5h0LonLHVbJcN94/zZ/s0b21WNPx7+jMNt1VsaP2fg/0Iw4XkFLXQEj1XAaOA4l6xJz6GEDQ=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy82-81.delta" sparkle:deltaFrom="81" length="322866" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OjxoQAVBzGhqk6aCZruAqJb5HPo7fn3zivaa49rMHKz4kJMoL5Bb1ACN7fXFFZfNHjwU+abm0cCrFlNQko26DQ=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy82-80.delta" sparkle:deltaFrom="80" length="354350" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="LGINXAbOIjNLsIPf/9ulwSsr3Hwmkv+2I9ElqmCm0XZ1Ce3euC+aXboIYYnlDCcder8sNWZ9r6XOpZtSkc9eBg=="/>
@@ -60,34 +83,10 @@ Enable the pad and set LED brightness in Settings → General.
 
 - The session recap no longer renders underneath the extension's notice banners (Remote Control, rate-limit warnings, MCP notices, settings errors). It now sits at the top of the composer where it is always visible.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy-2.12.0.dmg" length="3034855" type="application/octet-stream" sparkle:edSignature="ClF3MoylezRMY85YMVaw4r9uRVxC/869We5swd6gGVhtugRRRQxLTbwCoGvVg8zjyPvLZqGJHiB85WPrg6aWCw=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.14.0/Canopy-2.12.0.dmg" length="3034914" type="application/octet-stream" sparkle:edSignature="O5i0IJWcOQRpfpZ6RBcXtseTzsua5GH+nIkBUR0DME5hTp8SH79eVyMwr16iRacDN/ZbQAQCYsacYkASlgRIBw=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.12.0/Canopy81-80.delta" sparkle:deltaFrom="80" length="200978" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="3MyNyZk+U9hhFWZPjoyK3HPYCCKbQyCpyYSCdShrAUzst0gwnUDf5ovApO/KaDp/h1M8TSFFS6RDcXgbWN8jBA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.12.0/Canopy81-79.delta" sparkle:deltaFrom="79" length="261666" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="DnFP757u0iX314xFt596W0ZZQjkZ/Hug6nhBD9ijjhTVBQpjyi8N2rXJB7vE7S0ilbOdfmQi6rnOGdySpG8XDw=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>2.11.0</title>
-            <pubDate>Mon, 03 Aug 2026 22:51:35 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>80</sparkle:version>
-            <sparkle:shortVersionString>2.11.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Features
-
-- **Session recap.** When you come back to Canopy after being away for a few minutes, a one-line "where we left off" note now appears directly above the chat input for each visible session. It summarizes what the session was doing so you can pick up without re-reading the transcript, and it clears the moment you send your next message.
-  - This mirrors the Claude Code CLI's away-summary behavior, which never reached Canopy on its own.
-  - The recap does not consume your session's context window, and it never appears as a message in the transcript — including after you close and reopen the session.
-- **Settings toggle.** Session recaps can be turned off under Settings → General.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.13.0/Canopy-2.11.0.dmg" length="3015893" type="application/octet-stream" sparkle:edSignature="uon9uDEy8foWZ1gPBFLA7jsYY7s3JktKmZumJmdQk+dzEz+d5cghdUT5Xw8U0ufLrjbI981skEKin6q4e4BUAg=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-79.delta" sparkle:deltaFrom="79" length="212822" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="pnV5M0nFpyzQz7xD3oYBX91V0kiJGhXnbZ7i65ORMd2xzS2vU5JW9JMCOhS81Uk4xBZVzp+ptgeLAcTft1HZDg=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-78.delta" sparkle:deltaFrom="78" length="331946" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Zk1Qj5bl1ECQo2KjQH+vEGiidwIRWSP763Ez69ENsGfrUvz/bI1aC3B26bp28p2VJYopsrCshFvQk+uDdSa+AQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-77.delta" sparkle:deltaFrom="77" length="340326" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="EWxm58519leIZQcIEpKVSsMqGMiYgepf52jAgkTNVYA9jQcQaLnFrMBlLQV7JbK/yvbuKXkARw4gvRMzrfH2Bw=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-76.delta" sparkle:deltaFrom="76" length="345682" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="VUzXW+ZATGNAUIsb/fo4MQEGc9J4ukUrfmZZNm0Yz1nNevL6J+JtSR/cB/nVnzetZ5JM/TwETVUEm7o+ImtEDg=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.11.0/Canopy80-75.delta" sparkle:deltaFrom="75" length="368574" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="zO80w1Mx8Eq/nZHbu0BkUZgTrrQlULXuZdPlu1KYE/VM1tA7zw/9NyLmD5J2yYKdSITyzED+K9F0wKuROZbdDw=="/>
             </sparkle:deltas>
         </item>
         <item>
