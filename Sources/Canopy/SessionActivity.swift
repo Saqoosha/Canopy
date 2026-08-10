@@ -20,8 +20,8 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// Claude is generating (`isThinking`), or the shim is still coming up
     /// (`status == .spawning`). Deliberately one state: spawning is a few
     /// hundred ms of "the machine is busy, not your turn", which is exactly
-    /// what thinking means. Splitting them would need a second blue, and a
-    /// second blue is a brightness distinction — see `ledColor`.
+    /// what thinking means. Splitting them would need a second cyan, and a
+    /// second cyan is a brightness distinction — see `ledColor`.
     case working
     /// Claude itself is idle but a `run_in_background` Bash/Agent is still
     /// running (`isWaiting`). Alive, but not the user's turn either.
@@ -126,21 +126,30 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// future colour on the grey axis needs its own measurement; the six
     /// saturated colours are unaffected because they lean on one channel.
     ///
-    /// **`background` and `unread` cannot be tuned independently of each
-    /// other or of `working`.** They sit next to each other on the hue circle
-    /// — blue, cyan, green — so moving the middle one away from blue moves it
-    /// toward green by exactly as much. A plain cyan (`0x00C0C0`) read as too
-    /// close to blue on real hardware; `0x00FFA0` moves both of its channels
-    /// (green `C0`→`FF`, blue `C0`→`A0`) to open a wide gap against blue, and
-    /// `unread` then had to move from `0x00FF40` to pure green to get back out
-    /// of *its* way. Changing any one of these three is a three-way retune, on
-    /// hardware, not an edit here.
+    /// **`working`, `background` and `unread` are tuned as a set.** They used
+    /// to be blue, cyan and green — three neighbours on the hue circle, so
+    /// moving the middle one off blue moved it onto green by exactly as much.
+    /// A plain cyan (`0x00C0C0`) read as too close to blue then, which forced
+    /// `background` out to `0x00FFA0` and `unread` from `0x00FF40` to pure
+    /// green to stay clear of it. Moving `background` to blue-violet takes it
+    /// off that arc entirely, which is what frees `working` to be the plain
+    /// cyan that never worked beside a blue. The pair still sharing the arc is
+    /// `working` and `unread`, now 60° apart against the 37° that shipped
+    /// before.
+    ///
+    /// `background`'s red channel is the one number here that was A/B'd on a
+    /// real pad rather than reasoned: `A0` and `70` both read as flatly purple
+    /// through the keycap, and `40` still leaned that way. At `28` it reads as
+    /// blue carrying a violet cast — which is the whole ask, because the state
+    /// means "alive, not yours", not "look at me". Below about `14` the cast
+    /// is gone and it is simply blue, so this sits nearer that end than it
+    /// looks.
     var ledColor: UInt32 {
         switch self {
         case .empty: return 0x00_00_00
         case .idle: return 0x27_30_27
-        case .working: return 0x00_40_FF
-        case .background: return 0x00_FF_A0
+        case .working: return 0x00_FF_FF
+        case .background: return 0x28_00_FF
         case .asking: return 0xFF_80_00
         case .unread: return 0x00_FF_00
         case .error: return 0xFF_00_00
@@ -162,8 +171,8 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     var dotRGB: RGBComponents {
         switch self {
         case .empty, .idle: return RGBComponents(red: 0.62, green: 0.62, blue: 0.62)
-        case .working: return RGBComponents(red: 0.16, green: 0.42, blue: 0.95)
-        case .background: return RGBComponents(red: 0.00, green: 0.68, blue: 0.55)
+        case .working: return RGBComponents(red: 0.00, green: 0.62, blue: 0.72)
+        case .background: return RGBComponents(red: 0.30, green: 0.24, blue: 0.90)
         case .asking: return RGBComponents(red: 0.98, green: 0.52, blue: 0.11)
         case .unread: return RGBComponents(red: 0.20, green: 0.66, blue: 0.13)
         case .error: return RGBComponents(red: 0.88, green: 0.24, blue: 0.22)
