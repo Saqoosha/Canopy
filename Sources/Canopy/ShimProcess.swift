@@ -125,9 +125,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // JSONL: only the ids whose `<task-notification>` has
                 // landed in the log get cleared. Multi-bg-task case and
                 // user-typed-while-bg case both resolve correctly — see
-                // `clearCompletedBackgroundTasksOnWake()`.
+                // `reconcileCompletedBackgroundTasks(trigger:)`.
                 if !pendingBackgroundTaskIds.isEmpty {
-                    clearCompletedBackgroundTasksOnWake()
+                    reconcileCompletedBackgroundTasks(trigger: .wake)
                 }
             }
             boundSession?.isThinking = isWorking
@@ -140,13 +140,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// signature level for every site that touches the pending-bg map.
     private typealias BackgroundTaskID = String
 
-    /// JSONL byte position used as a *lower bound* for the wake-up completion
-    /// scan. Same nominal type as a file size, but the units are bytes-in-
-    /// JSONL — naming it apart from a generic `UInt64` prevents accidental
-    /// mix-ups with timestamps, counts, or `tail.utf8.count` (which can
-    /// diverge from the byte count when lossy UTF-8 inserts replacement
-    /// characters).
-    private typealias JSONLByteOffset = UInt64
+    /// JSONL byte position used as a *lower bound* for the completion scan.
+    /// Same nominal type as a file size, but the units are bytes-in-JSONL —
+    /// naming it apart from a generic `UInt64` prevents accidental mix-ups
+    /// with timestamps, counts, or `tail.utf8.count` (which can diverge from
+    /// the byte count when lossy UTF-8 inserts replacement characters).
+    ///
+    /// Internal, not private, only because `scannedByteCount` is internal for
+    /// the probe and names it in its signature. The distinction it draws is
+    /// for readers inside this file either way.
+    typealias JSONLByteOffset = UInt64
 
     /// Outstanding `tool_use` ids whose call was either a `Bash` with
     /// `run_in_background:true` or an `Agent` with `run_in_background:true`.
@@ -154,13 +157,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// the io_message channel (verified empirically with bg-trace logging),
     /// so we can't watch for completion directly. Instead we scan the session
     /// JSONL from each launch's byte offset on the next `isWorking: false→true`
-    /// transition — see `clearCompletedBackgroundTasksOnWake()` for the full
+    /// transition, plus on an idle timer while nothing else is going to wake us
+    /// — see `reconcileCompletedBackgroundTasks(trigger:)` for the full
     /// rationale. While the map is non-empty and `isWorking` is false, the
     /// sidebar shows the "waiting" hourglass.
     ///
     /// The value for each id is a *lower bound* on where that id's completion
     /// marker can appear in the JSONL — captured at detection time, then
-    /// advanced forward each wake (see "advance after scan" below). Three
+    /// moved to each scan's end (see "advance after scan" below; normally
+    /// forward, but it re-homes downward when the log is replaced). Three
     /// invariants make `min(values) → EOF` the tightest correct scan window:
     ///
     /// 1. Every pending id's completion marker (`<tool-use-id>X</tool-use-id>`,
@@ -178,16 +183,148 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// completion marker flushed BEFORE Swift gets around to processing the
     /// `assistant` io_message that started it. Without the margin, the
     /// captured offset would lie past the marker and the hourglass would
-    /// stick. After each wake's scan we advance each remaining id's offset
-    /// to the just-scanned EOF — markers can't be in already-scanned bytes,
-    /// so future wakes only read incremental growth (otherwise long-running
-    /// bg tasks would re-scan the whole accumulated region on every wake).
+    /// stick. After each scan — a wake's OR an idle backstop tick's — we
+    /// advance each remaining id's offset to the last whole line the scan
+    /// consumed, since markers can't be in already-scanned bytes, so later
+    /// scans only read incremental growth (otherwise a long-running bg task
+    /// would re-scan the whole accumulated region every time). "Whole line"
+    /// rather than "EOF" is what keeps invariant 1 true while the CLI is
+    /// mid-append, which idle ticks made routine — see `readJSONLFromOffset`.
     ///
     /// A fixed-size tail (the original 32 KB) silently fails when Claude
     /// continues streaming heavy tool output between launch and the next
-    /// wake: the completion marker scrolls off the tail and the hourglass
+    /// scan: the completion marker scrolls off the tail and the hourglass
     /// sticks forever. The offset-tracked approach above is the fix.
     private var pendingBackgroundTaskIds: [BackgroundTaskID: JSONLByteOffset] = [:]
+
+    /// What caused a `reconcileCompletedBackgroundTasks(trigger:)` pass. The
+    /// only thing it decides is whether the JSONL-unreachable and read-failed
+    /// branches may bulk-clear, and that difference is the whole reason the
+    /// idle backstop is safe to add (issue #132).
+    ///
+    /// A wake means a new turn started — usually the user typing, though the
+    /// CLI also wakes itself on a `<task-notification>`. Either way something
+    /// moved, so bulk-clearing there trades an edge case (a bg task genuinely
+    /// still running under an SSH remote, whose JSONL lives on the other
+    /// machine) for a guarantee that the hourglass can't stick forever on
+    /// sessions we can't reconcile. The idle backstop fires on a timer with
+    /// nothing behind it at all: the same bulk-clear would fire ~15 s after
+    /// the launching turn ends, on exactly those unreconcilable sessions, so
+    /// the hourglass would never survive long enough to mean anything there.
+    /// Hence idle passes only ever clear ids the scan positively matched, and
+    /// no-op when there is nothing to scan.
+    ///
+    /// Internal rather than private so `_SidebarLogicProbe` can pin these
+    /// values. Be clear about what that buys: the probe pins the POLICY, and
+    /// the two `guard trigger.allowsBulkClear else … return` statements that
+    /// APPLY it are inside private instance methods the probe cannot reach.
+    /// Deleting one of those guards leaves every assertion green and breaks
+    /// SSH sessions silently, which is exactly the failure the policy exists
+    /// to prevent — so treat those two guards as untested, not as covered.
+    enum BackgroundReconcileTrigger {
+        /// `isWorking: false→true`. Usually a new turn — the user typing,
+        /// or the CLI answering its own `<task-notification>`. On `--resume`
+        /// the CLI's replay of historical `assistant` messages drives it too,
+        /// which is not a turn at all; harmless, because the map is empty
+        /// then and the reconcile is guarded on it being non-empty.
+        case wake
+        /// The idle timer below, with `isWorking` false the whole time.
+        case idleBackstop
+
+        var allowsBulkClear: Bool {
+            switch self {
+            case .wake: true
+            case .idleBackstop: false
+            }
+        }
+
+        /// Names the path in the `[bg]` log lines, so "cleared at the start
+        /// of a turn" and "cleared by the timer, because that turn's scan
+        /// missed it" stay distinguishable. Issue #132 was diagnosed off a
+        /// single `wake jsonl-cleared` line whose `bytes=` was implausibly
+        /// small; the label exists so that kind of reading still works now
+        /// that two paths can emit the line.
+        ///
+        /// `switch`, not `self == .wake ? …`, for both properties: a third
+        /// trigger added later would inherit the ternary's negative branch
+        /// silently, and while that is the SAFE default for `allowsBulkClear`
+        /// it is a WRONG log label — mislabelling is worse than no label,
+        /// because the log is what this subsystem is diagnosed from. Same
+        /// reasoning as `MacroPadStatus.Keys` in CLAUDE.md: make dropping a
+        /// case a compile error.
+        var logLabel: String {
+            switch self {
+            case .wake: "wake"
+            case .idleBackstop: "idle"
+            }
+        }
+    }
+
+    /// Repeating idle reconcile, live while `!isWorking &&
+    /// !pendingBackgroundTaskIds.isEmpty` — the same condition that sets
+    /// `isWaiting`, armed and torn down from `refreshWaitingState()` so the
+    /// timer's lifetime is tied to the state it exists to correct rather than
+    /// to a set of call sites that can drift apart from it. Not quite "while
+    /// the hourglass is on screen": `SessionActivity` ranks `.error`,
+    /// `.asking` and `.working` (which `.spawning` also produces) above
+    /// `.background`, and a session with no `boundSession` has nowhere to
+    /// draw at all, so the timer's condition is a superset of what is drawn.
+    ///
+    /// Why it has to exist: the wake path notices completion only at the START
+    /// of the next turn, and the wake triggered by a task's own
+    /// `<task-notification>` can race the CLI's flush of the matching
+    /// `<tool-use-id>` marker. When it loses that race the reconcile lands one
+    /// turn late — and if the session then goes quiet, "one turn late" means
+    /// "until a human types in it again" (observed: 32 minutes, issue #132).
+    ///
+    /// What it covers is precisely "the wake missed a marker that IS in the
+    /// log", whatever the reason it missed it. What it cannot cover is a
+    /// task whose marker is never written at all (abandoned, or
+    /// TaskStop-killed), or drift in the `<tool-use-id>` wrapper itself —
+    /// the backstop reads that through the same `jsonlTailHasCompletion` the
+    /// wake does, so it fails identically. In particular it does NOT rescue
+    /// ack-wording drift, whose victims are exactly the TaskStop-killed
+    /// launches that write no marker; only the parser can cover that.
+    ///
+    /// A self-rescheduling `DispatchWorkItem` on the main queue, not a
+    /// `Timer` and not a `DispatchSourceTimer`: it is the shape `recapTimeout`
+    /// already uses in this file (the title fallback is the `asyncAfter` half
+    /// without the cancellable work item), it needs no new kind of object, and
+    /// unlike a runloop timer it still fires during the tracking modes (live
+    /// window resize, open menu) — exactly when someone is looking at the
+    /// sidebar.
+    private var bgIdleBackstop: DispatchWorkItem?
+
+    /// True between an idle backstop dispatching its read and that read's
+    /// result being applied, so a tick skips rather than stacking a second
+    /// read behind a slow one. Guards idle against idle ONLY: a wake is a
+    /// discrete event that happens as often as turns do, so its reads are
+    /// left free to overlap (with each other, and with an idle read) the way
+    /// they always have — it is the repeating timer that would pile up.
+    private var bgIdleBackstopReadInFlight = false
+
+    /// Idle reconcile period. Low frequency on purpose: while the session is
+    /// idle the JSONL barely grows, and each pass reads only from the stored
+    /// per-id offset forward. The FIRST pass after a launch is the expensive
+    /// one — it arms only once the launching turn ends, and reads from
+    /// `rawSize − bgScanSafetyMarginBytes`, so it covers that 1 MB margin
+    /// PLUS everything the rest of that turn appended — and a pass after it
+    /// usually reads only what was appended since, because the scan advances
+    /// the offsets. "Usually": the advance stops at the last newline, so a
+    /// trailing line still being written holds the offset where it is and
+    /// the next pass re-reads it, bounded by that line's length.
+    ///
+    /// The file read is off-main. What runs ON main per tick is
+    /// `sessionJSONLPath()` (one `fileExists`, two if the strict encoded
+    /// folder misses and the legacy one is tried) and then, in
+    /// `applyBgReconcile`, one `jsonlTailHasCompletion` substring search over
+    /// the whole scanned region PER PENDING ID. That search is the dominant
+    /// cost, and on the first pass it runs over the megabyte above.
+    ///
+    /// The user-visible cost of the interval is how long a finished bg task
+    /// can keep showing the hourglass — 15 s reads as "it noticed", where a
+    /// minute reads as "it's stuck".
+    private static let bgIdleBackstopInterval: TimeInterval = 15.0
 
     /// Maps a pending bg launch's `toolu_…` id to the CLI-side opaque
     /// `task_id` (e.g. `b5nt1jeth`) captured from the launch's initial
@@ -216,7 +353,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// payload alone. Any bg tool_use whose id is in this set is a replay,
     /// not a fresh launch, and must NOT be added to `pendingBackgroundTaskIds`:
     /// - If it already completed, its `<tool-use-id>` marker lives at a low
-    ///   JSONL offset that the wake-up scan (bounded at `rawSize - 1MB` at
+    ///   JSONL offset that a reconcile scan (bounded at `rawSize - 1MB` at
     ///   detection time, i.e. ~EOF at replay) will never reach → the entry
     ///   would stick forever.
     /// - If it was abandoned (process died without the CLI writing a
@@ -515,7 +652,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         if subagentTransitioned {
                             self.statusBarData?.subagents = self.subagentTracker.rows
                         }
-                        logger.info("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) purged=\(purged, privacy: .public) subagentPurged=\(subagentPurged, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public) bound=\(bound, privacy: .public) path=\(path, privacy: .public)")
+                        // `path` names the user's filesystem, and `notice`
+                        // (unlike the `info` this was) persists to disk and
+                        // into any sysdiagnose — so it drops to `.private`
+                        // while the counts, which are what the line is read
+                        // for, stay `.public`. Applied to every `[bg]` line
+                        // carrying a path rather than only this one: the
+                        // `warning`s persist identically, and a rule visible
+                        // on one line and not its neighbour reads as an
+                        // oversight rather than a decision.
+                        logger.notice("[bg] historic toolu ids loaded count=\(ids.count, privacy: .public) purged=\(purged, privacy: .public) subagentPurged=\(subagentPurged, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public) bound=\(bound, privacy: .public) path=\(path, privacy: .private)")
                     }
                 }
             }
@@ -2216,6 +2362,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
         bgTaskIdMap.removeAll()
+        // Benign today — the flag's only setter is always followed by an
+        // apply that clears it first thing — but it is the one piece of this
+        // subsystem's state the reset would otherwise skip, and "benign"
+        // there is a conclusion someone has to re-derive by tracing. Clearing
+        // it costs a line and removes the trace.
+        bgIdleBackstopReadInFlight = false
         subagentTracker = SubagentTracker()
         statusBarData?.subagents = []
         // A recap in flight when the process died will never be answered,
@@ -2244,15 +2396,64 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Recompute the waiting flag. We only flip the sidebar to "waiting" when
     /// Claude itself is idle — if `isWorking` is true the thinking flower
     /// takes precedence (and the user already knows the session is alive).
+    ///
+    /// Also owns the idle backstop's lifetime, which is not obvious from the
+    /// name and matters at every call site: calling this starts or stops a
+    /// repeating timer. See `syncBackgroundIdleBackstop`. (No count here —
+    /// a comment that says how many callers there are goes stale on the next
+    /// one added, and this one already had.)
     private func refreshWaitingState() {
-        boundSession?.isWaiting = !isWorking && !pendingBackgroundTaskIds.isEmpty
+        let waiting = !isWorking && !pendingBackgroundTaskIds.isEmpty
+        boundSession?.isWaiting = waiting
+        syncBackgroundIdleBackstop(waiting: waiting)
     }
 
-    /// Reconcile `pendingBackgroundTaskIds` against the session JSONL on the
-    /// `isWorking: false→true` transition. Only ids whose `<task-notification>`
-    /// has already been written to the log get cleared; everything else stays
-    /// pending so the hourglass keeps showing for bg tasks that are actually
-    /// still running.
+    /// Arm the idle backstop while a bg task is pending and Claude is idle,
+    /// tear it down the moment either stops holding. Driven off the same
+    /// `waiting` value `isWaiting` gets, so "the timer is running" and "this
+    /// session has an unreconciled bg task" are one condition by construction
+    /// — including the teardown paths (`resetActivityState` on shim
+    /// exit/crash empties the map and lands here) which would otherwise each
+    /// need to remember to cancel.
+    private func syncBackgroundIdleBackstop(waiting: Bool) {
+        guard waiting else {
+            bgIdleBackstop?.cancel()
+            bgIdleBackstop = nil
+            return
+        }
+        guard bgIdleBackstop == nil else { return }
+        scheduleBackgroundIdleBackstop()
+    }
+
+    /// One tick, which re-arms itself. Everything here runs on the main
+    /// queue, so the whole mechanism is single-threaded: `refreshWaitingState`
+    /// (main) arms it, `asyncAfter` delivers it back to main, and the tick
+    /// re-checks its own precondition rather than trusting the arm — a
+    /// `cancel()` that lands after the item is already dequeued does not
+    /// stop the block, and by then the state may have moved on.
+    private func scheduleBackgroundIdleBackstop() {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Clear FIRST: this item is spent either way, and leaving it
+            // in place would make `syncBackgroundIdleBackstop` believe a
+            // tick is still armed and skip re-arming forever.
+            self.bgIdleBackstop = nil
+            guard !self.isWorking, !self.pendingBackgroundTaskIds.isEmpty else { return }
+            if !self.bgIdleBackstopReadInFlight {
+                self.reconcileCompletedBackgroundTasks(trigger: .idleBackstop)
+            }
+            self.scheduleBackgroundIdleBackstop()
+        }
+        bgIdleBackstop = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.bgIdleBackstopInterval, execute: work)
+    }
+
+    /// Reconcile `pendingBackgroundTaskIds` against the session JSONL, either
+    /// on the `isWorking: false→true` transition or from the idle backstop
+    /// timer (see `bgIdleBackstop` for why the transition alone isn't
+    /// enough). Only ids whose `<task-notification>` has already been written
+    /// to the log get cleared; everything else stays pending so the hourglass
+    /// keeps showing for bg tasks that are actually still running.
     ///
     /// Rationale: the CLI does NOT route `<task-notification>` user messages
     /// through the io_message stream (verified empirically), so we can't
@@ -2261,8 +2462,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// both as a `queue-operation` enqueue and as the synthetic `user`
     /// message that wakes Claude. By the time we observe `isWorking` going
     /// true (first `stream_event` of the new turn), those JSONL entries are
-    /// flushed, so a scan from each launch offset is authoritative for which
-    /// pending ids are done.
+    /// usually flushed — but NOT reliably, which is the whole of issue #132:
+    /// a task's own `<task-notification>` can trigger the wake before its
+    /// marker has landed, and that scan then reports the task still running.
+    /// Treat a scan as authoritative about what it FOUND, never about what
+    /// it didn't; `bgIdleBackstop` is what covers the difference.
     ///
     /// Scans from `min(pendingBackgroundTaskIds.values)` — the earliest launch
     /// offset captured at detection time. This bounds the read to bytes
@@ -2275,9 +2479,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// After the scan, every still-pending id's offset is advanced to the
     /// end of the scanned region. The marker for any of those ids is, by the
     /// scan's outcome, NOT in the bytes we just read; if it ever lands, it
-    /// must lie at an offset ≥ the read's end, so the next wake only has to
+    /// must lie at an offset ≥ the read's end, so the next scan only has to
     /// look at incremental file growth. Without this advance, a long-running
-    /// bg task would force every subsequent wake to re-scan the whole growing
+    /// bg task would force every subsequent scan to re-scan the whole growing
     /// region from the original launch offset — main-thread cost grows with
     /// the bg task's lifetime, not with what's actually new.
     ///
@@ -2285,10 +2489,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// runs the CLI on the other machine; a brand-new session may not have
     /// flushed yet; a folder-encoding mismatch). The "user-typed-while-bg"
     /// and "multi-bg first completion" edge cases reappear in that fallback
-    /// path only.
-    private func clearCompletedBackgroundTasksOnWake() {
+    /// path only — and only on a `.wake`, see `BackgroundReconcileTrigger`.
+    private func reconcileCompletedBackgroundTasks(trigger: BackgroundReconcileTrigger) {
         let minOffset = pendingBackgroundTaskIds.values.min() ?? 0
         guard let path = sessionJSONLPath() else {
+            guard trigger.allowsBulkClear else {
+                // Nothing to scan and nothing this pass is allowed to assume.
+                // Deliberately not disarming the timer: the path can start
+                // resolving later in a session's life (it needs the session
+                // id, which arrives after launch). What a tick that keeps
+                // landing here costs depends on WHY the path is nil: on an
+                // SSH remote, nothing at all — `sessionJSONLPath()` returns
+                // at its `remoteHost` guard before touching the filesystem —
+                // though the tick then never stops, because that guard can
+                // never start passing. Locally it is the `fileExists` probe
+                // described on `bgIdleBackstopInterval`, and that case ends
+                // once the session id resolves.
+                logger.debug("[bg] idle backstop skipped (no JSONL access)")
+                return
+            }
             // Bulk-clear branch — pendingBackgroundTaskIds gets nuked because
             // we can't reconcile against a JSONL scan (no path). Sweep the
             // tracker too so running bg rows finish here rather than
@@ -2305,29 +2524,38 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if subagentTransitioned {
                 statusBarData?.subagents = subagentTracker.rows
             }
-            logger.info("[bg] wake bulk-cleared (no JSONL access) count=\(count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
+            logger.notice("[bg] \(trigger.logLabel, privacy: .public) bulk-cleared (no JSONL access) count=\(count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
             refreshWaitingState()
             return
         }
         // Run the read on a background queue so a multi-MB JSONL doesn't
-        // stall the main thread mid-wake. The serial queue serializes
-        // overlapping wakes (the next user message can fire `isWorking`
-        // false→true→false→true before the first read returns); per-id
-        // offsets are tolerant of stale reads because the apply step
-        // only ever clears ids that the read positively matched.
+        // stall the main thread mid-scan. Ordering and QoS are argued on
+        // `bgReadQueue` and not restated here; what matters at this call
+        // site is that per-id offsets tolerate a stale read, because the
+        // apply step only ever clears ids the read positively matched.
+        if trigger == .idleBackstop { bgIdleBackstopReadInFlight = true }
         Self.bgReadQueue.async { [weak self] in
             let read = Self.readJSONLFromOffset(path: path, offset: minOffset)
             DispatchQueue.main.async { [weak self] in
-                self?.applyBgReconcile(read: read, scannedFrom: minOffset)
+                self?.applyBgReconcile(read: read, scannedFrom: minOffset, trigger: trigger)
             }
         }
     }
 
-    /// Apply the result of an async wake-up scan back on the main actor.
-    /// Split out from `clearCompletedBackgroundTasksOnWake` so the I/O can
-    /// live off the main thread without leaking the state mutations off it.
-    private func applyBgReconcile(read: (text: String, endOffset: JSONLByteOffset)?, scannedFrom minOffset: JSONLByteOffset) {
+    /// Apply the result of an async scan back on the main actor. Split out
+    /// from `reconcileCompletedBackgroundTasks(trigger:)` so the I/O can live
+    /// off the main thread without leaking the state mutations off it.
+    private func applyBgReconcile(read: (text: String, endOffset: JSONLByteOffset)?, scannedFrom minOffset: JSONLByteOffset, trigger: BackgroundReconcileTrigger) {
+        if trigger == .idleBackstop { bgIdleBackstopReadInFlight = false }
         guard let read else {
+            guard trigger.allowsBulkClear else {
+                // A transient read failure says nothing about whether the bg
+                // task finished, and unlike a wake there's no user action to
+                // resolve against. Leave the map alone; the next tick reads
+                // again from the same offset.
+                logger.debug("[bg] idle backstop skipped (read failed)")
+                return
+            }
             // Read failed (I/O error during seek/readToEnd, file vanished
             // between our path probe and the open). Bulk-clear preserves
             // the documented contract of the offline path. Sweep the
@@ -2345,7 +2573,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if subagentTransitioned {
                 statusBarData?.subagents = subagentTracker.rows
             }
-            logger.info("[bg] wake bulk-cleared (read failed) count=\(count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
+            logger.notice("[bg] \(trigger.logLabel, privacy: .public) bulk-cleared (read failed) count=\(count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
             refreshWaitingState()
             return
         }
@@ -2365,7 +2593,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             removed.append(id)
         }
         if !removed.isEmpty {
-            logger.info("[bg] wake jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) bytes=\(read.endOffset - minOffset, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
+            let scannedBytes = Self.scannedByteCount(end: read.endOffset, from: minOffset)
+            logger.notice("[bg] \(trigger.logLabel, privacy: .public) jsonl-cleared ids=\(removed.joined(separator: ","), privacy: .public) bytes=\(scannedBytes, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
             refreshWaitingState()
         }
         if subagentTransitioned {
@@ -2374,7 +2603,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Advance every still-pending id to the read's end: their marker
         // wasn't in the bytes we just scanned (we just verified), so any
         // future marker must land at offset ≥ endOffset. Bounds the next
-        // wake's read to file growth, not cumulative-since-launch.
+        // scan's read to file growth, not cumulative-since-launch.
+        //
+        // **Plain assignment, NOT `max(existing, read.endOffset)`.** The
+        // offsets are therefore not monotonic, and that is deliberate: they
+        // track a position in whatever file `readJSONLFromOffset` just read,
+        // and that file can be replaced. When the recorded offset is past
+        // EOF — a truncated or re-forked session log — the read restarts at
+        // 0, so its `endOffset` legitimately lands *below* where the id was.
+        // Assigning it re-homes the id into the new file. Keeping the larger
+        // value instead strands it: the marker gets written near the start of
+        // the new file, the file eventually grows past the stale offset, and
+        // every later scan begins after the marker and never sees it — the
+        // permanent stuck hourglass, which is worse in kind than the
+        // re-scanning of a few hundred bytes that a backwards move costs.
+        //
+        // Recorded because `max` looks like the obvious tightening and was
+        // tried: it went in during review, and review caught it.
         if !pendingBackgroundTaskIds.isEmpty {
             for id in Array(pendingBackgroundTaskIds.keys) {
                 pendingBackgroundTaskIds[id] = read.endOffset
@@ -2382,10 +2627,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Serial background queue for the wake-up JSONL scan. Serial guarantees
-    /// overlapping wakes apply in dispatch order (so per-id `endOffset`
-    /// advances are monotonic); `userInitiated` matches the user-visible
-    /// "they just sent a message, the row's about to update" expectation.
+    /// Serial background queue for the JSONL reconcile scan — both triggers,
+    /// and shared process-wide by every `ShimProcess`. Serial guarantees
+    /// overlapping scans apply in dispatch order, so the last write to a
+    /// per-id offset is the one from the newest read rather than whichever
+    /// read happened to finish last. (Ordered, not monotonic — see the
+    /// advance in `applyBgReconcile` for why an offset may move backwards.)
+    ///
+    /// `userInitiated` was chosen for the wake path's "they just sent a
+    /// message, the row's about to update" expectation, and the idle
+    /// backstop's 15 s poll now rides the same queue at that QoS with no
+    /// user action behind it. Left as one queue on purpose: the reads are
+    /// small and serializing them is what the ordering guarantee rests on.
     private static let bgReadQueue = DispatchQueue(label: "sh.saqoo.Canopy.bgReadQueue", qos: .userInitiated)
 
     /// True when the JSONL tail contains a `<task-notification>` completion
@@ -2457,7 +2710,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // File vanished between the `fileExists` probe in
             // `sessionJSONLPath`/`jsonlPath` and here. Expected/recoverable —
             // debug level so the log stays quiet in normal operation.
-            logger.debug("[bg] extractToolUseIds: file vanished path=\(path, privacy: .public)")
+            logger.debug("[bg] extractToolUseIds: file vanished path=\(path, privacy: .private)")
             return []
         }
         defer { try? handle.close() }
@@ -2473,7 +2726,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // level so a sandbox regression that silently disables historic
             // filtering shows up in the unified log. Matches `jsonlFileSize`
             // and `readJSONLFromOffset` in this same file.
-            logger.warning("[bg] extractToolUseIds I/O error: \(error.localizedDescription, privacy: .public) path=\(path, privacy: .public)")
+            logger.warning("[bg] extractToolUseIds I/O error: \(error.localizedDescription, privacy: .public) path=\(path, privacy: .private)")
             return []
         }
         let text = String(decoding: data, as: UTF8.self)
@@ -2560,12 +2813,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `text`. Returns nil when the prefix is absent or the run is empty.
     /// Shared by `extractLaunchAckTaskId` / `extractStoppedTaskId` so a
     /// CLI wording change only needs one scanner to update. Kept as a
-    /// byte-scan rather than `NSRegularExpression` for stylistic
-    /// consistency with `extractToolUseIds(fromText:)`. The current
-    /// callers run on the main thread via `handleShimMessage`, so the
-    /// Tahoe libdispatch crash (bg-queue-only, per CLAUDE.md) doesn't
-    /// strictly apply here — the scanner is future-proofing if either
-    /// helper moves off-main.
+    /// byte-scan for consistency with `extractToolUseIds(fromText:)`; the
+    /// isolation hazard that makes closure-free code load-bearing off the
+    /// main thread is explained once, on `wholeLinePrefixLength`, and not
+    /// restated here — three copies of one mechanism is how the framings
+    /// drift apart.
     private static func extractAlnumAfterPrefix(_ text: String, prefix: String) -> String? {
         guard let prefixRange = text.range(of: prefix) else { return nil }
         let rest = text[prefixRange.upperBound...]
@@ -2578,17 +2830,75 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return id.isEmpty ? nil : id
     }
 
-    /// CLI bg-launch ack pattern (verbatim, Bash/Agent with
-    /// `run_in_background:true`):
-    /// `"Command running in background with ID: <task_id>. Output is being written to: …"`.
-    /// Captures the opaque CLI-side `task_id` (e.g. `b5nt1jeth`) so
-    /// `bgTaskIdMap` can reverse-lookup from a later `TaskStop`'s
-    /// `input.task_id` back to the Swift-side `toolu_…` we track in
-    /// `pendingBackgroundTaskIds`. Returns nil on no match, empty match,
-    /// or a non-alphanumeric-only run. Probe-callable (`static`) so a CLI
-    /// wording change goes red here instead of leaving the hourglass stuck.
+    /// Captures the opaque CLI-side id a later `TaskStop` will name in
+    /// `input.task_id`, so `bgTaskIdMap` can reverse-lookup back to the
+    /// Swift-side `toolu_…` we track in `pendingBackgroundTaskIds`. Returns
+    /// nil on no match, empty match, or a non-alphanumeric-only run.
+    /// Probe-callable (`static`) so a CLI wording change goes red here
+    /// instead of leaving the hourglass stuck.
+    ///
+    /// **Two ack wordings, because the CLI has two background mechanisms.**
+    /// A `run_in_background` Bash acks with
+    /// `"Command running in background with ID: <task_id>. Output is being
+    /// written to: …"` (`b5nt1jeth`-shaped id). An async `Agent` acks with
+    /// `"Async agent launched successfully.…\nagentId: <id> (internal ID …)"`
+    /// (`a43f5f7881f8bf5de`-shaped) and never uses the Bash phrase — so the
+    /// single-prefix version of this function returned nil for every
+    /// background Agent it was asked about, and the TaskStop purge path was
+    /// dead for those (issue #132). Both agent wordings currently on disk —
+    /// with and without the "(This tool result is internal metadata …)"
+    /// clause — carry the same `agentId: ` lead-in, so one prefix covers
+    /// both. It is the only shared token sitting immediately before the id;
+    /// they have other text in common, just not adjacent to what we want.
+    ///
+    /// The clause first appears in **CLI 2.1.199**, not 2.1.226 as issue
+    /// #132 says — measured twice, independently, across the top-level
+    /// session JSONLs in `~/.claude/projects` (~2,330 files; the ~6,000
+    /// more under `<session-id>/subagents/` were checked separately and
+    /// fall inside the legacy range). The last clause-free ack is 2.1.197
+    /// and there is no 2.1.198 in the corpus, so the introduction sits
+    /// somewhere in that gap — the single 2.1.199 sighting is the earliest
+    /// evidence, not a proven boundary. 2.1.226 was just the version in use
+    /// when the issue was filed, and the correction matters at a scale no
+    /// off-by-one would: the Agent ack has been unparsed for roughly 27
+    /// releases, not since last week.
+    ///
+    /// A third shape exists in older logs — `"Spawned successfully.\n
+    /// agent_id: <name>@<team>…"`, from the retired teams / mailbox
+    /// mechanism: 72 acks over 54 distinct launches in 14 files. Note
+    /// `agent_id` with an underscore and a non-alphanumeric id, so it
+    /// returns nil here — and 44 of those 72 came from a `tool_use` that
+    /// `isBackgroundLaunchBlock` WOULD have accepted, so they were pending
+    /// and did trip the drift warning at the call site. Deliberately
+    /// unhandled; recorded so the survey above is not read as "these are
+    /// the only two shapes that ever existed".
+    ///
+    /// "It was asked about" is doing real work in that sentence, and the
+    /// gap is measured: across local session JSONLs touched in the 21 days
+    /// to 2026-08-10, 33 of 355 async-agent acks belong to an `Agent`
+    /// `tool_use` carrying NO `run_in_background` key at all (one session:
+    /// 16 of 16). `isBackgroundLaunchBlock` requires that key, so those
+    /// launches never enter `pendingBackgroundTaskIds`, this function is
+    /// never called for them, and they get no hourglass and no purge. They
+    /// do all receive completion markers, so they would reconcile correctly
+    /// if they were tracked. Fixing that is a change to DETECTION, not to
+    /// this parser, and it is deliberately not made here: widening what
+    /// counts as a background launch risks a permanent hourglass on
+    /// anything misclassified, which is a worse failure than the one it
+    /// would fix.
+    ///
+    /// That the agent id is the SAME id space TaskStop uses is measured, not
+    /// assumed: live JSONLs hold `"name":"TaskStop","input":{"task_id":
+    /// "a9109847eff04238e"}` alongside `Successfully stopped task:
+    /// a9109847eff04238e`, i.e. `a`-shaped ids flow through the stop path
+    /// exactly like `b`-shaped ones.
+    ///
+    /// A prefix this generic is safe only because of where it's read: the
+    /// caller matches `tool_result`s whose `tool_use_id` is already a pending
+    /// bg launch, so no unrelated tool output reaches it.
     static func extractLaunchAckTaskId(_ text: String) -> String? {
         extractAlnumAfterPrefix(text, prefix: "Command running in background with ID: ")
+            ?? extractAlnumAfterPrefix(text, prefix: "agentId: ")
     }
 
     /// CLI TaskStop result pattern (verbatim): content is a JSON-object
@@ -2621,20 +2931,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return texts.joined(separator: "\n")
     }
 
-    /// Read a JSONL file from `offset` to EOF and return the lossy-decoded
-    /// text alongside the byte offset where the read ended (start + bytes-
-    /// actually-read). The end offset is the *byte* count, so it can be
-    /// stored back into `pendingBackgroundTaskIds` for the wake-up advance
-    /// without going through `String.utf8.count` — which inserts replacement
+    /// Read a JSONL file from `offset` to EOF. Returns the lossy-decoded
+    /// text of EVERYTHING read, alongside an end offset covering only the
+    /// WHOLE LINES within it (`start` + `wholeLinePrefixLength`) — the two
+    /// deliberately disagree whenever the read lands mid-append, and the
+    /// body says why. The end offset is a *byte* count, so it can be stored
+    /// back into `pendingBackgroundTaskIds` for the scan advance without
+    /// going through `String.utf8.count` — which inserts replacement
     /// characters for invalid sequences and therefore diverges from the
     /// actual file byte position.
     ///
-    /// Returns nil only on real I/O failure (handle open, seek, read) —
-    /// callers then fall back to bulk-clear. Lossy UTF-8 decoding is
-    /// intentional: an offset that lands mid-line possibly straddles a
+    /// Returns nil only on real I/O failure (handle open, seek, read). A
+    /// `.wake` caller then falls back to bulk-clear; an idle pass leaves the
+    /// map untouched — see `BackgroundReconcileTrigger`. Lossy UTF-8 decoding
+    /// is intentional: an offset that lands mid-line possibly straddles a
     /// multibyte boundary, and a strict decoder would nil out on every
-    /// wake-up for Japanese-heavy sessions, silently degrading the JSONL
-    /// reconcile to bulk-clear (same pattern as
+    /// reconcile pass for Japanese-heavy sessions, degrading the wake path to
+    /// bulk-clear and the idle path to doing nothing at all (same pattern as
     /// `ClaudeSessionHistory.extractMetadata`). The substring match further
     /// down looks for ASCII-only `<tool-use-id>…</tool-use-id>` markers,
     /// which live on later, fully-formed lines.
@@ -2642,7 +2955,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             // Race window: file existed at the `fileExists` probe in
             // `sessionJSONLPath` but is gone now. Expected/recoverable.
-            logger.debug("[bg] readJSONLFromOffset open failed path=\(path, privacy: .public)")
+            logger.debug("[bg] readJSONLFromOffset open failed path=\(path, privacy: .private)")
             return nil
         }
         defer { try? handle.close() }
@@ -2652,12 +2965,37 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // or rotated). The `==` case is the steady state — nothing new
             // appended since the last advance — and reading 0 bytes from
             // there is the correct (and cheap) answer. The earlier `<`
-            // boundary re-scanned the whole file every wake when nothing
+            // boundary re-scanned the whole file on every scan when nothing
             // new had been written.
             let start = offset <= size ? offset : 0
             try handle.seek(toOffset: start)
             let data = try handle.readToEnd() ?? Data()
-            let endOffset = start + JSONLByteOffset(data.count)
+            // **Match on everything read; advance only past whole lines.**
+            // The two are separate requirements and conflating them costs a
+            // marker either way round:
+            //
+            // - The ADVANCE needs a whole-line boundary. The caller moves
+            //   every still-pending id up to `endOffset` on the promise that
+            //   the marker cannot be in already-scanned bytes, and a scan
+            //   landing mid-append would otherwise consume the front half of
+            //   a `<tool-use-id>…</tool-use-id>` tag, advance past it, and
+            //   leave no later scan able to see the tag whole. Rare when
+            //   scans only happened at turn boundaries; routine now that the
+            //   idle backstop reads while the CLI is writing (issue #132).
+            // - The MATCH needs no such thing, because the marker is
+            //   self-delimiting: seeing the closing tag proves it whole. So
+            //   `text` is every byte read. Truncating it to the last newline
+            //   too — which this function did on its first revision — throws
+            //   away markers that are fully present in an unterminated tail,
+            //   and if the CLI died mid-write and the session forked into a
+            //   new JSONL, that file never grows again and the hourglass
+            //   sticks for good. Matching on the unterminated tail is safe: a
+            //   positive match removes the id, so its offset is never read.
+            //
+            // No newline at all → nothing is advanced (`endOffset == start`)
+            // and the next pass re-reads the same bytes, which is the honest
+            // answer for a scan that saw no complete line.
+            let endOffset = start + JSONLByteOffset(Self.wholeLinePrefixLength(data))
             return (text: String(decoding: data, as: UTF8.self), endOffset: endOffset)
         } catch {
             // Genuine I/O failure (EPERM/EACCES/EIO/EBADF). Shouldn't happen
@@ -2665,14 +3003,81 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // isn't masked as the documented "JSONL unreachable" fallback.
             // `offset=` in the message pinpoints whether `seek` or `seekToEnd`
             // tripped — `localizedDescription` alone elides the call site.
-            logger.warning("[bg] readJSONLFromOffset I/O error at offset=\(offset, privacy: .public): \(error.localizedDescription, privacy: .public) path=\(path, privacy: .public)")
+            logger.warning("[bg] readJSONLFromOffset I/O error at offset=\(offset, privacy: .public): \(error.localizedDescription, privacy: .public) path=\(path, privacy: .private)")
             return nil
         }
     }
 
+    /// How many bytes a scan covered, for the `[bg]` log line only.
+    ///
+    /// Guarded subtraction, because the operands can invert:
+    /// `readJSONLFromOffset` clamps its start to 0 when the recorded offset
+    /// is past EOF (a truncated or re-forked session file), so `end` can
+    /// legitimately land BELOW the offset we asked for. In that case the
+    /// scan started at 0 and `end` IS the count. `JSONLByteOffset` is
+    /// `UInt64`, so the unguarded subtraction does not merely print a silly
+    /// number — it traps, which would mean **a crash raised by a log line**.
+    /// That is the unusual risk profile worth the extra function: `internal`
+    /// so the probe pins it, since inlining the subtraction back is an easy
+    /// and invisible way to reintroduce the abort.
+    static func scannedByteCount(end: JSONLByteOffset, from start: JSONLByteOffset) -> JSONLByteOffset {
+        end >= start ? end - start : end
+    }
+
+    /// Bytes of `data` that form whole lines: everything up to and including
+    /// the last newline, or 0 when there is none. This is how far a scan is
+    /// allowed to advance its per-id offsets — see `readJSONLFromOffset`, and
+    /// invariant 1 on `pendingBackgroundTaskIds` for what the whole-line rule
+    /// protects.
+    ///
+    /// Split out and `internal` for the reason `jsonlTailHasCompletion` and
+    /// `extractLaunchAckTaskId` are: the probe can then pin the rule, and the
+    /// failure it guards against — an offset advanced past a marker nothing
+    /// will ever re-read — is silent, permanent, and indistinguishable from
+    /// the bug this whole subsystem exists to prevent. The byte arithmetic is
+    /// also the one part of the read that a later "simplify" would plausibly
+    /// touch without a file to test against.
+    ///
+    /// **No closure literal here, and that is not style.** `ShimProcess`
+    /// conforms to `WKScriptMessageHandler`, which the SDK marks
+    /// `WK_SWIFT_UI_ACTOR`, so global-actor inference makes the WHOLE CLASS
+    /// `@MainActor` — this `static` included. A closure literal written here
+    /// inherits that isolation, and handing it to a stdlib callback taking a
+    /// plain (non-`Sendable`) function makes the compiler emit a main-queue
+    /// check at the closure's entry; this runs on `bgReadQueue`, so an
+    /// innocuous `.map { … }` aborts the process on the first read with
+    /// `BUG IN CLIENT OF LIBDISPATCH: Block was expected to execute on queue
+    /// [com.apple.main-thread]`. Measured, not theorised — that crash is what
+    /// sent this function's first version back, and the check is visible in
+    /// the binary as a `swift_task_isCurrentExecutor` call inside the
+    /// closure's own symbol.
+    ///
+    /// State the rule narrowly, because the broad version is wrong twice
+    /// over: it is about NON-`@Sendable` closure LITERALS WRITTEN IN THIS
+    /// CLASS, on a path reachable from a background queue. A `@Sendable`
+    /// parameter cannot inherit isolation, which is why the
+    /// `bgReadQueue.async { … }` closure a few hundred lines up is fine; and
+    /// a stdlib higher-order call is fine too (`lastIndex(of:)` below reaches
+    /// `lastIndex(where:)`, whose closure is written inside the stdlib and
+    /// inherits nothing from here). There is also a one-keyword escape:
+    /// marking a member `nonisolated` drops both the inference and the
+    /// emitted check. Not used here — the surrounding invariants are
+    /// documented against this shape — but it is the fix, not closure
+    /// avoidance. See the NSRegularExpression note in CLAUDE.md: same
+    /// mechanism from the outside, `enumerateMatches` takes a closure written
+    /// at the call site and `numberOfMatches` does not.
+    static func wholeLinePrefixLength(_ data: Data) -> Int {
+        guard let newline = data.lastIndex(of: UInt8(ascii: "\n")) else { return 0 }
+        // `distance(from: data.startIndex, …)` rather than the index itself:
+        // `readToEnd()` hands back a zero-based `Data`, but a slice (what a
+        // caller gets from `prefix`/`dropFirst`) carries the parent's indices,
+        // and subtracting from 0 there would over-count by the slice's origin.
+        return data.distance(from: data.startIndex, to: newline) + 1
+    }
+
     /// Current byte size of the session JSONL, or nil when the file is not
     /// reachable (SSH remote / not yet flushed). Used to snapshot the launch
-    /// offset at bg-task detection time so `clearCompletedBackgroundTasksOnWake`
+    /// offset at bg-task detection time so `reconcileCompletedBackgroundTasks`
     /// can scan from a tight lower bound instead of a fixed-size tail.
     ///
     /// Distinguishes three failure modes so a regression doesn't hide as the
@@ -2686,7 +3091,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ///    are unexpected; warn so they surface in the unified log.
     ///
     /// In all failure modes the call site falls through to `?? 0`, meaning
-    /// "scan from the file start on the next wake" — over-scanning is
+    /// "scan from the file start on the next pass" — over-scanning is
     /// preferred over silently freezing the wrong hourglass.
     private static func jsonlFileSize(path: String?) -> JSONLByteOffset? {
         guard let path else { return nil }
@@ -2694,16 +3099,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         do {
             attrs = try FileManager.default.attributesOfItem(atPath: path)
         } catch CocoaError.fileReadNoSuchFile {
-            logger.debug("[bg] jsonlFileSize: file vanished path=\(path, privacy: .public)")
+            logger.debug("[bg] jsonlFileSize: file vanished path=\(path, privacy: .private)")
             return nil
         } catch {
-            logger.warning("[bg] jsonlFileSize I/O error: \(error.localizedDescription, privacy: .public) path=\(path, privacy: .public)")
+            logger.warning("[bg] jsonlFileSize I/O error: \(error.localizedDescription, privacy: .public) path=\(path, privacy: .private)")
             return nil
         }
         guard let size = attrs[.size] as? JSONLByteOffset else {
             // Bridge to UInt64 fails only on a Foundation API regression —
             // log so it doesn't masquerade as "file not flushed yet".
-            logger.warning("[bg] jsonlFileSize: .size attribute missing or unbridgeable path=\(path, privacy: .public)")
+            logger.warning("[bg] jsonlFileSize: .size attribute missing or unbridgeable path=\(path, privacy: .private)")
             return nil
         }
         return size
@@ -2713,7 +3118,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// fast-completion race: a very short bg task can be launched, completed,
     /// and have its `<task-notification>` flushed BEFORE Swift gets around to
     /// processing the `assistant` io_message that started it. Without the
-    /// margin the captured offset would lie past the marker and the wake-up
+    /// margin the captured offset would lie past the marker and a reconcile
     /// scan would miss it, leaving the hourglass stuck. 1 MB covers many
     /// hundreds of typical assistant + tool_result + queue-operation lines,
     /// so the scan window always reaches back past the launch even under
@@ -2738,7 +3143,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // launch several bg tools (rare but possible) and they share this
         // lower bound. Subtract `bgScanSafetyMarginBytes` to absorb the
         // fast-completion race documented on that constant: without the margin
-        // the wake-up scan starts AFTER the completion marker and never sees
+        // a reconcile scan starts AFTER the completion marker and never sees
         // it. Including a few extra MB of JSONL in the scan is harmless —
         // `jsonlTailHasCompletion` looks for `<tool-use-id>X</tool-use-id>`,
         // an angle-bracket tag wrapper that the CLI only emits in
@@ -2763,7 +3168,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             // Only insert on first sight: re-inserting would replace a
             // smaller (safer) launch offset with a larger one — possibly one
-            // that's past this id's completion marker — and the wake-up scan
+            // that's past this id's completion marker — and the reconcile scan
             // would miss it. The `== nil` guard is therefore an invariant,
             // not an optimization.
             if pendingBackgroundTaskIds[id] == nil {
@@ -2775,7 +3180,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.debug("[bg] skipped historic replays count=\(skippedHistoric, privacy: .public)")
         }
         if !added.isEmpty {
-            logger.info("[bg] launch +\(added.count, privacy: .public) ids=\(added.joined(separator: ","), privacy: .public) offset=\(launchOffset, privacy: .public) rawSize=\(rawSize, privacy: .public) pending=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
+            // `notice`, like every other [bg] line that RECORDS A DECISION
+            // (launch, cleared, purged, ack-mapped): `info` lives only in an
+            // in-memory ring buffer, so those records survive exactly as long
+            // as nobody needs them — which is the wrong property for a
+            // subsystem whose failure mode is silent staleness. Issue #132
+            // was investigated soon enough to still quote its `info` lines;
+            // the next one will not necessarily be, and that is the case
+            // this level change is for. Volume is a handful of lines per bg
+            // task. The skip/no-op lines stay `debug`; they say nothing
+            // happened.
+            logger.notice("[bg] launch +\(added.count, privacy: .public) ids=\(added.joined(separator: ","), privacy: .public) offset=\(launchOffset, privacy: .public) rawSize=\(rawSize, privacy: .public) pending=\(self.pendingBackgroundTaskIds.count, privacy: .public)")
             refreshWaitingState()
         }
     }
@@ -2783,7 +3198,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Detect `TaskStop` tool_use blocks and purge the matching pending bg
     /// launch. The CLI's kill path does NOT emit a `<task-notification>` /
     /// `<tool-use-id>` completion marker (natural completion does), so the
-    /// JSONL reconcile in `clearCompletedBackgroundTasksOnWake` never sees
+    /// JSONL reconcile in `reconcileCompletedBackgroundTasks` never sees
     /// these — without this live-stream path the hourglass sticks until
     /// Canopy restart. Mirrors `detectBackgroundTaskLaunch`: only the final
     /// `assistant` io_message is inspected (`stream_event` content_block_start
@@ -2831,7 +3246,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if subagentTransitioned {
             statusBarData?.subagents = subagentTracker.rows
         }
-        logger.info("[bg] TaskStop purged taskId=\(taskId, privacy: .public) toolUseId=\(toolUseId, privacy: .public) reason=\(reason, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
+        logger.notice("[bg] TaskStop purged taskId=\(taskId, privacy: .public) toolUseId=\(toolUseId, privacy: .public) reason=\(reason, privacy: .public) remaining=\(self.pendingBackgroundTaskIds.count, privacy: .public) subagentTransitioned=\(subagentTransitioned, privacy: .public)")
         refreshWaitingState()
     }
 
@@ -2870,7 +3285,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     let previous = bgTaskIdMap[toolUseId]
                     if previous != taskId {
                         bgTaskIdMap[toolUseId] = taskId
-                        logger.info("[bg] ack-mapped toolUseId=\(toolUseId, privacy: .public) taskId=\(taskId, privacy: .public)")
+                        logger.notice("[bg] ack-mapped toolUseId=\(toolUseId, privacy: .public) taskId=\(taskId, privacy: .public)")
                     }
                 } else {
                     logger.warning("[bg] pending launch tool_result missing ack task_id — CLI wording drift? toolUseId=\(toolUseId, privacy: .public) textPrefix=\(text.prefix(80), privacy: .public)")
