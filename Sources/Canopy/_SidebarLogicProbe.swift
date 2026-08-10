@@ -569,6 +569,79 @@ enum SidebarLogicProbe {
         record("bg complete: bare id without wrapper → no match",
                !ShimProcess.jsonlTailHasCompletion(tail: "toolu_01KDTwPWn2C3FdoCKvZSnmJx", taskId: "toolu_01KDTwPWn2C3FdoCKvZSnmJx"))
 
+        // The whole-line rule the offset advance rests on. A scan may only
+        // move a pending id's offset past bytes that form complete lines: an
+        // idle tick reads while the CLI is mid-append, and consuming half a
+        // `<tool-use-id>` tag would advance past a marker no later scan can
+        // ever re-read — a permanently stuck hourglass, silent. The matching
+        // half is deliberately NOT clamped (the marker is self-delimiting, so
+        // `readJSONLFromOffset` returns every byte it read as `text`).
+        func line(_ s: String) -> Data { Data(s.utf8) }
+        record("whole-line prefix: newline-terminated → all of it",
+               ShimProcess.wholeLinePrefixLength(line("a\nbb\n")) == 5)
+        record("whole-line prefix: partial trailing line → up to last newline",
+               ShimProcess.wholeLinePrefixLength(line("a\nbb\npart")) == 5)
+        record("whole-line prefix: no newline at all → consume nothing",
+               ShimProcess.wholeLinePrefixLength(line("no terminator here")) == 0)
+        record("whole-line prefix: empty → consume nothing",
+               ShimProcess.wholeLinePrefixLength(Data()) == 0)
+        record("whole-line prefix: a lone newline counts",
+               ShimProcess.wholeLinePrefixLength(line("\n")) == 1)
+        // A `Data` slice keeps its parent's indices, so a length computed by
+        // subtracting from 0 instead of from `startIndex` over-counts by the
+        // slice's origin — which would advance the offset past unread bytes.
+        record("whole-line prefix: slice indices don't leak into the length",
+               ShimProcess.wholeLinePrefixLength(line("XXXXa\nbb\npart").dropFirst(4)) == 5)
+
+        // The scanned-byte count exists only to fill a log line, but it is
+        // an unsigned subtraction whose operands genuinely invert when a read
+        // restarts at 0 past a truncated file — so the unguarded version is a
+        // crash raised BY logging. Both directions pinned.
+        record("scanned bytes: normal case is the difference",
+               ShimProcess.scannedByteCount(end: 1500, from: 500) == 1000)
+        record("scanned bytes: inverted operands don't trap, count from 0",
+               ShimProcess.scannedByteCount(end: 300, from: 5_000_000) == 300)
+
+        // The contract the two halves only have TOGETHER: a marker that a
+        // scan does not match must still be matchable by a later scan that
+        // starts where this one stopped advancing. This is issue #132's bug
+        // expressed as an assertion — a torn marker, then the rest of the
+        // line arriving.
+        let tornHead = "{\"a\":1}\n{\"content\":\"<tool-use-id>toolu_TORN</tool-u"
+        let tornTail = "se-id></task-notification>\"}\n"
+        record("torn marker: not matched while only half the tag has landed",
+               !ShimProcess.jsonlTailHasCompletion(tail: tornHead, taskId: "toolu_TORN"))
+        // 8 = the first line only. The advance stops before the torn line, so
+        // the next scan re-reads it and sees the tag whole. The resume slice
+        // is taken in BYTES, not Characters: `wholeLinePrefixLength` returns
+        // a byte count, and slicing the `String` instead would agree only
+        // while the fixture stays ASCII — the same byte/Character conflation
+        // `readJSONLFromOffset` avoids by never routing offsets through
+        // `String.utf8.count`.
+        let resumeAt = ShimProcess.wholeLinePrefixLength(line(tornHead))
+        let resumed = String(decoding: line(tornHead).dropFirst(resumeAt), as: UTF8.self) + tornTail
+        record("torn marker: found by the next scan, because the advance stopped short",
+               resumeAt == 8 && ShimProcess.jsonlTailHasCompletion(tail: resumed, taskId: "toolu_TORN"))
+
+        // Issue #132's idle backstop re-runs the same reconcile on a timer
+        // while a session sits idle with a pending bg task. Its whole safety
+        // rests on the bulk-clear fallbacks staying wake-only: a session
+        // whose JSONL we can't read (SSH remote — the log lives on the other
+        // machine) would otherwise have its hourglass wiped ~15 s after every
+        // launch, i.e. the "waiting" state would stop existing there.
+        record("bg reconcile: wake may bulk-clear",
+               ShimProcess.BackgroundReconcileTrigger.wake.allowsBulkClear)
+        record("bg reconcile: idle backstop must NOT bulk-clear",
+               !ShimProcess.BackgroundReconcileTrigger.idleBackstop.allowsBulkClear)
+        // Literals, not just inequality: SWAPPING the two labels keeps them
+        // distinct and passes an inequality check, while making every `[bg]`
+        // line in the unified log attribute a clear to the wrong path — the
+        // exact reading that diagnosed issue #132.
+        record("bg reconcile: wake logs under \"wake\"",
+               ShimProcess.BackgroundReconcileTrigger.wake.logLabel == "wake")
+        record("bg reconcile: idle backstop logs under \"idle\"",
+               ShimProcess.BackgroundReconcileTrigger.idleBackstop.logLabel == "idle")
+
         // Historic-id snapshot: `extractToolUseIds` grabs every `toolu_…`
         // occurrence in the JSONL so `detectBackgroundTaskLaunch` can
         // suppress CLI replays of already-logged assistant messages. The
@@ -1302,6 +1375,57 @@ enum SidebarLogicProbe {
                ShimProcess.extractLaunchAckTaskId("") == nil)
         record("bg lifecycle: extractLaunchAckTaskId prefix-only → nil",
                ShimProcess.extractLaunchAckTaskId("Command running in background with ID: ") == nil)
+
+        // The OTHER ack wording: an async `Agent` never says "Command
+        // running in background", so the Bash-only prefix silently returned
+        // nil for the background Agents it was asked about and killed their
+        // TaskStop purge path (issue #132). Both current forms are pinned —
+        // the one carrying the "internal metadata" clause and the legacy
+        // bare one — because `agentId: ` is the only shared token sitting
+        // immediately before the id. Named by SHAPE, not by CLI version:
+        // the version that introduced the clause is 2.1.199 (issue #132 says
+        // 2.1.226, which is only the version it was filed from), and a name
+        // like `agentAck2_1_226` bakes a number that goes stale into an
+        // assertion nobody will re-measure. Fixtures are the leading portion
+        // of live acks — verbatim through the sentence after `agentId:`,
+        // with the notification / output-file tail elided as irrelevant to
+        // the scan — real ids included. Full rationale, including what the
+        // version numbers actually measure, lives on
+        // `ShimProcess.extractLaunchAckTaskId`.
+        let agentAckWithMetadataClause =
+            "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: a43f5f7881f8bf5de (internal ID - do not mention to user. Use SendMessage with to: 'a43f5f7881f8bf5de', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background."
+        let agentAckLegacy =
+            "Async agent launched successfully.\nagentId: a525c96205f572784 (internal ID - do not mention to user. Use SendMessage with to: 'a525c96205f572784' to continue this agent.)\nThe agent is working in the background."
+        record("bg lifecycle: async Agent ack (metadata-clause wording) → agentId",
+               ShimProcess.extractLaunchAckTaskId(agentAckWithMetadataClause) == "a43f5f7881f8bf5de",
+               "got=\(ShimProcess.extractLaunchAckTaskId(agentAckWithMetadataClause) ?? "nil")")
+        record("bg lifecycle: async Agent ack (legacy wording) → agentId",
+               ShimProcess.extractLaunchAckTaskId(agentAckLegacy) == "a525c96205f572784",
+               "got=\(ShimProcess.extractLaunchAckTaskId(agentAckLegacy) ?? "nil")")
+        record("bg lifecycle: agentId prefix-only → nil",
+               ShimProcess.extractLaunchAckTaskId("agentId: ") == nil)
+        // Precedence is a decision, not an accident: both scanners match
+        // their prefix ANYWHERE in the text, so a text carrying both must
+        // resolve to the Bash id. Flipping the `??` operands keeps every
+        // other assertion green.
+        record("bg lifecycle: Bash ack wins when a text carries both prefixes",
+               ShimProcess.extractLaunchAckTaskId(
+                   "Command running in background with ID: bbbbbbbbb. …\nagentId: a1111111111111111"
+               ) == "bbbbbbbbb")
+        // The captured id has to come back out of the stop ack unchanged —
+        // that round trip is the whole point of capturing it, since the only
+        // consumer is `purgePendingByTaskId`'s reverse lookup. Asserted as an
+        // actual round trip (launch ack in, stop ack out, same id) rather
+        // than as two independent parser checks that never meet: `a`-shaped
+        // agent ids do flow through the stop path (measured in live JSONLs).
+        // `launchedId != nil` is load-bearing: two nils compare equal, so
+        // without it a parser that stopped matching anything at all would
+        // pass this assertion instead of failing it.
+        let launchedId = ShimProcess.extractLaunchAckTaskId(agentAckWithMetadataClause)
+        record("bg lifecycle: agent id round-trips launch ack → stop ack",
+               launchedId != nil
+                   && launchedId == ShimProcess.extractStoppedTaskId("Successfully stopped task: a43f5f7881f8bf5de"),
+               "launch=\(launchedId ?? "nil")")
 
         let stopResult =
             #"{"message":"Successfully stopped task: b5nt1jeth (pkill -f 'wrangler dev' 2>/dev/null; sleep 1\nsh -c 'exec node_modules/.bin/wrangler dev --remote --port 8791 2>&1')","task_id":"b5nt1jeth","task_type":"local_bash","command":"..."}"#

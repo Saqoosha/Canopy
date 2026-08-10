@@ -19,17 +19,20 @@ struct SubagentInfo: Identifiable, Equatable {
     /// the subagent works, same as the "↓ Nk tokens" column in the CLI.
     /// Monotonic — enforced by `bumpTokens(to:)`.
     private(set) var tokens: Int = 0
-    /// `input.run_in_background == true` at launch. Bg Agent's initial
-    /// `tool_result` is just an ack ("Command running in background with
-    /// ID: …"), NOT completion. The real completion arrives via one of
-    /// two disjoint transports, both wired through
+    /// `input.run_in_background == true` at launch. A bg launch's initial
+    /// `tool_result` is just an ack — `"Async agent launched successfully.…
+    /// agentId: …"` for an Agent, `"Command running in background with ID:
+    /// …"` for a Bash; `ShimProcess.extractLaunchAckTaskId` is the one place
+    /// that knows both — NOT completion. The real completion arrives via one
+    /// of two disjoint transports, both wired through
     /// `ShimProcess.completeIfPresent`:
     ///
     /// - **Natural completion**: written to the session JSONL as
     ///   `<tool-use-id>toolu_…</tool-use-id>`. The CLI does NOT re-emit
-    ///   this through io_message, so `ShimProcess` picks it up on the
-    ///   `isWorking: false→true` wake-up JSONL scan
-    ///   (`clearCompletedBackgroundTasksOnWake` → `applyBgReconcile`).
+    ///   this through io_message, so `ShimProcess` picks it up on a
+    ///   reconcile pass — the `isWorking: false→true` wake, or the idle
+    ///   backstop when that wake missed it
+    ///   (`reconcileCompletedBackgroundTasks` → `applyBgReconcile`).
     /// - **TaskStop kill**: does NOT write any JSONL `<tool-use-id>`
     ///   marker (verified against the MA-Whatsan session referenced in
     ///   `ShimProcess.bgTaskIdMap`'s docstring), but DOES flow through
