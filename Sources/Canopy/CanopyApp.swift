@@ -446,16 +446,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Distributes manual window-width deltas across pane preferredWidths.
     /// Route left-mouse-down clicks inside the detail column to pane focus.
     /// WKWebView eats mouse events entirely, so the SwiftUI
     /// `.simultaneousGesture(TapGesture())` on `paneCell` never fires when
     /// the user clicks the chat input or any webview surface. A local
     /// NSEvent monitor intercepts the event before AppKit dispatch: we
     /// look at the click's window-space x, subtract sidebar width, and
-    /// pick which pane owns that x range. Pass the event through
-    /// unchanged so WKWebView still
-    /// receives it.
+    /// pick which pane owns that x range. Pass the event through unchanged so
+    /// WKWebView still receives it — with one exception: a click inside a pane
+    /// header's `closeButtonHitRect` closes that pane and is CONSUMED, because
+    /// SwiftUI appears never to receive mouse-down in that band (see
+    /// `PaneHeaderStrip`'s doc for what was and was not measured).
     private func installPaneFocusClickMonitor() {
         guard paneFocusClickMonitor == nil else { return }
         paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
@@ -473,10 +474,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let sidebar = PaneWindowSizer.measuredSidebarWidthTrustingCollapse(in: window)
             guard clickX > sidebar else { return event }
 
-            // Skip the title bar so window-drag clicks don't move focus.
-            let titleBarHeight: CGFloat = 28
-            guard clickYFromTop > titleBarHeight else { return event }
-
             // preferredWidth is a weight. Use the same layout algorithm
             // (WeightedPaneLayout via PaneLayoutMetrics) as Detail.swift
             // so click hit-testing exactly matches the visual layout.
@@ -493,7 +490,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let paneW = index < widths.count ? widths[index] : 0
                 let paneEnd = xCursor + paneW
                 if clickX >= xCursor && clickX < paneEnd {
-                    if index != store.focusedPaneIndex {
+                    // Close X first: it lives in the pane header, which macOS 26
+                    // covers with the detail column's scroll-edge BackdropView
+                    // (see PaneHeaderStrip's doc for what that band was and was
+                    // not measured to do). Hit-test it here instead and consume
+                    // the event so the click can't also start a window drag on
+                    // the way out.
+                    //
+                    // Two limitations OF THAT KIND, accepted rather than
+                    // guarded. This is not the whole inventory: the rect's
+                    // geometric preconditions are listed on
+                    // `closeButtonHitRect`, and where one breaks, a consumed
+                    // click can land on blank header space or on the window's
+                    // own traffic lights. A round of review asked for a bare-modifier
+                    // test and an app-active test; the modifier test read
+                    // `deviceIndependentFlagsMask`, which contains `.capsLock`
+                    // — so an engaged Caps Lock killed the button outright,
+                    // the reported bug back in a narrower form. Its sibling
+                    // could not be shown to do anything: by the time a local
+                    // monitor sees the mouse-down, `NSApp.isActive` is already
+                    // true, so it cannot tell an activating click from any
+                    // other. What remains, unguarded and deliberately so:
+                    //   - ctrl-click and Cmd+click close the pane rather than
+                    //     meaning secondary-click / "new pane".
+                    //   - the click that brings a background window forward
+                    //     closes a pane instead of only activating, which a
+                    //     real control's default `acceptsFirstMouse == false`
+                    //     would have swallowed. `closePane` keeps the session,
+                    //     so the cost is re-opening a pane, not losing work.
+                    // Fixing either needs a measurement first, not a guess:
+                    // the guesses cost a round and shipped a worse bug. The
+                    // measurement for the second one is cheap — `isKeyWindow`
+                    // is set inside `NSWindow.sendEvent`, which this monitor
+                    // precedes, so logging it here for a click that raises a
+                    // background window would say whether it discriminates.
+                    let localPoint = CGPoint(x: clickX - xCursor, y: clickYFromTop)
+                    if PaneHeaderStrip.closeButtonHitRect(paneWidth: paneW).contains(localPoint) {
+                        // notice, not debug: this is the only record that the
+                        // geometry-derived branch removed a pane, and debug
+                        // does not survive to a log capture. Same rule the
+                        // background-reconcile subsystem follows.
+                        logger.notice("""
+                            [pane] close X hit: index=\(index, privacy: .public) \
+                            paneW=\(paneW, privacy: .public) \
+                            sidebar=\(sidebar, privacy: .public) \
+                            local=(\(localPoint.x, privacy: .public),\
+                            \(localPoint.y, privacy: .public))
+                            """)
+                        store.closePane(at: index)
+                        return nil
+                    }
+                    // Skip the title bar so window-drag clicks don't move
+                    // focus. Deliberately applied AFTER the close-X test and
+                    // not as an early return: the X's target spans y 8…40 and
+                    // this band is y <= 28, so an early return would kill the
+                    // top 20 of its 32pt — an intermittent failure that only
+                    // works when clicked low, which is worse to diagnose than
+                    // a dead button.
+                    let titleBarHeight: CGFloat = 28
+                    if clickYFromTop > titleBarHeight, index != store.focusedPaneIndex {
                         store.setFocusedPaneIndex(index)
                     }
                     break
