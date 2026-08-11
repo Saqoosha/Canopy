@@ -1085,11 +1085,14 @@ final class SessionStore {
         syncSelectionToFocusedPane()
         schedulePaneResize()
         // Hand keyboard first-responder to the surviving pane's webview so
-        // the user can keep typing without a click. Both close triggers
-        // leave firstResponder off the surviving webview — Cmd+W puts it
-        // on the window, the header's close-X puts it on the button —
-        // and without this handoff the surviving webview stays visually
-        // highlighted but keystrokes beep.
+        // the user can keep typing without a click. Both triggers reach here
+        // with first responder still on the CLOSING pane's webview, about to
+        // be torn down — Cmd+W's monitor consumes the keyDown and the close
+        // X's consumes the mouse-down, so neither ever hands it to a button
+        // or to the window on the way in. Without this handoff the surviving
+        // webview stays visually highlighted but keystrokes beep. It is a
+        // no-op whenever the surviving focused pane's webview already holds
+        // first responder, and for every launcher-pane survivor.
         makeFocusedPaneKeyResponder()
     }
 
