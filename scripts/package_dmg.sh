@@ -18,7 +18,17 @@ OUT_DMG="${BUILD_DIR}/${DMG_NAME}.dmg"
 # which hangs notarytool's xar_open_digest_verify on files there; /tmp is
 # never backed up. See CLAUDE.md "Time Machine notarize hang".
 TMP_WORK=$(mktemp -d /tmp/canopy-dmg.XXXXXX)
-trap 'rm -rf "$TMP_WORK"' EXIT INT TERM
+# Detach before removing, and in that order. notarytool mounts the DMG it is
+# submitting, and that mount is of the copy in HERE, not of anything under
+# build/ — so the preflight below cannot see it, and `rm -rf` alone leaves it
+# attached: an image outlives the deletion of its backing file. That is how a
+# release that dies mid-notarize hangs the NEXT one, with nothing connecting
+# the two runs (hit during 2.14.4; CLAUDE.md "notarytool DMG-mount hang").
+# Failure is logged, not fatal — the trap runs on the success path too, and a
+# release that already produced its DMG must not be failed by cleanup.
+trap '"${ROOT_DIR}/scripts/detach_dmg_mounts.sh" "$TMP_WORK" >/dev/null 2>&1 || \
+      echo "warning: could not detach images under $TMP_WORK; run scripts/detach_dmg_mounts.sh before the next release" >&2
+      rm -rf "$TMP_WORK"' EXIT INT TERM
 TMP_DMG="${TMP_WORK}/${DMG_NAME}.dmg"
 
 DEVELOPER_ID="Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
@@ -29,7 +39,7 @@ KEYCHAIN_PROFILE="notarytool-profile"
 # "notarytool DMG-mount hang" and issue #127. Lives here rather than in
 # release.sh so a standalone package_dmg.sh run is covered too.
 echo "=== Checking for leftover DMG mounts ==="
-if ! "${ROOT_DIR}/scripts/detach_dmg_mounts.sh" "${BUILD_DIR}"; then
+if ! "${ROOT_DIR}/scripts/detach_dmg_mounts.sh" "${BUILD_DIR}" "$TMP_WORK"; then
   echo "Error: could not confirm that nothing under ${BUILD_DIR} is attached." >&2
   echo "Not proceeding — see the error above; 'hdiutil info' lists what is attached." >&2
   exit 1
