@@ -370,9 +370,20 @@ enum ClaudeSessionHistory {
     }
 
     /// Bounded read: session JSONLs grow to tens of MB and this runs in
-    /// `ShimProcess.init` on the main thread (like the sibling readers, which
-    /// cap at 128KB head / 64KB tail). Head chunk keeps the first prompt
+    /// `ShimProcess.init` on the main thread (`loadTeleportedFromMap` bounds
+    /// itself the same way, at a 64KB tail). Head chunk keeps the first prompt
     /// (the session's goal), tail chunk keeps the recent ones.
+    ///
+    /// **This is still a byte window, and `extractMetadata` is no longer one.**
+    /// On a JSONL whose opening record is wider than `chunkSize` — a
+    /// `/security-review` run is the measured case, ~90KB of diff in a
+    /// `queue-operation` and a 92KB `type: "user"` record after it — the head
+    /// chunk ends mid-record and the first prompt is silently lost here, which
+    /// is exactly the defect `extractMetadata` was rewritten to stop having.
+    /// Left alone deliberately: this feeds recap and title generation rather
+    /// than the sidebar's automated-session filter, so it is a different
+    /// symptom from the one that prompted the rewrite, and it deserves its own
+    /// change rather than a widening of that one.
     static func loadUserPrompts(atPath path: String) -> [String] {
         let chunkSize = 131_072
         guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
@@ -516,23 +527,47 @@ enum ClaudeSessionHistory {
         return decoded
     }
 
-    /// Bytes read unconditionally on every session. Sized so large base64
-    /// image attachments don't push `ai-title` past the window.
-    private static let metadataHeadSize = 131_072
+    /// Bytes requested on the first read of every session, and the size of
+    /// each escalation chunk after it — a smaller file reads less. Sized so
+    /// large base64 image attachments don't push `ai-title` past the window.
+    /// Non-private for the same reason as `metadataMaxScanSize`.
+    static let metadataHeadSize = 131_072
 
-    /// Ceiling on the escalated scan (see `extractMetadata`). Sixteen head
-    /// chunks: comfortably past the largest header run measured (a
-    /// `/security-review` session needs 183,843 bytes to close its first
-    /// `type: "user"` record) while keeping a runaway file bounded.
+    /// Ceiling on the escalated scan (see `extractMetadata`) — sixteen head
+    /// chunks.
+    ///
+    /// **Measure this against the files the loaders can actually open, and
+    /// nothing else.** Both walk exactly two levels — `~/.claude/projects/
+    /// <encoded>/<uuid>.jsonl` — skipping `observer-sessions` by name and
+    /// anything not UUID-named, which excludes nested `subagents/` trees and
+    /// `agent-*.jsonl` alike. Over that population (1,047 files here): 31
+    /// escalate past one head chunk, none fails to close its header, and the
+    /// largest needs **1,056,552 bytes**, so this ceiling carries ~2× that.
+    ///
+    /// The number is easy to get wrong in both directions and this comment
+    /// exists because it was, twice in one review. It first read 184 KB —
+    /// the largest of the six files investigated by hand, generalised to a
+    /// corpus that disagrees 5.7×. A reviewer then re-measured over
+    /// everything under `~/.claude/projects` recursively and reported the
+    /// ceiling had 12.8% headroom, which is true of that set and not of this
+    /// one: the 1.83 MB and 1.96 MB header runs it found are in an
+    /// `agent-acompact-*.jsonl` and under `observer-sessions`, neither of
+    /// which is ever opened. They are still the reason not to tighten the
+    /// ceiling toward the 1.06 MB figure — the CLI evidently does write
+    /// headers that big, so the openable population is one unlucky session
+    /// away from them, and the cliff is silent (the row degrades to
+    /// "Untitled" *and* escapes the `sdk-*` filter).
+    ///
     /// Non-private so the sidebar logic probe can build a fixture that
     /// exceeds it rather than hardcoding a copy that could drift.
     static let metadataMaxScanSize = 2_097_152
 
     /// Read the header records of a JSONL and pull out everything the sidebar
     /// needs from them. Returns the cwd too so session discovery can skip
-    /// decoding the folder name. Also scans the last 32KB for
-    /// `type: "relocated"` events so a session moved into a git worktree
-    /// mid-way resolves to its current cwd, not the launch cwd.
+    /// decoding the folder name. Also scans up to the last 32KB — whatever of
+    /// it the line scan did not already cover — for `type: "relocated"`
+    /// events, so a session moved into a git worktree mid-way resolves to its
+    /// current cwd, not the launch cwd.
     ///
     /// `isAutomated` flags non-interactive `claude -p` / SDK-driven runs
     /// (memory observers, sub-agents from `/ship-it`, plugin background
@@ -548,16 +583,33 @@ enum ClaudeSessionHistory {
     /// at byte 91,815 and runs 92,028 bytes. A flat 128KB read therefore ended
     /// *inside* that record, `JSONSerialization` rejected the fragment, and
     /// the file looked like it had no user line at all: no `entrypoint` (so
-    /// the `sdk-*` filter never fired) and no title. Six such sessions showed
-    /// up in the sidebar as "Untitled" — two symptoms, one cause.
+    /// the `sdk-*` filter never fired) and no title. Six such rows were
+    /// visible in the sidebar as "Untitled" — the affected files are more
+    /// numerous, `maxSessionsToParse` just cuts the list — two symptoms, one
+    /// cause.
     ///
-    /// Cost is unchanged for ordinary sessions: the head chunk is read exactly
-    /// as before, and the scan only escalates — one chunk at a time, to
-    /// `metadataMaxScanSize` — while it has *not yet parsed a single*
-    /// `type: "user"` record, which is the signal that the window never
-    /// reached the header rather than that the header was uninteresting.
-    /// A file that blows the ceiling degrades to the old behaviour (no
-    /// entrypoint, "Untitled") instead of scanning unboundedly.
+    /// The scan escalates — one chunk at a time, to `metadataMaxScanSize` —
+    /// only while it has *not yet parsed a single* `type: "user"` record.
+    /// That is the signal that the window never reached the header, rather
+    /// than that the header was uninteresting; a session whose first user
+    /// record carries no text still ends the escalation, which is a real hole
+    /// and not one worth widening the gate for (measured: 0 of 1,047 local
+    /// sessions have a text-less first user record). A file that blows the
+    /// ceiling keeps whatever it parsed below it, which for a single
+    /// over-ceiling leading record means no entrypoint and "Untitled".
+    ///
+    /// **Per-file cost is unchanged for a session that does not escalate, but
+    /// the refresh cost is not, and the distinction matters because the
+    /// escalating sessions cluster in the recent window the loader actually
+    /// reads.** Over the openable population (see `metadataMaxScanSize`), 31
+    /// of 1,047 sessions escalate — 16 automated, 15 interactive — and the
+    /// whole-corpus read moves 100.1 MB → 106.8 MB. Over the newest 50, the
+    /// ones `maxSessionsToParse` keeps, 15 escalate and the read goes
+    /// 5.3 MB → 7.0 MB, because a day spent running `/security-review` fills
+    /// that window with exactly the sessions that need escalating. Both
+    /// callers run off the main actor and `loadAllSessions` caps at 50;
+    /// `loadSessionsFromDir` does neither, and is the one path where this is
+    /// bounded only by the folder's contents.
     private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             return ("Untitled", nil, false, false)
@@ -576,6 +628,11 @@ enum ClaudeSessionHistory {
         // Whole lines only, so JSON is parsed straight from the line's bytes.
         // The old lossy String decode existed to survive a window boundary
         // landing inside a multibyte sequence; complete lines can't have one.
+        // It also repaired bytes that were invalid *on disk*, which this does
+        // not — such a line is now rejected outright. That is the better
+        // failure (a mangled title is worse than none) but it is a real
+        // behaviour change, and on a header line it costs the title and the
+        // `sdk-*` filter together, the same pair this function exists to fix.
         func consume(_ lineData: Data) {
             guard !lineData.isEmpty,
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
@@ -609,9 +666,12 @@ enum ClaudeSessionHistory {
                content.contains("<scheduled-task")
             {
                 isBackgroundScheduled = true
-                // Do not stop on cwd/title alone — a scheduled-task enqueue may
-                // appear after the first user line in some JSONL orderings, so
-                // only this find ends the scan early.
+                // The only record whose *content* ends the scan. Do not add
+                // cwd or title to that list — a scheduled-task enqueue can
+                // appear after the first user line in some JSONL orderings,
+                // so stopping on those would step over it. (The byte loop has
+                // its own exit once a `user` record has parsed; that one is
+                // about the window, not about what was found.)
                 stopScan = true
             }
 
@@ -640,18 +700,26 @@ enum ClaudeSessionHistory {
 
         while !stopScan, !atEOF, scannedBytes < metadataMaxScanSize {
             // Past the head chunk, keep going only while the header is still
-            // out of reach.
-            if scannedBytes >= metadataHeadSize, sawUserRecord { break }
+            // out of reach — except that a non-empty `carry` may be a
+            // COMPLETE final record rather than a fragment. Which one it is
+            // depends solely on whether the file ends here, so ask, with a
+            // single byte, instead of guessing. Without this a file whose
+            // size is an exact multiple of the chunk loses its last record.
+            if scannedBytes >= metadataHeadSize, sawUserRecord {
+                if !carry.isEmpty { atEOF = handle.readData(ofLength: 1).isEmpty }
+                break
+            }
 
             let want = min(metadataHeadSize, metadataMaxScanSize - scannedBytes)
             let chunk = handle.readData(ofLength: want)
             scannedBytes += chunk.count
-            // A short read is EOF: `readData` only returns fewer bytes than
-            // asked when the file ends. This must be recorded before the
-            // empty-chunk exit, or the trailing-line consume below is skipped
-            // for a file whose size is an exact multiple of the chunk.
-            if chunk.count < want { atEOF = true }
-            if chunk.isEmpty { break }
+            // Only a zero-length read proves EOF. A short read implies it on a
+            // local regular file and not necessarily anywhere else, so reading
+            // one more time costs a syscall and removes an assumption.
+            if chunk.isEmpty {
+                atEOF = true
+                break
+            }
             carry.append(chunk)
 
             var searchStart = carry.startIndex
@@ -669,7 +737,20 @@ enum ClaudeSessionHistory {
         // must not be parsed.
         if !stopScan, atEOF, !carry.isEmpty {
             consume(carry)
+            carry = Data()
         }
+
+        // Bytes consumed as WHOLE LINES — which is not the same as bytes read,
+        // and the tail window below has to be bounded by this one. The line
+        // scan almost always stops mid-record, and that record's leading bytes
+        // are inside the read region while its tail is not; bounding the tail
+        // at `scannedBytes` would start it mid-record, the boundary probe would
+        // correctly call the remainder a fragment, and neither half would ever
+        // look at it. A `relocated` event landing there would be lost — and it
+        // is the tail scan's whole job not to lose one. Bounding here instead
+        // starts the tail exactly on a line boundary, so it also recovers a
+        // record straddling the head chunk, which the old fixed bound lost.
+        let consumedBytes = UInt64(scannedBytes - carry.count)
 
         // Sessions can be `relocated` many MB into the JSONL (e.g. a long
         // LSE-Core session that later cd into `.claude/worktrees/…`). The
@@ -684,18 +765,17 @@ enum ClaudeSessionHistory {
             var stage = "seekToEnd"
             do {
                 let fileSize = try handle.seekToEnd()
-                // Bound the tail against what the line scan actually consumed,
-                // not against the head chunk: an escalated scan may already
-                // have read past `fileSize - tailSize`, and re-reading it would
-                // only re-find relocations it has already applied.
-                if fileSize > UInt64(scannedBytes) {
+                if fileSize > consumedBytes {
                     let tailSize: UInt64 = 32_768
-                    let tailStart = max(UInt64(scannedBytes), fileSize - min(tailSize, fileSize))
+                    let tailStart = max(consumedBytes, fileSize - min(tailSize, fileSize))
                     // Only drop the first tail line when `tailStart` lands
                     // mid-line. If the previous byte is `\n`, the first line
                     // is complete — dropping it would lose a `relocated`
                     // event that begins exactly at the window boundary.
-                    var startsAtLineBoundary = false
+                    // Offset 0 is a line start by definition and has no
+                    // previous byte to probe; it became reachable when the
+                    // bound stopped being a positive constant.
+                    var startsAtLineBoundary = tailStart == 0
                     if tailStart > 0 {
                         stage = "seek to tailStart-1"
                         try handle.seek(toOffset: tailStart - 1)

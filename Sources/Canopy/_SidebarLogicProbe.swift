@@ -308,39 +308,114 @@ enum SidebarLogicProbe {
         // failure: a `/security-review` JSONL opens with a ~90KB
         // `queue-operation` carrying the whole diff, so its `type:"user"`
         // record — entrypoint, cwd and prompt all on it — starts inside the
-        // 128KB head chunk and ends past it. Reading a flat 128KB left that
+        // head chunk and ends past it. Reading a flat head chunk left that
         // record truncated and unparseable, which read as "no user line at
         // all": the sdk-py filter never fired and the title fell back, so six
-        // review runs sat in the sidebar as "Untitled".
+        // such rows sat in the sidebar as "Untitled".
+        //
+        // Every fixture below is sized off `metadataHeadSize` rather than a
+        // copy of 131,072 — the same reason `metadataMaxScanSize` is not
+        // private. A hardcoded 90,000 straddles the boundary only by
+        // arithmetic coincidence, so moving the constant would leave these
+        // passing for the wrong reason, both records inside one chunk.
+        let head = ClaudeSessionHistory.metadataHeadSize
+        let straddleFill = head * 7 / 10
         let giantEnqueue = "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\""
-            + String(repeating: "d", count: 90_000) + "\"}"
+            + String(repeating: "d", count: straddleFill) + "\"}"
         func giantUserLine(_ cwd: String) -> String {
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Review this change for security vulnerabilities. "
-                + String(repeating: "d", count: 90_000)
+                + String(repeating: "d", count: straddleFill)
                 + "\"},\"entrypoint\":\"sdk-py\",\"cwd\":\"\(cwd)\"}"
         }
+        func filler(_ bytes: Int) -> String {
+            let line = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\""
+                + String(repeating: "f", count: 512) + "\"}}\n"
+            return String(repeating: line, count: max(1, bytes / line.utf8.count))
+        }
         let giantLeadingRecordJSONL = giantEnqueue + "\n" + giantUserLine("/tmp/probe/six-keys") + "\n"
-        // A record wider than the escalation ceiling degrades to the old
-        // behaviour — unflagged and "Untitled" — rather than scanning forever.
+        // A record wider than the escalation ceiling keeps whatever parsed
+        // below it — here nothing — rather than scanning forever.
         let overCeilingJSONL = "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\""
             + String(repeating: "d", count: ClaudeSessionHistory.metadataMaxScanSize + 100_000) + "\"}\n"
             + giantUserLine("/tmp/probe/over-ceiling") + "\n"
-        // A scheduled-task enqueue ends the scan early even when it is the
-        // giant record — the escalation must not outrun that check.
+        // A scheduled-task enqueue ends the scan even when reaching it took an
+        // escalation — so the enqueue itself has to straddle the head chunk,
+        // which an earlier revision of this fixture did not do, leaving the
+        // assertion true on the single-chunk path it meant to escalate past.
         let giantScheduledJSONL = "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"<scheduled-task name=\\\"probe\\\">run</scheduled-task> "
-            + String(repeating: "d", count: 90_000) + "\"}\n"
+            + String(repeating: "d", count: head + head / 10) + "\"}\n"
             + giantUserLine("/tmp/probe/scheduled") + "\n"
         // The last record of a JSONL carries no trailing newline. It is
         // complete at EOF and must still be parsed.
         let noTrailingNewlineJSONL =
             "{\"type\":\"summary\",\"summary\":\"prior session\"}\n"
             + "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"unterminated final record\"}}"
+        // The escalation gate itself. Nothing else in this probe fails if the
+        // `sawUserRecord` break is deleted — every other fixture reports the
+        // same answer whether the scan stops at the head chunk or reads to the
+        // ceiling — so without this, the one line holding the whole cost
+        // argument is ungated. A cheap `ai-title` past the head chunk is the
+        // lever: it wins over `firstUserMessage` if and only if it is read,
+        // and the tail scan cannot rescue it because that path matches only
+        // `relocated`.
+        let escalationGateJSONL =
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"gate marker\"}}\n"
+            + filler(head + head / 2)
+            + "{\"type\":\"ai-title\",\"aiTitle\":\"ESCALATED PAST THE GATE\"}\n"
+        // The changed tail bound, exercised where it actually differs — which
+        // took two tries to build. A `relocated` record merely sitting after an
+        // escalation is NOT enough: the line scan consumes it on its way to the
+        // chunk boundary and the tail scan never runs, so the fixture passes
+        // under either bound. It has to STRADDLE the byte the scan stops on.
+        // Then its head half is discarded with `carry`, and bounding the tail
+        // at bytes READ starts the window mid-record, the boundary probe calls
+        // the remainder a fragment, and the relocation is lost by both halves.
+        let escalatedPrefix = giantEnqueue + "\n" + giantUserLine("/tmp/probe/launch") + "\n"
+        let relocatedRecord = "{\"type\":\"relocated\",\"sessionId\":\"probe\",\"relocatedCwd\":\"/tmp/probe/escalated-wt\"}"
+        // Two full chunks are read (the user record closes inside the second),
+        // so the scan stops at exactly `head * 2`. Start the relocation half a
+        // record before that line.
+        let stopOffset = head * 2
+        let relocatedStart = stopOffset - relocatedRecord.utf8.count / 2
+        let fillOverhead = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"\"}}\n".utf8.count
+        let fillPad = relocatedStart - escalatedPrefix.utf8.count - fillOverhead
+        precondition(fillPad > 0, "escalated-relocated fixture: prefix already passes the stop offset")
+        let escalatedRelocatedJSONL = escalatedPrefix
+            + "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\""
+            + String(repeating: "f", count: fillPad) + "\"}}\n"
+            + relocatedRecord + "\n"
+            // Keep the file inside `stopOffset + 32768` so the tail window
+            // starts at the scan's own stopping point rather than later.
+            + String(repeating: "z", count: 20_000) + "\n"
+        // A file whose size is an exact multiple of the head chunk, with a
+        // complete but unterminated final record. The read returns exactly what
+        // was asked for, so a short read never signals EOF and the scan has to
+        // confirm the end before discarding what it holds.
+        let exactMultipleHead =
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"first\"}}\n"
+        let exactMultipleTail = "{\"type\":\"ai-title\",\"aiTitle\":\"EXACT MULTIPLE\"}"
+        let exactMultiplePad = head - exactMultipleHead.utf8.count - exactMultipleTail.utf8.count - 1
+        precondition(exactMultiplePad > 0, "exact-multiple fixture exceeds the head chunk")
+        let exactMultipleJSONL = exactMultipleHead
+            + String(repeating: "x", count: exactMultiplePad) + "\n"
+            + exactMultipleTail
+        // Array content on the first user record — the shape the title path
+        // joins rather than reads whole, and the branch the `guard type ==
+        // "user"` hoist moved past.
+        let arrayContentJSONL =
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
+            + "[{\"type\":\"text\",\"text\":\"first block\"},{\"type\":\"text\",\"text\":\"second block\"}]}}"
         let giantLeadingPath = writeProbeJSONL(giantLeadingRecordJSONL)
         let overCeilingPath = writeProbeJSONL(overCeilingJSONL)
         let giantScheduledPath = writeProbeJSONL(giantScheduledJSONL)
         let noTrailingNewlinePath = writeProbeJSONL(noTrailingNewlineJSONL)
+        let escalationGatePath = writeProbeJSONL(escalationGateJSONL)
+        let escalatedRelocatedPath = writeProbeJSONL(escalatedRelocatedJSONL)
+        let exactMultiplePath = writeProbeJSONL(exactMultipleJSONL)
+        let arrayContentPath = writeProbeJSONL(arrayContentJSONL)
         defer {
-            for path in [giantLeadingPath, overCeilingPath, giantScheduledPath, noTrailingNewlinePath] {
+            for path in [giantLeadingPath, overCeilingPath, giantScheduledPath, noTrailingNewlinePath,
+                         escalationGatePath, escalatedRelocatedPath, exactMultiplePath, arrayContentPath] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
         }
@@ -355,13 +430,29 @@ enum SidebarLogicProbe {
         record("metadata: cwd read from a record straddling the head chunk",
                giantLeadingPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/six-keys")
         record("metadata: record past the scan ceiling stays unflagged",
-               overCeilingPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == false)
+               overCeilingPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true,
+               "path=\(overCeilingPath ?? "nil (fixture write failed)")")
         record("metadata: record past the scan ceiling stays Untitled",
-               overCeilingPath.map { ClaudeSessionHistory.title(atPath: $0) } == "Untitled")
-        record("metadata: giant scheduled-task enqueue still flagged scheduled",
+               overCeilingPath.map { ClaudeSessionHistory.title(atPath: $0) } == "Untitled",
+               "got \(overCeilingPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil (fixture write failed)")")
+        record("metadata: scheduled-task enqueue found after escalating",
                giantScheduledPath.map { ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
+        record("metadata: scheduled-task stop leaves the later sdk-py line unread",
+               giantScheduledPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
         record("metadata: final record without trailing newline parsed",
                noTrailingNewlinePath.map { ClaudeSessionHistory.title(atPath: $0) } == "unterminated final record")
+        record("metadata: escalation stops once a user record has parsed",
+               escalationGatePath.map { ClaudeSessionHistory.title(atPath: $0) } == "gate marker",
+               "got \(escalationGatePath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
+        record("metadata: relocated in the tail survives an escalated scan",
+               escalatedRelocatedPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/escalated-wt",
+               "got \(escalatedRelocatedPath.flatMap { ClaudeSessionHistory.cwd(atPath: $0) } ?? "nil")")
+        record("metadata: exact chunk-multiple keeps its unterminated last record",
+               exactMultiplePath.map { ClaudeSessionHistory.title(atPath: $0) } == "EXACT MULTIPLE",
+               "got \(exactMultiplePath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
+        record("metadata: array content joins into the title",
+               arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } == "first block second block",
+               "got \(arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
 
         // cwd resolution: `relocated` events (session moved into a git worktree)
         // must override the stale initial cwd; otherwise `--resume` spawns the
@@ -410,7 +501,13 @@ enum SidebarLogicProbe {
         // Boundary case: file size == headSize + tailSize so tailStart == headSize,
         // and the byte before tailStart is `\n` — the relocated line begins
         // exactly at the window edge and must NOT be dropped.
-        let headSize = 131_072
+        //
+        // Both this fixture and the mid-line one below open with a `type:"user"`
+        // record, so the line scan never escalates and stops exactly at the head
+        // chunk — which is what keeps `tailStart` at the offset their names claim.
+        // That precondition is implicit; read `metadataHeadSize` rather than a
+        // copy so at least the offset follows the constant if it ever moves.
+        let headSize = ClaudeSessionHistory.metadataHeadSize
         let tailSize = 32_768
         let boundaryFirst =
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"cwd\":\"/tmp/probe/main\"}\n"

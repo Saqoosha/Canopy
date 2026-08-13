@@ -2956,8 +2956,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// is intentional: an offset that lands mid-line possibly straddles a
     /// multibyte boundary, and a strict decoder would nil out on every
     /// reconcile pass for Japanese-heavy sessions, degrading the wake path to
-    /// bulk-clear and the idle path to doing nothing at all (same pattern as
-    /// `ClaudeSessionHistory.extractMetadata`). The substring match further
+    /// bulk-clear and the idle path to doing nothing at all. (This used to
+    /// cite `ClaudeSessionHistory.extractMetadata` as the same pattern; that
+    /// function reads whole lines now and drops partial ones rather than
+    /// repairing them. Only its tail scan still decodes lossily, and for the
+    /// narrower reason that it discards its own first line anyway.) The
+    /// substring match further
     /// down looks for ASCII-only `<tool-use-id>…</tool-use-id>` markers,
     /// which live on later, fully-formed lines.
     private static func readJSONLFromOffset(path: String, offset: JSONLByteOffset) -> (text: String, endOffset: JSONLByteOffset)? {
