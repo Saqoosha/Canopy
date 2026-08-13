@@ -469,6 +469,13 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).isAutomated
     }
 
+    /// The sidebar row's label before `SessionTitleStore` gets a say: the
+    /// session's `ai-title` if one was written, else its first user message,
+    /// else `"Untitled"`. Exposed for the sidebar logic probe.
+    static func title(atPath path: String) -> String {
+        extractMetadata(fromPath: path).title
+    }
+
     /// The session's *current* cwd — the directory the CLI would resume into.
     /// Prefers the latest `relocated` event's `relocatedCwd` over the initial
     /// `cwd` field so sessions that were moved into a git worktree resolve to
@@ -509,28 +516,53 @@ enum ClaudeSessionHistory {
         return decoded
     }
 
-    /// Read up to 128KB so large base64 image attachments don't push `ai-title`
-    /// past our window. Returns the cwd too so session discovery can skip
-    /// decoding the folder name. When the file is larger than 128KB, also scans
-    /// the last 32KB for `type: "relocated"` events so a session moved into a
-    /// git worktree mid-way resolves to its current cwd, not the launch cwd.
+    /// Bytes read unconditionally on every session. Sized so large base64
+    /// image attachments don't push `ai-title` past the window.
+    private static let metadataHeadSize = 131_072
+
+    /// Ceiling on the escalated scan (see `extractMetadata`). Sixteen head
+    /// chunks: comfortably past the largest header run measured (a
+    /// `/security-review` session needs 183,843 bytes to close its first
+    /// `type: "user"` record) while keeping a runaway file bounded.
+    /// Non-private so the sidebar logic probe can build a fixture that
+    /// exceeds it rather than hardcoding a copy that could drift.
+    static let metadataMaxScanSize = 2_097_152
+
+    /// Read the header records of a JSONL and pull out everything the sidebar
+    /// needs from them. Returns the cwd too so session discovery can skip
+    /// decoding the folder name. Also scans the last 32KB for
+    /// `type: "relocated"` events so a session moved into a git worktree
+    /// mid-way resolves to its current cwd, not the launch cwd.
     ///
     /// `isAutomated` flags non-interactive `claude -p` / SDK-driven runs
     /// (memory observers, sub-agents from `/ship-it`, plugin background
     /// reviews, etc.), detected via the `entrypoint: "sdk-*"` marker the
     /// CLI/SDKs write on their user lines (`sdk-cli`, `sdk-py`, `sdk-ts`).
+    ///
+    /// **Scanning is by whole line, never by byte prefix, and the byte budget
+    /// is a floor rather than a hard stop.** A JSONL record is only usable
+    /// when the entire line is present, and the CLI writes single records far
+    /// larger than any fixed window: a `/security-review` run opens with a
+    /// ~90KB `queue-operation` holding the whole diff, and its `type: "user"`
+    /// record — the one carrying `entrypoint`, `cwd` and the prompt — starts
+    /// at byte 91,815 and runs 92,028 bytes. A flat 128KB read therefore ended
+    /// *inside* that record, `JSONSerialization` rejected the fragment, and
+    /// the file looked like it had no user line at all: no `entrypoint` (so
+    /// the `sdk-*` filter never fired) and no title. Six such sessions showed
+    /// up in the sidebar as "Untitled" — two symptoms, one cause.
+    ///
+    /// Cost is unchanged for ordinary sessions: the head chunk is read exactly
+    /// as before, and the scan only escalates — one chunk at a time, to
+    /// `metadataMaxScanSize` — while it has *not yet parsed a single*
+    /// `type: "user"` record, which is the signal that the window never
+    /// reached the header rather than that the header was uninteresting.
+    /// A file that blows the ceiling degrades to the old behaviour (no
+    /// entrypoint, "Untitled") instead of scanning unboundedly.
     private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             return ("Untitled", nil, false, false)
         }
         defer { try? handle.close() }
-
-        // Use lossy UTF-8 decoding so a 128KB boundary landing inside a
-        // multibyte sequence (e.g. Japanese content) doesn't drop the whole
-        // buffer and fall back to lossy path decoding.
-        let headSize = 131_072
-        let data = handle.readData(ofLength: headSize)
-        let text = String(decoding: data, as: UTF8.self)
 
         var aiTitle: String?
         var firstUserMessage: String?
@@ -538,12 +570,16 @@ enum ClaudeSessionHistory {
         var lastRelocatedCwd: String?
         var isBackgroundScheduled = false
         var entrypoint: String?
+        var sawUserRecord = false
+        var stopScan = false
 
-        for line in text.components(separatedBy: "\n") {
-            guard !line.isEmpty,
-                  let lineData = line.data(using: .utf8),
+        // Whole lines only, so JSON is parsed straight from the line's bytes.
+        // The old lossy String decode existed to survive a window boundary
+        // landing inside a multibyte sequence; complete lines can't have one.
+        func consume(_ lineData: Data) {
+            guard !lineData.isEmpty,
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
-            else { continue }
+            else { return }
 
             if firstCwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
                 firstCwd = value
@@ -553,7 +589,7 @@ enum ClaudeSessionHistory {
                 entrypoint = value
             }
 
-            guard let type = json["type"] as? String else { continue }
+            guard let type = json["type"] as? String else { return }
 
             // `type: "relocated"` is the CLI's own signal that the session
             // moved to a new project folder (typically a git worktree). The
@@ -573,6 +609,10 @@ enum ClaudeSessionHistory {
                content.contains("<scheduled-task")
             {
                 isBackgroundScheduled = true
+                // Do not stop on cwd/title alone — a scheduled-task enqueue may
+                // appear after the first user line in some JSONL orderings, so
+                // only this find ends the scan early.
+                stopScan = true
             }
 
             if aiTitle == nil, type == "ai-title",
@@ -581,9 +621,10 @@ enum ClaudeSessionHistory {
                 aiTitle = value
             }
 
-            if firstUserMessage == nil, type == "user",
-               let message = json["message"] as? [String: Any]
-            {
+            guard type == "user" else { return }
+            sawUserRecord = true
+
+            if firstUserMessage == nil, let message = json["message"] as? [String: Any] {
                 if let content = message["content"] as? String, !content.isEmpty {
                     firstUserMessage = String(content.prefix(100))
                 } else if let contentArr = message["content"] as? [[String: Any]] {
@@ -591,10 +632,43 @@ enum ClaudeSessionHistory {
                     if !joined.isEmpty { firstUserMessage = String(joined.prefix(100)) }
                 }
             }
+        }
 
-            // Do not break early on cwd/title alone — scheduled-task enqueue may
-            // appear after the first user line in some JSONL orderings.
-            if isBackgroundScheduled { break }
+        var carry = Data()
+        var scannedBytes = 0
+        var atEOF = false
+
+        while !stopScan, !atEOF, scannedBytes < metadataMaxScanSize {
+            // Past the head chunk, keep going only while the header is still
+            // out of reach.
+            if scannedBytes >= metadataHeadSize, sawUserRecord { break }
+
+            let want = min(metadataHeadSize, metadataMaxScanSize - scannedBytes)
+            let chunk = handle.readData(ofLength: want)
+            scannedBytes += chunk.count
+            // A short read is EOF: `readData` only returns fewer bytes than
+            // asked when the file ends. This must be recorded before the
+            // empty-chunk exit, or the trailing-line consume below is skipped
+            // for a file whose size is an exact multiple of the chunk.
+            if chunk.count < want { atEOF = true }
+            if chunk.isEmpty { break }
+            carry.append(chunk)
+
+            var searchStart = carry.startIndex
+            while let newline = carry[searchStart...].firstIndex(of: 0x0A) {
+                consume(Data(carry[searchStart..<newline]))
+                searchStart = newline + 1
+                if stopScan { break }
+            }
+            // Keep only the unterminated tail; the copy re-bases the indices.
+            carry = Data(carry[searchStart...])
+        }
+
+        // A final record with no trailing newline is complete only at EOF.
+        // Hitting the ceiling instead leaves a fragment, which is exactly what
+        // must not be parsed.
+        if !stopScan, atEOF, !carry.isEmpty {
+            consume(carry)
         }
 
         // Sessions can be `relocated` many MB into the JSONL (e.g. a long
@@ -610,9 +684,13 @@ enum ClaudeSessionHistory {
             var stage = "seekToEnd"
             do {
                 let fileSize = try handle.seekToEnd()
-                if fileSize > UInt64(headSize) {
+                // Bound the tail against what the line scan actually consumed,
+                // not against the head chunk: an escalated scan may already
+                // have read past `fileSize - tailSize`, and re-reading it would
+                // only re-find relocations it has already applied.
+                if fileSize > UInt64(scannedBytes) {
                     let tailSize: UInt64 = 32_768
-                    let tailStart = max(UInt64(headSize), fileSize - min(tailSize, fileSize))
+                    let tailStart = max(UInt64(scannedBytes), fileSize - min(tailSize, fileSize))
                     // Only drop the first tail line when `tailStart` lands
                     // mid-line. If the previous byte is `\n`, the first line
                     // is complete — dropping it would lose a `relocated`

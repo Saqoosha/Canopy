@@ -304,6 +304,65 @@ enum SidebarLogicProbe {
         record("automated: sdk-py entrypoint flagged",
                sdkPyPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
 
+        // Metadata scanning is by whole line, not by byte prefix. The measured
+        // failure: a `/security-review` JSONL opens with a ~90KB
+        // `queue-operation` carrying the whole diff, so its `type:"user"`
+        // record — entrypoint, cwd and prompt all on it — starts inside the
+        // 128KB head chunk and ends past it. Reading a flat 128KB left that
+        // record truncated and unparseable, which read as "no user line at
+        // all": the sdk-py filter never fired and the title fell back, so six
+        // review runs sat in the sidebar as "Untitled".
+        let giantEnqueue = "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\""
+            + String(repeating: "d", count: 90_000) + "\"}"
+        func giantUserLine(_ cwd: String) -> String {
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Review this change for security vulnerabilities. "
+                + String(repeating: "d", count: 90_000)
+                + "\"},\"entrypoint\":\"sdk-py\",\"cwd\":\"\(cwd)\"}"
+        }
+        let giantLeadingRecordJSONL = giantEnqueue + "\n" + giantUserLine("/tmp/probe/six-keys") + "\n"
+        // A record wider than the escalation ceiling degrades to the old
+        // behaviour — unflagged and "Untitled" — rather than scanning forever.
+        let overCeilingJSONL = "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\""
+            + String(repeating: "d", count: ClaudeSessionHistory.metadataMaxScanSize + 100_000) + "\"}\n"
+            + giantUserLine("/tmp/probe/over-ceiling") + "\n"
+        // A scheduled-task enqueue ends the scan early even when it is the
+        // giant record — the escalation must not outrun that check.
+        let giantScheduledJSONL = "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"<scheduled-task name=\\\"probe\\\">run</scheduled-task> "
+            + String(repeating: "d", count: 90_000) + "\"}\n"
+            + giantUserLine("/tmp/probe/scheduled") + "\n"
+        // The last record of a JSONL carries no trailing newline. It is
+        // complete at EOF and must still be parsed.
+        let noTrailingNewlineJSONL =
+            "{\"type\":\"summary\",\"summary\":\"prior session\"}\n"
+            + "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"unterminated final record\"}}"
+        let giantLeadingPath = writeProbeJSONL(giantLeadingRecordJSONL)
+        let overCeilingPath = writeProbeJSONL(overCeilingJSONL)
+        let giantScheduledPath = writeProbeJSONL(giantScheduledJSONL)
+        let noTrailingNewlinePath = writeProbeJSONL(noTrailingNewlineJSONL)
+        defer {
+            for path in [giantLeadingPath, overCeilingPath, giantScheduledPath, noTrailingNewlinePath] {
+                if let path { try? FileManager.default.removeItem(atPath: path) }
+            }
+        }
+        record("metadata: sdk-py behind a giant leading record flagged",
+               giantLeadingPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true)
+        record("metadata: title read from a record straddling the head chunk",
+               giantLeadingPath.map {
+                   ClaudeSessionHistory.title(atPath: $0)
+                       .hasPrefix("Review this change for security vulnerabilities.")
+               } == true,
+               "got \(giantLeadingPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
+        record("metadata: cwd read from a record straddling the head chunk",
+               giantLeadingPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/six-keys")
+        record("metadata: record past the scan ceiling stays unflagged",
+               overCeilingPath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == false)
+        record("metadata: record past the scan ceiling stays Untitled",
+               overCeilingPath.map { ClaudeSessionHistory.title(atPath: $0) } == "Untitled")
+        record("metadata: giant scheduled-task enqueue still flagged scheduled",
+               giantScheduledPath.map { ClaudeSessionHistory.isBackgroundScheduledSession(atPath: $0) } == true)
+        record("metadata: final record without trailing newline parsed",
+               noTrailingNewlinePath.map { ClaudeSessionHistory.title(atPath: $0) } == "unterminated final record")
+
         // cwd resolution: `relocated` events (session moved into a git worktree)
         // must override the stale initial cwd; otherwise `--resume` spawns the
         // CLI in the wrong project folder and the CLI creates an empty session.
