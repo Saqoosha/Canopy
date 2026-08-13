@@ -371,19 +371,21 @@ enum ClaudeSessionHistory {
 
     /// Bounded read: session JSONLs grow to tens of MB and this runs in
     /// `ShimProcess.init` on the main thread (`loadTeleportedFromMap` bounds
-    /// itself the same way, at a 64KB tail). Head chunk keeps the first prompt
+    /// itself the same way, at a 64KB *tail* — its own doc comment claims a
+    /// 16KB head, which is wrong on both counts; read `extractTeleportedFrom`). Head chunk keeps the first prompt
     /// (the session's goal), tail chunk keeps the recent ones.
     ///
     /// **This is still a byte window, and `extractMetadata` is no longer one.**
-    /// On a JSONL whose opening record is wider than `chunkSize` — a
-    /// `/security-review` run is the measured case, ~90KB of diff in a
-    /// `queue-operation` and a 92KB `type: "user"` record after it — the head
-    /// chunk ends mid-record and the first prompt is silently lost here, which
-    /// is exactly the defect `extractMetadata` was rewritten to stop having.
-    /// Left alone deliberately: this feeds recap and title generation rather
-    /// than the sidebar's automated-session filter, so it is a different
-    /// symptom from the one that prompted the rewrite, and it deserves its own
-    /// change rather than a widening of that one.
+    /// The loss needs BOTH halves of the branch below: a first `type: "user"`
+    /// record ending past `chunkSize`, *and* a file bigger than `chunkSize * 2`
+    /// so the whole-file branch doesn't rescue it. Measured over the sessions
+    /// the sidebar can open, 24 of the 31 that escalate in `extractMetadata`
+    /// satisfy both and silently lose their first prompt here; the other 7 —
+    /// including the `/security-review` file that prompted the rewrite, at
+    /// 240,633 bytes — take the whole-file branch and lose nothing. Left alone
+    /// deliberately: this feeds recap and title generation rather than the
+    /// sidebar's automated-session filter, so it is a different symptom and
+    /// deserves its own change rather than a widening of that one.
     static func loadUserPrompts(atPath path: String) -> [String] {
         let chunkSize = 131_072
         guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
@@ -537,26 +539,25 @@ enum ClaudeSessionHistory {
     /// chunks.
     ///
     /// **Measure this against the files the loaders can actually open, and
-    /// nothing else.** Both walk exactly two levels — `~/.claude/projects/
-    /// <encoded>/<uuid>.jsonl` — skipping `observer-sessions` by name and
-    /// anything not UUID-named, which excludes nested `subagents/` trees and
-    /// `agent-*.jsonl` alike. Over that population (1,047 files here): 31
-    /// escalate past one head chunk, none fails to close its header, and the
-    /// largest needs **1,056,552 bytes**, so this ceiling carries ~2× that.
+    /// nothing else — every wrong answer this comment has carried came from
+    /// measuring a different set.** Both walk exactly two levels
+    /// (`~/.claude/projects/<encoded>/<uuid>.jsonl`), so nested `subagents/`
+    /// trees never appear; `loadAllSessions` additionally skips a directory
+    /// named `-` and any name ending `observer-sessions`, and both require a
+    /// UUID filename, which is what excludes `agent-*.jsonl`. Miss the `-`
+    /// skip alone and the population grows by 284 files and the answer below
+    /// changes. Measured 2026-08-13 over the resulting 1,047 files: 31
+    /// escalate past one head chunk, **every one of them closes its header
+    /// inside the ceiling**, and the largest needs **1,056,552 bytes** — so
+    /// this ceiling carries 1.99× the largest real header.
     ///
-    /// The number is easy to get wrong in both directions and this comment
-    /// exists because it was, twice in one review. It first read 184 KB —
-    /// the largest of the six files investigated by hand, generalised to a
-    /// corpus that disagrees 5.7×. A reviewer then re-measured over
-    /// everything under `~/.claude/projects` recursively and reported the
-    /// ceiling had 12.8% headroom, which is true of that set and not of this
-    /// one: the 1.83 MB and 1.96 MB header runs it found are in an
-    /// `agent-acompact-*.jsonl` and under `observer-sessions`, neither of
-    /// which is ever opened. They are still the reason not to tighten the
-    /// ceiling toward the 1.06 MB figure — the CLI evidently does write
-    /// headers that big, so the openable population is one unlucky session
-    /// away from them, and the cliff is silent (the row degrades to
-    /// "Untitled" *and* escapes the `sdk-*` filter).
+    /// It is not tightened toward that figure because the same CLI mechanism
+    /// writes far larger headers in files these loaders happen not to open:
+    /// 1,829,543 bytes in a `subagents/agent-acompact-*.jsonl`, and
+    /// 13,121,983 under `observer-sessions` (a 6.5 MB `queue-operation`
+    /// followed by a 6.5 MB user record). Only the population filter
+    /// separates those from the openable set, and the cliff is silent — the
+    /// row degrades to "Untitled" *and* escapes the `sdk-*` filter.
     ///
     /// Non-private so the sidebar logic probe can build a fixture that
     /// exceeds it rather than hardcoding a copy that could drift.
@@ -583,10 +584,8 @@ enum ClaudeSessionHistory {
     /// at byte 91,815 and runs 92,028 bytes. A flat 128KB read therefore ended
     /// *inside* that record, `JSONSerialization` rejected the fragment, and
     /// the file looked like it had no user line at all: no `entrypoint` (so
-    /// the `sdk-*` filter never fired) and no title. Six such rows were
-    /// visible in the sidebar as "Untitled" — the affected files are more
-    /// numerous, `maxSessionsToParse` just cuts the list — two symptoms, one
-    /// cause.
+    /// the `sdk-*` filter never fired) and no title. Several such rows sat in
+    /// the sidebar as "Untitled" — two symptoms, one cause.
     ///
     /// The scan escalates — one chunk at a time, to `metadataMaxScanSize` —
     /// only while it has *not yet parsed a single* `type: "user"` record.
@@ -594,22 +593,24 @@ enum ClaudeSessionHistory {
     /// than that the header was uninteresting; a session whose first user
     /// record carries no text still ends the escalation, which is a real hole
     /// and not one worth widening the gate for (measured: 0 of 1,047 local
-    /// sessions have a text-less first user record). A file that blows the
-    /// ceiling keeps whatever it parsed below it, which for a single
-    /// over-ceiling leading record means no entrypoint and "Untitled".
+    /// sessions have a text-less first user record; the probe pins the hole so
+    /// widening it can't happen by accident). A file that blows the ceiling
+    /// keeps whatever it parsed below it, which for a single over-ceiling
+    /// leading record means no entrypoint and "Untitled".
     ///
     /// **Per-file cost is unchanged for a session that does not escalate, but
-    /// the refresh cost is not, and the distinction matters because the
-    /// escalating sessions cluster in the recent window the loader actually
-    /// reads.** Over the openable population (see `metadataMaxScanSize`), 31
-    /// of 1,047 sessions escalate — 16 automated, 15 interactive — and the
-    /// whole-corpus read moves 100.1 MB → 106.8 MB. Over the newest 50, the
-    /// ones `maxSessionsToParse` keeps, 15 escalate and the read goes
-    /// 5.3 MB → 7.0 MB, because a day spent running `/security-review` fills
-    /// that window with exactly the sessions that need escalating. Both
-    /// callers run off the main actor and `loadAllSessions` caps at 50;
-    /// `loadSessionsFromDir` does neither, and is the one path where this is
-    /// bounded only by the folder's contents.
+    /// the refresh cost is not, because the escalating sessions cluster in the
+    /// recent window the loader actually reads.** Over the openable population
+    /// (see `metadataMaxScanSize`) 31 of 1,047 escalate, and the whole-corpus
+    /// read moves 105,103,370 → 112,112,155 bytes; over the newest 50 that
+    /// `maxSessionsToParse` keeps, 15 escalate and it moves 5,536,876 →
+    /// 7,365,828, because a day spent running `/security-review` fills that
+    /// window with exactly the sessions that need escalating. **The uncapped
+    /// path is also the main-thread one**: `loadAllSessions`'s two callers
+    /// both `Task.detached` and it caps at 50, while `loadSessionsFromDir` is
+    /// reached synchronously from `LauncherView.latestSession(for:)` — a
+    /// SwiftUI `View`, so main-actor — over every JSONL in one project folder.
+    /// Measured worst folder here: 159 files, 16.6 → 17.8 MiB.
     private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             return ("Untitled", nil, false, false)
@@ -670,8 +671,9 @@ enum ClaudeSessionHistory {
                 // cwd or title to that list — a scheduled-task enqueue can
                 // appear after the first user line in some JSONL orderings,
                 // so stopping on those would step over it. (The byte loop has
-                // its own exit once a `user` record has parsed; that one is
-                // about the window, not about what was found.)
+                // its own exit once a `user` record has parsed AND the head
+                // chunk is behind it; that one is about the window, not about
+                // what was found.)
                 stopScan = true
             }
 
@@ -735,9 +737,15 @@ enum ClaudeSessionHistory {
         // A final record with no trailing newline is complete only at EOF.
         // Hitting the ceiling instead leaves a fragment, which is exactly what
         // must not be parsed.
+        // `consume` silently rejects a line it cannot parse, so `carry` is NOT
+        // cleared here even on success. These files are appended to by running
+        // sessions, so "EOF" can mean "the CLI has not finished this record
+        // yet" — clearing would fold an unparsed fragment into `consumedBytes`
+        // below and hand the tail scan a mid-record start, which is the exact
+        // hole that bound exists to close. Leaving it costs the tail scan one
+        // re-read of a record already applied, and relocation is idempotent.
         if !stopScan, atEOF, !carry.isEmpty {
             consume(carry)
-            carry = Data()
         }
 
         // Bytes consumed as WHOLE LINES — which is not the same as bytes read,
@@ -748,8 +756,12 @@ enum ClaudeSessionHistory {
         // correctly call the remainder a fragment, and neither half would ever
         // look at it. A `relocated` event landing there would be lost — and it
         // is the tail scan's whole job not to lose one. Bounding here instead
-        // starts the tail exactly on a line boundary, so it also recovers a
-        // record straddling the head chunk, which the old fixed bound lost.
+        // starts the tail exactly on a line boundary. That also recovers a
+        // record straddling the head chunk — but only while the file ends
+        // within 32KB of it; past that `fileSize - tailSize` dominates and the
+        // straddling record falls in the gap neither half reads, exactly as it
+        // did before. The probe pins the naive bytes-read alternative, not the
+        // pre-PR constant, which this fixture's size happens to survive.
         let consumedBytes = UInt64(scannedBytes - carry.count)
 
         // Sessions can be `relocated` many MB into the JSONL (e.g. a long
@@ -773,8 +785,13 @@ enum ClaudeSessionHistory {
                     // is complete — dropping it would lose a `relocated`
                     // event that begins exactly at the window boundary.
                     // Offset 0 is a line start by definition and has no
-                    // previous byte to probe; it became reachable when the
-                    // bound stopped being a positive constant.
+                    // previous byte to probe. Reachable by exactly one path,
+                    // and two reviewers called it dead code by missing it: the
+                    // file was 0 bytes when the first read hit it (so the scan
+                    // exits with `scannedBytes == 0`) and had grown to <=32KB
+                    // by the time `seekToEnd` ran — a session JSONL being
+                    // created while the sidebar refreshes. Do not delete this
+                    // as unreachable without re-deriving that path.
                     var startsAtLineBoundary = tailStart == 0
                     if tailStart > 0 {
                         stage = "seek to tailStart-1"
