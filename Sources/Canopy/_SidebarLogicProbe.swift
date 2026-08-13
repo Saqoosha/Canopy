@@ -310,11 +310,11 @@ enum SidebarLogicProbe {
         // record — entrypoint, cwd and prompt all on it — starts inside the
         // head chunk and ends past it. Reading a flat head chunk left that
         // record truncated and unparseable, which read as "no user line at
-        // all": the sdk-py filter never fired and the title fell back, so six
-        // such rows sat in the sidebar as "Untitled".
+        // all": the sdk-py filter never fired and the title fell back, so
+        // several such rows sat in the sidebar as "Untitled".
         //
-        // Every fixture below is sized off `metadataHeadSize` rather than a
-        // copy of 131,072 — the same reason `metadataMaxScanSize` is not
+        // Every fixture below whose point is a boundary is sized off
+        // `metadataHeadSize` rather than a copy of 131,072 — the same reason `metadataMaxScanSize` is not
         // private. A hardcoded 90,000 straddles the boundary only by
         // arithmetic coincidence, so moving the constant would leave these
         // passing for the wrong reason, both records inside one chunk.
@@ -355,11 +355,11 @@ enum SidebarLogicProbe {
         let noTrailingNewlineJSONL =
             "{\"type\":\"summary\",\"summary\":\"prior session\"}\n"
             + "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"unterminated final record\"}}"
-        // The escalation gate itself. Nothing else in this probe fails if the
-        // `sawUserRecord` break is deleted — every other fixture reports the
-        // same answer whether the scan stops at the head chunk or reads to the
-        // ceiling — so without this, the one line holding the whole cost
-        // argument is ungated. A cheap `ai-title` past the head chunk is the
+        // The escalation gate itself. Only this fixture and `textlessUserJSONL`
+        // below fail if the `sawUserRecord` break is deleted — every other one
+        // reports the same answer whether the scan stops at the head chunk or
+        // reads to the ceiling — so without the two of them, the one line
+        // holding the whole cost argument is ungated. A cheap `ai-title` past the head chunk is the
         // lever: it wins over `firstUserMessage` if and only if it is read,
         // and the tail scan cannot rescue it because that path matches only
         // `relocated`.
@@ -382,9 +382,10 @@ enum SidebarLogicProbe {
         // so don't read the assertion as "this failed before the PR".
         let escalatedPrefix = giantEnqueue + "\n" + giantUserLine("/tmp/probe/launch") + "\n"
         let relocatedRecord = "{\"type\":\"relocated\",\"sessionId\":\"probe\",\"relocatedCwd\":\"/tmp/probe/escalated-wt\"}"
-        // Two full chunks are read (the user record closes inside the second),
-        // so the scan stops at exactly `head * 2`. Start the relocation half a
-        // record before that line.
+        // Two full chunks are READ (the user record closes inside the second),
+        // so `scannedBytes` lands on exactly `head * 2` — `consumedBytes` stops
+        // short of it, which is the whole point. Start the relocation half a
+        // record before the read boundary.
         let stopOffset = head * 2
         let relocatedStart = stopOffset - relocatedRecord.utf8.count / 2
         let fillOverhead = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"\"}}\n".utf8.count
@@ -431,10 +432,13 @@ enum SidebarLogicProbe {
             + "[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}}\n"
             + filler(head + head / 2)
             + "{\"type\":\"ai-title\",\"aiTitle\":\"MISSED\"}\n"
-        // Three or more escalation chunks with a live carry across each — the
-        // `carry = Data(carry[searchStart...])` re-basing is only exercised
-        // over multiple iterations that actually parse lines, which the
-        // two-chunk fixtures above and the parse-nothing ceiling fixture miss.
+        // The deepest escalation any fixture takes: four records, so the loop
+        // runs past three chunks with a live carry. What it pins is escalation
+        // DEPTH — capping the loop at two or three chunks fails here and
+        // nowhere else. It does NOT pin the `Data(carry[searchStart...])`
+        // re-basing copy, which was the first claim written here: dropping the
+        // copy, hardcoding `searchStart = 0`, or both, changes no fixture's
+        // result. The copy is a memory property, not an observable one.
         let deepRecord = { (n: Int) in
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"d\(n) "
                 + String(repeating: "d", count: head * 9 / 10) + "\"}}"
@@ -505,14 +509,20 @@ enum SidebarLogicProbe {
                "got \(deepEscalationPath.flatMap { ClaudeSessionHistory.cwd(atPath: $0) } ?? "nil")")
         record("metadata: a header line with invalid UTF-8 is rejected, not repaired",
                invalidUTF8Path.map { ClaudeSessionHistory.title(atPath: $0) } == "second",
-               "got \(invalidUTF8Path.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
+               "got \(invalidUTF8Path.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil (fixture write failed)")")
+        // Not decoration: `want = min(metadataHeadSize, ceiling - scannedBytes)`
+        // is dead code only while this holds. Break the relationship and the
+        // final chunk is short, on a path nothing else covers.
         record("metadata: the ceiling is an exact multiple of the head chunk",
                ClaudeSessionHistory.metadataMaxScanSize % ClaudeSessionHistory.metadataHeadSize == 0,
                "ceiling=\(ClaudeSessionHistory.metadataMaxScanSize) head=\(ClaudeSessionHistory.metadataHeadSize)")
         record("metadata: escalation stops once a user record has parsed",
                escalationGatePath.map { ClaudeSessionHistory.title(atPath: $0) } == "gate marker",
                "got \(escalationGatePath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
-        record("metadata: relocated in the tail survives an escalated scan",
+        // Named for the bound, not the escalation: removing escalation entirely
+        // leaves this passing, because the tail scan alone rescues the record.
+        // It is the sole killer for the tail bound, which is what it is here for.
+        record("metadata: relocated in the tail survives the consumed-bytes bound",
                escalatedRelocatedPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/escalated-wt",
                "got \(escalatedRelocatedPath.flatMap { ClaudeSessionHistory.cwd(atPath: $0) } ?? "nil")")
         record("metadata: exact chunk-multiple keeps its unterminated last record",
@@ -586,11 +596,12 @@ enum SidebarLogicProbe {
         let boundaryRelocated =
             "{\"type\":\"relocated\",\"sessionId\":\"probe\",\"relocatedCwd\":\"/tmp/probe/boundary-wt\"}\n"
         let headPadCount = headSize - boundaryFirst.utf8.count - 1
-        precondition(headPadCount > 0, "boundary fixture first line exceeds headSize")
+        record("metadata fixture: boundary first line fits inside the head chunk",
+               headPadCount > 0, "pad=\(headPadCount)")
         let zPadCount = max(0, tailSize - boundaryRelocated.utf8.count)
         let boundaryJSONL =
             boundaryFirst
-            + String(repeating: "x", count: headPadCount) + "\n"
+            + String(repeating: "x", count: max(0, headPadCount)) + "\n"
             + boundaryRelocated
             + String(repeating: "z", count: zPadCount)
         // Mid-line case: byte at tailStart-1 is NOT `\n`, so the first tail
@@ -602,12 +613,13 @@ enum SidebarLogicProbe {
         let midlineRelocated =
             "{\"type\":\"relocated\",\"sessionId\":\"probe\",\"relocatedCwd\":\"/tmp/probe/midline-wt\"}\n"
         let midlineHeadPad = headSize - midlineFirst.utf8.count
-        precondition(midlineHeadPad > 0, "midline fixture first line exceeds headSize")
+        record("metadata fixture: midline first line fits inside the head chunk",
+               midlineHeadPad > 0, "pad=\(midlineHeadPad)")
         let midlineTailBody = midlineFragment + "\n" + midlineRelocated
         let midlineTailPad = max(0, tailSize - midlineTailBody.utf8.count)
         let midlineJSONL =
             midlineFirst
-            + String(repeating: "x", count: midlineHeadPad)
+            + String(repeating: "x", count: max(0, midlineHeadPad))
             + midlineTailBody
             + String(repeating: "z", count: midlineTailPad)
         let plainCwdPath = writeProbeJSONL(plainCwdJSONL)

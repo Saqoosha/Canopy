@@ -208,8 +208,9 @@ enum ClaudeSessionHistory {
     /// header lines. Used by the sidebar to dedupe cloud rows that have
     /// already been teleported into local sessions.
     ///
-    /// Cheap: reads only the first ~16 KB of each file (the header chunk
-    /// where teleported-from is written by saveSession).
+    /// Cheap: reads only the last 64 KB of each file — `saveSession` writes
+    /// `teleported-from` after the messages, so it lives at the tail. See
+    /// `extractTeleportedFrom`.
     static func loadTeleportedFromMap() -> [String: String] {
         guard FileManager.default.fileExists(atPath: claudeDir.path) else { return [:] }
         let fm = FileManager.default
@@ -371,21 +372,21 @@ enum ClaudeSessionHistory {
 
     /// Bounded read: session JSONLs grow to tens of MB and this runs in
     /// `ShimProcess.init` on the main thread (`loadTeleportedFromMap` bounds
-    /// itself the same way, at a 64KB *tail* — its own doc comment claims a
-    /// 16KB head, which is wrong on both counts; read `extractTeleportedFrom`). Head chunk keeps the first prompt
+    /// itself the same way, at a 64KB tail). Head chunk keeps the first prompt
     /// (the session's goal), tail chunk keeps the recent ones.
     ///
     /// **This is still a byte window, and `extractMetadata` is no longer one.**
-    /// The loss needs BOTH halves of the branch below: a first `type: "user"`
-    /// record ending past `chunkSize`, *and* a file bigger than `chunkSize * 2`
-    /// so the whole-file branch doesn't rescue it. Measured over the sessions
-    /// the sidebar can open, 24 of the 31 that escalate in `extractMetadata`
-    /// satisfy both and silently lose their first prompt here; the other 7 —
-    /// including the `/security-review` file that prompted the rewrite, at
-    /// 240,633 bytes — take the whole-file branch and lose nothing. Left alone
-    /// deliberately: this feeds recap and title generation rather than the
-    /// sidebar's automated-session filter, so it is a different symptom and
-    /// deserves its own change rather than a widening of that one.
+    /// The loss needs the file to exceed `chunkSize * 2` (or the branch below
+    /// reads it whole) *and* no prompt-yielding user record inside the first
+    /// `chunkSize` — note "prompt-yielding", not "present": `parseUserPrompts`
+    /// filters meta and `<command-` lines, so a record can be in the window and
+    /// still contribute nothing. Measured over the openable sessions, 41 of
+    /// 1,049 lose their first prompt here, 24 of them among the 31 that
+    /// escalate in `extractMetadata`; the `/security-review` file that prompted
+    /// the rewrite is not one of them, at 240,633 bytes it is read whole. Left
+    /// alone deliberately: this feeds recap and title generation rather than
+    /// the sidebar's automated-session filter, so it is a different symptom
+    /// and deserves its own change rather than a widening of that one.
     static func loadUserPrompts(atPath path: String) -> [String] {
         let chunkSize = 131_072
         guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
@@ -549,7 +550,7 @@ enum ClaudeSessionHistory {
     /// changes. Measured 2026-08-13 over the resulting 1,047 files: 31
     /// escalate past one head chunk, **every one of them closes its header
     /// inside the ceiling**, and the largest needs **1,056,552 bytes** — so
-    /// this ceiling carries 1.99× the largest real header.
+    /// this ceiling carries 1.98× the largest real header.
     ///
     /// It is not tightened toward that figure because the same CLI mechanism
     /// writes far larger headers in files these loaders happen not to open:
@@ -598,9 +599,12 @@ enum ClaudeSessionHistory {
     /// keeps whatever it parsed below it, which for a single over-ceiling
     /// leading record means no entrypoint and "Untitled".
     ///
-    /// **Per-file cost is unchanged for a session that does not escalate, but
-    /// the refresh cost is not, because the escalating sessions cluster in the
-    /// recent window the loader actually reads.** Over the openable population
+    /// **Per-file line-scan cost is unchanged for a session that does not
+    /// escalate, but the refresh cost is not, because the escalating sessions
+    /// cluster in the recent window the loader actually reads.** (The tail
+    /// window can start earlier than it used to, costing up to 32KB more on a
+    /// file that stops mid-record; corpus-wide the tail read shrinks, because
+    /// escalated files start theirs later.) Over the openable population
     /// (see `metadataMaxScanSize`) 31 of 1,047 escalate, and the whole-corpus
     /// read moves 105,103,370 → 112,112,155 bytes; over the newest 50 that
     /// `maxSessionsToParse` keeps, 15 escalate and it moves 5,536,876 →
@@ -610,7 +614,11 @@ enum ClaudeSessionHistory {
     /// both `Task.detached` and it caps at 50, while `loadSessionsFromDir` is
     /// reached synchronously from `LauncherView.latestSession(for:)` — a
     /// SwiftUI `View`, so main-actor — over every JSONL in one project folder.
-    /// Measured worst folder here: 159 files, 16.6 → 17.8 MiB.
+    /// Measured worst *project* folder here: 159 files, 16.6 → 17.8 MiB. The
+    /// skip list lives on `loadAllSessions`, not here, so the worst folder
+    /// this path could be handed is `observer-sessions` itself at 1,056 files,
+    /// 111.9 → 1,045.2 MiB — which is the argument for keeping that list on
+    /// the caller rather than moving it down.
     private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             return ("Untitled", nil, false, false)
@@ -743,7 +751,12 @@ enum ClaudeSessionHistory {
         // yet" — clearing would fold an unparsed fragment into `consumedBytes`
         // below and hand the tail scan a mid-record start, which is the exact
         // hole that bound exists to close. Leaving it costs the tail scan one
-        // re-read of a record already applied, and relocation is idempotent.
+        // re-read: for a record `consume` accepted that is exactly idempotent,
+        // and relocation is last-wins. For one it REJECTED it is not — the
+        // tail decodes lossily, so a `relocated` carrying a byte that is
+        // invalid on disk can be accepted there after being refused here.
+        // Measured, and left as is: `resolveProjectPath` checks the directory
+        // exists before using it.
         if !stopScan, atEOF, !carry.isEmpty {
             consume(carry)
         }
@@ -785,13 +798,13 @@ enum ClaudeSessionHistory {
                     // is complete — dropping it would lose a `relocated`
                     // event that begins exactly at the window boundary.
                     // Offset 0 is a line start by definition and has no
-                    // previous byte to probe. Reachable by exactly one path,
-                    // and two reviewers called it dead code by missing it: the
-                    // file was 0 bytes when the first read hit it (so the scan
-                    // exits with `scannedBytes == 0`) and had grown to <=32KB
-                    // by the time `seekToEnd` ran — a session JSONL being
-                    // created while the sidebar refreshes. Do not delete this
-                    // as unreachable without re-deriving that path.
+                    // previous byte to probe. Reached whenever the scan
+                    // consumed no whole line — any file with no newline in the
+                    // region it read — and the file fits in one tail window.
+                    // The probe's own `arrayContentJSONL` is that shape, so
+                    // this runs on every CI build. Three reviewers have now
+                    // reasoned about this branch and the first two deleted it
+                    // in their heads; measure before believing either.
                     var startsAtLineBoundary = tailStart == 0
                     if tailStart > 0 {
                         stage = "seek to tailStart-1"
@@ -823,7 +836,7 @@ enum ClaudeSessionHistory {
                     }
                 }
             } catch {
-                logger.error("extractMetadata: tail scan I/O failed at \(stage, privacy: .public) for \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+                logger.error("extractMetadata: tail scan I/O failed at \(stage, privacy: .public) for \(path, privacy: .private): \(String(describing: error), privacy: .public)")
             }
         }
 
