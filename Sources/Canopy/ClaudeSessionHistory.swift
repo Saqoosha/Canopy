@@ -208,8 +208,9 @@ enum ClaudeSessionHistory {
     /// header lines. Used by the sidebar to dedupe cloud rows that have
     /// already been teleported into local sessions.
     ///
-    /// Cheap: reads only the first ~16 KB of each file (the header chunk
-    /// where teleported-from is written by saveSession).
+    /// Cheap: reads only the last 64 KB of each file — `saveSession` writes
+    /// `teleported-from` after the messages, so it lives at the tail. See
+    /// `extractTeleportedFrom`.
     static func loadTeleportedFromMap() -> [String: String] {
         guard FileManager.default.fileExists(atPath: claudeDir.path) else { return [:] }
         let fm = FileManager.default
@@ -370,9 +371,22 @@ enum ClaudeSessionHistory {
     }
 
     /// Bounded read: session JSONLs grow to tens of MB and this runs in
-    /// `ShimProcess.init` on the main thread (like the sibling readers, which
-    /// cap at 128KB head / 64KB tail). Head chunk keeps the first prompt
+    /// `ShimProcess.init` on the main thread (`loadTeleportedFromMap` bounds
+    /// itself the same way, at a 64KB tail). Head chunk keeps the first prompt
     /// (the session's goal), tail chunk keeps the recent ones.
+    ///
+    /// **This is still a byte window, and `extractMetadata` is no longer one.**
+    /// The loss needs the file to exceed `chunkSize * 2` (or the branch below
+    /// reads it whole) *and* no prompt-yielding user record inside the first
+    /// `chunkSize` — note "prompt-yielding", not "present": `parseUserPrompts`
+    /// filters meta and `<command-` lines, so a record can be in the window and
+    /// still contribute nothing. Measured over the openable sessions, 41 of
+    /// 1,049 lose their first prompt here, 24 of them among the 31 that
+    /// escalate in `extractMetadata`; the `/security-review` file that prompted
+    /// the rewrite is not one of them, at 240,633 bytes it is read whole. Left
+    /// alone deliberately: this feeds recap and title generation rather than
+    /// the sidebar's automated-session filter, so it is a different symptom
+    /// and deserves its own change rather than a widening of that one.
     static func loadUserPrompts(atPath path: String) -> [String] {
         let chunkSize = 131_072
         guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
@@ -469,6 +483,13 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).isAutomated
     }
 
+    /// The sidebar row's label before `SessionTitleStore` gets a say: the
+    /// session's `ai-title` if one was written, else its first user message,
+    /// else `"Untitled"`. Exposed for the sidebar logic probe.
+    static func title(atPath path: String) -> String {
+        extractMetadata(fromPath: path).title
+    }
+
     /// The session's *current* cwd — the directory the CLI would resume into.
     /// Prefers the latest `relocated` event's `relocatedCwd` over the initial
     /// `cwd` field so sessions that were moved into a git worktree resolve to
@@ -509,28 +530,100 @@ enum ClaudeSessionHistory {
         return decoded
     }
 
-    /// Read up to 128KB so large base64 image attachments don't push `ai-title`
-    /// past our window. Returns the cwd too so session discovery can skip
-    /// decoding the folder name. When the file is larger than 128KB, also scans
-    /// the last 32KB for `type: "relocated"` events so a session moved into a
-    /// git worktree mid-way resolves to its current cwd, not the launch cwd.
+    /// Bytes requested on the first read of every session, and the size of
+    /// each escalation chunk after it — a smaller file reads less. Sized so
+    /// large base64 image attachments don't push `ai-title` past the window.
+    /// Non-private for the same reason as `metadataMaxScanSize`.
+    static let metadataHeadSize = 131_072
+
+    /// Ceiling on the escalated scan (see `extractMetadata`) — sixteen head
+    /// chunks.
+    ///
+    /// **Measure this against the files the loaders can actually open, and
+    /// nothing else — every wrong answer this comment has carried came from
+    /// measuring a different set.** Both walk exactly two levels
+    /// (`~/.claude/projects/<encoded>/<uuid>.jsonl`), so nested `subagents/`
+    /// trees never appear; `loadAllSessions` additionally skips a directory
+    /// named `-` and any name ending `observer-sessions`, and both require a
+    /// UUID filename, which is what excludes `agent-*.jsonl`. Miss the `-`
+    /// skip alone and the population grows by 284 files and the answer below
+    /// changes. Measured 2026-08-13 over the resulting 1,047 files: 31
+    /// escalate past one head chunk, **every one of them closes its header
+    /// inside the ceiling**, and the largest needs **1,056,552 bytes** — so
+    /// this ceiling carries 1.98× the largest real header.
+    ///
+    /// It is not tightened toward that figure because the same CLI mechanism
+    /// writes far larger headers in files these loaders happen not to open:
+    /// 1,829,543 bytes in a `subagents/agent-acompact-*.jsonl`, and
+    /// 13,121,983 under `observer-sessions` (a 6.5 MB `queue-operation`
+    /// followed by a 6.5 MB user record). Only the population filter
+    /// separates those from the openable set, and the cliff is silent — the
+    /// row degrades to "Untitled" *and* escapes the `sdk-*` filter.
+    ///
+    /// Non-private so the sidebar logic probe can build a fixture that
+    /// exceeds it rather than hardcoding a copy that could drift.
+    static let metadataMaxScanSize = 2_097_152
+
+    /// Read the header records of a JSONL and pull out everything the sidebar
+    /// needs from them. Returns the cwd too so session discovery can skip
+    /// decoding the folder name. Also scans up to the last 32KB — whatever of
+    /// it the line scan did not already cover — for `type: "relocated"`
+    /// events, so a session moved into a git worktree mid-way resolves to its
+    /// current cwd, not the launch cwd.
     ///
     /// `isAutomated` flags non-interactive `claude -p` / SDK-driven runs
     /// (memory observers, sub-agents from `/ship-it`, plugin background
     /// reviews, etc.), detected via the `entrypoint: "sdk-*"` marker the
     /// CLI/SDKs write on their user lines (`sdk-cli`, `sdk-py`, `sdk-ts`).
+    ///
+    /// **Scanning is by whole line, never by byte prefix, and the byte budget
+    /// is a floor rather than a hard stop.** A JSONL record is only usable
+    /// when the entire line is present, and the CLI writes single records far
+    /// larger than any fixed window: a `/security-review` run opens with a
+    /// ~90KB `queue-operation` holding the whole diff, and its `type: "user"`
+    /// record — the one carrying `entrypoint`, `cwd` and the prompt — starts
+    /// at byte 91,815 and runs 92,028 bytes. A flat 128KB read therefore ended
+    /// *inside* that record, `JSONSerialization` rejected the fragment, and
+    /// the file looked like it had no user line at all: no `entrypoint` (so
+    /// the `sdk-*` filter never fired) and no title. Several such rows sat in
+    /// the sidebar as "Untitled" — two symptoms, one cause.
+    ///
+    /// The scan escalates — one chunk at a time, to `metadataMaxScanSize` —
+    /// only while it has *not yet parsed a single* `type: "user"` record.
+    /// That is the signal that the window never reached the header, rather
+    /// than that the header was uninteresting; a session whose first user
+    /// record carries no text still ends the escalation, which is a real hole
+    /// and not one worth widening the gate for (measured: 0 of 1,047 local
+    /// sessions have a text-less first user record; the probe pins the hole so
+    /// widening it can't happen by accident). A file that blows the ceiling
+    /// keeps whatever it parsed below it, which for a single over-ceiling
+    /// leading record means no entrypoint and "Untitled".
+    ///
+    /// **Per-file line-scan cost is unchanged for a session that does not
+    /// escalate, but the refresh cost is not, because the escalating sessions
+    /// cluster in the recent window the loader actually reads.** (The tail
+    /// window can start earlier than it used to, costing up to 32KB more on a
+    /// file that stops mid-record; corpus-wide the tail read shrinks, because
+    /// escalated files start theirs later.) Over the openable population
+    /// (see `metadataMaxScanSize`) 31 of 1,047 escalate, and the whole-corpus
+    /// read moves 105,103,370 → 112,112,155 bytes; over the newest 50 that
+    /// `maxSessionsToParse` keeps, 15 escalate and it moves 5,536,876 →
+    /// 7,365,828, because a day spent running `/security-review` fills that
+    /// window with exactly the sessions that need escalating. **The uncapped
+    /// path is also the main-thread one**: `loadAllSessions`'s two callers
+    /// both `Task.detached` and it caps at 50, while `loadSessionsFromDir` is
+    /// reached synchronously from `LauncherView.latestSession(for:)` — a
+    /// SwiftUI `View`, so main-actor — over every JSONL in one project folder.
+    /// Measured worst *project* folder here: 159 files, 16.6 → 17.8 MiB. The
+    /// skip list lives on `loadAllSessions`, not here, so the worst folder
+    /// this path could be handed is `observer-sessions` itself at 1,056 files,
+    /// 111.9 → 1,045.2 MiB — which is the argument for keeping that list on
+    /// the caller rather than moving it down.
     private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             return ("Untitled", nil, false, false)
         }
         defer { try? handle.close() }
-
-        // Use lossy UTF-8 decoding so a 128KB boundary landing inside a
-        // multibyte sequence (e.g. Japanese content) doesn't drop the whole
-        // buffer and fall back to lossy path decoding.
-        let headSize = 131_072
-        let data = handle.readData(ofLength: headSize)
-        let text = String(decoding: data, as: UTF8.self)
 
         var aiTitle: String?
         var firstUserMessage: String?
@@ -538,12 +631,21 @@ enum ClaudeSessionHistory {
         var lastRelocatedCwd: String?
         var isBackgroundScheduled = false
         var entrypoint: String?
+        var sawUserRecord = false
+        var stopScan = false
 
-        for line in text.components(separatedBy: "\n") {
-            guard !line.isEmpty,
-                  let lineData = line.data(using: .utf8),
+        // Whole lines only, so JSON is parsed straight from the line's bytes.
+        // The old lossy String decode existed to survive a window boundary
+        // landing inside a multibyte sequence; complete lines can't have one.
+        // It also repaired bytes that were invalid *on disk*, which this does
+        // not — such a line is now rejected outright. That is the better
+        // failure (a mangled title is worse than none) but it is a real
+        // behaviour change, and on a header line it costs the title and the
+        // `sdk-*` filter together, the same pair this function exists to fix.
+        func consume(_ lineData: Data) {
+            guard !lineData.isEmpty,
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
-            else { continue }
+            else { return }
 
             if firstCwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
                 firstCwd = value
@@ -553,7 +655,7 @@ enum ClaudeSessionHistory {
                 entrypoint = value
             }
 
-            guard let type = json["type"] as? String else { continue }
+            guard let type = json["type"] as? String else { return }
 
             // `type: "relocated"` is the CLI's own signal that the session
             // moved to a new project folder (typically a git worktree). The
@@ -573,6 +675,14 @@ enum ClaudeSessionHistory {
                content.contains("<scheduled-task")
             {
                 isBackgroundScheduled = true
+                // The only record whose *content* ends the scan. Do not add
+                // cwd or title to that list — a scheduled-task enqueue can
+                // appear after the first user line in some JSONL orderings,
+                // so stopping on those would step over it. (The byte loop has
+                // its own exit once a `user` record has parsed AND the head
+                // chunk is behind it; that one is about the window, not about
+                // what was found.)
+                stopScan = true
             }
 
             if aiTitle == nil, type == "ai-title",
@@ -581,9 +691,10 @@ enum ClaudeSessionHistory {
                 aiTitle = value
             }
 
-            if firstUserMessage == nil, type == "user",
-               let message = json["message"] as? [String: Any]
-            {
+            guard type == "user" else { return }
+            sawUserRecord = true
+
+            if firstUserMessage == nil, let message = json["message"] as? [String: Any] {
                 if let content = message["content"] as? String, !content.isEmpty {
                     firstUserMessage = String(content.prefix(100))
                 } else if let contentArr = message["content"] as? [[String: Any]] {
@@ -591,11 +702,80 @@ enum ClaudeSessionHistory {
                     if !joined.isEmpty { firstUserMessage = String(joined.prefix(100)) }
                 }
             }
-
-            // Do not break early on cwd/title alone — scheduled-task enqueue may
-            // appear after the first user line in some JSONL orderings.
-            if isBackgroundScheduled { break }
         }
+
+        var carry = Data()
+        var scannedBytes = 0
+        var atEOF = false
+
+        while !stopScan, !atEOF, scannedBytes < metadataMaxScanSize {
+            // Past the head chunk, keep going only while the header is still
+            // out of reach — except that a non-empty `carry` may be a
+            // COMPLETE final record rather than a fragment. Which one it is
+            // depends solely on whether the file ends here, so ask, with a
+            // single byte, instead of guessing. Without this a file whose
+            // size is an exact multiple of the chunk loses its last record.
+            if scannedBytes >= metadataHeadSize, sawUserRecord {
+                if !carry.isEmpty { atEOF = handle.readData(ofLength: 1).isEmpty }
+                break
+            }
+
+            let want = min(metadataHeadSize, metadataMaxScanSize - scannedBytes)
+            let chunk = handle.readData(ofLength: want)
+            scannedBytes += chunk.count
+            // Only a zero-length read proves EOF. A short read implies it on a
+            // local regular file and not necessarily anywhere else, so reading
+            // one more time costs a syscall and removes an assumption.
+            if chunk.isEmpty {
+                atEOF = true
+                break
+            }
+            carry.append(chunk)
+
+            var searchStart = carry.startIndex
+            while let newline = carry[searchStart...].firstIndex(of: 0x0A) {
+                consume(Data(carry[searchStart..<newline]))
+                searchStart = newline + 1
+                if stopScan { break }
+            }
+            // Keep only the unterminated tail; the copy re-bases the indices.
+            carry = Data(carry[searchStart...])
+        }
+
+        // A final record with no trailing newline is complete only at EOF.
+        // Hitting the ceiling instead leaves a fragment, which is exactly what
+        // must not be parsed.
+        // `consume` silently rejects a line it cannot parse, so `carry` is NOT
+        // cleared here even on success. These files are appended to by running
+        // sessions, so "EOF" can mean "the CLI has not finished this record
+        // yet" — clearing would fold an unparsed fragment into `consumedBytes`
+        // below and hand the tail scan a mid-record start, which is the exact
+        // hole that bound exists to close. Leaving it costs the tail scan one
+        // re-read: for a record `consume` accepted that is exactly idempotent,
+        // and relocation is last-wins. For one it REJECTED it is not — the
+        // tail decodes lossily, so a `relocated` carrying a byte that is
+        // invalid on disk can be accepted there after being refused here.
+        // Measured, and left as is: `resolveProjectPath` checks the directory
+        // exists before using it.
+        if !stopScan, atEOF, !carry.isEmpty {
+            consume(carry)
+        }
+
+        // Bytes consumed as WHOLE LINES — which is not the same as bytes read,
+        // and the tail window below has to be bounded by this one. The line
+        // scan almost always stops mid-record, and that record's leading bytes
+        // are inside the read region while its tail is not; bounding the tail
+        // at `scannedBytes` would start it mid-record, the boundary probe would
+        // correctly call the remainder a fragment, and neither half would ever
+        // look at it. A `relocated` event landing there would be lost — and it
+        // is the tail scan's whole job not to lose one. Bounding here instead
+        // starts the tail exactly on a line boundary. That also recovers a
+        // record straddling the head chunk — but only while the file ends
+        // within 32KB of it; past that `fileSize - tailSize` dominates and the
+        // straddling record falls in the gap neither half reads, exactly as it
+        // did before. The probe pins the naive bytes-read alternative, not the
+        // pre-PR constant, which this fixture's size happens to survive.
+        let consumedBytes = UInt64(scannedBytes - carry.count)
 
         // Sessions can be `relocated` many MB into the JSONL (e.g. a long
         // LSE-Core session that later cd into `.claude/worktrees/…`). The
@@ -610,14 +790,22 @@ enum ClaudeSessionHistory {
             var stage = "seekToEnd"
             do {
                 let fileSize = try handle.seekToEnd()
-                if fileSize > UInt64(headSize) {
+                if fileSize > consumedBytes {
                     let tailSize: UInt64 = 32_768
-                    let tailStart = max(UInt64(headSize), fileSize - min(tailSize, fileSize))
+                    let tailStart = max(consumedBytes, fileSize - min(tailSize, fileSize))
                     // Only drop the first tail line when `tailStart` lands
                     // mid-line. If the previous byte is `\n`, the first line
                     // is complete — dropping it would lose a `relocated`
                     // event that begins exactly at the window boundary.
-                    var startsAtLineBoundary = false
+                    // Offset 0 is a line start by definition and has no
+                    // previous byte to probe. Reached whenever the scan
+                    // consumed no whole line — any file with no newline in the
+                    // region it read — and the file fits in one tail window.
+                    // The probe's own `arrayContentJSONL` is that shape, so
+                    // this runs on every CI build. Three reviewers have now
+                    // reasoned about this branch and the first two deleted it
+                    // in their heads; measure before believing either.
+                    var startsAtLineBoundary = tailStart == 0
                     if tailStart > 0 {
                         stage = "seek to tailStart-1"
                         try handle.seek(toOffset: tailStart - 1)
@@ -648,7 +836,7 @@ enum ClaudeSessionHistory {
                     }
                 }
             } catch {
-                logger.error("extractMetadata: tail scan I/O failed at \(stage, privacy: .public) for \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+                logger.error("extractMetadata: tail scan I/O failed at \(stage, privacy: .public) for \(path, privacy: .private): \(String(describing: error), privacy: .public)")
             }
         }
 
