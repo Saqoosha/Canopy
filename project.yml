@@ -84,13 +84,73 @@ targets:
       SWIFT_STRICT_CONCURRENCY: complete
       configs:
         Debug:
-          # Same Developer ID identity as Release, NOT "Apple Development":
-          # TCC keys folder grants by (bundle id + designated requirement),
-          # so a Debug build signed with a different cert fights the
-          # installed /Applications copy over the same TCC row — every
-          # prod↔debug switch re-prompts "access your Documents folder".
-          # Matching identities → identical designated requirement → one
-          # grant covers both builds forever.
+          # Debug's own bundle id lives HERE, not only in
+          # scripts/build_debug_stable.sh, so that no call site can forget
+          # it. scripts/build.sh (Debug by default; it takes a configuration
+          # argument), scripts/auto-adopt.sh and the CI job (plus anyone
+          # reproducing it locally) all build Debug with no bundle-id
+          # override, so each of them used to produce an app claiming the
+          # SHIPPED id. Those three run `xcodegen generate` first, so the
+          # pin reaches them immediately. An Xcode GUI build does NOT: it
+          # uses whatever Canopy.xcodeproj was generated last, and that file
+          # is gitignored — so that route picks the pin up only after the
+          # next `xcodegen generate`.
+          #
+          # The measured harm, 2026-08-16 on one machine: seven
+          # LaunchServices registrations for sh.saqoo.Canopy, six of them
+          # worktree and scratchpad Debug builds. `lsregister` is not on
+          # PATH; `-dump` lists them and `-u <path>` drops one. Full path:
+          # /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+          #
+          # A stale TCC row for sh.saqoo.Canopy turned up in the same
+          # session and is NOT evidence for this change — recorded here only
+          # so the next person doesn't re-derive it. Its stored requirement
+          # demanded a Developer ID leaf with OU=G5G54TCH8W, so tccd
+          # answered every ScreenCapture and Accessibility check with
+          # "Failed to match existing code requirement for subject
+          # sh.saqoo.Canopy" and both grants read as not granted. Producing
+          # that requirement takes a Developer ID leaf from that identity,
+          # which is still valid in this keychain. The likely source is an
+          # install built before cfc1dd2 (#74, 2026-05-29), which migrated
+          # Release off "Developer ID Application: Whatever Co. (G5G54TCH8W)"
+          # while Debug was still Apple Development — so no Debug build of
+          # that era could have written it. A hand-signed build would also
+          # do it. Recovery: `tccutil reset ScreenCapture sh.saqoo.Canopy`
+          # (same for Accessibility), then re-grant.
+          #
+          # This retires the earlier "sign Debug with the same Developer ID
+          # so one folder grant covers both builds" arrangement: the shared
+          # grant was the whole point of matching identities, and separate
+          # ids give it up deliberately. Two consequences, both real:
+          #
+          #   * The UserDefaults domain splits too. Those routes move onto
+          #     the domain build_debug_stable.sh uses, so what they read on
+          #     first launch depends on whether that script has ever run on
+          #     the machine: if it has, they inherit ITS window frames,
+          #     filters and Sparkle state rather than the Release build's;
+          #     if it hasn't, the domain is new and they start empty. Either
+          #     way nothing migrates from sh.saqoo.Canopy, and any `defaults
+          #     write` aimed at a Debug build must now target
+          #     sh.saqoo.Canopy.debug.
+          #   * The TCC collision moves rather than ending. Debug and
+          #     Release can no longer share a row — but build_debug_stable.sh
+          #     signs Apple Development while this config pins Developer ID,
+          #     so the two DEBUG routes now hold the same bundle id under
+          #     different designated requirements and take turns invalidating
+          #     each other's grants. Alternating between them re-prompts each
+          #     time. Before the split, build.sh and auto-adopt.sh shared
+          #     Release's row harmlessly, since they inherited its identity
+          #     from this config; build_debug_stable.sh already carried its
+          #     own id and its own row.
+          #
+          # Since no cert can put Debug and Release on one row any more,
+          # CODE_SIGN_IDENTITY below could be any identity, and unifying it
+          # with build_debug_stable.sh's would close the Debug-vs-Debug case
+          # above. It is left as-is because choosing a Debug identity is its
+          # own decision, not a side effect of this one. Do NOT delete the
+          # line: nothing else supplies it (project-level `settings.base`
+          # has no signing keys), so removing it changes how Debug is signed.
+          PRODUCT_BUNDLE_IDENTIFIER: sh.saqoo.Canopy.debug
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: "Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
         Release:
