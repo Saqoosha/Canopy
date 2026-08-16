@@ -35,7 +35,7 @@ The project is defined in `project.yml` (XcodeGen format):
 - **Bundle ID:** `sh.saqoo.Canopy` (Release) / `sh.saqoo.Canopy.debug` (Debug — pinned in the `Debug:` config, so it applies to every build route once the project is regenerated; an Xcode GUI build uses the last generated `Canopy.xcodeproj`, which is gitignored)
 - **Deployment target:** macOS 15.0
 - **Swift version:** 6.0
-- **Concurrency:** Strict concurrency checking enabled (`SWIFT_STRICT_CONCURRENCY: complete`)
+- **Concurrency:** Swift 6 language mode (`SWIFT_VERSION: 6.0`) is what enforces actor isolation. `project.yml` also lists `SWIFT_STRICT_CONCURRENCY: complete`, but that key is a sibling of `configs:` and XcodeGen discards it, so it has never applied — see issue #143
 - **Resources:** `theme-light.css` and `Resources/vscode-shim/` (folder reference) are included as bundle resources
 
 ## How to Update Theme CSS
