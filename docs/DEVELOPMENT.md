@@ -126,7 +126,7 @@ The WKWebView has `isInspectable = true`, so you can debug the webview with Safa
 
 1. In Safari, enable "Show features for web developers" (Settings > Advanced)
 2. Launch Canopy
-3. In Safari menu: Develop > Canopy > _canopy.html
+3. In Safari menu: Develop > Canopy > `_canopy-<session-id>.html` (one entry per open session)
 4. You get full Web Inspector: Elements, Console, Network, Sources, etc.
 
 This is useful for:
@@ -185,7 +185,7 @@ The CC extension already has a complete React UI designed for VSCode's webview p
 ### Why Home Directory Read Access
 
 The `allowingReadAccessTo` parameter is set to the user's home directory because the webview needs to read from two separate locations:
-- `~/Library/Application Support/Canopy/_canopy.html` (the entry point)
+- `~/Library/Application Support/Canopy/_canopy-<session-id>.html` (the per-session entry point)
 - `~/.vscode/extensions/anthropic.claude-code-*/webview/` (JS, CSS, assets)
 
 A more restrictive path would not cover both locations.

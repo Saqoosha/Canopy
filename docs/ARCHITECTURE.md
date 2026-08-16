@@ -41,7 +41,7 @@ Detailed technical architecture of Canopy, a macOS app that hosts the Claude Cod
 |  |    1. Console capture (log/error/warn -> consoleLog)       |  |
 |  |    2. VSCodeStub (acquireVsCodeApi, IS_FULL_EDITOR, etc.)  |  |
 |  |                                                            |  |
-|  |  Loaded via loadFileURL(_canopy.html):                     |  |
+|  |  Loaded via loadFileURL(_canopy-<session-id>.html):        |  |
 |  |    - theme-light.css (456 --vscode-* CSS variables)        |  |
 |  |    - VSCode default webview CSS (@layer vscode-default)    |  |
 |  |    - --app-* bridge variables                              |  |
@@ -156,7 +156,8 @@ Static utility enum for finding Claude Code paths on disk:
 
 **HTML generation (`loadCCWebview`):**
 
-Writes `_canopy.html` to `~/Library/Application Support/Canopy/` containing:
+Writes one entry file per session — `_canopy-<session-id>.html` — to
+`~/Library/Application Support/Canopy/`, containing:
 1. Theme CSS variables (loaded from bundled `theme-light.css`)
 2. CC extension's `index.css` (linked via file URL)
 3. Custom CSS overrides: font families, `--app-*` bridge variables, timeline fix
@@ -329,7 +330,7 @@ Events are serialized to JSON and sent to the webview via `window.postMessage()`
 4. loadCCWebview:
    a. Find CC extension path
    b. Generate HTML with theme CSS + extension JS/CSS
-   c. Write _canopy.html to ~/Library/Application Support/Canopy/
+   c. Write _canopy-<session-id>.html to ~/Library/Application Support/Canopy/
    d. loadFileURL with read access to home directory
 5. Webview boots:
    a. React app mounts in <div id="root">
@@ -555,7 +556,7 @@ The `<body>` element must have `class="vscode-light"` (or `vscode-dark` for dark
 
 `WKWebView.loadHTMLString` does not allow the webview to load local file resources (JS, CSS, images) via relative or absolute file URLs. The CC extension's `index.js` imports other modules and references assets using file paths, so `loadFileURL` is required.
 
-The HTML is written to `~/Library/Application Support/Canopy/_canopy.html` and loaded with `allowingReadAccessTo` set to the user's home directory. This grants the webview read access to both the HTML file and the extension directory under `~/.vscode/extensions/`.
+The HTML is written to `~/Library/Application Support/Canopy/_canopy-<session-id>.html` — one file per session, keyed by the process-local session UUID — and loaded with `allowingReadAccessTo` set to the user's home directory. This grants the webview read access to both the HTML file and the extension directory under `~/.vscode/extensions/`.
 
 ### Injected Scripts (atDocumentStart)
 
