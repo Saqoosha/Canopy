@@ -1309,6 +1309,15 @@ final class SessionStore {
     /// every one of those with the developer's real saved layout.
     static func makeRestored() -> SessionStore {
         let store = SessionStore()
+        // The probe decides whether to run in `applicationDidFinishLaunching`,
+        // which is AFTER this `@State` initializer. Without this guard a local
+        // `CANOPY_RUN_LOGIC_PROBE=1` run consumes the developer's real saved
+        // layout — the key is one-shot by design — and spawns its sessions'
+        // shims and CLIs, all before a single assertion has executed. The
+        // factory alone does not insulate the probe; only this does.
+        guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else {
+            return store
+        }
         guard let snapshot = SessionStorePersistence.loadRestoreSnapshot() else {
             return store
         }
