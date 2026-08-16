@@ -109,10 +109,9 @@ extension SessionRestoreSnapshot {
     /// - **Version mismatch → empty**, before anything else is examined.
     /// - Sessions failing `sessionIsResumable` are dropped, and every pane
     ///   pointing at one goes with them. Restoring a session whose JSONL is
-    ///   gone fails loudly at the CLI (measurement on
-    ///   `ClaudeSessionHistory.sessionFileExists`), so the pane would come
-    ///   back as a crash rather than as a session; an absent pane is quieter
-    ///   and does not claim to have restored anything.
+    ///   gone would do something this project has twice guessed wrong about —
+    ///   see `ClaudeSessionHistory.sessionFileExists` for what is and is not
+    ///   established. An absent pane is the one outcome that needs no guess.
     /// - A resumeId appearing in two panes keeps only the leftmost, because
     ///   the store's one-session-one-pane invariant has no way to express
     ///   the duplicate and `paneIndex(forSession:)` would answer with the

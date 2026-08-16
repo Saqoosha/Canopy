@@ -57,13 +57,19 @@ enum ClaudeSessionHistory {
 
     /// True when a transcript for `id` exists under any encoding variant of
     /// `directory`. Used by launch restore to drop sessions whose JSONL is
-    /// gone. Measured on CLI 2.1.217: an unresolvable `--resume` id fails
-    /// LOUDLY — exit 1, `{"subtype":"error_during_execution"}`, and
-    /// `No conversation found with session ID: …` — so a restored session
-    /// whose JSONL vanished would surface as a shim crash rather than as a
-    /// silently-empty transcript. Dropping it here turns that into an absent
-    /// pane, which is the quieter and more honest of the two. Both encodings
-    /// are consulted for the same reason
+    /// gone.
+    ///
+    /// What a restored session with a missing JSONL would actually do is NOT
+    /// established, and two rounds of review each replaced one confident
+    /// wrong answer with another, so the claim is retired rather than
+    /// re-stated. What IS known: invoking the CLI directly with an
+    /// unresolvable `--resume` fails loudly (measured on 2.1.217 — exit 1,
+    /// `{"subtype":"error_during_execution"}`), but Canopy does not take that
+    /// path; the id reaches `extension.js`, and every brand-new Canopy session
+    /// runs on a placeholder resumeId with no JSONL and starts a fresh
+    /// conversation instead of failing (see `SessionStore.openNew`). Dropping
+    /// the pane here means the question never has to be answered. Both
+    /// encodings are consulted for the same reason
     /// `encodedFolderCandidates` exists: older CLI versions wrote the other
     /// folder name for the same directory.
     static func sessionFileExists(id: String, directory: URL) -> Bool {
