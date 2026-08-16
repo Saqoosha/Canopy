@@ -96,7 +96,12 @@ enum SessionStorePersistence {
         do {
             return try JSONDecoder().decode(SessionRestoreSnapshot.self, from: data)
         } catch {
-            logger.warning("loadRestoreSnapshot decode failed: \(error.localizedDescription, privacy: .public) — discarding")
+            // `\(error)`, not `.localizedDescription`: a DecodingError's
+            // localized string is the content-free "the data couldn't be read
+            // because it isn't in the correct format", and the blob is deleted
+            // two lines below — so this message is the only evidence that will
+            // ever exist about why.
+            logger.warning("loadRestoreSnapshot decode failed: \(error) — discarding")
             // A stale layout is not worth keeping (unlike the filter); the next
             // quit rewrites the key, so discard instead of stashing a .broken copy.
             UserDefaults.standard.removeObject(forKey: restoreSnapshotKey)
@@ -113,7 +118,13 @@ enum SessionStorePersistence {
             let data = try JSONEncoder().encode(snapshot)
             UserDefaults.standard.set(data, forKey: restoreSnapshotKey)
         } catch {
-            logger.warning("saveRestoreSnapshot encode failed: \(error.localizedDescription, privacy: .public)")
+            logger.warning("saveRestoreSnapshot encode failed: \(error)")
+            // Fail closed. `makeRestored` consumes the key at launch, so in
+            // practice there is nothing here to go stale — but "we could not
+            // write it" and "restore whatever was there before" must never be
+            // the same outcome, and one line buys that independent of the
+            // consume-at-launch rule holding forever.
+            clearRestoreSnapshot()
         }
     }
 
