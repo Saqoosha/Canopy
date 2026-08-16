@@ -339,11 +339,22 @@ jobs:
       #
       # That override means this job exercises a THIRD signing
       # configuration: project.yml pins Developer ID, scripts/
-      # build_debug_stable.sh overrides to Apple Development +
-      # sh.saqoo.Canopy.debug, and this overrides to ad-hoc while leaving
-      # the project's default bundle id. A green run here says nothing
-      # about whether build_debug_stable.sh or release.sh still sign
-      # correctly.
+      # build_debug_stable.sh overrides to Apple Development, and this
+      # overrides to ad-hoc. A green run here says nothing about whether
+      # build_debug_stable.sh or release.sh still sign correctly.
+      #
+      # The bundle id is NOT part of that difference any more. It used to
+      # be — this step left project.yml's default, so an ad-hoc build wore
+      # sh.saqoo.Canopy. Harmless on an ephemeral runner, unwanted on a
+      # developer's Mac, where reproducing this job registers a throwaway
+      # build with LaunchServices under the shipped app's identity — the
+      # measured harm project.yml's Debug comment records. (That comment
+      # also records a stale TCC row and traces it to a pre-#74 Release.
+      # This job is not a candidate either way: an ad-hoc signature is a
+      # cdhash requirement, not the Developer ID leaf that row demands.
+      # Don't read it as evidence about ad-hoc builds.) project.yml now pins
+      # sh.saqoo.Canopy.debug for every Debug build made from a freshly
+      # generated project, so no call site has to remember.
       - name: Build (Debug, ad-hoc signed)
         run: |
           xcodebuild \

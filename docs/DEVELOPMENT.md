@@ -32,7 +32,7 @@ Or open `Canopy.xcodeproj` in Xcode, select the Canopy scheme, and run (Cmd+R).
 
 The project is defined in `project.yml` (XcodeGen format):
 
-- **Bundle ID:** `sh.saqoo.Canopy`
+- **Bundle ID:** `sh.saqoo.Canopy` (Release) / `sh.saqoo.Canopy.debug` (Debug — pinned in the `Debug:` config, so it applies to every build route once the project is regenerated; an Xcode GUI build uses the last generated `Canopy.xcodeproj`, which is gitignored)
 - **Deployment target:** macOS 15.0
 - **Swift version:** 6.0
 - **Concurrency:** Strict concurrency checking enabled (`SWIFT_STRICT_CONCURRENCY: complete`)
@@ -152,15 +152,22 @@ log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ShimProc
 log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "NodeDiscovery"' --info
 ```
 
-### Debug Auto-Launch
+### Debug Auto-Launch (currently inert)
 
-Skip the launcher and start a session automatically (useful for testing):
+This was meant to skip the launcher and start a session automatically. **It does
+nothing today.** `AppState` reads `debugAutoLaunchDir` into a property and nothing
+consumes it — `grep -rn debugAutoLaunch Sources/` returns the declaration and that one
+read — so no route skips the launcher, and nothing clears the key either.
 
 ```bash
-defaults write sh.saqoo.Canopy debugAutoLaunchDir /path/to/dir
+defaults write sh.saqoo.Canopy.debug debugAutoLaunchDir /path/to/dir
 open build/Build/Products/Debug/Canopy.app
-# Clears automatically after one use
 ```
+
+The domain is recorded for whenever a consumer is restored: it is
+`sh.saqoo.Canopy.debug`, not `sh.saqoo.Canopy`, because `AppState.init()` reads
+`UserDefaults.standard`, which follows the bundle ID, and Debug's is pinned separately
+in `project.yml`.
 
 ## Key Design Decisions
 
