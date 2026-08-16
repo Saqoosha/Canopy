@@ -269,6 +269,8 @@ struct Sidebar: View {
                 RoundedRectangle(cornerRadius: 9)
                     .fill(paneHighlightFill(for: row))
                 RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(paneHighlightStroke(for: row), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 9)
                     .fill(rowBackgroundFill(for: row))
             }
             .padding(.horizontal, 3)
@@ -313,11 +315,29 @@ struct Sidebar: View {
         return Color.clear
     }
 
+    /// Neutral and deliberately pale, sharing `Color.primary` with the hover
+    /// fill above it. The row's activity dot is the only thing in the sidebar
+    /// carrying a *meaning* in its hue, so the surface under it stays achromatic
+    /// — an accent-tinted fill both darkened the row and competed with the dot's
+    /// own colour, and the low-saturation states (idle grey most of all) lost.
+    /// Fill says only "this row has a pane" — focused and unfocused panes share
+    /// it exactly, and `paneHighlightStroke(for:)` is the *whole* of what marks
+    /// the focused one. Splitting the distinction across both meant the focused
+    /// fill had to be the darker of two shades, which is the contrast the dot
+    /// pays for; an outline costs it nothing.
     private func paneHighlightFill(for row: SidebarRow) -> Color {
         switch highlight(for: row) {
         case .none: Color.clear
-        case .weak: Color.accentColor.opacity(0.12)
-        case .strong: Color.accentColor.opacity(0.35)
+        case .weak, .strong: Color.primary.opacity(0.06)
+        }
+    }
+
+    /// Focused pane only — an outline reads as "this one" without darkening the
+    /// surface the dot has to sit on.
+    private func paneHighlightStroke(for row: SidebarRow) -> Color {
+        switch highlight(for: row) {
+        case .none, .weak: Color.clear
+        case .strong: Color.primary.opacity(0.28)
         }
     }
 
