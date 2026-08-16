@@ -3421,6 +3421,196 @@ enum SidebarLogicProbe {
                MacroPadCommand.color(index: 0, rgb: 0xFF00_0000).line == "C 0 000000",
                "got \(MacroPadCommand.color(index: 0, rgb: 0xFF00_0000).line)")
 
+        // MARK: - Session restore snapshot
+        do {
+            func snapSession(
+                _ id: String,
+                origin: SessionRestoreSnapshot.Session.Origin = .local(path: "/tmp/probe")
+            ) -> SessionRestoreSnapshot.Session {
+                SessionRestoreSnapshot.Session(
+                    resumeId: id,
+                    title: id,
+                    project: "probe",
+                    origin: origin,
+                    permissionMode: .acceptEdits,
+                    model: nil,
+                    effortLevel: nil,
+                    providerId: nil,
+                    lastActiveAt: Date(timeIntervalSince1970: 1_700_000_000)
+                )
+            }
+            func snapPane(_ id: String?, _ w: CGFloat = 800) -> SessionRestoreSnapshot.Pane {
+                SessionRestoreSnapshot.Pane(
+                    content: id.map { .session(resumeId: $0) } ?? .launcher,
+                    width: w
+                )
+            }
+            let always: (SessionRestoreSnapshot.Session) -> Bool = { _ in true }
+
+            let original = SessionRestoreSnapshot(
+                sessions: [
+                    snapSession("a", origin: .local(path: "/tmp/a")),
+                    snapSession("b", origin: .remote(host: "mbp", path: "/tmp/b")),
+                ],
+                panes: [snapPane("a", 700), snapPane(nil, 500), snapPane("b", 900)],
+                focusedPaneIndex: 2
+            )
+            // Record the throw rather than `try!`-ing it: a trap here reads in
+            // CI as "the app never launched", which is the one failure mode the
+            // probe job's summary-line check exists to tell apart.
+            do {
+                let encoded = try JSONEncoder().encode(original)
+                let decoded = try JSONDecoder().decode(SessionRestoreSnapshot.self, from: encoded)
+                record("restore: JSON round-trip preserves sessions, panes, and focus",
+                       decoded == original)
+            } catch {
+                record("restore: JSON round-trip preserves sessions, panes, and focus",
+                       false, "threw \(error)")
+            }
+
+            let dropOne = SessionRestoreSnapshot(
+                sessions: [snapSession("keep"), snapSession("drop")],
+                panes: [snapPane("keep", 640), snapPane("drop", 720)],
+                focusedPaneIndex: 0
+            )
+            let afterDrop = dropOne.sanitized(paneCap: 5) { $0.resumeId == "keep" }
+            record("restore: an unresumable session drops its pane with it",
+                   afterDrop.sessions.map(\.resumeId) == ["keep"]
+                       && afterDrop.panes.count == 1)
+            record("restore: the surviving pane keeps its width and content",
+                   afterDrop.panes.first?.width == 640
+                       && afterDrop.panes.first?.content == .session(resumeId: "keep"))
+
+            // Four panes with focus in the MIDDLE, not on the last one. With
+            // only three the final clamp lands on the same index the shift
+            // does, so the assertion passes even with the `droppedBeforeFocus`
+            // bookkeeping deleted — it measures the clamp and nothing else.
+            let focusShift = SessionRestoreSnapshot(
+                sessions: (0..<4).map { snapSession("s\($0)") },
+                panes: (0..<4).map { snapPane("s\($0)") },
+                focusedPaneIndex: 2
+            )
+            let afterFocus = focusShift.sanitized(paneCap: 5) { $0.resumeId != "s0" }
+            record("restore: focus follows content when an earlier pane is dropped",
+                   afterFocus.focusedPaneIndex == 1
+                       && afterFocus.panes[1].content == .session(resumeId: "s2"),
+                   "focus=\(afterFocus.focusedPaneIndex) panes=\(afterFocus.panes.map(\.content))")
+
+            let overFocus = SessionRestoreSnapshot(
+                sessions: [snapSession("only")],
+                panes: [snapPane("only")],
+                focusedPaneIndex: 9
+            )
+            let afterClamp = overFocus.sanitized(paneCap: 5, sessionIsResumable: always)
+            record("restore: focus is clamped when it points past surviving panes",
+                   afterClamp.focusedPaneIndex == 0)
+
+            let dup = SessionRestoreSnapshot(
+                sessions: [snapSession("same")],
+                panes: [snapPane("same", 111), snapPane("same", 222)],
+                focusedPaneIndex: 1
+            )
+            let afterDup = dup.sanitized(paneCap: 5, sessionIsResumable: always)
+            record("restore: duplicate resumeId keeps only the leftmost pane",
+                   afterDup.panes.count == 1 && afterDup.panes[0].width == 111)
+
+            let capped = SessionRestoreSnapshot(
+                sessions: (0..<4).map { snapSession("c\($0)") },
+                panes: (0..<4).map { snapPane("c\($0)", CGFloat(100 + $0)) },
+                focusedPaneIndex: 0
+            )
+            let afterCap = capped.sanitized(paneCap: 2, sessionIsResumable: always)
+            record("restore: panes beyond the cap are dropped, not the whole snapshot",
+                   afterCap.panes.count == 2)
+            let referenced = Set(afterCap.panes.compactMap { pane -> String? in
+                if case .session(let id) = pane.content { return id }
+                return nil
+            })
+            record("restore: a session stranded by the cap is dropped from sessions too",
+                   afterCap.sessions.count == referenced.count
+                       && Set(afterCap.sessions.map(\.resumeId)) == referenced)
+
+            let launcherOnly = SessionRestoreSnapshot(
+                sessions: [snapSession("gone")],
+                panes: [snapPane(nil), snapPane("gone")],
+                focusedPaneIndex: 0
+            )
+            let afterLauncherOnly = launcherOnly.sanitized(paneCap: 5) { _ in false }
+            record("restore: no surviving session pane collapses the snapshot to empty",
+                   afterLauncherOnly.isEmpty)
+
+            var mismatched = original
+            mismatched.version = SessionRestoreSnapshot.currentVersion + 1
+            record("restore: a version mismatch is discarded as empty",
+                   mismatched.sanitized(paneCap: 5, sessionIsResumable: always).isEmpty)
+
+            let onePane = SessionRestoreSnapshot(
+                sessions: [snapSession("solo")],
+                panes: [snapPane("solo")],
+                focusedPaneIndex: 0
+            )
+            record("restore: isEmpty is false for a snapshot with one session pane",
+                   !onePane.isEmpty)
+
+            let ghostPath = "/nonexistent-probe-path-9f3a"
+            let remoteGhost = snapSession("remote-ghost", origin: .remote(host: "nowhere", path: ghostPath))
+            // Can't verify ≠ gone: SSH sessions are accepted without a local check.
+            record("restore: resumableOnDisk keeps a remote session without filesystem access",
+                   SessionRestoreSnapshot.resumableOnDisk(remoteGhost))
+            let localGhost = snapSession("local-ghost", origin: .local(path: ghostPath))
+            record("restore: resumableOnDisk rejects a local session on a nonexistent path",
+                   !SessionRestoreSnapshot.resumableOnDisk(localGhost))
+
+            // The capture half. `applyRestoreSnapshot` can't be exercised here
+            // — it resolves `resumableOnDisk` against the real filesystem and
+            // would drop every synthetic fixture — so capture is pinned on its
+            // own, plus the round-trip property that matters at the seam: what
+            // capture emits must already survive sanitize untouched. A capture
+            // that needed cleaning up would mean the two halves disagree about
+            // the shape, and the disagreement would only ever show as silently
+            // missing panes on somebody's next launch.
+            let capStore = SessionStore()
+            let capLocal = OpenSession(
+                origin: .local(cwd),
+                resumeId: "cap-local",
+                title: "Cap Local",
+                project: "ProjectCap",
+                status: .live,
+                permissionMode: .plan
+            )
+            let capRemote = OpenSession(
+                origin: .remote(host: "mbp", path: URL(fileURLWithPath: "/remote/dir")),
+                resumeId: "cap-remote",
+                title: "Cap Remote",
+                project: "mbp:dir",
+                status: .live
+            )
+            capStore._probeSeedOpenSessions([capLocal, capRemote])
+            capStore.openInFocusedPane(capLocal.id)
+            _ = capStore.openInNewPane(capRemote.id)
+            _ = capStore.openLauncherInNewPane()
+            let captured = capStore.captureRestoreSnapshot()
+
+            record("restore: capture mirrors the pane strip in order, launcher included",
+                   captured.panes.count == 3
+                       && captured.panes[0].content == .session(resumeId: "cap-local")
+                       && captured.panes[1].content == .session(resumeId: "cap-remote")
+                       && captured.panes[2].content == .launcher
+                       && captured.focusedPaneIndex == 2,
+                   "panes=\(captured.panes.map(\.content)) focus=\(captured.focusedPaneIndex)")
+            record("restore: capture stores one session per paned session, in pane order",
+                   captured.sessions.map(\.resumeId) == ["cap-local", "cap-remote"],
+                   "got \(captured.sessions.map(\.resumeId))")
+            record("restore: capture carries permission mode and a remote origin across",
+                   captured.sessions.first?.permissionMode == .plan
+                       && captured.sessions.last?.origin == .remote(host: "mbp", path: "/remote/dir"),
+                   "mode=\(String(describing: captured.sessions.first?.permissionMode)) "
+                       + "origin=\(String(describing: captured.sessions.last?.origin))")
+            record("restore: a captured snapshot already survives sanitize unchanged",
+                   captured.sanitized(paneCap: SessionStore.paneAbsoluteCap, sessionIsResumable: always)
+                       == captured)
+        }
+
         // Summary. Note `grep -c 'record('` does NOT equal this count: the
         // `func record(` definition matches too, and a few call sites only
         // fire on failure. Read the printed number, don't count the source.

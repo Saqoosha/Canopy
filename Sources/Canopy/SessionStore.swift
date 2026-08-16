@@ -1158,6 +1158,146 @@ final class SessionStore {
         schedulePaneResize()
     }
 
+    // MARK: - Launch restore
+
+    /// Snapshot the current pane strip for quit-time persistence. Only
+    /// sessions a pane references are included — see `SessionRestoreSnapshot`.
+    func captureRestoreSnapshot() -> SessionRestoreSnapshot {
+        // preferredWidth is a weight until this runs; the snapshot stores
+        // absolute pt measured against the live window.
+        normalizePaneWeightsToVisualWidths()
+
+        var sessions: [SessionRestoreSnapshot.Session] = []
+        var panesOut: [SessionRestoreSnapshot.Pane] = []
+        var seenResumeIds = Set<String>()
+        // Silently skipping a missing session without this would shift focus
+        // onto whatever pane slid left into the stored index.
+        var droppedBeforeFocus = 0
+
+        for (index, slot) in panes.enumerated() {
+            switch slot.content {
+            case .launcher:
+                panesOut.append(.init(content: .launcher, width: slot.preferredWidth))
+            case .session(let id):
+                guard let open = openSessions.first(where: { $0.id == id }) else {
+                    if index < focusedPaneIndex { droppedBeforeFocus += 1 }
+                    continue
+                }
+                panesOut.append(.init(content: .session(resumeId: open.resumeId), width: slot.preferredWidth))
+                if seenResumeIds.insert(open.resumeId).inserted {
+                    let origin: SessionRestoreSnapshot.Session.Origin
+                    switch open.origin {
+                    case .local(let url):
+                        origin = .local(path: url.path)
+                    case .remote(let host, let path):
+                        origin = .remote(host: host, path: path.path)
+                    case .teleportedFrom(let cloudId, let path):
+                        origin = .teleported(cloudSessionId: cloudId, path: path.path)
+                    }
+                    sessions.append(SessionRestoreSnapshot.Session(
+                        resumeId: open.resumeId,
+                        title: open.title,
+                        project: open.project,
+                        origin: origin,
+                        permissionMode: open.permissionMode,
+                        model: open.model,
+                        effortLevel: open.effortLevel,
+                        providerId: open.customApi?.id,
+                        lastActiveAt: open.lastActiveAt
+                    ))
+                }
+            }
+        }
+
+        return SessionRestoreSnapshot(
+            sessions: sessions,
+            panes: panesOut,
+            focusedPaneIndex: focusedPaneIndex - droppedBeforeFocus
+        )
+    }
+
+    /// Rebuild `openSessions` + `panes` from a quit-time snapshot. This is
+    /// where sanitization happens — callers hand over the raw stored blob and
+    /// every drop rule (missing transcript, duplicate pane, pane cap, focus
+    /// clamp) is resolved here, so there is exactly one place a restore can
+    /// decide something is unusable.
+    func applyRestoreSnapshot(_ snapshot: SessionRestoreSnapshot) {
+        let clean = snapshot.sanitized(
+            paneCap: Self.paneAbsoluteCap,
+            sessionIsResumable: SessionRestoreSnapshot.resumableOnDisk
+        )
+        guard !clean.isEmpty else { return }
+
+        let providers = ModelProviderStore.load()
+        var byResumeId: [String: OpenSession] = [:]
+        var restored: [OpenSession] = []
+        for s in clean.sessions {
+            let origin: OpenSession.Origin
+            switch s.origin {
+            case .local(let path):
+                origin = .local(URL(fileURLWithPath: path))
+            case .remote(let host, let path):
+                origin = .remote(host: host, path: URL(fileURLWithPath: path))
+            case .teleported(let cloudId, let path):
+                origin = .teleportedFrom(cloudSessionId: cloudId, localPath: URL(fileURLWithPath: path))
+            }
+            let provider = s.providerId.flatMap { id in providers.first { $0.id == id } }
+            let open = OpenSession(
+                origin: origin,
+                resumeId: s.resumeId,
+                title: s.title,
+                project: s.project,
+                status: .spawning,
+                lastActiveAt: s.lastActiveAt,
+                permissionMode: s.permissionMode,
+                model: s.model,
+                effortLevel: s.effortLevel,
+                customApi: provider
+            )
+            byResumeId[s.resumeId] = open
+            restored.append(open)
+        }
+        openSessions = restored
+
+        panes = clean.panes.compactMap { pane in
+            let content: PaneContent
+            switch pane.content {
+            case .launcher:
+                content = .launcher
+            case .session(let resumeId):
+                guard let open = byResumeId[resumeId] else { return nil }
+                content = .session(open.id)
+            }
+            return PaneSlot(content: content, preferredWidth: pane.width)
+        }
+
+        focusedPaneIndex = min(max(0, clean.focusedPaneIndex), max(0, panes.count - 1))
+        syncSelectionToFocusedPane()
+        // Do not call schedulePaneResize / normalizePaneWeightsToVisualWidths:
+        // the window frame is restored independently from canopy.mainWindowFrame
+        // by AppDelegate.configureCanopyWindow, and it is the same frame these
+        // widths were measured against — running the sizer would fight it.
+        logger.info("applyRestoreSnapshot: \(self.panes.count) panes, \(self.openSessions.count) sessions")
+    }
+
+    /// Factory that consumes a quit-time snapshot (if any) into a fresh store.
+    ///
+    /// The consume-before-apply order is load-bearing: a snapshot that crashes
+    /// the restore would otherwise be replayed on every launch forever, and
+    /// each replay tries to spawn N shims. This is a factory instead of work
+    /// inside `init()` because `_SidebarLogicProbe` constructs bare
+    /// `SessionStore()`s all over, and restoring inside `init` would contaminate
+    /// every one of those with the developer's real saved layout.
+    static func makeRestored() -> SessionStore {
+        let store = SessionStore()
+        guard let snapshot = SessionStorePersistence.loadRestoreSnapshot() else {
+            return store
+        }
+        SessionStorePersistence.clearRestoreSnapshot()
+        store.applyRestoreSnapshot(snapshot)
+        return store
+    }
+
     #if DEBUG
     /// Probe-only seeding helper. `openSessions` is `private(set)` (setter
     /// file-private), so `_SidebarLogicProbe` cannot assign it directly.

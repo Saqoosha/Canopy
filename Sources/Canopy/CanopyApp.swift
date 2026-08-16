@@ -10,7 +10,7 @@ struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
 
-    @State private var sidebarStore = SessionStore()
+    @State private var sidebarStore = SessionStore.makeRestored()
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -564,7 +564,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        normalizeSavedFrameForSinglePane()
+        // The two branches are mutually exclusive on purpose — normalizing
+        // the saved frame to one pane's width is only right when the next
+        // launch will NOT rebuild the pane strip.
+        if Self.shouldSaveRestoreSnapshot, let store = SessionStore.shared {
+            SessionStorePersistence.saveRestoreSnapshot(store.captureRestoreSnapshot())
+        } else {
+            normalizeSavedFrameForSinglePane()
+            SessionStorePersistence.clearRestoreSnapshot()
+        }
+        // Quit, and only our own files — see `WebViewContainer.purgeOwnEntryFiles`.
+        WebViewContainer.purgeOwnEntryFiles()
         macroPad?.shutdown()
         if let monitor = cmdWMonitor {
             NSEvent.removeMonitor(monitor)
@@ -576,9 +586,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Quitting with 2+ panes leaves the multi-pane window width in the
-    /// saved frame, but panes are NOT restored on launch (Phase A: no
-    /// auto-spawn) — so the next session would open as one giant pane
+    /// Runs only on the discard-layout quit path. On Save-and-Quit the full
+    /// multi-pane width is deliberately kept because the panes come back.
+    /// Quitting with 2+ panes otherwise leaves the multi-pane window width
+    /// in the saved frame, so the next session would open as one giant pane
     /// spanning the whole multi-pane-wide window. Rewrite the saved width
     /// to sidebar + the focused pane's current visual width, i.e. the
     /// window the user would get by closing the other panes before quit.
@@ -622,6 +633,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// this flag, so no `/bin/sh` waiter is ever left polling for our pid.
     @MainActor
     private static var shouldRelaunchOnExit = false
+
+    /// Set by the quit prompt, read by `applicationWillTerminate`, and it
+    /// decides between two mutually exclusive quit-time writes (snapshot vs.
+    /// single-pane frame normalization).
+    @MainActor
+    private static var shouldSaveRestoreSnapshot = false
 
     /// Schedule Canopy to relaunch by routing through `NSApp.terminate(nil)`
     /// so `applicationShouldTerminate`'s active-sessions prompt and shim
@@ -680,25 +697,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if ShimProcess.hasActiveSession {
             let count = ShimProcess.activeCount
+            let relaunching = Self.shouldRelaunchOnExit
+            let verb = relaunching ? "Restart" : "Quit"
+            let stopping = relaunching ? "Restarting" : "Quitting"
             let alert = NSAlert()
-            alert.messageText = "Active Sessions Running"
-            alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. Quitting will stop all sessions."
-            alert.addButton(withTitle: "Quit")
+            alert.messageText = relaunching ? "Restart Canopy" : "Active Sessions Running"
+            alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. \(stopping) will stop all sessions.\n\nSave and \(verb) restores this pane layout and these sessions next launch."
+            alert.addButton(withTitle: "Save and \(verb)")
+            alert.addButton(withTitle: verb)
             alert.addButton(withTitle: "Cancel")
+            // AppKit otherwise hands Escape to the SECOND button, which here
+            // is the destructive discard-and-quit.
+            alert.buttons[0].keyEquivalent = "\r"
+            alert.buttons[1].keyEquivalent = ""
+            alert.buttons[2].keyEquivalent = "\u{1b}"
             alert.alertStyle = .warning
-            if alert.runModal() == .alertSecondButtonReturn {
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                Self.shouldSaveRestoreSnapshot = true
+            case .alertSecondButtonReturn:
+                Self.shouldSaveRestoreSnapshot = false
+            default:
                 // User backed out — clear the relaunch flag so the next normal
                 // quit doesn't unexpectedly re-open Canopy.
                 Self.shouldRelaunchOnExit = false
+                Self.shouldSaveRestoreSnapshot = false
                 return .terminateCancel
             }
         }
+        // No active sessions → no alert, shouldSaveRestoreSnapshot stays false
+        // (nothing to restore).
 
         // If "Restart Now" triggered this terminate, spawn the waiter now —
         // before the run loop starts winding down — so the failure alert is
         // delivered cleanly and the user can decide what to do.
         if Self.shouldRelaunchOnExit, !spawnRelaunchHelper() {
             Self.shouldRelaunchOnExit = false
+            // Same reason the relaunch flag is cleared: a cancelled terminate
+            // must leave no decision behind. A stale `true` would make the
+            // NEXT quit — possibly one with no sessions and so no prompt —
+            // silently write a restore snapshot the user never asked for.
+            Self.shouldSaveRestoreSnapshot = false
             return .terminateCancel
         }
 

@@ -55,6 +55,24 @@ enum ClaudeSessionHistory {
         return strict == legacy ? [strict] : [strict, legacy]
     }
 
+    /// True when a transcript for `id` exists under any encoding variant of
+    /// `directory`. Used by launch restore to drop sessions whose JSONL is
+    /// gone — the CLI ignores an unresolvable `--resume` id and quietly
+    /// starts a fresh conversation instead of failing, so without this check
+    /// a deleted session comes back as its old title over an empty
+    /// transcript. Both encodings are consulted for the same reason
+    /// `encodedFolderCandidates` exists: older CLI versions wrote the other
+    /// folder name for the same directory.
+    static func sessionFileExists(id: String, directory: URL) -> Bool {
+        for folder in encodedFolderCandidates(for: directory.path) {
+            let url = claudeDir
+                .appendingPathComponent(folder)
+                .appendingPathComponent("\(id).jsonl")
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+        }
+        return false
+    }
+
     /// Decode encoded project directory name back to path.
     /// Uses greedy filesystem walk to resolve ambiguous `-` separators.
     /// Matching Sessylph's approach.
