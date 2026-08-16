@@ -108,8 +108,9 @@ final class SessionStore {
 
     /// Resume id of the session that was active at last quit. The sidebar
     /// uses this to highlight that row on cold launch (the user can click to
-    /// reopen). Phase A doesn't auto-spawn the shim — restoration is one
-    /// click away, with no MCP-connection wall-of-startup at launch.
+    /// reopen). This is the ORDINARY launch path, where nothing auto-spawns
+    /// and reopening is one click away. A Save-and-Quit launch is the other
+    /// path and does spawn — see `makeRestored()`.
     var lastActiveResumeId: String? = SessionStorePersistence.loadLastActiveResumeId()
 
     /// Sidebar-hidden session ids. Closed local rows whose JSONL id is in
@@ -1249,7 +1250,7 @@ final class SessionStore {
                 project: s.project,
                 status: .spawning,
                 lastActiveAt: s.lastActiveAt,
-                permissionMode: s.permissionMode,
+                permissionMode: Self.clampedPermissionMode(s.permissionMode),
                 model: s.model,
                 effortLevel: s.effortLevel,
                 customApi: provider
@@ -1278,6 +1279,24 @@ final class SessionStore {
         // by AppDelegate.configureCanopyWindow, and it is the same frame these
         // widths were measured against — running the sizer would fight it.
         logger.info("applyRestoreSnapshot: \(self.panes.count) panes, \(self.openSessions.count) sessions")
+    }
+
+    /// Re-apply the bypass-permissions opt-in to a mode that came from disk.
+    ///
+    /// Every other route to a `PermissionMode` already clamps: `CanopySettings`
+    /// does it in both `didSet` and `load()` for `defaultPermissionMode`, and
+    /// `LauncherView.resolvedPermission` does it for a launcher choice. Restore
+    /// is a third route, and the snapshot is plain JSON in UserDefaults — i.e.
+    /// exactly the "stale settings paired bypass with a disabled opt-in (manual
+    /// edit, downgrade)" case `CanopySettings`' own clamp comment names. Without
+    /// this, quitting with a bypass session and then turning the toggle OFF
+    /// brings that session back in bypass on the next launch, with the launcher
+    /// Picker still hiding the mode.
+    private static func clampedPermissionMode(_ mode: PermissionMode) -> PermissionMode {
+        guard mode == .bypassPermissions,
+              !CanopySettings.shared.allowDangerouslySkipPermissions else { return mode }
+        logger.notice("restore: clamping .bypassPermissions → .acceptEdits (opt-in is off)")
+        return .acceptEdits
     }
 
     /// Factory that consumes a quit-time snapshot (if any) into a fresh store.

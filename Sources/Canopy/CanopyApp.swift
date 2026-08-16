@@ -21,11 +21,15 @@ struct CanopyApp: App {
                 Detail(store: sidebarStore)
             }
             .navigationSplitViewStyle(.balanced)
-            // Started here rather than in `applicationDidFinishLaunching`
-            // because that runs before SwiftUI has built the scene, so
-            // `SessionStore.shared` may still be nil there — this is the
-            // first point where the store is unambiguously alive. Fires once
-            // per window; `startMacroPad` is idempotent.
+            // Started here rather than in `applicationDidFinishLaunching`.
+            // The old reason given — that the delegate callback runs before
+            // SwiftUI builds the scene — is FALSE and has been deleted rather
+            // than annotated: it fires after the first render (measured while
+            // debugging the entry-file sweep, see
+            // `WebViewContainer.purgeOwnEntryFiles`). What is true is that
+            // this is the point where the store is unambiguously alive and in
+            // hand, with no `SessionStore.shared` lookup. Fires once per
+            // window; `startMacroPad` is idempotent.
             .task { appDelegate.startMacroPad(store: sidebarStore) }
         }
         .windowStyle(.hiddenTitleBar)
@@ -564,11 +568,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // The two branches are mutually exclusive on purpose — normalizing
-        // the saved frame to one pane's width is only right when the next
-        // launch will NOT rebuild the pane strip.
-        if Self.shouldSaveRestoreSnapshot, let store = SessionStore.shared {
-            SessionStorePersistence.saveRestoreSnapshot(store.captureRestoreSnapshot())
+        // Saving the layout and normalizing the saved frame to one pane's
+        // width are mutually exclusive — but the deciding question is
+        // "will the next launch rebuild the pane strip?", NOT "did the user
+        // click Save". A capture with no session pane restores to nothing
+        // (see `SessionRestoreSnapshot.isEmpty`), so it has to take the
+        // normalize branch too or the user gets a multi-pane-wide window
+        // with a single giant pane in it.
+        if Self.shouldSaveRestoreSnapshot {
+            let snapshot = SessionStore.shared?.captureRestoreSnapshot()
+            if let snapshot, !snapshot.isEmpty {
+                SessionStorePersistence.saveRestoreSnapshot(snapshot)
+            } else {
+                // Reached when the store is gone (the `shared` weak ref is
+                // nil) or the strip held no session pane. The first is not
+                // supposed to happen and is the reason this logs: the user
+                // asked to save and is getting a discard, which is otherwise
+                // indistinguishable from having clicked Quit.
+                if snapshot == nil {
+                    logger.error("Save-and-Quit requested but SessionStore.shared is nil — layout NOT saved")
+                }
+                normalizeSavedFrameForSinglePane()
+                SessionStorePersistence.clearRestoreSnapshot()
+            }
         } else {
             normalizeSavedFrameForSinglePane()
             SessionStorePersistence.clearRestoreSnapshot()
@@ -706,8 +728,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.addButton(withTitle: "Save and \(verb)")
             alert.addButton(withTitle: verb)
             alert.addButton(withTitle: "Cancel")
-            // AppKit otherwise hands Escape to the SECOND button, which here
-            // is the destructive discard-and-quit.
+            // AppKit assigns Escape by BUTTON TITLE, not by position: the one
+            // titled "Cancel" gets it wherever it sits, and measuring this
+            // alert on macOS 26.6 shows all three lines below already match
+            // what AppKit picked. They are pinned anyway so that renaming or
+            // localizing "Cancel" cannot silently move Escape onto the
+            // destructive discard — with a third button titled anything else,
+            // Escape ends up bound to nothing.
             alert.buttons[0].keyEquivalent = "\r"
             alert.buttons[1].keyEquivalent = ""
             alert.buttons[2].keyEquivalent = "\u{1b}"

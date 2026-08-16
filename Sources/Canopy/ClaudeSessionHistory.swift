@@ -57,10 +57,13 @@ enum ClaudeSessionHistory {
 
     /// True when a transcript for `id` exists under any encoding variant of
     /// `directory`. Used by launch restore to drop sessions whose JSONL is
-    /// gone — the CLI ignores an unresolvable `--resume` id and quietly
-    /// starts a fresh conversation instead of failing, so without this check
-    /// a deleted session comes back as its old title over an empty
-    /// transcript. Both encodings are consulted for the same reason
+    /// gone. Measured on CLI 2.1.217: an unresolvable `--resume` id fails
+    /// LOUDLY — exit 1, `{"subtype":"error_during_execution"}`, and
+    /// `No conversation found with session ID: …` — so a restored session
+    /// whose JSONL vanished would surface as a shim crash rather than as a
+    /// silently-empty transcript. Dropping it here turns that into an absent
+    /// pane, which is the quieter and more honest of the two. Both encodings
+    /// are consulted for the same reason
     /// `encodedFolderCandidates` exists: older CLI versions wrote the other
     /// folder name for the same directory.
     static func sessionFileExists(id: String, directory: URL) -> Bool {

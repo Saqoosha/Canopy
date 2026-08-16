@@ -608,15 +608,23 @@ struct WebViewContainer: NSViewRepresentable {
 
     // MARK: - Webview entry files
 
-    static let entryFilePrefix = "_canopy-"
+    /// Private on purpose: nothing may sweep by this prefix. A glob sweep is
+    /// the design that deleted a concurrently-running instance's live files,
+    /// and `purgeOwnEntryFiles` replaced it.
+    private static let entryFilePrefix = "_canopy-"
 
     /// Per-session name for the webview's HTML entry point. Keyed by the
     /// `OpenSession`'s process-local UUID rather than its resumeId, because
     /// `ShimProcess.backfillResumeId` rewrites the resumeId mid-session and the
     /// file this webview is loaded from must not move under it.
-    private static func entryFileName(for session: OpenSession?) -> String {
-        guard let session else { return "\(entryFilePrefix)default.html" }
-        return "\(entryFilePrefix)\(session.id.uuidString).html"
+    ///
+    /// The nil-session fallback is a fresh UUID rather than a fixed name.
+    /// `SessionContainer` is the only construction site and always passes a
+    /// session, so the branch is unreachable — but a fixed name would be a
+    /// shared path carrying exactly the race this scheme exists to remove,
+    /// sitting inside the function that removes it.
+    static func entryFileName(for session: OpenSession?) -> String {
+        "\(entryFilePrefix)\(session?.id.uuidString ?? UUID().uuidString).html"
     }
 
     /// Entry files THIS process has written. The only thing `purgeOwnEntryFiles`

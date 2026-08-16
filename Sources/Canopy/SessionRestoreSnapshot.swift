@@ -83,7 +83,21 @@ struct SessionRestoreSnapshot: Codable, Equatable {
 
     /// True when there is nothing worth rebuilding. Callers treat this as
     /// "launch normally" rather than as an error.
-    var isEmpty: Bool { panes.isEmpty }
+    ///
+    /// The test is **a surviving session pane**, not `panes.isEmpty`, so that
+    /// "worth saving" and "worth restoring" are one predicate rather than two.
+    /// They used to differ, and the gap was reachable: Cmd+N in each of two
+    /// panes leaves two launcher panes with their sessions still running, so
+    /// the quit prompt appeared, the snapshot passed the save gate, and
+    /// `sanitized`'s no-session-pane rule then rejected it at launch. The user
+    /// got nothing back — plus the multi-pane-wide window, because taking the
+    /// save branch had skipped `normalizeSavedFrameForSinglePane()`.
+    var isEmpty: Bool {
+        !panes.contains { pane in
+            if case .session = pane.content { return true }
+            return false
+        }
+    }
 }
 
 extension SessionRestoreSnapshot {
@@ -92,11 +106,13 @@ extension SessionRestoreSnapshot {
     /// a closure so the probe can drive every branch without touching disk.
     ///
     /// The rules, and why each one is here:
+    /// - **Version mismatch → empty**, before anything else is examined.
     /// - Sessions failing `sessionIsResumable` are dropped, and every pane
     ///   pointing at one goes with them. Restoring a session whose JSONL is
-    ///   gone does not fail loudly — the CLI ignores a `--resume` id it
-    ///   can't find and silently starts a fresh conversation, so the user
-    ///   would get the old title on an empty transcript.
+    ///   gone fails loudly at the CLI (measurement on
+    ///   `ClaudeSessionHistory.sessionFileExists`), so the pane would come
+    ///   back as a crash rather than as a session; an absent pane is quieter
+    ///   and does not claim to have restored anything.
     /// - A resumeId appearing in two panes keeps only the leftmost, because
     ///   the store's one-session-one-pane invariant has no way to express
     ///   the duplicate and `paneIndex(forSession:)` would answer with the
@@ -108,7 +124,14 @@ extension SessionRestoreSnapshot {
     ///   Launcher panes are faithful to what the user arranged, but a
     ///   relaunch into three empty launchers reads as a bug, and a
     ///   launcher-only arrangement has nothing to restore in the first place.
+    /// - Sessions no surviving pane refers to are dropped, so a pane lost to
+    ///   the cap cannot strand one.
     /// - `focusedPaneIndex` is clamped last, after the pane list is final.
+    ///   Note the bookkeeping only repairs panes dropped BEFORE the focused
+    ///   one; when the focused pane is itself dropped, focus lands on
+    ///   whatever slid into its index. That is deliberate — there is no
+    ///   better answer — but it is not what "keeps pointing at the same
+    ///   content" would suggest on its own.
     func sanitized(
         paneCap: Int,
         sessionIsResumable: (Session) -> Bool
@@ -154,7 +177,17 @@ extension SessionRestoreSnapshot {
         let referenced: Set<String> = Set(keptPanes.compactMap {
             if case .session(let id) = $0.content { return id } else { return nil }
         })
-        let keptSessions = resumable.filter { referenced.contains($0.resumeId) }
+        // De-duplicate by resumeId as well as filtering. Capture cannot emit a
+        // duplicate, but this blob is plain JSON in UserDefaults and sanitize
+        // is the one place untrusted stored input gets laundered. Two entries
+        // sharing a resumeId would both become `OpenSession`s while only the
+        // last won the pane, leaving the first as an unpaned row stuck at
+        // `.spawning` — the permanently breathing "working" dot this type's
+        // own doc says the paned-only rule exists to prevent.
+        var seenSessions: Set<String> = []
+        let keptSessions = resumable.filter {
+            referenced.contains($0.resumeId) && seenSessions.insert($0.resumeId).inserted
+        }
 
         let focus = min(max(0, focusedPaneIndex - droppedBeforeFocus), keptPanes.count - 1)
         return SessionRestoreSnapshot(sessions: keptSessions, panes: keptPanes, focusedPaneIndex: focus)

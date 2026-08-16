@@ -3561,6 +3561,55 @@ enum SidebarLogicProbe {
             record("restore: resumableOnDisk rejects a local session on a nonexistent path",
                    !SessionRestoreSnapshot.resumableOnDisk(localGhost))
 
+            // The directory guard short-circuits the two assertions above, so
+            // on their own they never reach the transcript lookup — replacing
+            // `sessionFileExists` with `return true` left the whole suite
+            // green. Point at a directory that DOES exist so the JSONL check
+            // is the only thing left to decide the answer, and write a real
+            // transcript to pin the true branch and the folder encoding.
+            let realDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("CanopyProbe-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: realDir, withIntermediateDirectories: true)
+            let presentId = UUID().uuidString
+            record("restore: an existing cwd with no transcript is still not resumable",
+                   !SessionRestoreSnapshot.resumableOnDisk(
+                       snapSession(presentId, origin: .local(path: realDir.path))))
+
+            let encoded = ClaudeSessionHistory.encodedFolderCandidates(for: realDir.path)[0]
+            let projectDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude/projects").appendingPathComponent(encoded)
+            try? FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let transcript = projectDir.appendingPathComponent("\(presentId).jsonl")
+            try? Data("{}\n".utf8).write(to: transcript)
+            record("restore: a local session with a transcript on disk is resumable",
+                   SessionRestoreSnapshot.resumableOnDisk(
+                       snapSession(presentId, origin: .local(path: realDir.path))),
+                   "looked under \(encoded)")
+            try? FileManager.default.removeItem(at: transcript)
+            record("restore: deleting the transcript makes it unresumable again",
+                   !SessionRestoreSnapshot.resumableOnDisk(
+                       snapSession(presentId, origin: .local(path: realDir.path))))
+            try? FileManager.default.removeItem(at: projectDir)
+            try? FileManager.default.removeItem(at: realDir)
+
+            // Duplicate session entries: capture cannot emit them, but the
+            // blob is hand-editable JSON and sanitize is the laundering point.
+            let dupSessions = SessionRestoreSnapshot(
+                sessions: [snapSession("twin"), snapSession("twin")],
+                panes: [snapPane("twin")],
+                focusedPaneIndex: 0
+            )
+            let afterDupSessions = dupSessions.sanitized(paneCap: 5, sessionIsResumable: always)
+            record("restore: duplicate session entries collapse to one",
+                   afterDupSessions.sessions.count == 1,
+                   "got \(afterDupSessions.sessions.count)")
+
+            // A launcher-only strip must read as empty at BOTH ends, so the
+            // quit path normalizes the window frame instead of saving a
+            // snapshot the next launch will reject.
+            record("restore: a launcher-only strip is empty, so it is never saved",
+                   SessionRestoreSnapshot(sessions: [], panes: [snapPane(nil)], focusedPaneIndex: 0).isEmpty)
+
             // The capture half. `applyRestoreSnapshot` can't be exercised here
             // — it resolves `resumableOnDisk` against the real filesystem and
             // would drop every synthetic fixture — so capture is pinned on its
@@ -3609,6 +3658,59 @@ enum SidebarLogicProbe {
             record("restore: a captured snapshot already survives sanitize unchanged",
                    captured.sanitized(paneCap: SessionStore.paneAbsoluteCap, sessionIsResumable: always)
                        == captured)
+
+            // Field-by-field, not two hand-picked ones. Mutating title/project
+            // into each other, or nilling model/effortLevel/providerId, left
+            // the suite green — and providerId is the field that exists so the
+            // provider's authToken never reaches the JSON, so losing it
+            // silently drops the user's custom backend on restore.
+            let capFull = OpenSession(
+                origin: .local(cwd),
+                resumeId: "cap-full",
+                title: "Full Title",
+                project: "FullProject",
+                status: .live,
+                lastActiveAt: Date(timeIntervalSince1970: 776_000_000),
+                permissionMode: .plan,
+                model: "opus",
+                effortLevel: "high",
+                customApi: ModelProvider(id: "provider-xyz", name: "Probe")
+            )
+            let capStore2 = SessionStore()
+            capStore2._probeSeedOpenSessions([capFull])
+            capStore2.openInFocusedPane(capFull.id)
+            let cf = capStore2.captureRestoreSnapshot().sessions.first
+            record("restore: capture carries every restorable session field",
+                   cf?.resumeId == "cap-full" && cf?.title == "Full Title"
+                       && cf?.project == "FullProject" && cf?.permissionMode == .plan
+                       && cf?.model == "opus" && cf?.effortLevel == "high"
+                       && cf?.providerId == "provider-xyz"
+                       && cf?.origin == .local(path: cwd.path)
+                       && cf?.lastActiveAt == Date(timeIntervalSince1970: 776_000_000),
+                   "got \(String(describing: cf))")
+
+            // Widths are copied, not recomputed — assert against whatever
+            // `normalizePaneWeightsToVisualWidths()` produced rather than a
+            // literal, so the assertion can't be environment-dependent.
+            record("restore: capture copies each pane's width verbatim",
+                   captured.panes.map(\.width) == capStore.panes.map(\.preferredWidth))
+
+            // A teleported origin appears on no other fixture, so swapping its
+            // two associated values survived every existing assertion.
+            let capTele = OpenSession(
+                origin: .teleportedFrom(cloudSessionId: "cloud-77", localPath: cwd),
+                resumeId: "cap-tele",
+                title: "Teleported",
+                project: "ProjectTele",
+                status: .live
+            )
+            let capStore3 = SessionStore()
+            capStore3._probeSeedOpenSessions([capTele])
+            capStore3.openInFocusedPane(capTele.id)
+            let teleOrigin = capStore3.captureRestoreSnapshot().sessions.first?.origin
+            record("restore: a teleported origin keeps its cloud id and path in order",
+                   teleOrigin == .teleported(cloudSessionId: "cloud-77", path: cwd.path),
+                   "got \(String(describing: teleOrigin))")
         }
 
         // Summary. Note `grep -c 'record('` does NOT equal this count: the
