@@ -8,7 +8,7 @@ enum AppScreen {
     case session
 }
 
-enum PermissionMode: String, CaseIterable, Identifiable {
+enum PermissionMode: String, Codable, CaseIterable, Identifiable {
     case `default` = "default"
     case acceptEdits = "acceptEdits"
     case auto = "auto"

@@ -233,7 +233,7 @@ struct WebViewContainer: NSViewRepresentable {
     /// `updateNSView`) when `boundSession` changes, without the heavy
     /// SwiftUI `.id(...)` re-mount cycle. The WKWebView itself stays
     /// alive on `OpenSession.webView`.
-    func makeNSView(context: Context) -> NSView {
+    func makeNSView(context: Context) -> SessionWebViewHost {
         logger.debug("makeNSView: session=\(self.boundSession?.id.uuidString ?? "nil", privacy: .public) hasShim=\(self.boundSession?.shim != nil) hasWebView=\(self.boundSession?.webView != nil)")
         let host = SessionWebViewHost()
         host.translatesAutoresizingMaskIntoConstraints = true
@@ -252,14 +252,22 @@ struct WebViewContainer: NSViewRepresentable {
         return host
     }
 
-    func updateNSView(_ host: NSView, context: Context) {
+    func updateNSView(_ host: SessionWebViewHost, context: Context) {
         // Swap the inner WKWebView when the session bound to this view
         // changes. With `.id(session.id)` on the SessionContainer this
         // guard rarely fires (SwiftUI re-mounts on session change), but
         // we keep it for the SwiftUI double-pass case where makeNSView
         // is followed by an immediate updateNSView with the same id.
         let newId = boundSession?.id
-        guard newId != context.coordinator.lastBoundSessionId else { return }
+        guard newId != context.coordinator.lastBoundSessionId else {
+            // Same session, nothing to swap — but a sibling host built by
+            // SwiftUI's second `makeNSView` may have taken the webview since
+            // (see `SessionWebViewHost.expectedWebView`). `viewDidMoveToWindow`
+            // catches the case where the theft precedes this host being shown;
+            // this catches the reverse order, where it was already on screen.
+            host.adoptExpectedWebViewIfNeeded()
+            return
+        }
         logger.debug("updateNSView: swapping \(context.coordinator.lastBoundSessionId?.uuidString ?? "nil", privacy: .public) → \(newId?.uuidString ?? "nil", privacy: .public)")
         host.subviews.forEach { $0.removeFromSuperview() }
         // Reset coordinator state — the previous webView's delegates and
@@ -289,16 +297,8 @@ struct WebViewContainer: NSViewRepresentable {
 
     /// Build (or fetch cached) WKWebView for `boundSession` and add it
     /// as a subview of the host, filling its bounds.
-    private func attachWebView(to host: NSView, coordinator: Coordinator) {
-        let webView = buildWebView(coordinator: coordinator)
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(webView)
-        NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: host.topAnchor),
-            webView.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-            webView.leadingAnchor.constraint(equalTo: host.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-        ])
+    private func attachWebView(to host: SessionWebViewHost, coordinator: Coordinator) {
+        SessionWebViewHost.install(buildWebView(coordinator: coordinator), in: host)
     }
 
     private func buildWebView(coordinator: Coordinator) -> WKWebView {
@@ -496,7 +496,7 @@ struct WebViewContainer: NSViewRepresentable {
     /// In the sidebar shell we KEEP the WebView and ShimProcess alive —
     /// the OpenSession owns them. `SessionStore.closeSession` is the only
     /// path that stops the shim and releases the webView.
-    static func dismantleNSView(_ host: NSView, coordinator: Coordinator) {
+    static func dismantleNSView(_ host: SessionWebViewHost, coordinator: Coordinator) {
         coordinator.cancelReconnect()
         for sub in host.subviews {
             if let wk = sub as? WKWebView {
@@ -574,11 +574,25 @@ struct WebViewContainer: NSViewRepresentable {
         let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Canopy")
         try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
-        let htmlFile = appSupportDir.appendingPathComponent("_canopy.html")
+        // One entry file PER SESSION, never a shared `_canopy.html`.
+        //
+        // `data-initial-session` — the only thing that tells the CC extension's
+        // webview which conversation to render — is baked into this HTML, and
+        // `loadFileURL` reads the file asynchronously. Two webviews built in the
+        // same runloop tick therefore raced on one shared path: the second
+        // session's HTML overwrote the first's before the first had read it, and
+        // the loser rendered an empty conversation with no error anywhere.
+        // Opening panes by hand never hit it (the writes are seconds apart);
+        // restoring a pane strip at launch hit it every single time.
+        //
+        // The file must OUTLIVE the load, not be deleted after it:
+        // `webViewWebContentProcessDidTerminate` recovers by calling
+        // `webView.reload()`, which re-reads this exact URL.
+        let htmlFile = appSupportDir.appendingPathComponent(Self.entryFileName(for: boundSession))
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
         } catch {
-            logger.error("Failed to write _canopy.html: \(error.localizedDescription, privacy: .public)")
+            logger.error("Failed to write \(htmlFile.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
             webView.loadHTMLString(
                 "<html><body style='background:#fff;color:#333;padding:40px;font-family:sans-serif'>"
                 + "<h1>Canopy Error</h1><p>Failed to write webview HTML: \(error.localizedDescription)</p></body></html>",
@@ -586,9 +600,70 @@ struct WebViewContainer: NSViewRepresentable {
             )
             return
         }
+        Self.noteEntryFileWritten(htmlFile)
         // Allow read access to home directory (covers Application Support HTML and extension resources)
         let commonParent = FileManager.default.homeDirectoryForCurrentUser
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
+    }
+
+    // MARK: - Webview entry files
+
+    /// Private on purpose: nothing may sweep by this prefix. A glob sweep is
+    /// the design that deleted a concurrently-running instance's live files,
+    /// and `purgeOwnEntryFiles` replaced it.
+    private static let entryFilePrefix = "_canopy-"
+
+    /// Per-session name for the webview's HTML entry point. Keyed by the
+    /// `OpenSession`'s process-local UUID rather than its resumeId, because
+    /// `ShimProcess.backfillResumeId` rewrites the resumeId mid-session and the
+    /// file this webview is loaded from must not move under it.
+    ///
+    /// The nil-session fallback is a fresh UUID rather than a fixed name.
+    /// `SessionContainer` is the only construction site and always passes a
+    /// session, so the branch is unreachable — but a fixed name would be a
+    /// shared path carrying exactly the race this scheme exists to remove,
+    /// sitting inside the function that removes it.
+    static func entryFileName(for session: OpenSession?) -> String {
+        "\(entryFilePrefix)\(session?.id.uuidString ?? UUID().uuidString).html"
+    }
+
+    /// Entry files THIS process has written. The only thing `purgeOwnEntryFiles`
+    /// is allowed to delete.
+    @MainActor private static var ownedEntryFiles: Set<URL> = []
+
+    @MainActor static func noteEntryFileWritten(_ url: URL) {
+        ownedEntryFiles.insert(url)
+    }
+
+    /// Delete the entry files this process wrote. Call this **at quit only**,
+    /// and note the two separate reasons it is scoped this narrowly.
+    ///
+    /// *Quit, not launch:* `applicationDidFinishLaunching` runs **after**
+    /// SwiftUI's first render — measured, and the opposite of the obvious guess.
+    /// With a restored pane strip the shims are already up and the webviews have
+    /// already written their HTML, so a launch-time sweep deletes files that are
+    /// mid-load and every pane renders blank white.
+    ///
+    /// *Own files, not the whole directory:* `~/Library/Application Support/Canopy`
+    /// is named after the app, not the bundle id, so a Debug build
+    /// (`sh.saqoo.Canopy.debug`) and the installed Release share it. A sweep by
+    /// glob therefore deletes the OTHER instance's live entry files — and since
+    /// `webViewWebContentProcessDidTerminate` recovers by re-reading that exact
+    /// URL, the damage lands much later and nowhere near the cause.
+    ///
+    /// Cost of the narrow scope: a crashed run leaves its files behind for good,
+    /// since nothing else will ever claim them. They are inert and small, and a
+    /// heuristic sweep by age would re-open the cross-instance hazard on any
+    /// session that outlives the cutoff.
+    @MainActor static func purgeOwnEntryFiles() {
+        let owned = ownedEntryFiles
+        ownedEntryFiles.removeAll()
+        for url in owned {
+            try? FileManager.default.removeItem(at: url)
+        }
+        if !owned.isEmpty {
+            logger.info("Purged \(owned.count) webview entry file(s) written by this process")
+        }
     }
 
     // MARK: - Bundle Resource Reading
@@ -739,4 +814,53 @@ final class ConsoleLogHandler: NSObject, WKScriptMessageHandler {
 /// than tearing down the SwiftUI representable and re-creating it.
 final class SessionWebViewHost: NSView {
     override var isFlipped: Bool { true }
+
+    /// The WKWebView this host is supposed to be showing.
+    ///
+    /// SwiftUI calls `makeNSView` **twice** for one `SessionContainer` (the
+    /// reason is already documented on `buildWebView`'s shim-reuse guard) and
+    /// then keeps EITHER host. The WKWebView is cached on the `OpenSession`,
+    /// and `addSubview` **re-parents**, so the second `makeNSView` pulls the
+    /// webview out of the first host. If SwiftUI then keeps the first, the
+    /// host it puts on screen has no subviews at all and the pane renders as
+    /// a blank white rectangle — with the shim, the CLI and the page load all
+    /// perfectly healthy, which is what makes it so hard to read from logs.
+    ///
+    /// Which host survives is not ours to choose, so the host asserts the
+    /// invariant itself: *whoever is on screen holds the webview*. Restoring
+    /// a pane strip at launch takes the losing ordering every time; opening a
+    /// session by hand happened to take the other one, which is why this sat
+    /// latent until launch restore shipped.
+    weak var expectedWebView: NSView?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        adoptExpectedWebViewIfNeeded()
+    }
+
+    /// Re-parent `expectedWebView` back under this host when this host is the
+    /// one on screen. A no-op in the overwhelmingly common case where the
+    /// webview never moved.
+    func adoptExpectedWebViewIfNeeded() {
+        guard window != nil,
+              let expectedWebView,
+              expectedWebView.superview !== self
+        else { return }
+        Self.install(expectedWebView, in: self)
+    }
+
+    /// Pin `webView` to every edge of `host`. Fresh constraints each time:
+    /// the previous set crossed the old host boundary and `removeFromSuperview`
+    /// already tore it down.
+    static func install(_ webView: NSView, in host: SessionWebViewHost) {
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(webView)
+        host.expectedWebView = webView
+        NSLayoutConstraint.activate([
+            webView.topAnchor.constraint(equalTo: host.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            webView.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+        ])
+    }
 }

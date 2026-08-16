@@ -5,19 +5,20 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "Persistence
 
 /// UserDefaults-backed persistence for `SessionStore`.
 ///
-/// Phase A scope (intentionally narrow):
-///   - Filter facets persist across launches.
-///   - The resumeId of the last-active session persists so the sidebar can
-///     highlight that row on cold launch.
+/// Always-on state: filter facets, grouping mode, hidden ids, and the
+/// resumeId of the last-active session (so the sidebar can highlight that
+/// row on cold launch).
 ///
-/// We do NOT persist the open-sessions list yet. On launch, the sidebar
-/// shows whatever closed local/cloud rows exist; the user clicks to reopen.
-/// PR D may add full open-list restoration if real users miss it.
+/// Opt-in state: the pane/session restore snapshot. It is written only when
+/// the user picks "Save and Quit" at the quit prompt, and it is deleted the
+/// moment the next launch reads it — see `SessionRestoreSnapshot` and
+/// `SessionStore.makeRestored()`.
 enum SessionStorePersistence {
     private static let filterKey = "canopy.sidebarFilter.v1"
     private static let lastActiveResumeKey = "canopy.lastActiveResumeId.v1"
     private static let hiddenIdsKey = "canopy.hiddenSessionIds.v1"
     private static let groupingModeKey = "canopy.groupingMode.v1"
+    private static let restoreSnapshotKey = "canopy.sessionRestore.v1"
 
     // MARK: - Hidden sessions
 
@@ -84,5 +85,50 @@ enum SessionStorePersistence {
 
     static func saveGroupingMode(_ mode: GroupingMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: groupingModeKey)
+    }
+
+    // MARK: - Launch restore snapshot
+
+    static func loadRestoreSnapshot() -> SessionRestoreSnapshot? {
+        guard let data = UserDefaults.standard.data(forKey: restoreSnapshotKey) else {
+            return nil
+        }
+        do {
+            return try JSONDecoder().decode(SessionRestoreSnapshot.self, from: data)
+        } catch {
+            // `\(error)`, not `.localizedDescription`: a DecodingError's
+            // localized string is the content-free "the data couldn't be read
+            // because it isn't in the correct format", and the blob is deleted
+            // two lines below — so this message is the only evidence that will
+            // ever exist about why.
+            logger.warning("loadRestoreSnapshot decode failed: \(error) — discarding")
+            // A stale layout is not worth keeping (unlike the filter); the next
+            // quit rewrites the key, so discard instead of stashing a .broken copy.
+            UserDefaults.standard.removeObject(forKey: restoreSnapshotKey)
+            return nil
+        }
+    }
+
+    static func saveRestoreSnapshot(_ snapshot: SessionRestoreSnapshot) {
+        if snapshot.isEmpty {
+            clearRestoreSnapshot()
+            return
+        }
+        do {
+            let data = try JSONEncoder().encode(snapshot)
+            UserDefaults.standard.set(data, forKey: restoreSnapshotKey)
+        } catch {
+            logger.warning("saveRestoreSnapshot encode failed: \(error)")
+            // Fail closed. `makeRestored` consumes the key at launch, so in
+            // practice there is nothing here to go stale — but "we could not
+            // write it" and "restore whatever was there before" must never be
+            // the same outcome, and one line buys that independent of the
+            // consume-at-launch rule holding forever.
+            clearRestoreSnapshot()
+        }
+    }
+
+    static func clearRestoreSnapshot() {
+        UserDefaults.standard.removeObject(forKey: restoreSnapshotKey)
     }
 }

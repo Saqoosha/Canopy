@@ -10,7 +10,7 @@ struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
 
-    @State private var sidebarStore = SessionStore()
+    @State private var sidebarStore = SessionStore.makeRestored()
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -21,11 +21,15 @@ struct CanopyApp: App {
                 Detail(store: sidebarStore)
             }
             .navigationSplitViewStyle(.balanced)
-            // Started here rather than in `applicationDidFinishLaunching`
-            // because that runs before SwiftUI has built the scene, so
-            // `SessionStore.shared` may still be nil there — this is the
-            // first point where the store is unambiguously alive. Fires once
-            // per window; `startMacroPad` is idempotent.
+            // Started here rather than in `applicationDidFinishLaunching`.
+            // The old reason given — that the delegate callback runs before
+            // SwiftUI builds the scene — is FALSE and has been deleted rather
+            // than annotated: it fires after the first render (measured while
+            // debugging the entry-file sweep, see
+            // `WebViewContainer.purgeOwnEntryFiles`). What is true is that
+            // this is the point where the store is unambiguously alive and in
+            // hand, with no `SessionStore.shared` lookup. Fires once per
+            // window; `startMacroPad` is idempotent.
             .task { appDelegate.startMacroPad(store: sidebarStore) }
         }
         .windowStyle(.hiddenTitleBar)
@@ -564,7 +568,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        normalizeSavedFrameForSinglePane()
+        // Saving the layout and normalizing the saved frame to one pane's
+        // width are mutually exclusive — but the deciding question is
+        // "will the next launch rebuild the pane strip?", NOT "did the user
+        // click Save". A capture with no session pane restores to nothing
+        // (see `SessionRestoreSnapshot.isEmpty`), so it has to take the
+        // normalize branch too or the user gets a multi-pane-wide window
+        // with a single giant pane in it.
+        if Self.shouldSaveRestoreSnapshot {
+            let snapshot = SessionStore.shared?.captureRestoreSnapshot()
+            if let snapshot, !snapshot.isEmpty {
+                SessionStorePersistence.saveRestoreSnapshot(snapshot)
+            } else {
+                // Reached when the store is gone (the `shared` weak ref is
+                // nil) or the strip held no session pane. The first is not
+                // supposed to happen and is the reason this logs: the user
+                // asked to save and is getting a discard, which is otherwise
+                // indistinguishable from having clicked Quit.
+                if snapshot == nil {
+                    logger.error("Save-and-Quit requested but SessionStore.shared is nil — layout NOT saved")
+                }
+                normalizeSavedFrameForSinglePane()
+                SessionStorePersistence.clearRestoreSnapshot()
+            }
+        } else {
+            normalizeSavedFrameForSinglePane()
+            SessionStorePersistence.clearRestoreSnapshot()
+        }
+        // Quit, and only our own files — see `WebViewContainer.purgeOwnEntryFiles`.
+        WebViewContainer.purgeOwnEntryFiles()
         macroPad?.shutdown()
         if let monitor = cmdWMonitor {
             NSEvent.removeMonitor(monitor)
@@ -576,9 +608,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Quitting with 2+ panes leaves the multi-pane window width in the
-    /// saved frame, but panes are NOT restored on launch (Phase A: no
-    /// auto-spawn) — so the next session would open as one giant pane
+    /// Runs only on the discard-layout quit path. On Save-and-Quit the full
+    /// multi-pane width is deliberately kept because the panes come back.
+    /// Quitting with 2+ panes otherwise leaves the multi-pane window width
+    /// in the saved frame, so the next session would open as one giant pane
     /// spanning the whole multi-pane-wide window. Rewrite the saved width
     /// to sidebar + the focused pane's current visual width, i.e. the
     /// window the user would get by closing the other panes before quit.
@@ -622,6 +655,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// this flag, so no `/bin/sh` waiter is ever left polling for our pid.
     @MainActor
     private static var shouldRelaunchOnExit = false
+
+    /// Set by the quit prompt, read by `applicationWillTerminate`, and it
+    /// decides between two mutually exclusive quit-time writes (snapshot vs.
+    /// single-pane frame normalization).
+    @MainActor
+    private static var shouldSaveRestoreSnapshot = false
 
     /// Schedule Canopy to relaunch by routing through `NSApp.terminate(nil)`
     /// so `applicationShouldTerminate`'s active-sessions prompt and shim
@@ -680,25 +719,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if ShimProcess.hasActiveSession {
             let count = ShimProcess.activeCount
+            let relaunching = Self.shouldRelaunchOnExit
+            let verb = relaunching ? "Restart" : "Quit"
+            let stopping = relaunching ? "Restarting" : "Quitting"
             let alert = NSAlert()
-            alert.messageText = "Active Sessions Running"
-            alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. Quitting will stop all sessions."
-            alert.addButton(withTitle: "Quit")
+            alert.messageText = relaunching ? "Restart Canopy" : "Active Sessions Running"
+            alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. \(stopping) will stop all sessions.\n\nSave and \(verb) restores this pane layout and these sessions next launch."
+            alert.addButton(withTitle: "Save and \(verb)")
+            alert.addButton(withTitle: verb)
             alert.addButton(withTitle: "Cancel")
+            // AppKit assigns Escape by BUTTON TITLE, not by position: the one
+            // titled "Cancel" gets it wherever it sits, and measuring this
+            // alert on macOS 26.6 shows all three lines below already match
+            // what AppKit picked. They are pinned anyway so that renaming or
+            // localizing "Cancel" cannot silently move Escape onto the
+            // destructive discard — with a third button titled anything else,
+            // Escape ends up bound to nothing.
+            alert.buttons[0].keyEquivalent = "\r"
+            alert.buttons[1].keyEquivalent = ""
+            alert.buttons[2].keyEquivalent = "\u{1b}"
             alert.alertStyle = .warning
-            if alert.runModal() == .alertSecondButtonReturn {
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                Self.shouldSaveRestoreSnapshot = true
+            case .alertSecondButtonReturn:
+                Self.shouldSaveRestoreSnapshot = false
+            default:
                 // User backed out — clear the relaunch flag so the next normal
                 // quit doesn't unexpectedly re-open Canopy.
                 Self.shouldRelaunchOnExit = false
+                Self.shouldSaveRestoreSnapshot = false
                 return .terminateCancel
             }
         }
+        // No active sessions → no alert, shouldSaveRestoreSnapshot stays false
+        // (nothing to restore).
 
         // If "Restart Now" triggered this terminate, spawn the waiter now —
         // before the run loop starts winding down — so the failure alert is
         // delivered cleanly and the user can decide what to do.
         if Self.shouldRelaunchOnExit, !spawnRelaunchHelper() {
             Self.shouldRelaunchOnExit = false
+            // Same reason the relaunch flag is cleared: a cancelled terminate
+            // must leave no decision behind. A stale `true` would make the
+            // NEXT quit — possibly one with no sessions and so no prompt —
+            // silently write a restore snapshot the user never asked for.
+            Self.shouldSaveRestoreSnapshot = false
             return .terminateCancel
         }
 

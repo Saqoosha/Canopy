@@ -55,6 +55,33 @@ enum ClaudeSessionHistory {
         return strict == legacy ? [strict] : [strict, legacy]
     }
 
+    /// True when a transcript for `id` exists under any encoding variant of
+    /// `directory`. Used by launch restore to drop sessions whose JSONL is
+    /// gone.
+    ///
+    /// What a restored session with a missing JSONL would actually do is NOT
+    /// established, and two rounds of review each replaced one confident
+    /// wrong answer with another, so the claim is retired rather than
+    /// re-stated. What IS known: invoking the CLI directly with an
+    /// unresolvable `--resume` fails loudly (measured on 2.1.217 — exit 1,
+    /// `{"subtype":"error_during_execution"}`), but Canopy does not take that
+    /// path; the id reaches `extension.js`, and every brand-new Canopy session
+    /// runs on a placeholder resumeId with no JSONL and starts a fresh
+    /// conversation instead of failing (see `SessionStore.openNew`). Dropping
+    /// the pane here means the question never has to be answered. Both
+    /// encodings are consulted for the same reason
+    /// `encodedFolderCandidates` exists: older CLI versions wrote the other
+    /// folder name for the same directory.
+    static func sessionFileExists(id: String, directory: URL) -> Bool {
+        for folder in encodedFolderCandidates(for: directory.path) {
+            let url = claudeDir
+                .appendingPathComponent(folder)
+                .appendingPathComponent("\(id).jsonl")
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+        }
+        return false
+    }
+
     /// Decode encoded project directory name back to path.
     /// Uses greedy filesystem walk to resolve ambiguous `-` separators.
     /// Matching Sessylph's approach.

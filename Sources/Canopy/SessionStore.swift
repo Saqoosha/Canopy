@@ -108,8 +108,9 @@ final class SessionStore {
 
     /// Resume id of the session that was active at last quit. The sidebar
     /// uses this to highlight that row on cold launch (the user can click to
-    /// reopen). Phase A doesn't auto-spawn the shim — restoration is one
-    /// click away, with no MCP-connection wall-of-startup at launch.
+    /// reopen). This is the ORDINARY launch path, where nothing auto-spawns
+    /// and reopening is one click away. A Save-and-Quit launch is the other
+    /// path and does spawn — see `makeRestored()`.
     var lastActiveResumeId: String? = SessionStorePersistence.loadLastActiveResumeId()
 
     /// Sidebar-hidden session ids. Closed local rows whose JSONL id is in
@@ -1156,6 +1157,195 @@ final class SessionStore {
             else if idx < focusedPaneIndex { focusedPaneIndex -= 1 }
         }
         schedulePaneResize()
+    }
+
+    // MARK: - Launch restore
+
+    /// Snapshot the current pane strip for quit-time persistence. Only
+    /// sessions a pane references are included — see `SessionRestoreSnapshot`.
+    func captureRestoreSnapshot() -> SessionRestoreSnapshot {
+        // preferredWidth is a weight until this runs; the snapshot stores
+        // absolute pt measured against the live window.
+        normalizePaneWeightsToVisualWidths()
+
+        var sessions: [SessionRestoreSnapshot.Session] = []
+        var panesOut: [SessionRestoreSnapshot.Pane] = []
+        var seenResumeIds = Set<String>()
+        // Silently skipping a missing session without this would shift focus
+        // onto whatever pane slid left into the stored index.
+        var droppedBeforeFocus = 0
+
+        for (index, slot) in panes.enumerated() {
+            switch slot.content {
+            case .launcher:
+                panesOut.append(.init(content: .launcher, width: slot.preferredWidth))
+            case .session(let id):
+                guard let open = openSessions.first(where: { $0.id == id }) else {
+                    if index < focusedPaneIndex { droppedBeforeFocus += 1 }
+                    continue
+                }
+                panesOut.append(.init(content: .session(resumeId: open.resumeId), width: slot.preferredWidth))
+                if seenResumeIds.insert(open.resumeId).inserted {
+                    let origin: SessionRestoreSnapshot.Session.Origin
+                    switch open.origin {
+                    case .local(let url):
+                        origin = .local(path: url.path)
+                    case .remote(let host, let path):
+                        origin = .remote(host: host, path: path.path)
+                    case .teleportedFrom(let cloudId, let path):
+                        origin = .teleported(cloudSessionId: cloudId, path: path.path)
+                    }
+                    sessions.append(SessionRestoreSnapshot.Session(
+                        resumeId: open.resumeId,
+                        title: open.title,
+                        project: open.project,
+                        origin: origin,
+                        permissionMode: open.permissionMode,
+                        model: open.model,
+                        effortLevel: open.effortLevel,
+                        providerId: open.customApi?.id,
+                        lastActiveAt: open.lastActiveAt
+                    ))
+                }
+            }
+        }
+
+        return SessionRestoreSnapshot(
+            sessions: sessions,
+            panes: panesOut,
+            focusedPaneIndex: focusedPaneIndex - droppedBeforeFocus
+        )
+    }
+
+    /// Rebuild `openSessions` + `panes` from a quit-time snapshot. This is
+    /// where sanitization happens — callers hand over the raw stored blob and
+    /// every drop rule (missing transcript, duplicate pane, pane cap, focus
+    /// clamp) is resolved here, so there is exactly one place a restore can
+    /// decide something is unusable.
+    func applyRestoreSnapshot(_ snapshot: SessionRestoreSnapshot) {
+        let clean = snapshot.sanitized(
+            paneCap: Self.paneAbsoluteCap,
+            sessionIsResumable: SessionRestoreSnapshot.resumableOnDisk
+        )
+        guard !clean.isEmpty else {
+            // The one path where the user clicked a button promising to
+            // restore their layout and gets an empty Launcher. `makeRestored`
+            // has already consumed the key, so without this line there is no
+            // evidence anywhere that a snapshot ever existed — and the
+            // reachable causes are environmental (a missing Documents TCC
+            // grant makes `fileExists` reject every local cwd, a worktree
+            // deleted between quit and launch, a version bump), not bugs the
+            // user can see. `notice`, not `info`: `info` lives in an in-memory
+            // ring buffer, which is the wrong lifetime for the only trace of
+            // a silent failure.
+            logger.notice("restore: snapshot held \(snapshot.panes.count) pane(s) / \(snapshot.sessions.count) session(s), none survived sanitize — launching to the Launcher")
+            return
+        }
+
+        let providers = ModelProviderStore.load()
+        var byResumeId: [String: OpenSession] = [:]
+        var restored: [OpenSession] = []
+        for s in clean.sessions {
+            let origin: OpenSession.Origin
+            switch s.origin {
+            case .local(let path):
+                origin = .local(URL(fileURLWithPath: path))
+            case .remote(let host, let path):
+                origin = .remote(host: host, path: URL(fileURLWithPath: path))
+            case .teleported(let cloudId, let path):
+                origin = .teleportedFrom(cloudSessionId: cloudId, localPath: URL(fileURLWithPath: path))
+            }
+            let provider = s.providerId.flatMap { id in providers.first { $0.id == id } }
+            let open = OpenSession(
+                origin: origin,
+                resumeId: s.resumeId,
+                title: s.title,
+                project: s.project,
+                status: .spawning,
+                lastActiveAt: s.lastActiveAt,
+                permissionMode: Self.clampedPermissionMode(s.permissionMode),
+                model: s.model,
+                effortLevel: s.effortLevel,
+                customApi: provider
+            )
+            byResumeId[s.resumeId] = open
+            restored.append(open)
+        }
+        openSessions = restored
+
+        panes = clean.panes.compactMap { pane in
+            let content: PaneContent
+            switch pane.content {
+            case .launcher:
+                content = .launcher
+            case .session(let resumeId):
+                guard let open = byResumeId[resumeId] else { return nil }
+                content = .session(open.id)
+            }
+            return PaneSlot(content: content, preferredWidth: pane.width)
+        }
+
+        focusedPaneIndex = min(max(0, clean.focusedPaneIndex), max(0, panes.count - 1))
+        syncSelectionToFocusedPane()
+        // Do not call schedulePaneResize / normalizePaneWeightsToVisualWidths:
+        // the window frame is restored independently from canopy.mainWindowFrame
+        // by AppDelegate.configureCanopyWindow, and it is the same frame these
+        // widths were measured against — running the sizer would fight it.
+        // `notice` so the success and failure lines share a lifetime — a
+        // report of "my panes didn't come back" is diagnosable only if both
+        // outcomes survive in the log.
+        logger.notice("applyRestoreSnapshot: restored \(self.panes.count) pane(s) / \(self.openSessions.count) session(s) from \(snapshot.panes.count) stored")
+    }
+
+    /// Re-apply the bypass-permissions opt-in to a mode that came from disk.
+    ///
+    /// Every other route to a `PermissionMode` already clamps: `CanopySettings`
+    /// does it in both `didSet` and `load()` for `defaultPermissionMode`, and
+    /// `LauncherView.resolvedPermission` does it for a launcher choice. Restore
+    /// is a third route, and the snapshot is plain JSON in UserDefaults — i.e.
+    /// exactly the "stale settings paired bypass with a disabled opt-in (manual
+    /// edit, downgrade)" case `CanopySettings`' own clamp comment names. Without
+    /// this, quitting with a bypass session and then turning the toggle OFF
+    /// brings that session back in bypass on the next launch, with the launcher
+    /// Picker still hiding the mode.
+    private static func clampedPermissionMode(_ mode: PermissionMode) -> PermissionMode {
+        guard mode == .bypassPermissions,
+              !CanopySettings.shared.allowDangerouslySkipPermissions else { return mode }
+        logger.notice("restore: clamping .bypassPermissions → .acceptEdits (opt-in is off)")
+        return .acceptEdits
+    }
+
+    /// Factory that consumes a quit-time snapshot (if any) into a fresh store.
+    ///
+    /// The consume-before-apply order is load-bearing: a snapshot that crashes
+    /// the restore would otherwise be replayed on every launch forever, and
+    /// each replay tries to spawn N shims. This is a factory instead of work
+    /// inside `init()` because `_SidebarLogicProbe` constructs bare
+    /// `SessionStore()`s all over, and restoring inside `init` would contaminate
+    /// every one of those with the developer's real saved layout.
+    static func makeRestored() -> SessionStore {
+        let store = SessionStore()
+        // The probe decides whether to run in `applicationDidFinishLaunching`,
+        // which is AFTER this `@State` initializer. Without this guard a local
+        // `CANOPY_RUN_LOGIC_PROBE=1` run consumes the developer's real saved
+        // layout — the key is one-shot by design — and spawns its sessions'
+        // shims and CLIs, all before a single assertion has executed. The
+        // factory alone does not insulate the probe; only this does.
+        // `#if DEBUG` to match the thing it protects: `_SidebarLogicProbe` is
+        // `#if DEBUG` at file scope, so a Release build has no probe to
+        // insulate and must never let a stale `CANOPY_RUN_LOGIC_PROBE=1`
+        // export in a terminal skip a real user's restore.
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else {
+            return store
+        }
+        #endif
+        guard let snapshot = SessionStorePersistence.loadRestoreSnapshot() else {
+            return store
+        }
+        SessionStorePersistence.clearRestoreSnapshot()
+        store.applyRestoreSnapshot(snapshot)
+        return store
     }
 
     #if DEBUG
