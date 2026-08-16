@@ -1227,7 +1227,20 @@ final class SessionStore {
             paneCap: Self.paneAbsoluteCap,
             sessionIsResumable: SessionRestoreSnapshot.resumableOnDisk
         )
-        guard !clean.isEmpty else { return }
+        guard !clean.isEmpty else {
+            // The one path where the user clicked a button promising to
+            // restore their layout and gets an empty Launcher. `makeRestored`
+            // has already consumed the key, so without this line there is no
+            // evidence anywhere that a snapshot ever existed — and the
+            // reachable causes are environmental (a missing Documents TCC
+            // grant makes `fileExists` reject every local cwd, a worktree
+            // deleted between quit and launch, a version bump), not bugs the
+            // user can see. `notice`, not `info`: `info` lives in an in-memory
+            // ring buffer, which is the wrong lifetime for the only trace of
+            // a silent failure.
+            logger.notice("restore: snapshot held \(snapshot.panes.count) pane(s) / \(snapshot.sessions.count) session(s), none survived sanitize — launching to the Launcher")
+            return
+        }
 
         let providers = ModelProviderStore.load()
         var byResumeId: [String: OpenSession] = [:]
@@ -1278,7 +1291,10 @@ final class SessionStore {
         // the window frame is restored independently from canopy.mainWindowFrame
         // by AppDelegate.configureCanopyWindow, and it is the same frame these
         // widths were measured against — running the sizer would fight it.
-        logger.info("applyRestoreSnapshot: \(self.panes.count) panes, \(self.openSessions.count) sessions")
+        // `notice` so the success and failure lines share a lifetime — a
+        // report of "my panes didn't come back" is diagnosable only if both
+        // outcomes survive in the log.
+        logger.notice("applyRestoreSnapshot: restored \(self.panes.count) pane(s) / \(self.openSessions.count) session(s) from \(snapshot.panes.count) stored")
     }
 
     /// Re-apply the bypass-permissions opt-in to a mode that came from disk.
@@ -1315,9 +1331,15 @@ final class SessionStore {
         // layout — the key is one-shot by design — and spawns its sessions'
         // shims and CLIs, all before a single assertion has executed. The
         // factory alone does not insulate the probe; only this does.
+        // `#if DEBUG` to match the thing it protects: `_SidebarLogicProbe` is
+        // `#if DEBUG` at file scope, so a Release build has no probe to
+        // insulate and must never let a stale `CANOPY_RUN_LOGIC_PROBE=1`
+        // export in a terminal skip a real user's restore.
+        #if DEBUG
         guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else {
             return store
         }
+        #endif
         guard let snapshot = SessionStorePersistence.loadRestoreSnapshot() else {
             return store
         }
