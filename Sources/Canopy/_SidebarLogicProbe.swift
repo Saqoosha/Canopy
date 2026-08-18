@@ -3427,84 +3427,114 @@ enum SidebarLogicProbe {
                    !slow.note(at: base.addingTimeInterval(400)))
         }
 
-        // --- Sleep chord. The whole gesture is "both ends, two seconds", and
-        // every one of these is a way it could fire on a desk nobody is at, or
-        // refuse to fire for the one person holding it down.
+        // --- Sleep chord. Every assertion here is a way the pad could go
+        // dark on a desk nobody is at, or refuse to for the person holding it.
         do {
             let base = Date(timeIntervalSinceReferenceDate: 0)
             let hold = MacroPadSleepChord.holdDuration
+            let floor = MacroPadSleepChord.minimumKeyCount
 
-            let ends6 = MacroPadSleepChord.endIndices(keyCount: 6)
+            func chord(keys: Int?, _ presses: [(Int, Bool, TimeInterval)]) -> MacroPadSleepChord {
+                var c = MacroPadSleepChord()
+                c.setKeyCount(keys)
+                for (index, pressed, offset) in presses {
+                    c.note(index: index, pressed: pressed, at: base.addingTimeInterval(offset))
+                }
+                return c
+            }
+
             record("macropad chord: a 6-key pad's ends are 0 and 5",
-                   ends6?.low == 0 && ends6?.high == 5,
-                   "got \(String(describing: ends6))")
-            record("macropad chord: a 4-key pad's ends are 0 and 3",
-                   MacroPadSleepChord.endIndices(keyCount: 4)?.high == 3,
-                   "got \(String(describing: MacroPadSleepChord.endIndices(keyCount: 4)))")
-            // `HELLO <ver> 0` is a legitimate state, and an unidentified pad
-            // reports 0 here on purpose — neither has two ends to hold.
-            record("macropad chord: fewer than two keys has no chord",
-                   MacroPadSleepChord.endIndices(keyCount: 1) == nil
-                       && MacroPadSleepChord.endIndices(keyCount: 0) == nil)
-
-            var one = MacroPadSleepChord()
-            one.note(index: 0, pressed: true, at: base)
-            record("macropad chord: one end alone does not arm",
-                   !one.isArmed(keyCount: 6))
-            record("macropad chord: one end held forever never satisfies",
-                   !one.isSatisfied(keyCount: 6, at: base.addingTimeInterval(3600)))
-
-            // The middle keys are the ones in constant use; only the ends are
-            // the gesture.
-            var middle = MacroPadSleepChord()
-            middle.note(index: 1, pressed: true, at: base)
-            middle.note(index: 2, pressed: true, at: base)
+                   chord(keys: 6, [(0, true, 0), (5, true, 0)]).holdDeadline != nil)
+            record("macropad chord: an end and its neighbour are not the chord",
+                   chord(keys: 6, [(0, true, 0), (4, true, 0)]).holdDeadline == nil)
+            // Both sides of the minimum, and both derived from the constant —
+            // a re-typed 2 or 3 here would keep passing under a name that had
+            // become false, which is the `paneAbsoluteCap` incident's shape.
+            record("macropad chord: the narrowest pad with a chord has ends 0 and \(floor - 1)",
+                   chord(keys: floor, [(0, true, 0), (floor - 1, true, 0)]).holdDeadline != nil)
+            record("macropad chord: one key below the floor has no chord",
+                   chord(keys: floor - 1, [(0, true, 0), (floor - 2, true, 0)]).holdDeadline == nil)
+            // An unidentified pad reports no count on purpose: no gesture is
+            // right where a gesture aimed at guessed indices is not.
+            record("macropad chord: an unreported key count has no chord",
+                   chord(keys: nil, [(0, true, 0), (5, true, 0)]).holdDeadline == nil)
+            record("macropad chord: one end alone does not hold",
+                   chord(keys: 6, [(0, true, 0)]).holdDeadline == nil)
             record("macropad chord: an adjacent middle pair is not the chord",
-                   !middle.isArmed(keyCount: 6)
-                       && !middle.isSatisfied(keyCount: 6, at: base.addingTimeInterval(hold)))
+                   chord(keys: 6, [(1, true, 0), (2, true, 0)]).holdDeadline == nil)
 
-            var both = MacroPadSleepChord()
-            both.note(index: 0, pressed: true, at: base)
-            both.note(index: 5, pressed: true, at: base)
-            record("macropad chord: both ends arm the hold", both.isArmed(keyCount: 6))
-            record("macropad chord: a tap short of the hold does not fire",
-                   !both.isSatisfied(keyCount: 6, at: base.addingTimeInterval(hold - 0.5)))
-            record("macropad chord: the full hold fires",
-                   both.isSatisfied(keyCount: 6, at: base.addingTimeInterval(hold)))
-            // The same press timestamps against a pad that reports four keys:
-            // key 5 is not an end there, so the chord is not made.
-            record("macropad chord: the ends move with the reported key count",
-                   !both.isSatisfied(keyCount: 4, at: base.addingTimeInterval(hold)))
+            let both = chord(keys: 6, [(0, true, 0), (5, true, 0)])
+            record("macropad chord: the deadline is one hold after the press",
+                   both.holdDeadline == base.addingTimeInterval(hold),
+                   "got \(String(describing: both.holdDeadline))")
+            // Without this, `holdDuration = 0` passes every other assertion in
+            // this block and brushing both ends sleeps the pad instantly.
+            record("macropad chord: brushing both ends is not instantly the chord",
+                   both.holdDeadline.map { $0 > base } == true)
 
             // Measured from the SECOND end down: a thumb resting on key 0 all
             // evening must not shorten the gesture to a tap on key 5.
-            var late = MacroPadSleepChord()
-            late.note(index: 0, pressed: true, at: base)
-            late.note(index: 5, pressed: true, at: base.addingTimeInterval(60))
             record("macropad chord: the hold starts at the second end",
-                   !late.isSatisfied(keyCount: 6, at: base.addingTimeInterval(60 + hold - 0.5))
-                       && late.isSatisfied(keyCount: 6, at: base.addingTimeInterval(60 + hold)))
+                   chord(keys: 6, [(0, true, 0), (5, true, 60)]).holdDeadline
+                       == base.addingTimeInterval(60 + hold))
 
-            // Releasing disarms, which is what cancels the timer mid-hold.
-            var released = both
-            released.note(index: 0, pressed: false, at: base.addingTimeInterval(1))
-            record("macropad chord: releasing an end disarms",
-                   !released.isArmed(keyCount: 6)
-                       && !released.isSatisfied(keyCount: 6, at: base.addingTimeInterval(hold)))
-            // ...and re-pressing restarts the clock rather than resuming it.
-            released.note(index: 0, pressed: true, at: base.addingTimeInterval(1))
-            record("macropad chord: re-pressing restarts the hold",
-                   released.isArmed(keyCount: 6)
-                       && !released.isSatisfied(keyCount: 6, at: base.addingTimeInterval(hold))
-                       && released.isSatisfied(keyCount: 6, at: base.addingTimeInterval(1 + hold)))
+            // A press with no release before it means the release was lost on
+            // the wire. The clock restarts, so the deadline moves LATER — and
+            // the controller re-aims its timer at the new one. An earlier
+            // revision kept the old timer, and a single lost release edge
+            // wedged the gesture until the user let go.
+            record("macropad chord: a duplicate press pushes the deadline out",
+                   chord(keys: 6, [(0, true, 0), (5, true, 0), (5, true, 60)]).holdDeadline
+                       == base.addingTimeInterval(60 + hold))
+
+            record("macropad chord: releasing an end drops the hold",
+                   chord(keys: 6, [(0, true, 0), (5, true, 0), (0, false, 1)]).holdDeadline == nil)
+            record("macropad chord: re-pressing restarts rather than resumes",
+                   chord(keys: 6, [(0, true, 0), (5, true, 0), (0, false, 1), (0, true, 1)]).holdDeadline
+                       == base.addingTimeInterval(1 + hold))
 
             // `reset()` runs the moment sleep begins, while both ends are
-            // still held — a chord that stayed satisfied would re-fire.
+            // still physically held.
             var cleared = both
             cleared.reset()
             record("macropad chord: reset forgets keys that are still held",
-                   !cleared.isArmed(keyCount: 6)
-                       && !cleared.isSatisfied(keyCount: 6, at: base.addingTimeInterval(hold)))
+                   cleared.holdDeadline == nil)
+
+            // The geometry moving mid-hold is the one that sleeps a pad on a
+            // chord nobody made: hold 0, 3 and 5 on a six-key pad, let a
+            // `PONG` claim four keys, and (0, 3) is suddenly both ends — held
+            // long enough already. The presses have to go with the count.
+            var reshaped = chord(keys: 6, [(0, true, 0), (3, true, 0), (5, true, 0)])
+            reshaped.setKeyCount(4)
+            record("macropad chord: a key-count change cannot satisfy a chord nobody made",
+                   reshaped.holdDeadline == nil)
+            // Same count re-adopted is not a change, so it must not disturb a
+            // hold in progress.
+            var readopted = both
+            readopted.setKeyCount(6)
+            record("macropad chord: re-adopting the same count leaves the hold alone",
+                   readopted.holdDeadline == base.addingTimeInterval(hold))
+
+            // Wire garbage must not accumulate in the press map — the only
+            // place in this subsystem where an unbounded index could.
+            var forged = chord(keys: 6, [(0, true, 0), (5, true, 0)])
+            forged.note(index: 9_999, pressed: true, at: base)
+            forged.note(index: -1, pressed: true, at: base)
+            forged.note(index: 6, pressed: true, at: base)
+            record("macropad chord: out-of-range indices are dropped, not recorded",
+                   forged.holdDeadline == base.addingTimeInterval(hold))
+        }
+
+        // --- The sleep clamp: one expression carries three promises (dark on
+        // the gesture, dark through a reconnect, dark through a relaunch).
+        do {
+            record("macropad brightness: asleep overrides the setting",
+                   MacroPadController.effectiveBrightness(percent: 60, isAsleep: true) == 0)
+            record("macropad brightness: awake passes the setting through",
+                   MacroPadController.effectiveBrightness(percent: 60, isAsleep: false) == 60)
+            record("macropad brightness: clamped to the protocol's range",
+                   MacroPadController.effectiveBrightness(percent: 150, isAsleep: false) == 100
+                       && MacroPadController.effectiveBrightness(percent: -5, isAsleep: false) == 0)
         }
 
         record("macropad encode: rgb masked to 24 bits",
