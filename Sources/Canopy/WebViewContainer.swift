@@ -638,11 +638,15 @@ struct WebViewContainer: NSViewRepresentable {
     /// Delete the entry files this process wrote. Call this **at quit only**,
     /// and note the two separate reasons it is scoped this narrowly.
     ///
-    /// *Quit, not launch:* `applicationDidFinishLaunching` runs **after**
-    /// SwiftUI's first render — measured, and the opposite of the obvious guess.
-    /// With a restored pane strip the shims are already up and the webviews have
-    /// already written their HTML, so a launch-time sweep deletes files that are
-    /// mid-load and every pane renders blank white.
+    /// *Quit, not launch:* quit is the only moment the owned set is complete.
+    /// At `applicationDidFinishLaunching` this process has written no entry file
+    /// yet, so a launch-time sweep is a no-op that reclaims nothing — measured
+    /// on a restore launch: the delegate callback's own log line precedes
+    /// `applyRestoreSnapshot` by ~180 ms, and PR #149 defers that apply past the
+    /// first render, so at delegate time `panes` is empty and no shim is up.
+    /// Before #149 the hazard was the reverse and much worse — the strip was
+    /// already restored by then, so a launch-time sweep deleted files that were
+    /// mid-load and every pane rendered blank white.
     ///
     /// *Own files, not the whole directory:* `~/Library/Application Support/Canopy`
     /// is named after the app, not the bundle id, so a Debug build

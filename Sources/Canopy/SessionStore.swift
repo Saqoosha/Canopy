@@ -1737,8 +1737,16 @@ final class SessionStore {
         // after Cmd+Opt+S) and broken by a restore launch carrying as few as ONE
         // pane — so pane count is not the variable. The three heals tried, all
         // of which failed, are a window resize, a pane close, and dropping back
-        // to one pane. NOT tried: whether a freshly created window comes up
-        // broken too.
+        // to one pane.
+        //
+        // It is the LAUNCH that matters, not first-render-with-panes in general.
+        // Measured: destroy the window with panes still non-empty (a launcher
+        // pane, so `ShimProcess.hasActiveSession` is false and Cmd+Shift+W
+        // closes rather than hides) and re-create it with Cmd+0, and that fresh
+        // window's toggle collapses AND expands normally — twice, in both
+        // directions — even though `panes` was already populated at its own
+        // first render. So a later scene instance is fine and only the initial
+        // one is poisoned; what actually distinguishes them is unidentified.
         //
         // Two other fixes were built and measured and BOTH failed, so don't
         // re-try them: passing an explicit `columnVisibility:` binding to the
