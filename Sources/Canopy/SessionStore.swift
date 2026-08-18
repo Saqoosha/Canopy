@@ -1680,7 +1680,10 @@ final class SessionStore {
         return .acceptEdits
     }
 
-    /// Factory that consumes a quit-time snapshot (if any) into a fresh store.
+    /// Factory that consumes a quit-time snapshot (if any) and schedules it onto
+    /// a fresh store. The store is returned EMPTY; a snapshot that was found is
+    /// applied one main-queue drain later, deliberately — see the deferral note
+    /// at the call below.
     ///
     /// The consume-before-apply order is load-bearing: a snapshot that crashes
     /// the restore would otherwise be replayed on every launch forever, and
@@ -1709,7 +1712,65 @@ final class SessionStore {
             return store
         }
         SessionStorePersistence.clearRestoreSnapshot()
-        store.applyRestoreSnapshot(snapshot)
+        // Deferred by one main-queue drain, NOT inline — the delay is the whole
+        // point and removing it silently breaks the sidebar-toggle button.
+        //
+        // Symptom, measured on macOS 26.6: after a restore launch the
+        // `NavigationSplitView` sidebar-toggle button is hit and fires — its
+        // accessibility label flips between "Show Sidebar" and "Hide Sidebar" —
+        // but the split view never moves in response to it, for as long as that
+        // window was watched. Cmd+Opt+S and the View menu item keep working,
+        // which is what makes it read as
+        // "the button is dead" rather than "the split view is stuck". WHY those
+        // paths differ was NOT established; do not build on a mechanism here,
+        // there isn't one.
+        //
+        // What the deferral is anchored to is an observation, not a contract:
+        // enqueued from an `App`-level `@State` initializer, this block was
+        // measured to land after the first render. Nothing enforces that and
+        // nothing detects it regressing — the symptom is the dead button above.
+        // `Task { @MainActor in }` was never measured here; the `.task` on the
+        // window's content in `CanopyApp` was not tried either.
+        //
+        // Bisected against a working baseline rather than guessed. Healthy when
+        // panes are opened after launch (0/1/2/4 panes, after a divider drag,
+        // after Cmd+Opt+S) and broken by a restore launch carrying as few as ONE
+        // pane — so pane count is not the variable. The three heals tried, all
+        // of which failed, are a window resize, a pane close, and dropping back
+        // to one pane. NOT tried: whether a freshly created window comes up
+        // broken too.
+        //
+        // Two other fixes were built and measured and BOTH failed, so don't
+        // re-try them: passing an explicit `columnVisibility:` binding to the
+        // NavigationSplitView (the toggle writes the binding and SwiftUI still
+        // ignores it), and shrinking `WeightedPaneLayout.sizeThatFits`'s
+        // nil-proposal fallback so the detail column stops reporting a wide
+        // ideal width. Several minimal repro builds all toggle fine, including one
+        // that rendered four panes at its OWN first render out of a custom
+        // `Layout` with `.ignoresSafeArea(edges: .top)` children, WKWebViews,
+        // `.toolbar(removing: .title)`, `.windowStyle(.hiddenTitleBar)` and
+        // `.navigationSplitViewStyle(.balanced)`. Other builds carried a
+        // Canopy-shaped sidebar or the window delegate proxy, but no single
+        // build combined everything — so this narrows the suspects, it does not
+        // eliminate them.
+        //
+        // To check whether this is still needed on a newer macOS: make the call
+        // inline again, Save-and-Quit with at least one SESSION pane (the prompt
+        // is gated on a live shim, and a strip of launcher panes stores no
+        // snapshot), relaunch, click the toggle.
+        //
+        // The cost is not just a frame. `panes.isEmpty` renders `DetailLauncher`,
+        // so a restore launch runs launcher startup work: `LauncherView.onAppear`
+        // starts a detached `loadAllSessions()` scan and a marketplace query. A
+        // snapshot holding a launcher pane paid that anyway.
+        //
+        // Safe because nothing else writes what the restore assigns in that
+        // window — `openSessions`, `panes`, `focusedPaneIndex`, `selection`, and
+        // `lastActiveResumeId` (which it also persists) — and
+        // `applyRestoreSnapshot` assigns them wholesale rather than merging.
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { store.applyRestoreSnapshot(snapshot) }
+        }
         return store
     }
 
