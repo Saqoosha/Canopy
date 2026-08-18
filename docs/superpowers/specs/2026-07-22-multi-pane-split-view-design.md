@@ -25,7 +25,7 @@ We want to support **actively driving 2–5 sessions in parallel** by opening th
 - Adding a pane **grows the window horizontally** to keep the existing panes at their current width. Closing a pane **shrinks the window back**. Symmetric.
 - If the window can't grow (screen edge), the panes fall back to sharing the available width equally.
 - Focus moves with clicks inside a pane, or via **Cmd+Opt+← / →** (wraps).
-- Max **5 panes** total.
+- Max **6 panes** total (`SessionStore.paneAbsoluteCap`).
 
 ## Prerequisite work (bundled into this spec)
 
@@ -52,7 +52,7 @@ Invariants:
 - Every `panes` entry must exist in `openSessions`. Panes are a subset of open sessions.
 - No `OpenSession.ID` appears in `panes` more than once.
 - `focusedPaneIndex` is always a valid index into `panes` (or 0 if empty — the empty state is only the transient app-just-launched moment before the first pane fills in).
-- `panes.count` is capped at `absoluteCap = 5`.
+- `panes.count` is capped at `absoluteCap = 6`.
 - When `panes` is empty and the user selects a session, that session becomes `panes = [PaneSlot(id, preferredWidth: 800)]`, `focusedPaneIndex = 0` (single-pane default). 800 pt is the initial preferred width — every subsequent pane addition inherits from the current focused pane instead.
 
 Per-pane view-model state (owned by `OpenSession` today, unchanged):
@@ -149,12 +149,12 @@ Let:
 ### Max panes
 
 ```
-maxPanes = absoluteCap = 5
+maxPanes = absoluteCap = 6
 ```
 
 No screen-width term. The window's ability to accommodate the panes is enforced by the fallback branch above (equal share when we can't grow), not by refusing to add.
 
-Adding when `panes.count == 5` bounces (no-op) and shows a transient "Maximum 5 panes" hint in the focused pane's status bar for ~1 s.
+Adding when `panes.count == SessionStore.paneAbsoluteCap` bounces (no-op) and shows a transient "Maximum N panes" hint — N interpolated from the cap — in the focused pane's status bar for ~1 s.
 
 ---
 
@@ -167,7 +167,7 @@ Today's `List(selection:)` uses a "binding that always returns nil" trick to pre
   - Session not in any pane → replace focused pane's session (if session was closed, promote it to `openSessions` first).
 - **Cmd+click on a session row** (`.command` modifier detected on the click):
   - Session already in a pane → move focus to that pane, bounce hint (nothing to add).
-  - `panes.count == 5` → bounce.
+  - `panes.count == SessionStore.paneAbsoluteCap` → bounce.
   - Else → promote to `openSessions` if needed, append to `panes`, focus it. Trigger window grow.
 - **Plain click on the Launcher row**:
   - Replace focused pane with the Launcher view.
@@ -258,7 +258,7 @@ Actual break-point widths are tuned during Phase 0 implementation against real D
 ### Add (Cmd+click sidebar row / Cmd+click Launcher launch button)
 
 1. If session is already in a pane → focus that pane, bounce.
-2. If `panes.count == 5` → bounce, show "Maximum 5 panes" hint.
+2. If `panes.count == SessionStore.paneAbsoluteCap` → bounce, show the cap-reached hint.
 3. Ensure session is in `openSessions` (spawn shim if newly opened).
 4. Append `PaneSlot(sessionId, preferredWidth: currentFocusedPane.preferredWidth)` to `panes`.
 5. Compute `targetW`, grow window (or fall back to equal-share).
@@ -338,8 +338,8 @@ The X button on the per-pane header strip is a hover-only affordance on the righ
    - Continues to work (existing `.onMove` on sidebar). Reordering affects Cmd+1..9 index but not pane order.
 
 10. **New session (Cmd+N / Launcher launch) when panes are full**:
-    - `panes.count == 5`, Cmd+N inside focused pane → replaces the focused pane with Launcher (fine, no new pane created).
-    - `panes.count == 5`, Cmd+click Launcher launch button → bounces (max reached).
+    - `panes.count == SessionStore.paneAbsoluteCap`, Cmd+N inside focused pane → replaces the focused pane with Launcher (fine, no new pane created).
+    - `panes.count == SessionStore.paneAbsoluteCap`, Cmd+click Launcher launch button → bounces (max reached).
 
 ---
 

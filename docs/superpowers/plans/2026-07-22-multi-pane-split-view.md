@@ -410,7 +410,7 @@ Wait for user approval. Phase 0 complete — the app is now usable at any pane w
   - `SessionStore.closePane(at index: Int)` — removes pane, shifts focus
   - `SessionStore.moveFocus(delta: Int, wrap: Bool = true)` — Cmd+Opt+←/→
   - `SessionStore.paneIndex(forSession id: OpenSession.ID) -> Int?` — returns index of the pane holding `.session(id)`, nil for `.launcher` or missing
-- Constants: `SessionStore.paneAbsoluteCap = 5`, `SessionStore.paneDividerWidth: CGFloat = 1`, `SessionStore.paneDefaultWidth: CGFloat = 800`, `SessionStore.paneMinDragWidth: CGFloat = 100`
+- Constants: `SessionStore.paneAbsoluteCap = 6`, `SessionStore.paneDividerWidth: CGFloat = 1`, `SessionStore.paneDefaultWidth: CGFloat = 800`, `SessionStore.paneMinDragWidth: CGFloat = 100`
 
 - [ ] **Step 1: Create `PaneSlot.swift`**
 
@@ -458,7 +458,7 @@ private(set) var panes: [PaneSlot] = []
 /// index when panes is non-empty. Undefined (0) while panes is empty.
 private(set) var focusedPaneIndex: Int = 0
 
-static let paneAbsoluteCap: Int = 5
+static let paneAbsoluteCap: Int = 6
 static let paneDividerWidth: CGFloat = 1
 static let paneDefaultWidth: CGFloat = 800
 static let paneMinDragWidth: CGFloat = 100
@@ -515,7 +515,7 @@ func openLauncherInFocusedPane() {
 
 /// Append a new pane for `sessionId`. Returns false if bounced (already
 /// in a pane — caller should visually flash the existing pane — or cap
-/// reached — caller should show the "Maximum 5 panes" hint).
+/// reached — caller should show the cap-reached hint).
 @discardableResult
 func openInNewPane(_ sessionId: OpenSession.ID) -> Bool {
     guard openSessions.contains(where: { $0.id == sessionId }) else { return false }
@@ -633,12 +633,12 @@ do {
 
     // Cap
     let store2 = SessionStore()
-    let sessions = (0..<6).map { i in OpenSession(origin: .local(cwd), resumeId: "s\(i)", title: "s\(i)", project: "p", status: .live) }
+    let sessions = (0...SessionStore.paneAbsoluteCap).map { i in OpenSession(origin: .local(cwd), resumeId: "s\(i)", title: "s\(i)", project: "p", status: .live) }
     store2.openSessions = sessions
-    for s in sessions.prefix(5) { _ = store2.openInNewPane(s.id) }
-    record("cap reached at 5", store2.panes.count == 5)
-    let sixth = store2.openInNewPane(sessions[5].id)
-    record("cap bounces sixth add", !sixth && store2.panes.count == 5)
+    for s in sessions.prefix(SessionStore.paneAbsoluteCap) { _ = store2.openInNewPane(s.id) }
+    record("cap reached at paneAbsoluteCap", store2.panes.count == SessionStore.paneAbsoluteCap)
+    let overCap = store2.openInNewPane(sessions[SessionStore.paneAbsoluteCap].id)
+    record("cap bounces the add past paneAbsoluteCap", !overCap && store2.panes.count == SessionStore.paneAbsoluteCap)
 }
 ```
 
@@ -1287,7 +1287,7 @@ Verify:
 - Plain click on any sidebar row → replaces focused pane's session.
 - Cmd+click on a different row → new pane appears to the right, window grows.
 - Cmd+click on a row already in a pane → that pane becomes focused, no new pane.
-- Cmd+click while 5 panes are open → no-op (bounce, focus doesn't jump).
+- Cmd+click while the cap's worth of panes are open → no-op (bounce, focus doesn't jump).
 - All rows for sessions in some pane get a light-tinted background; the focused pane's row is more strongly tinted.
 - Right-click on an open row → "Hide from sidebar" is grayed out.
 - Right-click on a closed (Recents) row → "Hide from sidebar" is enabled.
@@ -1510,9 +1510,9 @@ Wait for user approval.
 
 ---
 
-## Task 12: Bounce animation for "Max 5 panes" + polish
+## Task 12: Bounce animation for the pane-cap hint + polish
 
-**Goal:** When Cmd+click hits the pane cap or targets an already-open session, provide visible feedback. Add a transient "Maximum 5 panes" hint in the focused pane's status bar area.
+**Goal:** When Cmd+click hits the pane cap or targets an already-open session, provide visible feedback. Add a transient cap-reached hint in the focused pane's status bar area.
 
 **Files:**
 - Modify: `Sources/Canopy/StatusBarData.swift` — add `transientHint: String?` + auto-clear
@@ -1578,16 +1578,16 @@ private func bouncePane(forSessionId sessionId: OpenSession.ID) {
        let focused = store.focusedPane,
        case .session(let id) = focused.content,
        let session = store.openSessions.first(where: { $0.id == id }) {
-        session.statusBar.showHint("Maximum 5 panes")
+        session.statusBar.showHint("Maximum \(SessionStore.paneAbsoluteCap) panes")
     }
 }
 ```
 
 - [ ] **Step 4: Build + smoke test**
 
-Open 5 panes. Cmd+click a 6th sidebar row. Verify:
+Open 6 panes (the cap). Cmd+click a 7th sidebar row. Verify:
 - No new pane appears.
-- The focused pane's status bar shows "Maximum 5 panes" in orange for ~1.5 s, then it disappears.
+- The focused pane's status bar shows "Maximum 6 panes" in orange for ~1.5 s, then it disappears.
 
 - [ ] **Step 5: Commit checkpoint**
 
@@ -1595,7 +1595,7 @@ Open 5 panes. Cmd+click a 6th sidebar row. Verify:
 jj describe -m "Transient status-bar hint for pane-cap bounces
 
 StatusBarData.showHint(_:forSeconds:) posts a self-clearing message.
-StatusBarView renders it. Sidebar's bounce path fires "Maximum 5 panes"
+StatusBarView renders it. Sidebar's bounce path fires the cap-reached hint
 when Cmd+click is rejected because the cap is reached. Signals to the
 user that the click was received but declined.
 
