@@ -60,7 +60,7 @@ final class StatusBarData {
         }
     }
 
-    /// Transient status-bar message (e.g. "Maximum 5 panes"). Cleared
+    /// Transient status-bar message (e.g. the pane cap-reached hint). Cleared
     /// automatically by `showHint(_:forSeconds:)` after the timeout.
     var transientHint: String? = nil
     private var hintClearTask: Task<Void, Never>?

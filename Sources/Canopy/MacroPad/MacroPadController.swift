@@ -524,7 +524,7 @@ final class MacroPadController {
         if case .session(let id)? = store.focusedPane?.content,
            let session = store.openSessions.first(where: { $0.id == id }) {
             // Longer than the default: this reports failing hardware, and the
-            // default dwell is tuned for "Maximum 5 panes".
+            // default dwell is tuned for the one-line cap-reached hint.
             session.statusBar.showHint("MacroPad keeps restarting", forSeconds: 6)
         } else {
             // The status bar lives inside a session pane, so there is nowhere

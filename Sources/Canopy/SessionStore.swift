@@ -167,15 +167,18 @@ final class SessionStore {
         PaneWindowSizer.applyForCurrentPanes(store: self)
     }
 
-    /// Surface the "Maximum 5 panes" hint on the focused session's status
+    /// Surface the cap-reached hint on the focused session's status
     /// bar. Called by openNew / openCloud / Sidebar when a `.newPane`
-    /// request hits the absolute cap. Launcher-focused panes have no
+    /// request hits the absolute cap. The text interpolates
+    /// `paneAbsoluteCap` rather than spelling the number, because it is a
+    /// user-facing string: a literal here silently starts lying the moment
+    /// the cap moves, and nothing in the build or the probe would notice. Launcher-focused panes have no
     /// status bar, so the hint is logged and dropped.
     func showCapReachedHintOnFocusedPane() {
         guard let focused = focusedPane else { return }
         if case .session(let id) = focused.content,
            let session = openSessions.first(where: { $0.id == id }) {
-            session.statusBar.showHint("Maximum 5 panes")
+            session.statusBar.showHint("Maximum \(Self.paneAbsoluteCap) panes")
             return
         }
         // Launcher-focused case: no session status bar to display on; hint is lost.
@@ -1009,7 +1012,7 @@ final class SessionStore {
 
     /// Append a new pane for `sessionId`. Returns false if bounced (already
     /// in a pane — caller should visually flash the existing pane — or cap
-    /// reached — caller should show the "Maximum 5 panes" hint).
+    /// reached — caller should show the cap-reached hint).
     @discardableResult
     func openInNewPane(_ sessionId: OpenSession.ID) -> Bool {
         guard openSessions.contains(where: { $0.id == sessionId }) else { return false }

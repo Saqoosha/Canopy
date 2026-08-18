@@ -17,7 +17,7 @@ English | [日本語](README.ja.md)
 - **Native macOS window** — Claude Code's full React UI in a WKWebView
 - **Launcher** — directory picker, recent directories, session history, model/effort/permission selectors
 - **Sidebar shell** — sessions live in a persistent left sidebar; the detail pane swaps the active webview in place
-- **Split view** — up to 5 panes side by side, Cmd+1–9 to focus one, drag the dividers to resize
+- **Split view** — up to 6 panes side by side, Cmd+1–9 to focus one, drag the dividers to resize
 - **Session resume** — pick up where you left off with instant history replay
 - **SSH remote** — run Claude CLI on remote machines via SSH
 - **Real-time streaming** — thinking, text, tool use, all streamed live
