@@ -171,6 +171,11 @@ struct CanopyApp: App {
 
     /// Sidebar's visible open session IDs, in the order they appear. Drives
     /// Cmd+Ctrl+1..9's target lookup and per-item enable state.
+    ///
+    /// Launcher rows sit in the same Open block and are deliberately skipped:
+    /// this shortcut loads a session INTO the focused pane, and a launcher has
+    /// nothing to load. So N here counts session rows, not visual positions —
+    /// Cmd+1..9 is the one that counts panes.
     private var visibleOpenSessionIds: [UUID] {
         sidebarStore.visibleRows.compactMap { row in
             if case .open(let s) = row { return s.id } else { return nil }

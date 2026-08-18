@@ -62,7 +62,7 @@ struct Sidebar: View {
                             rowView(row)
                         }
                         .onMove { from, to in
-                            store.moveOpenSessions(fromOffsets: from, toOffset: to)
+                            store.moveOpenRows(fromOffsets: from, toOffset: to)
                         }
                     }
                 }
@@ -73,7 +73,12 @@ struct Sidebar: View {
                         }
                     }
                 }
-                if rows.isEmpty {
+                // A launcher pane always contributes a row, so `rows.isEmpty`
+                // stopped being reachable while one is open — and with it the
+                // "No sessions yet." / "No sessions match your filter." state,
+                // which is exactly when a user needs the Clear-filters button.
+                // Ask whether anything but launcher rows is showing instead.
+                if SessionStore.holdsOnlyLauncherRows(rows) {
                     Section {
                         emptyStateView
                             .listRowSeparator(.hidden)
@@ -82,15 +87,21 @@ struct Sidebar: View {
                 }
             }
             // Animate the open block's row order. Rows now move on their own
-            // in one case the user didn't drag — a click pulling a session's
-            // row down to its pane's rank — and an instant jump there reads
-            // as a glitch rather than as the sidebar re-syncing.
+            // in cases the user didn't drag — a click pulling a session's row
+            // down to its pane's rank, or a launcher row following its pane —
+            // and an instant jump there reads as a glitch rather than as the
+            // sidebar re-syncing.
+            //
+            // Keyed on the open block's ROW ids, not on `openSessions`: a
+            // launcher row moves while `openSessions` is untouched, so the
+            // session-only key left exactly the rows this feature added
+            // snapping into place.
             //
             // Scoped to the row ORDER on purpose. The panes are deliberately
             // NOT animated: animating pane geometry drifts the embedded
             // WKWebView's scroll position, which is why PaneWindowSizer
             // resizes the window in one synchronous frame instead.
-            .animation(.easeInOut(duration: 0.2), value: store.openSessions.map(\.id))
+            .animation(.easeInOut(duration: 0.2), value: openRowIdentity)
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             // Compensate for `.listStyle(.sidebar)`'s built-in side
@@ -225,7 +236,10 @@ struct Sidebar: View {
         }
         .buttonStyle(.plain)
         .background(
-            store.selection == .launcher
+            // Only while no pane exists at all. Once a launcher has a pane it
+            // has a row, and the row carries the highlight — painting both
+            // reads as two selected things.
+            store.selection == .launcher && store.panes.isEmpty
                 ? Color.accentColor.opacity(0.18)
                 : Color.clear,
             in: RoundedRectangle(cornerRadius: 6)
@@ -300,12 +314,15 @@ struct Sidebar: View {
         if case .open(let s) = row {
             Button("Close session") { store.closeSession(s.id) }
         }
+        if case .launcher = row {
+            Button("Close pane") { handleClose(row) }
+        }
         Button("Hide from sidebar") {
             store.hideClosedSession(rowId: row.id)
         }
-        .disabled({
-            if case .open = row { return true } else { return false }
-        }())
+        // Open rows and launcher rows both stand for something live; hiding
+        // one would take a pane off the map without closing it.
+        .disabled(row.isOpen)
     }
 
     /// Hover fill only — the top layer of the inline `.background` ZStack.
@@ -341,9 +358,23 @@ struct Sidebar: View {
         }
     }
 
+    /// Animation key for the open block. This re-runs the whole `visibleRows`
+    /// pipeline — dedup, sort, filter, interleave — since that property caches
+    /// nothing and the List body's own `rows` is a different evaluation. Kept
+    /// anyway: keying on `panes` + the session order would miss a launcher
+    /// sliding to a new anchor because the VISIBLE session set changed (a
+    /// filter edit, a hide) while neither of those did.
+    private var openRowIdentity: [String] {
+        store.visibleRows.filter(\.isOpen).map(\.id)
+    }
+
     private func isActive(_ row: SidebarRow) -> Bool {
         switch (row, store.selection) {
         case (.open(let s), .session(let id)): return s.id == id
+        // A launcher row IS its pane, so "active" can only mean "that pane has
+        // focus" — `selection == .launcher` says nothing about which one when
+        // two launcher panes are open.
+        case (.launcher(let slot), _): return store.focusedPane?.id == slot
         default: return false
         }
     }
@@ -362,8 +393,14 @@ struct Sidebar: View {
     private enum PaneHighlightLevel { case none, weak, strong }
 
     private func highlight(for row: SidebarRow) -> PaneHighlightLevel {
-        guard case .open(let session) = row,
-              let idx = store.paneIndex(forSession: session.id) else { return .none }
+        let idx: Int?
+        switch row {
+        case .open(let session): idx = store.paneIndex(forSession: session.id)
+        // Always paned — a launcher row exists only because its pane does.
+        case .launcher(let slot): idx = store.paneIndex(forSlot: slot)
+        case .closedLocal, .closedCloud: idx = nil
+        }
+        guard let idx else { return .none }
         return idx == store.focusedPaneIndex ? .strong : .weak
     }
 
@@ -387,6 +424,12 @@ struct Sidebar: View {
             } else {
                 store.openInFocusedPane(session.id)
             }
+        case .launcher(let slot):
+            // The launcher is already in a pane, so there is nothing to load
+            // and nothing for Cmd to add — a click can only mean "focus it".
+            if let idx = store.paneIndex(forSlot: slot) {
+                store.setFocusedPaneIndex(idx)
+            }
         case .closedLocal(let entry):
             if addNewPane && store.panes.count >= SessionStore.paneAbsoluteCap {
                 store.showCapReachedHintOnFocusedPane()
@@ -405,8 +448,16 @@ struct Sidebar: View {
     }
 
     private func handleClose(_ row: SidebarRow) {
-        if case .open(let s) = row {
+        switch row {
+        case .open(let s):
             store.closeSession(s.id)
+        case .launcher(let slot):
+            // Closes the pane, not a session — there is no session behind it.
+            if let idx = store.paneIndex(forSlot: slot) {
+                store.closePane(at: idx)
+            }
+        case .closedLocal, .closedCloud:
+            break
         }
     }
 }
@@ -509,11 +560,15 @@ private struct SidebarRowView: View {
                     .foregroundStyle(titleColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Text(row.project)
-                    .font(.system(size: 11))
-                    .foregroundStyle(subtitleColor)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                // A launcher row has no project, and an empty Text would still
+                // reserve the second line's height.
+                if !row.project.isEmpty {
+                    Text(row.project)
+                        .font(.system(size: 11))
+                        .foregroundStyle(subtitleColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
             Spacer(minLength: 4)
             if shouldShowClose {
@@ -526,7 +581,7 @@ private struct SidebarRowView: View {
                         .frame(width: 16, height: 16)
                 }
                 .buttonStyle(.plain)
-                .help("Close session")
+                .help(closeHelp)
             }
         }
         .padding(.leading, 10)
@@ -555,6 +610,7 @@ private struct SidebarRowView: View {
     private var openIconSize: CGFloat {
         switch row {
         case .open: return 6 // small filled dot for idle open
+        case .launcher: return 12
         case .closedLocal, .closedCloud: return 14
         }
     }
@@ -562,6 +618,8 @@ private struct SidebarRowView: View {
     private var openIconWeight: Font.Weight {
         switch row {
         case .open: return .regular
+        // Matches the "+" on the New session button above the list.
+        case .launcher: return .medium
         case .closedLocal, .closedCloud: return .regular
         }
     }
@@ -571,6 +629,7 @@ private struct SidebarRowView: View {
         // Unreachable: `iconView` routes every open row to `ActivityDot`.
         // Kept so the switch stays exhaustive.
         case .open: return "circle.fill"
+        case .launcher: return "plus"
         case .closedLocal: return "desktopcomputer"
         case .closedCloud: return "cloud"
         }
@@ -582,7 +641,7 @@ private struct SidebarRowView: View {
         case .open:
             // Idle-open dot: muted secondary — not an attention grab.
             return .secondary
-        case .closedLocal, .closedCloud:
+        case .launcher, .closedLocal, .closedCloud:
             return .secondary
         }
     }
@@ -592,7 +651,7 @@ private struct SidebarRowView: View {
     private var titleWeight: Font.Weight {
         if isActive { return .semibold }
         switch row {
-        case .open: return .medium
+        case .open, .launcher: return .medium
         case .closedLocal, .closedCloud: return .regular
         }
     }
@@ -600,6 +659,7 @@ private struct SidebarRowView: View {
     private var titleColor: Color {
         switch row {
         case .open: return .primary
+        case .launcher: return .secondary
         case .closedLocal, .closedCloud: return .secondary
         }
     }
@@ -609,8 +669,13 @@ private struct SidebarRowView: View {
     private var closeColor: Color { .secondary }
 
     private var shouldShowClose: Bool {
-        guard case .open = row else { return false }
+        guard row.isOpen else { return false }
         return isHovered
+    }
+
+    private var closeHelp: String {
+        if case .launcher = row { return "Close pane" }
+        return "Close session"
     }
 }
 
