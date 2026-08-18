@@ -2487,16 +2487,23 @@ enum SidebarLogicProbe {
                    && storeKeepFocus.focusedPaneIndex == 1
                    && storeKeepFocus.panes[1].content == .session(openC.id))
 
-            // Cap
+            // Cap. Derived from `paneAbsoluteCap`, never a literal: this
+            // asserts that the boundary holds wherever it sits, and a
+            // hardcoded count turns a deliberate cap change into two probe
+            // failures that say nothing about the change.
             let store2 = SessionStore()
-            let sessions = (0..<6).map { i in
+            let sessions = (0...SessionStore.paneAbsoluteCap).map { i in
                 OpenSession(origin: .local(cwd), resumeId: "s\(i)", title: "s\(i)", project: "p", status: .live)
             }
             store2._probeSeedOpenSessions(sessions)
-            for s in sessions.prefix(5) { _ = store2.openInNewPane(s.id) }
-            record("cap reached at 5", store2.panes.count == 5)
-            let sixth = store2.openInNewPane(sessions[5].id)
-            record("cap bounces sixth add", !sixth && store2.panes.count == 5)
+            for s in sessions.prefix(SessionStore.paneAbsoluteCap) { _ = store2.openInNewPane(s.id) }
+            record("cap reached at paneAbsoluteCap",
+                   store2.panes.count == SessionStore.paneAbsoluteCap,
+                   "panes=\(store2.panes.count) cap=\(SessionStore.paneAbsoluteCap)")
+            let overCap = store2.openInNewPane(sessions[SessionStore.paneAbsoluteCap].id)
+            record("cap bounces the add past paneAbsoluteCap",
+                   !overCap && store2.panes.count == SessionStore.paneAbsoluteCap,
+                   "added=\(overCap) panes=\(store2.panes.count) cap=\(SessionStore.paneAbsoluteCap)")
 
             // closeSession → removePanesForClosedSession selection derivation.
             // panes=[A,C] with C focused; closing A (non-focused) must leave
@@ -2579,14 +2586,17 @@ enum SidebarLogicProbe {
 
             // openLauncherInNewPane cap-reached and normal
             let storeLaunchCap = SessionStore()
-            let launchSessions = (0..<5).map { i in
+            let launchSessions = (0..<SessionStore.paneAbsoluteCap).map { i in
                 OpenSession(origin: .local(cwd), resumeId: "launch-cap-\(i)", title: "s\(i)", project: "p", status: .live)
             }
             storeLaunchCap._probeSeedOpenSessions(launchSessions)
             for s in launchSessions { _ = storeLaunchCap.openInNewPane(s.id) }
             let launchCapResult = storeLaunchCap.openLauncherInNewPane()
             record("openLauncherInNewPane at cap returns false",
-                   !launchCapResult && storeLaunchCap.panes.count == 5)
+                   !launchCapResult
+                       && storeLaunchCap.panes.count == SessionStore.paneAbsoluteCap,
+                   "added=\(launchCapResult) panes=\(storeLaunchCap.panes.count) "
+                       + "cap=\(SessionStore.paneAbsoluteCap)")
 
             let storeLaunchOk = SessionStore()
             let launchOkA = OpenSession(origin: .local(cwd), resumeId: "launch-ok-A", title: "A", project: "p", status: .live)

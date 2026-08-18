@@ -71,7 +71,7 @@ final class SessionStore {
         unreadSessionIds = ids
     }
 
-    static let paneAbsoluteCap: Int = 5
+    static let paneAbsoluteCap: Int = 6
     /// Includes the 8pt drag target from PaneDivider's ZStack; the 1pt visible line is centered inside.
     static let paneDividerWidth: CGFloat = 8
     static let paneDefaultWidth: CGFloat = 800

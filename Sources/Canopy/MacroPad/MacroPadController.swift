@@ -96,10 +96,11 @@ struct MacroPadResetLoopDetector {
 /// colors, key presses back in as pane focus.
 ///
 /// Mapping is **pane index → key index**, which is Cmd+1..9's meaning, not
-/// Cmd+Ctrl+1..9's. Panes cap at 5 (`SessionStore.paneAbsoluteCap`) while a
-/// 4-key pad covers the first four; the fifth pane is knowingly invisible to
-/// the pad until the 5/6-key build lands. Nothing here hardcodes four — the
-/// count comes off the wire in `HELLO`.
+/// Cmd+Ctrl+1..9's. Panes cap at 6 (`SessionStore.paneAbsoluteCap`), which is
+/// what the 6-key pad covers, so every pane now reaches a key. A narrower pad
+/// covers a prefix and the keys past `panes.count` are blanked rather than
+/// skipped. Nothing here hardcodes a width — the count comes off the wire in
+/// `HELLO`.
 @MainActor
 final class MacroPadController {
     /// The count used whenever the device has not told us one — which is not
