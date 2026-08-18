@@ -1225,37 +1225,44 @@ enum SidebarLogicProbe {
         }
 
         // --- Open-session reorder (drag & drop) ---
-        // Pure mapping: a move expressed against the visible (filtered) open
-        // rows is applied to the master array; hidden rows keep their slots.
+        // Pure mapping: the visible (filtered) open rows after a move are
+        // written back into the master array; hidden rows keep their slots.
+        // These used to exercise `reorderPreservingHidden`, which took
+        // `.onMove` offsets — that function is gone, because a drag over the
+        // Open section now yields offsets in a list that also holds launcher
+        // rows, so the caller strips them and hands the session order in.
         record("reorder: full visible, move first to end",
-               SessionStore.reorderPreservingHidden(
+               SessionStore.applyVisibleOrder(
                    master: ["A", "B", "C"], visible: ["A", "B", "C"],
-                   fromOffsets: IndexSet(integer: 0), toOffset: 3)
+                   newVisible: ["B", "C", "A"])
                    == ["B", "C", "A"])
         record("reorder: full visible, move last to front",
-               SessionStore.reorderPreservingHidden(
+               SessionStore.applyVisibleOrder(
                    master: ["A", "B", "C"], visible: ["A", "B", "C"],
-                   fromOffsets: IndexSet(integer: 2), toOffset: 0)
+                   newVisible: ["C", "A", "B"])
                    == ["C", "A", "B"])
         record("reorder: hidden interior rows keep their slots",
-               SessionStore.reorderPreservingHidden(
+               SessionStore.applyVisibleOrder(
                    master: ["A", "h1", "B", "h2", "C"], visible: ["A", "B", "C"],
-                   fromOffsets: IndexSet(integer: 2), toOffset: 0)
+                   newVisible: ["C", "A", "B"])
                    == ["C", "h1", "A", "h2", "B"])
         record("reorder: no-op move returns master unchanged",
-               SessionStore.reorderPreservingHidden(
+               SessionStore.applyVisibleOrder(
                    master: ["A", "h1", "B"], visible: ["A", "B"],
-                   fromOffsets: IndexSet(integer: 1), toOffset: 1)
+                   newVisible: ["A", "B"])
                    == ["A", "h1", "B"])
-        record("reorder: out-of-range offsets return master unchanged",
-               SessionStore.reorderPreservingHidden(
-                   master: ["A", "B", "C"], visible: ["A", "B", "C"],
-                   fromOffsets: IndexSet(integer: 5), toOffset: 0)
-                   == ["A", "B", "C"]
-               && SessionStore.reorderPreservingHidden(
-                   master: ["A", "B", "C"], visible: ["A", "B", "C"],
-                   fromOffsets: IndexSet(integer: 0), toOffset: 7)
-                   == ["A", "B", "C"])
+        // The guard the doc promises: a caller handing back a different SET
+        // would silently drop or duplicate rows. Set equality alone is
+        // multiset-blind, so the duplicate case pins the count check too.
+        record("reorder: a non-permutation is refused, not written back",
+               SessionStore.applyVisibleOrder(
+                   master: ["A", "h1", "B"], visible: ["A", "B"],
+                   newVisible: ["A", "C"])
+                   == ["A", "h1", "B"]
+               && SessionStore.applyVisibleOrder(
+                   master: ["A", "h1", "B"], visible: ["A", "B"],
+                   newVisible: ["A", "A", "B"])
+                   == ["A", "h1", "B"])
 
         // --- SubagentTracker ---
         // Pure value-type probe: feed io_message dicts and assert the CLI-style
@@ -2611,15 +2618,17 @@ enum SidebarLogicProbe {
 
             // MARK: Pane follows sidebar drag
             //
-            // Drag is the ONLY thing that moves a pane, and it moves them by
-            // sorting the session panes into their rows' order.
+            // A drag moves panes by sorting the session panes into their rows'
+            // order and re-anchoring every launcher the rows can describe. It
+            // is not the only route that reorders panes — `openInNewPane`
+            // sorts too.
             //
             // These are the first probe tests that read `visibleRows`, so they
             // are the first that a developer's own saved sidebar filter can
             // break: every `SessionStore()` loads it in its property
             // initializer, and a saved `status: .closedOnly` or a `project`
-            // other than "p" empties `visibleRows`, making `moveOpenSessions`
-            // a silent no-op. That fails locally while passing on CI's clean
+            // other than "p" empties `visibleRows` of session rows, making
+            // `moveOpenRows` a silent no-op. That fails locally while passing on CI's clean
             // profile — indistinguishable from the stale-base diagnosis
             // CLAUDE.md describes. Neutralize the persisted value for the
             // whole block and put the real one back at the end.
@@ -2630,6 +2639,15 @@ enum SidebarLogicProbe {
             // real sidebar filtered to whatever a case last persisted, with no
             // visible cause.
             defer { SessionStorePersistence.saveFilter(savedFilter) }
+
+            // `filter`'s didSet persists globally, so every fixture that sets one
+            // must put it back — otherwise it leaks into every `SessionStore()`
+            // built after it, and the failure lands on an unrelated fixture
+            // further down the block. (Measured: one `.closedOnly` fixture took
+            // out four later ones.)
+            func clearPersistedFilter() {
+                SessionStorePersistence.saveFilter(SidebarFilter())
+            }
 
             func dragSession(_ n: String) -> OpenSession {
                 OpenSession(origin: .local(cwd), resumeId: "drag-\(n)", title: n, project: "p", status: .live)
@@ -2646,7 +2664,7 @@ enum SidebarLogicProbe {
             storeDrag.forceSetPaneWidth(at: 1, to: 400)
             storeDrag.forceSetPaneWidth(at: 2, to: 500)
             let widthSumBefore = storeDrag.panes.reduce(0) { $0 + $1.preferredWidth }
-            storeDrag.moveOpenSessions(fromOffsets: IndexSet(integer: 2), toOffset: 1)
+            storeDrag.moveOpenRows(fromOffsets: IndexSet(integer: 2), toOffset: 1)
             record("drag reorders panes to follow sidebar",
                    storeDrag.panes.map(\.content)
                    == [.session(dA.id), .session(dC.id), .session(dB.id)])
@@ -2666,7 +2684,7 @@ enum SidebarLogicProbe {
             storeNoop._probeSeedOpenSessions([nA, nB, nC])
             _ = storeNoop.openInNewPane(nA.id)
             _ = storeNoop.openInNewPane(nC.id)
-            storeNoop.moveOpenSessions(fromOffsets: IndexSet(integer: 0), toOffset: 2)
+            storeNoop.moveOpenRows(fromOffsets: IndexSet(integer: 0), toOffset: 2)
             record("drag across an unpaned row leaves panes alone",
                    storeNoop.openSessions.map(\.id) == [nB.id, nA.id, nC.id]
                    && storeNoop.panes.map(\.content)
@@ -2678,24 +2696,469 @@ enum SidebarLogicProbe {
             storeUnpaned._probeSeedOpenSessions([uA, uB, uC])
             _ = storeUnpaned.openInNewPane(uA.id)
             _ = storeUnpaned.openInNewPane(uB.id)
-            storeUnpaned.moveOpenSessions(fromOffsets: IndexSet(integer: 2), toOffset: 0)
+            storeUnpaned.moveOpenRows(fromOffsets: IndexSet(integer: 2), toOffset: 0)
             record("dragging an unpaned row never touches panes",
                    storeUnpaned.panes.map(\.content)
                    == [.session(uA.id), .session(uB.id)])
 
-            // [A][launcher][B]; drag B above A. The launcher has no sidebar
-            // row, so it must hold its slot index while the sessions swap
-            // around it.
+            // MARK: Launcher rows
+            //
+            // A launcher pane has a row of its own, so a launcher can no longer
+            // be the reason a pane is missing from the Open block — a filter
+            // still can, and four cases below turn on exactly that. Most of them
+            // are one property: the rows and the panes stay the same sequence.
+
+            func openRowIds(_ store: SessionStore) -> [String] {
+                store.visibleRows.filter(\.isOpen).map(\.id)
+            }
+
+            // [A][launcher][B] renders three rows in that order.
+            let iA = dragSession("iA"), iB = dragSession("iB")
+            let storeRows = SessionStore()
+            storeRows._probeSeedOpenSessions([iA, iB])
+            _ = storeRows.openInNewPane(iA.id)
+            _ = storeRows.openLauncherInNewPane()
+            _ = storeRows.openInNewPane(iB.id)
+            record("a launcher pane gets a row at its pane position",
+                   openRowIds(storeRows) == [
+                       SidebarRow.open(iA).id,
+                       SidebarRow.launcher(storeRows.panes[1].id).id,
+                       SidebarRow.open(iB).id,
+                   ])
+
+            // Leftmost launcher: nothing precedes it, so its row heads the list.
+            let hdA = dragSession("hdA")
+            let storeHead = SessionStore()
+            storeHead._probeSeedOpenSessions([hdA])
+            _ = storeHead.openLauncherInNewPane()
+            _ = storeHead.openInNewPane(hdA.id)
+            record("a leftmost launcher heads the open block",
+                   openRowIds(storeHead) == [
+                       SidebarRow.launcher(storeHead.panes[0].id).id,
+                       SidebarRow.open(hdA).id,
+                   ])
+
+            // An open session with no pane sits in the list without occupying a
+            // slot, so the launcher must be counted against PANED rows only.
+            // The unpaned row is deliberately ABOVE the paned one: with it
+            // below, counting every row and counting paned rows agree, and the
+            // fixture pins nothing (measured — that arrangement survived the
+            // mutation that counts every row).
+            let upA = dragSession("upA"), upU = dragSession("upU")
+            let storeUnpanedRow = SessionStore()
+            storeUnpanedRow._probeSeedOpenSessions([upU, upA])
+            _ = storeUnpanedRow.openInNewPane(upA.id)
+            _ = storeUnpanedRow.openLauncherInNewPane()
+            record("an unpaned row doesn't drift the launcher row",
+                   openRowIds(storeUnpanedRow) == [
+                       SidebarRow.open(upU).id,
+                       SidebarRow.open(upA).id,
+                       SidebarRow.launcher(storeUnpanedRow.panes[1].id).id,
+                   ])
+
+            // Two launchers behind the same session keep their pane order.
+            let twA = dragSession("twA")
+            let storeTwo = SessionStore()
+            storeTwo._probeSeedOpenSessions([twA])
+            _ = storeTwo.openInNewPane(twA.id)
+            _ = storeTwo.openLauncherInNewPane()
+            _ = storeTwo.openLauncherInNewPane()
+            record("two launchers behind one session keep their order",
+                   openRowIds(storeTwo) == [
+                       SidebarRow.open(twA).id,
+                       SidebarRow.launcher(storeTwo.panes[1].id).id,
+                       SidebarRow.launcher(storeTwo.panes[2].id).id,
+                   ])
+
+            // The filter can hide the paned row a launcher sits behind. The
+            // launcher is NOT filterable — it stands for a live pane — so it
+            // must still be drawn, and it slides LEFT to where the strip says
+            // it belongs rather than being pushed past the rows that are still
+            // visible.
+            let fvA = dragSession("fvA")
+            let fvH = OpenSession(origin: .local(cwd), resumeId: "drag-fvH",
+                                  title: "fvH", project: "hidden", status: .live)
+            let storeFiltered = SessionStore()
+            storeFiltered._probeSeedOpenSessions([fvH, fvA])
+            _ = storeFiltered.openInNewPane(fvH.id)
+            _ = storeFiltered.openLauncherInNewPane()
+            storeFiltered.filter.project = "p"   // hides fvH
+            record("a launcher survives its anchor row being filtered out",
+                   openRowIds(storeFiltered) == [
+                       SidebarRow.launcher(storeFiltered.panes[1].id).id,
+                       SidebarRow.open(fvA).id,
+                   ])
+            clearPersistedFilter()
+
+            // A launcher whose anchor pane has no visible row still belongs to
+            // the OPEN block — dropping it in wherever the walk happened to end
+            // would file it under a date/project heading with the recents. Uses
+            // the pure function directly: `SessionStore.recents` is
+            // `private(set)`, and a closed row is the whole point here.
+            let closedNeighbour = SessionEntry(id: "closed-neighbour", title: "closed",
+                                               timestamp: Date(), projectDirectory: cwd)
+            let strandedLauncher = PaneSlot(content: .launcher, preferredWidth: 400)
+            let interleaved = SessionStore.interleavingLaunchers(
+                into: [SidebarRow.closedLocal(closedNeighbour)],
+                panes: [PaneSlot(content: .session(UUID()), preferredWidth: 400), strandedLauncher]
+            )
+            record("a launcher never lands among the closed rows",
+                   interleaved.map(\.id) == [
+                       SidebarRow.launcher(strandedLauncher.id).id,
+                       SidebarRow.closedLocal(closedNeighbour).id,
+                   ])
+
+            // [A][launcher][B]; drag B (row 2) above A. Index-pinning the
+            // launcher renders [B][launcher][A] — self-consistent, but not the
+            // order the user dropped. Rows are derived from the strip, so the
+            // two can never visibly disagree; what pinning loses is the drop.
             let lA = dragSession("lA"), lB = dragSession("lB")
             let storeLaunch = SessionStore()
             storeLaunch._probeSeedOpenSessions([lA, lB])
             _ = storeLaunch.openInNewPane(lA.id)
             _ = storeLaunch.openLauncherInNewPane()
             _ = storeLaunch.openInNewPane(lB.id)
-            storeLaunch.moveOpenSessions(fromOffsets: IndexSet(integer: 1), toOffset: 0)
-            record("launcher pane holds its index while sessions reorder",
+            storeLaunch.moveOpenRows(fromOffsets: IndexSet(integer: 2), toOffset: 0)
+            record("a session dragged past a launcher takes the launcher's row order with it",
                    storeLaunch.panes.map(\.content)
-                   == [.session(lB.id), .launcher, .session(lA.id)])
+                   == [.session(lB.id), .session(lA.id), .launcher]
+                   && openRowIds(storeLaunch) == [
+                       SidebarRow.open(lB).id,
+                       SidebarRow.open(lA).id,
+                       SidebarRow.launcher(storeLaunch.panes[2].id).id,
+                   ])
+
+            // Dragging the launcher ROW moves its pane and nothing else.
+            let dlA = dragSession("dlA"), dlB = dragSession("dlB")
+            let storeDragLauncher = SessionStore()
+            storeDragLauncher._probeSeedOpenSessions([dlA, dlB])
+            _ = storeDragLauncher.openInNewPane(dlA.id)
+            _ = storeDragLauncher.openLauncherInNewPane()
+            _ = storeDragLauncher.openInNewPane(dlB.id)
+            let draggedLauncherId = storeDragLauncher.panes[1].id
+            storeDragLauncher.moveOpenRows(fromOffsets: IndexSet(integer: 1), toOffset: 0)
+            record("dragging a launcher row moves its pane, leaving sessions alone",
+                   storeDragLauncher.openSessions.map(\.id) == [dlA.id, dlB.id]
+                   && storeDragLauncher.panes.map(\.content)
+                   == [.launcher, .session(dlA.id), .session(dlB.id)]
+                   && storeDragLauncher.panes[0].id == draggedLauncherId)
+
+            // Dragging it to the far end, the direction that has no anchor to
+            // fall back on if the walk ever stopped early.
+            let dtA = dragSession("dtA"), dtB = dragSession("dtB")
+            let storeDragTail = SessionStore()
+            storeDragTail._probeSeedOpenSessions([dtA, dtB])
+            _ = storeDragTail.openLauncherInNewPane()
+            _ = storeDragTail.openInNewPane(dtA.id)
+            _ = storeDragTail.openInNewPane(dtB.id)
+            storeDragTail.setFocusedPaneIndex(0)   // the launcher
+            storeDragTail.moveOpenRows(fromOffsets: IndexSet(integer: 0), toOffset: 3)
+            record("a launcher row dragged to the end lands rightmost",
+                   storeDragTail.panes.map(\.content)
+                   == [.session(dtA.id), .session(dtB.id), .launcher])
+
+            // Focus is held by SLOT, so moving the focused launcher's row must
+            // carry the focus with it rather than hand it to whatever now sits
+            // at its old index.
+            record("dragging the focused launcher row carries its focus",
+                   storeDragTail.focusedPaneIndex == 2
+                   && storeDragTail.panes[storeDragTail.focusedPaneIndex].content == .launcher)
+
+            // The round trip both directions have to satisfy: read the rows off
+            // the panes, read the anchors back off those rows, and rebuilding
+            // must reproduce the pane strip exactly. One configuration, not a
+            // proof — the filtered cases below pin the direction that a count-
+            // based interleave got wrong, and the property holds only because
+            // both directions now speak in session ids.
+            let rtA = dragSession("rtA"), rtB = dragSession("rtB"), rtC = dragSession("rtC")
+            let storeRT = SessionStore()
+            storeRT._probeSeedOpenSessions([rtA, rtB, rtC])
+            _ = storeRT.openLauncherInNewPane()
+            _ = storeRT.openInNewPane(rtA.id)
+            _ = storeRT.openLauncherInNewPane()
+            _ = storeRT.openInNewPane(rtB.id)
+            let rtRows = storeRT.visibleRows.filter(\.isOpen)
+            var rtRank: [UUID: Int] = [:]
+            for (i, session) in storeRT.openSessions.enumerated() { rtRank[session.id] = i }
+            // Fed a SHUFFLED strip, not the strip the rows came from. With the
+            // real order as input the assertion was self-fulfilling: it also
+            // passed when `placingLaunchers` was mutated to `return panes`,
+            // because the bail-out output and the expected output were the same
+            // array. Reversing the input makes the rebuild do real work, and
+            // the expectation is still the order the rows describe.
+            record("rows and panes round-trip through interleave + anchors",
+                   SessionStore.placingLaunchers(
+                       storeRT.panes.reversed(),
+                       rank: rtRank,
+                       anchors: SessionStore.launcherAnchors(inRowOrder: rtRows, panes: storeRT.panes)
+                   ).map(\.id) == storeRT.panes.map(\.id))
+
+            // An anchor naming a session with no pane can't be honoured. It
+            // must degrade to the head rather than drop the pane — a dropped
+            // slot takes a live WKWebView off the strip.
+            let orphanPanes = storeRT.panes
+            // Asserting the resulting ORDER, not just the count: the final
+            // permutation guard returns the input unchanged on failure, so a
+            // count assertion passes on the bail-out path too and pins only the
+            // second half of its own name.
+            record("an unhonourable anchor degrades to the head, never to a lost pane",
+                   SessionStore.placingLaunchers(
+                       orphanPanes,
+                       rank: rtRank,
+                       anchors: orphanPanes.compactMap { slot in
+                           if case .launcher = slot.content {
+                               return SessionStore.LauncherAnchor(slot: slot.id, after: rtC.id)
+                           }
+                           return nil
+                       }
+                   ).map(\.content)
+                   == [.launcher, .launcher, .session(rtA.id), .session(rtB.id)])
+
+            // A filter hiding a paned row must not let an unrelated drag move a
+            // launcher pane. Four reviewers found this independently, two by
+            // running it: reading every launcher's anchor back off the FILTERED
+            // rows re-homes the ones whose own anchor row is hidden.
+            let khA = dragSession("khA"), khC = dragSession("khC")
+            let khH = OpenSession(origin: .local(cwd), resumeId: "drag-khH",
+                                  title: "khH", project: "hidden", status: .live)
+            let storeHiddenLaunch = SessionStore()
+            storeHiddenLaunch._probeSeedOpenSessions([khH, khA, khC])
+            _ = storeHiddenLaunch.openInNewPane(khH.id)
+            _ = storeHiddenLaunch.openLauncherInNewPane()
+            _ = storeHiddenLaunch.openInNewPane(khA.id)
+            _ = storeHiddenLaunch.openInNewPane(khC.id)
+            let hiddenLaunchSlot = storeHiddenLaunch.panes[1].id
+            storeHiddenLaunch.filter.project = "p"   // hides khH
+            // khH's row is hidden, so the launcher draws at the head: the visible
+            // rows are [L, khA, khC]. Drag khC above khA. The launcher's anchor
+            // row is the hidden one, so the rows cannot describe it and the
+            // strip's anchor wins — its pane must not move. (Being un-dragged is
+            // NOT what protects it: a launcher whose anchor row is visible does
+            // follow a session drag, which the "carries it with the drop"
+            // fixture below pins. The "dragged past a launcher" fixture above
+            // cannot pin it — there the strip anchor and the row anchor happen
+            // to be the same session, so it passes either way.)
+            storeHiddenLaunch.moveOpenRows(fromOffsets: IndexSet(integer: 2), toOffset: 1)
+            record("a filtered drag leaves an untouched launcher pane where it was",
+                   storeHiddenLaunch.panes.map(\.content)
+                   == [.session(khH.id), .launcher,
+                       .session(khC.id), .session(khA.id)]
+                   && storeHiddenLaunch.panes[1].id == hiddenLaunchSlot)
+            clearPersistedFilter()
+
+            // `paneIndex(forSlot:)` resolves a launcher row to its pane. Three
+            // view-layer callers depend on it, one of which decides which pane
+            // a close X removes from the strip. (Every call site matches
+            // `case .launcher`, and a launcher pane has no session behind it —
+            // that X removes the slot and nothing else. A session row's X takes
+            // a different path entirely, `closeSession`.) Round 2
+            // moved it out of the view layer so the probe could reach it, and
+            // then nothing reached it: `panes.isEmpty ? nil : 0` survived the
+            // whole suite. The realistic wrong version is "first launcher
+            // pane", which is right until a second launcher opens.
+            let piA = dragSession("piA"), piB = dragSession("piB")
+            let storeSlotIndex = SessionStore()
+            storeSlotIndex._probeSeedOpenSessions([piA, piB])
+            _ = storeSlotIndex.openInNewPane(piA.id)
+            _ = storeSlotIndex.openLauncherInNewPane()
+            _ = storeSlotIndex.openInNewPane(piB.id)
+            _ = storeSlotIndex.openLauncherInNewPane()
+            let firstLauncherSlot = storeSlotIndex.panes[1].id
+            let secondLauncherSlot = storeSlotIndex.panes[3].id
+            record("paneIndex(forSlot:) finds each launcher's own pane",
+                   storeSlotIndex.paneIndex(forSlot: firstLauncherSlot) == 1
+                   && storeSlotIndex.paneIndex(forSlot: secondLauncherSlot) == 3
+                   && storeSlotIndex.paneIndex(forSlot: storeSlotIndex.panes[0].id) == 0)
+            storeSlotIndex.closePane(at: 1)
+            record("paneIndex(forSlot:) returns nil for a pane that closed",
+                   storeSlotIndex.paneIndex(forSlot: firstLauncherSlot) == nil
+                   && storeSlotIndex.paneIndex(forSlot: secondLauncherSlot) == 2)
+
+            // The empty state's predicate: launcher rows alone must not keep
+            // "No sessions match your filter." off screen, and a session row
+            // must switch it off.
+            record("only-launcher rows still count as an empty sidebar",
+                   SessionStore.holdsOnlyLauncherRows([.launcher(UUID()), .launcher(UUID())])
+                   && SessionStore.holdsOnlyLauncherRows([])
+                   && !SessionStore.holdsOnlyLauncherRows([.launcher(UUID()), .open(piA)]))
+
+            // A SESSION dragged across a launcher carries the launcher with the
+            // drop, even though the user never grabbed it. Rows [A][L][B], drag
+            // A to the bottom: the drop reads [L][B][A], and anchoring L to A
+            // regardless would render [B][A][L] — the panes disagreeing with
+            // the order the user just dropped, which is the whole contract.
+            let xsA = dragSession("xsA"), xsB = dragSession("xsB")
+            let storeCrossing = SessionStore()
+            storeCrossing._probeSeedOpenSessions([xsA, xsB])
+            _ = storeCrossing.openInNewPane(xsA.id)
+            _ = storeCrossing.openLauncherInNewPane()
+            _ = storeCrossing.openInNewPane(xsB.id)
+            storeCrossing.moveOpenRows(fromOffsets: IndexSet(integer: 0), toOffset: 3)
+            record("a session dragged across a launcher carries it with the drop",
+                   storeCrossing.panes.map(\.content)
+                   == [.launcher, .session(xsB.id), .session(xsA.id)]
+                   && openRowIds(storeCrossing) == [
+                       SidebarRow.launcher(storeCrossing.panes[0].id).id,
+                       SidebarRow.open(xsB).id,
+                       SidebarRow.open(xsA).id,
+                   ])
+
+            // A launcher the rows CANNOT describe keeps the strip's anchor even
+            // while another launcher is being dragged: with one parked behind a
+            // filter-hidden pane, re-reading every anchor off the rows drags it
+            // across that pane too. (An earlier version of this fixture picked
+            // up no launcher at all, and back then the function returned early
+            // in that case, so it never reached the rule.)
+            let m1A = dragSession("m1A")
+            let m1H = OpenSession(origin: .local(cwd), resumeId: "drag-m1H",
+                                  title: "m1H", project: "hidden", status: .live)
+            let storeOneLauncher = SessionStore()
+            storeOneLauncher._probeSeedOpenSessions([m1H, m1A])
+            _ = storeOneLauncher.openInNewPane(m1H.id)
+            _ = storeOneLauncher.openLauncherInNewPane()      // behind the hidden pane
+            _ = storeOneLauncher.openInNewPane(m1A.id)
+            _ = storeOneLauncher.openLauncherInNewPane()      // behind the visible pane
+            let parkedLauncher = storeOneLauncher.panes[1].id
+            let draggedLauncher = storeOneLauncher.panes[3].id
+            storeOneLauncher.filter.project = "p"   // hides m1H
+            // Rows are [parked, m1A, dragged]; drag the last one to the head.
+            storeOneLauncher.moveOpenRows(fromOffsets: IndexSet(integer: 2), toOffset: 0)
+            record("dragging one launcher leaves another parked behind a hidden pane",
+                   storeOneLauncher.panes[0].id == draggedLauncher
+                   && storeOneLauncher.panes[2].id == parkedLauncher
+                   && storeOneLauncher.panes.map(\.content)
+                   == [.launcher, .session(m1H.id), .launcher, .session(m1A.id)])
+            clearPersistedFilter()
+
+            // `rowsCanAnchor` must count PANED visible rows, not merely visible
+            // ones. An unpaned row is visible but occupies no slot, so a row
+            // list holding only unpaned rows still cannot say where a launcher
+            // sits in the strip — and `launcherAnchors(inRowOrder:)` skips it,
+            // resolving every anchor to the head. Accepting any open row here
+            // survived the whole suite: no fixture occupied this middle state
+            // (every other launcher drag has a paned row visible, and the
+            // `.closedOnly` one has no open row at all).
+            let rcU = dragSession("rcU")   // unpaned, project "p", stays visible
+            let rcH = OpenSession(origin: .local(cwd), resumeId: "drag-rcH",
+                                  title: "rcH", project: "hidden", status: .live)
+            let storeUnpanedOnly = SessionStore()
+            storeUnpanedOnly._probeSeedOpenSessions([rcH, rcU])
+            _ = storeUnpanedOnly.openInNewPane(rcH.id)
+            _ = storeUnpanedOnly.openLauncherInNewPane()
+            storeUnpanedOnly.filter.project = "p"   // hides rcH; rcU has no pane
+            // Rows are [L, rcU]; drag the launcher below the unpaned row.
+            storeUnpanedOnly.moveOpenRows(fromOffsets: IndexSet(integer: 0), toOffset: 2)
+            record("a visible row with no pane can't anchor a launcher",
+                   storeUnpanedOnly.panes.map(\.content)
+                   == [.session(rcH.id), .launcher])
+            clearPersistedFilter()
+
+            // The exception to the exception: a launcher whose anchor row is
+            // hidden normally keeps its pane anchor, but if the USER dragged
+            // that launcher the drop is a statement about it and outranks the
+            // strip — even though honouring it crosses the hidden pane.
+            let exA = dragSession("exA")
+            let exH = OpenSession(origin: .local(cwd), resumeId: "drag-exH",
+                                  title: "exH", project: "hidden", status: .live)
+            let storeExplicit = SessionStore()
+            storeExplicit._probeSeedOpenSessions([exH, exA])
+            _ = storeExplicit.openInNewPane(exH.id)
+            _ = storeExplicit.openLauncherInNewPane()
+            _ = storeExplicit.openInNewPane(exA.id)
+            storeExplicit.filter.project = "p"   // hides exH
+            // Rows are [L, exA] (L drew at the head, its anchor being hidden);
+            // drag L below exA.
+            storeExplicit.moveOpenRows(fromOffsets: IndexSet(integer: 0), toOffset: 2)
+            record("an explicitly dragged launcher honours the drop past a hidden pane",
+                   storeExplicit.panes.map(\.content)
+                   == [.session(exH.id), .session(exA.id), .launcher])
+            clearPersistedFilter()
+
+            // The degenerate form: a status filter hides EVERY session row, so
+            // no anchor in the row order resolves. Dragging one launcher row
+            // must not collapse the other launchers onto the head.
+            let cdA = dragSession("cdA")
+            let storeClosedOnly = SessionStore()
+            storeClosedOnly._probeSeedOpenSessions([cdA])
+            _ = storeClosedOnly.openInNewPane(cdA.id)
+            _ = storeClosedOnly.openLauncherInNewPane()
+            _ = storeClosedOnly.openLauncherInNewPane()
+            let cdFirst = storeClosedOnly.panes[1].id, cdSecond = storeClosedOnly.panes[2].id
+            storeClosedOnly.filter.status = .closedOnly
+            // Rows are [L1, L2] and nothing else; swap them. The launchers may
+            // trade places, but the session pane they both sit behind must not
+            // be shoved to the right end.
+            storeClosedOnly.moveOpenRows(fromOffsets: IndexSet(integer: 1), toOffset: 0)
+            record("a closed-only filter can't drag the session pane across the strip",
+                   storeClosedOnly.panes.map(\.content)
+                   == [.session(cdA.id), .launcher, .launcher]
+                   && storeClosedOnly.panes[1].id == cdSecond
+                   && storeClosedOnly.panes[2].id == cdFirst)
+            clearPersistedFilter()
+
+            // The launcher's own anchor row hidden: it slides LEFT to the
+            // nearest visible paned row rather than being counted past it. A
+            // count-based interleave rendered this as [vB, L] — the launcher
+            // drawn to the RIGHT of a pane it sits to the left of.
+            let vbB = dragSession("vbB")
+            let vbH = OpenSession(origin: .local(cwd), resumeId: "drag-vbH",
+                                  title: "vbH", project: "hidden", status: .live)
+            let storeSlideLeft = SessionStore()
+            storeSlideLeft._probeSeedOpenSessions([vbH, vbB])
+            _ = storeSlideLeft.openInNewPane(vbH.id)
+            _ = storeSlideLeft.openLauncherInNewPane()
+            _ = storeSlideLeft.openInNewPane(vbB.id)
+            storeSlideLeft.filter.project = "p"   // hides vbH
+            record("a launcher whose anchor row is hidden draws left of the next pane",
+                   openRowIds(storeSlideLeft) == [
+                       SidebarRow.launcher(storeSlideLeft.panes[1].id).id,
+                       SidebarRow.open(vbB).id,
+                   ])
+            clearPersistedFilter()
+
+            // `launcherAnchors(inRowOrder:)` must skip UNPANED rows. The
+            // launcher is what moves here, ending up below an unpaned row;
+            // anchoring to that row would put it at the head instead, since an
+            // unpaned session has no pane to sit behind.
+            let unA = dragSession("unA"), unU = dragSession("unU")
+            let storeUnpanedDrag = SessionStore()
+            storeUnpanedDrag._probeSeedOpenSessions([unA, unU])
+            _ = storeUnpanedDrag.openInNewPane(unA.id)
+            _ = storeUnpanedDrag.openLauncherInNewPane()
+            // Rows are [unA, L, unU]; drag L to the end, below the unpaned row.
+            storeUnpanedDrag.moveOpenRows(fromOffsets: IndexSet(integer: 1), toOffset: 3)
+            record("a launcher dragged below an unpaned row keeps its real anchor",
+                   storeUnpanedDrag.panes.map(\.content)
+                   == [.session(unA.id), .launcher])
+
+            // Out-of-range offsets from the UI must be refused, not trapped.
+            let obA = dragSession("obA"), obB = dragSession("obB")
+            let storeBounds = SessionStore()
+            storeBounds._probeSeedOpenSessions([obA, obB])
+            _ = storeBounds.openInNewPane(obA.id)
+            _ = storeBounds.openInNewPane(obB.id)
+            storeBounds.moveOpenRows(fromOffsets: IndexSet(integer: 99), toOffset: 0)
+            storeBounds.moveOpenRows(fromOffsets: IndexSet(integer: 0), toOffset: -1)
+            storeBounds.moveOpenRows(fromOffsets: IndexSet(integer: 0), toOffset: 99)
+            record("out-of-range drag offsets are refused without trapping",
+                   storeBounds.openSessions.map(\.id) == [obA.id, obB.id]
+                   && storeBounds.panes.map(\.content)
+                   == [.session(obA.id), .session(obB.id)])
+
+            // A pane pointing at a session no longer open parks LAST, and the
+            // stable sort keeps two such panes in their existing order. Nothing
+            // else constructs that state, so both were unpinned.
+            let orA = dragSession("orA")
+            let orGhost1 = UUID(), orGhost2 = UUID()
+            let orphanStrip = [
+                PaneSlot(content: .session(orGhost1), preferredWidth: 400),
+                PaneSlot(content: .session(orA.id), preferredWidth: 400),
+                PaneSlot(content: .session(orGhost2), preferredWidth: 400),
+            ]
+            record("panes pointing at closed sessions park last, in their old order",
+                   SessionStore.placingLaunchers(orphanStrip, rank: [orA.id: 0], anchors: [])
+                       .map(\.content)
+                   == [.session(orA.id), .session(orGhost1), .session(orGhost2)])
 
             // Cmd+click aims at the ROW, so the row holds still and the new
             // pane sorts to where that row already sits. Giving fA a pane
@@ -2789,8 +3252,8 @@ enum SidebarLogicProbe {
                    storeSel.openSessions.map(\.id) == [pA.id, pB.id]
                    && storeSel.focusedPaneIndex == 1)
 
-            // Launcher panes hold no row, so they must not shift the rank a
-            // session pane is compared against.
+            // A launcher pane's row is not a session row, so it must not shift
+            // the rank a session pane is compared against.
             let gX = dragSession("gX"), gA = dragSession("gA"), gB = dragSession("gB")
             let storeGap = SessionStore()
             storeGap._probeSeedOpenSessions([gX, gA, gB])
@@ -2824,7 +3287,7 @@ enum SidebarLogicProbe {
             let storeMulti = SessionStore()
             storeMulti._probeSeedOpenSessions([mA, mB, mC, mD])
             for s in [mA, mB, mC, mD] { _ = storeMulti.openInNewPane(s.id) }
-            storeMulti.moveOpenSessions(fromOffsets: IndexSet([1, 2]), toOffset: 4)
+            storeMulti.moveOpenRows(fromOffsets: IndexSet([1, 2]), toOffset: 4)
             record("multi-row downward drag lands panes in the sidebar's final order",
                    storeMulti.openSessions.map(\.id) == [mA.id, mD.id, mB.id, mC.id]
                    && storeMulti.panes.map(\.content)
@@ -2838,7 +3301,7 @@ enum SidebarLogicProbe {
             let storeUp = SessionStore()
             storeUp._probeSeedOpenSessions([uA2, uB2, uC2, uD2])
             for s in [uA2, uB2, uC2, uD2] { _ = storeUp.openInNewPane(s.id) }
-            storeUp.moveOpenSessions(fromOffsets: IndexSet([2, 3]), toOffset: 0)
+            storeUp.moveOpenRows(fromOffsets: IndexSet([2, 3]), toOffset: 0)
             record("multi-row upward drag lands panes in the sidebar's final order",
                    storeUp.panes.map(\.content) == storeUp.openSessions.map {
                        PaneContent.session($0.id)
@@ -2850,15 +3313,15 @@ enum SidebarLogicProbe {
             let storeMix = SessionStore()
             storeMix._probeSeedOpenSessions([xA, xU, xB, xC])
             for s in [xA, xB, xC] { _ = storeMix.openInNewPane(s.id) }
-            storeMix.moveOpenSessions(fromOffsets: IndexSet([1, 2]), toOffset: 0)
+            storeMix.moveOpenRows(fromOffsets: IndexSet([1, 2]), toOffset: 0)
             record("a drag mixing paned and unpaned rows still matches row order",
                    storeMix.panes.map(\.content)
                    == storeMix.openSessions
                        .filter { s in storeMix.paneIndex(forSession: s.id) != nil }
                        .map { PaneContent.session($0.id) })
 
-            // A paned row the filter is hiding. `reorderPreservingHidden` keeps
-            // its ROW at its master position, and sorting the panes off that
+            // A paned row the filter is hiding. `applyVisibleOrder` keeps its
+            // ROW at its master position, and sorting the panes off that
             // master order reproduces the same placement — no separate pinning
             // rule. The earlier revision pinned hidden panes by slot instead,
             // which broke as soon as an unpaned row joined the mix (see the
@@ -2871,13 +3334,14 @@ enum SidebarLogicProbe {
             storeHidden._probeSeedOpenSessions([hA, hH, hB, hC])
             for s in [hA, hH, hB, hC] { _ = storeHidden.openInNewPane(s.id) }
             storeHidden.filter.project = "p"   // hides hH, whose project is "hidden"
-            storeHidden.moveOpenSessions(fromOffsets: IndexSet(integer: 2), toOffset: 0)
+            storeHidden.moveOpenRows(fromOffsets: IndexSet(integer: 2), toOffset: 0)
             record("panes follow row order across a filter-hidden pane",
                    storeHidden.openSessions.map(\.id)
                    == [hC.id, hH.id, hA.id, hB.id]
                    && storeHidden.panes.map(\.content)
                    == [.session(hC.id), .session(hH.id),
                        .session(hA.id), .session(hB.id)])
+            clearPersistedFilter()
 
             // The case slot-pinning got wrong: a hidden PANED row plus a
             // visible UNPANED row. Rows end [C, B, A] with B hidden, so the
@@ -2892,11 +3356,12 @@ enum SidebarLogicProbe {
             _ = storeInvert.openInNewPane(yA.id)
             _ = storeInvert.openInNewPane(yB.id)
             storeInvert.filter.project = "p"   // hides yB
-            storeInvert.moveOpenSessions(fromOffsets: IndexSet(integer: 0), toOffset: 2)
+            storeInvert.moveOpenRows(fromOffsets: IndexSet(integer: 0), toOffset: 2)
             record("a drag crossing a hidden pane inverts the panes with the rows",
                    storeInvert.openSessions.map(\.id) == [yC.id, yB.id, yA.id]
                    && storeInvert.panes.map(\.content)
                    == [.session(yB.id), .session(yA.id)])
+            clearPersistedFilter()
 
         }
 

@@ -202,7 +202,10 @@ final class SessionStore {
             openSessions.map(SidebarRow.open) + recentRows + cloudRows
         let deduped = SidebarRow.deduped(allRows, teleportedFromMap: teleportedFromMap)
         let sorted = SidebarRow.sorted(deduped)
-        return filter.apply(to: sorted)
+        // Launcher rows are added AFTER dedup / sort / filter, never before.
+        // They stand for a live pane, and a pane the filter can hide would put
+        // the row-order-is-the-pane-strip correspondence back where it started.
+        return Self.interleavingLaunchers(into: filter.apply(to: sorted), panes: panes)
     }
 
     /// True when the active selection points at an open session.
@@ -715,28 +718,32 @@ final class SessionStore {
 
     // MARK: - Open-session reorder
 
-    /// Pure core of drag-to-reorder. `visible` is the subset of `master`
-    /// the sidebar is actually showing (filter-applied), in master order.
-    /// The move (`fromOffsets`/`toOffset`, both in visible coordinates —
-    /// SwiftUI `.onMove` semantics) is applied to the visible ids, then the
-    /// new visible order is written back into the visible slots of `master`.
-    /// Hidden ids never change position.
-    static func reorderPreservingHidden<T: Hashable>(
+    /// Pure core of drag-to-reorder. `visible` is the subset of `master` the
+    /// sidebar is actually showing (filter-applied), in master order;
+    /// `newVisible` is that list after the drag. The new visible order is
+    /// written back into the visible slots of `master`, so hidden ids never
+    /// change position.
+    ///
+    /// It takes the reordered list rather than `.onMove`'s offsets because a
+    /// drag over the Open section no longer yields offsets that mean anything
+    /// to `master` on their own — launcher rows are interleaved into those
+    /// coordinates, so the caller strips them and hands the resulting session
+    /// order straight in.
+    ///
+    /// Returns `master` unchanged when the visible order didn't actually move,
+    /// or when `newVisible` isn't a permutation of `visible` (a caller bug —
+    /// writing back a different SET would silently drop or duplicate rows).
+    /// Checked as count plus set membership, which is exact only because
+    /// `visible` never holds duplicates — the one production caller passes
+    /// session ids, one per open session.
+    static func applyVisibleOrder<T: Hashable>(
         master: [T],
         visible: [T],
-        fromOffsets: IndexSet,
-        toOffset: Int
+        newVisible: [T]
     ) -> [T] {
-        // UI-supplied offsets: reject out-of-range input instead of letting
-        // Array.move trap. (IndexSet can't hold negatives, so max() covers
-        // the from side.)
-        guard (fromOffsets.max() ?? -1) < visible.count,
-              toOffset >= 0, toOffset <= visible.count else {
-            return master
-        }
-        var newVisible = visible
-        newVisible.move(fromOffsets: fromOffsets, toOffset: toOffset)
-        guard newVisible != visible else { return master }
+        guard newVisible != visible,
+              newVisible.count == visible.count,
+              Set(newVisible) == Set(visible) else { return master }
         let visibleSet = Set(visible)
         var iterator = newVisible.makeIterator()
         return master.map { id in
@@ -744,84 +751,435 @@ final class SessionStore {
         }
     }
 
-    /// Handle a drag-reorder from the sidebar's Open section. Offsets are
-    /// in visible-row coordinates (the filter may be hiding some open
-    /// rows); `reorderPreservingHidden` maps them onto `openSessions`.
-    /// Selection is untouched — only row positions change, matching
-    /// browser-tab behaviour. Cmd+Ctrl+1..9 and Cmd+Shift+[/] both consume
-    /// the visible open rows directly, so their targets follow the new
-    /// order automatically.
-    func moveOpenSessions(fromOffsets: IndexSet, toOffset: Int) {
-        let visibleIds = visibleRows.compactMap { row -> UUID? in
-            if case .open(let s) = row { return s.id }
-            return nil
-        }
+    /// Handle a drag-reorder from the sidebar's Open section. Offsets are in
+    /// visible-row coordinates, and those rows are sessions AND launchers
+    /// mixed — on top of which the filter may be hiding some session rows.
+    ///
+    /// One drag, two writes, because the two halves have different masters. A
+    /// session row's order lives in `openSessions`, where filter-hidden rows
+    /// keep their slots (`applyVisibleOrder`); a launcher row has no master
+    /// but the pane strip itself. So the sessions are written back first and
+    /// the pane order is then rebuilt, anchoring each launcher to the paned row
+    /// it follows. Moving the launcher pane by index instead desynchronises the
+    /// two the moment one drag moves a launcher and a session at once
+    /// (multi-row drag), and — the case that forced this design — whenever a
+    /// session is dragged PAST a launcher, since the launcher's index means
+    /// nothing once its neighbours have permuted.
+    ///
+    /// **A launcher follows the drop when the row list can describe it, and
+    /// keeps the strip's anchor when it cannot** — `draggedLauncherAnchors` is
+    /// where that line falls. The row list is filter-applied, so a launcher
+    /// sitting behind a hidden paned row has no truthful anchor in it, and
+    /// re-reading every launcher from the rows re-homed those to the nearest
+    /// VISIBLE row, sliding live panes across the strip on a drag that never
+    /// touched them. Four independent reviewers found that, two by executing
+    /// it; the degenerate case is a `.closedOnly` filter, where no paned row is
+    /// visible at all and every launcher would collapse to the head.
+    ///
+    /// Selection is untouched — only positions change, matching browser-tab
+    /// behaviour. Cmd+Ctrl+1..9 and Cmd+Shift+[/] both consume the visible
+    /// open rows directly, so their targets follow the new order automatically.
+    func moveOpenRows(fromOffsets: IndexSet, toOffset: Int) {
+        let visible = visibleRows.filter(\.isOpen)
+        // UI-supplied offsets: reject out-of-range input instead of letting
+        // Array.move trap. (IndexSet can't hold negatives, so max() covers
+        // the from side.)
+        guard (fromOffsets.max() ?? -1) < visible.count,
+              toOffset >= 0, toOffset <= visible.count else { return }
+        var moved = visible
+        moved.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        guard moved.map(\.id) != visible.map(\.id) else { return }
+
         let masterIds = openSessions.map(\.id)
-        let newOrder = Self.reorderPreservingHidden(
+        let newOrder = Self.applyVisibleOrder(
             master: masterIds,
-            visible: visibleIds,
-            fromOffsets: fromOffsets,
-            toOffset: toOffset
+            visible: visible.compactMap(Self.sessionId),
+            newVisible: moved.compactMap(Self.sessionId)
         )
-        guard newOrder != masterIds else { return }
-        let byId = Dictionary(uniqueKeysWithValues: openSessions.map { ($0.id, $0) })
-        openSessions = newOrder.compactMap { byId[$0] }
-        syncPaneOrderToRows()
-        logger.info("moveOpenSessions from=\(fromOffsets.map(String.init).joined(separator: ","), privacy: .public) to=\(toOffset)")
+        if newOrder != masterIds {
+            let byId = Dictionary(uniqueKeysWithValues: openSessions.map { ($0.id, $0) })
+            openSessions = newOrder.compactMap { byId[$0] }
+        }
+        applyPaneOrder(Self.placingLaunchers(
+            panes,
+            rank: rowRank(),
+            anchors: Self.draggedLauncherAnchors(
+                movedRows: moved,
+                pickedUp: fromOffsets.compactMap { idx -> PaneSlot.ID? in
+                    guard visible.indices.contains(idx),
+                          case .launcher(let slot) = visible[idx] else { return nil }
+                    return slot
+                },
+                panes: panes
+            )
+        ))
+        logger.info("moveOpenRows from=\(fromOffsets.map(String.init).joined(separator: ","), privacy: .public) to=\(toOffset)")
     }
 
-    /// Re-order the session panes so their left-to-right order matches the
-    /// order their rows hold in `openSessions`. Launcher panes have no row, so
-    /// they keep their slot index and the session panes permute around them.
+    /// The session behind a row, or nil for a launcher / closed row.
+    private static func sessionId(_ row: SidebarRow) -> OpenSession.ID? {
+        if case .open(let s) = row { return s.id }
+        return nil
+    }
+
+    /// The pane rendering `slot`, or nil if that pane is gone. The sidebar's
+    /// launcher rows resolve their pane through this — three inline copies of
+    /// `panes.firstIndex(where:)` lived in the view layer, which the probe
+    /// cannot reach at all, and one of them decides which pane a close X tears
+    /// down.
+    func paneIndex(forSlot slot: PaneSlot.ID) -> Int? {
+        panes.firstIndex { $0.id == slot }
+    }
+
+    /// True when the sidebar's rows hold nothing but launcher rows — every
+    /// session row filtered away, or none open at all. The Open section is
+    /// still drawn in that state, so the empty state has to ask this rather
+    /// than `rows.isEmpty`, which a launcher pane makes unreachable.
     ///
-    /// This is a plain sort, not a move of just the dragged pane, and that is
-    /// safe *because* `moveRowFollowingPaneAssignment` keeps the two orders in
-    /// agreement everywhere else — a drag is the only thing that can put them
-    /// out of step, so there is never stale disagreement for a sort to snap
-    /// back. An earlier revision moved only the dragged panes and pinned
-    /// filter-hidden ones by slot; three separate ordering bugs came out of
-    /// that (a multi-row drag, and a drag crossing a hidden pane, both with
+    /// Takes the rows rather than reading `visibleRows`: the caller has them
+    /// already, and a pure function is one the probe can reach — the view it
+    /// serves is not.
+    static func holdsOnlyLauncherRows(_ rows: [SidebarRow]) -> Bool {
+        !rows.contains { row in
+            if case .launcher = row { return false }
+            return true
+        }
+    }
+
+    /// Each open session's index in `openSessions` — the master order, which
+    /// is filter-blind and so is NOT the sidebar's open block once a row is
+    /// hidden or a launcher is interleaved.
+    private func rowRank() -> [OpenSession.ID: Int] {
+        var rank: [OpenSession.ID: Int] = [:]
+        for (i, session) in openSessions.enumerated() { rank[session.id] = i }
+        return rank
+    }
+
+    /// Re-order the panes so their left-to-right order matches the order their
+    /// rows hold in the sidebar: session panes follow `openSessions`, and each
+    /// launcher pane keeps the session pane it currently sits behind.
+    ///
+    /// Launcher panes used to hold their slot INDEX here, which was right only
+    /// while they had no row. A launcher's ROW POSITION is derived from the
+    /// strip (session rows run the other way — `openSessions` is their master),
+    /// so for a launcher the two can never visibly disagree — what an index costs is the drop: rows
+    /// [A][L][B], drag A to the bottom, and the drop reads [L][B][A], while
+    /// pinning L at index 1 renders [B][L][A]. Self-consistent, and not what
+    /// the user just dropped. Anchoring is what lets the strip follow it.
+    ///
+    /// The session half is a plain sort, not a move of just the dragged pane,
+    /// and that is safe *because* `moveRowFollowingPaneAssignment` keeps the
+    /// two orders in agreement everywhere else — a drag is the only thing that
+    /// can put them out of step, so there is never stale disagreement for a
+    /// sort to snap back. An earlier revision moved only the dragged panes and
+    /// pinned filter-hidden ones by slot; three separate ordering bugs came out
+    /// of that (a multi-row drag, and a drag crossing a hidden pane, both with
     /// and without an unpaned row in the mix). Sorting has none of those cases
     /// because it never reasons about indices. Do not "optimise" it back into
     /// a targeted move without first re-establishing that the orders can drift.
     ///
-    /// Filter-hidden rows need no special handling: `reorderPreservingHidden`
-    /// keeps them at their master positions, so reading the order straight off
+    /// Filter-hidden rows need no special handling: `applyVisibleOrder` keeps
+    /// them at their master positions, so reading the order straight off
     /// `openSessions` already accounts for them. (`_probeSeedOpenSessions` is
     /// the one writer that can manufacture a disagreeing state — that is what
     /// it exists for, and it is `#if DEBUG`.)
     ///
-    /// Focus follows slot IDENTITY rather than slot position, which is also
-    /// why it survives the focused pane being a launcher.
+    /// Anchors are read from the CURRENT pane order, because nothing about the
+    /// launchers moved on the routes that reach this. The one route that knows
+    /// better — `moveOpenRows` — bypasses this function entirely and calls
+    /// `placingLaunchers` with anchors of its own.
     private func syncPaneOrderToRows() {
-        let sessionSlots = panes.indices.filter {
-            if case .session = panes[$0].content { return true }
-            return false
-        }
-        guard sessionSlots.count > 1 else { return }
+        applyPaneOrder(Self.placingLaunchers(
+            panes,
+            rank: rowRank(),
+            anchors: Self.launcherAnchors(inPaneOrder: panes)
+        ))
+    }
 
-        var rowRank: [OpenSession.ID: Int] = [:]
-        for (i, session) in openSessions.enumerated() { rowRank[session.id] = i }
-        let sorted = sessionSlots.map { panes[$0] }.sorted { lhs, rhs in
-            guard case .session(let l) = lhs.content,
-                  case .session(let r) = rhs.content else { return false }
-            // A pane pointing at a session that is no longer open violates an
-            // invariant `removePanesForClosedSession` maintains; park it last
-            // rather than crashing.
-            return (rowRank[l] ?? Int.max) < (rowRank[r] ?? Int.max)
-        }
-        guard sorted.map(\.id) != sessionSlots.map({ panes[$0].id }) else { return }
-
+    /// Commit a rebuilt pane strip. Focus follows slot IDENTITY rather than
+    /// slot position, which is also why it survives the focused pane being a
+    /// launcher. A no-op when the order is unchanged, so callers can run it
+    /// unconditionally.
+    ///
+    /// The guard compares slot IDS only, so a `newPanes` that differs from the
+    /// current strip in `content` or `preferredWidth` alone is DISCARDED, not
+    /// applied. That is a constraint on callers, not a cheap safety net: every
+    /// one of them passes a permutation of the same `PaneSlot` values.
+    private func applyPaneOrder(_ newPanes: [PaneSlot]) {
+        guard newPanes.map(\.id) != panes.map(\.id) else { return }
         let focusedSlotId = panes.indices.contains(focusedPaneIndex)
             ? panes[focusedPaneIndex].id
             : nil
-        for (slotPos, slot) in zip(sessionSlots, sorted) {
-            panes[slotPos] = slot
-        }
+        panes = newPanes
         if let focusedSlotId,
            let newIndex = panes.firstIndex(where: { $0.id == focusedSlotId }) {
             focusedPaneIndex = newIndex
         }
+    }
+
+    // MARK: - Row/pane correspondence (pure)
+
+    /// Where one launcher pane sits in the row order: immediately behind the
+    /// row of `after`, or at the head of the open block when nil.
+    struct LauncherAnchor: Equatable {
+        let slot: PaneSlot.ID
+        let after: OpenSession.ID?
+    }
+
+    /// Insert a row per launcher pane into the sidebar's already-sorted,
+    /// already-filtered open rows, so the Open block reads as the pane strip:
+    /// launchers in pane order, interleaved among the session rows. It is one
+    /// row per pane only while the filter hides nothing — a hidden session's
+    /// pane has no row, which is the filter working, not this function.
+    ///
+    /// A launcher's position is expressed as **the session pane it sits behind**
+    /// — never as a count of preceding rows. The first version counted, and a
+    /// count is only an anchor while every paned row is visible: with the
+    /// filter hiding one, "behind the 2nd paned pane" and "after the 2nd
+    /// visible paned row" name different places, and the drawn order inverted
+    /// against the strip. Ids do not drift, so the same anchor vocabulary now
+    /// runs in both directions and `launcherAnchors(inRowOrder:panes:)` is this
+    /// function's inverse by construction rather than by coincidence.
+    ///
+    /// When a launcher's own anchor row is hidden, the launcher slides LEFT to
+    /// the nearest visible paned row (head, if there is none) — left, never
+    /// right, since sliding right would put it after a pane it sits before and
+    /// invert the order against the strip. Left is not the unique placement
+    /// (an unpaned row constrains nothing, so a spot just past one would read
+    /// the same); it is the only one the anchor vocabulary can name.
+    static func interleavingLaunchers(
+        into rows: [SidebarRow],
+        panes: [PaneSlot]
+    ) -> [SidebarRow] {
+        guard panes.contains(where: { if case .launcher = $0.content { return true } else { return false } })
+        else { return rows }
+
+        // `sorted(_:)` puts the open block first, and launcher rows belong in
+        // it — never among the closed rows under their date/project headings.
+        let openRows = Array(rows.prefix { $0.isOpen })
+        let closedRows = Array(rows.dropFirst(openRows.count))
+        let visibleSessions = Set(openRows.compactMap(sessionId))
+
+        // Walk the strip once, remembering the last session pane whose row is
+        // actually on screen. That is each launcher's effective anchor.
+        var head: [PaneSlot.ID] = []
+        var behind: [OpenSession.ID: [PaneSlot.ID]] = [:]
+        var lastVisible: OpenSession.ID?
+        for slot in panes {
+            switch slot.content {
+            case .session(let sid):
+                if visibleSessions.contains(sid) { lastVisible = sid }
+            case .launcher:
+                if let anchor = lastVisible {
+                    behind[anchor, default: []].append(slot.id)
+                } else {
+                    head.append(slot.id)
+                }
+            }
+        }
+
+        var out: [SidebarRow] = head.map(SidebarRow.launcher)
+        out.reserveCapacity(rows.count + head.count + behind.values.reduce(0) { $0 + $1.count })
+        var emitted = Set(head)
+        for row in openRows {
+            out.append(row)
+            guard let sid = sessionId(row), let trailing = behind[sid] else { continue }
+            out.append(contentsOf: trailing.map(SidebarRow.launcher))
+            emitted.formUnion(trailing)
+        }
+        // A launcher whose anchor row somehow never appeared still ships, at the
+        // end of the open block. Unreachable while every anchor is drawn from
+        // `visibleSessions` above; kept because the alternative is a live pane
+        // with no row, which is the bug this whole file exists to prevent.
+        for slot in panes where !emitted.contains(slot.id) {
+            if case .launcher = slot.content { out.append(.launcher(slot.id)) }
+        }
+        return out + closedRows
+    }
+
+    /// The anchors to rebuild the strip with after a drag: the pane strip's own
+    /// anchors, overridden by the row order for every launcher the rows can
+    /// speak for.
+    ///
+    /// The dividing line is **whether the row list can describe that launcher
+    /// faithfully**, not whether the user grabbed it. A drag of a SESSION
+    /// across a launcher moves the launcher too — rows `[A][L][B]`, drag A to
+    /// the bottom, and the drop says `[L][B][A]`; keeping L behind A there
+    /// renders `[B][A][L]` and breaks the contract that the panes follow the
+    /// order you dropped. So a launcher follows the rows whenever its anchor is
+    /// the head or a session whose row is visible.
+    ///
+    /// It does NOT when its anchor row is filtered out: the rows simply do not
+    /// contain that position, so reading one back re-homes the launcher to the
+    /// nearest visible row and slides a live pane across the strip on a drag
+    /// that never touched it. A launcher the user did pick up is the exception
+    /// to the exception — that drop is a statement about that launcher, and it
+    /// outranks the strip.
+    static func draggedLauncherAnchors(
+        movedRows: [SidebarRow],
+        pickedUp: [PaneSlot.ID],
+        panes: [PaneSlot]
+    ) -> [LauncherAnchor] {
+        let base = launcherAnchors(inPaneOrder: panes)
+        guard !base.isEmpty else { return base }
+        // Deliberately NOT gated on `pickedUp` being non-empty: a drag that
+        // grabs no launcher still moves the session rows a launcher is
+        // anchored between, so every launcher is re-resolved on every drag.
+        let dragged = Set(pickedUp)
+
+        // With no paned session row on screen — a `.closedOnly` filter, or a
+        // project filter excluding every paned session — the row list cannot
+        // say where a launcher sits relative to the SESSION panes at all. Every
+        // anchor would read as "leftmost" and the drag would drive the session
+        // panes to the right end of the strip. All the rows can carry in that
+        // state is the order of launchers that share one anchor, which the
+        // re-ordering below does; two launchers behind DIFFERENT hidden panes
+        // stay put, because swapping them means crossing a pane the rows never
+        // showed.
+        let paned = panedSessionIds(panes)
+        let visibleSessions = Set(movedRows.compactMap(sessionId))
+        let rowsCanAnchor = visibleSessions.contains(where: paned.contains)
+        let fromRows = Dictionary(
+            launcherAnchors(inRowOrder: movedRows, panes: panes).map { ($0.slot, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var resolved = base.map { anchor -> LauncherAnchor in
+            // Head-anchored launchers are always expressible: "leftmost" is a
+            // position the row list has.
+            let describable = anchor.after.map(visibleSessions.contains) ?? true
+            guard rowsCanAnchor, describable || dragged.contains(anchor.slot),
+                  let fromRow = fromRows[anchor.slot] else { return anchor }
+            return fromRow
+        }
+
+        // `placingLaunchers` keeps the array's order for launchers sharing an
+        // anchor, so this is how two launchers behind one session swap when
+        // their rows do. Stable sort. The `?? Int.max` is defensive only —
+        // every launcher pane has a row and launcher rows are never filtered,
+        // so `movedRows` ranks all of them.
+        let rowRank = Dictionary(
+            movedRows.compactMap { row -> PaneSlot.ID? in
+                if case .launcher(let slot) = row { return slot }
+                return nil
+            }.enumerated().map { ($1, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        resolved.sort { (rowRank[$0.slot] ?? Int.max) < (rowRank[$1.slot] ?? Int.max) }
+        return resolved
+    }
+
+    /// Read each launcher's anchor off the pane strip: the session pane to its
+    /// left, or nil when it is leftmost.
+    static func launcherAnchors(inPaneOrder panes: [PaneSlot]) -> [LauncherAnchor] {
+        var out: [LauncherAnchor] = []
+        var previousSession: OpenSession.ID?
+        for slot in panes {
+            switch slot.content {
+            case .session(let sid): previousSession = sid
+            case .launcher: out.append(LauncherAnchor(slot: slot.id, after: previousSession))
+            }
+        }
+        return out
+    }
+
+    /// Read each launcher's anchor off a row order: the nearest PANED open row
+    /// above it, or nil when there is none. Inverse of
+    /// `interleavingLaunchers(into:panes:)` — unpaned rows are skipped there
+    /// and skipped here, which is what makes the pair round-trip.
+    static func launcherAnchors(
+        inRowOrder rows: [SidebarRow],
+        panes: [PaneSlot]
+    ) -> [LauncherAnchor] {
+        let panedSessions = panedSessionIds(panes)
+        var out: [LauncherAnchor] = []
+        var previousSession: OpenSession.ID?
+        for row in rows {
+            switch row {
+            case .open(let session):
+                if panedSessions.contains(session.id) { previousSession = session.id }
+            case .launcher(let slot):
+                out.append(LauncherAnchor(slot: slot, after: previousSession))
+            case .closedLocal, .closedCloud:
+                break
+            }
+        }
+        return out
+    }
+
+    /// Rebuild the pane strip: session panes sorted by their rows' `rank`,
+    /// each launcher pane re-inserted behind its anchor.
+    ///
+    /// Returns the input unchanged if the result would not be a permutation of
+    /// it. Every branch here is meant to preserve the panes exactly, so that
+    /// guard only fires on a bug — but the failure it prevents is a pane (and
+    /// its live WKWebView) silently vanishing from the strip.
+    static func placingLaunchers(
+        _ panes: [PaneSlot],
+        rank: [OpenSession.ID: Int],
+        anchors: [LauncherAnchor]
+    ) -> [PaneSlot] {
+        // Ties are real — panes pointing at a session no longer in
+        // `openSessions` violate an invariant `removePanesForClosedSession`
+        // maintains, and they all share `Int.max` while parked at the end — and
+        // they keep their current relative order because Swift's sort IS
+        // stable and documented as such (SE-0372, implemented in Swift 5.8).
+        // An earlier revision tie-broke on the pane's index explicitly, on a
+        // comment asserting the opposite; the guarantee makes that dead weight.
+        let sessionPanes = panes
+            .filter { if case .session = $0.content { return true } else { return false } }
+            .sorted { sessionRank($0, rank) < sessionRank($1, rank) }
+
+        let launcherPanes = Dictionary(
+            panes.compactMap { slot -> (PaneSlot.ID, PaneSlot)? in
+                if case .launcher = slot.content { return (slot.id, slot) }
+                return nil
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        // No early return for the launcher-free case: it would skip the
+        // permutation guard at the bottom, which the doc above claims covers
+        // this function. With no launchers `head` and `behind` stay empty and
+        // `out` is just `sessionPanes`, so the general path is already right.
+        let panedSessions = panedSessionIds(panes)
+        var head: [PaneSlot] = []
+        var behind: [OpenSession.ID: [PaneSlot]] = [:]
+        var placed: Set<PaneSlot.ID> = []
+        for anchor in anchors {
+            guard let slot = launcherPanes[anchor.slot], !placed.contains(anchor.slot) else { continue }
+            placed.insert(anchor.slot)
+            // An anchor naming a session with no pane can't be honoured; the
+            // head is the safe fallback because it never drops the pane.
+            if let after = anchor.after, panedSessions.contains(after) {
+                behind[after, default: []].append(slot)
+            } else {
+                head.append(slot)
+            }
+        }
+
+        var out = head
+        for pane in sessionPanes {
+            out.append(pane)
+            if case .session(let sid) = pane.content, let trailing = behind[sid] {
+                out.append(contentsOf: trailing)
+            }
+        }
+        // A launcher no anchor mentioned (caller bug) still ships, at the end.
+        out.append(contentsOf: panes.filter { !placed.contains($0.id) && launcherPanes[$0.id] != nil })
+
+        guard Set(out.map(\.id)) == Set(panes.map(\.id)), out.count == panes.count else { return panes }
+        return out
+    }
+
+    private static func sessionRank(_ slot: PaneSlot, _ rank: [OpenSession.ID: Int]) -> Int {
+        guard case .session(let sid) = slot.content else { return Int.max }
+        return rank[sid] ?? Int.max
+    }
+
+    private static func panedSessionIds(_ panes: [PaneSlot]) -> Set<OpenSession.ID> {
+        Set(panes.compactMap { slot -> OpenSession.ID? in
+            if case .session(let sid) = slot.content { return sid }
+            return nil
+        })
     }
 
     /// Move `sessionId`'s row so its rank among paned rows matches its pane's
@@ -834,26 +1192,30 @@ final class SessionStore {
     ///
     /// The rank check is not an optimization, it is what keeps this quiet: it
     /// makes the call a no-op whenever the two ranks already agree. That covers
-    /// `openInNewPane`, where `openNew` appends the row and the pane append
-    /// coincides with it — without the check the row would jump above any
-    /// unpaned rows sitting below the last paned one on every such open.
+    /// a freshly-opened session, whose row `openNew` appended to the bottom
+    /// just before its pane was appended — without the check the row would jump
+    /// above any unpaned rows sitting below the last paned one on every such
+    /// open. (`openInNewPane` is a different route and never reaches here; it
+    /// calls `syncPaneOrderToRows` instead.)
     ///
     /// It is NOT a no-op for every new session, and the doc used to claim that
     /// wrongly: `openNew`'s default target is `.focused`, so opening into an
     /// existing pane (Cmd+O, the launcher's Start without Cmd, a plain click on
     /// a closed row) does move the fresh row up to that pane's rank whenever
-    /// the focused pane isn't the last one. That is this function working.
+    /// the focused pane isn't the last SESSION pane — this ranks among session
+    /// panes, so a launcher sitting rightmost doesn't count. That is this
+    /// function working.
     ///
     /// Sessions already in a pane are untouched — `openInFocusedPane`'s
     /// focus-only branch never calls this, so pure selection still moves
     /// nothing.
     ///
     /// Filter-blind, exactly like `syncPaneOrderToRows` — neither reads
-    /// `visibleRows`. Mapping visible offsets onto master ones is
-    /// `moveOpenSessions`' job (`reorderPreservingHidden`), and both helpers
-    /// edit the master order, which is what has to be right once the filter
-    /// clears. So a hidden paned row still counts toward the ranks here and
-    /// can be the anchor the insert lands next to.
+    /// `visibleRows`. Mapping the visible order onto the master one is
+    /// `moveOpenRows`' job (`applyVisibleOrder`), and both helpers edit the
+    /// master order, which is what has to be right once the filter clears. So
+    /// a hidden paned row still counts toward the ranks here and can be the
+    /// anchor the insert lands next to.
     private func moveRowFollowingPaneAssignment(_ sessionId: OpenSession.ID) {
         guard let paneIdx = paneIndex(forSession: sessionId) else { return }
         let sessionSlots = panes.indices.filter {
