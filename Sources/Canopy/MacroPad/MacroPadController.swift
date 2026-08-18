@@ -92,6 +92,67 @@ struct MacroPadResetLoopDetector {
     }
 }
 
+/// The two-ended chord that puts the pad to sleep, kept as a pure value type
+/// for the same reason as the two above: it is arithmetic over press
+/// timestamps, and embedded in the controller a gesture that fires too eagerly
+/// and one that never fires at all are indistinguishable without a pad in your
+/// hands.
+///
+/// The gesture is the two END keys held together, never an adjacent pair: the
+/// ends cannot be struck simultaneously by accident, and the shape is
+/// unmistakable on a board whose middle keys are the ones in constant use.
+/// Which indices those are comes from the count on the wire — the pad is six
+/// keys today and the subsystem hardcodes no width.
+struct MacroPadSleepChord {
+    /// How long both ends must be held. Tuned on hardware, not reasoned:
+    /// 2 s was the first draft and felt like waiting for a machine to decide,
+    /// while 1 s is still far past any two-handed fumble — the ends are not a
+    /// pair a hand crosses by accident, so the duration is confirming intent
+    /// rather than filtering noise, and it does not need to be long.
+    static let holdDuration: TimeInterval = 1
+    /// A one-key pad has no two ends, and a zero-key one has no keys at all
+    /// (`HELLO <ver> 0` — board up, NeoKey unwired).
+    static let minimumKeyCount = 2
+
+    private var pressedSince: [Int: Date] = [:]
+
+    static func endIndices(keyCount: Int) -> (low: Int, high: Int)? {
+        guard keyCount >= minimumKeyCount else { return nil }
+        return (0, keyCount - 1)
+    }
+
+    mutating func note(index: Int, pressed: Bool, at now: Date) {
+        // A press for a key already down means a release went missing (the
+        // firmware only emits settled edges), and restarting that key's clock
+        // is the conservative reading: it can only lengthen the gesture.
+        if pressed {
+            pressedSince[index] = now
+        } else {
+            pressedSince.removeValue(forKey: index)
+        }
+    }
+
+    mutating func reset() { pressedSince.removeAll() }
+
+    /// Both ends are down. Says nothing about for how long — this is what
+    /// arms the hold, and the timer is what measures it.
+    func isArmed(keyCount: Int) -> Bool {
+        guard let ends = Self.endIndices(keyCount: keyCount) else { return false }
+        return pressedSince[ends.low] != nil && pressedSince[ends.high] != nil
+    }
+
+    /// Both ends held for `holdDuration`, measured from whichever arrived
+    /// **second**: resting a thumb on one end all evening must not shorten the
+    /// gesture to a single tap on the other.
+    func isSatisfied(keyCount: Int, at now: Date) -> Bool {
+        guard let ends = Self.endIndices(keyCount: keyCount),
+              let low = pressedSince[ends.low],
+              let high = pressedSince[ends.high]
+        else { return false }
+        return now.timeIntervalSince(max(low, high)) >= Self.holdDuration
+    }
+}
+
 /// Binds Canopy's session state to the MacroPad: pane activity out as LED
 /// colors, key presses back in as pane focus.
 ///
@@ -122,6 +183,17 @@ final class MacroPadController {
     /// traffic, so nothing would notice it. The ping's write is what fails,
     /// and the failure is what triggers a reconnect.
     private static let watchdogInterval: TimeInterval = 30
+    /// Slack on the sleep-chord timer. `MacroPadSleepChord.isSatisfied`
+    /// re-measures the hold against the wall clock, so the timer must not fire
+    /// even a hair early: it is one-shot, so a rejected gesture is not retried
+    /// until the user releases an end and starts the hold over.
+    private static let sleepChordTimerMargin: TimeInterval = 0.05
+    /// Where manual sleep is remembered. It is a state the user put the pad
+    /// into rather than a preference, so it stays out of `CanopySettings` and
+    /// its Settings pane — but it has to outlive the process all the same:
+    /// the pad sits on a Mac that never sleeps, and a Canopy relaunch at 2am
+    /// must not light the whole desk back up.
+    private static let asleepDefaultsKey = "canopy.macroPadAsleep"
 
     private let store: SessionStore
     private let settings: CanopySettings
@@ -162,6 +234,13 @@ final class MacroPadController {
     /// silently swallow one.
     private var lastSentCommands: [Int: MacroPadCommand] = [:]
     private var lastBrightness: Int?
+    /// Manual sleep: the pad dark on a deliberate gesture, because macOS
+    /// offers no signal for "the display at that desk was switched off at its
+    /// own power button" — see issue #147 for the alternatives that were
+    /// measured and rejected.
+    private var isAsleep = UserDefaults.standard.bool(forKey: MacroPadController.asleepDefaultsKey)
+    private var chord = MacroPadSleepChord()
+    private var chordTimer: Timer?
     private var states: [SessionActivity] = []
     private var tracker = MacroPadUnreadTracker()
     private var watchdogTimer: Timer?
@@ -218,6 +297,7 @@ final class MacroPadController {
     func shutdown() {
         watchdogTimer?.invalidate()
         watchdogTimer = nil
+        cancelSleepChord()
         activationObservers.forEach(NotificationCenter.default.removeObserver)
         activationObservers.removeAll()
         // The observation loop stays armed, so leaving these set would let a
@@ -373,12 +453,37 @@ final class MacroPadController {
         )
     }
 
+    /// The single place sleep overrides brightness — written as a clamp rather
+    /// than an early `return` on purpose. The diff cache then holds 0 while
+    /// asleep, which buys two things no `guard` would: `fullPush()` drops that
+    /// cache and so re-asserts `B 0` by itself (load-bearing, because the
+    /// firmware resets brightness to its default on every reconnect, and a
+    /// `HELLO` at 3am must not relight the pad), and waking sends whatever the
+    /// slider says *now* rather than the value that was live when sleep began.
     private func applyBrightness(_ percent: Int) {
         guard isConnected else { return }
-        let clamped = min(100, max(0, percent))
+        let clamped = isAsleep ? 0 : min(100, max(0, percent))
         guard lastBrightness != clamped else { return }
         lastBrightness = clamped
         device.send(.brightness(percent: clamped))
+    }
+
+    /// `B 0` and back, and deliberately nothing else.
+    ///
+    /// `R` — or blanking each key — is the obvious move and is wrong here, for
+    /// the reason `fullPush()` refuses it: blanking makes every key steady, so
+    /// re-pulsing on wake restarts every phase together and puts `asking`'s
+    /// deep breath in lockstep with `working`'s shallow one, collapsing the
+    /// amplitude ladder that is the whole point of `SessionActivity.breath`.
+    /// Brightness is a plain multiply in the firmware, so zero scales the
+    /// output to black without touching any key's colour, floor, period or
+    /// phase — and wake is then one command, no re-push, no phase disturbed.
+    private func setAsleep(_ asleep: Bool) {
+        guard isAsleep != asleep else { return }
+        isAsleep = asleep
+        UserDefaults.standard.set(asleep, forKey: Self.asleepDefaultsKey)
+        logger.notice("MacroPad manual sleep: \(asleep ? "asleep" : "awake", privacy: .public)")
+        applyBrightness(settings.macroPadBrightness)
     }
 
     /// Re-sends everything from a known-nothing state. Used on connect and on
@@ -452,6 +557,10 @@ final class MacroPadController {
             fullPush()
         case .disconnected:
             isConnected = false
+            // A yanked cable never sends the release edges, so a chord half
+            // made at the moment it went would still be armed on reconnect —
+            // against a key count that has just been forgotten, at that.
+            cancelSleepChord()
             keyCount = nil
             protocolVersion = nil
             lastSentCommands.removeAll()
@@ -484,12 +593,7 @@ final class MacroPadController {
                 fullPush()
             }
         case .key(let index, let pressed):
-            // Release edges are forwarded by the firmware and deliberately
-            // ignored here — press-to-focus is the whole Phase 1 gesture, and
-            // acting on both edges would fire twice per tap. Long-press and
-            // chords have the events they need waiting when we want them.
-            guard pressed else { return }
-            focusPane(index)
+            handleKey(index: index, pressed: pressed)
         case .deviceError(let message):
             // `ERR fatal …` is the firmware's dying words before it reboots
             // itself, and the console port carrying the real traceback is one
@@ -581,6 +685,76 @@ final class MacroPadController {
         }
         keyCount = count
     }
+
+    /// Release edges reach the chord and stop there: press-to-focus is the
+    /// whole gesture, and acting on both edges would fire twice per tap. They
+    /// are no longer dropped at the top because a release is exactly what
+    /// cancels a half-made chord.
+    private func handleKey(index: Int, pressed: Bool) {
+        guard !isAsleep else {
+            // Any press wakes, and that press is swallowed: the first touch
+            // after a night asleep is the user reaching for the light switch,
+            // not for a pane.
+            guard pressed else { return }
+            cancelSleepChord()
+            setAsleep(false)
+            return
+        }
+        chord.note(index: index, pressed: pressed, at: Date())
+        updateSleepChordTimer()
+        guard pressed else { return }
+        // Making the chord DOES focus both end panes on the way in. Accepted,
+        // not fixed: suppressing it means holding every press until its
+        // release, which costs every ordinary press its immediacy to spare a
+        // stray focus change nobody is in front of.
+        focusPane(index)
+    }
+
+    /// Arms or cancels the hold. The timer only exists while both ends are
+    /// down, so there is no polling — and the 30s watchdog cannot carry this
+    /// check, since a 1s hold sampled every 30s is a 30s hold in practice.
+    private func updateSleepChordTimer() {
+        guard chord.isArmed(keyCount: chordKeyCount) else {
+            chordTimer?.invalidate()
+            chordTimer = nil
+            return
+        }
+        // Already counting down: a third key going down must not restart a
+        // hold the user is halfway through.
+        guard chordTimer == nil else { return }
+        // `[weak self]` on the OUTER block, for the reason spelled out in
+        // `startWatchdog`.
+        let timer = Timer.scheduledTimer(
+            withTimeInterval: MacroPadSleepChord.holdDuration + Self.sleepChordTimerMargin,
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.chordTimer = nil
+                guard self.chord.isSatisfied(keyCount: self.chordKeyCount, at: Date()) else { return }
+                self.setAsleep(true)
+                // The ends are still held. Forget them so the release edges
+                // that follow cannot be read as anything at all.
+                self.chord.reset()
+            }
+        }
+        // `.common` for the same reason as the watchdog: menu tracking and
+        // live resize suspend the default mode.
+        RunLoop.main.add(timer, forMode: .common)
+        chordTimer = timer
+    }
+
+    private func cancelSleepChord() {
+        chordTimer?.invalidate()
+        chordTimer = nil
+        chord.reset()
+    }
+
+    /// The chord needs to know where the ends *are*, so it uses the count the
+    /// device reported rather than `effectiveKeyCount`'s assumption: an
+    /// unidentified pad gets no gesture instead of a gesture aimed at the
+    /// wrong keys. In practice `HELLO` always precedes the first key event.
+    private var chordKeyCount: Int { keyCount ?? 0 }
 
     private func focusPane(_ index: Int) {
         guard store.panes.indices.contains(index) else { return }
