@@ -3446,7 +3446,16 @@ enum SidebarLogicProbe {
             record("macropad chord: a 6-key pad's ends are 0 and 5",
                    chord(keys: 6, [(0, true, 0), (5, true, 0)]).holdDeadline != nil)
             record("macropad chord: an end and its neighbour are not the chord",
+                   chord(keys: 6, [(0, true, 0), (1, true, 0)]).holdDeadline == nil)
+            record("macropad chord: an end and a non-end are not the chord",
                    chord(keys: 6, [(0, true, 0), (4, true, 0)]).holdDeadline == nil)
+            // The floor is derived, so no assertion can pin the number 3. Pin
+            // the ARGUMENT for it instead: the gesture's one surviving safety
+            // property is that the ends are not adjacent, which needs at least
+            // one key between them. This rejects a floor of 2 and would accept
+            // a legitimate future 4.
+            record("macropad chord: the floor leaves at least one key between the ends",
+                   floor - 2 >= 1, "minimumKeyCount=\(floor)")
             // Both sides of the minimum, and both derived from the constant —
             // a re-typed 2 or 3 here would keep passing under a name that had
             // become false, which is the `paneAbsoluteCap` incident's shape.
@@ -3479,10 +3488,11 @@ enum SidebarLogicProbe {
                        == base.addingTimeInterval(60 + hold))
 
             // A press with no release before it means the release was lost on
-            // the wire. The clock restarts, so the deadline moves LATER — and
-            // the controller re-aims its timer at the new one. An earlier
-            // revision kept the old timer, and a single lost release edge
-            // wedged the gesture until the user let go.
+            // the wire, and the clock restarts so the deadline moves LATER.
+            // That the CONTROLLER then re-aims its timer at the new deadline —
+            // the actual round-1 bug — is not asserted here and cannot be: it
+            // needs a live run loop, and the probe exits before one turns.
+            // `MacroPadSleepChordTimerAction` below is as close as this gets.
             record("macropad chord: a duplicate press pushes the deadline out",
                    chord(keys: 6, [(0, true, 0), (5, true, 0), (5, true, 60)]).holdDeadline
                        == base.addingTimeInterval(60 + hold))
@@ -3516,17 +3526,25 @@ enum SidebarLogicProbe {
                    readopted.holdDeadline == base.addingTimeInterval(hold))
 
             // Wire garbage must not accumulate in the press map — the only
-            // place in this subsystem where an unbounded index could.
+            // place in this subsystem where an unbounded index could. This has
+            // to be asserted through `trackedKeyCount`: an out-of-range press
+            // is by construction never an end, so it cannot move the deadline,
+            // and a deadline-only assertion here passes with the range guard
+            // deleted outright (measured).
             var forged = chord(keys: 6, [(0, true, 0), (5, true, 0)])
             forged.note(index: 9_999, pressed: true, at: base)
             forged.note(index: -1, pressed: true, at: base)
             forged.note(index: 6, pressed: true, at: base)
             record("macropad chord: out-of-range indices are dropped, not recorded",
+                   forged.trackedKeyCount == 2, "tracked=\(forged.trackedKeyCount)")
+            record("macropad chord: forged indices leave the hold itself alone",
                    forged.holdDeadline == base.addingTimeInterval(hold))
         }
 
-        // --- The sleep clamp: one expression carries three promises (dark on
-        // the gesture, dark through a reconnect, dark through a relaunch).
+        // --- The sleep clamp. It carries three promises — dark on the
+        // gesture, dark through a reconnect, dark through a relaunch — of
+        // which only the first is reachable here; the other two live in the
+        // diff cache and in `UserDefaults`.
         do {
             record("macropad brightness: asleep overrides the setting",
                    MacroPadController.effectiveBrightness(percent: 60, isAsleep: true) == 0)
@@ -3535,6 +3553,37 @@ enum SidebarLogicProbe {
             record("macropad brightness: clamped to the protocol's range",
                    MacroPadController.effectiveBrightness(percent: 150, isAsleep: false) == 100
                        && MacroPadController.effectiveBrightness(percent: -5, isAsleep: false) == 0)
+        }
+
+        // --- The scheduler's decision, extracted so it is reachable at all.
+        // Pinning it does NOT pin that the controller consults it — restoring
+        // the one-shot behaviour that wedged the gesture would leave all of
+        // these green. It pins the rule that behaviour broke.
+        do {
+            let a = Date(timeIntervalSinceReferenceDate: 0)
+            let b = a.addingTimeInterval(5)
+            typealias Action = MacroPadSleepChordTimerAction
+
+            record("macropad chord timer: an unmoved deadline keeps its timer",
+                   Action.next(current: a, desired: a, force: false) == .leaveAlone)
+            record("macropad chord timer: a moved deadline is re-aimed, never dropped",
+                   Action.next(current: a, desired: b, force: false) == .aim(b))
+            record("macropad chord timer: a released hold retires the timer",
+                   Action.next(current: a, desired: nil, force: false) == .retire)
+            record("macropad chord timer: no hold and no timer is not work",
+                   Action.next(current: nil, desired: nil, force: false) == .leaveAlone)
+            record("macropad chord timer: arming from nothing aims",
+                   Action.next(current: nil, desired: a, force: false) == .aim(a))
+            // The fire body clears its mirror before re-aiming, so "unchanged"
+            // there compares nil against nil. Without `force` it would answer
+            // `leaveAlone`, arm nothing, and re-create the wedge with both
+            // ends still held — which is what makes the two assignments above
+            // that guard load-bearing in a way no type could hold.
+            record("macropad chord timer: force re-aims a deadline that looks unchanged",
+                   Action.next(current: nil, desired: a, force: true) == .aim(a)
+                       && Action.next(current: a, desired: a, force: true) == .aim(a))
+            record("macropad chord timer: force still retires when the hold is gone",
+                   Action.next(current: nil, desired: nil, force: true) == .retire)
         }
 
         record("macropad encode: rgb masked to 24 bits",
