@@ -129,9 +129,13 @@ struct MacroPadSleepChord {
     /// so this duration confirms intent rather than filtering noise.
     static let holdDuration: TimeInterval = 1
     /// Below this there is no gesture at all — see the type's doc for why the
-    /// floor is 3 rather than 2. Both degenerate counts are real states, not
-    /// hypotheticals: `HELLO <ver> 0` is a board whose NeoKey is unwired, and
-    /// a pad that has not reported a count yet is modelled as nil.
+    /// floor is 3 rather than 2. A pad that has not reported a count yet is
+    /// modelled as nil and lands here too. Zero no longer means "board up,
+    /// NeoKey unwired": `code.py` fixes `NUM_KEYS` at module scope and says so
+    /// in as many words, so an unwired NeoKey now reports the full count plus
+    /// `ERR i2c …`. Elsewhere in this file and in CLAUDE.md zero is still
+    /// described as that hardware state — pre-existing firmware rot, worth one
+    /// sweep, not this change's to make.
     static let minimumKeyCount = 3
 
     private var keyCount: Int?
@@ -230,13 +234,15 @@ enum MacroPadSleepChordTimerAction: Equatable {
     case retire
     case aim(Date)
 
-    /// `force` exists to remove an ordering dependency, not to add a mode. The
-    /// fire body has already cleared its mirror of the deadline by the time it
-    /// re-aims, so "unchanged" would compare nil against nil and answer
-    /// `leaveAlone` — arming nothing, with both ends still held and no event
-    /// left to wake it. That is precisely the wedge this whole path exists to
-    /// fix, and without `force` the only thing preventing it is two
-    /// assignments sitting ABOVE a guard rather than below it.
+    /// `force` exists to remove an ordering dependency, not to add a mode —
+    /// and the dependency is positional, not a nil comparison. As the fire
+    /// body stands it clears its mirror before re-aiming, so `current` is nil
+    /// against a non-nil `desired` and it would arm even without `force`. Move
+    /// those two clears BELOW the guards — "clear only what we consumed", a
+    /// tidy-up nothing in the file argues against — and `current` holds the
+    /// same deadline `desired` does, `leaveAlone` wins, nothing is armed, and
+    /// both ends are still held with no event left to wake the gesture. That
+    /// is the round-1 wedge, restored by a refactor that looks like cleanup.
     static func next(current: Date?, desired: Date?, force: Bool) -> Self {
         if !force, desired == current { return .leaveAlone }
         guard let desired else { return .retire }
@@ -312,9 +318,11 @@ final class MacroPadController {
     /// Every write goes through `didSet` so the chord's geometry cannot lag
     /// the wire. `PONG` is the path that needs it: it reaches `adoptIdentity`
     /// without touching the chord, which is how a width change could land
-    /// inside a hold in progress. (`HELLO` cancels the chord explicitly first
-    /// — and has to, because a pad that reset reports the SAME count, so this
-    /// observer never fires there.)
+    /// inside a hold in progress. (`HELLO` also cancels the chord explicitly.
+    /// Whether that call is load-bearing was NOT established: every `HELLO`
+    /// this side can reach follows a notified disconnect, which has already
+    /// cleared everything. It is kept as defence against a device that ever
+    /// re-`HELLO`s inside one connection, not because a path was measured.)
     private var keyCount: Int? {
         didSet {
             guard keyCount != oldValue else { return }
@@ -568,6 +576,27 @@ final class MacroPadController {
         )
     }
 
+    /// Whether a key index off the wire is one this pad can actually have.
+    /// Pure so the probe can reach it — the third extraction in this change
+    /// for that reason, after `effectiveBrightness` and
+    /// `MacroPadSleepChordTimerAction`, and for the same measured cause: with
+    /// the check inlined in `handleKey`, deleting it left every assertion
+    /// green.
+    ///
+    /// A count that cannot discriminate accepts everything, and ZERO is such a
+    /// count. Refusing every index because the pad claims no keys strands a
+    /// sleeping pad exactly the way refusing because it named no width would
+    /// — and waking is the one action that must never become impossible,
+    /// because it is the only exit from a persisted dark state. (The current
+    /// firmware cannot report zero at all: `NUM_KEYS` is fixed at module
+    /// scope, so an unwired NeoKey now surfaces as the full count plus
+    /// `ERR i2c …`. Zero therefore means wire garbage — a corrupted `PONG`
+    /// — which is precisely when guessing is worst.)
+    static func acceptsKey(index: Int, keyCount: Int?) -> Bool {
+        guard let keyCount, keyCount > 0 else { return true }
+        return index >= 0 && index < keyCount
+    }
+
     /// Sleep's override of the brightness setting, as a pure function so the
     /// probe can reach it. Three promises ride on this one expression — the
     /// pad goes dark on the gesture, stays dark through a reconnect, and stays
@@ -617,8 +646,15 @@ final class MacroPadController {
     /// send (its refusal rests on separate `NUM_KEYS` evidence, which is about
     /// stranded keys, not phases): blanking makes every key steady, so
     /// re-pulsing on wake restarts every phase together and puts `asking`'s
-    /// deep breath in lockstep with `working`'s shallow one, collapsing the
-    /// amplitude ladder that is the whole point of `SessionActivity.breath`.
+    /// deep breath in lockstep with `working`'s shallow one. What that costs
+    /// is the DE-PHASING, not the ladder: `set_pulse` restarts a key's phase
+    /// only when a steady key begins to pulse and never rewrites floors, so
+    /// `asking` would still breathe deeper than `working` — it would just do
+    /// it in time with everything else, and the keys would stop drifting apart
+    /// on their own the way `MacroPadCommand.breathe` describes. (`fullPush`'s
+    /// doc calls the same loss "collapsing the amplitude ladder"; measured
+    /// against the firmware that names the wrong casualty, but it is
+    /// pre-existing text and not this change's to rewrite.)
     /// Brightness is a plain multiply in the firmware, so zero scales the
     /// output to black without touching any key's colour, floor, period or
     /// phase — and wake is then one command, no re-push, no phase disturbed.
@@ -655,14 +691,8 @@ final class MacroPadController {
     /// What the `R` did cost is real: the firmware restarts a key's phase when
     /// a steady key becomes a breathing one, so blanking first re-anchored
     /// every breathing key together and put `asking`'s deep breath in lockstep
-    /// with `working`'s shallow one. What that costs is the DE-PHASING, not
-    /// the ladder: the floors are per-key, so `asking` still breathes deeper
-    /// than `working` — it just does it in time with everything else, and the
-    /// keys stop drifting apart on their own the way `MacroPadCommand.breathe`
-    /// describes. (`fullPush`'s own doc and CLAUDE.md both say "collapsing the
-    /// amplitude ladder" here; measured against the firmware's `set_pulse`,
-    /// which restarts the phase only when a steady key becomes a breathing
-    /// one and never touches the floors, that names the wrong casualty.)
+    /// with `working`'s shallow one — collapsing the amplitude ladder that is
+    /// the whole point of `SessionActivity.breath`. See `MacroPadCommand.breathe`.
     ///
     /// The one shrink that *can* happen inside a connection — an implausible
     /// count on the wire — is handled in `adoptIdentity`, which keeps the count
@@ -707,11 +737,11 @@ final class MacroPadController {
             fullPush()
         case .disconnected:
             isConnected = false
-            // Redundant with `keyCount = nil` below, which clears the press
-            // map through the `didSet`. Kept so the two lines are not
-            // order-dependent — and note the asymmetry with the `HELLO` path,
-            // where the same call is NOT redundant: a pad that reset reports
-            // the same count, so the observer never fires there.
+            // Very nearly redundant with `keyCount = nil` below, which
+            // clears the press map through the `didSet`. Kept because the two
+            // are not identical — this also drops any partial state before
+            // the count is forgotten, and it keeps the line independent of
+            // the observer's implementation.
             cancelSleepChord()
             keyCount = nil
             protocolVersion = nil
@@ -852,11 +882,15 @@ final class MacroPadController {
         // `focusPane` bounds against the PANE count, and the chord bounds
         // against the key count; the wake path below had no bound at all, so a
         // forged `K 9999 1` could relight a pad that was deliberately dark.
-        // An unreported count accepts everything: refusing what cannot be
-        // validated would leave a pad that never named its width impossible to
-        // wake, which is worse than the forgery.
-        if let keyCount, index < 0 || index >= keyCount {
-            logger.debug("MacroPad ignoring key \(index, privacy: .public): the pad reported \(keyCount, privacy: .public) keys")
+        //
+        // `notice`, not `debug`: this records a decision to refuse input the
+        // user may be physically producing, and it is the only line that
+        // separates "the pad is narrower than you think" from "the subsystem
+        // is broken". `debug` lives in a ring buffer and is gone by the time
+        // anyone looks. An out-of-range index should be a never-event, so the
+        // volume argument does not apply.
+        guard Self.acceptsKey(index: index, keyCount: keyCount) else {
+            logger.notice("MacroPad ignoring key \(index, privacy: .public): the pad reported \(self.keyCount ?? -1, privacy: .public) keys")
             return
         }
         guard !isAsleep else {
@@ -917,6 +951,12 @@ final class MacroPadController {
             chordTimer?.invalidate()
             chordTimer = nil
             chordDeadline = nil
+            // Bumped here as well as in `cancelSleepChord`, so "the generation
+            // moved" means "no fire scheduled before now is still live" on
+            // EVERY path. Without it a width change landing on a hold whose
+            // timer had already fired let the stale body through to log a
+            // released-ends cause that had not happened.
+            chordTimerGeneration &+= 1
         case .aim(let deadline):
             chordTimer?.invalidate()
             chordDeadline = deadline
@@ -934,21 +974,32 @@ final class MacroPadController {
                     // have replaced this one by the time the body runs. The
                     // generation says whether this fire is still the live one.
                     //
-                    // It is NOT the only thing keeping a stale fire harmless,
-                    // and the re-reads below are not belt and braces: a
-                    // cancelled hold leaves the generation alone in no path
-                    // any more, but a fire that raced a RELEASE is rejected
-                    // only by `holdDeadline` having gone nil.
+                    // Every path that ends a hold now bumps it — `.retire`
+                    // and `cancelSleepChord` alike — so this guard alone is
+                    // enough to reject a fire scheduled before that. The
+                    // re-reads below are still not decoration: they are what
+                    // catches a release that lands in the window between this
+                    // timer firing and this body draining, which no
+                    // generation could see.
                     guard let self, self.chordTimerGeneration == generation else { return }
                     self.chordTimer = nil
                     self.chordDeadline = nil
                     guard let deadline = self.chord.holdDeadline else {
-                        // Both ends were no longer held when this drained. The
-                        // gesture is abandoned on purpose — every ambiguous
-                        // input in this subsystem resolves to "do not sleep" —
-                        // but it is indistinguishable at the pad from "I did
-                        // not hold it long enough", so it gets a line.
-                        logger.notice("MacroPad sleep chord abandoned: the ends were released before the timer drained")
+                        // Report the observation, not a cause: "released"
+                        // is only the usual reason both ends stopped being
+                        // held, and the code cannot tell it from a width
+                        // change or a cancel. Abandoning is deliberate —
+                        // ambiguity resolves to "do not sleep" — but at the
+                        // pad it is indistinguishable from "I did not hold it
+                        // long enough", so it gets a line.
+                        //
+                        // That bias is a tendency, not a guarantee: if this
+                        // body drains before a release that beat the deadline,
+                        // both ends are still recorded and the pad sleeps. The
+                        // exact claim is that whenever the release wins the
+                        // race, re-deriving refuses — where latching the
+                        // satisfaction at fire time would sleep either way.
+                        logger.notice("MacroPad sleep chord abandoned: the ends were not both held when the timer drained")
                         return
                     }
                     guard deadline <= Date() else {

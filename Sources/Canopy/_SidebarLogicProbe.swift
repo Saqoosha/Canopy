@@ -3489,10 +3489,13 @@ enum SidebarLogicProbe {
 
             // A press with no release before it means the release was lost on
             // the wire, and the clock restarts so the deadline moves LATER.
-            // That the CONTROLLER then re-aims its timer at the new deadline —
-            // the actual round-1 bug — is not asserted here and cannot be: it
-            // needs a live run loop, and the probe exits before one turns.
-            // `MacroPadSleepChordTimerAction` below is as close as this gets.
+            // That the CONTROLLER then re-aims its timer at the new deadline
+            // — the actual round-1 bug — is not asserted here. Observing the
+            // re-aim would mean reading `chordDeadline` after a synchronous
+            // `handleKey`, and both are private; watching the timer actually
+            // fire additionally needs a run loop, which this probe exits
+            // before turning. `MacroPadSleepChordTimerAction` below is as
+            // close as this gets, and it pins the rule, not the wiring.
             record("macropad chord: a duplicate press pushes the deadline out",
                    chord(keys: 6, [(0, true, 0), (5, true, 0), (5, true, 60)]).holdDeadline
                        == base.addingTimeInterval(60 + hold))
@@ -3537,6 +3540,9 @@ enum SidebarLogicProbe {
             forged.note(index: 6, pressed: true, at: base)
             record("macropad chord: out-of-range indices are dropped, not recorded",
                    forged.trackedKeyCount == 2, "tracked=\(forged.trackedKeyCount)")
+            // Not evidence — measured to survive every mutation that the
+            // tracked-count assertion above also catches. Kept as the sentence
+            // a reader wants next to it.
             record("macropad chord: forged indices leave the hold itself alone",
                    forged.holdDeadline == base.addingTimeInterval(hold))
         }
@@ -3553,6 +3559,28 @@ enum SidebarLogicProbe {
             record("macropad brightness: clamped to the protocol's range",
                    MacroPadController.effectiveBrightness(percent: 150, isAsleep: false) == 100
                        && MacroPadController.effectiveBrightness(percent: -5, isAsleep: false) == 0)
+        }
+
+        // --- Which key indices the controller will act on at all. Extracted
+        // because deleting the inlined bound left every assertion green
+        // (measured): the forged-`K` wake it closes is the one fix in this
+        // change that nothing else protects.
+        do {
+            record("macropad key bound: a real index on a six-key pad is accepted",
+                   MacroPadController.acceptsKey(index: 5, keyCount: 6))
+            record("macropad key bound: an index past the reported width is refused",
+                   !MacroPadController.acceptsKey(index: 6, keyCount: 6)
+                       && !MacroPadController.acceptsKey(index: 9_999, keyCount: 6))
+            record("macropad key bound: a negative index is refused",
+                   !MacroPadController.acceptsKey(index: -1, keyCount: 6))
+            // The two counts that cannot discriminate must accept, or a
+            // sleeping pad loses its only exit. Zero is the one that reads as
+            // a validated count and validates nothing.
+            record("macropad key bound: an unreported width accepts anything",
+                   MacroPadController.acceptsKey(index: 9_999, keyCount: nil))
+            record("macropad key bound: a zero width accepts anything rather than stranding the pad",
+                   MacroPadController.acceptsKey(index: 0, keyCount: 0)
+                       && MacroPadController.acceptsKey(index: 9_999, keyCount: 0))
         }
 
         // --- The scheduler's decision, extracted so it is reachable at all.
@@ -3574,11 +3602,12 @@ enum SidebarLogicProbe {
                    Action.next(current: nil, desired: nil, force: false) == .leaveAlone)
             record("macropad chord timer: arming from nothing aims",
                    Action.next(current: nil, desired: a, force: false) == .aim(a))
-            // The fire body clears its mirror before re-aiming, so "unchanged"
-            // there compares nil against nil. Without `force` it would answer
-            // `leaveAlone`, arm nothing, and re-create the wedge with both
-            // ends still held — which is what makes the two assignments above
-            // that guard load-bearing in a way no type could hold.
+            // `force` is what stops a plausible refactor from restoring the
+            // round-1 wedge: move the fire body's two clears below its guards
+            // and `current` holds the same deadline `desired` does, so
+            // `leaveAlone` wins and nothing is armed while both ends are still
+            // held. The `(a, a, true)` half is the one that pins it; the
+            // `(nil, a, true)` half is inert and kept only for symmetry.
             record("macropad chord timer: force re-aims a deadline that looks unchanged",
                    Action.next(current: nil, desired: a, force: true) == .aim(a)
                        && Action.next(current: a, desired: a, force: true) == .aim(a))
