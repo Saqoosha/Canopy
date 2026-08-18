@@ -7,7 +7,7 @@ enum GroupingMode: String, CaseIterable {
     case env = "Env"
 }
 
-/// One row in the sidebar list. Three flavours, all unified by Identifiable +
+/// One row in the sidebar list. Four flavours, all unified by Identifiable +
 /// Hashable so `List(selection:)` can target any of them.
 ///
 /// Sort order across a mixed array of rows:
@@ -17,16 +17,32 @@ enum GroupingMode: String, CaseIterable {
 ///      `lastModified` desc
 ///
 /// Use `SidebarRow.sorted(_:)` to apply this consistently.
+///
+/// `.launcher` is the odd one out and deliberately so: it is the only case
+/// with no session behind it, and it exists purely to keep the Open block
+/// readable as a map of the pane strip. A launcher pane used to have no row
+/// at all, which broke that correspondence exactly when a launcher was open.
+/// It carries a `PaneSlot.ID` rather than an index so it survives the pane
+/// strip being re-ordered under it, and it is NOT produced by
+/// `SessionStore.visibleRows`' own pipeline — it is interleaved in afterwards
+/// by `SessionStore.interleavingLaunchers(into:panes:)`, which is what keeps
+/// it out of `filter.apply` — a live pane the sidebar filter can hide would
+/// put the map back where it started. (`deduped` drops only `.closedCloud`
+/// rows and `hiddenIds` is applied to `recents`/`cloud` before any row is
+/// built, so neither could ever have touched it.)
 enum SidebarRow: Identifiable, Hashable {
     case open(OpenSession)
     case closedLocal(SessionEntry)
     case closedCloud(RemoteSession)
+    /// A launcher pane, keyed by the `PaneSlot.ID` it renders.
+    case launcher(PaneSlot.ID)
 
     var id: String {
         switch self {
         case .open(let s): "open:\(s.id.uuidString)"
         case .closedLocal(let e): "local:\(e.id)"
         case .closedCloud(let r): "cloud:\(r.id)"
+        case .launcher(let slot): "launcher:\(slot.uuidString)"
         }
     }
 
@@ -35,6 +51,7 @@ enum SidebarRow: Identifiable, Hashable {
         case .open(let s): s.title
         case .closedLocal(let e): e.title
         case .closedCloud(let r): r.summary
+        case .launcher: "New Session"
         }
     }
 
@@ -49,6 +66,11 @@ enum SidebarRow: Identifiable, Hashable {
                 return "\(owner)/\(name)"
             }
             return r.repoName ?? "—"
+        case .launcher:
+            // Empty rather than a placeholder: `SidebarRowView` drops the
+            // subtitle line entirely when this is empty, so the launcher row
+            // doesn't reserve space for a second line it has nothing to say on.
+            return ""
         }
     }
 
@@ -61,12 +83,25 @@ enum SidebarRow: Identifiable, Hashable {
         case .open(let s): s.lastActiveAt
         case .closedLocal(let e): e.timestamp
         case .closedCloud(let r): r.lastModified
+        // Never consulted, by two separate mechanisms. `sorted(_:)`'s closed
+        // block excludes `isOpen` rows itself, and `SidebarGrouping` only ever
+        // sees closed rows because its single call site hands it `closedRows`
+        // (`Sidebar.swift`) — it filters nothing of its own, so a future caller
+        // passing every row would reach this. Only `SidebarFilter.apply`'s
+        // lastActivity cutoff depends on running before the interleave.
+        case .launcher: .distantFuture
         }
     }
 
+    /// "Belongs in the Open section", not "is an OpenSession" — a launcher
+    /// row answers true here and matches no `case .open` pattern anywhere.
+    /// Every consumer that wants a session still pattern-matches `.open`, so
+    /// widening this doesn't silently hand them a row with no session.
     var isOpen: Bool {
-        if case .open = self { return true }
-        return false
+        switch self {
+        case .open, .launcher: true
+        case .closedLocal, .closedCloud: false
+        }
     }
 
     /// The row's "kind" for filtering: was this session born locally or in
@@ -80,6 +115,7 @@ enum SidebarRow: Identifiable, Hashable {
     var origin: Origin {
         switch self {
         case .open: .local
+        case .launcher: .local
         case .closedLocal: .local
         case .closedCloud: .cloud
         }
