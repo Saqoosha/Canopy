@@ -122,6 +122,102 @@ final class SessionStore {
     /// otherwise. Set by the Sidebar view from `.task` / `.onDisappear`.
     var isSidebarVisible: Bool = false
 
+    /// The session the rename sheet is currently editing, or nil when no sheet
+    /// is up. Presenting from the store rather than from a row's own view is
+    /// what lets two entry points — the sidebar's context menu and a
+    /// double-click on a pane header — open the same sheet.
+    var renameTarget: RenameTarget?
+
+    /// A session the user may rename, addressed by its `SessionTitleStore` key.
+    ///
+    /// `openSessionId` is separate from `sessionId` and both are needed: the
+    /// store is keyed by the CLI's session id, while the live title the
+    /// sidebar and pane header render lives on an `OpenSession` identified by
+    /// a per-process UUID. A closed row has the first and not the second.
+    struct RenameTarget: Identifiable, Equatable {
+        /// `SessionTitleStore` key — the CLI session id, not `OpenSession.ID`.
+        let sessionId: String
+        /// The live session to update in place, when this row has one.
+        let openSessionId: OpenSession.ID?
+        let currentTitle: String
+
+        var id: String { sessionId }
+    }
+
+    /// Open the rename sheet for a sidebar row, if that row is renameable.
+    ///
+    /// Cloud and launcher rows are not: a launcher stands for no session at
+    /// all, and a cloud row's title belongs to the server rather than to
+    /// `SessionTitleStore`, whose keys must be local session UUIDs.
+    func beginRename(row: SidebarRow) {
+        switch row {
+        case .open(let session):
+            renameTarget = RenameTarget(
+                sessionId: session.resumeId,
+                openSessionId: session.id,
+                currentTitle: session.title
+            )
+        case .closedLocal(let entry):
+            // `SessionEntry.id` IS the CLI session id — it is built from the
+            // JSONL's filename, which is that id.
+            renameTarget = RenameTarget(
+                sessionId: entry.id,
+                openSessionId: nil,
+                currentTitle: entry.title
+            )
+        case .closedCloud, .launcher:
+            break
+        }
+    }
+
+    /// Open the rename sheet for whatever session occupies a pane.
+    /// A launcher pane has no session to name, so this is a no-op there.
+    func beginRenameForPane(at index: Int) {
+        guard panes.indices.contains(index),
+              case .session(let openId) = panes[index].content,
+              let session = openSessions.first(where: { $0.id == openId })
+        else { return }
+        renameTarget = RenameTarget(
+            sessionId: session.resumeId,
+            openSessionId: session.id,
+            currentTitle: session.title
+        )
+    }
+
+    /// Apply a manual rename and close the sheet.
+    ///
+    /// The title is marked user-owned, which is what stops
+    /// `SessionTitleGenerator` from overwriting it: generation now runs several
+    /// times per session, so without the mark a name typed here would be
+    /// replaced a few turns later and again on the next launch.
+    ///
+    /// An empty or unchanged title just dismisses — treating empty as "revert
+    /// to automatic" would make the destructive reading of a stray Return the
+    /// silent one.
+    func commitRename(_ target: RenameTarget, to newTitle: String) {
+        defer { renameTarget = nil }
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != target.currentTitle else { return }
+
+        SessionTitleStore.save(title: trimmed, forSessionId: target.sessionId, userOwned: true)
+        if let openId = target.openSessionId,
+           let session = openSessions.first(where: { $0.id == openId })
+        {
+            session.title = trimmed
+            // The live shim decides on every prompt whether to regenerate a
+            // title, so it has to be told directly — persisting the mark alone
+            // would only take effect on the next launch.
+            session.shim?.noteUserRenamed(trimmed)
+        }
+        // Closed rows read their label from `SessionTitleStore` when
+        // `ClaudeSessionHistory` loads them, so they need a reload to redraw.
+        Task { await refreshRecents() }
+    }
+
+    func cancelRename() {
+        renameTarget = nil
+    }
+
     /// Background polling task for cloud session refresh. Lives while the
     /// sidebar is visible.
     private var cloudPollTask: Task<Void, Never>?

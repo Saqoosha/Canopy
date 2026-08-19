@@ -311,6 +311,15 @@ struct Sidebar: View {
 
     @ViewBuilder
     private func rowMenu(for row: SidebarRow) -> some View {
+        // Exhaustive rather than two `if case`s: a new row kind must decide
+        // whether it can be renamed instead of silently inheriting "no".
+        // Cloud titles belong to the server, and a launcher has no session.
+        switch row {
+        case .open, .closedLocal:
+            Button("Rename…") { store.beginRename(row: row) }
+        case .closedCloud, .launcher:
+            EmptyView()
+        }
         if case .open(let s) = row {
             Button("Close session") { store.closeSession(s.id) }
         }

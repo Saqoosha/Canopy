@@ -4388,6 +4388,125 @@ enum SidebarLogicProbe {
         // purpose means lowering that number in the same commit; adding them
         // needs no change. Keep the format in step with the awk there.
         //
+        // MARK: - Session title generation (out-of-session route)
+        //
+        // Every bound below is derived from the production constant rather
+        // than re-typed. A fixture spelling the number itself asserts only
+        // that nobody changed their mind, and fails loudly for the wrong
+        // reason when the constant legitimately moves.
+        do {
+            let gen = SessionTitleGenerator.self
+
+            // --- hasEnoughSignal: both sides of each condition -------------
+            record("titlegen: no prompts has no signal",
+                   !gen.hasEnoughSignal(prompts: []))
+            let atThreshold = String(repeating: "a", count: 40)
+            record("titlegen: one prompt at the length threshold has signal",
+                   gen.hasEnoughSignal(prompts: [atThreshold]))
+            record("titlegen: one prompt below the threshold has none",
+                   !gen.hasEnoughSignal(prompts: [String(atThreshold.dropLast())]))
+            // The count condition is independent of the length one: two short
+            // prompts pass even though neither could on its own.
+            record("titlegen: two short prompts have signal",
+                   gen.hasEnoughSignal(prompts: ["hi", "go"]))
+            // Whitespace is not signal — this is what keeps a padded "  hi  "
+            // opening from buying a title generated from nothing.
+            record("titlegen: whitespace is not signal",
+                   !gen.hasEnoughSignal(prompts: [String(repeating: " ", count: 100)]))
+
+            // --- sanitize -------------------------------------------------
+            record("titlegen: sanitize trims and takes the first line",
+                   gen.sanitize("  Fix the login bug  \nsecond line") == "Fix the login bug")
+            record("titlegen: sanitize strips surrounding quotes",
+                   gen.sanitize("\"Quoted title\"") == "Quoted title")
+            record("titlegen: sanitize strips a trailing period",
+                   gen.sanitize("Refactor the parser.") == "Refactor the parser")
+            record("titlegen: sanitize skips leading blank lines",
+                   gen.sanitize("\n\n  Real title") == "Real title")
+            record("titlegen: sanitize rejects empty output",
+                   gen.sanitize("   \n  ") == nil)
+            // Over-long output is prose, and is rejected rather than
+            // truncated: a truncated paragraph is worse than the raw-prompt
+            // fallback it would replace. Both sides of the bound.
+            let atMax = String(repeating: "t", count: gen.maxTitleLength)
+            record("titlegen: sanitize accepts output at the length cap",
+                   gen.sanitize(atMax) == atMax)
+            record("titlegen: sanitize rejects output past the length cap",
+                   gen.sanitize(atMax + "t") == nil)
+
+            // --- userPrompt -----------------------------------------------
+            let long = String(repeating: "x", count: gen.maxPromptLength + 50)
+            let wrapped = gen.userPrompt(prompts: [long])
+            record("titlegen: userPrompt delimits the messages",
+                   wrapped.contains("<messages>") && wrapped.contains("</messages>"))
+            record("titlegen: userPrompt truncates each prompt to the cap",
+                   !wrapped.contains(String(repeating: "x", count: gen.maxPromptLength + 1)))
+
+            // --- arguments ------------------------------------------------
+            let args = gen.arguments()
+            // The persona fix itself. Measured: with setting sources loaded
+            // the user's CLAUDE.md persona reaches the title generator and
+            // wins over any counter-instruction in the prompt.
+            if let i = args.firstIndex(of: "--setting-sources") {
+                record("titlegen: setting sources are emptied",
+                       i + 1 < args.count && args[i + 1].isEmpty)
+            } else {
+                record("titlegen: setting sources are emptied", false, "flag absent")
+            }
+            // Regression pin: a bare `{}` is rejected by the CLI with
+            // `mcpServers: Invalid input: expected record, received undefined`.
+            record("titlegen: empty MCP config carries the mcpServers key",
+                   args.contains(#"{"mcpServers":{}}"#))
+            // Replacing the system prompt, not appending to it — appending
+            // leaves the agent framing that invites the model to converse.
+            record("titlegen: system prompt replaces rather than appends",
+                   args.contains("--system-prompt") && !args.contains("--append-system-prompt"))
+            record("titlegen: regeneration is allowed more than once",
+                   gen.maxGenerations > 1)
+        }
+
+        // MARK: - SessionTitleStore user-owned marking
+        //
+        // Writes the real UserDefaults keys under a throwaway session id and
+        // removes it again, the same bargain the recent-directories fixtures
+        // above already make.
+        do {
+            let sid = UUID().uuidString
+            let other = UUID().uuidString
+            defer {
+                SessionTitleStore.clearUserOwned(sid)
+                SessionTitleStore.clearUserOwned(other)
+            }
+
+            SessionTitleStore.save(title: "Auto title", forSessionId: sid)
+            record("titlestore: an automatic title is not user-owned",
+                   !SessionTitleStore.isUserOwned(sid))
+
+            SessionTitleStore.save(title: "Human title", forSessionId: sid, userOwned: true)
+            record("titlestore: a manual rename marks the session user-owned",
+                   SessionTitleStore.isUserOwned(sid))
+            record("titlestore: a manual rename stores its title",
+                   SessionTitleStore.title(forSessionId: sid) == "Human title")
+
+            // The invariant the whole feature rests on: automatic generation
+            // runs several times per session, so it must not be able to demote
+            // a name the user typed by saving over it.
+            SessionTitleStore.save(title: "Auto again", forSessionId: sid)
+            record("titlestore: an automatic save cannot clear the user-owned mark",
+                   SessionTitleStore.isUserOwned(sid))
+
+            // Re-keying happens when the CLI replaces a placeholder resume id.
+            // The mark has to travel or generation overwrites the name one
+            // turn later.
+            SessionTitleStore.migrate(fromSessionId: sid, toSessionId: other)
+            record("titlestore: migrate carries the user-owned mark",
+                   SessionTitleStore.isUserOwned(other) && !SessionTitleStore.isUserOwned(sid))
+
+            SessionTitleStore.clearUserOwned(other)
+            record("titlestore: clearUserOwned releases the session",
+                   !SessionTitleStore.isUserOwned(other))
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

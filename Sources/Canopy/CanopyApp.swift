@@ -31,6 +31,16 @@ struct CanopyApp: App {
             // hand, with no `SessionStore.shared` lookup. Fires once per
             // window; `startMacroPad` is idempotent.
             .task { appDelegate.startMacroPad(store: sidebarStore) }
+            .sheet(item: Binding(
+                get: { sidebarStore.renameTarget },
+                set: { if $0 == nil { sidebarStore.cancelRename() } }
+            )) { target in
+                RenameSessionSheet(
+                    target: target,
+                    onCommit: { sidebarStore.commitRename(target, to: $0) },
+                    onCancel: { sidebarStore.cancelRename() }
+                )
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 800)
@@ -469,9 +479,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installPaneFocusClickMonitor() {
         guard paneFocusClickMonitor == nil else { return }
         paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            // `!isEmpty`, not `count > 1`: a double-click on a pane header
+            // renames its session, and a single pane is the common case for
+            // that. Every branch below that only made sense with two or more
+            // panes now carries its own count check, so nothing else changed
+            // behaviour when this guard widened.
             guard let window = event.window, isCanopyWindow(window),
                   let store = SessionStore.shared,
-                  store.panes.count > 1 else { return event }
+                  !store.panes.isEmpty else { return event }
 
             // Click location in window coordinates (bottom-left origin).
             let loc = event.locationInWindow
@@ -534,7 +549,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // precedes, so logging it here for a click that raises a
                     // background window would say whether it discriminates.
                     let localPoint = CGPoint(x: clickX - xCursor, y: clickYFromTop)
-                    if PaneHeaderStrip.closeButtonHitRect(paneWidth: paneW).contains(localPoint) {
+                    // `panes.count > 1` mirrors `PaneHeaderStrip`'s
+                    // `showCloseButton`: hit-testing an X that is not drawn
+                    // would close the only pane from blank header space.
+                    if store.panes.count > 1,
+                       PaneHeaderStrip.closeButtonHitRect(paneWidth: paneW).contains(localPoint) {
                         // notice, not debug: this is the only record that the
                         // geometry-derived branch removed a pane, and debug
                         // does not survive to a log capture. Same rule the
@@ -547,6 +566,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             \(localPoint.y, privacy: .public))
                             """)
                         store.closePane(at: index)
+                        return nil
+                    }
+                    // Double-click the header to rename, for the same
+                    // reason the close X is hit-tested here rather than by
+                    // SwiftUI: no mouse event reaches what that strip draws.
+                    // Consumed, so the click cannot also zoom the window —
+                    // deliberate, since this strip is the pane's title bar and
+                    // renaming is what a double-click on a title means here.
+                    // Ordered after the close X so the X keeps the smaller,
+                    // more specific target.
+                    if event.clickCount == 2, clickYFromTop < PaneHeaderStrip.height {
+                        store.beginRenameForPane(at: index)
                         return nil
                     }
                     // Skip the title bar so window-drag clicks don't move
