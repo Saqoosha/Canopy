@@ -4480,9 +4480,10 @@ enum SidebarLogicProbe {
             record("titlegen: runs non-interactively", args.contains("-p"))
             // Drop this and every title silently burns the default model.
             record("titlegen: pins the cheap model", valueAfter("--model") == gen.model)
-            // The persona fix itself. Measured: with setting sources loaded the
-            // persona reaches the title generator and wins over any
-            // counter-instruction in the prompt.
+            // The persona fix itself. Measured: 9 persona-voiced titles in 200
+            // with setting sources loaded, against 10 in the baseline taken
+            // before the counter-instruction was added — evidence the wording
+            // did not help, not that it loses to every possible wording.
             record("titlegen: setting sources are emptied", valueAfter("--setting-sources") == "")
             // Drop this and the user's MCP servers start on a call they never
             // made — the doc's own stated reason for the flag.
@@ -4491,17 +4492,24 @@ enum SidebarLogicProbe {
             // `mcpServers: Invalid input: expected record, received undefined`.
             record("titlegen: empty MCP config carries the mcpServers key",
                    valueAfter("--mcp-config") == #"{"mcpServers":{}}"#)
-            // Closes the injection path: the model reads untrusted user text,
-            // and with tools available could read a file and emit it as a title.
-            record("titlegen: no tools are allowed", valueAfter("--allowed-tools") == "")
+            // NOT the injection defence, despite how it reads. Measured on CLI
+            // 2.1.217: with this flag set the `init` event still lists the full
+            // toolset and a payload instructing a file read got the file back —
+            // it is the auto-approve allowlist, not a tool filter. The defence
+            // is the system prompt, asserted below. Pinned anyway because
+            // dropping auto-approval is worth keeping.
+            record("titlegen: no tools are auto-approved", valueAfter("--allowed-tools") == "")
             // Replacing the system prompt, not appending — appending leaves the
             // agent framing that invites the model to converse.
             record("titlegen: system prompt replaces rather than appends",
                    args.contains("--system-prompt") && !args.contains("--append-system-prompt"))
-            // Without this clause a probe run answered the user's question
-            // instead of titling it.
-            record("titlegen: system prompt forbids following the input",
-                   (valueAfter("--system-prompt") ?? "").contains("never answer"))
+            // The real injection defence: a probe run without this system
+            // prompt answered the user's question instead of titling it, and a
+            // payload told to read a file came back as a title with it in place.
+            // Compared against the constant rather than a re-typed fragment, so
+            // rewording cannot fail this for the wrong reason.
+            record("titlegen: the system prompt is the one that ships",
+                   valueAfter("--system-prompt") == gen.systemPrompt)
         }
 
         // MARK: - The generation decision
@@ -4603,6 +4611,71 @@ enum SidebarLogicProbe {
                    SessionTitleStore.title(forSessionId: other) == "Auto again")
         }
 
+        // MARK: - Store eviction, migration and corruption
+        //
+        // Each of these is a policy with a long rationale comment and, until
+        // now, no coverage at all — which is the shape CLAUDE.md warns about:
+        // a floor counts assertions, it cannot say any of them protects
+        // anything.
+        do {
+            let snapshot = SessionTitleStore._probeSnapshot()
+            defer { SessionTitleStore._probeRestore(snapshot) }
+
+            // --- eviction ---------------------------------------------------
+            SessionTitleStore._probeReset()
+            let cap = SessionTitleStore._probeMaxEntries
+            for _ in 0..<(cap - 1) {
+                SessionTitleStore.save(title: "auto", forSessionId: UUID().uuidString)
+            }
+            let owned = UUID().uuidString
+            SessionTitleStore.save(title: "human", forSessionId: owned, userOwned: true)
+            record("eviction: the store fills to its cap",
+                   SessionTitleStore._probeCount() == cap)
+
+            let newest = UUID().uuidString
+            SessionTitleStore.save(title: "newest", forSessionId: newest)
+            record("eviction: the store stays at its cap",
+                   SessionTitleStore._probeCount() == cap)
+            // The bug the `protecting` parameter exists for: dictionary order is
+            // hash-seeded, so a plain prefix could evict the entry inserted one
+            // line earlier — a rename discarded by the call performing it.
+            record("eviction: the record just written survives",
+                   SessionTitleStore.title(forSessionId: newest) == "newest")
+            // A human-chosen name is the one entry that cannot be regenerated.
+            record("eviction: a user-named record outlives automatic ones",
+                   SessionTitleStore.title(forSessionId: owned) == "human"
+                   && SessionTitleStore.isUserOwned(owned))
+
+            // --- legacy migration -------------------------------------------
+            // The one path standing between an existing user and losing every
+            // stored title on upgrade.
+            let legacyPlain = UUID().uuidString
+            let legacyOwned = UUID().uuidString
+            SessionTitleStore._probeSeedLegacy(
+                titles: [legacyPlain: "old auto", legacyOwned: "old human"],
+                owned: [legacyOwned]
+            )
+            record("migration: legacy titles are carried forward",
+                   SessionTitleStore.title(forSessionId: legacyPlain) == "old auto"
+                   && SessionTitleStore.title(forSessionId: legacyOwned) == "old human")
+            record("migration: the legacy user-owned mark is carried forward",
+                   SessionTitleStore.isUserOwned(legacyOwned)
+                   && !SessionTitleStore.isUserOwned(legacyPlain))
+
+            // --- corruption fails closed ------------------------------------
+            SessionTitleStore._probeReset()
+            SessionTitleStore.save(title: "keep me", forSessionId: UUID().uuidString)
+            SessionTitleStore._probeCorrupt()
+            record("corruption: reads degrade to empty instead of crashing",
+                   SessionTitleStore._probeCount() == 0)
+            // The load-bearing half. Treating "cannot read" as "nothing there"
+            // lets one save overwrite the whole store with a single record.
+            record("corruption: writes are refused",
+                   !SessionTitleStore.save(title: "clobber", forSessionId: UUID().uuidString))
+            record("corruption: the unreadable blob is parked, not discarded",
+                   SessionTitleStore._probeHasParkedBlob())
+        }
+
         // MARK: - Rename entry points
         do {
             let snapshot = SessionTitleStore._probeSnapshot()
@@ -4639,10 +4712,10 @@ enum SidebarLogicProbe {
                    store.renameTarget?.sessionId == closedId
                    && store.renameTarget?.openSessionId == nil)
 
-            // A cloud title belongs to the server, and a launcher row stands for
-            // no session at all. Both must refuse: `SessionTitleStore` would
-            // drop the write for a non-UUID id, so the sheet would appear to
-            // work and the name would vanish at the next launch.
+            // A cloud title belongs to the server, and a launcher row stands
+            // for no session at all. The id shape is NOT the reason — a cloud
+            // id may well be a UUID, and `save` now reports a rejected write so
+            // `commitRename` leaves the UI alone. Server ownership is.
             store.cancelRename()
             store.beginRename(row: .closedCloud(cloudFresh))
             record("rename: a cloud row is refused", store.renameTarget == nil)
@@ -4665,12 +4738,15 @@ enum SidebarLogicProbe {
                    && store.renameTarget == nil)
 
             // Commit.
-            guard let target = { () -> SessionStore.RenameTarget? in
-                store.beginRename(row: .open(renamable))
-                return store.renameTarget
-            }() else {
-                record("rename: commit fixtures have a target", false, "no target")
-                return (lines.joined(separator: "\n"), fail + 1)
+            store.beginRename(row: .open(renamable))
+            guard let target = store.renameTarget else {
+                // Records and falls through, like every other failure-only site
+                // in this file. Returning here would skip the summary line, and
+                // CI reads a missing summary as "the app never launched" rather
+                // than "an assertion failed" — landing a real failure in the
+                // wrong bucket. (`record` already counted it, so no `+ 1`.)
+                record("rename: commit fixtures have a target", false, "beginRename produced none")
+                return (lines.joined(separator: "\n"), fail)
             }
 
             store.commitRename(target, to: "   ")
@@ -4707,6 +4783,40 @@ enum SidebarLogicProbe {
             record("rename: a commit truncates to the displayed length",
                    renamable.title.count <= SessionTitleGenerator.maxTitleLength
                    && renamable.title == ShimProcess.truncatedTitle(overlong))
+
+            // The race `commitRename` names in its own doc, and the reason it
+            // resolves the key from the live session rather than the captured
+            // target: a launcher-born session starts on a placeholder id that
+            // `backfillResumeId` replaces the moment the CLI reports its real
+            // one, which can happen while the sheet is open. Committing against
+            // the captured value writes the mark under a dead id — and the
+            // title self-heals through another path while the mark does not, so
+            // the name survives one launch and is taken back the next.
+            let placeholder = UUID().uuidString
+            let realId = UUID().uuidString
+            let racing = OpenSession(
+                origin: .local(cwd),
+                resumeId: placeholder,
+                title: "Placeholder era",
+                project: "ProjectA",
+                status: .live,
+                lastActiveAt: now
+            )
+            let raceStore = SessionStore()
+            raceStore._probeSeedOpenSessions([racing])
+            raceStore.beginRename(row: .open(racing))
+            if let raceTarget = raceStore.renameTarget {
+                // Exactly what `backfillResumeId` does, while the sheet is up.
+                racing.resumeId = realId
+                raceStore.commitRename(raceTarget, to: "Named mid-backfill")
+                record("rename: a commit follows a resume-id backfill",
+                       SessionTitleStore.title(forSessionId: realId) == "Named mid-backfill"
+                       && SessionTitleStore.isUserOwned(realId))
+                record("rename: a commit writes nothing under the dead placeholder",
+                       SessionTitleStore.title(forSessionId: placeholder) == nil)
+            } else {
+                record("rename: backfill fixture has a target", false, "no target")
+            }
         }
 
         // Summary
