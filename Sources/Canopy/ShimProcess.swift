@@ -41,13 +41,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Blocks raw webview title overwrites; the extension keeps re-sending
     /// stale internal titles unless we explicitly replace them.
     private var hasGeneratedTitle = false
-    /// True when the displayed title is provisional — the user's own words
-    /// standing in until something better arrives — so a later fallback or a
-    /// generated title may replace it.
-    ///
-    /// It does NOT gate regeneration: `maybeGenerateTitle` never reads it, and
-    /// the count alone decides. Its only reader is `installFallbackTitle`.
-    private var titleIsFallback = false
     /// How many times this session has run title generation. Bounded by
     /// `SessionTitleGenerator.maxGenerations` — see that constant for why a
     /// single generation was the bug rather than the design.
@@ -542,12 +535,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // would survive the rename but not the next launch, which is the
             // harder failure to notice.
             self.userOwnsTitle = SessionTitleStore.isUserOwned(resumeSessionId)
-            // Regeneration on resume does NOT come from this line —
-            // `titleGenerationCount` starts at 0, so it is allowed regardless.
-            // What this decides is whether `installFallbackTitle` may replace
-            // the restored title with the user's latest raw words when
-            // generation is skipped or fails.
-            self.titleIsFallback = !self.userOwnsTitle
         }
         if let resumeSessionId {
             // Seed title-generation context from the resumed conversation.
@@ -1091,7 +1078,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     if let pending = pendingGeneratedTitle {
                         pendingGeneratedTitle = nil
                         if !userOwnsTitle {
-                            SessionTitleStore.save(title: pending, forSessionId: sid)
+                            if !SessionTitleStore.save(title: pending, forSessionId: sid) {
+                                logger.warning("Generated title not persisted; it will not survive relaunch")
+                            }
                             generatedSessionTitle = pending
                         }
                     }
@@ -2211,11 +2200,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func applyGeneratedTitle(_ title: String) {
         let truncated = Self.truncatedTitle(title)
         hasGeneratedTitle = true
-        titleIsFallback = false
         generatedSessionTitle = truncated
         updateWindowTitle(truncated)
         if let sid = activeSessionId ?? resumeSessionId {
-            SessionTitleStore.save(title: truncated, forSessionId: sid)
+            // Reported, not discarded: a store that refuses the write leaves a
+            // title on screen that is gone at the next launch, and without this
+            // line that state is indistinguishable from a working one.
+            if !SessionTitleStore.save(title: truncated, forSessionId: sid) {
+                logger.warning("Generated title not persisted; it will not survive relaunch")
+            }
         } else {
             pendingGeneratedTitle = truncated
         }
@@ -2223,8 +2216,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Show the user's own most recent words as a provisional title.
     ///
-    /// Marked `titleIsFallback` so a later generation still replaces it, and
-    /// deliberately NOT persisted. `SessionTitleStore` is where a session's
+    /// Deliberately NOT persisted. `SessionTitleStore` is where a session's
     /// *name* lives, and a fallback is not one — persisting it is how the four
     /// raw-prompt entries in the stored 200 got there ("this is latest
     /// summary. todays.…"). Closed rows lose nothing: `ClaudeSessionHistory`
@@ -2249,12 +2241,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // `rename_tab` silently reverted the display to it. Two titles at once,
         // and the doc claimed the state could not arise.
         guard generatedSessionTitle == nil else { return }
-        guard !hasGeneratedTitle || titleIsFallback else { return }
         guard let text = lastUserMessageText ?? promptHistory.last, !text.isEmpty else { return }
         let truncated = Self.truncatedTitle(text)
         guard truncated != sessionTitle else { return }
         hasGeneratedTitle = true
-        titleIsFallback = true
         updateWindowTitle(truncated)
     }
 
@@ -2270,7 +2260,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let truncated = Self.truncatedTitle(title)
         userOwnsTitle = true
         hasGeneratedTitle = true
-        titleIsFallback = false
         generatedSessionTitle = truncated
         updateWindowTitle(truncated)
     }

@@ -4492,13 +4492,12 @@ enum SidebarLogicProbe {
             // `mcpServers: Invalid input: expected record, received undefined`.
             record("titlegen: empty MCP config carries the mcpServers key",
                    valueAfter("--mcp-config") == #"{"mcpServers":{}}"#)
-            // NOT the injection defence, despite how it reads. Measured on CLI
-            // 2.1.217: with this flag set the `init` event still lists the full
-            // toolset and a payload instructing a file read got the file back —
-            // it is the auto-approve allowlist, not a tool filter. The defence
-            // is the system prompt, asserted below. Pinned anyway because
-            // dropping auto-approval is worth keeping.
-            record("titlegen: no tools are auto-approved", valueAfter("--allowed-tools") == "")
+            // Pins the flag's VALUE and nothing about its effect — measured
+            // twice on CLI 2.1.217, it has none here (see `arguments`' doc).
+            // The name says only what is asserted; an earlier name claimed no
+            // tools were auto-approved, which the second measurement refuted.
+            record("titlegen: the tool allowlist argument is empty",
+                   valueAfter("--allowed-tools") == "")
             // Replacing the system prompt, not appending — appending leaves the
             // agent framing that invites the model to converse.
             record("titlegen: system prompt replaces rather than appends",
@@ -4611,6 +4610,45 @@ enum SidebarLogicProbe {
                    SessionTitleStore.title(forSessionId: other) == "Auto again")
         }
 
+        // MARK: - Title-generation environment
+        //
+        // Added because a reviewer measured that commenting out the entrypoint
+        // scrub left the whole suite green: the fix for a real bug (a sidebar
+        // row per generation) was ungated while the floor went up by 74.
+        do {
+            let key = "CLAUDE_CODE_ENTRYPOINT"
+            let prior = ProcessInfo.processInfo.environment[key]
+            defer {
+                if let prior { setenv(key, prior, 1) } else { unsetenv(key) }
+            }
+            setenv(key, "claude-vscode", 1)
+            let cli = URL(fileURLWithPath: "/usr/local/bin/claude")
+            let env = SessionTitleGenerator.environment(customApi: nil, cli: cli)
+            // The transcript this feature writes stays out of the sidebar only
+            // because `isAutomated` reads the CLI's entrypoint — which comes
+            // from this variable, not from `-p`. Inherited, it is not `sdk-*`
+            // and the row shows up.
+            record("titleenv: the inherited entrypoint is scrubbed",
+                   env[key] == nil)
+            record("titleenv: the CLI's own directory is on PATH",
+                   (env["PATH"] ?? "").contains(cli.deletingLastPathComponent().path))
+
+            // A provider-only setup must not fall back to an inherited
+            // Anthropic key pointing at a different endpoint.
+            var provider = ModelProvider()
+            provider.baseURL = "https://example.invalid"
+            provider.authToken = "t"
+            provider.haikuModel = "some-haiku"
+            setenv("ANTHROPIC_API_KEY", "leftover", 1)
+            defer { unsetenv("ANTHROPIC_API_KEY") }
+            let providerEnv = SessionTitleGenerator.environment(customApi: provider, cli: cli)
+            record("titleenv: a custom provider drops any inherited API key",
+                   providerEnv["ANTHROPIC_API_KEY"] == nil)
+            record("titleenv: a custom provider redirects the endpoint and model",
+                   providerEnv["ANTHROPIC_BASE_URL"] == "https://example.invalid"
+                   && providerEnv["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "some-haiku")
+        }
+
         // MARK: - Store eviction, migration and corruption
         //
         // Each of these is a policy with a long rationale comment and, until
@@ -4624,15 +4662,22 @@ enum SidebarLogicProbe {
             // --- eviction ---------------------------------------------------
             SessionTitleStore._probeReset()
             let cap = SessionTitleStore._probeMaxEntries
+            // The two special ids are the LEXICALLY SMALLEST in the store, and
+            // that is what makes these fixtures bite. `write` sorts candidates
+            // by (not-owned first, then id), so the victim is the smallest
+            // non-owned candidate. With random UUIDs both guards could be
+            // deleted and each assertion would still pass ~199 runs in 200 —
+            // measured, not assumed. Pinned here so removing either guard puts
+            // that guard's own id in the victim slot immediately.
             for _ in 0..<(cap - 1) {
                 SessionTitleStore.save(title: "auto", forSessionId: UUID().uuidString)
             }
-            let owned = UUID().uuidString
+            let owned = "00000000-0000-4000-8000-000000000001"
             SessionTitleStore.save(title: "human", forSessionId: owned, userOwned: true)
             record("eviction: the store fills to its cap",
                    SessionTitleStore._probeCount() == cap)
 
-            let newest = UUID().uuidString
+            let newest = "00000000-0000-4000-8000-000000000002"
             SessionTitleStore.save(title: "newest", forSessionId: newest)
             record("eviction: the store stays at its cap",
                    SessionTitleStore._probeCount() == cap)
@@ -4662,24 +4707,42 @@ enum SidebarLogicProbe {
                    SessionTitleStore.isUserOwned(legacyOwned)
                    && !SessionTitleStore.isUserOwned(legacyPlain))
 
-            // --- corruption fails closed ------------------------------------
+            // --- corruption fails closed, then recovers ---------------------
+            // The contract is per-call and the ORDER is the whole point: the
+            // call that DISCOVERS a corrupt blob refuses, parks the bytes and
+            // clears the live key, so the refusal lasts exactly one call.
+            // Treating "cannot read" as "nothing there" would let one save
+            // overwrite every stored title; never clearing the key would make
+            // titling dead for the life of the install. Both halves are pinned.
             SessionTitleStore._probeReset()
             SessionTitleStore.save(title: "keep me", forSessionId: UUID().uuidString)
+
             SessionTitleStore._probeCorrupt()
-            record("corruption: reads degrade to empty instead of crashing",
+            record("corruption: the discovering read degrades to empty",
                    SessionTitleStore._probeCount() == 0)
-            // The load-bearing half. Treating "cannot read" as "nothing there"
-            // lets one save overwrite the whole store with a single record.
-            record("corruption: writes are refused",
-                   !SessionTitleStore.save(title: "clobber", forSessionId: UUID().uuidString))
             record("corruption: the unreadable blob is parked, not discarded",
                    SessionTitleStore._probeHasParkedBlob())
+            record("corruption: a later call recovers",
+                   SessionTitleStore.save(title: "after", forSessionId: UUID().uuidString))
+
+            // Same again with a WRITE as the discovering call — the branch that
+            // actually protects the data.
+            SessionTitleStore._probeCorrupt()
+            record("corruption: the discovering write is refused",
+                   !SessionTitleStore.save(title: "clobber", forSessionId: UUID().uuidString))
+            record("corruption: a later write succeeds",
+                   SessionTitleStore.save(title: "later", forSessionId: UUID().uuidString))
         }
 
         // MARK: - Rename entry points
         do {
             let snapshot = SessionTitleStore._probeSnapshot()
             defer { SessionTitleStore._probeRestore(snapshot) }
+            // Reset, like the block above. Without it these run on top of the
+            // developer's real store, and a local store that is corrupt or at
+            // its cap turns every rename assertion red — pointing the report at
+            // rename when the fault is elsewhere.
+            SessionTitleStore._probeReset()
 
             let renameId = UUID().uuidString
             let renamable = OpenSession(
@@ -4713,9 +4776,9 @@ enum SidebarLogicProbe {
                    && store.renameTarget?.openSessionId == nil)
 
             // A cloud title belongs to the server, and a launcher row stands
-            // for no session at all. The id shape is NOT the reason — a cloud
-            // id may well be a UUID, and `save` now reports a rejected write so
-            // `commitRename` leaves the UI alone. Server ownership is.
+            // for no session at all. Server ownership is the reason; the id
+            // shape is not, and nothing here establishes what a cloud id looks
+            // like either way.
             store.cancelRename()
             store.beginRename(row: .closedCloud(cloudFresh))
             record("rename: a cloud row is refused", store.renameTarget == nil)
@@ -4739,16 +4802,12 @@ enum SidebarLogicProbe {
 
             // Commit.
             store.beginRename(row: .open(renamable))
-            guard let target = store.renameTarget else {
-                // Records and falls through, like every other failure-only site
-                // in this file. Returning here would skip the summary line, and
-                // CI reads a missing summary as "the app never launched" rather
-                // than "an assertion failed" — landing a real failure in the
-                // wrong bucket. (`record` already counted it, so no `+ 1`.)
-                record("rename: commit fixtures have a target", false, "beginRename produced none")
-                return (lines.joined(separator: "\n"), fail)
-            }
-
+            // `if let`, not `guard`: the previous version's comment claimed it
+            // "falls through", which a guard body cannot do, and its `return`
+            // skipped the summary line — so CI would have reported a real
+            // assertion failure as "the app never launched", which is exactly
+            // the bucket separation the probe job exists to provide.
+            if let target = store.renameTarget {
             store.commitRename(target, to: "   ")
             record("rename: an empty title dismisses without writing",
                    store.renameTarget == nil
@@ -4815,7 +4874,10 @@ enum SidebarLogicProbe {
                 record("rename: a commit writes nothing under the dead placeholder",
                        SessionTitleStore.title(forSessionId: placeholder) == nil)
             } else {
-                record("rename: backfill fixture has a target", false, "no target")
+                    record("rename: backfill fixture has a target", false, "no target")
+                }
+            } else {
+                record("rename: commit fixtures have a target", false, "beginRename produced none")
             }
         }
 

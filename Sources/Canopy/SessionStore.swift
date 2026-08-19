@@ -137,7 +137,8 @@ final class SessionStore {
     /// `openSessionId` is separate from `sessionId` and both are needed: the
     /// store is keyed by the CLI's session id, while the live title the
     /// sidebar and pane header render lives on an `OpenSession` identified by
-    /// a per-process UUID. A closed row has the first and not the second.
+    /// a per-process UUID. A closed row has a `sessionId` and no
+    /// `openSessionId`.
     struct RenameTarget: Identifiable, Equatable {
         /// `SessionTitleStore` key — the CLI session id, not `OpenSession.ID`.
         let sessionId: String
@@ -152,7 +153,9 @@ final class SessionStore {
     ///
     /// Cloud and launcher rows are not: a launcher stands for no session at
     /// all, and a cloud row's title belongs to the server rather than to
-    /// `SessionTitleStore`, whose keys must be local session UUIDs.
+    /// `SessionTitleStore`. The id SHAPE is not the reason — nothing here
+    /// establishes what a cloud id looks like, and `save` reports a rejected
+    /// write anyway.
     func beginRename(row: SidebarRow) {
         switch row {
         case .open(let session):
@@ -233,10 +236,14 @@ final class SessionStore {
         let storeId = session?.resumeId ?? target.sessionId
 
         guard SessionTitleStore.save(title: trimmed, forSessionId: storeId, userOwned: true) else {
-            // Only a non-UUID id gets here. Nothing was persisted, so the UI is
-            // deliberately left alone rather than showing a rename that would
-            // vanish at the next launch.
-            logger.warning("Rename not persisted: session id is not a UUID")
+            // Three causes now, not one: a non-UUID id, a stored blob that did
+            // not decode, or an encode failure. An earlier version of this
+            // comment named only the first, and then asserted it in the log —
+            // so a user renaming while the store was unreadable got a silent
+            // no-op explained by a diagnosis that was provably wrong.
+            // Nothing was persisted, so the UI is left alone rather than
+            // showing a rename that would vanish at the next launch.
+            logger.warning("Rename not persisted (bad id, or the stored titles could not be read or written)")
             return
         }
 

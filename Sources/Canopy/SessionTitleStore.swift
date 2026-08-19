@@ -12,14 +12,13 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "TitleStore"
 /// bit every manual rename would be overwritten a few turns later, and again
 /// on the next launch.
 ///
-/// **Title and flag live in ONE record, deliberately.** The first version kept
-/// them in two UserDefaults keys, whose housekeeping deleted any mark whose
-/// session had no title — while the eviction path could produce exactly that
-/// state, by dropping a just-written title (the order was a hash-seeded
-/// `keys.prefix`) and leaving its mark behind for the next unrelated automatic
-/// save to sweep. So a title the user had just typed could come back un-owned.
-/// One record cannot drift from itself, needs no cross-key reconciliation, and
-/// cannot be half-written by a crash.
+/// **Title and flag live in ONE record, deliberately.** An earlier draft kept
+/// them in two UserDefaults keys that had to be reconciled, and this comment
+/// has now told two different stories about exactly how that reconciliation
+/// went wrong — neither of which is checkable, because no shipped commit has
+/// the two-key design. The archaeology is dropped rather than told a third
+/// time. What survives is the property worth having: one record cannot drift
+/// from itself and needs no cross-key reconciliation.
 ///
 /// It still needs housekeeping of the other kind — the entry cap is enforced on
 /// every write, and the legacy read runs until the first write lands.
@@ -48,10 +47,11 @@ enum SessionTitleStore {
     /// automatic regeneration. Passing `false` (the default) does NOT clear an
     /// existing mark — automatic generation must never be able to demote a
     /// title the user named. `clearUserOwned` is the only way back.
-    /// Returns false when nothing was written. The result is not decoration:
-    /// the id must be a CLI session UUID, and a caller that ignores a rejected
-    /// write shows the rename as applied while nothing was persisted — the name
-    /// then evaporates at the next launch with no log anywhere on the path.
+    /// Returns false when nothing was written, for any of three reasons: the id
+    /// is not a CLI session UUID, the title is empty, or the store could not be
+    /// read or encoded. The result is not decoration — a caller that ignores a
+    /// rejected write shows the rename as applied while nothing was persisted,
+    /// and the name evaporates at the next launch with no log on the path.
     @discardableResult
     static func save(title: String, forSessionId sessionId: String, userOwned: Bool = false) -> Bool {
         guard !title.isEmpty, UUID(uuidString: sessionId) != nil else { return false }
@@ -110,16 +110,27 @@ enum SessionTitleStore {
     /// decode", and a write built on that mistake is unrecoverable: one
     /// malformed value fails the whole `[String: Record]` decode, the caller
     /// gets an empty map, inserts one record, and overwrites the key — two
-    /// hundred titles gone, every user-owned one among them, with no log. So a
-    /// failed decode is a distinct state, and writes refuse to proceed in it.
+    /// hundred titles gone, every user-owned one among them, with no log.
     private enum Load {
         case ok([String: Record])
-        /// A blob exists and could not be decoded. Reads degrade to empty;
-        /// writes are refused rather than allowed to overwrite it.
+        /// The blob could not be decoded on THIS call. Mutating paths refuse,
+        /// so nothing overwrites data that was never read. The bad bytes are
+        /// parked and the live key cleared in the same breath, so the state
+        /// lasts one call rather than the life of the install.
         case unreadable
     }
 
+    /// Where an undecodable blob is parked. Nothing in the shipping UI reads
+    /// it — recovering is a `defaults read sh.saqoo.Canopy
+    /// sessionTitles.v2.broken` job, and the point of keeping it is that such
+    /// a recovery stays possible at all.
     private static let brokenKey = "sessionTitles.v2.broken"
+
+    /// Set once per process so a corrupt blob does not log per lookup.
+    /// `title(forSessionId:)` runs inside the per-session loops in
+    /// `ClaudeSessionHistory`, so an unlatched error line would repeat for
+    /// every row on every recents refresh, forever, saying the same one bit.
+    private nonisolated(unsafe) static var didLogUnreadable = false
 
     private static func load() -> Load {
         guard let data = UserDefaults.standard.data(forKey: key) else {
@@ -128,19 +139,28 @@ enum SessionTitleStore {
         do {
             return .ok(try JSONDecoder().decode([String: Record].self, from: data))
         } catch {
-            // Parked, not discarded — the same bargain `SessionStorePersistence`
-            // makes for a corrupt filter. A layout is worth one launch; two
-            // hundred titles are worth keeping the bytes around for.
+            // Park the bytes, then CLEAR the live key. Both halves, in this
+            // order, are what `SessionStorePersistence.loadFilter` does — and
+            // an earlier version of this cited that precedent while omitting
+            // the clear, which turned a decode failure into a permanent
+            // lockout: every later `load()` re-read the same bytes, every
+            // mutating path refused forever, and titling was dead for the life
+            // of the install with only a log line to say so.
             if UserDefaults.standard.data(forKey: brokenKey) == nil {
                 UserDefaults.standard.set(data, forKey: brokenKey)
             }
-            logger.error("Stored titles did not decode; writes suspended: \(error.localizedDescription, privacy: .public)")
+            UserDefaults.standard.removeObject(forKey: key)
+            if !didLogUnreadable {
+                didLogUnreadable = true
+                logger.error("Stored titles did not decode; parked and reset: \(error.localizedDescription, privacy: .public)")
+            }
             return .unreadable
         }
     }
 
-    /// Reads degrade to empty on a corrupt blob. Nothing is destroyed by this —
-    /// the rows fall back to their prompt-derived labels for the launch.
+    /// Reads degrade to empty on the call that discovers a corrupt blob.
+    /// Nothing is destroyed — the bytes are parked and the rows fall back to
+    /// their prompt-derived labels.
     private static func all() -> [String: Record] {
         if case .ok(let records) = load() { return records }
         return [:]
@@ -158,7 +178,10 @@ enum SessionTitleStore {
         }
     }
 
-    /// Persist, trimming to `maxEntries`. Returns false when nothing reached disk.
+    /// Persist, trimming to `maxEntries`. Returns false when nothing was
+    /// accepted for persistence — which is not the same as reaching disk:
+    /// `UserDefaults` flushes asynchronously, so a `true` here is not a promise
+    /// that the title survives a power cut.
     ///
     /// `protecting` is the key this write exists to store. Swift's dictionary
     /// order is unspecified and hash-seeded, so a plain `keys.prefix(excess)`
@@ -233,6 +256,7 @@ enum SessionTitleStore {
         for k in [key, legacyTitlesKey, legacyUserOwnedKey, brokenKey] {
             UserDefaults.standard.removeObject(forKey: k)
         }
+        didLogUnreadable = false
     }
 
     /// Probe support: how many records are stored, without exposing the map.
