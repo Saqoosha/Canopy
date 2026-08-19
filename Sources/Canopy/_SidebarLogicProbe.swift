@@ -4390,49 +4390,71 @@ enum SidebarLogicProbe {
         //
         // MARK: - Session title generation (out-of-session route)
         //
-        // Every bound below is derived from the production constant rather
-        // than re-typed. A fixture spelling the number itself asserts only
-        // that nobody changed their mind, and fails loudly for the wrong
-        // reason when the constant legitimately moves.
+        // Every bound below is derived from the production constant. The two
+        // signal thresholds are named constants *because* of this rule — they
+        // were inline literals, and the fixtures re-typed them, which asserts
+        // only that nobody changed their mind and fails for the wrong reason
+        // when the value legitimately moves (the `paneAbsoluteCap` trap).
         do {
             let gen = SessionTitleGenerator.self
 
             // --- hasEnoughSignal: both sides of each condition -------------
             record("titlegen: no prompts has no signal",
                    !gen.hasEnoughSignal(prompts: []))
-            let atThreshold = String(repeating: "a", count: 40)
+            let atThreshold = String(repeating: "a", count: gen.minimumSignalLength)
             record("titlegen: one prompt at the length threshold has signal",
                    gen.hasEnoughSignal(prompts: [atThreshold]))
             record("titlegen: one prompt below the threshold has none",
                    !gen.hasEnoughSignal(prompts: [String(atThreshold.dropLast())]))
-            // The count condition is independent of the length one: two short
-            // prompts pass even though neither could on its own.
-            record("titlegen: two short prompts have signal",
-                   gen.hasEnoughSignal(prompts: ["hi", "go"]))
-            // Whitespace is not signal — this is what keeps a padded "  hi  "
-            // opening from buying a title generated from nothing.
-            record("titlegen: whitespace is not signal",
+            // The count condition is independent of the length one: enough
+            // short prompts pass even though none could on its own.
+            record("titlegen: enough short prompts have signal",
+                   gen.hasEnoughSignal(
+                       prompts: Array(repeating: "hi", count: gen.minimumSignalPromptCount)))
+            record("titlegen: one below the count threshold has none",
+                   !gen.hasEnoughSignal(
+                       prompts: Array(repeating: "hi", count: gen.minimumSignalPromptCount - 1)))
+            // Whitespace is not signal, on BOTH branches. It used to be
+            // stripped only on the single-prompt one, so several blank prompts
+            // reported signal — the exact degenerate case the gate is about.
+            record("titlegen: whitespace is not signal (length branch)",
                    !gen.hasEnoughSignal(prompts: [String(repeating: " ", count: 100)]))
+            record("titlegen: whitespace is not signal (count branch)",
+                   !gen.hasEnoughSignal(
+                       prompts: Array(repeating: "  \n ", count: gen.minimumSignalPromptCount + 1)))
 
             // --- sanitize -------------------------------------------------
             record("titlegen: sanitize trims and takes the first line",
                    gen.sanitize("  Fix the login bug  \nsecond line") == "Fix the login bug")
-            record("titlegen: sanitize strips surrounding quotes",
+            record("titlegen: sanitize strips straight quotes",
                    gen.sanitize("\"Quoted title\"") == "Quoted title")
+            // Regression pin: the opening list once held U+201D (the CLOSING
+            // curly quote) and no U+201C at all, so this lost its closing quote
+            // and kept its opening one.
+            record("titlegen: sanitize strips curly double quotes at both ends",
+                   gen.sanitize("\u{201C}Fix login\u{201D}") == "Fix login")
+            record("titlegen: sanitize strips curly single quotes at both ends",
+                   gen.sanitize("\u{2018}Fix login\u{2019}") == "Fix login")
+            record("titlegen: sanitize strips corner brackets",
+                   gen.sanitize("\u{300C}Fix login\u{300D}") == "Fix login")
             record("titlegen: sanitize strips a trailing period",
                    gen.sanitize("Refactor the parser.") == "Refactor the parser")
             record("titlegen: sanitize skips leading blank lines",
                    gen.sanitize("\n\n  Real title") == "Real title")
             record("titlegen: sanitize rejects empty output",
                    gen.sanitize("   \n  ") == nil)
-            // Over-long output is prose, and is rejected rather than
-            // truncated: a truncated paragraph is worse than the raw-prompt
-            // fallback it would replace. Both sides of the bound.
+            // Over-long output is prose, and is rejected rather than truncated.
+            // Both sides of the bound.
             let atMax = String(repeating: "t", count: gen.maxTitleLength)
             record("titlegen: sanitize accepts output at the length cap",
                    gen.sanitize(atMax) == atMax)
             record("titlegen: sanitize rejects output past the length cap",
                    gen.sanitize(atMax + "t") == nil)
+            // The cap only means "reject rather than truncate" while it equals
+            // the length the app actually displays. When the two drifted apart,
+            // everything in between was accepted here and truncated downstream.
+            record("titlegen: the acceptance cap is the displayed length",
+                   ShimProcess.truncatedTitle(atMax) == atMax)
 
             // --- userPrompt -----------------------------------------------
             let long = String(repeating: "x", count: gen.maxPromptLength + 50)
@@ -4441,44 +4463,112 @@ enum SidebarLogicProbe {
                    wrapped.contains("<messages>") && wrapped.contains("</messages>"))
             record("titlegen: userPrompt truncates each prompt to the cap",
                    !wrapped.contains(String(repeating: "x", count: gen.maxPromptLength + 1)))
+            // A regression to "first prompt only" would keep every assertion
+            // above green while silently dropping the later-messages input the
+            // system prompt is written around.
+            let multi = gen.userPrompt(prompts: ["first goal", "later detail"])
+            record("titlegen: userPrompt keeps every prompt",
+                   multi.contains("first goal") && multi.contains("later detail"))
 
             // --- arguments ------------------------------------------------
             let args = gen.arguments()
-            // The persona fix itself. Measured: with setting sources loaded
-            // the user's CLAUDE.md persona reaches the title generator and
-            // wins over any counter-instruction in the prompt.
-            if let i = args.firstIndex(of: "--setting-sources") {
-                record("titlegen: setting sources are emptied",
-                       i + 1 < args.count && args[i + 1].isEmpty)
-            } else {
-                record("titlegen: setting sources are emptied", false, "flag absent")
+            func valueAfter(_ flag: String) -> String? {
+                guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+                return args[i + 1]
             }
+            // Drop this and the CLI goes interactive and hangs to the watchdog.
+            record("titlegen: runs non-interactively", args.contains("-p"))
+            // Drop this and every title silently burns the default model.
+            record("titlegen: pins the cheap model", valueAfter("--model") == gen.model)
+            // The persona fix itself. Measured: with setting sources loaded the
+            // persona reaches the title generator and wins over any
+            // counter-instruction in the prompt.
+            record("titlegen: setting sources are emptied", valueAfter("--setting-sources") == "")
+            // Drop this and the user's MCP servers start on a call they never
+            // made — the doc's own stated reason for the flag.
+            record("titlegen: MCP config is strict", args.contains("--strict-mcp-config"))
             // Regression pin: a bare `{}` is rejected by the CLI with
             // `mcpServers: Invalid input: expected record, received undefined`.
             record("titlegen: empty MCP config carries the mcpServers key",
-                   args.contains(#"{"mcpServers":{}}"#))
-            // Replacing the system prompt, not appending to it — appending
-            // leaves the agent framing that invites the model to converse.
+                   valueAfter("--mcp-config") == #"{"mcpServers":{}}"#)
+            // Closes the injection path: the model reads untrusted user text,
+            // and with tools available could read a file and emit it as a title.
+            record("titlegen: no tools are allowed", valueAfter("--allowed-tools") == "")
+            // Replacing the system prompt, not appending — appending leaves the
+            // agent framing that invites the model to converse.
             record("titlegen: system prompt replaces rather than appends",
                    args.contains("--system-prompt") && !args.contains("--append-system-prompt"))
-            record("titlegen: regeneration is allowed more than once",
-                   gen.maxGenerations > 1)
+            // Without this clause a probe run answered the user's question
+            // instead of titling it.
+            record("titlegen: system prompt forbids following the input",
+                   (valueAfter("--system-prompt") ?? "").contains("never answer"))
         }
 
-        // MARK: - SessionTitleStore user-owned marking
+        // MARK: - The generation decision
         //
-        // Writes the real UserDefaults keys under a throwaway session id and
-        // removes it again, the same bargain the recent-directories fixtures
-        // above already make.
+        // These rules used to live on six private fields of `ShimProcess`,
+        // where the whole suite stayed green with any of them deleted — and two
+        // of them ARE this feature's headline claims.
         do {
+            typealias Gate = SessionTitleGenerator.TitleGenerationGate
+            let cap = SessionTitleGenerator.maxGenerations
+            let rich = [String(repeating: "a", count: SessionTitleGenerator.minimumSignalLength)]
+
+            record("titlegate: a rich prompt generates",
+                   Gate(userOwnsTitle: false, isRunning: false, generationCount: 0, prompts: rich)
+                       .decide() == .generate)
+            record("titlegate: a manual rename blocks generation",
+                   Gate(userOwnsTitle: true, isRunning: false, generationCount: 0, prompts: rich)
+                       .decide() == .doNothing(.userOwnsTitle))
+            // Ownership outranks every other reason, so a renamed session can
+            // never be talked into generating by some other state.
+            record("titlegate: ownership outranks every other block",
+                   Gate(userOwnsTitle: true, isRunning: true, generationCount: cap, prompts: [])
+                       .decide() == .doNothing(.userOwnsTitle))
+            record("titlegate: an in-flight generation blocks a second",
+                   Gate(userOwnsTitle: false, isRunning: true, generationCount: 0, prompts: rich)
+                       .decide() == .doNothing(.alreadyRunning))
+            record("titlegate: no prompts blocks",
+                   Gate(userOwnsTitle: false, isRunning: false, generationCount: 0, prompts: [])
+                       .decide() == .doNothing(.noPrompts))
+            // The cap. Deleting it entirely would spawn one CLI per user turn
+            // forever, and nothing else in this suite would notice.
+            record("titlegate: the last allowed generation still runs",
+                   Gate(userOwnsTitle: false, isRunning: false, generationCount: cap - 1, prompts: rich)
+                       .decide() == .generate)
+            record("titlegate: the cap blocks the next one",
+                   Gate(userOwnsTitle: false, isRunning: false, generationCount: cap, prompts: rich)
+                       .decide() == .doNothing(.capReached))
+            record("titlegate: a thin opening shows a fallback instead",
+                   Gate(userOwnsTitle: false, isRunning: false, generationCount: 0, prompts: ["hi"])
+                       .decide() == .installFallback)
+            // Cap before signal: an exhausted session must stop installing raw
+            // prompts over whatever title it already has.
+            record("titlegate: the cap is checked before the signal gate",
+                   Gate(userOwnsTitle: false, isRunning: false, generationCount: cap, prompts: ["hi"])
+                       .decide() == .doNothing(.capReached))
+        }
+
+        // MARK: - SessionTitleStore
+        //
+        // These write the live UserDefaults domain — there is no separate test
+        // domain — so the whole blob is snapshotted and put back. An earlier
+        // version cleared only the ownership marks and left two junk titles per
+        // run in the developer's real store, which also pushed the entry cap.
+        do {
+            let snapshot = SessionTitleStore._probeSnapshot()
+            defer { SessionTitleStore._probeRestore(snapshot) }
+
             let sid = UUID().uuidString
             let other = UUID().uuidString
-            defer {
-                SessionTitleStore.clearUserOwned(sid)
-                SessionTitleStore.clearUserOwned(other)
-            }
 
-            SessionTitleStore.save(title: "Auto title", forSessionId: sid)
+            record("titlestore: a non-UUID id is rejected and says so",
+                   !SessionTitleStore.save(title: "No", forSessionId: "not-a-uuid"))
+            record("titlestore: an empty title is rejected",
+                   !SessionTitleStore.save(title: "", forSessionId: sid))
+
+            record("titlestore: a valid save reports success",
+                   SessionTitleStore.save(title: "Auto title", forSessionId: sid))
             record("titlestore: an automatic title is not user-owned",
                    !SessionTitleStore.isUserOwned(sid))
 
@@ -4489,22 +4579,134 @@ enum SidebarLogicProbe {
                    SessionTitleStore.title(forSessionId: sid) == "Human title")
 
             // The invariant the whole feature rests on: automatic generation
-            // runs several times per session, so it must not be able to demote
-            // a name the user typed by saving over it.
+            // runs several times per launch, so it must not be able to demote a
+            // name the user typed by saving over it.
             SessionTitleStore.save(title: "Auto again", forSessionId: sid)
             record("titlestore: an automatic save cannot clear the user-owned mark",
                    SessionTitleStore.isUserOwned(sid))
 
             // Re-keying happens when the CLI replaces a placeholder resume id.
-            // The mark has to travel or generation overwrites the name one
-            // turn later.
+            // The mark travels because it lives inside the record — when it was
+            // a parallel set, the two could disagree and housekeeping resolved
+            // that disagreement by deleting the mark.
             SessionTitleStore.migrate(fromSessionId: sid, toSessionId: other)
             record("titlestore: migrate carries the user-owned mark",
                    SessionTitleStore.isUserOwned(other) && !SessionTitleStore.isUserOwned(sid))
+            record("titlestore: migrate carries the title",
+                   SessionTitleStore.title(forSessionId: other) == "Auto again"
+                   && SessionTitleStore.title(forSessionId: sid) == nil)
 
             SessionTitleStore.clearUserOwned(other)
             record("titlestore: clearUserOwned releases the session",
                    !SessionTitleStore.isUserOwned(other))
+            record("titlestore: clearUserOwned keeps the title",
+                   SessionTitleStore.title(forSessionId: other) == "Auto again")
+        }
+
+        // MARK: - Rename entry points
+        do {
+            let snapshot = SessionTitleStore._probeSnapshot()
+            defer { SessionTitleStore._probeRestore(snapshot) }
+
+            let renameId = UUID().uuidString
+            let renamable = OpenSession(
+                origin: .local(cwd),
+                resumeId: renameId,
+                title: "Before",
+                project: "ProjectA",
+                status: .live,
+                lastActiveAt: now
+            )
+            let store = SessionStore()
+            store._probeSeedOpenSessions([renamable])
+
+            store.beginRename(row: .open(renamable))
+            record("rename: an open row targets its resume id and live session",
+                   store.renameTarget?.sessionId == renameId
+                   && store.renameTarget?.openSessionId == renamable.id
+                   && store.renameTarget?.currentTitle == "Before")
+
+            store.cancelRename()
+            record("rename: cancel clears the target", store.renameTarget == nil)
+
+            let closedId = UUID().uuidString
+            let closed = SessionEntry(
+                id: closedId, title: "Closed one",
+                timestamp: now, projectDirectory: cwd
+            )
+            store.beginRename(row: .closedLocal(closed))
+            record("rename: a closed row targets the entry id with no live session",
+                   store.renameTarget?.sessionId == closedId
+                   && store.renameTarget?.openSessionId == nil)
+
+            // A cloud title belongs to the server, and a launcher row stands for
+            // no session at all. Both must refuse: `SessionTitleStore` would
+            // drop the write for a non-UUID id, so the sheet would appear to
+            // work and the name would vanish at the next launch.
+            store.cancelRename()
+            store.beginRename(row: .closedCloud(cloudFresh))
+            record("rename: a cloud row is refused", store.renameTarget == nil)
+            store.beginRename(row: .launcher(UUID()))
+            record("rename: a launcher row is refused", store.renameTarget == nil)
+
+            // Pane entry point. The Bool is what the click monitor consumes on:
+            // consuming a double-click that opened nothing would swallow the
+            // window zoom too.
+            record("rename: an out-of-range pane index is refused",
+                   !store.beginRenameForPane(at: 0))
+            store.openInFocusedPane(renamable.id)
+            record("rename: a session pane opens the sheet",
+                   store.beginRenameForPane(at: 0)
+                   && store.renameTarget?.sessionId == renameId)
+            store.cancelRename()
+            store.openLauncherInNewPane()
+            record("rename: a launcher pane is refused",
+                   !store.beginRenameForPane(at: store.panes.count - 1)
+                   && store.renameTarget == nil)
+
+            // Commit.
+            guard let target = { () -> SessionStore.RenameTarget? in
+                store.beginRename(row: .open(renamable))
+                return store.renameTarget
+            }() else {
+                record("rename: commit fixtures have a target", false, "no target")
+                return (lines.joined(separator: "\n"), fail + 1)
+            }
+
+            store.commitRename(target, to: "   ")
+            record("rename: an empty title dismisses without writing",
+                   store.renameTarget == nil
+                   && SessionTitleStore.title(forSessionId: renameId) == nil
+                   && renamable.title == "Before")
+
+            store.beginRename(row: .open(renamable))
+            store.commitRename(target, to: "Before")
+            record("rename: an unchanged title dismisses without writing",
+                   store.renameTarget == nil
+                   && SessionTitleStore.title(forSessionId: renameId) == nil)
+
+            store.beginRename(row: .open(renamable))
+            store.commitRename(target, to: "  A better name  ")
+            record("rename: a commit applies to the live session",
+                   renamable.title == "A better name")
+            record("rename: a commit persists the title",
+                   SessionTitleStore.title(forSessionId: renameId) == "A better name")
+            // Without the mark the name is overwritten a few turns into the
+            // next launch — the exact failure the feature exists to prevent.
+            record("rename: a commit marks the title user-owned",
+                   SessionTitleStore.isUserOwned(renameId))
+
+            // The sheet imposes no length limit; every automatic writer
+            // truncates, so a rename that did not would be the one title that
+            // renders long until the next launch quietly shortened it.
+            let overlong = String(repeating: "z", count: SessionTitleGenerator.maxTitleLength + 20)
+            store.beginRename(row: .open(renamable))
+            if let t2 = store.renameTarget {
+                store.commitRename(t2, to: overlong)
+            }
+            record("rename: a commit truncates to the displayed length",
+                   renamable.title.count <= SessionTitleGenerator.maxTitleLength
+                   && renamable.title == ShimProcess.truncatedTitle(overlong))
         }
 
         // Summary

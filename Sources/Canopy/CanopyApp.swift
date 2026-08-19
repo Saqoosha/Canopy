@@ -481,9 +481,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
             // `!isEmpty`, not `count > 1`: a double-click on a pane header
             // renames its session, and a single pane is the common case for
-            // that. Every branch below that only made sense with two or more
-            // panes now carries its own count check, so nothing else changed
-            // behaviour when this guard widened.
+            // that. Nothing else changed OUTCOME when the guard widened, but
+            // the two branches get there differently and only one is
+            // self-evident: the close X carries its own `panes.count > 1`,
+            // while the focus branch is inert at one pane only because
+            // `focusedPaneIndex` is clamped to 0 wherever the strip shrinks —
+            // an invariant held in `SessionStore`, not a check here. A change
+            // to that clamping would break this silently. What DID change is
+            // execution: the sidebar measurement and the full
+            // `PaneLayoutMetrics` computation now run on every left mouse-down
+            // in the single-pane case, which is the common one.
             guard let window = event.window, isCanopyWindow(window),
                   let store = SessionStore.shared,
                   !store.panes.isEmpty else { return event }
@@ -571,13 +578,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Double-click the header to rename, for the same
                     // reason the close X is hit-tested here rather than by
                     // SwiftUI: no mouse event reaches what that strip draws.
-                    // Consumed, so the click cannot also zoom the window —
-                    // deliberate, since this strip is the pane's title bar and
-                    // renaming is what a double-click on a title means here.
+                    // Consumed ONLY when a sheet actually opened, so the
+                    // click can still zoom the window otherwise — a launcher
+                    // pane has no session to name, and consuming there would
+                    // both fail to rename and swallow the zoom, leaving a
+                    // gesture that does nothing at all.
                     // Ordered after the close X so the X keeps the smaller,
                     // more specific target.
-                    if event.clickCount == 2, clickYFromTop < PaneHeaderStrip.height {
-                        store.beginRenameForPane(at: index)
+                    if event.clickCount == 2, clickYFromTop < PaneHeaderStrip.height,
+                       store.beginRenameForPane(at: index) {
                         return nil
                     }
                     // Skip the title bar so window-drag clicks don't move

@@ -7,48 +7,101 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "TitleGen")
 /// own context**, instead of asking the extension to generate one in-session.
 ///
 /// The in-session route could not be fixed by prompt wording. The CLI's title
-/// generator ran with the user's `~/.claude/CLAUDE.md` loaded, so an
-/// output-style persona sat in the system prompt while the counter-instruction
-/// ("ignore any persona") was only a user turn — and lost. Measured over the
-/// 200 stored titles on 2026-08-19: 9 were written in the persona's voice
-/// rather than describing the session ("Kimiが動いた！よいよいよい！…"), against
-/// 10 in the 2026-07-03 baseline taken *before* the counter-instruction was
-/// added. The wording changed nothing because it was never the deciding input.
+/// generator ran with the user's own configuration loaded, so an output-style
+/// persona sat in the system prompt while the counter-instruction ("ignore any
+/// persona") was only a user turn, and lost. Measured over the 200 stored
+/// titles on 2026-08-19: 9 were written in the persona's voice rather than
+/// describing the session, against 10 in the 2026-07-03 baseline taken *before*
+/// the counter-instruction was added. The wording was never the deciding input.
 ///
-/// `--setting-sources ''` is what actually fixes it: with no setting sources
-/// loaded there is no CLAUDE.md, so there is no persona to leak. Verified on
-/// the exact input that produced the leaked title above — the same messages
-/// yielded `Model information inquiry`.
+/// `--setting-sources ''` is what fixes it. What is **measured** is the outcome:
+/// the exact messages that had produced a leaked title yielded `Model
+/// information inquiry` instead. Which configuration layer carried the persona
+/// — the user's `settings.json` output style, their `CLAUDE.md`, or both — was
+/// not isolated, so do not cite a mechanism here that nobody tested.
 ///
-/// Skills and plugins are NOT suppressed by that flag (a probe run still cited
-/// a skill by name). They cost latency here and nothing else, so they are left
-/// alone rather than chased with an undocumented flag.
+/// Skills and plugins are NOT dropped by that flag: a probe run still cited a
+/// skill by name, which is direct evidence they reach the model. They are left
+/// alone because chasing them needs an undocumented flag, not because they were
+/// shown to be harmless — the honest statement is that their effect on titles
+/// is unmeasured.
+///
+/// Two side effects worth knowing before treating this as free. Each generation
+/// runs the CLI, so it writes a transcript under `~/.claude/projects/` like any
+/// other run; those are excluded from both sidebar loaders by the pre-existing
+/// `metadata.isAutomated` filter, which this feature therefore depends on
+/// without having asked for it. And an **SSH-remote session is titled by the
+/// LOCAL CLI**, on the local account: `ShimProcess` knows `remoteHost` and this
+/// does not. Skipping remote sessions would leave them permanently untitled,
+/// which is worse, so the local call stands as a deliberate choice rather than
+/// an oversight.
 enum SessionTitleGenerator {
     /// Wall-clock ceiling for one generation. Past this the process is killed
     /// and the caller keeps whatever title it had.
     static let timeout: TimeInterval = 30
 
+    /// Grace period between the watchdog's SIGTERM and a SIGKILL.
+    ///
+    /// Not optional politeness. `waitUntilExit()` returns only once the child
+    /// is reaped, and the stdout read above it returns only at EOF — so a CLI
+    /// that catches SIGTERM and hangs in shutdown blocks a worker thread
+    /// forever AND strands `titleGenerationInFlight`, which silently disables
+    /// titling for that session's whole life. `RemoteSessionsBridge` and
+    /// `killTree` both escalate for the same reason. The residual case a
+    /// SIGKILL cannot close is a grandchild inheriting the stdout write end;
+    /// that is accepted, not solved.
+    static let killGrace: TimeInterval = 3
+
     /// Model alias for the generation. Cheapest tier that can write a title;
     /// a custom provider maps this alias through `ANTHROPIC_DEFAULT_HAIKU_MODEL`.
     static let model = "haiku"
 
-    /// Longest acceptable title. Longer output is prose, not a title, and is
-    /// rejected rather than truncated — a truncated paragraph is worse than
-    /// the raw-first-prompt fallback it would replace.
-    static let maxTitleLength = 80
+    /// Longest acceptable title, and the length every title Canopy shows or
+    /// stores is cut to — `ShimProcess.truncatedTitle` takes its default from
+    /// here rather than carrying a second number. When the two differed, the
+    /// "reject rather than truncate" rule below was simply false for everything
+    /// in between: `sanitize` accepted it and the caller truncated it anyway.
+    ///
+    /// It lives on THIS type, not on `ShimProcess`, because `ShimProcess` is
+    /// `@MainActor` by inference from `WKScriptMessageHandler` — its statics
+    /// are main-actor isolated and cannot be a default value out here.
+    ///
+    /// Output past it is prose, not a title, and is rejected rather than
+    /// truncated — a truncated paragraph is worse than the raw-prompt fallback
+    /// it would replace.
+    static let maxTitleLength = 60
 
     /// Per-prompt input cap, matching what the in-session path used.
     static let maxPromptLength = 300
 
-    /// How many times one session may generate a title.
+    /// A single prompt this long is worth titling on its own.
+    /// Named rather than inline so probe fixtures can derive it — a fixture
+    /// spelling `40` asserts only that nobody changed their mind.
+    static let minimumSignalLength = 40
+
+    /// This many prompts are worth titling however short each one is.
+    static let minimumSignalPromptCount = 2
+
+    /// How many times one **launch** of a session may generate a title.
+    ///
+    /// Not "one session": `titleGenerationCount` lives on `ShimProcess`, and a
+    /// resumed session gets a fresh one, so a session opened ten times may
+    /// generate thirty titles. That is the accurate scope and it is fine —
+    /// the cap exists to bound cost per run, not per conversation.
     ///
     /// Not 1, which is what the in-session path effectively allowed: it stopped
     /// as soon as a non-fallback title landed, so a session opening with "hi"
     /// was named from that one word and could never improve, however much work
     /// followed. That single early lock is the measured cause of the ~28/200
     /// contentless titles ("Initial greeting and session start" ×3, "Try
-    /// again", "User expresses interest"). Regeneration is the fix; the cap
-    /// exists only so a long session does not spawn a CLI per turn.
+    /// again", "User expresses interest").
+    ///
+    /// Accepted limit, so nobody re-derives it as a bug: because generation
+    /// fires on every prompt carrying signal, the three attempts land on the
+    /// earliest turns. A session that only becomes substantial at turn 20 is
+    /// still named from its opening — the same complaint, three prompts later.
+    /// Spacing them over prompt-count milestones would address that and is a
+    /// behaviour change nobody has asked for yet.
     static let maxGenerations = 3
 
     // MARK: - Pure helpers (probe-reachable)
@@ -69,7 +122,17 @@ enum SessionTitleGenerator {
         goal. The first message usually states that goal; weight it most.
         """
 
-    /// CLI arguments, minus the prompt itself.
+    /// CLI arguments.
+    ///
+    /// The prompt is deliberately NOT among these. It goes over stdin, because
+    /// `Process.arguments` become the child's `argv`, and on macOS any process
+    /// running as this user can read another's full command line out of the
+    /// process table (`ps -axww`, `KERN_PROCARGS2`) with no privilege at all.
+    /// The prompt is verbatim user chat text, so putting it there would publish
+    /// the conversation to every local process for the life of the call —
+    /// something the rest of Canopy avoids by streaming user content to the CLI
+    /// over stdin. `claude -p` reads its prompt from stdin when none is passed
+    /// positionally; verified against the invocation this builds.
     ///
     /// `--setting-sources ''` is the persona fix (see the type doc).
     /// `--strict-mcp-config` with an empty server map keeps the generation from
@@ -77,6 +140,11 @@ enum SessionTitleGenerator {
     /// have side effects on a call the user never asked for. The empty map must
     /// be spelled `{"mcpServers":{}}` — a bare `{}` is rejected by the CLI with
     /// `mcpServers: Invalid input: expected record, received undefined`.
+    /// `--allowed-tools ''` closes the one path by which a prompt-injection
+    /// payload in a session could make this call *act*: the model reads
+    /// untrusted user text, and without an empty allow-list it could read a
+    /// file and emit its contents as a title, which Canopy then persists and
+    /// draws. Verified not to affect a normal generation.
     static func arguments(model: String = model) -> [String] {
         [
             "-p",
@@ -84,15 +152,16 @@ enum SessionTitleGenerator {
             "--setting-sources", "",
             "--strict-mcp-config",
             "--mcp-config", #"{"mcpServers":{}}"#,
+            "--allowed-tools", "",
             "--system-prompt", systemPrompt,
         ]
     }
 
     /// Wrap the session's user messages as data for the generator.
     ///
-    /// Delimited rather than inlined after a label: the previous phrasing
-    /// ("User said: …") read as a question addressed to the model, and it
-    /// answered rather than titled.
+    /// Delimited rather than inlined after a label: the phrasing the extension
+    /// route still uses ("User said: …") read as a question addressed to the
+    /// model, and it answered rather than titled.
     static func userPrompt(prompts: [String]) -> String {
         let body = prompts
             .map { String($0.prefix(maxPromptLength)) }
@@ -108,41 +177,48 @@ enum SessionTitleGenerator {
 
     /// Whether these prompts carry enough signal to be worth titling.
     ///
-    /// A one-line opening ("hi", "続き", "test") describes nothing, and a title
-    /// generated from it is worse than the fallback, which at least shows the
-    /// real words the user typed. Waiting costs nothing: the fallback is
-    /// already on screen.
+    /// A one-line opening ("hi", "continue", "test") describes nothing, and a
+    /// title generated from it is worse than the fallback, which at least shows
+    /// the real words the user typed.
     ///
     /// Either condition suffices, because they fail in opposite directions —
     /// a single substantial prompt is titleable immediately, and several short
-    /// ones together carry more than any one of them does.
+    /// ones together carry more than any one of them does. Whitespace is
+    /// stripped **before** either test: applying it to only one branch made
+    /// `["  ", "\n"]` report signal, which is the degenerate case the gate is
+    /// entirely about.
     static func hasEnoughSignal(prompts: [String]) -> Bool {
-        if prompts.count >= 2 { return true }
         let meaningful = prompts
-            .joined()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return meaningful.count >= 40
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if meaningful.count >= minimumSignalPromptCount { return true }
+        return meaningful.joined().count >= minimumSignalLength
     }
 
     /// Reduce raw CLI output to a usable title, or nil if it isn't one.
     ///
-    /// Returning nil is a real outcome, not a failure to handle: the caller
-    /// keeps the title it already had. That is why over-long output is
-    /// rejected instead of truncated.
+    /// Returning nil is a real outcome, not a failure to handle. It means "this
+    /// produced no title"; what the caller does about that is the caller's
+    /// business — today `ShimProcess` shows a fallback rather than keeping the
+    /// old title, which is why this doc does not promise the latter.
     static func sanitize(_ raw: String) -> String? {
         guard let line = raw
             .split(separator: "\n", omittingEmptySubsequences: true)
-            .map({ $0.trimmingCharacters(in: .whitespaces) })
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
             .first(where: { !$0.isEmpty })
         else { return nil }
 
         var title = line
-        // Strip one layer of surrounding quotes of either kind.
-        for quote in ["\"", "'", "「", "”"] where title.hasPrefix(quote) {
+        // Strip one layer of surrounding quotes. The two lists are NOT the same
+        // set: each holds the quote that opens or closes on that side. An
+        // earlier version had `”` (U+201D, the closing quote) in the opening
+        // list and no `“` at all, so `“Fix login”` lost its closing quote and
+        // kept its opening one.
+        for quote in ["\"", "'", "\u{300C}", "\u{201C}", "\u{2018}"] where title.hasPrefix(quote) {
             title = String(title.dropFirst())
             break
         }
-        for quote in ["\"", "'", "」", "”"] where title.hasSuffix(quote) {
+        for quote in ["\"", "'", "\u{300D}", "\u{201D}", "\u{2019}"] where title.hasSuffix(quote) {
             title = String(title.dropLast())
             break
         }
@@ -153,76 +229,228 @@ enum SessionTitleGenerator {
         return title
     }
 
+    // MARK: - The decision (probe-reachable)
+
+    /// Why a prompt produced no generation.
+    enum TitleGenerationBlock: Equatable {
+        case userOwnsTitle
+        case alreadyRunning
+        case noPrompts
+        case capReached
+    }
+
+    /// What `ShimProcess` should do with one user prompt.
+    enum TitleGenerationDecision: Equatable {
+        case generate
+        /// Show the user's own words; the session has not said enough yet.
+        case installFallback
+        case doNothing(TitleGenerationBlock)
+    }
+
+    /// The guard ladder that decides whether a prompt triggers a generation,
+    /// split out of `ShimProcess` so it can be exercised.
+    ///
+    /// This is the `RecapGate` treatment, and it is here for the same reason:
+    /// the rules live on six private fields of a class the probe cannot reach,
+    /// so every one of them could be deleted with the whole suite still green.
+    /// Two of those rules ARE the PR's headline claims — a manual rename is
+    /// never overwritten, and generation is capped — and neither was testable
+    /// while they lived in a private method.
+    ///
+    /// Order matters and is asserted: ownership outranks everything (a renamed
+    /// session must not even *consider* generating), and the cap is checked
+    /// before the signal gate so an exhausted session stops installing
+    /// fallbacks over a title it already has.
+    struct TitleGenerationGate: Equatable {
+        var userOwnsTitle: Bool
+        var isRunning: Bool
+        var generationCount: Int
+        var prompts: [String]
+
+        func decide(maxGenerations: Int = SessionTitleGenerator.maxGenerations) -> TitleGenerationDecision {
+            if userOwnsTitle { return .doNothing(.userOwnsTitle) }
+            if isRunning { return .doNothing(.alreadyRunning) }
+            if prompts.isEmpty { return .doNothing(.noPrompts) }
+            if generationCount >= maxGenerations { return .doNothing(.capReached) }
+            if !SessionTitleGenerator.hasEnoughSignal(prompts: prompts) { return .installFallback }
+            return .generate
+        }
+    }
+
     // MARK: - Generation
+
+    /// Set once by the watchdog so a killed process is distinguishable from a
+    /// process that failed on its own. Same shape as `GitWorktree`'s.
+    private final class TimeoutFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+        func set() { lock.lock(); fired = true; lock.unlock() }
+        var value: Bool { lock.lock(); defer { lock.unlock() }; return fired }
+    }
 
     /// Run one generation. `completion` is always called, on the main actor.
     ///
-    /// `stdin` is `/dev/null` deliberately: with an inherited stdin the CLI
-    /// waits three seconds for piped input before proceeding, which would be
-    /// most of this call's latency.
+    /// `sessionLabel` is only for logging, and it is not optional in practice:
+    /// Canopy runs up to six panes and `process == "Canopy"` already mixes the
+    /// Debug and Release builds, so a bare "Title generation exited 1" names
+    /// none of the six sessions it could belong to.
+    ///
+    /// The prompt is piped to the child's stdin rather than passed on argv —
+    /// see `arguments` for why that is a requirement and not a preference.
+    /// Piping also settles the latency question an earlier `/dev/null` stdin
+    /// was there for: an *inherited* stdin makes the CLI wait three seconds for
+    /// input that never comes, and a pipe that is written and closed gives it
+    /// the input immediately.
     static func generate(
         prompts: [String],
         customApi: ModelProvider?,
+        sessionLabel: String,
         completion: @escaping @MainActor (String?) -> Void
     ) {
         let finish: @Sendable (String?) -> Void = { result in
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(result) } }
         }
 
-        guard !prompts.isEmpty, let cli = CCExtension.cliBinaryPath() else {
-            logger.warning("Title generation skipped: no CLI binary")
+        guard !prompts.isEmpty else {
+            logger.debug("[title] \(sessionLabel, privacy: .public): skipped, no prompts")
+            finish(nil)
+            return
+        }
+        guard let cli = CCExtension.cliBinaryPath() else {
+            logger.notice("[title] \(sessionLabel, privacy: .public): skipped, no CLI binary found")
             finish(nil)
             return
         }
 
-        let args = arguments() + [userPrompt(prompts: prompts)]
-        let env = environment(customApi: customApi)
+        let args = arguments()
+        let promptData = Data(userPrompt(prompts: prompts).utf8)
+        let env = environment(customApi: customApi, cli: cli)
+        let workDir = FileManager.default.temporaryDirectory
 
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
             process.executableURL = cli
             process.arguments = args
             process.environment = env
-            process.standardInput = FileHandle.nullDevice
+            // Explicit, because an `open`-launched GUI app's cwd is `/`. The
+            // CLI records its transcript against the cwd either way; naming one
+            // makes where that lands predictable instead of incidental.
+            process.currentDirectoryURL = workDir
+
+            // The prompt arrives here rather than on argv (see `arguments`).
+            let stdin = Pipe()
             let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardInput = stdin
             process.standardOutput = stdout
-            process.standardError = FileHandle.nullDevice
+            process.standardError = stderr
 
             do {
                 try process.run()
             } catch {
-                logger.warning("Title generation failed to launch: \(error.localizedDescription, privacy: .public)")
+                logger.notice("[title] \(sessionLabel, privacy: .public): launch failed: \(error.localizedDescription, privacy: .public)")
                 finish(nil)
                 return
             }
 
-            // Watchdog: the CLI can hang on a wedged network. Terminating it
-            // makes the read below return, so there is no second timeout path.
-            let watchdog = DispatchWorkItem {
-                guard process.isRunning else { return }
-                logger.warning("Title generation timed out after \(timeout)s; terminating")
+            // Written before the reads below, and closed so the CLI sees EOF
+            // and stops waiting for more. A prompt this size fits the pipe
+            // buffer, so this cannot deadlock against a child that is not
+            // reading yet; `try?` because a child that died between `run()` and
+            // here turns the write into EPIPE, which the exit status reports.
+            try? stdin.fileHandleForWriting.write(contentsOf: promptData)
+            try? stdin.fileHandleForWriting.close()
+
+            let timedOut = TimeoutFlag()
+            let watchdog = DispatchWorkItem { [weak process] in
+                guard let process, process.isRunning else { return }
+                timedOut.set()
                 process.terminate()
             }
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
+            // Escalation, not decoration — see `killGrace`.
+            let killer = DispatchWorkItem { [weak process] in
+                guard let process, process.isRunning else { return }
+                kill(process.processIdentifier, SIGKILL)
+            }
+            let queue = DispatchQueue.global(qos: .utility)
+            queue.asyncAfter(deadline: .now() + timeout, execute: watchdog)
+            queue.asyncAfter(deadline: .now() + timeout + killGrace, execute: killer)
 
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            // Both streams are drained concurrently. Reading them in sequence
+            // deadlocks the moment the one not being read fills its 64KB pipe
+            // buffer — the child blocks writing, so the stream being read never
+            // reaches EOF. Same reason `CloneRepoSheet` uses a group.
+            let group = DispatchGroup()
+            var outData = Data()
+            var errData = Data()
+            queue.async(group: group) { outData = drain(stdout.fileHandleForReading) }
+            queue.async(group: group) { errData = drain(stderr.fileHandleForReading) }
+            group.wait()
+
             process.waitUntilExit()
             watchdog.cancel()
+            killer.cancel()
 
+            if timedOut.value {
+                logger.notice("[title] \(sessionLabel, privacy: .public): timed out after \(Int(timeout), privacy: .public)s")
+                finish(nil)
+                return
+            }
             guard process.terminationStatus == 0 else {
-                logger.warning("Title generation exited \(process.terminationStatus, privacy: .public)")
+                // stderr carries the only usable diagnosis the CLI produces —
+                // an expired login, a flag this CLI version does not know
+                // (which would make the persona fix above fail closed), a
+                // provider 401, a network error. Discarding it left every one
+                // of those looking like "exited 1".
+                let reason = String(data: errData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(300) ?? ""
+                logger.notice("""
+                    [title] \(sessionLabel, privacy: .public): exited \
+                    \(process.terminationStatus, privacy: .public): \
+                    \(reason.isEmpty ? "no stderr" : String(reason), privacy: .public)
+                    """)
                 finish(nil)
                 return
             }
-            let raw = String(data: data, encoding: .utf8) ?? ""
+            let raw = String(data: outData, encoding: .utf8) ?? ""
             guard let title = sanitize(raw) else {
-                logger.warning("Title generation produced no usable title")
+                // The rejected text is the evidence, and this is the branch a
+                // successful prompt injection lands in (the model answered
+                // instead of titling). `.private` because it is model output
+                // derived from the user's own conversation.
+                logger.notice("""
+                    [title] \(sessionLabel, privacy: .public): no usable title from \
+                    \(String(raw.prefix(200)), privacy: .private)
+                    """)
                 finish(nil)
                 return
             }
-            logger.info("Title generated: \(title, privacy: .public)")
+            // Titles summarise the user's prompts, so they are session content
+            // and are logged `.private` — the same rule the `[bg]` paths follow.
+            logger.notice("[title] \(sessionLabel, privacy: .public): generated \(title, privacy: .private)")
             finish(title)
         }
+    }
+
+    /// Read a handle to EOF, keeping at most `outputCap` bytes.
+    ///
+    /// It keeps reading past the cap rather than returning early: stopping
+    /// would leave the child blocked on a full pipe and `waitUntilExit()`
+    /// hanging on a child that never exits. Only the first line is ever used,
+    /// so the discard costs nothing.
+    private static let outputCap = 64 * 1024
+
+    private static func drain(_ handle: FileHandle) -> Data {
+        var collected = Data()
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            if collected.count < outputCap {
+                collected.append(chunk.prefix(outputCap - collected.count))
+            }
+        }
+        return collected
     }
 
     /// Environment for the generation.
@@ -231,9 +459,24 @@ enum SessionTitleGenerator {
     /// the title goes to the same endpoint the session uses. Without this the
     /// call would fall back to Anthropic with credentials the user may not
     /// have set, and every title would silently fail on a provider-only setup.
-    private static func environment(customApi: ModelProvider?) -> [String: String] {
+    ///
+    /// `PATH` is widened for the same reason `ShimProcess` widens it: a GUI app
+    /// inherits `/usr/bin:/bin:…`, and a `claude` that is an npm shim
+    /// (`#!/usr/bin/env node`) cannot find its interpreter under that. `HOME`
+    /// is set explicitly because a GUI-launched process does not reliably
+    /// inherit the user's, and the CLI reads credentials relative to it.
+    static func environment(customApi: ModelProvider?, cli: URL) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+
+        let extraPaths = [cli.deletingLastPathComponent().path, "/opt/homebrew/bin", "/usr/local/bin"]
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let existing = Set(currentPath.split(separator: ":").map(String.init))
+        let newPaths = extraPaths.filter { !existing.contains($0) }
+        if !newPaths.isEmpty {
+            env["PATH"] = (newPaths + [currentPath]).joined(separator: ":")
+        }
+
         guard let api = customApi, api.isEnabled else { return env }
         env["ANTHROPIC_BASE_URL"] = api.baseURL
         env["ANTHROPIC_AUTH_TOKEN"] = api.authToken

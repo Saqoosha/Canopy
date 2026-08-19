@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Modal for renaming a session from the sidebar context menu (or a future
-/// pane-header entry). The store owns when the sheet is up — this view only
-/// edits and reports the trimmed title back through `onCommit` / `onCancel`.
+/// Modal for renaming a session, opened from either the sidebar row's
+/// context menu or a double-click on a pane header. The store owns when the
+/// sheet is up — this view only edits and hands the text back through
+/// `onCommit` / `onCancel`; the store trims and truncates it.
 struct RenameSessionSheet: View {
     let target: SessionStore.RenameTarget
     let onCommit: (String) -> Void

@@ -126,7 +126,11 @@ final class SessionStore {
     /// is up. Presenting from the store rather than from a row's own view is
     /// what lets two entry points — the sidebar's context menu and a
     /// double-click on a pane header — open the same sheet.
-    var renameTarget: RenameTarget?
+    /// `private(set)`: the two constructors below are the only vetted way in,
+    /// and they are where the "cloud and launcher rows cannot be renamed" rule
+    /// lives. A plain `var` let any code in the module present the sheet for a
+    /// row those constructors reject.
+    private(set) var renameTarget: RenameTarget?
 
     /// A session the user may rename, addressed by its `SessionTitleStore` key.
     ///
@@ -172,16 +176,24 @@ final class SessionStore {
 
     /// Open the rename sheet for whatever session occupies a pane.
     /// A launcher pane has no session to name, so this is a no-op there.
-    func beginRenameForPane(at index: Int) {
+    /// Returns whether a sheet was actually opened.
+    ///
+    /// The caller is an NSEvent monitor that consumes the click, and consuming
+    /// one that opened nothing is worse than not handling it: on a launcher
+    /// pane the double-click would neither rename nor let the window zoom, a
+    /// completely dead gesture with nothing to explain it.
+    @discardableResult
+    func beginRenameForPane(at index: Int) -> Bool {
         guard panes.indices.contains(index),
               case .session(let openId) = panes[index].content,
               let session = openSessions.first(where: { $0.id == openId })
-        else { return }
+        else { return false }
         renameTarget = RenameTarget(
             sessionId: session.resumeId,
             openSessionId: session.id,
             currentTitle: session.title
         )
+        return true
     }
 
     /// Apply a manual rename and close the sheet.
@@ -196,22 +208,51 @@ final class SessionStore {
     /// silent one.
     func commitRename(_ target: RenameTarget, to newTitle: String) {
         defer { renameTarget = nil }
-        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Truncated to the one title length the app uses anywhere. The sheet
+        // imposes no limit, and every automatic writer already truncates, so
+        // skipping it here would let a rename be the one title that renders
+        // long — until the next launch shortened it behind the user's back.
+        let trimmed = ShimProcess.truncatedTitle(
+            newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
         guard !trimmed.isEmpty, trimmed != target.currentTitle else { return }
 
-        SessionTitleStore.save(title: trimmed, forSessionId: target.sessionId, userOwned: true)
-        if let openId = target.openSessionId,
-           let session = openSessions.first(where: { $0.id == openId })
-        {
+        let session = target.openSessionId.flatMap { openId in
+            openSessions.first(where: { $0.id == openId })
+        }
+        // The live session's id, not the one captured when the sheet opened.
+        // `OpenSession.resumeId` is a `var`: a launcher-born session starts on
+        // a placeholder UUID that `backfillResumeId` replaces the moment the
+        // CLI reports its real one, and that can happen while the sheet is up.
+        // Committing against the captured value then writes under a dead id —
+        // and the failure is asymmetric, which is what makes it nasty: the
+        // TITLE self-heals, because the `rename_tab` path re-saves it under the
+        // real id, but with `userOwned: false`. So the name survives and the
+        // mark does not, and automatic generation takes the session back a few
+        // turns into the NEXT launch.
+        let storeId = session?.resumeId ?? target.sessionId
+
+        guard SessionTitleStore.save(title: trimmed, forSessionId: storeId, userOwned: true) else {
+            // Only a non-UUID id gets here. Nothing was persisted, so the UI is
+            // deliberately left alone rather than showing a rename that would
+            // vanish at the next launch.
+            logger.warning("Rename not persisted: session id is not a UUID")
+            return
+        }
+
+        if let session {
             session.title = trimmed
             // The live shim decides on every prompt whether to regenerate a
             // title, so it has to be told directly — persisting the mark alone
             // would only take effect on the next launch.
             session.shim?.noteUserRenamed(trimmed)
+        } else {
+            // Only closed rows need this: they read their label from
+            // `SessionTitleStore` when `ClaudeSessionHistory` loads them, while
+            // an open row was just updated in place above. Reloading anyway
+            // re-parses up to 50 JSONLs for nothing.
+            Task { await refreshRecents() }
         }
-        // Closed rows read their label from `SessionTitleStore` when
-        // `ClaudeSessionHistory` loads them, so they need a reload to redraw.
-        Task { await refreshRecents() }
     }
 
     func cancelRename() {
