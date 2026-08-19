@@ -34,22 +34,28 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var stdoutBuffer = Data()
     /// Descendant PIDs collected before termination, used for cleanup on unexpected exit.
     private var descendantPids: [pid_t] = []
-    /// Channel ID from launch_claude, needed for generate_session_title requests.
+    /// Channel ID from launch_claude, needed for the recap and usage requests.
+    /// NOT for titles any more — those no longer go through the extension.
     private var channelId: String?
     /// True after an AI-generated title (or fallback) has been applied.
     /// Blocks raw webview title overwrites; the extension keeps re-sending
     /// stale internal titles unless we explicitly replace them.
     private var hasGeneratedTitle = false
-    /// True when the current title should be regenerated on the next prompt.
-    /// Set on session resume (stored title may not reflect new conversation)
-    /// and when the 30s fallback fires. Cleared once an AI title arrives.
-    private var titleIsFallback = false
-    /// True while a `generate_session_title` request is awaiting a response.
-    private var titleRequestInFlight = false
-    /// Title generation may queue behind the main turn and MCP startup.
-    private let titleFallbackDelay: TimeInterval = 30.0
-    /// Request ID of the current title generation, used to reject stale responses.
-    private var currentTitleRequestId: String?
+    /// How many times this session has run title generation. Bounded by
+    /// `SessionTitleGenerator.maxGenerations` — see that constant for why a
+    /// single generation was the bug rather than the design.
+    private var titleGenerationCount = 0
+    /// True while a generation is running, so overlapping user prompts do not
+    /// each spawn their own CLI.
+    private var titleGenerationInFlight = false
+    /// Latch for the one-time "budget spent" line. A separate flag rather than
+    /// pushing `titleGenerationCount` past its cap — the counter means "how
+    /// many generations ran" and a log latch must not redefine it.
+    private var didLogTitleBudgetSpent = false
+    /// True once a human has named this session via Rename. Suppresses every
+    /// automatic title path for the rest of the session; loaded from
+    /// `SessionTitleStore` on resume so it survives relaunch.
+    private var userOwnsTitle = false
     /// Sliding window of recent user prompts (max 5), used as context for title generation.
     private var promptHistory: [String] = []
     /// Most recent user message text, used as fallback when AI generation doesn't respond.
@@ -424,7 +430,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// gates on the actual precondition instead.
     private var recapContended = false
 
-
     /// Set to true when the session's JSONL was non-empty at spawn, i.e.
     /// this is a resume with prior conversation. Seeds the eligibility gate
     /// so a resumed-and-parked session earns a recap without the user having
@@ -525,9 +530,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             self.sessionTitle = truncated
             self.generatedSessionTitle = truncated
             self.hasGeneratedTitle = true
-            // Allow one regeneration on the first new prompt so the title
-            // can incorporate the resumed conversation direction.
-            self.titleIsFallback = true
+            // A title the user typed is final: no regeneration, and no
+            // extension title may replace it either. Without this the name
+            // would survive the rename but not the next launch, which is the
+            // harder failure to notice.
+            self.userOwnsTitle = SessionTitleStore.isUserOwned(resumeSessionId)
         }
         if let resumeSessionId {
             // Seed title-generation context from the resumed conversation.
@@ -945,7 +952,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             ]
             sendToWebView(statusMsg)
 
-
             // Request initial rate limit data after a short delay (extension needs time to activate)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 self?.requestUsageUpdate()
@@ -958,8 +964,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // get_claude_state, get_asset_uris, list_sessions) don't, and the
         // !cid.isEmpty guard correctly skips them. If `launch_claude` failed
         // to set channelId for any reason, the next channel-scoped message
-        // recovers it; without this, `requestSessionTitle`'s nil-guard would
-        // silently disable title generation for the session's whole lifetime.
+        // recovers it. Title generation no longer depends on channelId at all
+        // (it runs the CLI directly); what breaks without this is the recap —
+        // `recapIneligibilityReason`'s channelId branch — and `requestUsageUpdate`.
+        // Deleting the backstop and testing titles would therefore look fine.
         // First non-empty channelId wins; once set, only the launch_claude
         // handler above is allowed to replace it.
         if self.channelId == nil,
@@ -972,7 +980,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             self.channelId = cid
         }
 
-        var titleRequestDescriptionAfterForward: String?
+        // A Bool, not the text: `maybeGenerateTitle` takes no argument and
+        // reads `promptHistory` itself. Keeping a `String?` named "description"
+        // here implied the description still flowed somewhere.
+        var sawUserPromptThisMessage = false
 
         // Start spinner when user sends a message and capture title text.
         if dict["type"] as? String == "io_message",
@@ -1007,14 +1018,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
             }
 
-            // Generate a title for the first user prompt (or first after a
-            // fallback). Once an AI title is acquired, further prompts skip
-            // generation unless the current title is only a fallback.
+            // Every user prompt is a chance to regenerate the title, until
+            // the per-launch cap runs out. The old policy — stop as soon as one
+            // AI title landed — is what made a session opening with "hi" keep
+            // that name forever, which is the bug this replaced.
             if let userText {
                 promptHistory.append(userText)
                 promptHistory = Self.trimmedPromptHistory(promptHistory)
                 lastUserMessageText = userText
-                titleRequestDescriptionAfterForward = userText
+                sawUserPromptThisMessage = true
             }
         }
 
@@ -1033,13 +1045,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return
             }
 
-            if reqType == "generate_session_title",
-               let requestId = dict["requestId"] as? String,
-               !requestId.hasPrefix("canopy-title-"),
-               let description = request["description"] as? String,
-               !description.isEmpty
-            {
-                request["description"] = titleGenerationDescription(for: description)
+            // The extension still generates its own in-session title; Canopy
+            // no longer consumes the result (see `applyTitleFromResponse`), so
+            // the request is forwarded unmodified apart from `persist`, which
+            // keeps the CLI from writing `ai-title` records into the session
+            // JSONL. Canopy used to rewrite the description too, to make that
+            // title less persona-tainted — pointless once nothing reads it, and
+            // the rewrite's own counter-instruction is the wording the
+            // out-of-session route exists because it did not work.
+            //
+            // The request is not dropped: the webview issued it and may be
+            // awaiting the response, and this side cannot see what it does with
+            // it. So the cost of that generation is still paid — an accepted
+            // limitation, and the only remaining reason a session still runs a
+            // title generation inside its own context.
+            if reqType == "generate_session_title" {
                 request["persist"] = false
             }
 
@@ -1049,10 +1069,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     activeSessionId = sid
                     backfillResumeId(sid)
                     // Save any title that was generated before we had a session ID.
+                    // `userOwnsTitle` is checked here like on every other
+                    // automatic path: a generation that finished before the id
+                    // arrived must not land on top of a name the user typed in
+                    // the meantime. Narrow — `resumeSessionId` is almost always
+                    // set, so this rarely holds a value — but it is the one
+                    // automatic writer that used to skip the check.
                     if let pending = pendingGeneratedTitle {
-                        SessionTitleStore.save(title: pending, forSessionId: sid)
-                        generatedSessionTitle = pending
                         pendingGeneratedTitle = nil
+                        if !userOwnsTitle {
+                            if !SessionTitleStore.save(title: pending, forSessionId: sid) {
+                                logger.warning("Generated title not persisted; it will not survive relaunch")
+                            }
+                            generatedSessionTitle = pending
+                        }
                     }
                 }
                 if let title = request["title"] as? String, !title.isEmpty {
@@ -1081,8 +1111,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         sendToShim(["type": "webview_message", "message": dict])
-        if let titleRequestDescriptionAfterForward {
-            requestSessionTitle(description: titleRequestDescriptionAfterForward)
+        if sawUserPromptThisMessage {
+            maybeGenerateTitle()
         }
     }
 
@@ -1891,7 +1921,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         recapTimeout = nil
     }
 
-
     /// Swallow the CLI traffic generated by our own `/recap` injection.
     /// Returns true when the message was consumed and must NOT reach the
     /// webview (nor any of the status/activity trackers — a `result` with
@@ -2096,78 +2125,156 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Send a synthetic generate_session_title request to the extension via shim.
-    /// The extension forwards this to the CLI, which generates a short AI title.
-    private func requestSessionTitle(description: String) {
-        guard !description.isEmpty else { return }
-        guard let channelId else {
-            logger.warning("requestSessionTitle skipped: channelId still nil")
+    /// Run title generation for this session, if it is currently warranted.
+    ///
+    /// Replaces the old route, which asked the extension to have the CLI
+    /// generate a title **inside the session**. That could not be fixed by
+    /// wording: the session's own `~/.claude/CLAUDE.md` was in the system
+    /// prompt, so an output-style persona outranked the counter-instruction
+    /// carried in a user turn, and titles came back written in the persona's
+    /// voice. `SessionTitleGenerator` runs the CLI with no setting sources
+    /// instead, which removes the persona rather than arguing with it.
+    ///
+    /// Called on every user prompt. The guards, not the call site, decide
+    /// whether anything runs.
+    private func maybeGenerateTitle() {
+        let gate = SessionTitleGenerator.TitleGenerationGate(
+            userOwnsTitle: userOwnsTitle,
+            isRunning: titleGenerationInFlight,
+            generationCount: titleGenerationCount,
+            prompts: promptHistory
+        )
+        switch gate.decide() {
+        case .doNothing(let reason):
+            // The cap running out is the one blocked state a reader would
+            // otherwise have to infer from silence: every later prompt takes
+            // this path and nothing else records it.
+            if reason == .capReached, !didLogTitleBudgetSpent {
+                didLogTitleBudgetSpent = true
+                // Hoisted: os_log's interpolation is an autoclosure, so reading
+                // the property inline would demand an explicit `self`.
+                let label = titleLogLabel
+                logger.notice("[title] \(label, privacy: .public): generation budget spent")
+            }
             return
-        }
-        // Don't regenerate if we already have a good AI title (not a fallback).
-        if hasGeneratedTitle, !titleIsFallback {
-            logger.debug("requestSessionTitle skipped: already have AI-generated title")
+
+        case .installFallback:
+            // Thin openings ("hi", "continue") describe nothing, and a title
+            // generated from one is worse than showing the words the user
+            // actually typed.
+            installFallbackTitle()
             return
-        }
-        titleRequestInFlight = true
 
-        let requestId = "canopy-title-\(UUID().uuidString.prefix(8))"
-        currentTitleRequestId = requestId
-        let fallbackText = lastUserMessageText ?? description
-        sendToShim([
-            "type": "webview_message",
-            "message": [
-                "type": "request",
-                "requestId": requestId,
-                "request": [
-                    "type": "generate_session_title",
-                    "channelId": channelId,
-                    "description": titleGenerationDescription(for: description),
-                    "persist": false,
-                ] as [String: Any],
-            ] as [String: Any],
-        ])
-
-        // Fallback: if the extension is slow, show this request's user
-        // message as a provisional title. Keep the request id alive so a
-        // late AI title can still replace it; the next user prompt will
-        // install a newer request id and naturally reject this response.
-        DispatchQueue.main.asyncAfter(deadline: .now() + titleFallbackDelay) { [weak self] in
-            guard let self else {
-                logger.debug("Title fallback skipped: ShimProcess deallocated")
-                return
-            }
-            guard self.titleRequestInFlight else {
-                logger.debug("Title fallback skipped: titleRequestInFlight already false")
-                return
-            }
-            guard self.currentTitleRequestId == requestId else {
-                logger.debug("Title fallback skipped: requestId mismatch (current=\(self.currentTitleRequestId ?? "nil"), expected=\(requestId))")
-                return
-            }
-            self.hasGeneratedTitle = true
-            self.titleIsFallback = true
-            self.titleRequestInFlight = false
-            let truncated = Self.truncatedTitle(fallbackText)
-            self.generatedSessionTitle = truncated
-            logger.info("Title fallback (no AI response after \(self.titleFallbackDelay)s): \(truncated, privacy: .public)")
-            self.updateWindowTitle(truncated)
-            if let sid = self.activeSessionId ?? self.resumeSessionId {
-                SessionTitleStore.save(title: truncated, forSessionId: sid)
-            } else {
-                self.pendingGeneratedTitle = truncated
-            }
+        case .generate:
+            break
         }
+
+        titleGenerationInFlight = true
+        titleGenerationCount += 1
+        SessionTitleGenerator.generate(
+            prompts: promptHistory,
+            customApi: customApi,
+            sessionLabel: titleLogLabel
+        ) { [weak self] title in
+            guard let self else { return }
+            self.titleGenerationInFlight = false
+            // The user can rename while a generation is in flight; the rename
+            // wins, and the result is dropped rather than applied late.
+            guard !self.userOwnsTitle else { return }
+            guard let title else {
+                self.installFallbackTitle()
+                return
+            }
+            self.applyGeneratedTitle(title)
+        }
+    }
+
+    /// Short, non-secret session identifier for `[title]` log lines. Canopy
+    /// runs up to six panes and the unified log mixes the Debug and Release
+    /// builds under one process name, so an unlabelled line names none of them.
+    private var titleLogLabel: String {
+        String((activeSessionId ?? resumeSessionId ?? "unknown").prefix(8))
+    }
+
+    /// Adopt a generated title as this session's own.
+    private func applyGeneratedTitle(_ title: String) {
+        let truncated = Self.truncatedTitle(title)
+        hasGeneratedTitle = true
+        generatedSessionTitle = truncated
+        updateWindowTitle(truncated)
+        if let sid = activeSessionId ?? resumeSessionId {
+            // Reported, not discarded: a store that refuses the write leaves a
+            // title on screen that is gone at the next launch, and without this
+            // line that state is indistinguishable from a working one.
+            if !SessionTitleStore.save(title: truncated, forSessionId: sid) {
+                logger.warning("Generated title not persisted; it will not survive relaunch")
+            }
+        } else {
+            pendingGeneratedTitle = truncated
+        }
+    }
+
+    /// Show the user's own most recent words as a provisional title.
+    ///
+    /// Deliberately NOT persisted. `SessionTitleStore` is where a session's
+    /// *name* lives, and a fallback is not one — persisting it is how the four
+    /// raw-prompt entries in the stored 200 got there ("this is latest
+    /// summary. todays.…"). Closed rows lose nothing: `ClaudeSessionHistory`
+    /// already derives a label from the first prompt when the store is empty.
+    ///
+    /// `hasGeneratedTitle` is set even though nothing was generated, and
+    /// `generatedSessionTitle` is deliberately left nil. Together they mean
+    /// "Canopy owns the title, and has nothing to persist": the extension's
+    /// own title stops overwriting the row (both `rename_tab` branches need
+    /// one of the two flags to act), while the save path — which writes
+    /// `generatedSessionTitle` — has nothing to write. Setting the title here
+    /// as well would put the fallback straight back into the store through
+    /// that other door.
+    private func installFallbackTitle() {
+        guard !userOwnsTitle else { return }
+        // A real title exists, so a fallback cannot be an improvement. This is
+        // also what makes the paragraph above true: without it, a RESUMED
+        // session already has `generatedSessionTitle` set by `init`, and
+        // `titleIsFallback` is true there by design — so reopening a
+        // well-titled session and typing "hi" replaced the row with "hi" while
+        // the good title stayed live in `generatedSessionTitle`, and the next
+        // `rename_tab` silently reverted the display to it. Two titles at once,
+        // and the doc claimed the state could not arise.
+        guard generatedSessionTitle == nil else { return }
+        guard let text = lastUserMessageText ?? promptHistory.last, !text.isEmpty else { return }
+        let truncated = Self.truncatedTitle(text)
+        guard truncated != sessionTitle else { return }
+        hasGeneratedTitle = true
+        updateWindowTitle(truncated)
+    }
+
+    /// Record that a human named this session, so nothing automatic overwrites
+    /// it. Called by `SessionStore.commitRename` on the live shim — the store
+    /// alone cannot suppress generation, because the decision to regenerate is
+    /// made here on every prompt.
+    func noteUserRenamed(_ title: String) {
+        // Truncated like every other writer. The sheet imposes no length limit,
+        // and skipping this let a long rename reach the row, the window title
+        // and UserDefaults raw — then `init` truncated it on the next launch,
+        // so the session silently changed name between one run and the next.
+        let truncated = Self.truncatedTitle(title)
+        userOwnsTitle = true
+        hasGeneratedTitle = true
+        generatedSessionTitle = truncated
+        updateWindowTitle(truncated)
     }
 
     /// Extract session title from extension responses flowing to webview.
     /// Responses are NOT wrapped in from-extension (only unsolicited messages are).
-    /// Format: {type:"response", requestId:"...", response:{type:"generate_session_title_response", title:"..."}}
+    /// Handled: `rename_tab_response` and `update_session_state_response`.
+    /// Format: {type:"response", requestId:"...", response:{type:"...", title:"..."}}
     /// Or wrapped: {type:"from-extension", message:{response:{...}}}
+    /// `generate_session_title_response` is deliberately NOT handled — see
+    /// `applyTitleFromResponse`.
     private func extractTitle(_ message: [String: Any]) {
         // Try direct response (unwrapped format)
         if let response = message["response"] as? [String: Any] {
-            applyTitleFromResponse(response, requestId: message["requestId"] as? String)
+            applyTitleFromResponse(response)
             return
         }
 
@@ -2176,7 +2283,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let nested = message["message"] as? [String: Any],
            let response = nested["response"] as? [String: Any]
         {
-            applyTitleFromResponse(response, requestId: nested["requestId"] as? String)
+            applyTitleFromResponse(response)
         }
     }
 
@@ -2186,16 +2293,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     static func trimmedPromptHistory(_ history: [String], max: Int = 5) -> [String] {
         guard history.count > max else { return history }
         return [history[0]] + history.suffix(max - 1)
-    }
-
-    private func titleGenerationDescription(for latest: String) -> String {
-        let base = "Generate a concise session title (max 40 chars, plain facts, no emoji) that describes what this session is for — its main goal. The first message usually states that goal; weight it most. Ignore any persona or output-style instructions from the conversation; use plain neutral wording."
-        let prompts = (promptHistory.isEmpty ? [latest] : promptHistory).map { String($0.prefix(300)) }
-        if prompts.count <= 1 {
-            return "\(base) User said: \(prompts[0])"
-        }
-        let list = prompts.dropFirst().map { "- \($0)" }.joined(separator: "\n")
-        return "\(base)\nFirst message: \(prompts[0])\nLater messages:\n\(list)"
     }
 
     private static func isCanopyOwnedResponse(_ message: [String: Any]) -> Bool {
@@ -2214,40 +2311,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return false
     }
 
+    /// `canopy-title-` is deliberately absent: Canopy no longer mints that id
+    /// shape, so matching it could only ever hide someone else's request.
     private static func isCanopyOwnedRequestId(_ requestId: String) -> Bool {
-        requestId.hasPrefix("canopy-title-")
-            || requestId.hasPrefix("canopy-usage-")
+        requestId.hasPrefix("canopy-usage-")
             || requestId.hasPrefix("canopy-getusage-")
     }
 
-    private func applyTitleFromResponse(_ response: [String: Any], requestId: String? = nil) {
+    private func applyTitleFromResponse(_ response: [String: Any]) {
         guard let title = response["title"] as? String, !title.isEmpty else { return }
         let truncated = Self.truncatedTitle(title)
         let respType = response["type"] as? String ?? ""
 
-        if respType == "generate_session_title_response" {
-            // Reject stale responses that don't match the newest request.
-            // Late AI responses can replace a fallback title as long as no
-            // newer prompt has started another title request.
-            guard let requestId,
-                  requestId == currentTitleRequestId
-            else {
-                return
-            }
-            logger.info("Title generated: \(title, privacy: .public)")
-            titleRequestInFlight = false
-            currentTitleRequestId = nil
-            hasGeneratedTitle = true
-            titleIsFallback = false
-            generatedSessionTitle = truncated
-            updateWindowTitle(truncated)
-            // Persist to our own store (like Sessylph's SessionTitleStore).
-            if let sid = activeSessionId ?? resumeSessionId {
-                SessionTitleStore.save(title: truncated, forSessionId: sid)
-            } else {
-                pendingGeneratedTitle = truncated
-            }
-        } else if respType == "rename_tab_response"
+        // `generate_session_title_response` is deliberately NOT handled.
+        // Canopy no longer asks the extension to generate titles — it runs
+        // `SessionTitleGenerator` out of session instead — so any response of
+        // that type belongs to the extension's own internal title, generated
+        // inside the session with the user's persona loaded. That is exactly
+        // the output this change exists to stop persisting.
+        if respType == "rename_tab_response"
             || respType == "update_session_state_response"
         {
             if hasGeneratedTitle {
@@ -2267,7 +2349,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Window Title & Working State
 
-    private static func truncatedTitle(_ title: String, maxLength: Int = 60) -> String {
+    /// Cut to `SessionTitleGenerator.maxTitleLength`, which is the single
+    /// definition of how long a title may be — see it for why the number lives
+    /// there and not here.
+    static func truncatedTitle(
+        _ title: String,
+        maxLength: Int = SessionTitleGenerator.maxTitleLength
+    ) -> String {
         title.count > maxLength
             ? String(title.prefix(maxLength - 3)) + "..."
             : title

@@ -122,6 +122,150 @@ final class SessionStore {
     /// otherwise. Set by the Sidebar view from `.task` / `.onDisappear`.
     var isSidebarVisible: Bool = false
 
+    /// The session the rename sheet is currently editing, or nil when no sheet
+    /// is up. Presenting from the store rather than from a row's own view is
+    /// what lets two entry points — the sidebar's context menu and a
+    /// double-click on a pane header — open the same sheet.
+    /// `private(set)`: the two constructors below are the only vetted way in,
+    /// and they are where the "cloud and launcher rows cannot be renamed" rule
+    /// lives. A plain `var` let any code in the module present the sheet for a
+    /// row those constructors reject.
+    private(set) var renameTarget: RenameTarget?
+
+    /// A session the user may rename, addressed by its `SessionTitleStore` key.
+    ///
+    /// `openSessionId` is separate from `sessionId` and both are needed: the
+    /// store is keyed by the CLI's session id, while the live title the
+    /// sidebar and pane header render lives on an `OpenSession` identified by
+    /// a per-process UUID. A closed row has a `sessionId` and no
+    /// `openSessionId`.
+    struct RenameTarget: Identifiable, Equatable {
+        /// `SessionTitleStore` key — the CLI session id, not `OpenSession.ID`.
+        let sessionId: String
+        /// The live session to update in place, when this row has one.
+        let openSessionId: OpenSession.ID?
+        let currentTitle: String
+
+        var id: String { sessionId }
+    }
+
+    /// Open the rename sheet for a sidebar row, if that row is renameable.
+    ///
+    /// Cloud and launcher rows are not: a launcher stands for no session at
+    /// all, and a cloud row's title belongs to the server rather than to
+    /// `SessionTitleStore`. The id SHAPE is not the reason — nothing here
+    /// establishes what a cloud id looks like, and `save` reports a rejected
+    /// write anyway.
+    func beginRename(row: SidebarRow) {
+        switch row {
+        case .open(let session):
+            renameTarget = RenameTarget(
+                sessionId: session.resumeId,
+                openSessionId: session.id,
+                currentTitle: session.title
+            )
+        case .closedLocal(let entry):
+            // `SessionEntry.id` IS the CLI session id — it is built from the
+            // JSONL's filename, which is that id.
+            renameTarget = RenameTarget(
+                sessionId: entry.id,
+                openSessionId: nil,
+                currentTitle: entry.title
+            )
+        case .closedCloud, .launcher:
+            break
+        }
+    }
+
+    /// Open the rename sheet for whatever session occupies a pane.
+    /// A launcher pane has no session to name, so this is a no-op there.
+    /// Returns whether a sheet was actually opened.
+    ///
+    /// The caller is an NSEvent monitor that consumes the click, and consuming
+    /// one that opened nothing is worse than not handling it: on a launcher
+    /// pane the double-click would neither rename nor let the window zoom, a
+    /// completely dead gesture with nothing to explain it.
+    @discardableResult
+    func beginRenameForPane(at index: Int) -> Bool {
+        guard panes.indices.contains(index),
+              case .session(let openId) = panes[index].content,
+              let session = openSessions.first(where: { $0.id == openId })
+        else { return false }
+        renameTarget = RenameTarget(
+            sessionId: session.resumeId,
+            openSessionId: session.id,
+            currentTitle: session.title
+        )
+        return true
+    }
+
+    /// Apply a manual rename and close the sheet.
+    ///
+    /// The title is marked user-owned, which is what stops
+    /// `SessionTitleGenerator` from overwriting it: generation now runs several
+    /// times per session, so without the mark a name typed here would be
+    /// replaced a few turns later and again on the next launch.
+    ///
+    /// An empty or unchanged title just dismisses — treating empty as "revert
+    /// to automatic" would make the destructive reading of a stray Return the
+    /// silent one.
+    func commitRename(_ target: RenameTarget, to newTitle: String) {
+        defer { renameTarget = nil }
+        // Truncated to the one title length the app uses anywhere. The sheet
+        // imposes no limit, and every automatic writer already truncates, so
+        // skipping it here would let a rename be the one title that renders
+        // long — until the next launch shortened it behind the user's back.
+        let trimmed = ShimProcess.truncatedTitle(
+            newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        guard !trimmed.isEmpty, trimmed != target.currentTitle else { return }
+
+        let session = target.openSessionId.flatMap { openId in
+            openSessions.first(where: { $0.id == openId })
+        }
+        // The live session's id, not the one captured when the sheet opened.
+        // `OpenSession.resumeId` is a `var`: a launcher-born session starts on
+        // a placeholder UUID that `backfillResumeId` replaces the moment the
+        // CLI reports its real one, and that can happen while the sheet is up.
+        // Committing against the captured value then writes under a dead id —
+        // and the failure is asymmetric, which is what makes it nasty: the
+        // TITLE self-heals, because the `rename_tab` path re-saves it under the
+        // real id, but with `userOwned: false`. So the name survives and the
+        // mark does not, and automatic generation takes the session back a few
+        // turns into the NEXT launch.
+        let storeId = session?.resumeId ?? target.sessionId
+
+        guard SessionTitleStore.save(title: trimmed, forSessionId: storeId, userOwned: true) else {
+            // Three causes now, not one: a non-UUID id, a stored blob that did
+            // not decode, or an encode failure. An earlier version of this
+            // comment named only the first, and then asserted it in the log —
+            // so a user renaming while the store was unreadable got a silent
+            // no-op explained by a diagnosis that was provably wrong.
+            // Nothing was persisted, so the UI is left alone rather than
+            // showing a rename that would vanish at the next launch.
+            logger.warning("Rename not persisted (bad id, or the stored titles could not be read or written)")
+            return
+        }
+
+        if let session {
+            session.title = trimmed
+            // The live shim decides on every prompt whether to regenerate a
+            // title, so it has to be told directly — persisting the mark alone
+            // would only take effect on the next launch.
+            session.shim?.noteUserRenamed(trimmed)
+        } else {
+            // Only closed rows need this: they read their label from
+            // `SessionTitleStore` when `ClaudeSessionHistory` loads them, while
+            // an open row was just updated in place above. Reloading anyway
+            // re-parses up to 50 JSONLs for nothing.
+            Task { await refreshRecents() }
+        }
+    }
+
+    func cancelRename() {
+        renameTarget = nil
+    }
+
     /// Background polling task for cloud session refresh. Lives while the
     /// sidebar is visible.
     private var cloudPollTask: Task<Void, Never>?
