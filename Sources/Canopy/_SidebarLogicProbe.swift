@@ -4084,6 +4084,94 @@ enum SidebarLogicProbe {
                MacroPadCommand.color(index: 0, rgb: 0xFF00_0000).line == "C 0 000000",
                "got \(MacroPadCommand.color(index: 0, rgb: 0xFF00_0000).line)")
 
+        // MARK: - MacroPad remote endpoint parsing (remote transport)
+        //
+        // Parsing happens once, at the settings boundary. Every assertion
+        // here is a shape that must NOT reach the socket layer as a guess.
+
+        record("macropad endpoint: bare host takes the default port",
+               MacroPadRemoteEndpoint.parse("mbp") == MacroPadRemoteEndpoint(host: "mbp", port: 8765),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("mbp")))")
+        record("macropad endpoint: host:port",
+               MacroPadRemoteEndpoint.parse("mbp:9000") == MacroPadRemoteEndpoint(host: "mbp", port: 9000),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("mbp:9000")))")
+        record("macropad endpoint: surrounding whitespace is trimmed",
+               MacroPadRemoteEndpoint.parse("  mbp:9000  ") == MacroPadRemoteEndpoint(host: "mbp", port: 9000),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("  mbp:9000  ")))")
+        record("macropad endpoint: bracketed IPv6 with a port",
+               MacroPadRemoteEndpoint.parse("[fd7a::1]:8765") == MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("[fd7a::1]:8765")))")
+        record("macropad endpoint: bracketed IPv6 without a port",
+               MacroPadRemoteEndpoint.parse("[fd7a::1]") == MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("[fd7a::1]")))")
+        // A bare v6 literal is ambiguous with host:port. Rejected, never guessed.
+        record("macropad endpoint: unbracketed IPv6 is rejected",
+               MacroPadRemoteEndpoint.parse("fd7a::1") == nil,
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("fd7a::1")))")
+        record("macropad endpoint: empty is nil",
+               MacroPadRemoteEndpoint.parse("") == nil, "expected nil")
+        record("macropad endpoint: whitespace only is nil",
+               MacroPadRemoteEndpoint.parse("   ") == nil, "expected nil")
+        record("macropad endpoint: empty host with a port is nil",
+               MacroPadRemoteEndpoint.parse(":8765") == nil, "expected nil")
+        record("macropad endpoint: port 0 is nil",
+               MacroPadRemoteEndpoint.parse("mbp:0") == nil, "expected nil")
+        record("macropad endpoint: port 65536 is nil",
+               MacroPadRemoteEndpoint.parse("mbp:65536") == nil, "expected nil")
+        record("macropad endpoint: non-numeric port is nil",
+               MacroPadRemoteEndpoint.parse("mbp:abc") == nil, "expected nil")
+        record("macropad endpoint: missing port after the colon is nil",
+               MacroPadRemoteEndpoint.parse("mbp:") == nil, "expected nil")
+        record("macropad endpoint: displayLabel round-trips",
+               MacroPadRemoteEndpoint.parse("mbp")?.displayLabel == "mbp:8765",
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("mbp")?.displayLabel))")
+
+        // --- MacroPadSource resolution and migration
+        record("macropad source: off resolves",
+               MacroPadSource.resolve(rawValue: "off", host: "") == .off, "expected .off")
+        record("macropad source: local resolves",
+               MacroPadSource.resolve(rawValue: "local", host: "") == .local, "expected .local")
+        record("macropad source: remote resolves with a valid host",
+               MacroPadSource.resolve(rawValue: "remote", host: "mbp:9000")
+                   == .remote(MacroPadRemoteEndpoint(host: "mbp", port: 9000)),
+               "got \(String(describing: MacroPadSource.resolve(rawValue: "remote", host: "mbp:9000")))")
+        // Degrading to .local here would silently drive a DIFFERENT pad than
+        // the one configured, which is the worst outcome available.
+        record("macropad source: remote with an empty host degrades to off, not local",
+               MacroPadSource.resolve(rawValue: "remote", host: "") == .off,
+               "got \(String(describing: MacroPadSource.resolve(rawValue: "remote", host: "")))")
+        record("macropad source: remote with an unparseable host degrades to off",
+               MacroPadSource.resolve(rawValue: "remote", host: "mbp:abc") == .off,
+               "got \(String(describing: MacroPadSource.resolve(rawValue: "remote", host: "mbp:abc")))")
+        record("macropad source: an unknown selector does not resolve",
+               MacroPadSource.resolve(rawValue: "banana", host: "") == nil, "expected nil")
+        record("macropad source: isOff only for off",
+               MacroPadSource.off.isOff && !MacroPadSource.local.isOff, "isOff is wrong")
+        record("macropad source: rawValue spellings",
+               MacroPadSource.off.rawValue == "off"
+                   && MacroPadSource.local.rawValue == "local"
+                   && MacroPadSource.remote(MacroPadRemoteEndpoint(host: "m", port: 1)).rawValue == "remote",
+               "rawValue spelling changed")
+
+        record("macropad source migration: legacy enabled=true becomes local",
+               MacroPadSource.migrated(storedRaw: nil, storedHost: "", legacyEnabled: true) == .local,
+               "expected .local")
+        record("macropad source migration: legacy enabled=false becomes off",
+               MacroPadSource.migrated(storedRaw: nil, storedHost: "", legacyEnabled: false) == .off,
+               "expected .off")
+        record("macropad source migration: a fresh install defaults to local",
+               MacroPadSource.migrated(storedRaw: nil, storedHost: "", legacyEnabled: nil) == .local,
+               "expected .local")
+        // The stored selector outranks the legacy key once it exists.
+        record("macropad source migration: a stored selector wins over the legacy key",
+               MacroPadSource.migrated(storedRaw: "off", storedHost: "", legacyEnabled: true) == .off,
+               "expected .off")
+        // A garbage SELECTOR falls through to the legacy/default path. That is
+        // different from a garbage ADDRESS, which degrades to .off above.
+        record("macropad source migration: a garbage selector falls through to the legacy key",
+               MacroPadSource.migrated(storedRaw: "banana", storedHost: "", legacyEnabled: false) == .off,
+               "expected .off")
+
         // MARK: - Session restore snapshot
         do {
             func snapSession(
