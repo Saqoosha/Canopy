@@ -4179,6 +4179,19 @@ enum SidebarLogicProbe {
                ["off", "local", "remote"].contains(CanopySettings.shared.macroPadSource.rawValue),
                "got \(CanopySettings.shared.macroPadSource.rawValue)")
 
+        // Switching source is an explicit "I am using this pad now"; the chord
+        // means "go dark". The newer, more specific verb wins — otherwise
+        // every transition costs a swallowed keypress to wake the new pad.
+        record("macropad sleep: switching to local clears sleep",
+               MacroPadController.clearsSleep(movingTo: .local), "expected true")
+        record("macropad sleep: switching to remote clears sleep",
+               MacroPadController.clearsSleep(movingTo: .remote(MacroPadRemoteEndpoint(host: "mbp", port: 8765))),
+               "expected true")
+        // Off disconnects, and the firmware blanks itself. Clearing the flag
+        // there would silently un-sleep the pad you get back later.
+        record("macropad sleep: switching to off does not clear sleep",
+               !MacroPadController.clearsSleep(movingTo: .off), "expected false")
+
         // MARK: - Session restore snapshot
         do {
             func snapSession(

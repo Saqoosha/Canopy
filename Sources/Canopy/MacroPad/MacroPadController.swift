@@ -368,7 +368,7 @@ final class MacroPadController {
     private var tracker = MacroPadUnreadTracker()
     private var watchdogTimer: Timer?
     private var helloIsHostInitiated = false
-    private var lastEnabled: Bool?
+    private var lastSource: MacroPadSource?
     /// Mirrors `NSApp.isActive`. Kept as stored state rather than read live
     /// because `refresh()` has to re-run when it changes, and AppKit's
     /// activation is a notification, not an observable property.
@@ -457,19 +457,24 @@ final class MacroPadController {
         // Every property read inside the tracked closure is what re-arms the
         // observation — including `settings.macroPadSource`, which is why
         // the toggle takes effect without its own observer.
-        let enabled = !settings.macroPadSource.isOff
+        let source = settings.macroPadSource
         let brightness = settings.macroPadBrightness
         let panes = store.panes
         let focusedPaneIndex = store.focusedPaneIndex
         let openSessions = store.openSessions
 
-        if lastEnabled != enabled {
-            // A toggle Canopy performed will produce a `HELLO` that is not a
+        if lastSource != source {
+            // A switch Canopy performed will produce a `HELLO` that is not a
             // firmware reboot.
-            if enabled { expectHostInitiatedHello() }
-            lastEnabled = enabled
+            if !source.isOff { expectHostInitiatedHello() }
+            // Only on an actual change, and only once `lastSource` is
+            // non-nil: at launch this runs before the user has touched
+            // anything, and clearing there would discard a sleep the user set
+            // before quitting.
+            if lastSource != nil, Self.clearsSleep(movingTo: source) { setAsleep(false) }
+            lastSource = source
         }
-        device.setSource(settings.macroPadSource)
+        device.setSource(source)
 
         var paneIndexBySession: [UUID: Int] = [:]
         for (index, pane) in panes.enumerated() {
@@ -606,6 +611,12 @@ final class MacroPadController {
     static func effectiveBrightness(percent: Int, isAsleep: Bool) -> Int {
         isAsleep ? 0 : min(100, max(0, percent))
     }
+
+    /// Whether moving to `source` should clear manual sleep.
+    ///
+    /// Pure and static so the probe can reach it — `setAsleep` is private and
+    /// needs a live controller. See the assertions for the reasoning.
+    static func clearsSleep(movingTo source: MacroPadSource) -> Bool { !source.isOff }
 
     /// Written as a clamp rather than an early `return` on purpose: a
     /// `guard !isAsleep else { return }` here would send **nothing** while
