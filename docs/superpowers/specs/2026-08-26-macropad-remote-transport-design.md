@@ -227,13 +227,41 @@ there is none — **never** fall back to `0.0.0.0`. `--install` writes
 `~/Library/Logs/canopy-macropad-bridge.log`. A missing `socat` is named explicitly
 rather than failing as a generic command-not-found.
 
-### 8. Exclusivity
+### 8. Exclusivity is opt-in, and Canopy has to ask for it
 
-`/dev/cu.*` is opened exclusively by the OS, so two Canopys can never drive one pad
-at once and there is no split-brain to design around. Whichever side opens first
-wins; the loser gets `EBUSY`, logs it, and retries. This is why the MBP's Canopy must
-be at `Off` for the bridge to reach pad #2 — that is the one genuinely irreducible
-toggle in the whole scheme, and it is already a live setting.
+An earlier draft of this spec claimed `/dev/cu.*` is opened exclusively by the
+OS, so two Canopys could never drive one pad and there was no split-brain to
+design around. That is false, and it was caught by implementation rather than
+by reasoning. Measured with Canopy holding `/dev/cu.usbmodem20103`: a second
+`open(O_RDWR|O_NONBLOCK|O_NOCTTY)` from another process **succeeds**.
+Exclusivity on a BSD tty is opt-in via `ioctl(fd, TIOCEXCL)`, and Canopy had
+never set it.
+
+The claim looked corroborated by something true: `EBUSY` really is the most
+common bring-up state, and CLAUDE.md says so. But that is because `screen` sets
+`TIOCEXCL` itself — the OS was never the thing enforcing it.
+
+Left alone, this makes the daily procedure fail silently instead of loudly.
+With the bridge Mac's Canopy still on `.local`, socat opens the pad too; two
+readers then split the key-event stream between them at random and two writers
+interleave colour commands — exactly the split-brain this section used to say
+could not exist.
+
+So `openAndProbe`'s serial branch sets `TIOCEXCL` immediately after a
+successful `open`. Canopy-first then behaves the way the rest of this spec
+assumes: socat's open fails with `EBUSY`, and the bridge script names the
+cause.
+
+**The fix is one-directional, and the residual gap is real.** socat never sets
+`TIOCEXCL`, and `TIOCEXCL` does not fail against a descriptor another process
+already holds — so if socat opens the pad first, Canopy can still join it and
+the split-brain returns. What is fixed is the common case: the local Canopy
+runs continuously and the bridge's socat opens the port only once a client
+connects. Starting the bridge before Canopy is the uncovered order.
+
+This is still why the bridge Mac's Canopy must be at `Off` for the bridge to
+reach its pad — but that toggle is now enforced by a real error rather than by
+an assumption.
 
 ## Testing
 

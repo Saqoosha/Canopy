@@ -408,14 +408,29 @@ final class MacroPadDevice: @unchecked Sendable {
                     """)
                 return false
             }
+            // macOS does NOT make /dev/cu.* exclusive by default — measured: a
+            // second open() succeeds while Canopy already holds the port.
+            // Exclusivity is opt-in, and without it the bridge's socat can open
+            // the same pad this Canopy is driving, splitting the key-event
+            // stream between two readers and interleaving two writers' colour
+            // commands. A failure here is worth saying out loud but not worth
+            // refusing the port over: a shared pad still works, it just cannot
+            // detect the collision.
+            if ioctl(opened, TIOCEXCL) != 0 {
+                logger.notice("""
+                    MacroPad: TIOCEXCL on \(path, privacy: .public) failed: \
+                    \(String(cString: strerror(errno)), privacy: .public); \
+                    another process can still open this pad
+                    """)
+            }
             guard configureTTY(opened) else {
                 close(opened)
                 return false
             }
             handle = opened
-        case .tcp:
-            // Task 4 fills this in.
-            return false
+        case .tcp(let remote):
+            guard let opened = openTCP(remote) else { return false }
+            handle = opened
         }
 
         decoder.reset()
@@ -490,6 +505,127 @@ final class MacroPadDevice: @unchecked Sendable {
             return false
         }
         return true
+    }
+
+    /// Connects to a bridge over TCP and returns a probe-ready descriptor.
+    ///
+    /// The result is deliberately indistinguishable from a serial fd to
+    /// everything downstream: the same `HELLO`/`PONG` probe adopts it, the
+    /// same read source drives it, the same `writeBytes` feeds it. No
+    /// `configureTTY` — there is no line discipline on a socket.
+    ///
+    /// Known bound: `getaddrinfo` blocks, and it runs on `queue`, which
+    /// `stop()` waits on with `queue.sync`. A hung DNS lookup therefore
+    /// lengthens Cmd+Q. Tailscale MagicDNS resolves locally and fails fast, so
+    /// this is accepted; if it is ever observed the fix is to move resolution
+    /// off the synchronous path, not to shorten a timeout.
+    private func openTCP(_ endpoint: MacroPadRemoteEndpoint) -> Int32? {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        // The port is already a number; without this the resolver would also
+        // consult /etc/services for it.
+        hints.ai_flags = AI_NUMERICSERV
+
+        var list: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(endpoint.host, String(endpoint.port), &hints, &list)
+        guard status == 0, let head = list else {
+            // Distinguishable from a refused connection, which is the whole
+            // point: a typo'd host and a bridge that isn't running are
+            // different problems with different fixes.
+            logger.notice("""
+                MacroPad: getaddrinfo(\(endpoint.displayLabel, privacy: .public)) failed: \
+                \(String(cString: gai_strerror(status)), privacy: .public)
+                """)
+            return nil
+        }
+        defer { freeaddrinfo(head) }
+
+        var node: UnsafeMutablePointer<addrinfo>? = head
+        while let info = node {
+            // A quit issued mid-connect would otherwise wait out the full
+            // timeout for every address the resolver returned.
+            if stopRequested.withLock({ $0 }) { return nil }
+            if let handle = connectSocket(info.pointee, label: endpoint.displayLabel) { return handle }
+            node = info.pointee.ai_next
+        }
+        return nil
+    }
+
+    /// One address, one attempt. Returns a connected non-blocking descriptor
+    /// or nil, having closed anything it opened.
+    private func connectSocket(_ info: addrinfo, label: String) -> Int32? {
+        let handle = socket(info.ai_family, info.ai_socktype, info.ai_protocol)
+        guard handle >= 0 else { return nil }
+
+        var enable: Int32 = 1
+        // NOT optional. A write to a hung-up tty returns EIO; a write to a
+        // closed socket raises SIGPIPE, which has no handler here and takes
+        // the whole app down. Stopping the bridge would crash Canopy.
+        setsockopt(handle, SOL_SOCKET, SO_NOSIGPIPE, &enable, socklen_t(MemoryLayout<Int32>.size))
+        // Commands are ~10 bytes. Nagle would hold a colour change behind the
+        // previous ACK.
+        setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &enable, socklen_t(MemoryLayout<Int32>.size))
+        // Closing the bridge Mac's lid leaves the connection half-open, and
+        // writes keep succeeding into the send buffer — so neither the read
+        // side nor the controller's watchdog ping can notice. 15s idle, 15s
+        // between probes, 3 probes: ~45s, the same budget SSH remote uses
+        // (ServerAliveInterval=15, ServerAliveCountMax=3).
+        setsockopt(handle, SOL_SOCKET, SO_KEEPALIVE, &enable, socklen_t(MemoryLayout<Int32>.size))
+        var idle: Int32 = 15
+        setsockopt(handle, IPPROTO_TCP, TCP_KEEPALIVE, &idle, socklen_t(MemoryLayout<Int32>.size))
+        var interval: Int32 = 15
+        setsockopt(handle, IPPROTO_TCP, TCP_KEEPINTVL, &interval, socklen_t(MemoryLayout<Int32>.size))
+        var probes: Int32 = 3
+        setsockopt(handle, IPPROTO_TCP, TCP_KEEPCNT, &probes, socklen_t(MemoryLayout<Int32>.size))
+
+        // Non-blocking for the same reason the serial path opens O_NONBLOCK:
+        // it is what lets `writeBytes`'s EAGAIN loop and the read source work
+        // unchanged on this descriptor.
+        let flags = fcntl(handle, F_GETFL, 0)
+        guard flags >= 0, fcntl(handle, F_SETFL, flags | O_NONBLOCK) >= 0 else {
+            close(handle)
+            return nil
+        }
+
+        if connect(handle, info.ai_addr, info.ai_addrlen) == 0 { return handle }
+        guard errno == EINPROGRESS else {
+            logger.notice("""
+                MacroPad: connect(\(label, privacy: .public)) failed: \
+                \(String(cString: strerror(errno)), privacy: .public)
+                """)
+            close(handle)
+            return nil
+        }
+
+        let deadline = Date().addingTimeInterval(Self.probeTimeout)
+        while Date() < deadline {
+            if stopRequested.withLock({ $0 }) { break }
+            var poller = pollfd(fd: handle, events: Int16(POLLOUT), revents: 0)
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            let ready = poll(&poller, 1, Int32(remaining * 1000))
+            if ready < 0 {
+                if errno == EINTR { continue }
+                break
+            }
+            if ready == 0 { break }
+
+            var socketError: Int32 = 0
+            var length = socklen_t(MemoryLayout<Int32>.size)
+            guard getsockopt(handle, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0 else { break }
+            if socketError == 0 { return handle }
+            logger.notice("""
+                MacroPad: connect(\(label, privacy: .public)) failed: \
+                \(String(cString: strerror(socketError)), privacy: .public)
+                """)
+            close(handle)
+            return nil
+        }
+
+        logger.notice("MacroPad: connect(\(label, privacy: .public)) timed out")
+        close(handle)
+        return nil
     }
 
     /// Events decoded during the probe window are forwarded after
