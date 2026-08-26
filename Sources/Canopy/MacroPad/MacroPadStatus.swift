@@ -22,7 +22,7 @@ final class MacroPadStatus {
     static let shared = MacroPadStatus()
 
     enum Link: Equatable {
-        /// The link is not running: the Settings toggle is off, `shutdown()`
+        /// The link is not running: the source is `.off`, `shutdown()`
         /// ran, or no controller has published yet (this is `link`'s initial
         /// value). The three collapse into one case because none of them is
         /// something the user can act on. Note the *controller* keeps running

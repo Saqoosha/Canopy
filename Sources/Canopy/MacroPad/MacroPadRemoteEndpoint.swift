@@ -48,7 +48,7 @@ struct MacroPadRemoteEndpoint: Equatable, Sendable {
             guard !host.isEmpty, let port = parsePort(String(parts[1])) else { return nil }
             return MacroPadRemoteEndpoint(host: host, port: port)
         default:
-            // Three or more colons: an unbracketed IPv6 literal. See the doc.
+            // Two or more colons: an unbracketed IPv6 literal. See the doc.
             return nil
         }
     }

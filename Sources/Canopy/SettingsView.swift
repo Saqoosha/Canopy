@@ -90,7 +90,7 @@ private struct GeneralSettingsTab: View {
                     // choice off the menu. Safe because the selection can
                     // never *be* `remote` with an unusable address:
                     // `CanopySettings.load` degrades that to `.off` and
-                    // `commitHost` moves it to `.local`.
+                    // `commitHost` moves it to `.off` too.
                     if MacroPadRemoteEndpoint.parse(settings.macroPadRemoteHost) != nil {
                         Text("Remote bridge").tag("remote")
                     }
@@ -150,8 +150,10 @@ private struct GeneralSettingsTab: View {
         guard !trimmed.isEmpty else {
             hostError = nil
             settings.macroPadRemoteHost = ""
-            // The selector cannot stay on a source with no address.
-            if case .remote = settings.macroPadSource { settings.macroPadSource = .local }
+            // The selector cannot stay on a source with no address. It moves
+            // to `.off`, never `.local` — silently connecting to a different
+            // pad than the one configured is the worst outcome available.
+            if case .remote = settings.macroPadSource { settings.macroPadSource = .off }
             return
         }
         guard let endpoint = MacroPadRemoteEndpoint.parse(trimmed) else {

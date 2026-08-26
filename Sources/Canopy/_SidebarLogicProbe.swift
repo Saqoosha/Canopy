@@ -4172,12 +4172,21 @@ enum SidebarLogicProbe {
                MacroPadSource.migrated(storedRaw: "banana", storedHost: "", legacyEnabled: false) == .off,
                "expected .off")
 
-        // The load/save pair reads the real settings file and is not
-        // probe-reachable; this pins only that the new surface exists and
-        // that the retired boolean is gone from the type.
-        record("macropad settings: the live source is one of the three spellings",
-               ["off", "local", "remote"].contains(CanopySettings.shared.macroPadSource.rawValue),
-               "got \(CanopySettings.shared.macroPadSource.rawValue)")
+        // Deliberately no assertion here touching `CanopySettings.shared`.
+        // `load()` unconditionally assigns `macroPadSource` /
+        // `macroPadRemoteHost` whenever a settings.json exists at all (even
+        // one with neither key present), and those assignments' `didSet`
+        // fires `save()` — so merely constructing the shared instance writes
+        // the real, shared `~/Library/Application Support/Canopy/settings.json`
+        // (shared between this Debug build and the installed Release app;
+        // see CLAUDE.md) with none of the snapshot/restore discipline every
+        // other fixture in this file uses. A prior version of this block
+        // asserted `["off", "local", "remote"].contains(macroPadSource.rawValue)`
+        // for exactly that side effect, which was also a tautology —
+        // `rawValue` can only be one of those three by construction — so it
+        // bought a real hazard (a silent settings change for a user running
+        // an older Release build) for zero actual coverage. The load/save
+        // pair itself is still not probe-reachable and remains untested here.
 
         // Switching source is an explicit "I am using this pad now"; the chord
         // means "go dark". The newer, more specific verb wins — otherwise

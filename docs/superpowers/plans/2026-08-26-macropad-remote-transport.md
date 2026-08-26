@@ -1,5 +1,26 @@
 # MacroPad Remote Transport Implementation Plan
 
+**Status:** Landed — all 9 tasks committed on the `macropad-remote-transport`
+branch. This is the plan as written, not as built; treat
+[`2026-08-26-macropad-remote-transport-handover.md`](2026-08-26-macropad-remote-transport-handover.md)
+as authoritative for what actually happened, what was verified, and how to
+operate it. Known-wrong below, by symbol: the `find_device()` shown around
+line 1342 (proved unable to match anything against this machine's `ioreg`
+output — `scripts/macropad-bridge.sh`'s own `find_device` is the version that
+works); the `b115200` socat option at lines 858 and 1391 (rejected outright
+by this machine's socat 1.8.1.3 — the shipped script uses
+`ispeed=115200,ospeed=115200`); `device.setEnabled(...)` and
+`settings.macroPadEnabled` throughout Tasks 2–5 (mechanical mid-refactor
+scaffolding for a rename that landed as `setSource(_:)` /
+`macroPadSource` — neither retired symbol exists on this branch); and Task
+9 Step 1's real-hardware loopback, which was never run — the only real
+MacroPad was in continuous use by the installed Canopy throughout this
+branch's work (see the handover doc's "What is verified, and what is not").
+The Global Constraints line asserting pure-value-type coverage is "verified
+by the loopback run in Task 9" (line 20) is false for the same reason — that
+run never happened; the handover doc's verification table is what actually
+covers that ground.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let Canopy drive its MacroPad over TCP from a bridge on another Mac, switchable live between `Off` / `Local USB` / `Remote`, so a pad plugged into the MBP can run the Studio's Canopy over Tailscale.

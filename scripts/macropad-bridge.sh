@@ -7,6 +7,12 @@
 #   ./scripts/macropad-bridge.sh --install    install + start a launchd agent
 #   ./scripts/macropad-bridge.sh --uninstall  stop + remove the agent
 #
+# Env:
+#   CANOPY_MACROPAD_BRIDGE_PORT   TCP port to listen on (default 8765). Also
+#                                 honored by --install, which bakes the value
+#                                 into the launchd agent's plist — set it
+#                                 before installing, not after.
+#
 # The Canopy running on THIS machine must have MacroPad set to Off, or it
 # holds the serial port and socat gets EBUSY.
 set -euo pipefail
@@ -109,6 +115,7 @@ run_bridge() {
   echo "macropad-bridge: starting up; will bind $ip:$PORT once a pad is found"
 
   local reported_no_pad=""
+  local reported_busy=""
   while true; do
     local dev
     if ! dev="$(find_device)"; then
@@ -137,9 +144,19 @@ run_bridge() {
     # outright with "unknown option", it is not a recognized socat option at
     # all on this build. `socat -hh` lists `ispeed`/`ospeed` as the real
     # termios option names.
-    if ! socat "TCP-LISTEN:$PORT,bind=$ip,reuseaddr" "FILE:$dev,raw,ispeed=115200,ospeed=115200,nonblock"; then
-      # EBUSY is the common one: the local Canopy still has MacroPad on.
-      echo "macropad-bridge: socat exited non-zero (is this Mac's Canopy holding the pad?)"
+    if socat "TCP-LISTEN:$PORT,bind=$ip,reuseaddr" "FILE:$dev,raw,ispeed=115200,ospeed=115200,nonblock"; then
+      reported_busy=""
+    else
+      # EBUSY is the common one: the local Canopy still has MacroPad on. This
+      # is the state the spec expects whenever this Mac's own Canopy is set
+      # to Local — reported once on entry, not on every retry, or a Canopy
+      # left on Local drives ~2 lines per 8s reconnect cycle into this log
+      # forever (~21k lines/day) with no rotation. Re-armed only once a socat
+      # run actually succeeds, same shape as reported_no_pad above.
+      if [ -z "$reported_busy" ]; then
+        echo "macropad-bridge: socat exited non-zero (is this Mac's Canopy holding the pad?)"
+        reported_busy=1
+      fi
       sleep 2
     fi
   done
@@ -156,6 +173,13 @@ install_agent() {
   # with "socat not found" under launchd even though it works in every
   # interactive shell. Both Homebrew prefixes are listed since which one is
   # populated depends on the Mac's architecture.
+  #
+  # CANOPY_MACROPAD_BRIDGE_PORT also needs to be in EnvironmentVariables, not
+  # just read at the top of this script: PORT is a plain shell variable at
+  # install time, and the agent launchd starts later is a fresh process with
+  # none of this shell's environment. Without this, `--install` reports
+  # success and installs an agent listening on 8765 regardless of what PORT
+  # was set to at install time.
   cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -175,6 +199,8 @@ install_agent() {
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>CANOPY_MACROPAD_BRIDGE_PORT</key>
+    <string>$PORT</string>
   </dict>
 </dict>
 </plist>

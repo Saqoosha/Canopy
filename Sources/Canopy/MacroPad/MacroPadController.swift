@@ -300,8 +300,9 @@ final class MacroPadController {
     /// reboots are even visible.
     ///
     /// `HELLO` also arrives whenever *the host* opens the port, so launches
-    /// and Settings-toggle flips are excluded explicitly — otherwise flipping
-    /// the switch three times would tell the user their hardware is failing.
+    /// and source-selector changes are excluded explicitly — otherwise
+    /// flipping the switch three times would tell the user their hardware is
+    /// failing.
     /// Two host-initiated reopens are NOT excluded and can still false-positive:
     /// a hand-driven replug, and the reconnect that follows a write failure or
     /// an EOF. The cost of being wrong is one status-bar hint, which is the
@@ -456,7 +457,7 @@ final class MacroPadController {
     private func refresh() {
         // Every property read inside the tracked closure is what re-arms the
         // observation — including `settings.macroPadSource`, which is why
-        // the toggle takes effect without its own observer.
+        // switching source takes effect without its own observer.
         let source = settings.macroPadSource
         let brightness = settings.macroPadBrightness
         let panes = store.panes
@@ -521,7 +522,7 @@ final class MacroPadController {
 
     /// Mirrors the link state out to the sidebar indicator. Driven from
     /// `refresh()` rather than from the connect/disconnect handlers alone,
-    /// because the Settings toggle is a third input and only `refresh()`
+    /// because the source selector is a third input and only `refresh()`
     /// observes it.
     ///
     /// `MacroPadStatus.publish` drops no-op writes, so the common case is
