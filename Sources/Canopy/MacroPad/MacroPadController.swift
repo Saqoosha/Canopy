@@ -15,8 +15,9 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MacroPad")
 /// answers a question the screen never had to: *did anything finish while I
 /// wasn't looking?* With the pad mapped to panes, every mapped session is on
 /// screen, so "not visible" can't be the trigger the way it could if the pad
-/// mapped to sidebar rows. Clearing it answers two separate questions — see
-/// `update`'s doc for why they cannot be collapsed into one signal.
+/// mapped to sidebar rows. Clearing it answers three independent
+/// questions — see `update`'s doc for why none of the three can be derived
+/// from either of the others.
 struct MacroPadUnreadTracker {
     struct Snapshot {
         let id: UUID
@@ -38,13 +39,31 @@ struct MacroPadUnreadTracker {
     private(set) var unread: Set<UUID> = []
     private var wasThinking: [UUID: Bool] = [:]
 
-    /// Clearing answers two independent questions, and the previous rule's
-    /// bug was answering only one of them:
+    /// Clearing answers three independent questions. Two prior rules each
+    /// answered only one of them; this branch's own first attempt answered
+    /// two of the three and, on a false argument that the third was implied
+    /// by the second, dropped it — which is the regression this doc and
+    /// `update`'s signature now both correct.
     ///
     /// | Question | Signal |
     /// | --- | --- |
-    /// | *Which* session was the user working with? | interaction with it — typed into its pane, clicked it, focused it, or pressed its MacroPad key |
-    /// | Is the user *still there at all*? | presence — the most recent of OS-level input and a MacroPad key press |
+    /// | *Which* session was the user with? | interaction — typed into its pane, clicked it, focused it, or pressed its MacroPad key |
+    /// | Is a human **at the machine** at all? | presence — the more recent of OS-level input (any device, any app) and a MacroPad key press |
+    /// | Is that human **looking at Canopy**? | app activation |
+    ///
+    /// None of the three is derivable from either of the others, and all
+    /// four combinations of the last two behave differently:
+    ///
+    /// - Canopy frontmost, presence recent → using Canopy → clear
+    /// - Canopy frontmost, presence stale → walked away with Canopy still
+    ///   up → do NOT clear (the original bug — pane focus alone, or
+    ///   `isAppActive` alone, both read this as "here")
+    /// - Canopy backgrounded, presence recent → working in another app →
+    ///   do NOT clear (this branch's regression: `secondsSincePresence` is
+    ///   `CGEventSource`'s SYSTEM-WIDE idle time, reset by input to ANY
+    ///   app, so typing in a different app kept it "recent" and cleared a
+    ///   mark on a session nobody was looking at)
+    /// - Canopy backgrounded, presence stale → gone → do NOT clear
     ///
     /// A prior version answered only the first — "typed into this pane
     /// within the last 60 s" — on the theory that a keystroke can only reach
@@ -52,17 +71,34 @@ struct MacroPadUnreadTracker {
     /// It doesn't: the common way to walk away is type a message, hit enter,
     /// and get up, and a turn finishing 40 s later still read as "typed
     /// recently" — the bug it was meant to fix, just bounded to a minute
-    /// instead of unbounded. Presence and attribution are different
-    /// measurements and need different inputs. `secondsSincePresence` is
-    /// deliberately not "OS input" alone either — `MacroPadController`
-    /// computes it as the MINIMUM of `CGEventSource` idle time and time
-    /// since the last MacroPad key press, because the pad's firmware
-    /// disables its USB HID interface on purpose (CLAUDE.md's "Serial (CDC),
-    /// never HID") and so a press is invisible to `CGEventSource` — without
-    /// the pad's own timestamp, walking up and pressing the lit key would
-    /// attribute correctly but never satisfy presence, and the LED would
-    /// stay lit under the user's own hand. `lastInteractedSessionId`
-    /// answers only "which" — it is stamped by a `.keyDown` monitor on the
+    /// instead of unbounded.
+    ///
+    /// Splitting attribution from presence fixed that, and this branch then
+    /// argued "presence subsumes app activation, since input only reaches
+    /// the frontmost app" and deleted `isAppActive`. That is true of a
+    /// keystroke delivered to one of Canopy's own windows — the mechanism
+    /// behind `lastInteractedSessionId` — but false of `secondsSincePresence`
+    /// itself, which measures input to the WHOLE SYSTEM, not to Canopy: type
+    /// into session A, switch to another app, keep typing there, and
+    /// presence never goes stale while A's turn finishes and clears itself —
+    /// exactly the case the LED exists to report. Presence answers "is a
+    /// human at the machine", which is necessary but not sufficient for "is
+    /// that human looking at Canopy" — the same shape of gap that makes
+    /// attribution alone insufficient for presence. Each of the three is
+    /// measured from its own, disjoint input (a keystroke's destination
+    /// window, `CGEventSource` plus the pad's own press timestamp, and
+    /// `NSApplication`'s activation notifications), so the only sound
+    /// combination is exactly three ANDed conditions, none standing in for
+    /// another.
+    ///
+    /// `isAppActive` is not read live here — pure value types don't ask
+    /// AppKit anything. `MacroPadController` mirrors `NSApp.isActive` into a
+    /// stored property via `didBecomeActive` / `didResignActive` observers
+    /// and passes the snapshot in, because AppKit's activation is a
+    /// notification, not a value `refresh()`'s tracked closure could read to
+    /// become a dependency of it.
+    ///
+    /// `lastInteractedSessionId` is stamped by a `.keyDown` monitor on the
     /// currently focused pane's session, by `MacroPadController.refresh` on
     /// any change to which session occupies the focused pane (covers focus
     /// changes from any source — click, Cmd+1..9, Cmd+Opt+arrow,
@@ -72,7 +108,8 @@ struct MacroPadUnreadTracker {
     /// stale attribution.
     mutating func update(_ sessions: [Snapshot],
                          lastInteractedSessionId: UUID?,
-                         secondsSincePresence: TimeInterval) {
+                         secondsSincePresence: TimeInterval,
+                         isAppActive: Bool) {
         let live = Set(sessions.map(\.id))
         unread.formIntersection(live)
         wasThinking = wasThinking.filter { live.contains($0.key) }
@@ -92,7 +129,10 @@ struct MacroPadUnreadTracker {
         // `unread.remove` on an id that isn't a member (a stale
         // `lastInteractedSessionId` whose session already closed) is a
         // harmless no-op — nothing to look up, nothing left stale.
-        guard let lastInteractedSessionId, secondsSincePresence <= Self.presenceThreshold else { return }
+        guard let lastInteractedSessionId,
+              secondsSincePresence <= Self.presenceThreshold,
+              isAppActive
+        else { return }
         unread.remove(lastInteractedSessionId)
     }
 
@@ -472,6 +512,16 @@ final class MacroPadController {
     /// step or a sleep/wake skew on a `Date`-based timestamp could otherwise
     /// make this term go negative and trivially satisfy presence.
     private var lastPadPressAt: DispatchTime?
+    /// Mirrors `NSApp.isActive`. Kept as stored state rather than read live
+    /// because `refresh()` has to re-run when it changes, and AppKit's
+    /// activation is a notification, not an observable property `refresh()`'s
+    /// tracked closure could depend on directly. Answers the third of
+    /// `MacroPadUnreadTracker.update`'s three clearing questions — "is the
+    /// present human looking at Canopy" — which neither attribution nor
+    /// system-wide presence can answer (see that doc for the measured case
+    /// where presence alone reads a backgrounded Canopy as "here").
+    private var isAppActive = NSApp?.isActive ?? true
+    private var activationObservers: [NSObjectProtocol] = []
 
     init(store: SessionStore,
          settings: CanopySettings = .shared,
@@ -489,7 +539,31 @@ final class MacroPadController {
         expectHostInitiatedHello()
         device.start()
         startWatchdog()
+        observeActivation()
         track()
+    }
+
+    /// The activation half of `MacroPadUnreadTracker.update`'s three
+    /// conditions. Also what makes returning to Canopy via Cmd+Tab (mouse
+    /// movement alone deliberately does not — see the type's doc, clearing
+    /// stays a deliberate act on the pane) clear a mark that was already
+    /// eligible: activation mutates no `SessionStore` or `CanopySettings`
+    /// property `refresh()`'s tracked closure reads, so without an explicit
+    /// `refresh()` here nothing would notice the return until some unrelated
+    /// change woke the tracked closure on its own.
+    private func observeActivation() {
+        let center = NotificationCenter.default
+        for (name, active) in [(NSApplication.didBecomeActiveNotification, true),
+                               (NSApplication.didResignActiveNotification, false)] {
+            let token = center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isAppActive != active else { return }
+                    self.isAppActive = active
+                    self.refresh()
+                }
+            }
+            activationObservers.append(token)
+        }
     }
 
     /// Blanks the pad and closes the port synchronously. Call from
@@ -503,6 +577,8 @@ final class MacroPadController {
         watchdogTimer?.invalidate()
         watchdogTimer = nil
         cancelSleepChord()
+        activationObservers.forEach(NotificationCenter.default.removeObserver)
+        activationObservers.removeAll()
         // The observation loop stays armed, so leaving these set would let a
         // later `refresh()` walk straight past `pushStates`' connection guard
         // and send into a stopped device. It only ever worked because
@@ -623,7 +699,8 @@ final class MacroPadController {
                 MacroPadUnreadTracker.Snapshot(id: $0.id, isThinking: $0.isThinking)
             },
             lastInteractedSessionId: lastInteractedSessionId,
-            secondsSincePresence: secondsSincePresence
+            secondsSincePresence: secondsSincePresence,
+            isAppActive: isAppActive
         )
         // Publish so the sidebar's dot and the pad's LED read the same set.
         //

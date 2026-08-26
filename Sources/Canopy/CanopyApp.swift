@@ -616,11 +616,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Local `.keyDown` monitor that stamps interaction — "the user is here,
     /// working in this pane" — onto the MacroPad controller. This feeds only
-    /// the attribution half of `MacroPadUnreadTracker`'s two-source split
-    /// (see its doc): *which* session the user is with, never *whether they
-    /// are still there* — that second question is presence, computed
-    /// separately in `MacroPadController.refresh()` from `CGEventSource` and
-    /// the pad's own press timestamp.
+    /// the attribution question of `MacroPadUnreadTracker`'s three-question
+    /// clearing rule (see its doc): *which* session the user is with. It says
+    /// nothing about the other two — whether a human is at the machine at
+    /// all (presence, computed separately in `MacroPadController.refresh()`
+    /// from `CGEventSource` and the pad's own press timestamp) or whether
+    /// that human is looking at Canopy (app activation, mirrored from
+    /// `NSApp.isActive` by `MacroPadController.observeActivation()`). It
+    /// cannot stand in for activation either, despite being a local monitor
+    /// that (as a consequence of AppKit local-monitor delivery) only ever
+    /// fires while Canopy is frontmost: it fires on a keystroke, not on the
+    /// transition of becoming frontmost, so returning to Canopy by any means
+    /// that isn't itself a keystroke into a pane — Cmd+Tab and then just
+    /// looking, a click on the Dock icon — produces no event here at all.
+    /// That gap is exactly what `observeActivation()`'s notification
+    /// observers exist to close.
     ///
     /// Does not care about the key's content — any keystroke into a Canopy
     /// window is the signal — but it does not literally see every key.

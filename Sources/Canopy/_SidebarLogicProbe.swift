@@ -3653,9 +3653,9 @@ enum SidebarLogicProbe {
 
             var tracker = MacroPadUnreadTracker()
             tracker.update([.init(id: idA, isThinking: true)],
-                           lastInteractedSessionId: nil, secondsSincePresence: 0)
+                           lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             tracker.update([.init(id: idA, isThinking: false)],
-                           lastInteractedSessionId: nil, secondsSincePresence: 0)
+                           lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             record("unread: finish with no interaction becomes unread",
                    tracker.unread.contains(idA),
                    "unread=\(tracker.unread)")
@@ -3664,9 +3664,9 @@ enum SidebarLogicProbe {
             // having seen input recently, clears.
             var recent = MacroPadUnreadTracker()
             recent.update([.init(id: idA, isThinking: true)],
-                          lastInteractedSessionId: idA, secondsSincePresence: 0)
+                          lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             recent.update([.init(id: idA, isThinking: false)],
-                          lastInteractedSessionId: idA, secondsSincePresence: 0)
+                          lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             record("unread: last-interacted session with recent system input clears",
                    !recent.unread.contains(idA),
                    "unread=\(recent.unread)")
@@ -3679,9 +3679,9 @@ enum SidebarLogicProbe {
             // user may well have typed it and then walked away.
             var idle = MacroPadUnreadTracker()
             idle.update([.init(id: idA, isThinking: true)],
-                        lastInteractedSessionId: idA, secondsSincePresence: threshold + 1)
+                        lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: true)
             idle.update([.init(id: idA, isThinking: false)],
-                        lastInteractedSessionId: idA, secondsSincePresence: threshold + 1)
+                        lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: true)
             record("unread: last-interacted session but system idle past threshold still marks",
                    idle.unread.contains(idA),
                    "unread=\(idle.unread)")
@@ -3709,10 +3709,10 @@ enum SidebarLogicProbe {
             )
             padPresent.update([.init(id: idA, isThinking: true)],
                               lastInteractedSessionId: idA,
-                              secondsSincePresence: padPresentReading)
+                              secondsSincePresence: padPresentReading, isAppActive: true)
             padPresent.update([.init(id: idA, isThinking: false)],
                               lastInteractedSessionId: idA,
-                              secondsSincePresence: padPresentReading)
+                              secondsSincePresence: padPresentReading, isAppActive: true)
             record("unread: OS input stale but a recent pad press still clears",
                    !padPresent.unread.contains(idA),
                    "unread=\(padPresent.unread)")
@@ -3726,10 +3726,10 @@ enum SidebarLogicProbe {
             )
             bothStale.update([.init(id: idA, isThinking: true)],
                              lastInteractedSessionId: idA,
-                             secondsSincePresence: bothStaleReading)
+                             secondsSincePresence: bothStaleReading, isAppActive: true)
             bothStale.update([.init(id: idA, isThinking: false)],
                              lastInteractedSessionId: idA,
-                             secondsSincePresence: bothStaleReading)
+                             secondsSincePresence: bothStaleReading, isAppActive: true)
             record("unread: OS input stale and pad press also stale still marks",
                    bothStale.unread.contains(idA),
                    "unread=\(bothStale.unread)")
@@ -3741,10 +3741,10 @@ enum SidebarLogicProbe {
             )
             bothRecent.update([.init(id: idA, isThinking: true)],
                               lastInteractedSessionId: idA,
-                              secondsSincePresence: bothRecentReading)
+                              secondsSincePresence: bothRecentReading, isAppActive: true)
             bothRecent.update([.init(id: idA, isThinking: false)],
                               lastInteractedSessionId: idA,
-                              secondsSincePresence: bothRecentReading)
+                              secondsSincePresence: bothRecentReading, isAppActive: true)
             record("unread: both presence sources recent clears",
                    !bothRecent.unread.contains(idA),
                    "unread=\(bothRecent.unread)")
@@ -3764,9 +3764,9 @@ enum SidebarLogicProbe {
             // attribution to THIS session clears nothing.
             var other = MacroPadUnreadTracker()
             other.update([.init(id: idB, isThinking: true)],
-                         lastInteractedSessionId: idA, secondsSincePresence: 0)
+                         lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             other.update([.init(id: idB, isThinking: false)],
-                         lastInteractedSessionId: idA, secondsSincePresence: 0)
+                         lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             record("unread: a session that isn't last-interacted stays marked despite recent input",
                    other.unread.contains(idB),
                    "unread=\(other.unread)")
@@ -3775,9 +3775,9 @@ enum SidebarLogicProbe {
             // however recent secondsSincePresence claims to be.
             var neverInteracted = MacroPadUnreadTracker()
             neverInteracted.update([.init(id: idA, isThinking: true)],
-                                   lastInteractedSessionId: nil, secondsSincePresence: 0)
+                                   lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             neverInteracted.update([.init(id: idA, isThinking: false)],
-                                   lastInteractedSessionId: nil, secondsSincePresence: 0)
+                                   lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             record("unread: nil lastInteractedSessionId never clears",
                    neverInteracted.unread.contains(idA),
                    "unread=\(neverInteracted.unread)")
@@ -3786,18 +3786,18 @@ enum SidebarLogicProbe {
             // threshold, stale just past it.
             var boundaryClear = MacroPadUnreadTracker()
             boundaryClear.update([.init(id: idA, isThinking: true)],
-                                 lastInteractedSessionId: idA, secondsSincePresence: 0)
+                                 lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             boundaryClear.update([.init(id: idA, isThinking: false)],
-                                 lastInteractedSessionId: idA, secondsSincePresence: threshold)
+                                 lastInteractedSessionId: idA, secondsSincePresence: threshold, isAppActive: true)
             record("unread: exactly at the idle threshold still clears (inclusive)",
                    !boundaryClear.unread.contains(idA),
                    "unread=\(boundaryClear.unread)")
 
             var boundaryStale = MacroPadUnreadTracker()
             boundaryStale.update([.init(id: idA, isThinking: true)],
-                                 lastInteractedSessionId: idA, secondsSincePresence: 0)
+                                 lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             boundaryStale.update([.init(id: idA, isThinking: false)],
-                                 lastInteractedSessionId: idA, secondsSincePresence: threshold + 0.001)
+                                 lastInteractedSessionId: idA, secondsSincePresence: threshold + 0.001, isAppActive: true)
             record("unread: just past the idle threshold does not clear",
                    boundaryStale.unread.contains(idA),
                    "unread=\(boundaryStale.unread)")
@@ -3808,19 +3808,19 @@ enum SidebarLogicProbe {
             // id that isn't a member is a harmless no-op.
             var staleId = MacroPadUnreadTracker()
             staleId.update([.init(id: idB, isThinking: true)],
-                           lastInteractedSessionId: idA, secondsSincePresence: 0)
+                           lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             staleId.update([.init(id: idB, isThinking: false)],
-                           lastInteractedSessionId: idA, secondsSincePresence: 0)
+                           lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             record("unread: a last-interacted id with no live session doesn't crash or leave anything stale",
                    staleId.unread.contains(idB),
                    "unread=\(staleId.unread)")
 
             var unmapped = MacroPadUnreadTracker()
             unmapped.update([.init(id: idB, isThinking: true)],
-                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             unmapped.update([.init(id: idB, isThinking: false)],
-                            lastInteractedSessionId: nil, secondsSincePresence: 0)
-            unmapped.update([], lastInteractedSessionId: nil, secondsSincePresence: 0)
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            unmapped.update([], lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             record("unread: disappeared id is pruned",
                    !unmapped.unread.contains(idB),
                    "unread=\(unmapped.unread)")
@@ -3831,10 +3831,10 @@ enum SidebarLogicProbe {
             // the test above leaves untouched.
             var relaunch = MacroPadUnreadTracker()
             relaunch.update([.init(id: idA, isThinking: true)],
-                            lastInteractedSessionId: nil, secondsSincePresence: 0)
-            relaunch.update([], lastInteractedSessionId: nil, secondsSincePresence: 0)
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            relaunch.update([], lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             relaunch.update([.init(id: idA, isThinking: false)],
-                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             record("unread: close-and-reopen does not fake a finish",
                    !relaunch.unread.contains(idA),
                    "unread=\(relaunch.unread)")
@@ -3844,14 +3844,14 @@ enum SidebarLogicProbe {
             var pair = MacroPadUnreadTracker()
             pair.update([.init(id: idA, isThinking: true),
                          .init(id: idB, isThinking: true)],
-                        lastInteractedSessionId: nil, secondsSincePresence: 0)
+                        lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             pair.update([.init(id: idA, isThinking: false),
                          .init(id: idB, isThinking: false)],
-                        lastInteractedSessionId: nil, secondsSincePresence: 0)
+                        lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             let bothMarked = pair.unread.contains(idA) && pair.unread.contains(idB)
             pair.update([.init(id: idA, isThinking: false),
                          .init(id: idB, isThinking: false)],
-                        lastInteractedSessionId: idA, secondsSincePresence: 0)
+                        lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
             record("unread: interacting with one session clears only that session",
                    bothMarked && !pair.unread.contains(idA) && pair.unread.contains(idB),
                    "bothMarked=\(bothMarked) unread=\(pair.unread)")
@@ -3860,14 +3860,69 @@ enum SidebarLogicProbe {
             // only one pass would show green for a single frame.
             var repeated = MacroPadUnreadTracker()
             repeated.update([.init(id: idA, isThinking: true)],
-                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             repeated.update([.init(id: idA, isThinking: false)],
-                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             repeated.update([.init(id: idA, isThinking: false)],
-                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             record("unread: mark survives a repeated identical refresh",
                    repeated.unread.contains(idA),
                    "unread=\(repeated.unread)")
+
+            // The regression this fix closes: "presence subsumes app
+            // activation, since input only reaches the frontmost app" is
+            // false for `secondsSincePresence`, which is system-wide OS
+            // idle time — it drops to near-zero from typing into ANY app,
+            // Canopy included or not. Last-interacted session, presence
+            // recent, but Canopy backgrounded must NOT clear — without the
+            // `isAppActive` condition this is exactly the case that cleared
+            // wrongly (a session finishes while the user works in another
+            // app, having last touched this session in Canopy moments
+            // earlier).
+            var backgroundedRecent = MacroPadUnreadTracker()
+            backgroundedRecent.update([.init(id: idA, isThinking: true)],
+                                      lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: false)
+            backgroundedRecent.update([.init(id: idA, isThinking: false)],
+                                      lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: false)
+            record("unread: last-interacted + recent presence but Canopy backgrounded still marks (the regression)",
+                   backgroundedRecent.unread.contains(idA),
+                   "unread=\(backgroundedRecent.unread)")
+
+            // Same inputs, Canopy frontmost: clears. Isolates `isAppActive`
+            // as the only thing distinguishing this from the case above.
+            var frontmostRecent = MacroPadUnreadTracker()
+            frontmostRecent.update([.init(id: idA, isThinking: true)],
+                                   lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            frontmostRecent.update([.init(id: idA, isThinking: false)],
+                                   lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            record("unread: last-interacted + recent presence + Canopy frontmost clears",
+                   !frontmostRecent.unread.contains(idA),
+                   "unread=\(frontmostRecent.unread)")
+
+            // Frontmost alone is not enough either — the ORIGINAL bug this
+            // whole file exists to fix: Canopy frontmost, a pane left
+            // focused, but the user walked away (presence stale) must still
+            // mark. `isAppActive` is necessary, not sufficient.
+            var frontmostStale = MacroPadUnreadTracker()
+            frontmostStale.update([.init(id: idA, isThinking: true)],
+                                  lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: true)
+            frontmostStale.update([.init(id: idA, isThinking: false)],
+                                  lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: true)
+            record("unread: last-interacted + Canopy frontmost but presence stale still marks",
+                   frontmostStale.unread.contains(idA),
+                   "unread=\(frontmostStale.unread)")
+
+            // Backgrounded and stale: still marks, same as every other
+            // incomplete combination — nothing here is a coincidence of two
+            // conditions happening to agree.
+            var backgroundedStale = MacroPadUnreadTracker()
+            backgroundedStale.update([.init(id: idA, isThinking: true)],
+                                     lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: false)
+            backgroundedStale.update([.init(id: idA, isThinking: false)],
+                                     lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: false)
+            record("unread: backgrounded and presence stale still marks",
+                   backgroundedStale.unread.contains(idA),
+                   "unread=\(backgroundedStale.unread)")
         }
 
         // --- MacroPadController.sessionId(atPaneIndex:in:) — the pane→session

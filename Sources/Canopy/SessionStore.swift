@@ -50,15 +50,22 @@ final class SessionStore {
     /// sidebar and as the green LED on the MacroPad.
     ///
     /// A session with no pane counts as unfocused, so it is marked on finish.
-    /// Clearing needs both a deliberate act *on that session* — typing into
-    /// its pane, clicking it, focusing it (by sidebar click, Cmd+1..9,
-    /// Cmd+Opt+arrow, Cmd+Shift+[/] cycling, or its MacroPad key) — AND a
-    /// human recently present, by either OS-level input or a MacroPad key
-    /// press (the pad has no HID interface, so those two are tracked
-    /// separately and the more recent one wins). The first alone used to be
+    /// Clearing needs three things at once, none derivable from the others:
+    /// a deliberate act *on that session* — typing into its pane, clicking
+    /// it, focusing it (by sidebar click, Cmd+1..9, Cmd+Opt+arrow,
+    /// Cmd+Shift+[/] cycling, or its MacroPad key); a human recently present
+    /// AT THE MACHINE, by either OS-level input (system-wide, any app) or a
+    /// MacroPad key press (the pad has no HID interface, so those two are
+    /// tracked separately and the more recent one wins); and Canopy actually
+    /// being the app that human is LOOKING AT. Attribution alone used to be
     /// enough, and wasn't: focusing a pane and then walking away for an hour
-    /// is still "focused", not "here". See `MacroPadUnreadTracker.update`'s
-    /// doc.
+    /// is still "focused", not "here". System-wide presence without app
+    /// activation isn't enough either, and a later branch shipped exactly
+    /// that gap: typing into another app after last touching a session in
+    /// Canopy keeps system-wide input "recent" and would clear a mark on a
+    /// session nobody was looking at. See `MacroPadUnreadTracker.update`'s
+    /// doc for the full four-combination argument and why none of the three
+    /// signals can stand in for another.
     ///
     /// "Deliberate" is now load-bearing rather than aspirational: a pane can
     /// become focused with nobody at the desk (a crashed session's pane
