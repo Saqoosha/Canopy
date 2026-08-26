@@ -32,6 +32,23 @@ final class MacroPadDevice: @unchecked Sendable {
         case event(MacroPadEvent)
     }
 
+    /// Where a probe-ready file descriptor comes from. The two cases are the
+    /// only transport-specific part of this class: everything from `adopt`
+    /// onward — the read source, `writeBytes`, the decoder — works on any fd.
+    enum Endpoint: Equatable {
+        case serial(path: String, interfaceNumber: Int)
+        case tcp(MacroPadRemoteEndpoint)
+
+        /// What logs say. `adopt` takes this rather than a path so a TCP link
+        /// reads as `mbp:8765` instead of an empty or fabricated device path.
+        var label: String {
+            switch self {
+            case .serial(let path, _): return path
+            case .tcp(let endpoint): return endpoint.displayLabel
+            }
+        }
+    }
+
     /// `boot.py` sets this via `supervisor.set_usb_identification`. Matching on
     /// it rather than on a `/dev/cu.usbmodemNNNN` path is the whole point: the
     /// numeric suffix changes with the port and across reboots.
@@ -79,7 +96,10 @@ final class MacroPadDevice: @unchecked Sendable {
     private var matchedIterator: io_iterator_t = 0
     private var retryDelay: TimeInterval = 1
     private var isStopped = false
-    private var isEnabled = true
+    /// The active selection. Owned by `queue` like the rest of the state.
+    /// Starts at `.off` so nothing is opened before `setSource` has run —
+    /// `MacroPadController.start()` supplies the real value.
+    private var source: MacroPadSource = .off
     /// True once hot-plug is armed. When it is false the matching callback
     /// will never fire, so the retry chain has to keep itself alive instead.
     private var hasHotplug = false
@@ -90,7 +110,7 @@ final class MacroPadDevice: @unchecked Sendable {
         stopRequested.withLock { $0 = false }
         queue.async { [self] in
             isStopped = false
-            armMatchingNotification()
+            applySourceArming()
             attemptConnect()
         }
     }
@@ -122,20 +142,37 @@ final class MacroPadDevice: @unchecked Sendable {
         }
     }
 
-    /// Settings toggle. Disabling closes the port (and blanks the pad first)
-    /// so a disabled pad isn't left displaying stale colors.
-    func setEnabled(_ enabled: Bool) {
+    /// Settings selector. Switching closes the current port (blanking the pad
+    /// first) so a pad that is being switched away from is not left showing
+    /// stale colours — the firmware also blanks on host disconnect, so this is
+    /// belt-and-braces for the case where the close is clean.
+    ///
+    /// Arms hot-plug only in `.local`. In `.remote` the IOKit matching
+    /// notification would never fire, so `hasHotplug` stays false and the
+    /// `scheduleRetry` chain is what keeps discovery alive — the same fallback
+    /// that already exists for a failed arm.
+    func setSource(_ newSource: MacroPadSource) {
         queue.async { [self] in
-            guard isEnabled != enabled else { return }
-            isEnabled = enabled
-            if enabled {
-                attemptConnect()
-            } else {
-                if fd >= 0, !writeBytes(MacroPadCommand.reset.wireBytes) {
-                    logger.error("MacroPad: reset write failed while disabling; the device blanks itself on disconnect")
+            guard source != newSource else { return }
+            source = newSource
+            if fd >= 0 {
+                if !writeBytes(MacroPadCommand.reset.wireBytes) {
+                    logger.error("MacroPad: reset write failed while switching source; the device blanks itself on disconnect")
                 }
                 closePort(notifying: true)
             }
+            applySourceArming()
+            retryDelay = 1
+            attemptConnect()
+        }
+    }
+
+    /// Must run on `queue`. Hot-plug is a local-USB concept only.
+    private func applySourceArming() {
+        if case .local = source {
+            armMatchingNotification()
+        } else {
+            disarmMatchingNotification()
         }
     }
 
@@ -285,6 +322,18 @@ final class MacroPadDevice: @unchecked Sendable {
         return candidates.sorted { $0.interfaceNumber > $1.interfaceNumber }
     }
 
+    /// The single list `attemptConnect` walks, whichever mode is active.
+    private func rankedEndpoints() -> [Endpoint] {
+        switch source {
+        case .off:
+            return []
+        case .remote(let endpoint):
+            return [.tcp(endpoint)]
+        case .local:
+            return rankedCandidates().map { .serial(path: $0.path, interfaceNumber: $0.interfaceNumber) }
+        }
+    }
+
     private static func stringProperty(_ entry: io_object_t, _ key: String) -> String? {
         IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?
             .takeRetainedValue() as? String
@@ -311,9 +360,9 @@ final class MacroPadDevice: @unchecked Sendable {
     // MARK: - Connect
 
     private func attemptConnect() {
-        guard !isStopped, isEnabled, fd < 0 else { return }
-        let candidates = rankedCandidates()
-        guard !candidates.isEmpty else {
+        guard !isStopped, !source.isOff, fd < 0 else { return }
+        let endpoints = rankedEndpoints()
+        guard !endpoints.isEmpty else {
             // Nothing enumerated. With hot-plug armed the matching callback is
             // the wake-up and a timer would be redundant — but when arming
             // failed, this is the only thread back, and returning here would
@@ -325,8 +374,8 @@ final class MacroPadDevice: @unchecked Sendable {
 
         // Not `for … where`: `openAndProbe` opens a port, writes to it, and
         // can block for `probeTimeout`. That does not belong in a filter.
-        for candidate in candidates {
-            if openAndProbe(candidate) { return }
+        for endpoint in endpoints {
+            if openAndProbe(endpoint) { return }
         }
         // Every candidate stayed silent. Common during bring-up (wrong port,
         // firmware not running) and after a reset that is still booting.
@@ -334,7 +383,7 @@ final class MacroPadDevice: @unchecked Sendable {
     }
 
     private func scheduleRetry() {
-        guard !isStopped, isEnabled else { return }
+        guard !isStopped, !source.isOff else { return }
         let delay = retryDelay
         retryDelay = min(retryDelay * 2, 8)
         queue.asyncAfter(deadline: .now() + delay) { [self] in attemptConnect() }
@@ -343,21 +392,29 @@ final class MacroPadDevice: @unchecked Sendable {
     /// Opens the port, asks it to identify itself, and adopts it only if it
     /// answers. Probing rather than trusting the ranking is what makes the
     /// console-vs-data ordering a preference rather than a dependency.
-    private func openAndProbe(_ candidate: Candidate) -> Bool {
-        let handle = open(candidate.path, O_RDWR | O_NOCTTY | O_NONBLOCK)
-        guard handle >= 0 else {
-            // `EBUSY` here is the single most common bring-up state — a
-            // `screen` session or a CircuitPython IDE holding the port — and
-            // it is unactionable unless it is said out loud. Without this the
-            // symptom is a pad that silently never connects.
-            logger.notice("""
-                MacroPad: open(\(candidate.path, privacy: .public)) failed: \
-                \(String(cString: strerror(errno)), privacy: .public)
-                """)
-            return false
-        }
-        guard configureTTY(handle) else {
-            close(handle)
+    private func openAndProbe(_ endpoint: Endpoint) -> Bool {
+        let handle: Int32
+        switch endpoint {
+        case .serial(let path, _):
+            let opened = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
+            guard opened >= 0 else {
+                // `EBUSY` here is the single most common bring-up state — a
+                // `screen` session, a CircuitPython IDE, or (with the remote
+                // transport) the bridge on this same machine holding the port
+                // — and it is unactionable unless it is said out loud.
+                logger.notice("""
+                    MacroPad: open(\(path, privacy: .public)) failed: \
+                    \(String(cString: strerror(errno)), privacy: .public)
+                    """)
+                return false
+            }
+            guard configureTTY(opened) else {
+                close(opened)
+                return false
+            }
+            handle = opened
+        case .tcp:
+            // Task 4 fills this in.
             return false
         }
 
@@ -367,7 +424,7 @@ final class MacroPadDevice: @unchecked Sendable {
         // that window and missed it. If it can't even be written, the port is
         // not viable and waiting out the full timeout learns nothing.
         guard writeBytes(MacroPadCommand.ping.wireBytes, to: handle) else {
-            logger.notice("MacroPad: ping write failed on \(candidate.path, privacy: .public); skipping candidate")
+            logger.notice("MacroPad: ping write failed on \(endpoint.label, privacy: .public); skipping candidate")
             close(handle)
             return false
         }
@@ -402,7 +459,7 @@ final class MacroPadDevice: @unchecked Sendable {
                 return false
             }
             if identified {
-                adopt(handle: handle, path: candidate.path, pending: pending)
+                adopt(handle: handle, label: endpoint.label, pending: pending)
                 return true
             }
         }
@@ -442,7 +499,7 @@ final class MacroPadDevice: @unchecked Sendable {
     /// will focus that pane — real input, treated as such. A key already held
     /// when the cable goes in does not: the firmware adopts that state
     /// silently rather than inventing a press.
-    private func adopt(handle: Int32, path: String, pending: [MacroPadEvent]) {
+    private func adopt(handle: Int32, label: String, pending: [MacroPadEvent]) {
         fd = handle
         retryDelay = 1
 
@@ -452,8 +509,8 @@ final class MacroPadDevice: @unchecked Sendable {
         readSource = source
         source.resume()
 
-        logger.info("MacroPad connected on \(path, privacy: .public)")
-        emit(.connected(path: path))
+        logger.info("MacroPad connected on \(label, privacy: .public)")
+        emit(.connected(path: label))
         for event in pending { emit(.event(event)) }
     }
 

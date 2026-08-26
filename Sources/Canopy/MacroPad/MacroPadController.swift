@@ -387,7 +387,7 @@ final class MacroPadController {
 
     func start() {
         device.setOutputHandler { [weak self] output in self?.handle(output) }
-        device.setEnabled(!settings.macroPadSource.isOff)
+        device.setSource(settings.macroPadSource)
         expectHostInitiatedHello()
         device.start()
         startWatchdog()
@@ -469,7 +469,7 @@ final class MacroPadController {
             if enabled { expectHostInitiatedHello() }
             lastEnabled = enabled
         }
-        device.setEnabled(enabled)
+        device.setSource(settings.macroPadSource)
 
         var paneIndexBySession: [UUID: Int] = [:]
         for (index, pane) in panes.enumerated() {
