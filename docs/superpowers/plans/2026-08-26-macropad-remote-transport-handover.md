@@ -27,9 +27,12 @@ Studio drives it locally.
    not the MBP locally. If it is left on Local, the bridge fails cleanly and
    loudly rather than fighting for the pad: Canopy's `TIOCEXCL` (set right
    after its own `open`) makes socat's `open` of the same device return
-   `EBUSY`, socat exits, and the bridge log names the cause ("is this Mac's
-   Canopy holding the pad?"). See Known gaps for the one ordering this
-   doesn't cover.
+   `EBUSY`, socat exits, and the bridge logs the failure. The log line
+   deliberately does not name this as *the* cause — an unplugged pad
+   produces the same non-zero exit, and the two are indistinguishable from
+   inside that one line; the very next loop iteration's "no pad found"
+   message is what actually tells them apart. See Known gaps for the one
+   ordering this doesn't cover.
 
 Uninstall the MBP-side agent with `scripts/macropad-bridge.sh --uninstall`.
 
@@ -119,10 +122,18 @@ transitions — it needs to pass on its own merits, not just as a setup step
 for step 3.
 
 A connect attempt is bounded by `MacroPadDevice.probeTimeout` (1.5 s, the
-same constant the local-USB probe loop uses) before it retries — so the
-first switch to a peer that just woke (from sleep, or right after the bridge
-itself starts) may take a retry or two before it lands. That is the backoff
-working as designed, not a fault to debug.
+same constant the local-USB probe loop uses) before it retries. Over a
+Tailscale address, that budget is what a failed attempt actually spends, not
+a fast failure: measured against a bridge that was not listening (no pad
+plugged in yet), Canopy logged `connect(...) timed out` on each attempt
+rather than an immediate refusal, because Tailscale's userspace netstack
+drops an unreachable port instead of refusing it (see the spec's §7 for the
+full measurement — a loopback or LAN address is expected to refuse
+instantly instead, but that was not itself tested here). So the first switch
+to a peer that just woke (from sleep, right after the bridge itself starts,
+or before a pad is plugged in) may take a retry or two before it lands, each
+one costing the full 1.5 s rather than failing fast. That is the backoff
+working as designed, not a fault to debug — but it is not free.
 
 **The one thing none of that proves, and the one thing left for the user to
 do:** an actual MacroPad, actually bridged over an actual Tailscale link
@@ -148,7 +159,8 @@ these four transitions:
   blocks a *later* opener. In the order that actually occurs — Canopy
   running continuously, socat holding no fd on the pad until a client
   connects — that is enough: Canopy-first means socat's `open` returns
-  `EBUSY`, socat exits, and the bridge log names the cause. What is *not*
+  `EBUSY`, socat exits, and the bridge logs the failure (without claiming
+  that cause specifically — see the same log-line note above). What is *not*
   covered is starting the bridge (or a hand-run `socat`) before the local
   Canopy: a `socat`-first open still lets a local Canopy join afterward, and
   the split-brain this section used to say could not exist returns. The Off

@@ -219,8 +219,20 @@ held it only once one had. That establishes the ordering for this machine's soca
 build against a PTY stand-in, not a claim about every socat or about the real pad.
 
 Not listening at all when no pad is present is a deliberate choice over accepting and
-immediately dropping: Canopy gets `ECONNREFUSED` and retries cleanly, instead of
-seeing a connection that dies before `HELLO`.
+immediately dropping: the alternative shows Canopy a connection that dies before
+`HELLO`, which stays worse regardless of what a failed connect itself costs. What that
+cost is was mis-stated in an earlier draft of this paragraph, which claimed a uniform
+"Canopy gets `ECONNREFUSED` and retries cleanly." On a loopback or LAN address the
+connect is refused immediately, and that part holds. But measured over a real
+Tailscale address, with the bridge not listening, Canopy instead logged
+`connect(100.116.127.93:8765) timed out` on each attempt: Tailscale's userspace
+netstack drops an unreachable port's connection rather than refusing it, so each
+attempt burns the full connect budget (`probeTimeout`, 1.5 s) before retrying. The
+design choice is still right — Canopy still reconnects cleanly once a pad appears —
+but over a Tailscale address specifically, a bridge with no pad costs one `probeTimeout`
+per retry rather than nothing. Only the Tailscale address family was actually tested
+here; loopback and LAN are not re-verified by this branch, only assumed to follow
+ordinary TCP refusal behaviour.
 
 Other details: bind to the address from `tailscale ip -4`, and exit with an error if
 there is none — **never** fall back to `0.0.0.0`. `--install` writes

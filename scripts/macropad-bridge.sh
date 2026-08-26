@@ -119,10 +119,17 @@ run_bridge() {
   while true; do
     local dev
     if ! dev="$(find_device)"; then
-      # Deliberately do not listen at all with no pad present: Canopy then
-      # gets ECONNREFUSED and retries cleanly, instead of seeing a connection
-      # that dies before HELLO. Logged once on entry to this state, not on
-      # every 2s retry, so an unplugged pad doesn't fill the log forever.
+      # Deliberately do not listen at all with no pad present: the
+      # alternative is Canopy seeing a connection that dies before HELLO,
+      # which stays worse regardless of what the failed connect itself
+      # costs. That cost is address-family dependent: on a loopback or LAN
+      # address the connect is refused immediately, but over a real
+      # Tailscale address Canopy's connect blocks for the full
+      # `probeTimeout` (1.5s) and then times out instead — Tailscale's
+      # userspace netstack drops an unreachable port rather than refusing
+      # it (see the spec's Bridge section for the measurement). Logged once
+      # on entry to this state, not on every 2s retry, so an unplugged pad
+      # doesn't fill the log forever.
       if [ -z "$reported_no_pad" ]; then
         echo "macropad-bridge: no pad found; not listening on $ip:$PORT"
         reported_no_pad=1
@@ -158,14 +165,20 @@ run_bridge() {
     if socat "TCP-LISTEN:$PORT,bind=$ip,reuseaddr" "FILE:$dev,raw,ispeed=115200,ospeed=115200,nonblock"; then
       reported_busy=""
     else
-      # EBUSY is the common one: the local Canopy still has MacroPad on. This
-      # is the state the spec expects whenever this Mac's own Canopy is set
-      # to Local — reported once on entry, not on every retry, or a Canopy
-      # left on Local drives ~2 lines per 8s reconnect cycle into this log
-      # forever (~21k lines/day) with no rotation. Re-armed only once a socat
-      # run actually succeeds, same shape as reported_no_pad above.
+      # Deliberately does not name a single cause: EBUSY (this Mac's own
+      # Canopy holding the pad — the state the spec expects when it's set to
+      # Local) is one, but measured on hardware, an unplugged pad reaches
+      # here too (socat logs "Device not configured" first), and the next
+      # loop iteration already reports that case correctly via
+      # reported_no_pad above. An earlier version of this line named EBUSY
+      # as *the* cause and sent someone hunting a toggle that was not the
+      # problem. Reported once on entry to this state, not on every retry,
+      # or a Canopy left on Local drives ~2 lines per 8s reconnect cycle into
+      # this log forever (~21k lines/day) with no rotation. Re-armed only
+      # once a socat run actually succeeds, same shape as reported_no_pad
+      # above.
       if [ -z "$reported_busy" ]; then
-        echo "macropad-bridge: socat exited non-zero (is this Mac's Canopy holding the pad?)"
+        echo "macropad-bridge: socat exited non-zero — the pad may have been unplugged, or this Mac's Canopy may be holding it"
         reported_busy=1
       fi
       sleep 2
