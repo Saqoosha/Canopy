@@ -561,8 +561,19 @@ final class MacroPadDevice: @unchecked Sendable {
         var enable: Int32 = 1
         // NOT optional. A write to a hung-up tty returns EIO; a write to a
         // closed socket raises SIGPIPE, which has no handler here and takes
-        // the whole app down. Stopping the bridge would crash Canopy.
-        setsockopt(handle, SOL_SOCKET, SO_NOSIGPIPE, &enable, socklen_t(MemoryLayout<Int32>.size))
+        // the whole app down. Stopping the bridge would crash Canopy. Unlike
+        // the options below, a failure here is not survivable later — Canopy
+        // would run fine until the first write after the bridge closes, then
+        // die on a signal with no diagnostic. So this one is checked, and a
+        // failure refuses the endpoint rather than connecting anyway.
+        guard setsockopt(handle, SOL_SOCKET, SO_NOSIGPIPE, &enable, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            logger.error("""
+                MacroPad: setsockopt(SO_NOSIGPIPE) failed on \(label, privacy: .public): \
+                \(String(cString: strerror(errno)), privacy: .public)
+                """)
+            close(handle)
+            return nil
+        }
         // Commands are ~10 bytes. Nagle would hold a colour change behind the
         // previous ACK.
         setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &enable, socklen_t(MemoryLayout<Int32>.size))
@@ -600,20 +611,43 @@ final class MacroPadDevice: @unchecked Sendable {
 
         let deadline = Date().addingTimeInterval(Self.probeTimeout)
         while Date() < deadline {
-            if stopRequested.withLock({ $0 }) { break }
+            // Cancellation, not a timeout — a quit issued mid-connect must not
+            // read like a network problem in the log.
+            if stopRequested.withLock({ $0 }) {
+                logger.notice("MacroPad: connect(\(label, privacy: .public)) cancelled")
+                close(handle)
+                return nil
+            }
             var poller = pollfd(fd: handle, events: Int16(POLLOUT), revents: 0)
             let remaining = deadline.timeIntervalSinceNow
+            // The deadline was reached between the loop's own check and here —
+            // a genuine timeout, so this falls through to the shared message
+            // below along with `ready == 0`.
             guard remaining > 0 else { break }
             let ready = poll(&poller, 1, Int32(remaining * 1000))
             if ready < 0 {
                 if errno == EINTR { continue }
-                break
+                logger.notice("""
+                    MacroPad: poll(\(label, privacy: .public)) failed: \
+                    \(String(cString: strerror(errno)), privacy: .public)
+                    """)
+                close(handle)
+                return nil
             }
+            // poll's own wait elapsed with nothing ready — also a genuine
+            // timeout.
             if ready == 0 { break }
 
             var socketError: Int32 = 0
             var length = socklen_t(MemoryLayout<Int32>.size)
-            guard getsockopt(handle, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0 else { break }
+            guard getsockopt(handle, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0 else {
+                logger.notice("""
+                    MacroPad: getsockopt(SO_ERROR, \(label, privacy: .public)) failed: \
+                    \(String(cString: strerror(errno)), privacy: .public)
+                    """)
+                close(handle)
+                return nil
+            }
             if socketError == 0 { return handle }
             logger.notice("""
                 MacroPad: connect(\(label, privacy: .public)) failed: \
@@ -623,6 +657,10 @@ final class MacroPadDevice: @unchecked Sendable {
             return nil
         }
 
+        // Reached only by the two genuine-timeout paths above (deadline hit
+        // between checks, or poll's own wait elapsed) and by the while
+        // condition itself going false — all three mean the same thing: the
+        // socket never became writable in time.
         logger.notice("MacroPad: connect(\(label, privacy: .public)) timed out")
         close(handle)
         return nil
