@@ -3690,22 +3690,29 @@ enum SidebarLogicProbe {
             // HID interface (CLAUDE.md's "Serial (CDC), never HID"), so a
             // MacroPad key press cannot register with `CGEventSource` at
             // all. `MacroPadController.refresh` covers that by feeding the
-            // tracker `min(secondsSinceOSInput, secondsSincePadPress)`
-            // rather than OS input alone — simulated here by computing that
-            // minimum the same way before calling `update`. OS input is
-            // stale (past threshold) but the pad was pressed moments ago, so
-            // the minimum is recent and the session clears. Passing OS idle
-            // alone — what the previous round of this fix did — would fail
-            // this exactly like the "idle past threshold" case just above.
+            // tracker `MacroPadController.effectivePresence(...)` rather than
+            // OS input alone — called here exactly as `refresh()` calls it,
+            // not re-derived as an inline `min`, so this test can actually
+            // fail if a future edit drops the pad term from the real
+            // combination (an inline `min(staleOSInput, recentPadPress)`
+            // would keep passing even then — it isn't calling the production
+            // code at all). OS input is stale (past threshold) but the pad
+            // was pressed moments ago, so the combined reading is recent and
+            // the session clears. Passing OS idle alone — what the previous
+            // round of this fix did — would fail this exactly like the "idle
+            // past threshold" case just above.
             var padPresent = MacroPadUnreadTracker()
             let staleOSInput = threshold + 5
             let recentPadPress: TimeInterval = 0
+            let padPresentReading = MacroPadController.effectivePresence(
+                secondsSinceOSInput: staleOSInput, secondsSincePadPress: recentPadPress
+            )
             padPresent.update([.init(id: idA, isThinking: true)],
                               lastInteractedSessionId: idA,
-                              secondsSincePresence: min(staleOSInput, recentPadPress))
+                              secondsSincePresence: padPresentReading)
             padPresent.update([.init(id: idA, isThinking: false)],
                               lastInteractedSessionId: idA,
-                              secondsSincePresence: min(staleOSInput, recentPadPress))
+                              secondsSincePresence: padPresentReading)
             record("unread: OS input stale but a recent pad press still clears",
                    !padPresent.unread.contains(idA),
                    "unread=\(padPresent.unread)")
@@ -3714,27 +3721,43 @@ enum SidebarLogicProbe {
             // by itself keep the session artificially "present".
             var bothStale = MacroPadUnreadTracker()
             let stalePadPress = threshold + 5
+            let bothStaleReading = MacroPadController.effectivePresence(
+                secondsSinceOSInput: staleOSInput, secondsSincePadPress: stalePadPress
+            )
             bothStale.update([.init(id: idA, isThinking: true)],
                              lastInteractedSessionId: idA,
-                             secondsSincePresence: min(staleOSInput, stalePadPress))
+                             secondsSincePresence: bothStaleReading)
             bothStale.update([.init(id: idA, isThinking: false)],
                              lastInteractedSessionId: idA,
-                             secondsSincePresence: min(staleOSInput, stalePadPress))
+                             secondsSincePresence: bothStaleReading)
             record("unread: OS input stale and pad press also stale still marks",
                    bothStale.unread.contains(idA),
                    "unread=\(bothStale.unread)")
 
             // Both sources recent: clears, same as either alone.
             var bothRecent = MacroPadUnreadTracker()
+            let bothRecentReading = MacroPadController.effectivePresence(
+                secondsSinceOSInput: 0, secondsSincePadPress: 0
+            )
             bothRecent.update([.init(id: idA, isThinking: true)],
                               lastInteractedSessionId: idA,
-                              secondsSincePresence: min(0, 0))
+                              secondsSincePresence: bothRecentReading)
             bothRecent.update([.init(id: idA, isThinking: false)],
                               lastInteractedSessionId: idA,
-                              secondsSincePresence: min(0, 0))
+                              secondsSincePresence: bothRecentReading)
             record("unread: both presence sources recent clears",
                    !bothRecent.unread.contains(idA),
                    "unread=\(bothRecent.unread)")
+
+            // `effectivePresence` itself, pinned directly: which argument
+            // wins is the property a caller could invert by accident (e.g.
+            // swapping the two parameters at a call site) and neither of the
+            // tests above would notice, since both use symmetric inputs in
+            // one case and only check the tracker's downstream behaviour in
+            // the others.
+            record("presence: effectivePresence takes the smaller (more recent) reading",
+                   MacroPadController.effectivePresence(secondsSinceOSInput: 40, secondsSincePadPress: 5) == 5
+                   && MacroPadController.effectivePresence(secondsSinceOSInput: 5, secondsSincePadPress: 40) == 5)
 
             // A session that is NOT the last-interacted one stays marked no
             // matter how recent system input was — presence without
@@ -3845,6 +3868,27 @@ enum SidebarLogicProbe {
             record("unread: mark survives a repeated identical refresh",
                    repeated.unread.contains(idA),
                    "unread=\(repeated.unread)")
+        }
+
+        // --- MacroPadController.sessionId(atPaneIndex:in:) — the pane→session
+        // lookup `refresh()`'s focus-change hook and `noteInteraction` both
+        // resolve through, written once so they cannot drift apart.
+        do {
+            let sessionId = UUID()
+            let sessionPane = PaneSlot(content: .session(sessionId), preferredWidth: 800)
+            let launcherPane = PaneSlot(content: .launcher, preferredWidth: 800)
+            let panes = [sessionPane, launcherPane]
+
+            record("sessionId(atPaneIndex:): resolves a session pane",
+                   MacroPadController.sessionId(atPaneIndex: 0, in: panes) == sessionId)
+            record("sessionId(atPaneIndex:): a launcher pane resolves to nil",
+                   MacroPadController.sessionId(atPaneIndex: 1, in: panes) == nil)
+            record("sessionId(atPaneIndex:): an out-of-range index resolves to nil",
+                   MacroPadController.sessionId(atPaneIndex: 2, in: panes) == nil)
+            record("sessionId(atPaneIndex:): a negative index resolves to nil",
+                   MacroPadController.sessionId(atPaneIndex: -1, in: panes) == nil)
+            record("sessionId(atPaneIndex:): an empty pane list resolves to nil",
+                   MacroPadController.sessionId(atPaneIndex: 0, in: []) == nil)
         }
 
         // --- SessionActivity: the SSH rung, and unread's place at the bottom

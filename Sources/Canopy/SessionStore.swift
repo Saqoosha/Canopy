@@ -60,6 +60,16 @@ final class SessionStore {
     /// is still "focused", not "here". See `MacroPadUnreadTracker.update`'s
     /// doc.
     ///
+    /// "Deliberate" is now load-bearing rather than aspirational: a pane can
+    /// become focused with nobody at the desk (a crashed session's pane
+    /// closes and hands focus to whatever pane is left), and
+    /// `MacroPadController.refresh()` only counts that as the attribution
+    /// half of clearing when presence is *already* satisfied at the moment
+    /// the change is observed — a genuine click or keypress qualifies for
+    /// free, an autonomous focus change does not. See
+    /// `lastObservedFocusedSessionId`'s doc on that type for the failure
+    /// this closes.
+    ///
     /// The store only *holds* this; the edge detection that produces it lives
     /// in `MacroPadUnreadTracker`, driven by `MacroPadController`. It lives
     /// here rather than in the controller because the sidebar and the pad must
