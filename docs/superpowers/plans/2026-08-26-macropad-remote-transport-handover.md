@@ -4,41 +4,62 @@ The branch adds a TCP transport so a MacroPad plugged into one Mac can drive a
 Canopy running on another, over Tailscale. This is the operational guide for
 turning it on and the honest account of what has and has not been run.
 
-## One-time setup, on the Mac the pad is physically plugged into
+## Topology
+
+Both machines have a pad permanently attached — this is not "whichever Mac
+happens to have the pad." The Studio (office) has pad #1; the MBP (home /
+portable) has pad #2. The bridge exposes **the MBP's** pad #2 over Tailscale,
+because the case it exists for is sitting at the MBP at night, driving the
+Studio's Canopy through Parsec, with no way for Parsec to forward pad #2's
+USB to the far end. The Studio's pad #1 is never bridged — at the office the
+Studio drives it locally.
+
+## One-time setup, on the MBP
 
 1. Install `socat` if it is not already there: `brew install socat`.
-2. From a checkout of this repo on that Mac: `scripts/macropad-bridge.sh --install`.
+2. From a checkout of this repo on the MBP: `scripts/macropad-bridge.sh --install`.
    This writes and bootstraps `~/Library/LaunchAgents/sh.saqoo.canopy-macropad-bridge.plist`
-   (`RunAtLoad` + `KeepAlive`), binds only that Mac's Tailscale IPv4 address —
+   (`RunAtLoad` + `KeepAlive`), binds only the MBP's Tailscale IPv4 address —
    never `0.0.0.0` — and refuses to install if `tailscale ip -4` returns nothing.
    Logs land at `~/Library/Logs/canopy-macropad-bridge.log`.
-3. **That Mac's own Canopy must have MacroPad set to Off.** The bridge and a
-   local Canopy both want the serial port; Canopy does not set `TIOCEXCL`
-   ahead of the bridge in a way that excludes it (see Known gaps), so a local
-   Canopy left on Local can and will fight the bridge for the pad rather than
-   failing cleanly.
+3. **The MBP's own Canopy must have MacroPad set to Off.** This is also the
+   default in steady state, because the common case is driving the Studio,
+   not the MBP locally. The bridge and a local Canopy both want the serial
+   port; Canopy does not set `TIOCEXCL` ahead of the bridge in a way that
+   excludes it (see Known gaps), so an MBP Canopy left on Local can and will
+   fight the bridge for pad #2 rather than failing cleanly.
 
-Uninstall with `scripts/macropad-bridge.sh --uninstall`.
+Uninstall with `scripts/macropad-bridge.sh --uninstall`. The Studio side needs
+no install at all — it only ever runs Canopy, never the bridge.
 
 ## Daily switching
 
-The pad drives whichever Canopy currently has it. Exactly one Canopy should
-be `Local` or pointed `Remote` at the bridge at a time — see "One transport at
-a time" in `CLAUDE.md`'s MacroPad learnings for why fan-out across both was
-rejected.
+Exactly one Canopy should be driving a given pad at a time — see "One
+transport at a time" in `CLAUDE.md`'s MacroPad learnings for why fan-out was
+rejected. In practice that means: the Studio's Canopy chooses between its own
+local pad #1 and reaching pad #2 over the bridge; the MBP's Canopy mostly
+stays `Off` and only goes `Local` for the occasional evening working on it
+directly.
 
-| Situation | Studio (pad's usual desk) | MBP (or wherever else Canopy runs) |
+| Situation | Studio Canopy | MBP Canopy |
 | --- | --- | --- |
-| At the office, pad on the Studio | `Use Local` | — |
-| Leaving the office | *(leave as-is)* | — |
-| At home, working through the MBP against the Studio's bridge | `Off` | `Use <studio-host>` |
-| Back at the office, working locally again | `Use Local` | `Off` |
+| Morning at the office, pad #1 on the Studio desk | `Use Local` | `Off` |
+| Leaving the office | *(nothing)* | *(nothing)* |
+| Evening at home, driving the Studio through Parsec — the common case | `Use <mbp-host>` | `Off` |
+| Evening at home, working on the MBP's own Canopy — occasional | `Off` | `Use Local` |
 
-Only the side actually being used needs to change; the other can be left
-alone or set explicitly — either order works, since each Canopy reconnects
-independently. Switching a Canopy's source away from `Off` clears manual
-sleep on it automatically (`MacroPadController.clearsSleep(movingTo:)`), so
-the pad should arrive lit at the new destination with no keypress needed.
+**Leaving the office needs no action** because switching the Studio to
+`Use <mbp-host>` from home releases its serial port, and the firmware blanks
+pad #1 by itself. But that only happens *at the moment of the switch* — pad
+#1 stays lit on an empty desk for the hours in between, which is what the
+**sleep chord** (hold the two outermost keys) is for before walking out.
+
+**The last row's two changes are order-independent.** Releasing on one side
+frees the pad, and the other side's existing reconnect backoff (capped at
+8 s) picks it up on its own. Switching a Canopy's source away from `Off` also
+clears manual sleep on it automatically
+(`MacroPadController.clearsSleep(movingTo:)`), so the pad should arrive lit
+at the new destination with no keypress needed.
 
 ## What is verified, and what is not
 
