@@ -110,12 +110,23 @@ final class CanopySettings {
         if let recap = dict["canopy.recapEnabled"] as? Bool {
             recapEnabled = recap
         }
+        let storedSourceRaw = dict["canopy.macroPadSource"] as? String
         macroPadRemoteHost = (dict["canopy.macroPadRemoteHost"] as? String) ?? ""
         macroPadSource = MacroPadSource.migrated(
-            storedRaw: dict["canopy.macroPadSource"] as? String,
+            storedRaw: storedSourceRaw,
             storedHost: macroPadRemoteHost,
             legacyEnabled: dict["canopy.macroPadEnabled"] as? Bool
         )
+        // `resolve` degrades a `remote` selector with an unusable stored
+        // host to `.off` silently — by design, since `resolve` is pure and
+        // probe-reached. This is the one place that can say something about
+        // it: settings.json is hand-editable (see the doc comment on
+        // `macroPadRemoteHost`), and without this a hand edit that broke the
+        // address would leave MacroPad silently off next launch with no
+        // trail explaining why.
+        if storedSourceRaw == "remote", macroPadSource.isOff {
+            logger.notice("MacroPad: stored source was \"remote\" but canopy.macroPadRemoteHost could not be parsed; falling back to Off")
+        }
         if let brightness = dict["canopy.macroPadBrightness"] as? Int { macroPadBrightness = min(100, max(0, brightness)) }
         if let raw = dict["canopy.defaultPermissionMode"] as? String,
            let mode = PermissionMode(rawValue: raw)

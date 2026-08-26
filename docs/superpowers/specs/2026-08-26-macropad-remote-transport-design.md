@@ -198,12 +198,27 @@ risk a collision.
 
 ```
 while true:
-  DEV = the callout device from `ioreg -a -r -c IOSerialBSDClient -l` whose
+  DEV = the callout device from `ioreg -a -r -c IOUSBHostDevice -l` whose
         "USB Product Name" is "Canopy MacroPad", highest bInterfaceNumber
   if no DEV: sleep 2; continue          # do not even listen
-  socat TCP-LISTEN:$PORT,bind=$TS_IP,reuseaddr FILE:$DEV,raw,b115200,nonblock
+  socat TCP-LISTEN:$PORT,bind=$TS_IP,reuseaddr FILE:$DEV,raw,ispeed=115200,ospeed=115200,nonblock
   # socat exits when the client disconnects -> loop, re-resolving DEV
 ```
+
+Both lines above are corrected from an earlier draft's pseudocode, and the
+correction is only in this spec — the implementation plan's supersession
+header at the top of `2026-08-26-macropad-remote-transport.md` already names
+both as known-wrong, since this document (not the plan) is the binding
+authority for what the bridge is supposed to do. `IOSerialBSDClient` is the
+wrong query target: the leaf carries neither "USB Product Name" nor
+"bInterfaceNumber" — those live on ancestor `IOUSBHostDevice` /
+`IOUSBHostInterface` nodes, which is why the shipped `find_device()` in
+`scripts/macropad-bridge.sh` walks a `IOUSBHostDevice` subtree top-down
+inheriting each ancestor's properties down to the `IOSerialBSDClient` leaf,
+rather than reading the property directly off the matched service. And
+`b115200` is rejected outright by this machine's socat (1.8.1.3, Darwin
+build) — `socat -hh` lists `ispeed`/`ospeed` as the real termios option
+names, which is what the shipped script uses.
 
 The ranking rule is deliberately the same one `MacroPadDevice.rankedCandidates` uses,
 so console-vs-data is decided identically on both sides.
@@ -263,8 +278,13 @@ could not exist.
 
 So `openAndProbe`'s serial branch sets `TIOCEXCL` immediately after a
 successful `open`. Canopy-first then behaves the way the rest of this spec
-assumes: socat's open fails with `EBUSY`, and the bridge script names the
-cause.
+assumes: socat's open fails with `EBUSY`. The bridge script's final commit
+deliberately does NOT name that as *the* cause in its log line — measured on
+hardware, an unplugged pad reaches the same `socat exited non-zero` branch
+(socat logs "Device not configured" first), so a single-cause message would
+have sent someone hunting a toggle that was not the problem; see
+`scripts/macropad-bridge.sh`'s `run_bridge` for the actual wording and the
+handover doc for the earlier, since-corrected claim.
 
 **The fix is one-directional, and the residual gap is real.** socat never sets
 `TIOCEXCL`, and `TIOCEXCL` does not fail against a descriptor another process

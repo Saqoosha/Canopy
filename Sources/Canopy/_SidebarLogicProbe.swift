@@ -4122,9 +4122,39 @@ enum SidebarLogicProbe {
                MacroPadRemoteEndpoint.parse("mbp:abc") == nil, "expected nil")
         record("macropad endpoint: missing port after the colon is nil",
                MacroPadRemoteEndpoint.parse("mbp:") == nil, "expected nil")
+        // `parsePort`'s own comment says the ASCII-digit guard exists
+        // because `UInt16(raw)` alone would accept "+1" and Unicode digits.
+        // "abc" (asserted above) already fails `UInt16(_:)` on its own, so it
+        // proves nothing about that guard specifically — these two do.
+        record("macropad endpoint: a leading-plus port is nil",
+               MacroPadRemoteEndpoint.parse("mbp:+1") == nil, "expected nil")
+        record("macropad endpoint: a Unicode-digit port is nil",
+               MacroPadRemoteEndpoint.parse("mbp:\u{0661}\u{0662}\u{0663}") == nil, "expected nil")
         record("macropad endpoint: displayLabel round-trips",
                MacroPadRemoteEndpoint.parse("mbp")?.displayLabel == "mbp:8765",
                "got \(String(describing: MacroPadRemoteEndpoint.parse("mbp")?.displayLabel))")
+        // Unbracketed input is rejected by `parse` (asserted above), but
+        // `displayLabel` is reachable on any endpoint, including one built
+        // directly with the memberwise initializer — so it has to defend
+        // its own invariant rather than trust every caller went through
+        // `parse`. Without the bracket this reads as "fd7a:115c:a1e0::5201"
+        // on port "7f5d:8765", which is exactly the ambiguity `parse` exists
+        // to refuse.
+        record("macropad endpoint: displayLabel brackets an IPv6 host",
+               MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel == "[fd7a::1]:8765",
+               "got \(MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel)")
+
+        // MARK: - MacroPadDevice.Endpoint.label
+        //
+        // Every new TCP log line routes through this. Pure, and reachable
+        // from the probe module without any access-level change.
+        record("macropad device endpoint: serial label is the callout path",
+               MacroPadDevice.Endpoint.serial(path: "/dev/cu.usbmodem20103", interfaceNumber: 3).label
+                   == "/dev/cu.usbmodem20103",
+               "got \(MacroPadDevice.Endpoint.serial(path: "/dev/cu.usbmodem20103", interfaceNumber: 3).label)")
+        record("macropad device endpoint: tcp label is the endpoint's displayLabel",
+               MacroPadDevice.Endpoint.tcp(MacroPadRemoteEndpoint(host: "mbp", port: 9000)).label == "mbp:9000",
+               "got \(MacroPadDevice.Endpoint.tcp(MacroPadRemoteEndpoint(host: "mbp", port: 9000)).label)")
 
         // --- MacroPadSource resolution and migration
         record("macropad source: off resolves",
@@ -4191,15 +4221,31 @@ enum SidebarLogicProbe {
         // Switching source is an explicit "I am using this pad now"; the chord
         // means "go dark". The newer, more specific verb wins — otherwise
         // every transition costs a swallowed keypress to wake the new pad.
-        record("macropad sleep: switching to local clears sleep",
-               MacroPadController.clearsSleep(movingTo: .local), "expected true")
-        record("macropad sleep: switching to remote clears sleep",
-               MacroPadController.clearsSleep(movingTo: .remote(MacroPadRemoteEndpoint(host: "mbp", port: 8765))),
+        // `shouldClearSleep` is two conditions, and both need their own
+        // assertion: `lastSource == nil` (a fresh launch) must never clear,
+        // whatever the target — that's the guard against a launch silently
+        // un-sleeping a pad the user put to sleep before quitting. Only once
+        // `lastSource` is real does the target's `isOff` decide anything.
+        record("macropad sleep: a nil lastSource never clears, whatever the target",
+               !MacroPadController.shouldClearSleep(lastSource: nil, movingTo: .local)
+                   && !MacroPadController.shouldClearSleep(
+                       lastSource: nil,
+                       movingTo: .remote(MacroPadRemoteEndpoint(host: "mbp", port: 8765))
+                   )
+                   && !MacroPadController.shouldClearSleep(lastSource: nil, movingTo: .off),
+               "expected false for every nil-lastSource case")
+        record("macropad sleep: a real change to local clears sleep",
+               MacroPadController.shouldClearSleep(lastSource: .off, movingTo: .local), "expected true")
+        record("macropad sleep: a real change to remote clears sleep",
+               MacroPadController.shouldClearSleep(
+                   lastSource: .off,
+                   movingTo: .remote(MacroPadRemoteEndpoint(host: "mbp", port: 8765))
+               ),
                "expected true")
         // Off disconnects, and the firmware blanks itself. Clearing the flag
         // there would silently un-sleep the pad you get back later.
-        record("macropad sleep: switching to off does not clear sleep",
-               !MacroPadController.clearsSleep(movingTo: .off), "expected false")
+        record("macropad sleep: a real change to off does not clear sleep",
+               !MacroPadController.shouldClearSleep(lastSource: .local, movingTo: .off), "expected false")
 
         // MARK: - Session restore snapshot
         do {

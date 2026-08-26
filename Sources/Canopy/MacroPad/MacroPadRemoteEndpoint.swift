@@ -13,10 +13,18 @@ struct MacroPadRemoteEndpoint: Equatable, Sendable {
     let host: String
     let port: UInt16
 
-    /// What logs and the menu show. Always carries the port, including when
-    /// the user typed a bare host, so a log line is unambiguous about which
-    /// port was actually tried.
-    var displayLabel: String { "\(host):\(port)" }
+    /// What logs show — NOT the menu, which renders `host` alone
+    /// (`MacroPadCommands.remoteTitle`). Always carries the port, including
+    /// when the user typed a bare host, and brackets the host whenever it
+    /// contains a colon (an IPv6 literal) so the result stays parseable by
+    /// `parse` itself: unbracketed, `fd7a::1:8765` doesn't say where the
+    /// address ends and where the port begins. `parse` never constructs an
+    /// endpoint with an unbracketed colon in `host`, but the memberwise
+    /// initializer isn't private, so this guards the type's own invariant
+    /// rather than trusting every caller to have gone through `parse`.
+    var displayLabel: String {
+        host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+    }
 
     /// Accepts `host`, `host:port`, `[v6]`, and `[v6]:port`.
     ///

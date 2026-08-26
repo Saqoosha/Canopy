@@ -78,7 +78,9 @@ pad #1 by itself. But that only happens *at the moment of the switch* — pad
 frees the pad, and the other side's existing reconnect backoff (capped at
 8 s) picks it up on its own. Switching a Canopy's source away from `Off` also
 clears manual sleep on it automatically
-(`MacroPadController.clearsSleep(movingTo:)`), so the pad should arrive lit
+(`MacroPadController.shouldClearSleep(lastSource:movingTo:)`, renamed from
+`clearsSleep` in a later review-fix round to also gate on a real prior
+source — see that function's doc for why), so the pad should arrive lit
 at the new destination with no keypress needed.
 
 ## What is verified, and what is not
@@ -109,7 +111,7 @@ below touch the firmware at all.
 | `SO_NOSIGPIPE` survives a dead bridge | A standalone Swift script isolating the exact socket-option sequence `connectSocket` uses, writing to a closed socket with and without the option set — the control run (option unset) died on `SIGPIPE`, confirming the option is what prevents it, not incidental behaviour | Task 4 |
 | Reconnect with backoff | Same fake-pad harness, bridge cycled while the link was up | Task 4 |
 | Device-path re-resolution | Real `ioreg` queries against the real pad (for the discovery logic itself) plus a PTY standing in for the serial device, to confirm `socat` really does defer opening the file address until a client connects (see Ruling N below) — never the TCP reconnect path against a re-plugged real pad end-to-end | Task 8 |
-| Sleep clears on switching source | A logging fake pad recorded the literal command sequence (`B 0` while asleep, then `B 30` — the configured brightness — immediately on switching to a non-off source), confirming the clear fires before the first push rather than after | Task 6 |
+| Sleep clears on switching source | A logging fake pad recorded the literal command sequence (`B 0` while asleep, then a `B` matching the tester's own `macroPadBrightness` — not the default 60, just whatever this machine had at the time — immediately on switching to a non-off source), confirming the clear fires before the first push rather than after | Task 6 |
 
 **The pre-existing local-USB path was never exercised on this branch either,
 and the table above doesn't say so.** Task 3 refactored serial discovery and
@@ -171,9 +173,3 @@ these four transitions:
   A `socat` on one of those paths works from an interactive shell but the
   installed agent will report "socat not found" until the plist is edited by
   hand.
-- **The plist heredoc does not XML-escape the script path.** `$SCRIPT` (and
-  `$LABEL`/`$LOG`) are interpolated directly into XML text and attribute
-  positions. In practice these are all built from `$HOME`/`dirname`/`basename`
-  and can't contain `<`, `>`, `&`, or `'` under normal use, so this has not
-  caused a problem — but a repo checked out under a path containing one of
-  those characters would produce a broken plist with no clear error.

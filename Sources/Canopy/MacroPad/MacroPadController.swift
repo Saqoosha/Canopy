@@ -468,11 +468,8 @@ final class MacroPadController {
             // A switch Canopy performed will produce a `HELLO` that is not a
             // firmware reboot.
             if !source.isOff { expectHostInitiatedHello() }
-            // Only on an actual change, and only once `lastSource` is
-            // non-nil: at launch this runs before the user has touched
-            // anything, and clearing there would discard a sleep the user set
-            // before quitting.
-            if lastSource != nil, Self.clearsSleep(movingTo: source) { setAsleep(false) }
+            // See `shouldClearSleep`'s doc for why both conditions matter.
+            if Self.shouldClearSleep(lastSource: lastSource, movingTo: source) { setAsleep(false) }
             lastSource = source
         }
         device.setSource(source)
@@ -615,9 +612,18 @@ final class MacroPadController {
 
     /// Whether moving to `source` should clear manual sleep.
     ///
-    /// Pure and static so the probe can reach it — `setAsleep` is private and
-    /// needs a live controller. See the assertions for the reasoning.
-    static func clearsSleep(movingTo source: MacroPadSource) -> Bool { !source.isOff }
+    /// Two conditions, both required, not one: `!source.isOff` is the
+    /// newer-verb-wins rule (switching source is "I am using this pad now";
+    /// the sleep chord is "go dark", and the more specific one should win).
+    /// `lastSource != nil` is what stops a fresh launch from clobbering a
+    /// sleep set before quitting — at launch `refresh()` runs before the
+    /// user has touched anything, so evaluating `!source.isOff` alone would
+    /// immediately un-sleep a pad the user put to sleep on purpose. Pure and
+    /// static so the probe can reach both halves together — `setAsleep` is
+    /// private and needs a live controller.
+    static func shouldClearSleep(lastSource: MacroPadSource?, movingTo source: MacroPadSource) -> Bool {
+        lastSource != nil && !source.isOff
+    }
 
     /// Written as a clamp rather than an early `return` on purpose: a
     /// `guard !isAsleep else { return }` here would send **nothing** while

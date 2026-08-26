@@ -35,6 +35,22 @@ line number cited here would drift on the next edit (including this one).
   `commitHost`'s empty-address fallback to `.off` (matching the spec's
   argument in §1) — see `Sources/Canopy/SettingsView.swift`'s live
   `commitHost` for the current behaviour.
+- `MacroPadController.clearsSleep(movingTo:)`, produced by Task 5 and quoted
+  throughout that task's body (including its Global Constraints bullet),
+  was renamed to `shouldClearSleep(lastSource:movingTo:)` in a later
+  review-fix round, which also gave it a second parameter — the old
+  single-parameter signature no longer exists. See that function's doc
+  comment on `MacroPadController` for why both conditions are needed.
+- Task 9's closing arithmetic ("the tasks above add 31 … Task 1 measured
+  578, which is exactly 551 + 27") is stale twice over: a later commit on
+  this branch removed one probe assertion, landing the floor at 581, and a
+  subsequent review-fix round (T1/T2/T3 in that round's report) added 6 more
+  — 2 for `parsePort`'s ASCII-digit guard, 1 net for extracting
+  `MacroPadController.shouldClearSleep`, 1 for `displayLabel`'s IPv6
+  bracketing, and 2 for `MacroPadDevice.Endpoint.label` — measured at 587.
+  `.github/workflows/ci.yml`'s `EXPECTED_ASSERTIONS` is the live number; this
+  bullet is a historical note about why the body's arithmetic no longer
+  matches it, not a second place that number is tracked.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -88,9 +88,15 @@ private struct GeneralSettingsTab: View {
                     // enabled and selectable, measured via the accessibility
                     // tree) — a conditional row is what actually keeps this
                     // choice off the menu. Safe because the selection can
-                    // never *be* `remote` with an unusable address:
-                    // `CanopySettings.load` degrades that to `.off` and
-                    // `commitHost` moves it to `.off` too.
+                    // never *be* `remote` with an unusable address, though
+                    // not by one mechanism: `CanopySettings.load` degrades
+                    // that case to `.off`, `commitHost` moves it to `.off`
+                    // too when the field is cleared to empty, and for a
+                    // non-empty-but-unparseable edit `commitHost` sets
+                    // `hostError` and returns without touching
+                    // `macroPadSource` at all — every write site validates
+                    // before ever assigning `.remote`, so the invariant holds
+                    // without that branch needing to reach for `.off` itself.
                     if MacroPadRemoteEndpoint.parse(settings.macroPadRemoteHost) != nil {
                         Text("Remote bridge").tag("remote")
                     }

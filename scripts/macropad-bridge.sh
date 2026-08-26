@@ -30,6 +30,34 @@ require_socat() {
   command -v socat >/dev/null 2>&1 || die "socat not found. Install it with: brew install socat"
 }
 
+# `PORT=0` would make socat listen on an ephemeral port that
+# MacroPadRemoteEndpoint.parse rejects outright (port 0 is nil), so Canopy
+# could never be configured to reach it — the bridge would start and be
+# permanently unreachable with no error anywhere. Non-decimal input would
+# otherwise flow straight into socat's listen address and the launchd plist.
+# Checked before both run modes that use PORT.
+validate_port() {
+  case "$PORT" in
+    ''|*[!0-9]*) die "CANOPY_MACROPAD_BRIDGE_PORT must be a decimal integer 1-65535, got: $PORT" ;;
+  esac
+  if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    die "CANOPY_MACROPAD_BRIDGE_PORT must be 1-65535, got: $PORT"
+  fi
+}
+
+# Escapes the five XML-significant characters for use in plist text and
+# attribute positions. $SCRIPT and $LOG derive from $HOME and this checkout's
+# path, neither of which this script controls.
+xml_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  s="${s//\"/&quot;}"
+  s="${s//\'/&apos;}"
+  printf '%s' "$s"
+}
+
 # The Tailscale address, and only that. Binding 0.0.0.0 would expose a device
 # that can switch panes to every network this Mac joins.
 tailscale_ip() {
@@ -78,7 +106,13 @@ import plistlib, sys
 product = sys.argv[1]
 try:
     entries = plistlib.loads(sys.stdin.buffer.read())
-except Exception:
+except Exception as e:
+    # A malformed/truncated ioreg plist and "no pad attached" both reach
+    # this script as "find_device failed" otherwise — indistinguishable in
+    # the log, so a broken ioreg pipeline reads forever as "no pad found"
+    # with no way to tell the two apart. Print the real exception so that
+    # distinction survives.
+    print(f"find_device: failed to parse ioreg output: {e}", file=sys.stderr)
     sys.exit(1)
 
 best = None
@@ -105,6 +139,7 @@ print(best[1])
 }
 
 run_bridge() {
+  validate_port
   require_socat
   local ip
   ip="$(tailscale_ip)" || die "no Tailscale IPv4 address. Start Tailscale, or fix the bridge before exposing it more widely — this script will not bind 0.0.0.0."
@@ -187,6 +222,7 @@ run_bridge() {
 }
 
 install_agent() {
+  validate_port
   require_socat
   tailscale_ip >/dev/null || die "no Tailscale IPv4 address; refusing to install an agent that cannot bind."
   mkdir -p "$(dirname "$PLIST")" "$(dirname "$LOG")"
@@ -204,6 +240,15 @@ install_agent() {
   # none of this shell's environment. Without this, `--install` reports
   # success and installs an agent listening on 8765 regardless of what PORT
   # was set to at install time.
+  # $SCRIPT and $LOG derive from $HOME and this checkout's path; $PORT is
+  # already validated to be a decimal integer above, but is escaped too for
+  # consistency rather than trusting that validation never moves. Escaping
+  # is what stops a checkout path (or $HOME) containing &, <, >, or ' from
+  # producing a plist that `launchctl bootstrap` rejects with no clear error.
+  local script_esc log_esc port_esc
+  script_esc="$(xml_escape "$SCRIPT")"
+  log_esc="$(xml_escape "$LOG")"
+  port_esc="$(xml_escape "$PORT")"
   cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -213,18 +258,18 @@ install_agent() {
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>$SCRIPT</string>
+    <string>$script_esc</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$LOG</string>
-  <key>StandardErrorPath</key><string>$LOG</string>
+  <key>StandardOutPath</key><string>$log_esc</string>
+  <key>StandardErrorPath</key><string>$log_esc</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>CANOPY_MACROPAD_BRIDGE_PORT</key>
-    <string>$PORT</string>
+    <string>$port_esc</string>
   </dict>
 </dict>
 </plist>

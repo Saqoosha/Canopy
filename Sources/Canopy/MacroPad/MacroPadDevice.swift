@@ -575,20 +575,48 @@ final class MacroPadDevice: @unchecked Sendable {
             return nil
         }
         // Commands are ~10 bytes. Nagle would hold a colour change behind the
-        // previous ACK.
+        // previous ACK. Left unchecked, unlike the keepalive group below: a
+        // failure here only costs latency, never detection, so it isn't
+        // worth a log line.
         setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &enable, socklen_t(MemoryLayout<Int32>.size))
         // Closing the bridge Mac's lid leaves the connection half-open, and
         // writes keep succeeding into the send buffer — so neither the read
         // side nor the controller's watchdog ping can notice. 15s idle, 15s
         // between probes, 3 probes: ~45s, the same budget SSH remote uses
         // (ServerAliveInterval=15, ServerAliveCountMax=3).
-        setsockopt(handle, SOL_SOCKET, SO_KEEPALIVE, &enable, socklen_t(MemoryLayout<Int32>.size))
+        //
+        // This group is the ONLY thing that can notice a half-open
+        // connection, so a silently-failed setsockopt here means the pad can
+        // sit "connected" forever with nothing in the log to explain why it
+        // never comes back. Logged, not refused: unlike SO_NOSIGPIPE above,
+        // a failure here degrades detection rather than crashing the app, so
+        // the connection is still worth keeping.
+        func logIfFailed(_ result: Int32, _ option: String) {
+            guard result != 0 else { return }
+            logger.notice("""
+                MacroPad: setsockopt(\(option, privacy: .public)) failed on \(label, privacy: .public): \
+                \(String(cString: strerror(errno)), privacy: .public)
+                """)
+        }
+        logIfFailed(
+            setsockopt(handle, SOL_SOCKET, SO_KEEPALIVE, &enable, socklen_t(MemoryLayout<Int32>.size)),
+            "SO_KEEPALIVE"
+        )
         var idle: Int32 = 15
-        setsockopt(handle, IPPROTO_TCP, TCP_KEEPALIVE, &idle, socklen_t(MemoryLayout<Int32>.size))
+        logIfFailed(
+            setsockopt(handle, IPPROTO_TCP, TCP_KEEPALIVE, &idle, socklen_t(MemoryLayout<Int32>.size)),
+            "TCP_KEEPALIVE"
+        )
         var interval: Int32 = 15
-        setsockopt(handle, IPPROTO_TCP, TCP_KEEPINTVL, &interval, socklen_t(MemoryLayout<Int32>.size))
+        logIfFailed(
+            setsockopt(handle, IPPROTO_TCP, TCP_KEEPINTVL, &interval, socklen_t(MemoryLayout<Int32>.size)),
+            "TCP_KEEPINTVL"
+        )
         var probes: Int32 = 3
-        setsockopt(handle, IPPROTO_TCP, TCP_KEEPCNT, &probes, socklen_t(MemoryLayout<Int32>.size))
+        logIfFailed(
+            setsockopt(handle, IPPROTO_TCP, TCP_KEEPCNT, &probes, socklen_t(MemoryLayout<Int32>.size)),
+            "TCP_KEEPCNT"
+        )
 
         // Non-blocking for the same reason the serial path opens O_NONBLOCK:
         // it is what lets `writeBytes`'s EAGAIN loop and the read source work
