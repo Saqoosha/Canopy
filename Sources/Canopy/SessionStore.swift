@@ -45,19 +45,25 @@ final class SessionStore {
     /// index when panes is non-empty. Undefined (0) while panes is empty.
     private(set) var focusedPaneIndex: Int = 0
 
-    /// Sessions that finished a turn while the user wasn't recently present
-    /// with them. Rendered as the green `SessionActivity.unread` dot in the
+    /// Sessions that finished a turn with no deliberate act on them since. Rendered as the green `SessionActivity.unread` dot in the
     /// sidebar and as the green LED on the MacroPad.
     ///
-    /// A session with no pane counts as unfocused, so it is marked on finish.
-    /// Clearing needs three things at once, none derivable from the others:
+    /// Every open session is marked on finish, paned or not — focus is not
+    /// an input to marking, only to clearing.
+    /// Clearing needs four things at once — three independent signals, plus
+    /// an ordering constraint over the same events as the first:
     /// a deliberate act *on that session* — typing into its pane, clicking
     /// it, focusing it (by sidebar click, Cmd+1..9, Cmd+Opt+arrow,
-    /// Cmd+Shift+[/] cycling, or its MacroPad key); a human recently present
-    /// AT THE MACHINE, by either OS-level input (system-wide, any app) or a
+    /// Cmd+Shift+[/] cycling, or its MacroPad key); that act being NEWER
+    /// than the mark it would clear; a human recently present AT THE
+    /// MACHINE, by either OS-level input (system-wide, any app) or a
     /// MacroPad key press (the pad has no HID interface, so those two are
     /// tracked separately and the more recent one wins); and Canopy actually
-    /// being the app that human is LOOKING AT. Attribution alone used to be
+    /// being the app that human is LOOKING AT. The second is the one that
+    /// looks redundant and is not: the keystroke that SENDS a prompt is an
+    /// act on that session, so without an ordering rule it cleared the
+    /// completion of the very turn it started, and no turn that finished
+    /// while the user was still nearby could ever light up. Attribution alone used to be
     /// enough, and wasn't: focusing a pane and then walking away for an hour
     /// is still "focused", not "here". System-wide presence without app
     /// activation isn't enough either, and a later branch shipped exactly
@@ -65,7 +71,8 @@ final class SessionStore {
     /// Canopy keeps system-wide input "recent" and would clear a mark on a
     /// session nobody was looking at. See `MacroPadUnreadTracker.update`'s
     /// doc for the full four-combination argument and why none of the three
-    /// signals can stand in for another.
+    /// SIGNALS can stand in for another — the ordering condition is not one
+    /// of those three and is argued separately, on `markSeq`.
     ///
     /// "Deliberate" is now load-bearing rather than aspirational: a pane can
     /// become focused with nobody at the desk (a crashed session's pane

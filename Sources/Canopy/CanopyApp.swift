@@ -477,26 +477,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the user clicks the chat input or any webview surface. A local
     /// NSEvent monitor intercepts the event before AppKit dispatch: we
     /// look at the click's window-space x, subtract sidebar width, and
-    /// pick which pane owns that x range. Pass the event through unchanged so
-    /// WKWebView still receives it — with one exception: a click inside a pane
-    /// header's `closeButtonHitRect` closes that pane and is CONSUMED, because
-    /// SwiftUI appears never to receive mouse-down in that band (see
-    /// `PaneHeaderStrip`'s doc for what was and was not measured).
+    /// pick which pane owns that x range. It has a second job: a click in a
+    /// pane body is a deliberate act on that pane, so it stamps interaction
+    /// on the MacroPad controller — see the comment at that call for why the
+    /// stamp is NOT tied to the focus change. Pass the event through
+    /// unchanged so WKWebView still receives it — with two exceptions, both
+    /// CONSUMED because SwiftUI appears never to receive mouse-down in that
+    /// band (see `PaneHeaderStrip`'s doc for what was and was not measured):
+    /// a click inside a pane header's `closeButtonHitRect` closes that pane,
+    /// and a double-click on a session pane's header opens the rename sheet —
+    /// that second one consumed only when a sheet actually opens, so a
+    /// launcher pane's header still zooms the window.
     private func installPaneFocusClickMonitor() {
         guard paneFocusClickMonitor == nil else { return }
-        paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+        paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             // `!isEmpty`, not `count > 1`: a double-click on a pane header
             // renames its session, and a single pane is the common case for
-            // that. Nothing else changed OUTCOME when the guard widened, but
-            // the two branches get there differently and only one is
-            // self-evident: the close X carries its own `panes.count > 1`,
-            // while the focus branch is inert at one pane only because
-            // `focusedPaneIndex` is clamped to 0 wherever the strip shrinks —
-            // an invariant held in `SessionStore`, not a check here. A change
-            // to that clamping would break this silently. What DID change is
-            // execution: the sidebar measurement and the full
-            // `PaneLayoutMetrics` computation now run on every left mouse-down
-            // in the single-pane case, which is the common one.
+            // that. That guard is now LOAD-BEARING rather than merely
+            // harmless — the branch below also acknowledges an unread mark,
+            // which matters most with one pane. (It used to be argued here
+            // that the branch was inert at one pane, because
+            // `focusedPaneIndex` is clamped to 0 wherever the strip shrinks;
+            // that was true only while the branch did nothing but move focus.
+            // The clamp is still an invariant held in `SessionStore` rather
+            // than a check here, and is still what makes the focus CALL a
+            // no-op.) The cost the widening did carry: the sidebar
+            // measurement and the full `PaneLayoutMetrics` computation run on
+            // every left mouse-down in the single-pane case, the common one.
             guard let window = event.window, isCanopyWindow(window),
                   let store = SessionStore.shared,
                   !store.panes.isEmpty else { return event }
@@ -596,15 +603,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         return nil
                     }
                     // Skip the title bar so window-drag clicks don't move
-                    // focus. Deliberately applied AFTER the close-X test and
+                    // focus. Since the stamp below moved inside this branch,
+                    // the band now also gates ACKNOWLEDGEMENT: a click in a
+                    // pane's top 28pt acknowledges nothing. Hoisting the stamp
+                    // above the test would fix that and would also make
+                    // dragging the window by a pane's header clear that pane's
+                    // mark, which is not an act on the pane — left as it is
+                    // deliberately, not by omission.
+                    // Deliberately applied AFTER the close-X test and
                     // not as an early return: the X's target spans y 8…40 and
                     // this band is y <= 28, so an early return would kill the
                     // top 20 of its 32pt — an intermittent failure that only
                     // works when clicked low, which is worse to diagnose than
                     // a dead button.
                     let titleBarHeight: CGFloat = 28
-                    if clickYFromTop > titleBarHeight, index != store.focusedPaneIndex {
-                        store.setFocusedPaneIndex(index)
+                    if clickYFromTop > titleBarHeight {
+                        // Focus only moves when it isn't already here, but the
+                        // MacroPad stamp is unconditional — and the difference
+                        // is the whole point. Clearing an unread mark needs a
+                        // deliberate act on that pane AFTER its turn finished
+                        // (see `MacroPadUnreadTracker.markSeq`), and clicking
+                        // the pane you are already in is exactly that act. Tying
+                        // the stamp to the focus CHANGE would mean the one pane
+                        // most likely to be lit — the one you left focused when
+                        // you walked away — is the one clicking cannot
+                        // acknowledge, which is how this was found.
+                        if index != store.focusedPaneIndex {
+                            store.setFocusedPaneIndex(index)
+                        }
+                        self?.macroPad?.noteInteraction(paneIndex: index)
                     }
                     break
                 }
@@ -612,25 +639,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return event
         }
+        // `addLocalMonitorForEvents` returns nil on sandboxing/mask rejection
+        // (see the NSEvent monitor coverage matrix in CLAUDE.md). There is no
+        // retry — not because the `guard` above forbids one (on failure the
+        // property is left nil, so a second call WOULD re-install) but
+        // because there is exactly one call site, in
+        // `applicationDidFinishLaunching`. Its
+        // sibling `installKeyTypingMonitor` has warned about this for a
+        // while; this one now has more to lose — a nil here silently takes
+        // out pane focus by click, the close X, header rename, AND one of the
+        // two mouse gestures that acknowledge an unread mark on an
+        // already-focused pane. The other three routes survive it: typing,
+        // the pad key, and a click on that session's sidebar row, which
+        // reaches the controller through SwiftUI rather than this monitor.
+        if paneFocusClickMonitor == nil {
+            logger.warning("installPaneFocusClickMonitor: addLocalMonitorForEvents returned nil — pane focus by click, the close X, header rename, and acknowledging a MacroPad unread mark by clicking its pane are all dead (typing, the pad key, and clicking its sidebar row still acknowledge)")
+        }
     }
 
     /// Local `.keyDown` monitor that stamps interaction — "the user is here,
-    /// working in this pane" — onto the MacroPad controller. This feeds only
-    /// the attribution question of `MacroPadUnreadTracker`'s three-question
-    /// clearing rule (see its doc): *which* session the user is with. It says
-    /// nothing about the other two — whether a human is at the machine at
-    /// all (presence, computed separately in `MacroPadController.refresh()`
-    /// from `CGEventSource` and the pad's own press timestamp) or whether
-    /// that human is looking at Canopy (app activation, mirrored from
-    /// `NSApp.isActive` by `MacroPadController.observeActivation()`). It
-    /// cannot stand in for activation either, despite being a local monitor
-    /// that (as a consequence of AppKit local-monitor delivery) only ever
-    /// fires while Canopy is frontmost: it fires on a keystroke, not on the
-    /// transition of becoming frontmost, so returning to Canopy by any means
-    /// that isn't itself a keystroke into a pane — Cmd+Tab and then just
-    /// looking, a click on the Dock icon — produces no event here at all.
-    /// That gap is exactly what `observeActivation()`'s notification
-    /// observers exist to close.
+    /// working in this pane" — onto the MacroPad controller. It feeds two of
+    /// `MacroPadUnreadTracker`'s clearing questions, both through
+    /// `stampInteraction`: *which* session the user is with, and — since the
+    /// generation rule — *when*, because a keystroke is an act that can
+    /// acknowledge a mark recorded before it. It says nothing about the other
+    /// two: whether a human is at the machine at all (presence, computed
+    /// separately in `MacroPadController.refresh()` from `CGEventSource` and
+    /// the pad's own press timestamp) or whether that human is looking at
+    /// Canopy (app activation, mirrored from `NSApp.isActive` by
+    /// `MacroPadController.observeActivation()`). It cannot stand in for
+    /// activation either, despite being a local monitor that (as a
+    /// consequence of AppKit local-monitor delivery) only ever fires while
+    /// Canopy is frontmost: it fires on a keystroke, not on the transition of
+    /// becoming frontmost, so returning to Canopy by any means that isn't
+    /// itself a keystroke into a pane — Cmd+Tab and then just looking, a
+    /// click on the Dock icon — produces no event here at all. What
+    /// `observeActivation()` closes is NOT "the mark clears on return":
+    /// returning bumps no generation, so bare Cmd+Tab clears nothing by
+    /// design. It closes the case where an act ALREADY happened while
+    /// `isAppActive` was still false — a pad press, or the click that
+    /// activates Canopy — and the activation has to land for that act to
+    /// count.
     ///
     /// Does not care about the key's content — any keystroke into a Canopy
     /// window is the signal — but it does not literally see every key.
@@ -660,11 +709,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // `addLocalMonitorForEvents` returns nil on sandboxing/mask
         // rejection (see the NSEvent monitor coverage matrix in CLAUDE.md) —
-        // a silent nil here would mean typing quietly stops counting as
-        // MacroPad presence forever, since `guard keyTypingMonitor == nil`
-        // above never retries once this method has run once.
+        // a silent nil here would mean typing quietly stops ACKNOWLEDGING
+        // MacroPad unread marks forever, since `guard keyTypingMonitor == nil`
+        // above never retries once this method has run once. Not presence:
+        // `CGEventSource` sees every keystroke whether or not this monitor
+        // exists, so presence is the one thing a nil here cannot break.
         guard let monitor else {
-            logger.warning("installKeyTypingMonitor: addLocalMonitorForEvents returned nil — MacroPad presence will never see a keystroke")
+            logger.warning("installKeyTypingMonitor: addLocalMonitorForEvents returned nil — keystrokes will never acknowledge a MacroPad unread mark (presence, the pad key and mouse clicks are unaffected)")
             return
         }
         keyTypingMonitor = monitor
