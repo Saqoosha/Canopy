@@ -4172,6 +4172,13 @@ enum SidebarLogicProbe {
                MacroPadSource.migrated(storedRaw: "banana", storedHost: "", legacyEnabled: false) == .off,
                "expected .off")
 
+        // The load/save pair reads the real settings file and is not
+        // probe-reachable; this pins only that the new surface exists and
+        // that the retired boolean is gone from the type.
+        record("macropad settings: the live source is one of the three spellings",
+               ["off", "local", "remote"].contains(CanopySettings.shared.macroPadSource.rawValue),
+               "got \(CanopySettings.shared.macroPadSource.rawValue)")
+
         // MARK: - Session restore snapshot
         do {
             func snapSession(

@@ -63,7 +63,10 @@ private struct GeneralSettingsTab: View {
             }
 
             Section {
-                Toggle("Enable MacroPad", isOn: $settings.macroPadEnabled)
+                Toggle("Enable MacroPad", isOn: Binding(
+                    get: { !settings.macroPadSource.isOff },
+                    set: { settings.macroPadSource = $0 ? .local : .off }
+                ))
                 LabeledContent("LED brightness") {
                     HStack(spacing: 8) {
                         Slider(value: Binding(get: { Double(settings.macroPadBrightness) },
@@ -75,7 +78,7 @@ private struct GeneralSettingsTab: View {
                             .frame(width: 40, alignment: .trailing)
                     }
                 }
-                .disabled(!settings.macroPadEnabled)
+                .disabled(settings.macroPadSource.isOff)
             } footer: {
                 SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Connects automatically when the pad is plugged in. A small indicator at the bottom of the sidebar shows the link state; turning this off hides it.")
             }

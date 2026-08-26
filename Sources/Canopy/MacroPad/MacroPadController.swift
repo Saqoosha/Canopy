@@ -387,7 +387,7 @@ final class MacroPadController {
 
     func start() {
         device.setOutputHandler { [weak self] output in self?.handle(output) }
-        device.setEnabled(settings.macroPadEnabled)
+        device.setEnabled(!settings.macroPadSource.isOff)
         expectHostInitiatedHello()
         device.start()
         startWatchdog()
@@ -455,9 +455,9 @@ final class MacroPadController {
 
     private func refresh() {
         // Every property read inside the tracked closure is what re-arms the
-        // observation — including `settings.macroPadEnabled`, which is why
+        // observation — including `settings.macroPadSource`, which is why
         // the toggle takes effect without its own observer.
-        let enabled = settings.macroPadEnabled
+        let enabled = !settings.macroPadSource.isOff
         let brightness = settings.macroPadBrightness
         let panes = store.panes
         let focusedPaneIndex = store.focusedPaneIndex
@@ -526,7 +526,7 @@ final class MacroPadController {
     /// The mapping into `Keys` lives here rather than in `adoptIdentity`
     /// because it needs `isConnected` as well as the count.
     private func publishStatus() {
-        guard settings.macroPadEnabled else {
+        guard !settings.macroPadSource.isOff else {
             status.publish(.disabled)
             return
         }

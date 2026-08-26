@@ -32,9 +32,25 @@ final class CanopySettings {
     var recapEnabled: Bool = true {
         didSet { save() }
     }
-    /// Whether the USB MacroPad is adopted when plugged in. Off leaves the
-    /// pad alone (and blanks it if it was already connected).
-    var macroPadEnabled: Bool = true {
+    /// Which pad this Canopy drives: none, the local USB one, or a bridge on
+    /// another Mac. Replaces the old `macroPadEnabled` boolean, which is read
+    /// once at load for migration and then never written again.
+    ///
+    /// Only one is ever live. Switching away releases the port, and the
+    /// firmware blanks itself on host disconnect, so the pad left behind goes
+    /// dark with no code and no user action.
+    var macroPadSource: MacroPadSource = .local {
+        didSet { save() }
+    }
+
+    /// Address of the remote bridge, as the user typed it (`mbp`, `mbp:8765`).
+    /// Kept separate from `macroPadSource` so the menu can switch to remote
+    /// and back without the address having to be re-entered.
+    ///
+    /// Stored raw rather than as a parsed endpoint because this is also what
+    /// the Settings field shows; it is validated on commit there, and
+    /// re-validated at load in case the JSON was edited by hand.
+    var macroPadRemoteHost: String = "" {
         didSet { save() }
     }
     /// Global LED brightness 0–100. The firmware multiplies this into every
@@ -94,7 +110,12 @@ final class CanopySettings {
         if let recap = dict["canopy.recapEnabled"] as? Bool {
             recapEnabled = recap
         }
-        if let enabled = dict["canopy.macroPadEnabled"] as? Bool { macroPadEnabled = enabled }
+        macroPadRemoteHost = (dict["canopy.macroPadRemoteHost"] as? String) ?? ""
+        macroPadSource = MacroPadSource.migrated(
+            storedRaw: dict["canopy.macroPadSource"] as? String,
+            storedHost: macroPadRemoteHost,
+            legacyEnabled: dict["canopy.macroPadEnabled"] as? Bool
+        )
         if let brightness = dict["canopy.macroPadBrightness"] as? Int { macroPadBrightness = min(100, max(0, brightness)) }
         if let raw = dict["canopy.defaultPermissionMode"] as? String,
            let mode = PermissionMode(rawValue: raw)
@@ -124,7 +145,12 @@ final class CanopySettings {
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
         dict["claudeCode.respectGitIgnore"] = respectGitIgnore
         dict["canopy.recapEnabled"] = recapEnabled
-        dict["canopy.macroPadEnabled"] = macroPadEnabled
+        dict["canopy.macroPadSource"] = macroPadSource.rawValue
+        dict["canopy.macroPadRemoteHost"] = macroPadRemoteHost
+        // Retire the pre-source key on the first save after migration.
+        // Assigning nil removes it, so a downgrade sees a fresh install
+        // rather than a stale boolean fighting the selector.
+        dict["canopy.macroPadEnabled"] = nil
         dict["canopy.macroPadBrightness"] = macroPadBrightness
         dict["canopy.defaultPermissionMode"] = defaultPermissionMode.rawValue
         writeDict(dict)

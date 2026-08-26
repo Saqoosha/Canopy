@@ -28,8 +28,8 @@ final class MacroPadStatus {
         /// something the user can act on. Note the *controller* keeps running
         /// through all three — it also owns the unread bookkeeping.
         ///
-        /// Note what this case does **not** buy. `CanopySettings.macroPadEnabled`
-        /// defaults to `true`, so a user who has never heard of the MacroPad
+        /// Note what this case does **not** buy. `CanopySettings.macroPadSource`
+        /// defaults to `.local`, so a user who has never heard of the MacroPad
         /// is in `.searching`, not here — the quiet outline glyph is the
         /// resting state for everyone without hardware, and only an explicit
         /// trip to Settings removes it. Hiding on `.disabled` alone does not
@@ -193,8 +193,8 @@ final class MacroPadStatus {
 
 /// Tiny link-state glyph at the start of the sidebar's version footer.
 ///
-/// It draws nothing only in `Link.disabled`. Since `macroPadEnabled` defaults
-/// to `true`, that is **not** the no-hardware case: a user with no pad sits in
+/// It draws nothing only in `Link.disabled`. Since `macroPadSource` defaults
+/// to `.local`, that is **not** the no-hardware case: a user with no pad sits in
 /// `.searching` and carries the quiet outline glyph until they turn the
 /// feature off in Settings. That is the deliberate trade — an indicator that
 /// vanished whenever no pad answered could not distinguish "unplugged" from
