@@ -3649,34 +3649,178 @@ enum SidebarLogicProbe {
         do {
             let idA = UUID()
             let idB = UUID()
-            var tracker = MacroPadUnreadTracker()
+            let threshold = MacroPadUnreadTracker.presenceThreshold
 
-            tracker.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            tracker.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            record("unread: finish off-focus becomes unread",
+            var tracker = MacroPadUnreadTracker()
+            tracker.update([.init(id: idA, isThinking: true)],
+                           lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            tracker.update([.init(id: idA, isThinking: false)],
+                           lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            record("unread: finish with no interaction becomes unread",
                    tracker.unread.contains(idA),
                    "unread=\(tracker.unread)")
 
-            var focused = MacroPadUnreadTracker()
-            focused.update([.init(id: idA, isThinking: true, paneIndex: 0)], focusedPaneIndex: 0, isAppActive: true)
-            focused.update([.init(id: idA, isThinking: false, paneIndex: 0)], focusedPaneIndex: 0, isAppActive: true)
-            record("unread: finish on-focus stays clean",
-                   !focused.unread.contains(idA),
-                   "unread=\(focused.unread)")
+            // Requirement: the last-interacted-with session, with the system
+            // having seen input recently, clears.
+            var recent = MacroPadUnreadTracker()
+            recent.update([.init(id: idA, isThinking: true)],
+                          lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            recent.update([.init(id: idA, isThinking: false)],
+                          lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            record("unread: last-interacted session with recent system input clears",
+                   !recent.unread.contains(idA),
+                   "unread=\(recent.unread)")
 
-            tracker.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 1, isAppActive: true)
-            record("unread: focusing the pane clears it",
-                   !tracker.unread.contains(idA),
-                   "unread=\(tracker.unread)")
+            // Finding 1, reproduced directly: the previous commit's rule
+            // (keystroke recency alone, 60 s) would clear this — 31 s is
+            // "typed recently" under that window. It shouldn't: 31 s of
+            // system-wide silence is well past the 30 s idle threshold, so
+            // "attributed to this session" is not enough on its own — the
+            // user may well have typed it and then walked away.
+            var idle = MacroPadUnreadTracker()
+            idle.update([.init(id: idA, isThinking: true)],
+                        lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: true)
+            idle.update([.init(id: idA, isThinking: false)],
+                        lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: true)
+            record("unread: last-interacted session but system idle past threshold still marks",
+                   idle.unread.contains(idA),
+                   "unread=\(idle.unread)")
+
+            // The bug this round fixes, reproduced directly: the pad has no
+            // HID interface (CLAUDE.md's "Serial (CDC), never HID"), so a
+            // MacroPad key press cannot register with `CGEventSource` at
+            // all. `MacroPadController.refresh` covers that by feeding the
+            // tracker `MacroPadController.effectivePresence(...)` rather than
+            // OS input alone — called here exactly as `refresh()` calls it,
+            // not re-derived as an inline `min`, so this test can actually
+            // fail if a future edit drops the pad term from the real
+            // combination (an inline `min(staleOSInput, recentPadPress)`
+            // would keep passing even then — it isn't calling the production
+            // code at all). OS input is stale (past threshold) but the pad
+            // was pressed moments ago, so the combined reading is recent and
+            // the session clears. Passing OS idle alone — what the previous
+            // round of this fix did — would fail this exactly like the "idle
+            // past threshold" case just above.
+            var padPresent = MacroPadUnreadTracker()
+            let staleOSInput = threshold + 5
+            let recentPadPress: TimeInterval = 0
+            let padPresentReading = MacroPadController.effectivePresence(
+                secondsSinceOSInput: staleOSInput, secondsSincePadPress: recentPadPress
+            )
+            padPresent.update([.init(id: idA, isThinking: true)],
+                              lastInteractedSessionId: idA,
+                              secondsSincePresence: padPresentReading, isAppActive: true)
+            padPresent.update([.init(id: idA, isThinking: false)],
+                              lastInteractedSessionId: idA,
+                              secondsSincePresence: padPresentReading, isAppActive: true)
+            record("unread: OS input stale but a recent pad press still clears",
+                   !padPresent.unread.contains(idA),
+                   "unread=\(padPresent.unread)")
+
+            // Both sources stale: still marked. A stale pad press must not
+            // by itself keep the session artificially "present".
+            var bothStale = MacroPadUnreadTracker()
+            let stalePadPress = threshold + 5
+            let bothStaleReading = MacroPadController.effectivePresence(
+                secondsSinceOSInput: staleOSInput, secondsSincePadPress: stalePadPress
+            )
+            bothStale.update([.init(id: idA, isThinking: true)],
+                             lastInteractedSessionId: idA,
+                             secondsSincePresence: bothStaleReading, isAppActive: true)
+            bothStale.update([.init(id: idA, isThinking: false)],
+                             lastInteractedSessionId: idA,
+                             secondsSincePresence: bothStaleReading, isAppActive: true)
+            record("unread: OS input stale and pad press also stale still marks",
+                   bothStale.unread.contains(idA),
+                   "unread=\(bothStale.unread)")
+
+            // Both sources recent: clears, same as either alone.
+            var bothRecent = MacroPadUnreadTracker()
+            let bothRecentReading = MacroPadController.effectivePresence(
+                secondsSinceOSInput: 0, secondsSincePadPress: 0
+            )
+            bothRecent.update([.init(id: idA, isThinking: true)],
+                              lastInteractedSessionId: idA,
+                              secondsSincePresence: bothRecentReading, isAppActive: true)
+            bothRecent.update([.init(id: idA, isThinking: false)],
+                              lastInteractedSessionId: idA,
+                              secondsSincePresence: bothRecentReading, isAppActive: true)
+            record("unread: both presence sources recent clears",
+                   !bothRecent.unread.contains(idA),
+                   "unread=\(bothRecent.unread)")
+
+            // `effectivePresence` itself, pinned directly: which argument
+            // wins is the property a caller could invert by accident (e.g.
+            // swapping the two parameters at a call site) and neither of the
+            // tests above would notice, since both use symmetric inputs in
+            // one case and only check the tracker's downstream behaviour in
+            // the others.
+            record("presence: effectivePresence takes the smaller (more recent) reading",
+                   MacroPadController.effectivePresence(secondsSinceOSInput: 40, secondsSincePadPress: 5) == 5
+                   && MacroPadController.effectivePresence(secondsSinceOSInput: 5, secondsSincePadPress: 40) == 5)
+
+            // A session that is NOT the last-interacted one stays marked no
+            // matter how recent system input was — presence without
+            // attribution to THIS session clears nothing.
+            var other = MacroPadUnreadTracker()
+            other.update([.init(id: idB, isThinking: true)],
+                         lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            other.update([.init(id: idB, isThinking: false)],
+                         lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            record("unread: a session that isn't last-interacted stays marked despite recent input",
+                   other.unread.contains(idB),
+                   "unread=\(other.unread)")
+
+            // lastInteractedSessionId == nil: nothing is ever cleared,
+            // however recent secondsSincePresence claims to be.
+            var neverInteracted = MacroPadUnreadTracker()
+            neverInteracted.update([.init(id: idA, isThinking: true)],
+                                   lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            neverInteracted.update([.init(id: idA, isThinking: false)],
+                                   lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            record("unread: nil lastInteractedSessionId never clears",
+                   neverInteracted.unread.contains(idA),
+                   "unread=\(neverInteracted.unread)")
+
+            // Threshold boundary, both sides: inclusive at exactly the
+            // threshold, stale just past it.
+            var boundaryClear = MacroPadUnreadTracker()
+            boundaryClear.update([.init(id: idA, isThinking: true)],
+                                 lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            boundaryClear.update([.init(id: idA, isThinking: false)],
+                                 lastInteractedSessionId: idA, secondsSincePresence: threshold, isAppActive: true)
+            record("unread: exactly at the idle threshold still clears (inclusive)",
+                   !boundaryClear.unread.contains(idA),
+                   "unread=\(boundaryClear.unread)")
+
+            var boundaryStale = MacroPadUnreadTracker()
+            boundaryStale.update([.init(id: idA, isThinking: true)],
+                                 lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            boundaryStale.update([.init(id: idA, isThinking: false)],
+                                 lastInteractedSessionId: idA, secondsSincePresence: threshold + 0.001, isAppActive: true)
+            record("unread: just past the idle threshold does not clear",
+                   boundaryStale.unread.contains(idA),
+                   "unread=\(boundaryStale.unread)")
+
+            // A last-interacted id whose session is no longer live (its pane
+            // closed) must not crash and must leave nothing stale: `unread`
+            // was already intersected against the live set, so removing an
+            // id that isn't a member is a harmless no-op.
+            var staleId = MacroPadUnreadTracker()
+            staleId.update([.init(id: idB, isThinking: true)],
+                           lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            staleId.update([.init(id: idB, isThinking: false)],
+                           lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            record("unread: a last-interacted id with no live session doesn't crash or leave anything stale",
+                   staleId.unread.contains(idB),
+                   "unread=\(staleId.unread)")
 
             var unmapped = MacroPadUnreadTracker()
-            unmapped.update([.init(id: idB, isThinking: true, paneIndex: nil)], focusedPaneIndex: 0, isAppActive: true)
-            unmapped.update([.init(id: idB, isThinking: false, paneIndex: nil)], focusedPaneIndex: 0, isAppActive: true)
-            record("unread: nil paneIndex finish becomes unread",
-                   unmapped.unread.contains(idB),
-                   "unread=\(unmapped.unread)")
-
-            unmapped.update([], focusedPaneIndex: 0, isAppActive: true)
+            unmapped.update([.init(id: idB, isThinking: true)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            unmapped.update([.init(id: idB, isThinking: false)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            unmapped.update([], lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             record("unread: disappeared id is pruned",
                    !unmapped.unread.contains(idB),
                    "unread=\(unmapped.unread)")
@@ -3686,61 +3830,120 @@ enum SidebarLogicProbe {
             // so it must not be marked. Covers the `wasThinking` pruning that
             // the test above leaves untouched.
             var relaunch = MacroPadUnreadTracker()
-            relaunch.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            relaunch.update([], focusedPaneIndex: 0, isAppActive: true)
-            relaunch.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            relaunch.update([.init(id: idA, isThinking: true)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            relaunch.update([], lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            relaunch.update([.init(id: idA, isThinking: false)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             record("unread: close-and-reopen does not fake a finish",
                    !relaunch.unread.contains(idA),
                    "unread=\(relaunch.unread)")
 
-            // Clearing must be per-session, not "wipe the set when the focused
-            // pane's session is present".
+            // Clearing must be per-session, not "wipe the set when the
+            // last-interacted session is present".
             var pair = MacroPadUnreadTracker()
-            pair.update([.init(id: idA, isThinking: true, paneIndex: 0),
-                         .init(id: idB, isThinking: true, paneIndex: 1)], focusedPaneIndex: 2, isAppActive: true)
-            pair.update([.init(id: idA, isThinking: false, paneIndex: 0),
-                         .init(id: idB, isThinking: false, paneIndex: 1)], focusedPaneIndex: 2, isAppActive: true)
+            pair.update([.init(id: idA, isThinking: true),
+                         .init(id: idB, isThinking: true)],
+                        lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            pair.update([.init(id: idA, isThinking: false),
+                         .init(id: idB, isThinking: false)],
+                        lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             let bothMarked = pair.unread.contains(idA) && pair.unread.contains(idB)
-            pair.update([.init(id: idA, isThinking: false, paneIndex: 0),
-                         .init(id: idB, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            record("unread: focusing one pane clears only that session",
+            pair.update([.init(id: idA, isThinking: false),
+                         .init(id: idB, isThinking: false)],
+                        lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            record("unread: interacting with one session clears only that session",
                    bothMarked && !pair.unread.contains(idA) && pair.unread.contains(idB),
                    "bothMarked=\(bothMarked) unread=\(pair.unread)")
 
             // `refresh()` runs many times per second; a mark that survived
             // only one pass would show green for a single frame.
             var repeated = MacroPadUnreadTracker()
-            repeated.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            // The app being in the background overrides pane focus: this is
-            // the case the pad exists for, and it produced no green at all.
-            var away = MacroPadUnreadTracker()
-            away.update([.init(id: idA, isThinking: true, paneIndex: 0)],
-                        focusedPaneIndex: 0, isAppActive: false)
-            away.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                        focusedPaneIndex: 0, isAppActive: false)
-            record("unread: finishing in the focused pane while away still marks",
-                   away.unread.contains(idA), "unread=\(away.unread)")
-            away.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                        focusedPaneIndex: 0, isAppActive: true)
-            record("unread: coming back clears the focused pane",
-                   !away.unread.contains(idA), "unread=\(away.unread)")
-
-            // Returning must not clear a pane the user did not come back to.
-            var elsewhere = MacroPadUnreadTracker()
-            elsewhere.update([.init(id: idB, isThinking: true, paneIndex: 1)],
-                             focusedPaneIndex: 0, isAppActive: false)
-            elsewhere.update([.init(id: idB, isThinking: false, paneIndex: 1)],
-                             focusedPaneIndex: 0, isAppActive: false)
-            elsewhere.update([.init(id: idB, isThinking: false, paneIndex: 1)],
-                             focusedPaneIndex: 0, isAppActive: true)
-            record("unread: coming back leaves other panes marked",
-                   elsewhere.unread.contains(idB), "unread=\(elsewhere.unread)")
-
+            repeated.update([.init(id: idA, isThinking: true)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            repeated.update([.init(id: idA, isThinking: false)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
+            repeated.update([.init(id: idA, isThinking: false)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0, isAppActive: true)
             record("unread: mark survives a repeated identical refresh",
                    repeated.unread.contains(idA),
                    "unread=\(repeated.unread)")
+
+            // The regression this fix closes: "presence subsumes app
+            // activation, since input only reaches the frontmost app" is
+            // false for `secondsSincePresence`, which is system-wide OS
+            // idle time — it drops to near-zero from typing into ANY app,
+            // Canopy included or not. Last-interacted session, presence
+            // recent, but Canopy backgrounded must NOT clear — without the
+            // `isAppActive` condition this is exactly the case that cleared
+            // wrongly (a session finishes while the user works in another
+            // app, having last touched this session in Canopy moments
+            // earlier).
+            var backgroundedRecent = MacroPadUnreadTracker()
+            backgroundedRecent.update([.init(id: idA, isThinking: true)],
+                                      lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: false)
+            backgroundedRecent.update([.init(id: idA, isThinking: false)],
+                                      lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: false)
+            record("unread: last-interacted + recent presence but Canopy backgrounded still marks (the regression)",
+                   backgroundedRecent.unread.contains(idA),
+                   "unread=\(backgroundedRecent.unread)")
+
+            // Same inputs, Canopy frontmost: clears. Isolates `isAppActive`
+            // as the only thing distinguishing this from the case above.
+            var frontmostRecent = MacroPadUnreadTracker()
+            frontmostRecent.update([.init(id: idA, isThinking: true)],
+                                   lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            frontmostRecent.update([.init(id: idA, isThinking: false)],
+                                   lastInteractedSessionId: idA, secondsSincePresence: 0, isAppActive: true)
+            record("unread: last-interacted + recent presence + Canopy frontmost clears",
+                   !frontmostRecent.unread.contains(idA),
+                   "unread=\(frontmostRecent.unread)")
+
+            // Frontmost alone is not enough either — the ORIGINAL bug this
+            // whole file exists to fix: Canopy frontmost, a pane left
+            // focused, but the user walked away (presence stale) must still
+            // mark. `isAppActive` is necessary, not sufficient.
+            var frontmostStale = MacroPadUnreadTracker()
+            frontmostStale.update([.init(id: idA, isThinking: true)],
+                                  lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: true)
+            frontmostStale.update([.init(id: idA, isThinking: false)],
+                                  lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: true)
+            record("unread: last-interacted + Canopy frontmost but presence stale still marks",
+                   frontmostStale.unread.contains(idA),
+                   "unread=\(frontmostStale.unread)")
+
+            // Backgrounded and stale: still marks, same as every other
+            // incomplete combination — nothing here is a coincidence of two
+            // conditions happening to agree.
+            var backgroundedStale = MacroPadUnreadTracker()
+            backgroundedStale.update([.init(id: idA, isThinking: true)],
+                                     lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: false)
+            backgroundedStale.update([.init(id: idA, isThinking: false)],
+                                     lastInteractedSessionId: idA, secondsSincePresence: threshold + 1, isAppActive: false)
+            record("unread: backgrounded and presence stale still marks",
+                   backgroundedStale.unread.contains(idA),
+                   "unread=\(backgroundedStale.unread)")
+        }
+
+        // --- MacroPadController.sessionId(atPaneIndex:in:) — the pane→session
+        // lookup `refresh()`'s focus-change hook and `noteInteraction` both
+        // resolve through, written once so they cannot drift apart.
+        do {
+            let sessionId = UUID()
+            let sessionPane = PaneSlot(content: .session(sessionId), preferredWidth: 800)
+            let launcherPane = PaneSlot(content: .launcher, preferredWidth: 800)
+            let panes = [sessionPane, launcherPane]
+
+            record("sessionId(atPaneIndex:): resolves a session pane",
+                   MacroPadController.sessionId(atPaneIndex: 0, in: panes) == sessionId)
+            record("sessionId(atPaneIndex:): a launcher pane resolves to nil",
+                   MacroPadController.sessionId(atPaneIndex: 1, in: panes) == nil)
+            record("sessionId(atPaneIndex:): an out-of-range index resolves to nil",
+                   MacroPadController.sessionId(atPaneIndex: 2, in: panes) == nil)
+            record("sessionId(atPaneIndex:): a negative index resolves to nil",
+                   MacroPadController.sessionId(atPaneIndex: -1, in: panes) == nil)
+            record("sessionId(atPaneIndex:): an empty pane list resolves to nil",
+                   MacroPadController.sessionId(atPaneIndex: 0, in: []) == nil)
         }
 
         // --- SessionActivity: the SSH rung, and unread's place at the bottom

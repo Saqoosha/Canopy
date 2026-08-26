@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 import Observation
 import os.log
@@ -14,25 +15,101 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MacroPad")
 /// answers a question the screen never had to: *did anything finish while I
 /// wasn't looking?* With the pad mapped to panes, every mapped session is on
 /// screen, so "not visible" can't be the trigger the way it could if the pad
-/// mapped to sidebar rows. The trigger is the focused pane instead.
+/// mapped to sidebar rows. Clearing it answers three independent
+/// questions — see `update`'s doc for why none of the three can be derived
+/// from either of the others.
 struct MacroPadUnreadTracker {
     struct Snapshot {
         let id: UUID
         let isThinking: Bool
-        /// Which pane hosts this session, or nil when it isn't mapped to one.
-        let paneIndex: Int?
     }
+
+    /// How long ago the most recent presence signal — OS-level input on any
+    /// device, OR a MacroPad key press, whichever is more recent — may have
+    /// happened for the user to still count as present. This is deliberately
+    /// not scoped to a pane or to typing: it answers "is anyone at the Mac at
+    /// all", which a keystroke in one pane cannot answer about the other 59
+    /// seconds after it, and OS input alone cannot answer for a press on a
+    /// device with no HID interface. Short enough that a pane left focused
+    /// overnight does not go on clearing itself; long enough to survive an
+    /// ordinary reading pause with nothing touched, which is not the same as
+    /// having left.
+    static let presenceThreshold: TimeInterval = 30
 
     private(set) var unread: Set<UUID> = []
     private var wasThinking: [UUID: Bool] = [:]
 
-    /// `isAppActive` is not a refinement of `focusedPaneIndex` — it overrides
-    /// it. The question unread answers is "did anything finish while I wasn't
-    /// looking", and a focused pane in a background app is not being looked at.
-    /// Without this, the one case the pad exists for — you walked away, a turn
-    /// finished — produced no green at all, because the pane you left focused
-    /// is the pane the turn finished in.
-    mutating func update(_ sessions: [Snapshot], focusedPaneIndex: Int, isAppActive: Bool) {
+    /// Clearing answers three independent questions. Two prior rules each
+    /// answered only one of them; this branch's own first attempt answered
+    /// two of the three and, on a false argument that the third was implied
+    /// by the second, dropped it — which is the regression this doc and
+    /// `update`'s signature now both correct.
+    ///
+    /// | Question | Signal |
+    /// | --- | --- |
+    /// | *Which* session was the user with? | interaction — typed into its pane, clicked it, focused it, or pressed its MacroPad key |
+    /// | Is a human **at the machine** at all? | presence — the more recent of OS-level input (any device, any app) and a MacroPad key press |
+    /// | Is that human **looking at Canopy**? | app activation |
+    ///
+    /// None of the three is derivable from either of the others, and all
+    /// four combinations of the last two behave differently:
+    ///
+    /// - Canopy frontmost, presence recent → using Canopy → clear
+    /// - Canopy frontmost, presence stale → walked away with Canopy still
+    ///   up → do NOT clear (the original bug — pane focus alone, or
+    ///   `isAppActive` alone, both read this as "here")
+    /// - Canopy backgrounded, presence recent → working in another app →
+    ///   do NOT clear (this branch's regression: `secondsSincePresence` is
+    ///   `CGEventSource`'s SYSTEM-WIDE idle time, reset by input to ANY
+    ///   app, so typing in a different app kept it "recent" and cleared a
+    ///   mark on a session nobody was looking at)
+    /// - Canopy backgrounded, presence stale → gone → do NOT clear
+    ///
+    /// A prior version answered only the first — "typed into this pane
+    /// within the last 60 s" — on the theory that a keystroke can only reach
+    /// the frontmost app, so leaving lets the recency go stale on its own.
+    /// It doesn't: the common way to walk away is type a message, hit enter,
+    /// and get up, and a turn finishing 40 s later still read as "typed
+    /// recently" — the bug it was meant to fix, just bounded to a minute
+    /// instead of unbounded.
+    ///
+    /// Splitting attribution from presence fixed that, and this branch then
+    /// argued "presence subsumes app activation, since input only reaches
+    /// the frontmost app" and deleted `isAppActive`. That is true of a
+    /// keystroke delivered to one of Canopy's own windows — the mechanism
+    /// behind `lastInteractedSessionId` — but false of `secondsSincePresence`
+    /// itself, which measures input to the WHOLE SYSTEM, not to Canopy: type
+    /// into session A, switch to another app, keep typing there, and
+    /// presence never goes stale while A's turn finishes and clears itself —
+    /// exactly the case the LED exists to report. Presence answers "is a
+    /// human at the machine", which is necessary but not sufficient for "is
+    /// that human looking at Canopy" — the same shape of gap that makes
+    /// attribution alone insufficient for presence. Each of the three is
+    /// measured from its own, disjoint input (a keystroke's destination
+    /// window, `CGEventSource` plus the pad's own press timestamp, and
+    /// `NSApplication`'s activation notifications), so the only sound
+    /// combination is exactly three ANDed conditions, none standing in for
+    /// another.
+    ///
+    /// `isAppActive` is not read live here — pure value types don't ask
+    /// AppKit anything. `MacroPadController` mirrors `NSApp.isActive` into a
+    /// stored property via `didBecomeActive` / `didResignActive` observers
+    /// and passes the snapshot in, because AppKit's activation is a
+    /// notification, not a value `refresh()`'s tracked closure could read to
+    /// become a dependency of it.
+    ///
+    /// `lastInteractedSessionId` is stamped by a `.keyDown` monitor on the
+    /// currently focused pane's session, by `MacroPadController.refresh` on
+    /// any change to which session occupies the focused pane (covers focus
+    /// changes from any source — click, Cmd+1..9, Cmd+Opt+arrow,
+    /// Cmd+Shift+[/] cycling), and by a MacroPad key press. It is keyed on
+    /// the session's `UUID`, not a pane index, so a pane closing and a
+    /// different session later landing at the same index cannot inherit a
+    /// stale attribution.
+    mutating func update(_ sessions: [Snapshot],
+                         lastInteractedSessionId: UUID?,
+                         secondsSincePresence: TimeInterval,
+                         isAppActive: Bool) {
         let live = Set(sessions.map(\.id))
         unread.formIntersection(live)
         wasThinking = wasThinking.filter { live.contains($0.key) }
@@ -44,18 +121,19 @@ struct MacroPadUnreadTracker {
         }
 
         // Clearing runs after marking, deliberately: a turn that ends in the
-        // pane the user is already looking at must never light up green. The
-        // two-step ordering is what makes "finished while focused" and
-        // "finished elsewhere, then focused" collapse to the same clean state
-        // without a special case for either.
+        // session the user is actively present with must never light up
+        // green. The two-step ordering is what makes "finished while there"
+        // and "finished elsewhere, then arrived" collapse to the same clean
+        // state without a special case for either.
         //
-        // It is skipped entirely while the app is in the background, which is
-        // also what makes returning to Canopy clear the focused pane: the next
-        // update after activation runs this loop again.
-        guard isAppActive else { return }
-        for session in sessions where session.paneIndex == focusedPaneIndex {
-            unread.remove(session.id)
-        }
+        // `unread.remove` on an id that isn't a member (a stale
+        // `lastInteractedSessionId` whose session already closed) is a
+        // harmless no-op — nothing to look up, nothing left stale.
+        guard let lastInteractedSessionId,
+              secondsSincePresence <= Self.presenceThreshold,
+              isAppActive
+        else { return }
+        unread.remove(lastInteractedSessionId)
     }
 
     mutating func reset() {
@@ -370,9 +448,78 @@ final class MacroPadController {
     private var watchdogTimer: Timer?
     private var helloIsHostInitiated = false
     private var lastSource: MacroPadSource?
+    /// The session the user last interacted with — answers only *which*
+    /// session, never *whether they are still there* (that's
+    /// `secondsSincePresence`, computed fresh in `refresh()` from
+    /// `CGEventSource` and `lastPadPressAt`, not stored). Stamped by
+    /// AppDelegate's `.keyDown` monitor (any keystroke into a Canopy window
+    /// counts, regardless of which key — a presence-in-that-pane signal, not
+    /// a content one), by `refresh()` itself when the session occupying the
+    /// focused pane changes AND presence is currently satisfied (see
+    /// `lastObservedFocusedSessionId` — attribution only, and the presence
+    /// gate this needs, are both argued at that read site), and by
+    /// `focusPane` (pressing a MacroPad key for a pane that is already
+    /// focused changes nothing `refresh()` would notice, so it needs its own
+    /// stamp — the same reason the `.keyDown` monitor exists for typing into
+    /// an already-focused pane). `refresh()` feeds this into
+    /// `MacroPadUnreadTracker.update` on every pass; nothing else reads it.
+    private var lastInteractedSessionId: UUID?
+    /// The session `refresh()` last saw occupying the focused pane. Compared
+    /// against on every pass so a CHANGE — not the raw value — is what
+    /// stamps `lastInteractedSessionId`: sitting on the same pane for hours
+    /// must not read as a fresh interaction, but a sidebar click, Cmd+1..9,
+    /// Cmd+Opt+arrow, or Cmd+Shift+[/] cycling the session shown in the
+    /// focused pane all must. `nil` also covers "no session at the focused
+    /// pane yet", so the very first real session landing there does count as
+    /// a change — the boot-time no-op is harmless because nothing is unread
+    /// yet at that point either.
+    ///
+    /// A CHANGE alone is not sufficient, though — only a necessary condition
+    /// for stamping. A pane can become focused with nobody at the desk: a
+    /// crashed or `.reconnectFailed` session's pane closes autonomously
+    /// (`SessionStore.removePanesForClosedSession`), collapses the strip, and
+    /// hands focus to whatever pane is left, which may host an unread
+    /// session. Stamping attribution unconditionally on that event forged
+    /// exactly the attribution this file exists to get right: presence,
+    /// satisfied later by an ordinary touch anywhere on the Mac, would then
+    /// clear a mark nobody ever looked at. `refresh()` therefore only stamps
+    /// when `secondsSincePresence` is *already* within
+    /// `MacroPadUnreadTracker.presenceThreshold` at the moment the change is
+    /// observed — a real click or keypress satisfies that trivially (it is
+    /// itself what invalidated the tracked closure or immediately preceded
+    /// it), while a pane collapsing with nobody around does not.
+    private var lastObservedFocusedSessionId: UUID?
+    /// The last time a physical key on the pad was pressed — a presence
+    /// signal, stamped in `handleKey` at the moment of the press itself. Only
+    /// the sleep-wake press is exempt from calling `focusPane` (swallowed in
+    /// `handleKey`'s sleep branch, see below); every other accepted press —
+    /// chord presses included — DOES reach `focusPane`, since `handleKey`
+    /// never gates it on whether a chord completed. `lastPadPressAt` still
+    /// has to be stamped independently of that: `focusPane` only records
+    /// attribution (via `noteInteraction`), never presence, so nothing else
+    /// would notice a human touched the pad at all — least of all the
+    /// sleep-wake press, which never reaches `focusPane` to record anything
+    /// itself. This exists because the pad's firmware disables its USB HID
+    /// interface on purpose (CLAUDE.md's "Serial (CDC), never HID"), so
+    /// `CGEventSource` cannot see a press arriving over the pad's serial link
+    /// at all. `refresh()` folds this and `CGEventSource`'s own idle reading
+    /// together — whichever is more recent wins — into
+    /// `secondsSincePresence`; nothing else reads it.
+    ///
+    /// Backed by `DispatchTime` (a monotonic uptime tick), not `Date`, so
+    /// that `min`ing it against `CGEventSource`'s own monotonic reading in
+    /// `refresh()` never mixes a wall clock with a monotonic one — an NTP
+    /// step or a sleep/wake skew on a `Date`-based timestamp could otherwise
+    /// make this term go negative and trivially satisfy presence.
+    private var lastPadPressAt: DispatchTime?
     /// Mirrors `NSApp.isActive`. Kept as stored state rather than read live
     /// because `refresh()` has to re-run when it changes, and AppKit's
-    /// activation is a notification, not an observable property.
+    /// activation is a notification, not an observable property `refresh()`'s
+    /// tracked closure could depend on directly. Answers the third of
+    /// `MacroPadUnreadTracker.update`'s three clearing questions — "is the
+    /// present human looking at Canopy" — which neither attribution nor
+    /// system-wide presence can answer (see that doc for the measured case
+    /// where presence alone reads a backgrounded Canopy as "here").
     private var isAppActive = NSApp?.isActive ?? true
     private var activationObservers: [NSObjectProtocol] = []
 
@@ -396,6 +543,14 @@ final class MacroPadController {
         track()
     }
 
+    /// The activation half of `MacroPadUnreadTracker.update`'s three
+    /// conditions. Also what makes returning to Canopy via Cmd+Tab (mouse
+    /// movement alone deliberately does not — see the type's doc, clearing
+    /// stays a deliberate act on the pane) clear a mark that was already
+    /// eligible: activation mutates no `SessionStore` or `CanopySettings`
+    /// property `refresh()`'s tracked closure reads, so without an explicit
+    /// `refresh()` here nothing would notice the return until some unrelated
+    /// change woke the tracked closure on its own.
     private func observeActivation() {
         let center = NotificationCenter.default
         for (name, active) in [(NSApplication.didBecomeActiveNotification, true),
@@ -461,7 +616,6 @@ final class MacroPadController {
         let source = settings.macroPadSource
         let brightness = settings.macroPadBrightness
         let panes = store.panes
-        let focusedPaneIndex = store.focusedPaneIndex
         let openSessions = store.openSessions
 
         if lastSource != source {
@@ -474,20 +628,78 @@ final class MacroPadController {
         }
         device.setSource(source)
 
-        var paneIndexBySession: [UUID: Int] = [:]
-        for (index, pane) in panes.enumerated() {
-            if case .session(let id) = pane.content { paneIndexBySession[id] = index }
+        // Presence has two sources, and the tracker gets whichever is more
+        // recent. System-wide idle time, any input device — deliberately not
+        // scoped to a pane or to typing. Exposes only elapsed time, not
+        // event content, so it needs no TCC permission (verified: no prompt
+        // on a sandboxless run, values increase monotonically while idle).
+        // Not probe-reachable — it is a live read of the current process's
+        // event stream, which no fixture can substitute for; see
+        // `MacroPadUnreadTracker`'s probe coverage for what IS pinned here
+        // (the two-source combination itself, via `effectivePresence`).
+        let secondsSinceOSInput = CGEventSource.secondsSinceLastEventType(
+            .combinedSessionState, eventType: CGEventType(rawValue: ~0)!
+        )
+        if secondsSinceOSInput < 0 {
+            // Never observed, and never clamped here — clamping would hide
+            // exactly the anomaly this line exists to surface. A negative
+            // reading would trivially satisfy presence below, reinstating
+            // the bug this file fixes with nothing left to grep for.
+            logger.notice("MacroPad presence: CGEventSource reported a negative idle time (\(secondsSinceOSInput, privacy: .public))")
+        }
+        // The pad's firmware disables its USB HID interface on purpose
+        // (CLAUDE.md's "Serial (CDC), never HID") so `CGEventSource` cannot
+        // see a key press — without this second source, walking up and
+        // pressing the lit key would attribute correctly (`handleKey` stamps
+        // `lastPadPressAt`) but never satisfy presence, and the LED would
+        // stay lit under the user's own hand.
+        let secondsSincePadPress: TimeInterval = lastPadPressAt.map {
+            Double(DispatchTime.now().uptimeNanoseconds - $0.uptimeNanoseconds) / 1_000_000_000
+        } ?? .infinity
+        let secondsSincePresence = Self.effectivePresence(
+            secondsSinceOSInput: secondsSinceOSInput, secondsSincePadPress: secondsSincePadPress
+        )
+
+        // Reading `store.focusedPaneIndex` here is what makes it a dependency
+        // of this tracked closure — a later write to it (a sidebar click, a
+        // pane click, Cmd+1..9, Cmd+Opt+arrow, or a MacroPad key via
+        // `focusPane`) invalidates the tracking and schedules the next
+        // `refresh()` through `track()`'s `onChange`. Cmd+Shift+[/] cycling
+        // does NOT write `focusedPaneIndex` — it swaps `panes[i].content`
+        // through `openInFocusedPane`, so that dependency comes from reading
+        // `panes` a few lines up instead. Comparing the SESSION at the
+        // focused index (not the index itself) against what we saw last time
+        // is what turns "focus moved" into "an interaction happened": both
+        // mechanisms can change which session sits behind an unmoving
+        // `focusedPaneIndex`, so an index-only comparison would miss either.
+        //
+        // This hook is attribution-only in what it's FOR — it never reads
+        // presence to decide THAT something changed. But a pane can become
+        // focused with no human involved at all (closing the focused pane's
+        // session collapses the strip and moves focus onto whatever pane is
+        // left, autonomously), so the stamp below is additionally gated on
+        // `secondsSincePresence` already being within threshold at this
+        // instant — see `lastObservedFocusedSessionId`'s doc for the failure
+        // this closes. A real click or keypress satisfies that gate for
+        // free, since it is what invalidated this tracked closure (or
+        // immediately preceded it via `noteInteraction`'s explicit refresh).
+        // Not probe-reachable — it needs a live `SessionStore` and
+        // `Observation` tracking, neither of which the DEBUG probe drives.
+        let focusedPaneIndex = store.focusedPaneIndex
+        let focusedSessionId = Self.sessionId(atPaneIndex: focusedPaneIndex, in: panes)
+        if focusedSessionId != lastObservedFocusedSessionId {
+            lastObservedFocusedSessionId = focusedSessionId
+            if let focusedSessionId, secondsSincePresence <= MacroPadUnreadTracker.presenceThreshold {
+                lastInteractedSessionId = focusedSessionId
+            }
         }
 
         tracker.update(
             openSessions.map {
-                MacroPadUnreadTracker.Snapshot(
-                    id: $0.id,
-                    isThinking: $0.isThinking,
-                    paneIndex: paneIndexBySession[$0.id]
-                )
+                MacroPadUnreadTracker.Snapshot(id: $0.id, isThinking: $0.isThinking)
             },
-            focusedPaneIndex: focusedPaneIndex,
+            lastInteractedSessionId: lastInteractedSessionId,
+            secondsSincePresence: secondsSincePresence,
             isAppActive: isAppActive
         )
         // Publish so the sidebar's dot and the pad's LED read the same set.
@@ -598,6 +810,33 @@ final class MacroPadController {
     static func acceptsKey(index: Int, keyCount: Int?) -> Bool {
         guard let keyCount, keyCount > 0 else { return true }
         return index >= 0 && index < keyCount
+    }
+
+    /// Combines the two presence sources — OS-level idle time and time since
+    /// the pad's own last key press — into the one reading
+    /// `MacroPadUnreadTracker.update` gates clearing on. Pure and static so
+    /// the probe can pin the actual DESIGN DECISION being tested: that
+    /// presence has two sources and a pad press is one of them. Before this
+    /// existed, the probe's "pad present" tests computed `min(...)` inline
+    /// and handed the scalar straight to `update`, which could not fail if a
+    /// future edit dropped the pad term from the real combination in
+    /// `refresh()` — the tests exercised `min` the operation, not this
+    /// function.
+    static func effectivePresence(
+        secondsSinceOSInput: TimeInterval, secondsSincePadPress: TimeInterval
+    ) -> TimeInterval {
+        min(secondsSinceOSInput, secondsSincePadPress)
+    }
+
+    /// Resolves the session occupying a pane index, or nil for an
+    /// out-of-range index or a pane with no session (`.launcher`). Written
+    /// once so the two call sites that used to hand-roll this bounds check —
+    /// `refresh()`'s focus-change hook and `noteInteraction` — cannot drift
+    /// out of step with each other, the same reason `PaneLayoutMetrics` is
+    /// one shared function rather than one per caller.
+    static func sessionId(atPaneIndex index: Int, in panes: [PaneSlot]) -> UUID? {
+        guard panes.indices.contains(index), case .session(let id) = panes[index].content else { return nil }
+        return id
     }
 
     /// Sleep's override of the brightness setting, as a pure function so the
@@ -911,6 +1150,18 @@ final class MacroPadController {
             logger.notice("MacroPad ignoring key \(index, privacy: .public): the pad reported \(self.keyCount ?? -1, privacy: .public) keys")
             return
         }
+        // A physical press is proof someone is at the desk regardless of
+        // where it ends up attributed — the sleep-wake press below is
+        // swallowed before it ever reaches `focusPane`, but every other
+        // accepted press (chord presses included) DOES reach it, since
+        // `handleKey` never gates `focusPane` on whether a chord completed.
+        // Stamped here, not only alongside attribution in `focusPane`,
+        // because `focusPane` only ever records attribution, never
+        // presence — so the wake press, which never reaches `focusPane` at
+        // all, would otherwise leave no trace that anyone was there. See
+        // `lastPadPressAt`'s doc for why this exists at all (the pad has no
+        // HID interface for `CGEventSource` to see).
+        if pressed { lastPadPressAt = .now() }
         guard !isAsleep else {
             // Any press wakes, and that press is swallowed: the first touch
             // after a night asleep is the user reaching for the light switch,
@@ -1057,8 +1308,56 @@ final class MacroPadController {
         chord.reset()
     }
 
+    /// Records "the user is here, working in this pane" and forces an
+    /// immediate `refresh()` so the change can clear unread in the same pass
+    /// that stamped it — Observation would otherwise wait for some unrelated
+    /// `SessionStore`/`CanopySettings` mutation to re-run the tracked
+    /// closure, and neither a keystroke nor a MacroPad key press mutates
+    /// anything `refresh()` reads on their own.
+    ///
+    /// Resolves the pane to its session at call time and stores only the
+    /// `UUID` (`MacroPadUnreadTracker` is keyed on it, not on a pane index —
+    /// see its doc for why a stored index goes stale). A `paneIndex` outside
+    /// `store.panes` or a launcher pane with no session is a silent no-op.
+    ///
+    /// Called from two places that `refresh()`'s own focus-change tracking
+    /// (see `lastObservedFocusedSessionId`) cannot cover, because in both the
+    /// session at the focused pane does not change: AppDelegate's `.keyDown`
+    /// monitor, for typing into a pane that is already focused, and
+    /// `focusPane`, for a MacroPad key press on a pane that is already
+    /// focused. Every focus change that DOES move which session sits at
+    /// `store.focusedPaneIndex` — sidebar click, plain pane click, Cmd+1..9,
+    /// Cmd+Opt+arrow, Cmd+Shift+[/] cycling, and a MacroPad key press that
+    /// changes focus — is picked up by `refresh()` itself and needs no call
+    /// here.
+    func noteInteraction(paneIndex: Int) {
+        guard let id = Self.sessionId(atPaneIndex: paneIndex, in: store.panes) else { return }
+        let alreadyStamped = lastInteractedSessionId == id
+        lastInteractedSessionId = id
+        // `noteInteraction` fires on every keystroke — many times a second
+        // while typing — and an unconditional `refresh()` re-reads settings,
+        // snapshots panes/sessions, runs the tracker, diffs LED commands, and
+        // publishes status, all synchronously on the main actor. Skip it when
+        // it provably cannot change anything: the stamp was already this
+        // session, and nothing is currently marked unread for a clear to
+        // have any visible effect. Finish detection is unaffected by
+        // skipping — a session's `isThinking` flip is itself an `Observation`
+        // dependency of `refresh()`'s tracked closure, so it schedules its
+        // own `refresh()` through `track()`'s `onChange` independent of this
+        // call.
+        guard !alreadyStamped || !store.unreadSessionIds.isEmpty else { return }
+        refresh()
+    }
+
     private func focusPane(_ index: Int) {
         guard store.panes.indices.contains(index) else { return }
+        // Covers the same-pane repress `refresh()`'s focus-change tracking
+        // cannot see (no session change to notice) — see `noteInteraction`'s
+        // doc. For the ordinary cross-pane press this duplicates what
+        // `setFocusedPaneIndex` below will trigger anyway; the duplication is
+        // harmless (idempotent) and buys an immediate `refresh()` instead of
+        // waiting one Observation hop for the LED to catch up.
+        noteInteraction(paneIndex: index)
         // "Press it and you're there" means the app comes forward too — the
         // pad's reason to exist is being reachable while looking at something
         // else, so quietly moving focus behind another app's window would

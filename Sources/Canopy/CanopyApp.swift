@@ -410,6 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// keyDown here keeps the title bar still.
     private var cmdWMonitor: Any?
     private var paneFocusClickMonitor: Any?
+    private var keyTypingMonitor: Any?
 
     // NOTE: there is deliberately NO app-wide didResizeNotification observer
     // feeding pane state. An earlier iteration distributed manual window-
@@ -438,6 +439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         installCmdWMonitor()
         installPaneFocusClickMonitor()
+        installKeyTypingMonitor()
         RecapCoordinator.shared.start()
 
         // SwiftUI may make the first window main before our observer is
@@ -612,6 +614,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Local `.keyDown` monitor that stamps interaction — "the user is here,
+    /// working in this pane" — onto the MacroPad controller. This feeds only
+    /// the attribution question of `MacroPadUnreadTracker`'s three-question
+    /// clearing rule (see its doc): *which* session the user is with. It says
+    /// nothing about the other two — whether a human is at the machine at
+    /// all (presence, computed separately in `MacroPadController.refresh()`
+    /// from `CGEventSource` and the pad's own press timestamp) or whether
+    /// that human is looking at Canopy (app activation, mirrored from
+    /// `NSApp.isActive` by `MacroPadController.observeActivation()`). It
+    /// cannot stand in for activation either, despite being a local monitor
+    /// that (as a consequence of AppKit local-monitor delivery) only ever
+    /// fires while Canopy is frontmost: it fires on a keystroke, not on the
+    /// transition of becoming frontmost, so returning to Canopy by any means
+    /// that isn't itself a keystroke into a pane — Cmd+Tab and then just
+    /// looking, a click on the Dock icon — produces no event here at all.
+    /// That gap is exactly what `observeActivation()`'s notification
+    /// observers exist to close.
+    ///
+    /// Does not care about the key's content — any keystroke into a Canopy
+    /// window is the signal — but it does not literally see every key.
+    /// `cmdWMonitor` is installed FIRST and returns `nil` (consuming the
+    /// event) for a plain Cmd+W with a key window present; a local monitor
+    /// that returns `nil` measurably stops every later-registered local
+    /// monitor for the same event type from seeing that event at all —
+    /// verified with a standalone two-monitor harness dispatched through
+    /// `NSApp.sendEvent(_:)` (not tested against the real app, and
+    /// `sendEvent(_:)` is only one of the paths an event can take to a local
+    /// monitor). So a plain Cmd+W is the one keystroke this monitor never
+    /// observes — narrow, since closing a session isn't "still typing in
+    /// it", but worth stating precisely rather than the unconditional claim
+    /// this doc used to make. Unlike `cmdWMonitor`, this monitor only
+    /// observes: it MUST return the event unmodified, or every other keyDown
+    /// consumer in the app (menu shortcuts, the webview's own input) stops
+    /// receiving keys. Not probe-reachable — it needs a live `NSApplication`
+    /// event loop, which the DEBUG probe does not run.
+    private func installKeyTypingMonitor() {
+        guard keyTypingMonitor == nil else { return }
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let window = event.window, isCanopyWindow(window),
+                  let store = SessionStore.shared, !store.panes.isEmpty
+            else { return event }
+            self?.macroPad?.noteInteraction(paneIndex: store.focusedPaneIndex)
+            return event
+        }
+        // `addLocalMonitorForEvents` returns nil on sandboxing/mask
+        // rejection (see the NSEvent monitor coverage matrix in CLAUDE.md) —
+        // a silent nil here would mean typing quietly stops counting as
+        // MacroPad presence forever, since `guard keyTypingMonitor == nil`
+        // above never retries once this method has run once.
+        guard let monitor else {
+            logger.warning("installKeyTypingMonitor: addLocalMonitorForEvents returned nil — MacroPad presence will never see a keystroke")
+            return
+        }
+        keyTypingMonitor = monitor
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -654,6 +712,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let paneFocusClickMonitor {
             NSEvent.removeMonitor(paneFocusClickMonitor)
             self.paneFocusClickMonitor = nil
+        }
+        if let keyTypingMonitor {
+            NSEvent.removeMonitor(keyTypingMonitor)
+            self.keyTypingMonitor = nil
         }
     }
 
