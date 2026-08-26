@@ -107,11 +107,32 @@ private struct GeneralSettingsTab: View {
                         TextField("", text: $hostDraft, prompt: Text("mbp or mbp:8765"))
                             .textFieldStyle(.roundedBorder)
                             .focused($hostFieldFocused)
+                            .onChange(of: hostDraft) { _, newValue in
+                                // While the source isn't already `.remote`,
+                                // mirror a parseable (or emptied) draft in
+                                // live so the Picker's "Remote bridge" row
+                                // can appear as the address becomes valid,
+                                // rather than staying hidden until commit.
+                                // See `liveHostUpdate`'s doc for why a LIVE
+                                // `.remote` selection is excluded, and why an
+                                // unparseable draft stores nothing.
+                                guard let stored = MacroPadRemoteEndpoint.liveHostUpdate(
+                                    source: settings.macroPadSource,
+                                    draft: newValue
+                                ) else { return }
+                                settings.macroPadRemoteHost = stored
+                                // The user has visibly fixed it; a half-typed
+                                // draft never sets this in the first place.
+                                if MacroPadRemoteEndpoint.parse(stored) != nil { hostError = nil }
+                            }
                             .onSubmit { commitHost() }
                             .onChange(of: hostFieldFocused) { _, focused in
                                 // Committing per keystroke would try to
                                 // connect to "m", then "mb", then "mbp",
-                                // tearing down the link each time.
+                                // tearing down the link each time — this is
+                                // what still applies while the source is
+                                // already `.remote`, since the live update
+                                // above excludes that case.
                                 if !focused { commitHost() }
                             }
                         if let hostError {

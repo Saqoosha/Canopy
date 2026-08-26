@@ -4144,6 +4144,43 @@ enum SidebarLogicProbe {
                MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel == "[fd7a::1]:8765",
                "got \(MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel)")
 
+        // MARK: - MacroPadRemoteEndpoint.liveHostUpdate (SettingsView live typing)
+        //
+        // Fixes the "Remote bridge" row staying hidden until Return/blur:
+        // while the source is not already `.remote`, a parseable (or
+        // emptied) draft should store live; a live `.remote` selection must
+        // keep deferring to `commitHost()`, and a non-empty unparseable
+        // draft must store nothing so it can't wipe out a good address.
+        record("macropad live host: .remote source never stores, even for a valid draft",
+               MacroPadRemoteEndpoint.liveHostUpdate(
+                   source: .remote(MacroPadRemoteEndpoint(host: "mbp", port: 8765)),
+                   draft: "other"
+               ) == nil,
+               "expected nil")
+        record("macropad live host: .off source stores a parseable draft",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .off, draft: "mbp") == "mbp",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .off, draft: "mbp")))")
+        record("macropad live host: .local source stores a parseable draft",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "mbp:9000") == "mbp:9000",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "mbp:9000")))")
+        record("macropad live host: a single character already parses as a bare host",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "m") == "m",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "m")))")
+        record("macropad live host: an empty draft stores empty",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "") == "",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "")))")
+        record("macropad live host: a whitespace-only draft stores empty",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "   ") == "",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "   ")))")
+        // A non-empty unparseable intermediate shape (mid-typing a port)
+        // must not overwrite a previously-stored good address.
+        record("macropad live host: a non-empty unparseable draft stores nothing",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "mbp:") == nil,
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "mbp:")))")
+        record("macropad live host: an unbracketed IPv6 draft stores nothing",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .off, draft: "fd7a::1") == nil,
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .off, draft: "fd7a::1")))")
+
         // MARK: - MacroPadDevice.Endpoint.label
         //
         // Every new TCP log line routes through this. Pure, and reachable

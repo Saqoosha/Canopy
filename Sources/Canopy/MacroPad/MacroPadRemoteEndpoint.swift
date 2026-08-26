@@ -61,6 +61,38 @@ struct MacroPadRemoteEndpoint: Equatable, Sendable {
         }
     }
 
+    /// What `SettingsView`'s live typing should store into
+    /// `CanopySettings.macroPadRemoteHost`, or nil to leave the stored value
+    /// untouched.
+    ///
+    /// The "Remote bridge" Picker row is gated on the COMMITTED host parsing
+    /// successfully (see `SettingsView`'s row builder), and until this
+    /// existed nothing wrote that value before `commitHost()` fired on
+    /// Return or focus loss — so a user typing a valid address watched
+    /// nothing happen, with the very option they were trying to enable still
+    /// missing from the menu. Found during real two-machine testing.
+    ///
+    /// Mirroring the trimmed draft in as the user types fixes that, but only
+    /// while `source` is not already `.remote`: storing on every keystroke
+    /// against a LIVE remote selection would let the settings file hold a
+    /// half-typed host next to a still-`.remote` selector, and
+    /// `MacroPadSource.migrated` re-derives `.remote` from exactly that pair
+    /// on the next launch — a crash or quit mid-edit would silently resolve
+    /// to the half-typed address rather than the address the pad is actually
+    /// using. `commitHost()` keeps deferring for that case, unchanged.
+    ///
+    /// A non-empty, unparseable draft returns nil rather than storing "" or
+    /// the garbage itself: storing on every keystroke of an intermediate
+    /// shape (`mbp` -> `mbp:` -> `mbp:8`) would destroy a previously-good
+    /// stored address and flicker the Picker row open, closed, open again
+    /// while the user is still typing toward a valid one.
+    static func liveHostUpdate(source: MacroPadSource, draft: String) -> String? {
+        if case .remote = source { return nil }
+        let trimmed = draft.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return "" }
+        return parse(trimmed) != nil ? trimmed : nil
+    }
+
     private static func parsePort(_ raw: String) -> UInt16? {
         // `UInt16(raw)` alone would accept "+1" and Unicode digits; both would
         // then be handed to `getaddrinfo` as a service name.
