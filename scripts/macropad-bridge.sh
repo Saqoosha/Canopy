@@ -131,7 +131,18 @@ run_bridge() {
       continue
     fi
     reported_no_pad=""
-    echo "macropad-bridge: $dev found, listening on $ip:$PORT, waiting for a client"
+    # Gated on reported_busy, not printed unconditionally: during a busy
+    # spin (this Mac's own Canopy holding the pad) this line would otherwise
+    # fire on every retry right alongside the "socat exited non-zero" line
+    # below, doubling that line's log volume. Suppressing it here reuses the
+    # same flag that line sets/clears, so both fall silent together and both
+    # come back together once a socat run actually succeeds — a genuine
+    # client session still gets exactly one "found, listening" line marking
+    # its start, since reported_busy is empty whenever a busy spin has not
+    # just happened.
+    if [ -z "$reported_busy" ]; then
+      echo "macropad-bridge: $dev found, listening on $ip:$PORT, waiting for a client"
+    fi
     # No `fork`: the device path must be re-resolved after a re-plug, and a
     # forking socat holds its argv for the life of the process. socat opens
     # address 1 (accept) before address 2, so the serial port still stays free
