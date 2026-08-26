@@ -37,8 +37,15 @@ require_socat() {
 # otherwise flow straight into socat's listen address and the launchd plist.
 # Checked before both run modes that use PORT.
 validate_port() {
+  # A valid port is at most 5 digits (65535). Bound the digit count in the
+  # `case` pattern itself, before any arithmetic: an all-digit string longer
+  # than that (e.g. a 20-digit typo) would otherwise reach `-lt`/`-gt` below,
+  # where it overflows the shell's integer comparison, prints two bash
+  # errors to stderr, and — because both `[` calls exit 2, which `if` reads
+  # as false — falls through `A || B` as if the port were in range. That is
+  # the exact fail-open this function exists to prevent.
   case "$PORT" in
-    ''|*[!0-9]*) die "CANOPY_MACROPAD_BRIDGE_PORT must be a decimal integer 1-65535, got: $PORT" ;;
+    ''|*[!0-9]*|??????*) die "CANOPY_MACROPAD_BRIDGE_PORT must be a decimal integer 1-65535, got: $PORT" ;;
   esac
   if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     die "CANOPY_MACROPAD_BRIDGE_PORT must be 1-65535, got: $PORT"
