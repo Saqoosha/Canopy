@@ -212,9 +212,11 @@ so console-vs-data is decided identically on both sides.
 when the pad is re-plugged, so the device path must be re-resolved per connection,
 and a forking socat holds its argv for the life of the process. And the property that
 motivated `fork` in the first place — the serial port staying free until a client
-actually connects — is expected to hold without it, because socat opens address 1
-(accept) before address 2. That expectation is the one thing here taken on reasoning
-rather than measurement; the loopback test below is what settles it.
+actually connects — holds without it, because socat opens address 1 (accept) before
+address 2. This was measured, not assumed: with a PTY standing in for the pad,
+`lsof` held no fd on the PTY before a client connected to the TCP-LISTEN socat, and
+held it only once one had. That establishes the ordering for this machine's socat
+build against a PTY stand-in, not a claim about every socat or about the real pad.
 
 Not listening at all when no pad is present is a deliberate choice over accepting and
 immediately dropping: Canopy gets `ECONNREFUSED` and retries cleanly, instead of
