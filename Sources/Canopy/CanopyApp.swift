@@ -163,6 +163,10 @@ struct CanopyApp: App {
                     .disabled(!visible.indices.contains(idx - 1))
                 }
             }
+
+            CommandMenu("MacroPad") {
+                MacroPadCommands()
+            }
         }
 
         Settings {

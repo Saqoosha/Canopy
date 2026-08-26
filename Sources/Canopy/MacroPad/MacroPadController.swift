@@ -300,8 +300,9 @@ final class MacroPadController {
     /// reboots are even visible.
     ///
     /// `HELLO` also arrives whenever *the host* opens the port, so launches
-    /// and Settings-toggle flips are excluded explicitly — otherwise flipping
-    /// the switch three times would tell the user their hardware is failing.
+    /// and source-selector changes are excluded explicitly — otherwise
+    /// flipping the switch three times would tell the user their hardware is
+    /// failing.
     /// Two host-initiated reopens are NOT excluded and can still false-positive:
     /// a hand-driven replug, and the reconnect that follows a write failure or
     /// an EOF. The cost of being wrong is one status-bar hint, which is the
@@ -368,7 +369,7 @@ final class MacroPadController {
     private var tracker = MacroPadUnreadTracker()
     private var watchdogTimer: Timer?
     private var helloIsHostInitiated = false
-    private var lastEnabled: Bool?
+    private var lastSource: MacroPadSource?
     /// Mirrors `NSApp.isActive`. Kept as stored state rather than read live
     /// because `refresh()` has to re-run when it changes, and AppKit's
     /// activation is a notification, not an observable property.
@@ -387,7 +388,7 @@ final class MacroPadController {
 
     func start() {
         device.setOutputHandler { [weak self] output in self?.handle(output) }
-        device.setEnabled(settings.macroPadEnabled)
+        device.setSource(settings.macroPadSource)
         expectHostInitiatedHello()
         device.start()
         startWatchdog()
@@ -455,21 +456,23 @@ final class MacroPadController {
 
     private func refresh() {
         // Every property read inside the tracked closure is what re-arms the
-        // observation — including `settings.macroPadEnabled`, which is why
-        // the toggle takes effect without its own observer.
-        let enabled = settings.macroPadEnabled
+        // observation — including `settings.macroPadSource`, which is why
+        // switching source takes effect without its own observer.
+        let source = settings.macroPadSource
         let brightness = settings.macroPadBrightness
         let panes = store.panes
         let focusedPaneIndex = store.focusedPaneIndex
         let openSessions = store.openSessions
 
-        if lastEnabled != enabled {
-            // A toggle Canopy performed will produce a `HELLO` that is not a
+        if lastSource != source {
+            // A switch Canopy performed will produce a `HELLO` that is not a
             // firmware reboot.
-            if enabled { expectHostInitiatedHello() }
-            lastEnabled = enabled
+            if !source.isOff { expectHostInitiatedHello() }
+            // See `shouldClearSleep`'s doc for why both conditions matter.
+            if Self.shouldClearSleep(lastSource: lastSource, movingTo: source) { setAsleep(false) }
+            lastSource = source
         }
-        device.setEnabled(enabled)
+        device.setSource(source)
 
         var paneIndexBySession: [UUID: Int] = [:]
         for (index, pane) in panes.enumerated() {
@@ -516,7 +519,7 @@ final class MacroPadController {
 
     /// Mirrors the link state out to the sidebar indicator. Driven from
     /// `refresh()` rather than from the connect/disconnect handlers alone,
-    /// because the Settings toggle is a third input and only `refresh()`
+    /// because the source selector is a third input and only `refresh()`
     /// observes it.
     ///
     /// `MacroPadStatus.publish` drops no-op writes, so the common case is
@@ -526,7 +529,7 @@ final class MacroPadController {
     /// The mapping into `Keys` lives here rather than in `adoptIdentity`
     /// because it needs `isConnected` as well as the count.
     private func publishStatus() {
-        guard settings.macroPadEnabled else {
+        guard !settings.macroPadSource.isOff else {
             status.publish(.disabled)
             return
         }
@@ -605,6 +608,21 @@ final class MacroPadController {
     /// read, neither of which the probe can drive.
     static func effectiveBrightness(percent: Int, isAsleep: Bool) -> Int {
         isAsleep ? 0 : min(100, max(0, percent))
+    }
+
+    /// Whether moving to `source` should clear manual sleep.
+    ///
+    /// Two conditions, both required, not one: `!source.isOff` is the
+    /// newer-verb-wins rule (switching source is "I am using this pad now";
+    /// the sleep chord is "go dark", and the more specific one should win).
+    /// `lastSource != nil` is what stops a fresh launch from clobbering a
+    /// sleep set before quitting — at launch `refresh()` runs before the
+    /// user has touched anything, so evaluating `!source.isOff` alone would
+    /// immediately un-sleep a pad the user put to sleep on purpose. Pure and
+    /// static so the probe can reach both halves together — `setAsleep` is
+    /// private and needs a live controller.
+    static func shouldClearSleep(lastSource: MacroPadSource?, movingTo source: MacroPadSource) -> Bool {
+        lastSource != nil && !source.isOff
     }
 
     /// Written as a clamp rather than an early `return` on purpose: a

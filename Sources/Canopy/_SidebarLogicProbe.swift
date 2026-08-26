@@ -4084,6 +4084,206 @@ enum SidebarLogicProbe {
                MacroPadCommand.color(index: 0, rgb: 0xFF00_0000).line == "C 0 000000",
                "got \(MacroPadCommand.color(index: 0, rgb: 0xFF00_0000).line)")
 
+        // MARK: - MacroPad remote endpoint parsing (remote transport)
+        //
+        // Parsing happens once, at the settings boundary. Every assertion
+        // here is a shape that must NOT reach the socket layer as a guess.
+
+        record("macropad endpoint: bare host takes the default port",
+               MacroPadRemoteEndpoint.parse("mbp") == MacroPadRemoteEndpoint(host: "mbp", port: 8765),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("mbp")))")
+        record("macropad endpoint: host:port",
+               MacroPadRemoteEndpoint.parse("mbp:9000") == MacroPadRemoteEndpoint(host: "mbp", port: 9000),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("mbp:9000")))")
+        record("macropad endpoint: surrounding whitespace is trimmed",
+               MacroPadRemoteEndpoint.parse("  mbp:9000  ") == MacroPadRemoteEndpoint(host: "mbp", port: 9000),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("  mbp:9000  ")))")
+        record("macropad endpoint: bracketed IPv6 with a port",
+               MacroPadRemoteEndpoint.parse("[fd7a::1]:8765") == MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("[fd7a::1]:8765")))")
+        record("macropad endpoint: bracketed IPv6 without a port",
+               MacroPadRemoteEndpoint.parse("[fd7a::1]") == MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765),
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("[fd7a::1]")))")
+        // A bare v6 literal is ambiguous with host:port. Rejected, never guessed.
+        record("macropad endpoint: unbracketed IPv6 is rejected",
+               MacroPadRemoteEndpoint.parse("fd7a::1") == nil,
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("fd7a::1")))")
+        record("macropad endpoint: empty is nil",
+               MacroPadRemoteEndpoint.parse("") == nil, "expected nil")
+        record("macropad endpoint: whitespace only is nil",
+               MacroPadRemoteEndpoint.parse("   ") == nil, "expected nil")
+        record("macropad endpoint: empty host with a port is nil",
+               MacroPadRemoteEndpoint.parse(":8765") == nil, "expected nil")
+        record("macropad endpoint: port 0 is nil",
+               MacroPadRemoteEndpoint.parse("mbp:0") == nil, "expected nil")
+        record("macropad endpoint: port 65536 is nil",
+               MacroPadRemoteEndpoint.parse("mbp:65536") == nil, "expected nil")
+        record("macropad endpoint: non-numeric port is nil",
+               MacroPadRemoteEndpoint.parse("mbp:abc") == nil, "expected nil")
+        record("macropad endpoint: missing port after the colon is nil",
+               MacroPadRemoteEndpoint.parse("mbp:") == nil, "expected nil")
+        // `parsePort`'s own comment says the ASCII-digit guard exists
+        // because `UInt16(raw)` alone would accept "+1" and Unicode digits.
+        // "abc" (asserted above) already fails `UInt16(_:)` on its own, so it
+        // proves nothing about that guard specifically — these two do.
+        record("macropad endpoint: a leading-plus port is nil",
+               MacroPadRemoteEndpoint.parse("mbp:+1") == nil, "expected nil")
+        record("macropad endpoint: a Unicode-digit port is nil",
+               MacroPadRemoteEndpoint.parse("mbp:\u{0661}\u{0662}\u{0663}") == nil, "expected nil")
+        record("macropad endpoint: displayLabel round-trips",
+               MacroPadRemoteEndpoint.parse("mbp")?.displayLabel == "mbp:8765",
+               "got \(String(describing: MacroPadRemoteEndpoint.parse("mbp")?.displayLabel))")
+        // Unbracketed input is rejected by `parse` (asserted above), but
+        // `displayLabel` is reachable on any endpoint, including one built
+        // directly with the memberwise initializer — so it has to defend
+        // its own invariant rather than trust every caller went through
+        // `parse`. Without the bracket this reads as "fd7a:115c:a1e0::5201"
+        // on port "7f5d:8765", which is exactly the ambiguity `parse` exists
+        // to refuse.
+        record("macropad endpoint: displayLabel brackets an IPv6 host",
+               MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel == "[fd7a::1]:8765",
+               "got \(MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel)")
+
+        // MARK: - MacroPadRemoteEndpoint.liveHostUpdate (SettingsView live typing)
+        //
+        // Fixes the "Remote bridge" row staying hidden until Return/blur:
+        // while the source is not already `.remote`, a parseable (or
+        // emptied) draft should store live; a live `.remote` selection must
+        // keep deferring to `commitHost()`, and a non-empty unparseable
+        // draft must store nothing so it can't wipe out a good address.
+        record("macropad live host: .remote source never stores, even for a valid draft",
+               MacroPadRemoteEndpoint.liveHostUpdate(
+                   source: .remote(MacroPadRemoteEndpoint(host: "mbp", port: 8765)),
+                   draft: "other"
+               ) == nil,
+               "expected nil")
+        record("macropad live host: .off source stores a parseable draft",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .off, draft: "mbp") == "mbp",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .off, draft: "mbp")))")
+        record("macropad live host: .local source stores a parseable draft",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "mbp:9000") == "mbp:9000",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "mbp:9000")))")
+        record("macropad live host: a single character already parses as a bare host",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "m") == "m",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "m")))")
+        record("macropad live host: an empty draft stores empty",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "") == "",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "")))")
+        record("macropad live host: a whitespace-only draft stores empty",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "   ") == "",
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "   ")))")
+        // A non-empty unparseable intermediate shape (mid-typing a port)
+        // must not overwrite a previously-stored good address.
+        record("macropad live host: a non-empty unparseable draft stores nothing",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "mbp:") == nil,
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .local, draft: "mbp:")))")
+        record("macropad live host: an unbracketed IPv6 draft stores nothing",
+               MacroPadRemoteEndpoint.liveHostUpdate(source: .off, draft: "fd7a::1") == nil,
+               "got \(String(describing: MacroPadRemoteEndpoint.liveHostUpdate(source: .off, draft: "fd7a::1")))")
+
+        // MARK: - MacroPadDevice.Endpoint.label
+        //
+        // Every new TCP log line routes through this. Pure, and reachable
+        // from the probe module without any access-level change.
+        record("macropad device endpoint: serial label is the callout path",
+               MacroPadDevice.Endpoint.serial(path: "/dev/cu.usbmodem20103", interfaceNumber: 3).label
+                   == "/dev/cu.usbmodem20103",
+               "got \(MacroPadDevice.Endpoint.serial(path: "/dev/cu.usbmodem20103", interfaceNumber: 3).label)")
+        record("macropad device endpoint: tcp label is the endpoint's displayLabel",
+               MacroPadDevice.Endpoint.tcp(MacroPadRemoteEndpoint(host: "mbp", port: 9000)).label == "mbp:9000",
+               "got \(MacroPadDevice.Endpoint.tcp(MacroPadRemoteEndpoint(host: "mbp", port: 9000)).label)")
+
+        // --- MacroPadSource resolution and migration
+        record("macropad source: off resolves",
+               MacroPadSource.resolve(rawValue: "off", host: "") == .off, "expected .off")
+        record("macropad source: local resolves",
+               MacroPadSource.resolve(rawValue: "local", host: "") == .local, "expected .local")
+        record("macropad source: remote resolves with a valid host",
+               MacroPadSource.resolve(rawValue: "remote", host: "mbp:9000")
+                   == .remote(MacroPadRemoteEndpoint(host: "mbp", port: 9000)),
+               "got \(String(describing: MacroPadSource.resolve(rawValue: "remote", host: "mbp:9000")))")
+        // Degrading to .local here would silently drive a DIFFERENT pad than
+        // the one configured, which is the worst outcome available.
+        record("macropad source: remote with an empty host degrades to off, not local",
+               MacroPadSource.resolve(rawValue: "remote", host: "") == .off,
+               "got \(String(describing: MacroPadSource.resolve(rawValue: "remote", host: "")))")
+        record("macropad source: remote with an unparseable host degrades to off",
+               MacroPadSource.resolve(rawValue: "remote", host: "mbp:abc") == .off,
+               "got \(String(describing: MacroPadSource.resolve(rawValue: "remote", host: "mbp:abc")))")
+        record("macropad source: an unknown selector does not resolve",
+               MacroPadSource.resolve(rawValue: "banana", host: "") == nil, "expected nil")
+        record("macropad source: isOff only for off",
+               MacroPadSource.off.isOff && !MacroPadSource.local.isOff, "isOff is wrong")
+        record("macropad source: rawValue spellings",
+               MacroPadSource.off.rawValue == "off"
+                   && MacroPadSource.local.rawValue == "local"
+                   && MacroPadSource.remote(MacroPadRemoteEndpoint(host: "m", port: 1)).rawValue == "remote",
+               "rawValue spelling changed")
+
+        record("macropad source migration: legacy enabled=true becomes local",
+               MacroPadSource.migrated(storedRaw: nil, storedHost: "", legacyEnabled: true) == .local,
+               "expected .local")
+        record("macropad source migration: legacy enabled=false becomes off",
+               MacroPadSource.migrated(storedRaw: nil, storedHost: "", legacyEnabled: false) == .off,
+               "expected .off")
+        record("macropad source migration: a fresh install defaults to local",
+               MacroPadSource.migrated(storedRaw: nil, storedHost: "", legacyEnabled: nil) == .local,
+               "expected .local")
+        // The stored selector outranks the legacy key once it exists.
+        record("macropad source migration: a stored selector wins over the legacy key",
+               MacroPadSource.migrated(storedRaw: "off", storedHost: "", legacyEnabled: true) == .off,
+               "expected .off")
+        // A garbage SELECTOR falls through to the legacy/default path. That is
+        // different from a garbage ADDRESS, which degrades to .off above.
+        record("macropad source migration: a garbage selector falls through to the legacy key",
+               MacroPadSource.migrated(storedRaw: "banana", storedHost: "", legacyEnabled: false) == .off,
+               "expected .off")
+
+        // Deliberately no assertion here touching `CanopySettings.shared`.
+        // `load()` unconditionally assigns `macroPadSource` /
+        // `macroPadRemoteHost` whenever a settings.json exists at all (even
+        // one with neither key present), and those assignments' `didSet`
+        // fires `save()` — so merely constructing the shared instance writes
+        // the real, shared `~/Library/Application Support/Canopy/settings.json`
+        // (shared between this Debug build and the installed Release app;
+        // see CLAUDE.md) with none of the snapshot/restore discipline every
+        // other fixture in this file uses. A prior version of this block
+        // asserted `["off", "local", "remote"].contains(macroPadSource.rawValue)`
+        // for exactly that side effect, which was also a tautology —
+        // `rawValue` can only be one of those three by construction — so it
+        // bought a real hazard (a silent settings change for a user running
+        // an older Release build) for zero actual coverage. The load/save
+        // pair itself is still not probe-reachable and remains untested here.
+
+        // Switching source is an explicit "I am using this pad now"; the chord
+        // means "go dark". The newer, more specific verb wins — otherwise
+        // every transition costs a swallowed keypress to wake the new pad.
+        // `shouldClearSleep` is two conditions, and both need their own
+        // assertion: `lastSource == nil` (a fresh launch) must never clear,
+        // whatever the target — that's the guard against a launch silently
+        // un-sleeping a pad the user put to sleep before quitting. Only once
+        // `lastSource` is real does the target's `isOff` decide anything.
+        record("macropad sleep: a nil lastSource never clears, whatever the target",
+               !MacroPadController.shouldClearSleep(lastSource: nil, movingTo: .local)
+                   && !MacroPadController.shouldClearSleep(
+                       lastSource: nil,
+                       movingTo: .remote(MacroPadRemoteEndpoint(host: "mbp", port: 8765))
+                   )
+                   && !MacroPadController.shouldClearSleep(lastSource: nil, movingTo: .off),
+               "expected false for every nil-lastSource case")
+        record("macropad sleep: a real change to local clears sleep",
+               MacroPadController.shouldClearSleep(lastSource: .off, movingTo: .local), "expected true")
+        record("macropad sleep: a real change to remote clears sleep",
+               MacroPadController.shouldClearSleep(
+                   lastSource: .off,
+                   movingTo: .remote(MacroPadRemoteEndpoint(host: "mbp", port: 8765))
+               ),
+               "expected true")
+        // Off disconnects, and the firmware blanks itself. Clearing the flag
+        // there would silently un-sleep the pad you get back later.
+        record("macropad sleep: a real change to off does not clear sleep",
+               !MacroPadController.shouldClearSleep(lastSource: .local, movingTo: .off), "expected false")
+
         // MARK: - Session restore snapshot
         do {
             func snapSession(

@@ -1,0 +1,300 @@
+#!/bin/bash
+# Bridge a locally-attached Canopy MacroPad onto TCP so a Canopy on another
+# Mac can drive it (see MacroPadDevice's remote transport).
+#
+# Usage:
+#   ./scripts/macropad-bridge.sh              run in the foreground
+#   ./scripts/macropad-bridge.sh --install    install + start a launchd agent
+#   ./scripts/macropad-bridge.sh --uninstall  stop + remove the agent
+#
+# Env:
+#   CANOPY_MACROPAD_BRIDGE_PORT   TCP port to listen on (default 8765). Also
+#                                 honored by --install, which bakes the value
+#                                 into the launchd agent's plist — set it
+#                                 before installing, not after.
+#
+# The Canopy running on THIS machine must have MacroPad set to Off, or it
+# holds the serial port and socat gets EBUSY.
+set -euo pipefail
+
+PORT="${CANOPY_MACROPAD_BRIDGE_PORT:-8765}"
+LABEL="sh.saqoo.canopy-macropad-bridge"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LOG="$HOME/Library/Logs/canopy-macropad-bridge.log"
+SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+PRODUCT="Canopy MacroPad"
+
+die() { echo "macropad-bridge: $*" >&2; exit 1; }
+
+require_socat() {
+  command -v socat >/dev/null 2>&1 || die "socat not found. Install it with: brew install socat"
+}
+
+# `PORT=0` would make socat listen on an ephemeral port that
+# MacroPadRemoteEndpoint.parse rejects outright (port 0 is nil), so Canopy
+# could never be configured to reach it — the bridge would start and be
+# permanently unreachable with no error anywhere. Non-decimal input would
+# otherwise flow straight into socat's listen address and the launchd plist.
+# Checked before both run modes that use PORT.
+validate_port() {
+  # A valid port is at most 5 digits (65535). Bound the digit count in the
+  # `case` pattern itself, before any arithmetic: an all-digit string longer
+  # than that (e.g. a 20-digit typo) would otherwise reach `-lt`/`-gt` below,
+  # where it overflows the shell's integer comparison, prints two bash
+  # errors to stderr, and — because both `[` calls exit 2, which `if` reads
+  # as false — falls through `A || B` as if the port were in range. That is
+  # the exact fail-open this function exists to prevent.
+  case "$PORT" in
+    ''|*[!0-9]*|??????*) die "CANOPY_MACROPAD_BRIDGE_PORT must be a decimal integer 1-65535, got: $PORT" ;;
+  esac
+  if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    die "CANOPY_MACROPAD_BRIDGE_PORT must be 1-65535, got: $PORT"
+  fi
+}
+
+# Escapes the five XML-significant characters for use in plist text and
+# attribute positions. $SCRIPT and $LOG derive from $HOME and this checkout's
+# path, neither of which this script controls.
+xml_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  s="${s//\"/&quot;}"
+  s="${s//\'/&apos;}"
+  printf '%s' "$s"
+}
+
+# The Tailscale address, and only that. Binding 0.0.0.0 would expose a device
+# that can switch panes to every network this Mac joins.
+tailscale_ip() {
+  local ts ip
+  for ts in /usr/local/bin/tailscale /opt/homebrew/bin/tailscale \
+            /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
+    [ -x "$ts" ] || continue
+    ip="$("$ts" ip -4 2>/dev/null | head -1)" || true
+    [ -n "$ip" ] && { echo "$ip"; return 0; }
+  done
+  if command -v tailscale >/dev/null 2>&1; then
+    ip="$(tailscale ip -4 2>/dev/null | head -1)" || true
+    [ -n "$ip" ] && { echo "$ip"; return 0; }
+  fi
+  return 1
+}
+
+# Same ranking rule MacroPadDevice.rankedCandidates uses: match the product
+# string (the one identifier this project controls, set by boot.py), then take
+# the highest bInterfaceNumber, which on CircuitPython is the data port rather
+# than the REPL console. Never hardcode /dev/cu.usbmodemNNNN — the suffix moves
+# with the port and across reboots, which is also why this is re-run per
+# connection rather than resolved once.
+#
+# Measured on real hardware: `ioreg -c IOSerialBSDClient -l` (querying the
+# serial leaf directly) never carries "USB Product Name" or
+# "bInterfaceNumber" — those properties live on ancestor IOUSBHostDevice /
+# IOUSBHostInterface nodes several levels up, not on the IOSerialBSDClient
+# node itself. That is exactly why MacroPadDevice.swift's rankedCandidates()
+# calls IORegistryEntrySearchCFProperty with kIORegistryIterateParents rather
+# than reading the property directly off the matched service. `ioreg`'s CLI
+# has no "search ancestors" flag, so this queries IOUSBHostDevice instead
+# (small, scoped subtree per device — not the whole registry) and walks each
+# device's subtree top-down, inheriting the nearest ancestor's product name
+# and interface number down to each IOSerialBSDClient leaf. That is the same
+# tree relationship as the Swift parent-search, just traversed from the
+# opposite end because that's what's expressible from the command line.
+find_device() {
+  # The script goes in -c, NOT `python3 -`: ioreg output is already on
+  # stdin, and `-` would make python read its own source from there
+  # instead. The product string is argv, never interpolated into the -c
+  # source (an apostrophe in it would be a SyntaxError, which is what
+  # issue #127 records).
+  ioreg -a -r -c IOUSBHostDevice -l 2>/dev/null | python3 -c '
+import plistlib, sys
+product = sys.argv[1]
+try:
+    entries = plistlib.loads(sys.stdin.buffer.read())
+except Exception as e:
+    # A malformed/truncated ioreg plist and "no pad attached" both reach
+    # this script as "find_device failed" otherwise — indistinguishable in
+    # the log, so a broken ioreg pipeline reads forever as "no pad found"
+    # with no way to tell the two apart. Print the real exception so that
+    # distinction survives.
+    print(f"find_device: failed to parse ioreg output: {e}", file=sys.stderr)
+    sys.exit(1)
+
+best = None
+
+def walk(node, inherited_product, inherited_interface):
+    global best
+    node_product = node.get("USB Product Name", inherited_product)
+    node_interface = node.get("bInterfaceNumber", inherited_interface)
+    path = node.get("IOCalloutDevice")
+    if path and node_product == product:
+        interface = node_interface if node_interface is not None else 0
+        if best is None or interface > best[0]:
+            best = (interface, path)
+    for child in node.get("IORegistryEntryChildren", []) or []:
+        walk(child, node_product, node_interface)
+
+for entry in entries or []:
+    walk(entry, None, None)
+
+if best is None:
+    sys.exit(1)
+print(best[1])
+' "$PRODUCT"
+}
+
+run_bridge() {
+  validate_port
+  require_socat
+  local ip
+  ip="$(tailscale_ip)" || die "no Tailscale IPv4 address. Start Tailscale, or fix the bridge before exposing it more widely — this script will not bind 0.0.0.0."
+  # Intent, not a completed action: no socket exists yet, and won't until a
+  # pad is actually found below. The old wording said "listening" here,
+  # which was true only once socat itself started — for however long no pad
+  # is attached, it was a stale claim about a bind that never happened.
+  echo "macropad-bridge: starting up; will bind $ip:$PORT once a pad is found"
+
+  local reported_no_pad=""
+  local reported_busy=""
+  while true; do
+    local dev
+    if ! dev="$(find_device)"; then
+      # Deliberately do not listen at all with no pad present: the
+      # alternative is Canopy seeing a connection that dies before HELLO,
+      # which stays worse regardless of what the failed connect itself
+      # costs. That cost is address-family dependent: on a loopback or LAN
+      # address the connect is refused immediately, but over a real
+      # Tailscale address Canopy's connect blocks for the full
+      # `probeTimeout` (1.5s) and then times out instead — Tailscale's
+      # userspace netstack drops an unreachable port rather than refusing
+      # it (see the spec's Bridge section for the measurement). Logged once
+      # on entry to this state, not on every 2s retry, so an unplugged pad
+      # doesn't fill the log forever.
+      if [ -z "$reported_no_pad" ]; then
+        echo "macropad-bridge: no pad found; not listening on $ip:$PORT"
+        reported_no_pad=1
+      fi
+      sleep 2
+      continue
+    fi
+    reported_no_pad=""
+    # Gated on reported_busy, not printed unconditionally: during a busy
+    # spin (this Mac's own Canopy holding the pad) this line would otherwise
+    # fire on every retry right alongside the "socat exited non-zero" line
+    # below, doubling that line's log volume. Suppressing it here reuses the
+    # same flag that line sets/clears, so both fall silent together and both
+    # come back together once a socat run actually succeeds — a genuine
+    # client session still gets exactly one "found, listening" line marking
+    # its start, since reported_busy is empty whenever a busy spin has not
+    # just happened.
+    if [ -z "$reported_busy" ]; then
+      echo "macropad-bridge: $dev found, listening on $ip:$PORT, waiting for a client"
+    fi
+    # No `fork`: the device path must be re-resolved after a re-plug, and a
+    # forking socat holds its argv for the life of the process. socat opens
+    # address 1 (accept) before address 2, so the serial port still stays free
+    # until a client actually connects — measured against a PTY stand-in
+    # (never the real pad): lsof showed no fd on the target until a client
+    # connected, and opened it only then.
+    #
+    # `ispeed=115200,ospeed=115200`, not the shorthand `b115200`: measured on
+    # this machine's socat (1.8.1.3, Darwin build) — `b115200` is rejected
+    # outright with "unknown option", it is not a recognized socat option at
+    # all on this build. `socat -hh` lists `ispeed`/`ospeed` as the real
+    # termios option names.
+    if socat "TCP-LISTEN:$PORT,bind=$ip,reuseaddr" "FILE:$dev,raw,ispeed=115200,ospeed=115200,nonblock"; then
+      reported_busy=""
+    else
+      # Deliberately does not name a single cause: EBUSY (this Mac's own
+      # Canopy holding the pad — the state the spec expects when it's set to
+      # Local) is one, but measured on hardware, an unplugged pad reaches
+      # here too (socat logs "Device not configured" first), and the next
+      # loop iteration already reports that case correctly via
+      # reported_no_pad above. An earlier version of this line named EBUSY
+      # as *the* cause and sent someone hunting a toggle that was not the
+      # problem. Reported once on entry to this state, not on every retry,
+      # or a Canopy left on Local drives ~2 lines per 8s reconnect cycle into
+      # this log forever (~21k lines/day) with no rotation. Re-armed only
+      # once a socat run actually succeeds, same shape as reported_no_pad
+      # above.
+      if [ -z "$reported_busy" ]; then
+        echo "macropad-bridge: socat exited non-zero — the pad may have been unplugged, or this Mac's Canopy may be holding it"
+        reported_busy=1
+      fi
+      sleep 2
+    fi
+  done
+}
+
+install_agent() {
+  validate_port
+  require_socat
+  tailscale_ip >/dev/null || die "no Tailscale IPv4 address; refusing to install an agent that cannot bind."
+  mkdir -p "$(dirname "$PLIST")" "$(dirname "$LOG")"
+  # EnvironmentVariables/PATH below is required, not decorative: measured on
+  # this machine, launchd's default PATH for a LaunchAgent is
+  # /usr/bin:/bin:/usr/sbin:/sbin — no Homebrew prefix — so a bare `socat`
+  # (from require_socat's `command -v` or the invocation in run_bridge) fails
+  # with "socat not found" under launchd even though it works in every
+  # interactive shell. Both Homebrew prefixes are listed since which one is
+  # populated depends on the Mac's architecture.
+  #
+  # CANOPY_MACROPAD_BRIDGE_PORT also needs to be in EnvironmentVariables, not
+  # just read at the top of this script: PORT is a plain shell variable at
+  # install time, and the agent launchd starts later is a fresh process with
+  # none of this shell's environment. Without this, `--install` reports
+  # success and installs an agent listening on 8765 regardless of what PORT
+  # was set to at install time.
+  # $SCRIPT and $LOG derive from $HOME and this checkout's path; $PORT is
+  # already validated to be a decimal integer above, but is escaped too for
+  # consistency rather than trusting that validation never moves. Escaping
+  # is what stops a checkout path (or $HOME) containing &, <, >, or ' from
+  # producing a plist that `launchctl bootstrap` rejects with no clear error.
+  local script_esc log_esc port_esc
+  script_esc="$(xml_escape "$SCRIPT")"
+  log_esc="$(xml_escape "$LOG")"
+  port_esc="$(xml_escape "$PORT")"
+  cat > "$PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$script_esc</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$log_esc</string>
+  <key>StandardErrorPath</key><string>$log_esc</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>CANOPY_MACROPAD_BRIDGE_PORT</key>
+    <string>$port_esc</string>
+  </dict>
+</dict>
+</plist>
+PLIST_EOF
+  launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$UID" "$PLIST"
+  echo "macropad-bridge: installed. Logs: $LOG"
+}
+
+uninstall_agent() {
+  launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+  rm -f "$PLIST"
+  echo "macropad-bridge: uninstalled."
+}
+
+case "${1:-}" in
+  --install)   install_agent ;;
+  --uninstall) uninstall_agent ;;
+  "")          run_bridge ;;
+  *)           die "unknown argument: $1" ;;
+esac

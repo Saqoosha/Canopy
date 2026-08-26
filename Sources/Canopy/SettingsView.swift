@@ -63,7 +63,86 @@ private struct GeneralSettingsTab: View {
             }
 
             Section {
-                Toggle("Enable MacroPad", isOn: $settings.macroPadEnabled)
+                Picker("MacroPad", selection: Binding(
+                    get: { settings.macroPadSource.rawValue },
+                    set: { raw in
+                        switch raw {
+                        case "off":
+                            settings.macroPadSource = .off
+                        case "remote":
+                            // Unreachable while the row is absent from the
+                            // menu (see the conditional row below), but the
+                            // Picker's setter is not the place to trust that.
+                            if let endpoint = MacroPadRemoteEndpoint.parse(settings.macroPadRemoteHost) {
+                                settings.macroPadSource = .remote(endpoint)
+                            }
+                        default:
+                            settings.macroPadSource = .local
+                        }
+                    }
+                )) {
+                    Text("Off").tag("off")
+                    Text("Local USB").tag("local")
+                    // `.disabled` on an individual Picker row is a no-op for
+                    // this Picker's rendering (AXPopUpButton menu item stayed
+                    // enabled and selectable, measured via the accessibility
+                    // tree) — a conditional row is what actually keeps this
+                    // choice off the menu. Safe because the selection can
+                    // never *be* `remote` with an unusable address, though
+                    // not by one mechanism: `CanopySettings.load` degrades
+                    // that case to `.off`, `commitHost` moves it to `.off`
+                    // too when the field is cleared to empty, and for a
+                    // non-empty-but-unparseable edit `commitHost` sets
+                    // `hostError` and returns without touching
+                    // `macroPadSource` at all — every write site validates
+                    // before ever assigning `.remote`, so the invariant holds
+                    // without that branch needing to reach for `.off` itself.
+                    if MacroPadRemoteEndpoint.parse(settings.macroPadRemoteHost) != nil {
+                        Text("Remote bridge").tag("remote")
+                    }
+                }
+
+                LabeledContent("Bridge address") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("", text: $hostDraft, prompt: Text("mbp or mbp:8765"))
+                            .textFieldStyle(.roundedBorder)
+                            .focused($hostFieldFocused)
+                            .onChange(of: hostDraft) { _, newValue in
+                                // While the source isn't already `.remote`,
+                                // mirror a parseable (or emptied) draft in
+                                // live so the Picker's "Remote bridge" row
+                                // can appear as the address becomes valid,
+                                // rather than staying hidden until commit.
+                                // See `liveHostUpdate`'s doc for why a LIVE
+                                // `.remote` selection is excluded, and why an
+                                // unparseable draft stores nothing.
+                                guard let stored = MacroPadRemoteEndpoint.liveHostUpdate(
+                                    source: settings.macroPadSource,
+                                    draft: newValue
+                                ) else { return }
+                                settings.macroPadRemoteHost = stored
+                                // The user has visibly fixed it; a half-typed
+                                // draft never sets this in the first place.
+                                if MacroPadRemoteEndpoint.parse(stored) != nil { hostError = nil }
+                            }
+                            .onSubmit { commitHost() }
+                            .onChange(of: hostFieldFocused) { _, focused in
+                                // Committing per keystroke would try to
+                                // connect to "m", then "mb", then "mbp",
+                                // tearing down the link each time — this is
+                                // what still applies while the source is
+                                // already `.remote`, since the live update
+                                // above excludes that case.
+                                if !focused { commitHost() }
+                            }
+                        if let hostError {
+                            Text(hostError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+
                 LabeledContent("LED brightness") {
                     HStack(spacing: 8) {
                         Slider(value: Binding(get: { Double(settings.macroPadBrightness) },
@@ -75,12 +154,44 @@ private struct GeneralSettingsTab: View {
                             .frame(width: 40, alignment: .trailing)
                     }
                 }
-                .disabled(!settings.macroPadEnabled)
+                .disabled(settings.macroPadSource.isOff)
             } footer: {
-                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Connects automatically when the pad is plugged in. A small indicator at the bottom of the sidebar shows the link state; turning this off hides it.")
+                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Local USB connects automatically when the pad is plugged in; Remote bridge reaches a pad on another Mac running scripts/macropad-bridge.sh. A small indicator at the bottom of the sidebar shows the link state; Off hides it.")
             }
+            .onAppear { hostDraft = settings.macroPadRemoteHost }
         }
         .formStyle(.grouped)
+    }
+
+    @State private var hostDraft: String = ""
+    @State private var hostError: String?
+    @FocusState private var hostFieldFocused: Bool
+
+    /// Validates at the boundary so nothing downstream ever re-parses. An
+    /// unparseable value is refused rather than stored — the settings file is
+    /// the only other way in, and `CanopySettings.load` re-validates that.
+    private func commitHost() {
+        let trimmed = hostDraft.trimmingCharacters(in: .whitespaces)
+        hostDraft = trimmed
+
+        guard !trimmed.isEmpty else {
+            hostError = nil
+            settings.macroPadRemoteHost = ""
+            // The selector cannot stay on a source with no address. It moves
+            // to `.off`, never `.local` — silently connecting to a different
+            // pad than the one configured is the worst outcome available.
+            if case .remote = settings.macroPadSource { settings.macroPadSource = .off }
+            return
+        }
+        guard let endpoint = MacroPadRemoteEndpoint.parse(trimmed) else {
+            hostError = "Use host or host:port, e.g. mbp:8765."
+            return
+        }
+        hostError = nil
+        settings.macroPadRemoteHost = trimmed
+        // Re-resolve a live remote selection so an edited port takes effect
+        // without a second trip through the Picker.
+        if case .remote = settings.macroPadSource { settings.macroPadSource = .remote(endpoint) }
     }
 }
 
