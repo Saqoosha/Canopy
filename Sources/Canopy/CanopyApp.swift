@@ -410,6 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// keyDown here keeps the title bar still.
     private var cmdWMonitor: Any?
     private var paneFocusClickMonitor: Any?
+    private var keyTypingMonitor: Any?
 
     // NOTE: there is deliberately NO app-wide didResizeNotification observer
     // feeding pane state. An earlier iteration distributed manual window-
@@ -438,6 +439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         installCmdWMonitor()
         installPaneFocusClickMonitor()
+        installKeyTypingMonitor()
         RecapCoordinator.shared.start()
 
         // SwiftUI may make the first window main before our observer is
@@ -612,6 +614,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Local `.keyDown` monitor that stamps "the user is here, typing in
+    /// this pane" onto the MacroPad controller — the signal
+    /// `MacroPadUnreadTracker` now uses to decide whether a turn finishing
+    /// in the focused pane should light the green unread LED (see
+    /// `MacroPadUnreadTracker.update`'s doc for why keystroke recency
+    /// replaced "is Canopy the frontmost app").
+    ///
+    /// Does not care which key was pressed — any keystroke into a Canopy
+    /// window is the signal, content is irrelevant. Unlike `cmdWMonitor`'s
+    /// one Cmd+W case, this monitor only observes: it MUST return the event
+    /// unmodified, or every other keyDown consumer in the app (menu
+    /// shortcuts, the webview's own input) stops receiving keys.
+    private func installKeyTypingMonitor() {
+        guard keyTypingMonitor == nil else { return }
+        keyTypingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let window = event.window, isCanopyWindow(window),
+                  let store = SessionStore.shared, !store.panes.isEmpty
+            else { return event }
+            self?.macroPad?.noteInteraction(paneIndex: store.focusedPaneIndex)
+            return event
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -654,6 +679,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let paneFocusClickMonitor {
             NSEvent.removeMonitor(paneFocusClickMonitor)
             self.paneFocusClickMonitor = nil
+        }
+        if let keyTypingMonitor {
+            NSEvent.removeMonitor(keyTypingMonitor)
+            self.keyTypingMonitor = nil
         }
     }
 

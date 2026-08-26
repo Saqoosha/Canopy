@@ -45,12 +45,14 @@ final class SessionStore {
     /// index when panes is non-empty. Undefined (0) while panes is empty.
     private(set) var focusedPaneIndex: Int = 0
 
-    /// Sessions that finished a turn while the user was looking at a
-    /// different pane. Rendered as the green `SessionActivity.unread` dot in
+    /// Sessions that finished a turn while the user wasn't recently typing
+    /// in their pane. Rendered as the green `SessionActivity.unread` dot in
     /// the sidebar and as the green LED on the MacroPad.
     ///
     /// A session with no pane counts as unfocused, so it is marked on finish
-    /// and stays marked until it is loaded into the focused pane.
+    /// and stays marked until the user types into its pane (or presses that
+    /// pane's MacroPad key) — merely focusing it, by mouse or otherwise,
+    /// does not clear it. See `MacroPadUnreadTracker.update`'s doc.
     ///
     /// The store only *holds* this; the edge detection that produces it lives
     /// in `MacroPadUnreadTracker`, driven by `MacroPadController`. It lives

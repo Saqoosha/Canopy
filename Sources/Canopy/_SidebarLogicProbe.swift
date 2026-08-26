@@ -3649,34 +3649,90 @@ enum SidebarLogicProbe {
         do {
             let idA = UUID()
             let idB = UUID()
-            var tracker = MacroPadUnreadTracker()
+            let threshold = MacroPadUnreadTracker.recentTypingThreshold
 
-            tracker.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            tracker.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            record("unread: finish off-focus becomes unread",
+            var tracker = MacroPadUnreadTracker()
+            tracker.update([.init(id: idA, isThinking: true, paneIndex: 1)],
+                           lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            tracker.update([.init(id: idA, isThinking: false, paneIndex: 1)],
+                           lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            record("unread: finish off the typed-in pane becomes unread",
                    tracker.unread.contains(idA),
                    "unread=\(tracker.unread)")
 
-            var focused = MacroPadUnreadTracker()
-            focused.update([.init(id: idA, isThinking: true, paneIndex: 0)], focusedPaneIndex: 0, isAppActive: true)
-            focused.update([.init(id: idA, isThinking: false, paneIndex: 0)], focusedPaneIndex: 0, isAppActive: true)
-            record("unread: finish on-focus stays clean",
-                   !focused.unread.contains(idA),
-                   "unread=\(focused.unread)")
+            // Requirement: a turn finishing in the pane the user is actively
+            // typing in (recent keystroke) must never light up green.
+            var typing = MacroPadUnreadTracker()
+            typing.update([.init(id: idA, isThinking: true, paneIndex: 0)],
+                          lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            typing.update([.init(id: idA, isThinking: false, paneIndex: 0)],
+                          lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            record("unread: finish in the just-typed pane (recent) stays clean",
+                   !typing.unread.contains(idA),
+                   "unread=\(typing.unread)")
 
-            tracker.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 1, isAppActive: true)
-            record("unread: focusing the pane clears it",
-                   !tracker.unread.contains(idA),
-                   "unread=\(tracker.unread)")
+            // The bug this branch fixes, reproduced directly: a turn
+            // finishing in the FOCUSED pane while the last keystroke there is
+            // stale must still mark unread — a focused-but-untouched pane is
+            // not "being looked at". Fails without the fix (the old
+            // `isAppActive` rule cleared this unconditionally).
+            var stale = MacroPadUnreadTracker()
+            stale.update([.init(id: idA, isThinking: true, paneIndex: 0)],
+                         lastTypedPaneIndex: 0, secondsSinceTyped: threshold + 1)
+            stale.update([.init(id: idA, isThinking: false, paneIndex: 0)],
+                         lastTypedPaneIndex: 0, secondsSinceTyped: threshold + 1)
+            record("unread: finish in the typed-in pane with a stale keystroke still marks",
+                   stale.unread.contains(idA),
+                   "unread=\(stale.unread)")
+
+            // Typing again resets recency and clears the mark left above.
+            stale.update([.init(id: idA, isThinking: false, paneIndex: 0)],
+                         lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            record("unread: typing into the marked pane clears it",
+                   !stale.unread.contains(idA),
+                   "unread=\(stale.unread)")
+
+            // Threshold boundary, both sides: inclusive at exactly the
+            // threshold, stale just past it.
+            var boundaryClear = MacroPadUnreadTracker()
+            boundaryClear.update([.init(id: idA, isThinking: true, paneIndex: 0)],
+                                 lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            boundaryClear.update([.init(id: idA, isThinking: false, paneIndex: 0)],
+                                 lastTypedPaneIndex: 0, secondsSinceTyped: threshold)
+            record("unread: exactly at the threshold still clears (inclusive)",
+                   !boundaryClear.unread.contains(idA),
+                   "unread=\(boundaryClear.unread)")
+
+            var boundaryStale = MacroPadUnreadTracker()
+            boundaryStale.update([.init(id: idA, isThinking: true, paneIndex: 0)],
+                                 lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            boundaryStale.update([.init(id: idA, isThinking: false, paneIndex: 0)],
+                                 lastTypedPaneIndex: 0, secondsSinceTyped: threshold + 0.001)
+            record("unread: just past the threshold does not clear",
+                   boundaryStale.unread.contains(idA),
+                   "unread=\(boundaryStale.unread)")
+
+            // lastTypedPaneIndex == nil (never typed): nothing is ever
+            // cleared, however recent secondsSinceTyped claims to be.
+            var neverTyped = MacroPadUnreadTracker()
+            neverTyped.update([.init(id: idA, isThinking: true, paneIndex: 0)],
+                              lastTypedPaneIndex: nil, secondsSinceTyped: 0)
+            neverTyped.update([.init(id: idA, isThinking: false, paneIndex: 0)],
+                              lastTypedPaneIndex: nil, secondsSinceTyped: 0)
+            record("unread: nil lastTypedPaneIndex never clears",
+                   neverTyped.unread.contains(idA),
+                   "unread=\(neverTyped.unread)")
 
             var unmapped = MacroPadUnreadTracker()
-            unmapped.update([.init(id: idB, isThinking: true, paneIndex: nil)], focusedPaneIndex: 0, isAppActive: true)
-            unmapped.update([.init(id: idB, isThinking: false, paneIndex: nil)], focusedPaneIndex: 0, isAppActive: true)
+            unmapped.update([.init(id: idB, isThinking: true, paneIndex: nil)],
+                            lastTypedPaneIndex: nil, secondsSinceTyped: 0)
+            unmapped.update([.init(id: idB, isThinking: false, paneIndex: nil)],
+                            lastTypedPaneIndex: nil, secondsSinceTyped: 0)
             record("unread: nil paneIndex finish becomes unread",
                    unmapped.unread.contains(idB),
                    "unread=\(unmapped.unread)")
 
-            unmapped.update([], focusedPaneIndex: 0, isAppActive: true)
+            unmapped.update([], lastTypedPaneIndex: nil, secondsSinceTyped: 0)
             record("unread: disappeared id is pruned",
                    !unmapped.unread.contains(idB),
                    "unread=\(unmapped.unread)")
@@ -3686,61 +3742,56 @@ enum SidebarLogicProbe {
             // so it must not be marked. Covers the `wasThinking` pruning that
             // the test above leaves untouched.
             var relaunch = MacroPadUnreadTracker()
-            relaunch.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            relaunch.update([], focusedPaneIndex: 0, isAppActive: true)
-            relaunch.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
+            relaunch.update([.init(id: idA, isThinking: true, paneIndex: 1)],
+                            lastTypedPaneIndex: nil, secondsSinceTyped: 0)
+            relaunch.update([], lastTypedPaneIndex: nil, secondsSinceTyped: 0)
+            relaunch.update([.init(id: idA, isThinking: false, paneIndex: 1)],
+                            lastTypedPaneIndex: nil, secondsSinceTyped: 0)
             record("unread: close-and-reopen does not fake a finish",
                    !relaunch.unread.contains(idA),
                    "unread=\(relaunch.unread)")
 
-            // Clearing must be per-session, not "wipe the set when the focused
-            // pane's session is present".
+            // Clearing must be per-session, not "wipe the set when the
+            // typed-in pane's session is present".
             var pair = MacroPadUnreadTracker()
             pair.update([.init(id: idA, isThinking: true, paneIndex: 0),
-                         .init(id: idB, isThinking: true, paneIndex: 1)], focusedPaneIndex: 2, isAppActive: true)
+                         .init(id: idB, isThinking: true, paneIndex: 1)],
+                        lastTypedPaneIndex: 2, secondsSinceTyped: 0)
             pair.update([.init(id: idA, isThinking: false, paneIndex: 0),
-                         .init(id: idB, isThinking: false, paneIndex: 1)], focusedPaneIndex: 2, isAppActive: true)
+                         .init(id: idB, isThinking: false, paneIndex: 1)],
+                        lastTypedPaneIndex: 2, secondsSinceTyped: 0)
             let bothMarked = pair.unread.contains(idA) && pair.unread.contains(idB)
             pair.update([.init(id: idA, isThinking: false, paneIndex: 0),
-                         .init(id: idB, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            record("unread: focusing one pane clears only that session",
+                         .init(id: idB, isThinking: false, paneIndex: 1)],
+                        lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            record("unread: typing into one pane clears only that session",
                    bothMarked && !pair.unread.contains(idA) && pair.unread.contains(idB),
                    "bothMarked=\(bothMarked) unread=\(pair.unread)")
 
             // `refresh()` runs many times per second; a mark that survived
             // only one pass would show green for a single frame.
             var repeated = MacroPadUnreadTracker()
-            repeated.update([.init(id: idA, isThinking: true, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)], focusedPaneIndex: 0, isAppActive: true)
-            // The app being in the background overrides pane focus: this is
-            // the case the pad exists for, and it produced no green at all.
-            var away = MacroPadUnreadTracker()
-            away.update([.init(id: idA, isThinking: true, paneIndex: 0)],
-                        focusedPaneIndex: 0, isAppActive: false)
-            away.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                        focusedPaneIndex: 0, isAppActive: false)
-            record("unread: finishing in the focused pane while away still marks",
-                   away.unread.contains(idA), "unread=\(away.unread)")
-            away.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                        focusedPaneIndex: 0, isAppActive: true)
-            record("unread: coming back clears the focused pane",
-                   !away.unread.contains(idA), "unread=\(away.unread)")
-
-            // Returning must not clear a pane the user did not come back to.
-            var elsewhere = MacroPadUnreadTracker()
-            elsewhere.update([.init(id: idB, isThinking: true, paneIndex: 1)],
-                             focusedPaneIndex: 0, isAppActive: false)
-            elsewhere.update([.init(id: idB, isThinking: false, paneIndex: 1)],
-                             focusedPaneIndex: 0, isAppActive: false)
-            elsewhere.update([.init(id: idB, isThinking: false, paneIndex: 1)],
-                             focusedPaneIndex: 0, isAppActive: true)
-            record("unread: coming back leaves other panes marked",
-                   elsewhere.unread.contains(idB), "unread=\(elsewhere.unread)")
-
+            repeated.update([.init(id: idA, isThinking: true, paneIndex: 1)],
+                            lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)],
+                            lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)],
+                            lastTypedPaneIndex: 0, secondsSinceTyped: 0)
             record("unread: mark survives a repeated identical refresh",
                    repeated.unread.contains(idA),
                    "unread=\(repeated.unread)")
+
+            // A turn finishing in a pane other than the typed-in one stays
+            // marked regardless of how recent the keystroke elsewhere was —
+            // recency is scoped to a pane, not to the tracker as a whole.
+            var elsewhere = MacroPadUnreadTracker()
+            elsewhere.update([.init(id: idB, isThinking: true, paneIndex: 1)],
+                             lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            elsewhere.update([.init(id: idB, isThinking: false, paneIndex: 1)],
+                             lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            record("unread: finish in a pane other than the typed-in one stays marked",
+                   elsewhere.unread.contains(idB),
+                   "unread=\(elsewhere.unread)")
         }
 
         // --- SessionActivity: the SSH rung, and unread's place at the bottom

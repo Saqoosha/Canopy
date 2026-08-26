@@ -14,7 +14,9 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MacroPad")
 /// answers a question the screen never had to: *did anything finish while I
 /// wasn't looking?* With the pad mapped to panes, every mapped session is on
 /// screen, so "not visible" can't be the trigger the way it could if the pad
-/// mapped to sidebar rows. The trigger is the focused pane instead.
+/// mapped to sidebar rows. The trigger is which pane the user last typed
+/// into, and how recently — see `update`'s doc for why that replaced pane
+/// focus plus app activation.
 struct MacroPadUnreadTracker {
     struct Snapshot {
         let id: UUID
@@ -23,16 +25,36 @@ struct MacroPadUnreadTracker {
         let paneIndex: Int?
     }
 
+    /// How long a keystroke keeps a pane "recently typed in" for the purpose
+    /// of clearing unread. Long enough to survive an ordinary thinking pause
+    /// mid-message without the green mark reappearing under the user's own
+    /// hands; short enough that a pane left focused overnight does not go on
+    /// clearing itself the moment a turn happens to finish there.
+    static let recentTypingThreshold: TimeInterval = 60
+
     private(set) var unread: Set<UUID> = []
     private var wasThinking: [UUID: Bool] = [:]
 
-    /// `isAppActive` is not a refinement of `focusedPaneIndex` — it overrides
-    /// it. The question unread answers is "did anything finish while I wasn't
-    /// looking", and a focused pane in a background app is not being looked at.
-    /// Without this, the one case the pad exists for — you walked away, a turn
-    /// finished — produced no green at all, because the pane you left focused
-    /// is the pane the turn finished in.
-    mutating func update(_ sessions: [Snapshot], focusedPaneIndex: Int, isAppActive: Bool) {
+    /// Clearing is driven by keystroke recency in a pane, not by whether
+    /// Canopy is the frontmost app. The app-active rule this replaced
+    /// conflated two different questions: "is Canopy the frontmost app" is
+    /// not "is a human looking at the screen". Walk away from the Mac
+    /// without switching apps and Canopy stays active, the pane you left
+    /// stays focused, and a turn finishing there produced no green at all —
+    /// the one case the pad exists for.
+    ///
+    /// Keystroke recency subsumes app activation rather than sitting beside
+    /// it: a keystroke can only reach the frontmost app in the first place,
+    /// so switching to another app lets `secondsSinceTyped` go stale on its
+    /// own with nothing extra to track. `lastTypedPaneIndex` is stamped by a
+    /// `.keyDown` monitor on the currently focused pane, and by a MacroPad
+    /// key press on the pane it focuses — it is deliberately not read from
+    /// `focusedPaneIndex` itself, because a pane can sit focused for hours
+    /// with nobody at the keyboard, which is exactly the state the old rule
+    /// could not tell apart from someone actually there.
+    mutating func update(_ sessions: [Snapshot],
+                         lastTypedPaneIndex: Int?,
+                         secondsSinceTyped: TimeInterval) {
         let live = Set(sessions.map(\.id))
         unread.formIntersection(live)
         wasThinking = wasThinking.filter { live.contains($0.key) }
@@ -44,16 +66,12 @@ struct MacroPadUnreadTracker {
         }
 
         // Clearing runs after marking, deliberately: a turn that ends in the
-        // pane the user is already looking at must never light up green. The
-        // two-step ordering is what makes "finished while focused" and
-        // "finished elsewhere, then focused" collapse to the same clean state
-        // without a special case for either.
-        //
-        // It is skipped entirely while the app is in the background, which is
-        // also what makes returning to Canopy clear the focused pane: the next
-        // update after activation runs this loop again.
-        guard isAppActive else { return }
-        for session in sessions where session.paneIndex == focusedPaneIndex {
+        // pane the user is actively typing in must never light up green. The
+        // two-step ordering is what makes "finished while typing there" and
+        // "finished elsewhere, then typed there" collapse to the same clean
+        // state without a special case for either.
+        guard let lastTypedPaneIndex, secondsSinceTyped <= Self.recentTypingThreshold else { return }
+        for session in sessions where session.paneIndex == lastTypedPaneIndex {
             unread.remove(session.id)
         }
     }
@@ -370,11 +388,14 @@ final class MacroPadController {
     private var watchdogTimer: Timer?
     private var helloIsHostInitiated = false
     private var lastSource: MacroPadSource?
-    /// Mirrors `NSApp.isActive`. Kept as stored state rather than read live
-    /// because `refresh()` has to re-run when it changes, and AppKit's
-    /// activation is a notification, not an observable property.
-    private var isAppActive = NSApp?.isActive ?? true
-    private var activationObservers: [NSObjectProtocol] = []
+    /// The pane the user was last typing in, and when. Stamped by
+    /// AppDelegate's `.keyDown` monitor (any keystroke into a Canopy window
+    /// counts, regardless of which key — this is a presence signal, not a
+    /// content one) and by `focusPane` (answering the pad is itself "I am
+    /// here, in this pane"). `refresh()` folds both into
+    /// `MacroPadUnreadTracker.update` on every pass; nothing else reads them.
+    private var lastTypedPaneIndex: Int?
+    private var lastTypedAt: Date?
 
     init(store: SessionStore,
          settings: CanopySettings = .shared,
@@ -392,23 +413,7 @@ final class MacroPadController {
         expectHostInitiatedHello()
         device.start()
         startWatchdog()
-        observeActivation()
         track()
-    }
-
-    private func observeActivation() {
-        let center = NotificationCenter.default
-        for (name, active) in [(NSApplication.didBecomeActiveNotification, true),
-                               (NSApplication.didResignActiveNotification, false)] {
-            let token = center.addObserver(forName: name, object: nil, queue: .main) { _ in
-                Task { @MainActor [weak self] in
-                    guard let self, self.isAppActive != active else { return }
-                    self.isAppActive = active
-                    self.refresh()
-                }
-            }
-            activationObservers.append(token)
-        }
     }
 
     /// Blanks the pad and closes the port synchronously. Call from
@@ -422,8 +427,6 @@ final class MacroPadController {
         watchdogTimer?.invalidate()
         watchdogTimer = nil
         cancelSleepChord()
-        activationObservers.forEach(NotificationCenter.default.removeObserver)
-        activationObservers.removeAll()
         // The observation loop stays armed, so leaving these set would let a
         // later `refresh()` walk straight past `pushStates`' connection guard
         // and send into a stopped device. It only ever worked because
@@ -461,7 +464,6 @@ final class MacroPadController {
         let source = settings.macroPadSource
         let brightness = settings.macroPadBrightness
         let panes = store.panes
-        let focusedPaneIndex = store.focusedPaneIndex
         let openSessions = store.openSessions
 
         if lastSource != source {
@@ -479,6 +481,7 @@ final class MacroPadController {
             if case .session(let id) = pane.content { paneIndexBySession[id] = index }
         }
 
+        let secondsSinceTyped = lastTypedAt.map { Date().timeIntervalSince($0) } ?? .infinity
         tracker.update(
             openSessions.map {
                 MacroPadUnreadTracker.Snapshot(
@@ -487,8 +490,8 @@ final class MacroPadController {
                     paneIndex: paneIndexBySession[$0.id]
                 )
             },
-            focusedPaneIndex: focusedPaneIndex,
-            isAppActive: isAppActive
+            lastTypedPaneIndex: lastTypedPaneIndex,
+            secondsSinceTyped: secondsSinceTyped
         )
         // Publish so the sidebar's dot and the pad's LED read the same set.
         //
@@ -1057,8 +1060,23 @@ final class MacroPadController {
         chord.reset()
     }
 
+    /// Records "the user is here, working in this pane" and forces an
+    /// immediate `refresh()` so the recency change clears unread in the same
+    /// pass that stamped it — Observation would otherwise wait for some
+    /// unrelated `SessionStore`/`CanopySettings` mutation to re-run the
+    /// tracked closure, and a keystroke touches neither. Called from
+    /// AppDelegate's `.keyDown` monitor with the currently focused pane, and
+    /// from `focusPane` with the pane a MacroPad key press just brought
+    /// forward.
+    func noteInteraction(paneIndex: Int) {
+        lastTypedPaneIndex = paneIndex
+        lastTypedAt = Date()
+        refresh()
+    }
+
     private func focusPane(_ index: Int) {
         guard store.panes.indices.contains(index) else { return }
+        noteInteraction(paneIndex: index)
         // "Press it and you're there" means the app comes forward too — the
         // pad's reason to exist is being reachable while looking at something
         // else, so quietly moving focus behind another app's window would
