@@ -11,3 +11,6 @@ Resources/prism/
 tmp/
 .claude/scheduled_tasks.lock
 .spm-cache/
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
