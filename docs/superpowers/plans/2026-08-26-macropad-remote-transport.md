@@ -1525,7 +1525,7 @@ Filter by `Canopy[<pid>` if the installed Release build is also running — `pro
 CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy 2>&1 | tail -3
 ```
 
-Read the `--- N passed` line and set `EXPECTED_ASSERTIONS` in `.github/workflows/ci.yml` (line 442) to exactly `N`. It is 551 before this branch; the tasks above add 30. Do not guess the number — use the measured one, because CI builds the merge ref and main may have moved.
+Read the `--- N passed` line and set `EXPECTED_ASSERTIONS` in `.github/workflows/ci.yml` (line 442) to exactly `N`. It is 551 before this branch; the tasks above add 31 (27 in Task 1, 1 in Task 2, 3 in Task 5) — Task 1 measured 578, which is exactly 551 + 27. Do not guess the number — use the measured one, because CI builds the merge ref and main may have moved.
 
 - [ ] **Step 3: Update CLAUDE.md**
 
