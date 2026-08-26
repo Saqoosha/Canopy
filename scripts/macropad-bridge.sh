@@ -102,18 +102,29 @@ run_bridge() {
   require_socat
   local ip
   ip="$(tailscale_ip)" || die "no Tailscale IPv4 address. Start Tailscale, or fix the bridge before exposing it more widely — this script will not bind 0.0.0.0."
-  echo "macropad-bridge: listening on $ip:$PORT"
+  # Intent, not a completed action: no socket exists yet, and won't until a
+  # pad is actually found below. The old wording said "listening" here,
+  # which was true only once socat itself started — for however long no pad
+  # is attached, it was a stale claim about a bind that never happened.
+  echo "macropad-bridge: starting up; will bind $ip:$PORT once a pad is found"
 
+  local reported_no_pad=""
   while true; do
     local dev
     if ! dev="$(find_device)"; then
       # Deliberately do not listen at all with no pad present: Canopy then
       # gets ECONNREFUSED and retries cleanly, instead of seeing a connection
-      # that dies before HELLO.
+      # that dies before HELLO. Logged once on entry to this state, not on
+      # every 2s retry, so an unplugged pad doesn't fill the log forever.
+      if [ -z "$reported_no_pad" ]; then
+        echo "macropad-bridge: no pad found; not listening on $ip:$PORT"
+        reported_no_pad=1
+      fi
       sleep 2
       continue
     fi
-    echo "macropad-bridge: $dev ready, waiting for a client"
+    reported_no_pad=""
+    echo "macropad-bridge: $dev found, listening on $ip:$PORT, waiting for a client"
     # No `fork`: the device path must be re-resolved after a re-plug, and a
     # forking socat holds its argv for the life of the process. socat opens
     # address 1 (accept) before address 2, so the serial port still stays free
