@@ -3649,90 +3649,155 @@ enum SidebarLogicProbe {
         do {
             let idA = UUID()
             let idB = UUID()
-            let threshold = MacroPadUnreadTracker.recentTypingThreshold
+            let threshold = MacroPadUnreadTracker.presenceThreshold
 
             var tracker = MacroPadUnreadTracker()
-            tracker.update([.init(id: idA, isThinking: true, paneIndex: 1)],
-                           lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            tracker.update([.init(id: idA, isThinking: false, paneIndex: 1)],
-                           lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            record("unread: finish off the typed-in pane becomes unread",
+            tracker.update([.init(id: idA, isThinking: true)],
+                           lastInteractedSessionId: nil, secondsSincePresence: 0)
+            tracker.update([.init(id: idA, isThinking: false)],
+                           lastInteractedSessionId: nil, secondsSincePresence: 0)
+            record("unread: finish with no interaction becomes unread",
                    tracker.unread.contains(idA),
                    "unread=\(tracker.unread)")
 
-            // Requirement: a turn finishing in the pane the user is actively
-            // typing in (recent keystroke) must never light up green.
-            var typing = MacroPadUnreadTracker()
-            typing.update([.init(id: idA, isThinking: true, paneIndex: 0)],
-                          lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            typing.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                          lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            record("unread: finish in the just-typed pane (recent) stays clean",
-                   !typing.unread.contains(idA),
-                   "unread=\(typing.unread)")
+            // Requirement: the last-interacted-with session, with the system
+            // having seen input recently, clears.
+            var recent = MacroPadUnreadTracker()
+            recent.update([.init(id: idA, isThinking: true)],
+                          lastInteractedSessionId: idA, secondsSincePresence: 0)
+            recent.update([.init(id: idA, isThinking: false)],
+                          lastInteractedSessionId: idA, secondsSincePresence: 0)
+            record("unread: last-interacted session with recent system input clears",
+                   !recent.unread.contains(idA),
+                   "unread=\(recent.unread)")
 
-            // The bug this branch fixes, reproduced directly: a turn
-            // finishing in the FOCUSED pane while the last keystroke there is
-            // stale must still mark unread — a focused-but-untouched pane is
-            // not "being looked at". Fails without the fix (the old
-            // `isAppActive` rule cleared this unconditionally).
-            var stale = MacroPadUnreadTracker()
-            stale.update([.init(id: idA, isThinking: true, paneIndex: 0)],
-                         lastTypedPaneIndex: 0, secondsSinceTyped: threshold + 1)
-            stale.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                         lastTypedPaneIndex: 0, secondsSinceTyped: threshold + 1)
-            record("unread: finish in the typed-in pane with a stale keystroke still marks",
-                   stale.unread.contains(idA),
-                   "unread=\(stale.unread)")
+            // Finding 1, reproduced directly: the previous commit's rule
+            // (keystroke recency alone, 60 s) would clear this — 31 s is
+            // "typed recently" under that window. It shouldn't: 31 s of
+            // system-wide silence is well past the 30 s idle threshold, so
+            // "attributed to this session" is not enough on its own — the
+            // user may well have typed it and then walked away.
+            var idle = MacroPadUnreadTracker()
+            idle.update([.init(id: idA, isThinking: true)],
+                        lastInteractedSessionId: idA, secondsSincePresence: threshold + 1)
+            idle.update([.init(id: idA, isThinking: false)],
+                        lastInteractedSessionId: idA, secondsSincePresence: threshold + 1)
+            record("unread: last-interacted session but system idle past threshold still marks",
+                   idle.unread.contains(idA),
+                   "unread=\(idle.unread)")
 
-            // Typing again resets recency and clears the mark left above.
-            stale.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                         lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            record("unread: typing into the marked pane clears it",
-                   !stale.unread.contains(idA),
-                   "unread=\(stale.unread)")
+            // The bug this round fixes, reproduced directly: the pad has no
+            // HID interface (CLAUDE.md's "Serial (CDC), never HID"), so a
+            // MacroPad key press cannot register with `CGEventSource` at
+            // all. `MacroPadController.refresh` covers that by feeding the
+            // tracker `min(secondsSinceOSInput, secondsSincePadPress)`
+            // rather than OS input alone — simulated here by computing that
+            // minimum the same way before calling `update`. OS input is
+            // stale (past threshold) but the pad was pressed moments ago, so
+            // the minimum is recent and the session clears. Passing OS idle
+            // alone — what the previous round of this fix did — would fail
+            // this exactly like the "idle past threshold" case just above.
+            var padPresent = MacroPadUnreadTracker()
+            let staleOSInput = threshold + 5
+            let recentPadPress: TimeInterval = 0
+            padPresent.update([.init(id: idA, isThinking: true)],
+                              lastInteractedSessionId: idA,
+                              secondsSincePresence: min(staleOSInput, recentPadPress))
+            padPresent.update([.init(id: idA, isThinking: false)],
+                              lastInteractedSessionId: idA,
+                              secondsSincePresence: min(staleOSInput, recentPadPress))
+            record("unread: OS input stale but a recent pad press still clears",
+                   !padPresent.unread.contains(idA),
+                   "unread=\(padPresent.unread)")
+
+            // Both sources stale: still marked. A stale pad press must not
+            // by itself keep the session artificially "present".
+            var bothStale = MacroPadUnreadTracker()
+            let stalePadPress = threshold + 5
+            bothStale.update([.init(id: idA, isThinking: true)],
+                             lastInteractedSessionId: idA,
+                             secondsSincePresence: min(staleOSInput, stalePadPress))
+            bothStale.update([.init(id: idA, isThinking: false)],
+                             lastInteractedSessionId: idA,
+                             secondsSincePresence: min(staleOSInput, stalePadPress))
+            record("unread: OS input stale and pad press also stale still marks",
+                   bothStale.unread.contains(idA),
+                   "unread=\(bothStale.unread)")
+
+            // Both sources recent: clears, same as either alone.
+            var bothRecent = MacroPadUnreadTracker()
+            bothRecent.update([.init(id: idA, isThinking: true)],
+                              lastInteractedSessionId: idA,
+                              secondsSincePresence: min(0, 0))
+            bothRecent.update([.init(id: idA, isThinking: false)],
+                              lastInteractedSessionId: idA,
+                              secondsSincePresence: min(0, 0))
+            record("unread: both presence sources recent clears",
+                   !bothRecent.unread.contains(idA),
+                   "unread=\(bothRecent.unread)")
+
+            // A session that is NOT the last-interacted one stays marked no
+            // matter how recent system input was — presence without
+            // attribution to THIS session clears nothing.
+            var other = MacroPadUnreadTracker()
+            other.update([.init(id: idB, isThinking: true)],
+                         lastInteractedSessionId: idA, secondsSincePresence: 0)
+            other.update([.init(id: idB, isThinking: false)],
+                         lastInteractedSessionId: idA, secondsSincePresence: 0)
+            record("unread: a session that isn't last-interacted stays marked despite recent input",
+                   other.unread.contains(idB),
+                   "unread=\(other.unread)")
+
+            // lastInteractedSessionId == nil: nothing is ever cleared,
+            // however recent secondsSincePresence claims to be.
+            var neverInteracted = MacroPadUnreadTracker()
+            neverInteracted.update([.init(id: idA, isThinking: true)],
+                                   lastInteractedSessionId: nil, secondsSincePresence: 0)
+            neverInteracted.update([.init(id: idA, isThinking: false)],
+                                   lastInteractedSessionId: nil, secondsSincePresence: 0)
+            record("unread: nil lastInteractedSessionId never clears",
+                   neverInteracted.unread.contains(idA),
+                   "unread=\(neverInteracted.unread)")
 
             // Threshold boundary, both sides: inclusive at exactly the
             // threshold, stale just past it.
             var boundaryClear = MacroPadUnreadTracker()
-            boundaryClear.update([.init(id: idA, isThinking: true, paneIndex: 0)],
-                                 lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            boundaryClear.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                                 lastTypedPaneIndex: 0, secondsSinceTyped: threshold)
-            record("unread: exactly at the threshold still clears (inclusive)",
+            boundaryClear.update([.init(id: idA, isThinking: true)],
+                                 lastInteractedSessionId: idA, secondsSincePresence: 0)
+            boundaryClear.update([.init(id: idA, isThinking: false)],
+                                 lastInteractedSessionId: idA, secondsSincePresence: threshold)
+            record("unread: exactly at the idle threshold still clears (inclusive)",
                    !boundaryClear.unread.contains(idA),
                    "unread=\(boundaryClear.unread)")
 
             var boundaryStale = MacroPadUnreadTracker()
-            boundaryStale.update([.init(id: idA, isThinking: true, paneIndex: 0)],
-                                 lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            boundaryStale.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                                 lastTypedPaneIndex: 0, secondsSinceTyped: threshold + 0.001)
-            record("unread: just past the threshold does not clear",
+            boundaryStale.update([.init(id: idA, isThinking: true)],
+                                 lastInteractedSessionId: idA, secondsSincePresence: 0)
+            boundaryStale.update([.init(id: idA, isThinking: false)],
+                                 lastInteractedSessionId: idA, secondsSincePresence: threshold + 0.001)
+            record("unread: just past the idle threshold does not clear",
                    boundaryStale.unread.contains(idA),
                    "unread=\(boundaryStale.unread)")
 
-            // lastTypedPaneIndex == nil (never typed): nothing is ever
-            // cleared, however recent secondsSinceTyped claims to be.
-            var neverTyped = MacroPadUnreadTracker()
-            neverTyped.update([.init(id: idA, isThinking: true, paneIndex: 0)],
-                              lastTypedPaneIndex: nil, secondsSinceTyped: 0)
-            neverTyped.update([.init(id: idA, isThinking: false, paneIndex: 0)],
-                              lastTypedPaneIndex: nil, secondsSinceTyped: 0)
-            record("unread: nil lastTypedPaneIndex never clears",
-                   neverTyped.unread.contains(idA),
-                   "unread=\(neverTyped.unread)")
+            // A last-interacted id whose session is no longer live (its pane
+            // closed) must not crash and must leave nothing stale: `unread`
+            // was already intersected against the live set, so removing an
+            // id that isn't a member is a harmless no-op.
+            var staleId = MacroPadUnreadTracker()
+            staleId.update([.init(id: idB, isThinking: true)],
+                           lastInteractedSessionId: idA, secondsSincePresence: 0)
+            staleId.update([.init(id: idB, isThinking: false)],
+                           lastInteractedSessionId: idA, secondsSincePresence: 0)
+            record("unread: a last-interacted id with no live session doesn't crash or leave anything stale",
+                   staleId.unread.contains(idB),
+                   "unread=\(staleId.unread)")
 
             var unmapped = MacroPadUnreadTracker()
-            unmapped.update([.init(id: idB, isThinking: true, paneIndex: nil)],
-                            lastTypedPaneIndex: nil, secondsSinceTyped: 0)
-            unmapped.update([.init(id: idB, isThinking: false, paneIndex: nil)],
-                            lastTypedPaneIndex: nil, secondsSinceTyped: 0)
-            record("unread: nil paneIndex finish becomes unread",
-                   unmapped.unread.contains(idB),
-                   "unread=\(unmapped.unread)")
-
-            unmapped.update([], lastTypedPaneIndex: nil, secondsSinceTyped: 0)
+            unmapped.update([.init(id: idB, isThinking: true)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+            unmapped.update([.init(id: idB, isThinking: false)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+            unmapped.update([], lastInteractedSessionId: nil, secondsSincePresence: 0)
             record("unread: disappeared id is pruned",
                    !unmapped.unread.contains(idB),
                    "unread=\(unmapped.unread)")
@@ -3742,56 +3807,44 @@ enum SidebarLogicProbe {
             // so it must not be marked. Covers the `wasThinking` pruning that
             // the test above leaves untouched.
             var relaunch = MacroPadUnreadTracker()
-            relaunch.update([.init(id: idA, isThinking: true, paneIndex: 1)],
-                            lastTypedPaneIndex: nil, secondsSinceTyped: 0)
-            relaunch.update([], lastTypedPaneIndex: nil, secondsSinceTyped: 0)
-            relaunch.update([.init(id: idA, isThinking: false, paneIndex: 1)],
-                            lastTypedPaneIndex: nil, secondsSinceTyped: 0)
+            relaunch.update([.init(id: idA, isThinking: true)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+            relaunch.update([], lastInteractedSessionId: nil, secondsSincePresence: 0)
+            relaunch.update([.init(id: idA, isThinking: false)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0)
             record("unread: close-and-reopen does not fake a finish",
                    !relaunch.unread.contains(idA),
                    "unread=\(relaunch.unread)")
 
             // Clearing must be per-session, not "wipe the set when the
-            // typed-in pane's session is present".
+            // last-interacted session is present".
             var pair = MacroPadUnreadTracker()
-            pair.update([.init(id: idA, isThinking: true, paneIndex: 0),
-                         .init(id: idB, isThinking: true, paneIndex: 1)],
-                        lastTypedPaneIndex: 2, secondsSinceTyped: 0)
-            pair.update([.init(id: idA, isThinking: false, paneIndex: 0),
-                         .init(id: idB, isThinking: false, paneIndex: 1)],
-                        lastTypedPaneIndex: 2, secondsSinceTyped: 0)
+            pair.update([.init(id: idA, isThinking: true),
+                         .init(id: idB, isThinking: true)],
+                        lastInteractedSessionId: nil, secondsSincePresence: 0)
+            pair.update([.init(id: idA, isThinking: false),
+                         .init(id: idB, isThinking: false)],
+                        lastInteractedSessionId: nil, secondsSincePresence: 0)
             let bothMarked = pair.unread.contains(idA) && pair.unread.contains(idB)
-            pair.update([.init(id: idA, isThinking: false, paneIndex: 0),
-                         .init(id: idB, isThinking: false, paneIndex: 1)],
-                        lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            record("unread: typing into one pane clears only that session",
+            pair.update([.init(id: idA, isThinking: false),
+                         .init(id: idB, isThinking: false)],
+                        lastInteractedSessionId: idA, secondsSincePresence: 0)
+            record("unread: interacting with one session clears only that session",
                    bothMarked && !pair.unread.contains(idA) && pair.unread.contains(idB),
                    "bothMarked=\(bothMarked) unread=\(pair.unread)")
 
             // `refresh()` runs many times per second; a mark that survived
             // only one pass would show green for a single frame.
             var repeated = MacroPadUnreadTracker()
-            repeated.update([.init(id: idA, isThinking: true, paneIndex: 1)],
-                            lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)],
-                            lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            repeated.update([.init(id: idA, isThinking: false, paneIndex: 1)],
-                            lastTypedPaneIndex: 0, secondsSinceTyped: 0)
+            repeated.update([.init(id: idA, isThinking: true)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+            repeated.update([.init(id: idA, isThinking: false)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0)
+            repeated.update([.init(id: idA, isThinking: false)],
+                            lastInteractedSessionId: nil, secondsSincePresence: 0)
             record("unread: mark survives a repeated identical refresh",
                    repeated.unread.contains(idA),
                    "unread=\(repeated.unread)")
-
-            // A turn finishing in a pane other than the typed-in one stays
-            // marked regardless of how recent the keystroke elsewhere was —
-            // recency is scoped to a pane, not to the tracker as a whole.
-            var elsewhere = MacroPadUnreadTracker()
-            elsewhere.update([.init(id: idB, isThinking: true, paneIndex: 1)],
-                             lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            elsewhere.update([.init(id: idB, isThinking: false, paneIndex: 1)],
-                             lastTypedPaneIndex: 0, secondsSinceTyped: 0)
-            record("unread: finish in a pane other than the typed-in one stays marked",
-                   elsewhere.unread.contains(idB),
-                   "unread=\(elsewhere.unread)")
         }
 
         // --- SessionActivity: the SSH rung, and unread's place at the bottom

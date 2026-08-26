@@ -45,14 +45,20 @@ final class SessionStore {
     /// index when panes is non-empty. Undefined (0) while panes is empty.
     private(set) var focusedPaneIndex: Int = 0
 
-    /// Sessions that finished a turn while the user wasn't recently typing
-    /// in their pane. Rendered as the green `SessionActivity.unread` dot in
-    /// the sidebar and as the green LED on the MacroPad.
+    /// Sessions that finished a turn while the user wasn't recently present
+    /// with them. Rendered as the green `SessionActivity.unread` dot in the
+    /// sidebar and as the green LED on the MacroPad.
     ///
-    /// A session with no pane counts as unfocused, so it is marked on finish
-    /// and stays marked until the user types into its pane (or presses that
-    /// pane's MacroPad key) — merely focusing it, by mouse or otherwise,
-    /// does not clear it. See `MacroPadUnreadTracker.update`'s doc.
+    /// A session with no pane counts as unfocused, so it is marked on finish.
+    /// Clearing needs both a deliberate act *on that session* — typing into
+    /// its pane, clicking it, focusing it (by sidebar click, Cmd+1..9,
+    /// Cmd+Opt+arrow, Cmd+Shift+[/] cycling, or its MacroPad key) — AND a
+    /// human recently present, by either OS-level input or a MacroPad key
+    /// press (the pad has no HID interface, so those two are tracked
+    /// separately and the more recent one wins). The first alone used to be
+    /// enough, and wasn't: focusing a pane and then walking away for an hour
+    /// is still "focused", not "here". See `MacroPadUnreadTracker.update`'s
+    /// doc.
     ///
     /// The store only *holds* this; the edge detection that produces it lives
     /// in `MacroPadUnreadTracker`, driven by `MacroPadController`. It lives
