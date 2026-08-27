@@ -6,18 +6,40 @@ import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MacroPad")
 
-/// Tracks which sessions have finished a turn while the user was looking
-/// somewhere else. Split out of `MacroPadController` as a pure value type so
-/// the probe can exercise the edge cases without a `SessionStore`, a window,
-/// or a device.
+
+/// Which session was last acted on, and the act's place in a monotonic
+/// order — one value because they are one fact, and a value type because the
+/// alternative is untestable. As two stored properties on the controller,
+/// deleting the counter's increment left the probe at a full green while the
+/// feature was totally dead: every generation would be 0, `0 > 0` is false,
+/// and nothing would ever clear again. That mutation now fails.
+struct InteractionStamp: Equatable {
+    private(set) var sessionId: UUID?
+    private(set) var seq: UInt64 = 0
+
+    /// `&+=` because 2^64 interactions is unreachable — that, not the cost of
+    /// a trap, is why wrapping is safe. A wrap would not renumber gracefully:
+    /// it would drop below every outstanding mark at once and strand them all
+    /// until the counter climbed back past them.
+    mutating func stamp(_ id: UUID) {
+        sessionId = id
+        seq &+= 1
+    }
+}
+
+/// Tracks which sessions have finished a turn with no deliberate act on
+/// them since — a turn finishing in the pane the user is looking at is
+/// marked too; focus is not an input to marking. Split out of
+/// `MacroPadController` as a pure value type so the probe can exercise the
+/// edge cases without a `SessionStore`, a window, or a device.
 ///
 /// "Unread" has no counterpart in Canopy's own UI — it exists because the pad
 /// answers a question the screen never had to: *did anything finish while I
 /// wasn't looking?* With the pad mapped to panes, every mapped session is on
 /// screen, so "not visible" can't be the trigger the way it could if the pad
-/// mapped to sidebar rows. Clearing it answers three independent
-/// questions — see `update`'s doc for why none of the three can be derived
-/// from either of the others.
+/// mapped to sidebar rows. Clearing it answers four questions — three
+/// independent signals plus an ordering constraint; see `update`'s doc for
+/// why none of them can be derived from the rest.
 struct MacroPadUnreadTracker {
     struct Snapshot {
         let id: UUID
@@ -39,20 +61,72 @@ struct MacroPadUnreadTracker {
     private(set) var unread: Set<UUID> = []
     private var wasThinking: [UUID: Bool] = [:]
 
-    /// Clearing answers three independent questions. Two prior rules each
-    /// answered only one of them; this branch's own first attempt answered
-    /// two of the three and, on a false argument that the third was implied
-    /// by the second, dropped it — which is the regression this doc and
-    /// `update`'s signature now both correct.
+    /// The interaction generation in force when each mark was created. It
+    /// supplies the AFTER in "a deliberate act on that pane, AFTER this turn
+    /// finished"; `lastInteractedSessionId` supplies the *which*.
+    ///
+    /// Without it, the act of sending a prompt cleared the completion of the
+    /// very turn it started: `lastInteractedSessionId` is stamped when the
+    /// user types, and a turn that finishes inside
+    /// `presenceThreshold` of that keystroke satisfied attribution,
+    /// presence and activation all at once — so the mark was inserted and
+    /// removed inside one `update`. Measured on hardware 2026-08-27: prompt
+    /// at t=0, finish at t=11 s — the row is quoted on `logUnreadDecision`, which is also where the caveat about its now-obsolete format lives. The
+    /// bound was never "turns shorter than the threshold" — presence is reset
+    /// by ANY input anywhere on the Mac, so the old rule also swallowed
+    /// arbitrarily long turns whose finish landed within `presenceThreshold`
+    /// of the user touching anything, while that session was still the
+    /// last-interacted one and Canopy was frontmost.
+    ///
+    /// The accepted cost of the new rule, stated so the next round does not
+    /// rediscover it as a bug and swing back: a turn that finishes under the
+    /// user's eyes DOES light up, and stays lit until they click, type, or
+    /// press its key. Reading is not an act this can see.
+    private var markSeq: [UUID: UInt64] = [:]
+
+    /// What one `update` actually did, as distinct from what the set looks
+    /// like afterwards. The two are not the same and the difference is the
+    /// bug this file exists to catch: a mark inserted and cleared inside the
+    /// SAME call leaves `unread` byte-identical to an idle refresh, so a
+    /// before/after diff cannot see it — which is precisely how the reported
+    /// regression stayed invisible until a human who knew a turn had just
+    /// ended read the log.
+    ///
+    /// `marked` and `cleared` both containing an id is that regression's
+    /// signature — and under the current guard it is provably EMPTY, since a
+    /// generation recorded one statement earlier can never be exceeded. Read
+    /// it as a tripwire, not a live diagnostic: it fires only if someone
+    /// reorders clear-before-mark or relaxes the comparison to `>=`. An empty
+    /// pair is not evidence the mechanism ran.
+    struct Outcome: Equatable {
+        var marked: Set<UUID> = []
+        var cleared: Set<UUID> = []
+    }
+
+    /// Clearing answers four questions. Three are independent signals; the
+    /// fourth is an ordering constraint over the same input as the first,
+    /// which is why counting disjoint signals found three and only hardware
+    /// found the fourth. Two prior rules each answered one of the three;
+    /// an earlier attempt answered two and, on a false argument that the
+    /// third was implied by the second, dropped it.
     ///
     /// | Question | Signal |
     /// | --- | --- |
     /// | *Which* session was the user with? | interaction — typed into its pane, clicked it, focused it, or pressed its MacroPad key |
+    /// | Did that act come **after** this turn finished? | `interactionSeq` against `markSeq` |
     /// | Is a human **at the machine** at all? | presence — the more recent of OS-level input (any device, any app) and a MacroPad key press |
     /// | Is that human **looking at Canopy**? | app activation |
     ///
-    /// None of the three is derivable from either of the others, and all
-    /// four combinations of the last two behave differently:
+    /// The second row is the one this file learned last, and it is not a
+    /// refinement of the first: attribution says *which* pane an act was
+    /// aimed at and says nothing about *when*, so on its own it let the
+    /// prompt-sending keystroke clear the completion of its own turn. See
+    /// `markSeq`.
+    ///
+    /// None of the three SIGNALS is derivable from the others, and all four
+    /// combinations of presence × activation behave differently. The list
+    /// below enumerates those two only; every line of it additionally
+    /// requires the ordering row above:
     ///
     /// - Canopy frontmost, presence recent → using Canopy → clear
     /// - Canopy frontmost, presence stale → walked away with Canopy still
@@ -84,12 +158,14 @@ struct MacroPadUnreadTracker {
     /// exactly the case the LED exists to report. Presence answers "is a
     /// human at the machine", which is necessary but not sufficient for "is
     /// that human looking at Canopy" — the same shape of gap that makes
-    /// attribution alone insufficient for presence. Each of the three is
-    /// measured from its own, disjoint input (a keystroke's destination
-    /// window, `CGEventSource` plus the pad's own press timestamp, and
-    /// `NSApplication`'s activation notifications), so the only sound
-    /// combination is exactly three ANDed conditions, none standing in for
-    /// another.
+    /// attribution alone insufficient for presence. Each of the three
+    /// signals is measured from its own, disjoint input (a keystroke's
+    /// destination window, `CGEventSource` plus the pad's own press
+    /// timestamp, and `NSApplication`'s activation notifications), so none
+    /// can stand in for another. That argument does NOT extend to the
+    /// ordering condition, which reads the SAME events as attribution and
+    /// adds only *when* — which is why three disjoint inputs yielded three
+    /// conditions and the fourth had to be found on hardware.
     ///
     /// `isAppActive` is not read live here — pure value types don't ask
     /// AppKit anything. `MacroPadController` mirrors `NSApp.isActive` into a
@@ -99,46 +175,122 @@ struct MacroPadUnreadTracker {
     /// become a dependency of it.
     ///
     /// `lastInteractedSessionId` is stamped by a `.keyDown` monitor on the
-    /// currently focused pane's session, by `MacroPadController.refresh` on
-    /// any change to which session occupies the focused pane (covers focus
-    /// changes from any source — click, Cmd+1..9, Cmd+Opt+arrow,
-    /// Cmd+Shift+[/] cycling), and by a MacroPad key press. It is keyed on
+    /// currently focused pane's session, by a click in a pane's body, by a
+    /// click on its sidebar row, by `MacroPadController.refresh` on any
+    /// change to which session occupies the focused pane (covers focus
+    /// changes from any source — Cmd+1..9, Cmd+Opt+arrow, Cmd+Shift+[/]
+    /// cycling), and by a MacroPad key press. The two click routes are
+    /// explicit because both can leave the focused session UNCHANGED, which
+    /// is exactly when they matter — see `noteInteraction`. It is keyed on
     /// the session's `UUID`, not a pane index, so a pane closing and a
     /// different session later landing at the same index cannot inherit a
     /// stale attribution.
+    @discardableResult
     mutating func update(_ sessions: [Snapshot],
                          lastInteractedSessionId: UUID?,
+                         interactionSeq: UInt64,
                          secondsSincePresence: TimeInterval,
-                         isAppActive: Bool) {
+                         isAppActive: Bool) -> Outcome {
+        var outcome = Outcome()
         let live = Set(sessions.map(\.id))
         unread.formIntersection(live)
         wasThinking = wasThinking.filter { live.contains($0.key) }
+        markSeq = markSeq.filter { live.contains($0.key) }
 
         for session in sessions {
             let finished = (wasThinking[session.id] ?? false) && !session.isThinking
             wasThinking[session.id] = session.isThinking
-            if finished { unread.insert(session.id) }
+            if finished {
+                // `marked` reports the ARMING, not the set insertion, and
+                // the difference is not cosmetic: a second turn finishing
+                // while the first is still unacknowledged leaves `unread`
+                // unchanged but advances `markSeq`, which INVALIDATES any act
+                // that had already happened. (A is marked at gen 10; the user
+                // clicks it at 11 but the clear is refused because Canopy was
+                // not yet frontmost; A finishes again and re-arms at 11, so
+                // that click is now permanently insufficient.) Keyed on the
+                // set transition, the log said nothing at the one moment a
+                // reader would need it to.
+                //
+                // Known and deliberately not fixed: the generation recorded
+                // is the one in force when the finish is OBSERVED, not when
+                // it happened. `refresh()` is scheduled by `Observation`, so
+                // an act landing in the gap — the user clicks a fraction of a
+                // second after a turn ends, before the queued refresh runs —
+                // bumps the counter first and is then refused by its own
+                // mark. It fails SAFE (the LED stays lit; a second click
+                // clears it) and the window is one main-actor turn.
+                //
+                // The obvious fix, marking at the generation in force at the
+                // LAST refresh, was traced and rejected: it also flips the
+                // case where focus ARRIVES at a pane in the same pass its
+                // turn ends, which reviewers read as correctly staying lit,
+                // and it edits the one comparison this file spent two rounds
+                // pinning. Reported by two reviewers independently; recorded
+                // here so the third does not have to re-derive it.
+                unread.insert(session.id)
+                outcome.marked.insert(session.id)
+                markSeq[session.id] = interactionSeq
+            }
         }
 
-        // Clearing runs after marking, deliberately: a turn that ends in the
-        // session the user is actively present with must never light up
-        // green. The two-step ordering is what makes "finished while there"
-        // and "finished elsewhere, then arrived" collapse to the same clean
-        // state without a special case for either.
+        // Clearing runs after marking so a mark created in this same call
+        // is visible to the guard below — which then refuses it, because
+        // `interactionSeq` cannot exceed a generation recorded one statement
+        // ago. That refusal IS the feature: a turn that finishes while the
+        // user is present lights up green and waits to be acknowledged,
+        // rather than being cleared by the keystroke that started it.
         //
-        // `unread.remove` on an id that isn't a member (a stale
-        // `lastInteractedSessionId` whose session already closed) is a
-        // harmless no-op — nothing to look up, nothing left stale.
+        // An earlier version claimed the opposite ("a turn that ends in the
+        // session the user is actively present with must never light up
+        // green") and cleared without regard to WHEN the act happened — the
+        // other three clauses were already here, so do not go looking in the
+        // history for a bare unconditional `unread.remove`. That is what made the
+        // LED unusable for its whole purpose: any turn whose finish landed
+        // within `presenceThreshold` of the user touching anything was marked
+        // and unmarked inside one `update`, so walking away right after
+        // sending a prompt — the exact gesture this file exists to serve —
+        // produced nothing.
+        //
+        // The `markSeq` lookup replaces what used to be a bare
+        // `unread.remove`, and subsumes its no-op case: a stale
+        // `lastInteractedSessionId` whose session has closed was already
+        // pruned from `markSeq`, so the guard fails there instead.
         guard let lastInteractedSessionId,
+              let markedAtSeq = markSeq[lastInteractedSessionId],
+              interactionSeq > markedAtSeq,
               secondsSincePresence <= Self.presenceThreshold,
               isAppActive
-        else { return }
-        unread.remove(lastInteractedSessionId)
+        else { return outcome }
+        // `cleared` cannot under-report only because `markSeq.keys == unread`
+        // holds by construction — written together above, nilled together
+        // here, pruned together against `live`, cleared together in `reset()`.
+        // Nothing enforces that; if it broke in the "generation with no mark"
+        // direction this would consume a generation and report nothing, which
+        // in this subsystem is the failure mode rather than a symptom of one.
+        if unread.remove(lastInteractedSessionId) != nil {
+            outcome.cleared.insert(lastInteractedSessionId)
+        }
+        markSeq[lastInteractedSessionId] = nil
+        return outcome
     }
 
+    /// The generation recorded when `id` was marked, or nil if it holds no
+    /// mark. Exists only so `logUnreadDecision` can print the stored side of
+    /// the ordering comparison; nothing decides anything from it.
+    func markedGeneration(of id: UUID) -> UInt64? { markSeq[id] }
+
+    /// Clears every map this type owns. `markSeq` is easy to forget here and
+    /// was, for one commit: the direction that broke was the safe one (a
+    /// generation with no mark only ever enables a no-op remove), but the
+    /// other direction — a mark with no generation — makes that session
+    /// unclearable for the life of the process, with nothing logged. There
+    /// are no callers today; the point is that the first one inherits a
+    /// consistent type rather than this omission.
     mutating func reset() {
         unread.removeAll()
         wasThinking.removeAll()
+        markSeq.removeAll()
     }
 }
 
@@ -448,22 +600,19 @@ final class MacroPadController {
     private var watchdogTimer: Timer?
     private var helloIsHostInitiated = false
     private var lastSource: MacroPadSource?
-    /// The session the user last interacted with — answers only *which*
-    /// session, never *whether they are still there* (that's
-    /// `secondsSincePresence`, computed fresh in `refresh()` from
-    /// `CGEventSource` and `lastPadPressAt`, not stored). Stamped by
-    /// AppDelegate's `.keyDown` monitor (any keystroke into a Canopy window
-    /// counts, regardless of which key — a presence-in-that-pane signal, not
-    /// a content one), by `refresh()` itself when the session occupying the
-    /// focused pane changes AND presence is currently satisfied (see
-    /// `lastObservedFocusedSessionId` — attribution only, and the presence
-    /// gate this needs, are both argued at that read site), and by
-    /// `focusPane` (pressing a MacroPad key for a pane that is already
-    /// focused changes nothing `refresh()` would notice, so it needs its own
-    /// stamp — the same reason the `.keyDown` monitor exists for typing into
-    /// an already-focused pane). `refresh()` feeds this into
-    /// `MacroPadUnreadTracker.update` on every pass; nothing else reads it.
-    private var lastInteractedSessionId: UUID?
+    /// Which session was last acted on, and the act's place in the order —
+    /// one value because they are one fact, and because two stored properties
+    /// let a stamp site advance one without the other. Read through
+    /// `lastInteractedSessionId` / `interactionSeq` below; written only by
+    /// `stampInteraction`.
+    ///
+    /// It answers *which* session, never *whether the user is still there*
+    /// (that's `secondsSincePresence`, computed fresh in `refresh()` and not
+    /// stored) — and, since the generation, *when* relative to a mark. The
+    /// routes that stamp it are enumerated once, on `noteInteraction`; an
+    /// earlier copy here listed three of the five and went stale the same
+    /// commit that added the fourth.
+    private var interaction = InteractionStamp()
     /// The session `refresh()` last saw occupying the focused pane. Compared
     /// against on every pass so a CHANGE — not the raw value — is what
     /// stamps `lastInteractedSessionId`: sitting on the same pane for hours
@@ -512,11 +661,53 @@ final class MacroPadController {
     /// step or a sleep/wake skew on a `Date`-based timestamp could otherwise
     /// make this term go negative and trivially satisfy presence.
     private var lastPadPressAt: DispatchTime?
+
+    /// Weak, because the controller is owned by `AppDelegate` and SwiftUI
+    /// views cannot reach it otherwise. `MacroPadStatus` covers what the UI
+    /// needs to READ; this covers the one thing a view needs to TELL it —
+    /// that a click happened on a row.
+    ///
+    /// Deliberately NOT `nonisolated(unsafe)`, which is where
+    /// `SessionStore.shared` differs: that one is read from a raw `NSEvent`
+    /// monitor closure with no static isolation, and this one only from a
+    /// `View`, which infers `@MainActor` from `body`. Keeping the isolation
+    /// means the compiler checks the next call site instead of this comment
+    /// having to.
+    static weak var shared: MacroPadController?
+
+    /// Records one interaction: which session it was aimed at, and its place
+    /// in the order. The two are halves of one fact and a mark is only
+    /// clearable by a generation NEWER than its own, so a stamp site that
+    /// moved the id without advancing the counter would silently reinstate
+    /// the bug this whole rule exists to fix — attribution landing on a
+    /// session whose mark predates the current generation, which then clears
+    /// on the next refresh. Written once so that cannot be forgotten at a
+    /// third call site; both existing ones go through here.
+    private func stampInteraction(_ id: UUID) {
+        interaction.stamp(id)
+    }
+
+    private var lastInteractedSessionId: UUID? { interaction.sessionId }
+
+    /// Count of interactions — keystrokes, pane clicks, sidebar row clicks,
+    /// pad presses and focus arrivals, not keystrokes alone. Its only job is
+    /// ordering: a mark records the value in force when it was created, and
+    /// only a strictly larger value may clear it. One user act can bump it
+    /// twice (a click that also moves focus), which the strictly-greater
+    /// comparison makes harmless. See `InteractionStamp` for the wrap.
+    private var interactionSeq: UInt64 { interaction.seq }
+
+    /// Dedup key of the last line emitted by `logUnreadDecision`, so an
+    /// unchanged decision is not re-logged. It is the emitted line MINUS the
+    /// generation, the mark's own generation, and the raw presence reading —
+    /// see that method for why those three exclusions are load-bearing, and
+    /// for why this subsystem logs at all.
+    private var lastUnreadLogKey: String = ""
     /// Mirrors `NSApp.isActive`. Kept as stored state rather than read live
     /// because `refresh()` has to re-run when it changes, and AppKit's
     /// activation is a notification, not an observable property `refresh()`'s
-    /// tracked closure could depend on directly. Answers the third of
-    /// `MacroPadUnreadTracker.update`'s three clearing questions — "is the
+    /// tracked closure could depend on directly. Answers the last of
+    /// `MacroPadUnreadTracker.update`'s clearing questions — "is the
     /// present human looking at Canopy" — which neither attribution nor
     /// system-wide presence can answer (see that doc for the measured case
     /// where presence alone reads a backgrounded Canopy as "here").
@@ -534,6 +725,7 @@ final class MacroPadController {
     }
 
     func start() {
+        Self.shared = self
         device.setOutputHandler { [weak self] output in self?.handle(output) }
         device.setSource(settings.macroPadSource)
         expectHostInitiatedHello()
@@ -543,14 +735,21 @@ final class MacroPadController {
         track()
     }
 
-    /// The activation half of `MacroPadUnreadTracker.update`'s three
-    /// conditions. Also what makes returning to Canopy via Cmd+Tab (mouse
-    /// movement alone deliberately does not — see the type's doc, clearing
-    /// stays a deliberate act on the pane) clear a mark that was already
-    /// eligible: activation mutates no `SessionStore` or `CanopySettings`
-    /// property `refresh()`'s tracked closure reads, so without an explicit
-    /// `refresh()` here nothing would notice the return until some unrelated
-    /// change woke the tracked closure on its own.
+    /// The activation condition of `MacroPadUnreadTracker.update`'s rule.
+    ///
+    /// The explicit `refresh()` is required because activation mutates no
+    /// `SessionStore` or `CanopySettings` property `refresh()`'s tracked
+    /// closure reads, so without it nothing would notice the return until
+    /// some unrelated change woke the tracked closure on its own — and
+    /// `isAppActive` would then be stale in every decision taken in between.
+    ///
+    /// It does NOT clear anything by itself, and an earlier version of this
+    /// doc claimed it did ("what makes returning to Canopy via Cmd+Tab clear
+    /// a mark that was already eligible"). Since `markSeq`, clearing needs an
+    /// act NEWER than the mark, and coming back to the app is not an act on
+    /// any particular pane — `interactionSeq` is deliberately not bumped
+    /// here. Cmd+Tab makes a mark eligible; a click, a keystroke or a pad
+    /// press is what spends it.
     private func observeActivation() {
         let center = NotificationCenter.default
         for (name, active) in [(NSApplication.didBecomeActiveNotification, true),
@@ -690,18 +889,24 @@ final class MacroPadController {
         if focusedSessionId != lastObservedFocusedSessionId {
             lastObservedFocusedSessionId = focusedSessionId
             if let focusedSessionId, secondsSincePresence <= MacroPadUnreadTracker.presenceThreshold {
-                lastInteractedSessionId = focusedSessionId
+                stampInteraction(focusedSessionId)
             }
         }
 
-        tracker.update(
+        let outcome = tracker.update(
             openSessions.map {
                 MacroPadUnreadTracker.Snapshot(id: $0.id, isThinking: $0.isThinking)
             },
             lastInteractedSessionId: lastInteractedSessionId,
+            interactionSeq: interactionSeq,
             secondsSincePresence: secondsSincePresence,
             isAppActive: isAppActive
         )
+        logUnreadDecision(secondsSincePresence: secondsSincePresence,
+                          focusedSessionId: focusedSessionId,
+                          thinking: openSessions.filter(\.isThinking).map(\.id),
+                          outcome: outcome)
+
         // Publish so the sidebar's dot and the pad's LED read the same set.
         //
         // The comparison is what keeps the sidebar still: `@Observable`
@@ -828,6 +1033,20 @@ final class MacroPadController {
         min(secondsSinceOSInput, secondsSincePadPress)
     }
 
+    /// Whether `noteInteraction` must run a full `refresh()`. Pure and static
+    /// so the four combinations can be pinned: the argument for skipping is
+    /// that a clear can only ever remove `lastInteractedSessionId`, which the
+    /// caller just set to `id`, so nothing can change unless `id` itself is
+    /// marked — and the DANGEROUS direction is tightening this further. Add a
+    /// condition (an `isAppActive` test, a focused-pane check) and the
+    /// acknowledging click stops triggering a refresh, so the mark burns
+    /// until some unrelated observation happens to wake `refresh()`. That is
+    /// the failure this whole file exists to remove, and before this was a
+    /// function nothing stood between it and main.
+    static func shouldRefresh(alreadyStamped: Bool, idIsUnread: Bool) -> Bool {
+        !alreadyStamped || idIsUnread
+    }
+
     /// Resolves the session occupying a pane index, or nil for an
     /// out-of-range index or a pane with no session (`.launcher`). Written
     /// once so the two call sites that used to hand-roll this bounds check —
@@ -837,6 +1056,90 @@ final class MacroPadController {
     static func sessionId(atPaneIndex index: Int, in panes: [PaneSlot]) -> UUID? {
         guard panes.indices.contains(index), case .session(let id) = panes[index].content else { return nil }
         return id
+    }
+
+    /// Records every change to the unread OUTCOME — not to the reason behind
+    /// it: the raw presence reading rides outside the dedup key, so which
+    /// clause is currently refusing can change with no row. Exists because this
+    /// subsystem's failure mode is silence: an LED that stays dark looks
+    /// exactly like an LED with nothing to report, and no other line in the
+    /// process distinguishes them. Three separate wrong rules shipped here
+    /// (CLAUDE.md's MacroPad learnings carry the full ladder; `update`'s doc
+    /// argues only the last two), and the one that survived longest was
+    /// diagnosed only after this line was added by hand mid-session — it
+    /// named the cause in a single row, `p=11 act=true int=A9C7 pre= post=`,
+    /// after reasoning from the source had failed for the better part of an
+    /// hour. That hand-added row predates today's fields, so do not grep a
+    /// capture for its exact shape. Re-deriving it next time is the cost
+    /// this line buys off.
+    ///
+    /// `notice`, not `info` or `debug`: the gesture being diagnosed is "walk
+    /// away for minutes, come back and look", so the interesting rows are
+    /// always older than the in-memory ring buffer those levels live in.
+    /// Volume is bounded by emitting only on a CHANGE of the DECISION — an
+    /// idle Canopy settles to silence, and an active turn produces a handful
+    /// of rows. Not literally nothing: the first refresh always emits, and
+    /// `act=` and `foc=` are in the key, so app switches and focus changes
+    /// cost one row each even with nothing running. Which fields count as "the decision"
+    /// is load-bearing rather than cosmetic; see the key below for the two
+    /// that are excluded and what including them cost. Session ids are truncated to four characters: enough
+    /// to tell panes apart in one capture, not enough to correlate a user
+    /// across logs.
+    private func logUnreadDecision(secondsSincePresence: TimeInterval,
+                                   focusedSessionId: UUID?,
+                                   thinking: [UUID],
+                                   outcome: MacroPadUnreadTracker.Outcome) {
+        func tag(_ id: UUID?) -> String { id.map { String($0.uuidString.prefix(4)) } ?? "-" }
+        func tags(_ ids: some Collection<UUID>) -> String {
+            ids.map { String($0.uuidString.prefix(4)) }.sorted().joined(separator: ",")
+        }
+        // Three fields deliberately ride along OUTSIDE the dedup key: `seq`,
+        // which advances on every keystroke; `mark`, which moves with it; and
+        // `p`, which ticks once a second. Keying on any of the three made the
+        // guard unreachable exactly when
+        // something was lit — `noteInteraction` refreshes per keystroke while
+        // that pane's session is unread — turning "a handful of rows per
+        // turn" into one persisted `notice` per character typed.
+        //
+        // `+`/`-` are the marks added and cleared BY THIS CALL, and they are
+        // in the key. Nothing else in the line can show a mark inserted and
+        // cleared inside one `update`: the set looks identical before and
+        // after, which is exactly how the reported regression stayed
+        // invisible until a human who knew a turn had just ended read the log.
+        let key = [
+            "act=\(isAppActive)",
+            "int=\(tag(lastInteractedSessionId))",
+            "foc=\(tag(focusedSessionId))",
+            "think=\(tags(thinking))",
+            "unread=\(tags(tracker.unread))",
+            "+\(tags(outcome.marked))",
+            "-\(tags(outcome.cleared))",
+        ].joined(separator: " ")
+        guard key != lastUnreadLogKey else { return }
+        lastUnreadLogKey = key
+        // `inf` rather than a numeric sentinel: a NEGATIVE reading is a real
+        // anomaly this file logs separately and refuses to clamp, so a `-1`
+        // here would be indistinguishable from it in a capture.
+        // A NEGATIVE reading gets its own token rather than a number. Clamping
+        // it to 0 — which an earlier version did, beside a comment claiming
+        // this file "refuses to clamp" a negative — is the worst available
+        // lie: 0 reads as "input one second ago", exactly the state a negative
+        // reading counterfeits, in the one line built to surface it. NaN is
+        // separated for the same reason: it is a different anomaly from "no
+        // pad press ever recorded", which is what `inf` means. The upper clamp
+        // stays and is a real `Int(Double)` trap guard, so `86400` means "a day
+        // or more", not "exactly a day".
+        let presence: String
+        if secondsSincePresence.isNaN { presence = "nan" }
+        else if secondsSincePresence < 0 { presence = "neg" }
+        else if secondsSincePresence.isInfinite { presence = "inf" }
+        else { presence = String(Int(min(86_400, secondsSincePresence.rounded()))) }
+        // `mark` is the OTHER operand of the ordering comparison. `seq` alone
+        // says which generation we are in and nothing about how far the mark
+        // is from clearable, which left half of that clause unreadable — the
+        // complaint that produced this field in the first place.
+        let stored = lastInteractedSessionId.flatMap { tracker.markedGeneration(of: $0) }
+        logger.notice("MacroPad unread: p=\(presence, privacy: .public) seq=\(self.interactionSeq, privacy: .public) mark=\(stored.map(String.init) ?? "-", privacy: .public) \(key, privacy: .public)")
     }
 
     /// Sleep's override of the brightness setting, as a pure function so the
@@ -1320,20 +1623,60 @@ final class MacroPadController {
     /// see its doc for why a stored index goes stale). A `paneIndex` outside
     /// `store.panes` or a launcher pane with no session is a silent no-op.
     ///
-    /// Called from two places that `refresh()`'s own focus-change tracking
-    /// (see `lastObservedFocusedSessionId`) cannot cover, because in both the
-    /// session at the focused pane does not change: AppDelegate's `.keyDown`
-    /// monitor, for typing into a pane that is already focused, and
-    /// `focusPane`, for a MacroPad key press on a pane that is already
-    /// focused. Every focus change that DOES move which session sits at
-    /// `store.focusedPaneIndex` — sidebar click, plain pane click, Cmd+1..9,
-    /// Cmd+Opt+arrow, Cmd+Shift+[/] cycling, and a MacroPad key press that
-    /// changes focus — is picked up by `refresh()` itself and needs no call
-    /// here.
+    /// Called from four places. Three of them exist because `refresh()`'s own
+    /// focus-change tracking (see `lastObservedFocusedSessionId`) cannot see
+    /// them — the session at the focused pane does not change: AppDelegate's
+    /// `.keyDown` monitor, for typing into an already-focused pane;
+    /// `installPaneFocusClickMonitor`, for a click in an already-focused
+    /// pane's body; and `focusPane`, for a MacroPad press on an
+    /// already-focused pane. The fourth, the sidebar's row click, goes
+    /// through `noteInteraction(sessionId:)` for the same reason in a
+    /// different surface.
+    ///
+    /// The click monitor's call is deliberately UNCONDITIONAL rather than
+    /// scoped to the same-pane case, so for a click that DOES move focus it
+    /// duplicates what `refresh()`'s hook would do anyway — harmless under a
+    /// strictly-greater comparison, the same trade `focusPane` documents
+    /// below. An earlier version of this paragraph listed "plain pane click"
+    /// among the routes that "need no call here"; acting on that would delete
+    /// the call and reinstate the bug (`markSeq`) exists to fix.
+    ///
+    /// Still needing no call here: Cmd+1..9, Cmd+Opt+arrow, and Cmd+Shift+[/]
+    /// cycling. `refresh()`'s focus hook stamps the ARRIVING session for all
+    /// three. The `.keyDown` monitor also fires on them, but at key-down —
+    /// before the command moves focus — so it attributes to the pane being
+    /// LEFT; that is a harmless extra bump under the strictly-greater
+    /// comparison, not the mechanism that covers them.
     func noteInteraction(paneIndex: Int) {
         guard let id = Self.sessionId(atPaneIndex: paneIndex, in: store.panes) else { return }
+        noteInteraction(sessionId: id)
+    }
+
+    /// The same act, named by session rather than by pane, for callers that
+    /// already hold an id — the sidebar, whose row is where the green dot the
+    /// user is reacting to actually lives.
+    ///
+    /// Clicking the row of a session that ALREADY occupies the focused pane
+    /// reaches neither of the two routes a mouse click can otherwise take:
+    /// the pane-click monitor
+    /// bails before the sidebar's x range, and `openInFocusedPane` takes its
+    /// focus-only branch, so `refresh()`'s focus hook sees no session change.
+    /// Four reviewers found that independently, and it is the same shape as
+    /// the bug this file's generation rule exists to fix — an unmistakably
+    /// deliberate act on a lit session that acknowledges nothing.
+    ///
+    /// Deliberately called from the sidebar's click handler and NOT from
+    /// `SessionStore.openInFocusedPane`, which is also reached by routes with
+    /// no human behind them (a closing pane collapsing focus onto its
+    /// neighbour). A store method cannot tell those apart; a click handler
+    /// does not have to.
+    func noteInteraction(sessionId id: UUID) {
         let alreadyStamped = lastInteractedSessionId == id
-        lastInteractedSessionId = id
+        // Stamped before the early return below, not after it: the skip is an
+        // optimisation about whether anything VISIBLE can change, and a
+        // keystroke still has to count as an act for ordering purposes even
+        // when this particular one repaints nothing.
+        stampInteraction(id)
         // `noteInteraction` fires on every keystroke — many times a second
         // while typing — and an unconditional `refresh()` re-reads settings,
         // snapshots panes/sessions, runs the tracker, diffs LED commands, and
@@ -1345,7 +1688,19 @@ final class MacroPadController {
         // dependency of `refresh()`'s tracked closure, so it schedules its
         // own `refresh()` through `track()`'s `onChange` independent of this
         // call.
-        guard !alreadyStamped || !store.unreadSessionIds.isEmpty else { return }
+        //
+        // The condition is `contains(id)`, not `!isEmpty`, and the difference
+        // became load-bearing with `markSeq`: a clear can only ever remove
+        // `lastInteractedSessionId`, which this call just set to `id`, so a
+        // refresh cannot change anything unless `id` ITSELF is marked. Under
+        // the old rule marks cleared within one `update` and `isEmpty` was
+        // almost always true, so the skip fired; now a mark persists until
+        // acknowledged, and `!isEmpty` would mean one full `refresh()` — a
+        // `CGEventSource` syscall, a pane/session snapshot, an LED diff —
+        // per keystroke for as long as ANY pane anywhere stayed lit.
+        guard Self.shouldRefresh(alreadyStamped: alreadyStamped,
+                                 idIsUnread: store.unreadSessionIds.contains(id))
+        else { return }
         refresh()
     }
 

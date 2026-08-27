@@ -422,6 +422,20 @@ struct Sidebar: View {
             // the new pane into place rather than parking it on the right end.
             // (A plain click points at the focused PANE instead, so there the
             // row is what moves. Whichever the user aimed at stays put.)
+            // Clicking a row is a deliberate act on that session, and it has
+            // to be recorded HERE: when the session already occupies the
+            // focused pane, neither of the MacroPad's other two stamp routes
+            // fires (the pane-click monitor never sees a click this far left,
+            // and `openInFocusedPane` takes its focus-only branch), so the
+            // green dot the user just clicked would keep burning. See
+            // `MacroPadController.noteInteraction(sessionId:)`.
+            //
+            // Unconditional on purpose, above the Cmd branch: the
+            // already-focused case is why it exists, and on every other route
+            // it is a duplicate the strictly-greater comparison makes
+            // harmless. Narrowing it to the case the paragraph above
+            // describes is the edit not to make.
+            MacroPadController.shared?.noteInteraction(sessionId: session.id)
             if addNewPane {
                 if store.panes.count >= SessionStore.paneAbsoluteCap,
                    store.paneIndex(forSession: session.id) == nil {

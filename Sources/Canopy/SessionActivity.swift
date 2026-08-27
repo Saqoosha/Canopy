@@ -29,9 +29,14 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// A tool-permission request or `AskUserQuestion` is outstanding
     /// (`isAsking`). The user MUST act — the only blinking state.
     case asking
-    /// Finished while the user was looking at a different pane. Cleared the
-    /// moment that pane takes focus. See `MacroPadController` for the edge
-    /// detection; this enum only names the state.
+    /// Finished a turn with no deliberate act on that session since. Cleared
+    /// by an interaction with it — a click in its pane, a keystroke, its
+    /// MacroPad key, focus arriving — that happens AFTER the finish, while a
+    /// human is present and Canopy is frontmost. Deliberately NOT "cleared
+    /// when that pane takes focus": a turn finishing in the pane you are
+    /// already looking at lights up too, and waits to be acknowledged. See
+    /// `MacroPadUnreadTracker` for the rule and `MacroPadController` for the
+    /// edge detection; this enum only names the state.
     case unread
     /// Shim crashed, or an SSH session gave up reconnecting.
     case error
