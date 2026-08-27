@@ -34,7 +34,7 @@ packages:
   # re-resolves on the next build.
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    exactVersion: 2.9.4
+    exactVersion: 2.9.6
 
 settings:
   base:
