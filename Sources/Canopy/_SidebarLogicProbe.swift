@@ -3835,11 +3835,12 @@ enum SidebarLogicProbe {
             // closed) must not crash and must leave nothing stale. Since
             // `markSeq`, the guard refuses one condition EARLIER than it used
             // to — at the `markSeq[id]` lookup, which here was never populated
-            // (this id never finished a turn). The live-prune is NOT what
-            // empties it in this fixture, and nothing here exercises the
-            // prune: it is unobservable through `unread` by construction,
-            // since ids are minted per session instance and a leaked entry can
-            // never be looked up again.
+            // (this id never finished a turn), so the live-prune is not what
+            // empties it HERE. The prune itself is pinned elsewhere — since
+            // membership became the mark, deleting it fails the
+            // "disappeared id is pruned" fixture below. It used to be
+            // genuinely unobservable, when the unread set and the generations
+            // were two collections and only the set was public.
             var staleId = MacroPadUnreadTracker()
             staleId.update([.init(id: idB, isThinking: true)],
                            lastInteractedSessionId: idA, interactionSeq: 1, secondsSincePresence: 0, isAppActive: true)
