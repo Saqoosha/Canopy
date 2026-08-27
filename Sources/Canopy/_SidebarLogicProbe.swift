@@ -1,4 +1,5 @@
 #if DEBUG
+import AppKit
 import Foundation
 import os.log
 
@@ -4175,6 +4176,45 @@ enum SidebarLogicProbe {
             record("stamp: stamping another session moves the id and advances again",
                    stamp.sessionId == idB && stamp.seq > afterFirst + 1,
                    "stamp=\(stamp)")
+
+            // --- the indicator's symbol table. A misspelled SF Symbol renders
+            // as a broken-image glyph and is invisible until someone looks at
+            // the window; `square.grid.2x2.slash` shipped in a draft of the
+            // source selector and does not exist.
+            //
+            // Two things this does NOT buy, both claimed by an earlier version
+            // of this comment. A `Link` case added without a `demoCycle` entry
+            // is simply never visited, and both assertions stay green — what
+            // catches that is `appearance(for:)`'s exhaustive `switch`, at
+            // compile time, not this. And `isEmpty` over zero iterations is
+            // vacuously true, so an emptied `demoCycle` would pass everything
+            // here; the count assertion below is what closes that.
+            //
+            // Resolution is against the RUNNING system's symbol catalog, not
+            // the deployment target — CI runs macos-26 while the target is
+            // macOS 15, so a symbol introduced in 26 would pass here and draw
+            // broken on 15. All three current symbols predate 15 by years.
+            var unresolved: [String] = []
+            var blankHelp: [String] = []
+            for link in MacroPadStatus.demoCycle {
+                let appearance = MacroPadIndicator.appearance(for: link)
+                if NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: nil) == nil {
+                    unresolved.append(appearance.symbol)
+                }
+                if appearance.help.isEmpty { blankHelp.append(appearance.symbol) }
+            }
+            record("indicator: every link state resolves to a real SF Symbol",
+                   unresolved.isEmpty,
+                   "unresolved=\(unresolved)")
+            record("indicator: every link state carries help text",
+                   blankHelp.isEmpty,
+                   "blank=\(blankHelp)")
+            // Without this the two assertions above are vacuously green on an
+            // empty cycle — `isEmpty` over nothing is true. Pinning the count
+            // also makes removing a state cost an edit here.
+            record("indicator: the demo cycle still covers five states",
+                   MacroPadStatus.demoCycle.count == 5,
+                   "count=\(MacroPadStatus.demoCycle.count)")
 
             // --- the refresh-skip predicate. The dangerous direction is
             // TIGHTENING it: a skipped refresh on the acknowledging act leaves

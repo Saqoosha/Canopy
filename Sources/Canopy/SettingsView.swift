@@ -156,7 +156,7 @@ private struct GeneralSettingsTab: View {
                 }
                 .disabled(settings.macroPadSource.isOff)
             } footer: {
-                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Local USB connects automatically when the pad is plugged in; Remote bridge reaches a pad on another Mac running scripts/macropad-bridge.sh. A small indicator at the bottom of the sidebar shows the link state; Off hides it.")
+                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Local USB connects automatically when the pad is plugged in; Remote bridge reaches a pad on another Mac running scripts/macropad-bridge.sh. A small indicator at the bottom of the sidebar shows the link state, and clicking it switches source without coming here.")
             }
             .onAppear { hostDraft = settings.macroPadRemoteHost }
         }

@@ -25,15 +25,20 @@ final class MacroPadStatus {
         /// The link is not running: the source is `.off`, `shutdown()`
         /// ran, or no controller has published yet (this is `link`'s initial
         /// value). The three collapse into one case because none of them is
-        /// something the user can act on. Note the *controller* keeps running
-        /// through all three — it also owns the unread bookkeeping.
+        /// something the LINK can be made to do about — the remedy for all
+        /// three is the same, which is what lets them share a case. The glyph
+        /// is a control here like everywhere else, and its help text says
+        /// "inactive" rather than naming the one cause the user chose, because
+        /// two of the three are not that cause. Note the *controller* keeps
+        /// running through all three — it also owns the unread bookkeeping.
         ///
-        /// Note what this case does **not** buy. `CanopySettings.macroPadSource`
-        /// defaults to `.local`, so a user who has never heard of the MacroPad
-        /// is in `.searching`, not here — the quiet outline glyph is the
-        /// resting state for everyone without hardware, and only an explicit
-        /// trip to Settings removes it. Hiding on `.disabled` alone does not
-        /// make the indicator free; see `MacroPadIndicator`.
+        /// It draws a slashed glyph rather than nothing. It used to draw
+        /// nothing, to keep a switched-off MacroPad out of the footer — but
+        /// the glyph is the source selector now, and the machine most in need
+        /// of the switch is precisely the one sitting here: the one serving
+        /// its own pad to another Canopy over the bridge, which must be `.off`
+        /// for `socat` to hold the port. A control that vanishes in the state
+        /// it reports cannot be used to leave it.
         case disabled
         /// Enabled, and nothing has answered a probe. Unplugged, mid-probe and
         /// mid-retry collapse here because the device layer emits no `Output`
@@ -130,9 +135,10 @@ final class MacroPadStatus {
 
     /// The states the demo walks, in cycle order — every case of `Link`, with
     /// three representatives standing in for the unbounded `connected`.
-    /// `.disabled` is in the list on purpose even though it draws nothing —
-    /// that tick is where you see whether the case is genuinely empty rather
-    /// than a transparent glyph holding its slot.
+    /// `.disabled` is in the list on purpose: that tick is where you see the
+    /// slashed glyph, and confirm it holds its slot rather than collapsing the
+    /// row. It used to be where you confirmed the
+    /// case drew nothing at all.
     ///
     /// No two *adjacent* entries are equal, so every tick visibly changes the
     /// indicator; an equal pair would read as a stalled demo. (The timer
@@ -191,21 +197,31 @@ final class MacroPadStatus {
     }
 }
 
-/// Tiny link-state glyph at the start of the sidebar's version footer.
+/// The MacroPad source selector at the start of the sidebar's version
+/// footer, drawn as a link-state glyph.
 ///
-/// It draws nothing only in `Link.disabled`. Since `macroPadSource` defaults
-/// to `.local`, that is **not** the no-hardware case: a user with no pad sits in
-/// `.searching` and carries the quiet outline glyph until they turn the
-/// feature off in Settings. That is the deliberate trade — an indicator that
-/// vanished whenever no pad answered could not distinguish "unplugged" from
-/// "the subsystem is broken", which is the question it was added to answer.
+/// It always draws, and clicking it opens the source selector — the thing
+/// that reports the state is the thing that changes it. `Settings` and the
+/// menu bar both switch source too; neither is where the eye already is when
+/// the question "which pad am I driving?" comes up.
+///
+/// Every state draws, including `.disabled`. The `appearance(for:)` return
+/// type is what makes a nil branch a compile error; it does not stop `body`
+/// from putting a condition around the `Menu`, so "always draws" is a property
+/// of both together. It is also why the indicator never vanishes when no pad
+/// answers: an indicator that disappeared then could not distinguish
+/// "unplugged" from "the subsystem is broken", which is the question it was
+/// added to answer.
 struct MacroPadIndicator: View {
     /// Defaulted rather than hardcoded so a caller could drive an injected
     /// instance. Nothing does today: the demo mode covers the same ground, and
     /// the logic probe exits before SwiftUI renders anything.
     var status: MacroPadStatus = .shared
 
-    private struct Appearance {
+    /// Internal rather than `private` so `_SidebarLogicProbe` can resolve
+    /// every state's symbol — the one defect here that compiles, runs, and is
+    /// invisible until someone looks at the window.
+    struct Appearance {
         let symbol: String
         let tint: AnyShapeStyle
         let help: String
@@ -214,7 +230,15 @@ struct MacroPadIndicator: View {
     }
 
     var body: some View {
-        if let appearance = Self.appearance(for: status.link) {
+        let appearance = Self.appearance(for: status.link)
+        // `MacroPadCommands` is mounted verbatim rather than re-implemented:
+        // the three rows are a radio group with one non-obvious detail (a
+        // `Toggle` rather than a `Label`, so AppKit reserves the checkmark
+        // column for every row) argued at length in that file. Two mount
+        // points, one definition.
+        Menu {
+            MacroPadCommands()
+        } label: {
             HStack(spacing: 4) {
                 Image(systemName: appearance.symbol)
                     .font(.system(size: 9))
@@ -225,47 +249,159 @@ struct MacroPadIndicator: View {
                         .foregroundStyle(.tertiary)
                 }
             }
-            // `.ignore` before the label so the demo's two children cannot
-            // each inherit it and announce twice.
-            .accessibilityElement(children: .ignore)
-            .help(appearance.help)
-            .accessibilityLabel(appearance.help)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        // `.borderlessButton` renders as an `NSPopUpButton`, which keeps its
+        // own minimum metrics. A `.frame` does shrink it — see the measurement
+        // below — but only to a floor those metrics set, so sizing the box
+        // alone left the footer heavier than the released build. This is the
+        // lever that moves the floor: framed at `.regular` the popup measures
+        // 17pt tall, framed at `.mini` 14.
+        .controlSize(.mini)
+        // Measured in an `NSHostingView` harness reproducing this exact
+        // modifier stack, because an earlier version of this comment argued
+        // three things that turned out to be false:
+        //
+        //   - the frame does NOT merely centre an unshrinkable control. It
+        //     shrinks it: the same `.mini` popup is 22pt wide unframed and
+        //     14pt framed.
+        //   - the control is not the box. The box lands at x=12 w=9; the
+        //     drawn `SwiftUIPopupButton` lands at x=7 w=14 — right-aligned to
+        //     the box and overhanging 5pt to its left, which moves the glyph
+        //     2pt left of where the released build drew it (10 vs 12).
+        //   - the height is honoured by the popup's metrics, not by the box:
+        //     the layout box reports 14 tall despite `height: 9`.
+        //
+        // What the frame is actually for, then, is the popup's own metrics —
+        // footer height is 16 unframed and 15 framed. It is load-bearing, for
+        // a different reason than it was first given.
+        //
+        // Width is released under the demo, and only there: the demo draws
+        // the state's name beside the glyph, and a fixed width clipped it —
+        // caught by capturing the demo and finding the labels gone. The cost
+        // is that the demo now renders a geometry users never see (120pt wide
+        // against the shipped 14), so "I checked it in the demo" no longer
+        // covers the shipped width.
+        .frame(width: status.isDemo ? nil : Self.glyphSide, height: Self.glyphSide)
+        // Kept, but it does nothing measurable: the drawn `NSPopUpButton` is
+        // 14pt wide against this rect and overhangs it 5pt to the left
+        // (measured in the shipped config, where the frame's width is 9; under
+        // the demo it is nil. The vertical relationship was not measured, and
+        // the horizontal result was right-alignment rather than centring, so
+        // do not assume symmetry). AppKit does its own hit testing, so the
+        // real target is the 14×14 control. Left in as the SwiftUI-side
+        // statement of intent rather than removed on a measurement that only
+        // covers geometry.
+        .contentShape(Rectangle())
+        // `.ignore` before the label, so the glyph and the demo's state name
+        // cannot each inherit it and announce twice. They sit inside the
+        // `Menu`'s label now rather than being direct children of the modified
+        // view, and whether flattening a `Menu` this way costs VoiceOver the
+        // popup's own role and show-menu action is NOT measured — it needs a
+        // real window, which neither the probe nor a headless harness has.
+        .accessibilityElement(children: .ignore)
+        .help(appearance.help)
+        .accessibilityLabel(appearance.help)
     }
 
-    /// Nil means "draw nothing at all" — the one branch that has to survive
-    /// every later edit intact, since it is what keeps a switched-off MacroPad
-    /// from occupying the footer.
-    private static func appearance(for link: MacroPadStatus.Link) -> Appearance? {
+    /// The box the `Menu` is given. It governs the popup's metrics, and the
+    /// footer's size through them: measured 16pt tall unframed, 15pt framed.
+    ///
+    /// It does NOT normalise anything about the symbols, and two earlier
+    /// versions of this doc claimed it did — first that their differing
+    /// bounds moved the row's HEIGHT, then, as the correction, that they
+    /// moved its WIDTH. Both are false and the second is worse, because the
+    /// figures it cited refute it in the same sentence: `square.slash` is
+    /// 11x13 and `square.grid.2x2` is 11x11, so they differ in height and
+    /// share a width. Measured across all three symbols and all four
+    /// framed/unframed combinations, the footer comes out identical per
+    /// symbol — the popup's own minimum metrics absorb the variation
+    /// entirely, so symbol bounds move neither axis. There was also nothing
+    /// to normalise before this PR: only two symbols existed and both were
+    /// 11x11.
+    ///
+    /// The inner `.frame` those claims justified is gone with them. What is
+    /// left is this one, on the `Menu`.
+    ///
+    /// Do not cite this file's older note about "watching the version text
+    /// slide left and back" here, as both of those versions did. Read in
+    /// full, it is about `.disabled` returning nil and the glyph VANISHING —
+    /// the row reflowing around an absent indicator, not around a differently
+    /// sized one. The citation inverts its source.
+    ///
+    /// 9, matching the symbol's own point size, so the box is the type size
+    /// rather than a number picked to look about right. The first version of
+    /// this used 11 and read visibly larger than the released build — the
+    /// glyph itself never changed size (a `.frame` sets the layout box, it
+    /// does not scale the image), so what grew was the space around it.
+    private static let glyphSide: CGFloat = 9
+
+    /// Every state's `help` names the click, not just the one that reads as
+    /// broken: the glyph is the same control in all of them, and a tooltip
+    /// that mentions the affordance in one state only teaches that clicking
+    /// is for fixing something.
+    ///
+    /// Total, and that is the load-bearing part: the glyph is now the source
+    /// selector, and a control that draws nothing cannot be clicked to leave
+    /// the state it is reporting. `.disabled` used to return nil so a
+    /// switched-off MacroPad did not occupy the footer — which meant the one
+    /// machine most in need of the switch, the one currently serving its pad
+    /// to another Canopy over the bridge, had nothing to click.
+    ///
+    /// The old branch also paid for something that no longer applies: keeping
+    /// the footer free for someone who has no pad and never will. This app
+    /// has one user and he has two of them.
+    ///
+    /// The return type is the invariant. Re-introducing a nil branch is a
+    /// compile error rather than a silently unreachable control.
+    static func appearance(for link: MacroPadStatus.Link) -> Appearance {
         switch link {
         case .disabled:
-            // Under the demo this tick is indistinguishable from the timer
-            // having died. That is fine — the next state lands one interval
-            // later, and watching the version text slide left and back is
-            // precisely what confirms this case draws nothing.
-            return nil
+            // Slashed, not absent: this is a state the user can leave, so it
+            // reads as switched-off hardware rather than as missing hardware.
+            // Quaternary keeps it from competing with the version string it
+            // sits beside.
+            //
+            // "inactive", not "off": this case collapses three causes and only
+            // one of them is the user's choice. The initial value is also here
+            // — `MacroPadController.start()` runs from a `.task`, so it lands
+            // AFTER the first render — and claiming "off" in that window would
+            // tell a `.local` machine its pad is switched off. Drawing nothing
+            // made no claim at all, which is what this case used to do.
+            //
+            // `square.slash`, not `square.grid.2x2.slash` — the latter is not
+            // a real SF Symbol and renders as a broken-image glyph. Caught by
+            // eye; the probe now resolves every symbol reachable through
+            // `MacroPadStatus.demoCycle`, which today covers all five states,
+            // so the next typo fails a test instead. See the probe for what
+            // that does and does not buy.
+            return Appearance(symbol: "square.slash",
+                              tint: AnyShapeStyle(.quaternary),
+                              help: "MacroPad inactive — click to change source",
+                              demoLabel: "off")
         case .searching:
             // Outline + quaternary: findable when you go looking for it,
             // quiet enough not to read as a warning. An unplugged pad is the
             // normal state for most of the day.
             return Appearance(symbol: "square.grid.2x2",
                               tint: AnyShapeStyle(.quaternary),
-                              help: "MacroPad not connected",
+                              help: "MacroPad not connected — click to change source",
                               demoLabel: "searching")
         case .connected(.unreachable):
             return Appearance(symbol: "square.grid.2x2",
                               tint: AnyShapeStyle(Color.orange.opacity(0.8)),
-                              help: "MacroPad connected, but the NeoKey is not responding — check the Qwiic cable",
+                              help: "MacroPad connected, but the NeoKey is not responding — check the Qwiic cable. Click to change source",
                               demoLabel: "connected · 0 keys")
         case .connected(.counting):
             return Appearance(symbol: "square.grid.2x2.fill",
                               tint: AnyShapeStyle(.tertiary),
-                              help: "MacroPad connected",
+                              help: "MacroPad connected — click to change source",
                               demoLabel: "connected · no count")
         case .connected(.available(let count)):
             return Appearance(symbol: "square.grid.2x2.fill",
                               tint: AnyShapeStyle(.tertiary),
-                              help: "MacroPad connected — \(count) \(count == 1 ? "key" : "keys")",
+                              help: "MacroPad connected — \(count) \(count == 1 ? "key" : "keys"). Click to change source",
                               demoLabel: "connected · \(count) keys")
         }
     }
