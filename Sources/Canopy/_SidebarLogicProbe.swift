@@ -37,6 +37,24 @@ enum SidebarLogicProbe {
             else  { fail += 1; lines.append("  FAIL \(name) — \(detail)") }
         }
 
+        // Peer-name pinning. Every one of these is a way a renamed session
+        // silently loses its name, so each states which failure it pins.
+        do {
+            record("peer pin: /rename is always pinned",
+                   PeerNameStore.isPinned(nameSource: "user"))
+            record("peer pin: a derived name is never pinned",
+                   !PeerNameStore.isPinned(nameSource: "derived"))
+            record("peer pin: a collision name is never pinned",
+                   !PeerNameStore.isPinned(nameSource: "collision"))
+            // An absent source means "set at spawn", which for a Canopy
+            // session is the name Canopy itself passed. Pinning it would let a
+            // /clear inside the same shim persist that name under a second
+            // sessionId, and it buys nothing: the store entry that drove the
+            // restore is still there to drive the next one.
+            record("peer pin: an absent source is not pinned",
+                   !PeerNameStore.isPinned(nameSource: nil))
+        }
+
         // Synthetic data
         let now = Date()
         let oneHour: TimeInterval = 3600

@@ -730,6 +730,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Read the peer names while the CLIs are still up. This is the LAST
+        // point at which they exist: each CLI deletes its
+        // `~/.claude/sessions/<pid>.json` on exit, and a `/rename` is an
+        // in-place write that fires no directory event, so a rename inside the
+        // final poll interval is only ever seen here. `ShimProcess.stop`
+        // carries the same call for the close-one-session path, but quit does
+        // not route live sessions through it — renaming and then quitting is
+        // the headline case, and it was open until this line existed.
+        PeerNameStore.shared.captureNow()
+
         // Saving the layout and normalizing the saved frame to one pane's
         // width are mutually exclusive — but the deciding question is
         // "will the next launch rebuild the pane strip?", NOT "did the user
