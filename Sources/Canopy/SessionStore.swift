@@ -29,8 +29,10 @@ final class SessionStore {
     /// `init`; auto-cleared on deinit via the weak ref.
     nonisolated(unsafe) static weak var shared: SessionStore?
 
-    /// Live sessions: shim is up (or spawning), webview mounted, user can
-    /// switch to any of these instantly.
+    /// Open sessions. Usually live — shim up or spawning, webview mounted,
+    /// switched to instantly — but a launch-restored session with no pane is
+    /// `.dormant`: an open row with no shim and no webview until a pane takes
+    /// it, at which point switching to it costs a full spawn.
     private(set) var openSessions: [OpenSession] = []
 
     /// What the detail pane is showing right now. Defaults to launcher.
@@ -1439,6 +1441,28 @@ final class SessionStore {
 
     enum PaneTarget: Equatable { case focused, newPane }
 
+    /// Wake a launch-restored session that a pane has just taken.
+    ///
+    /// `.dormant` means "open row, no shim" (see `OpenSession.Status`), and a
+    /// pane assignment is exactly the moment that stops being true:
+    /// `SessionContainer` mounts, `WebViewContainer` spawns the shim, and
+    /// `SessionContainer`'s own 1.2 s task flips the status to `.live` (that
+    /// task lives in `SessionContainer.body`, not in `WebViewContainer`).
+    /// Moving to `.spawning` here rather than letting `SessionContainer`
+    /// recognise `.dormant` keeps the case honest — a `.dormant` session is one with no shim, full stop —
+    /// and gets the SpawningOverlay plus the breathing dot for free.
+    ///
+    /// Called from every route that puts a session into a pane, which is only
+    /// ever `openInFocusedPane` (its seed and content-swap branches; the
+    /// already-paned branch is a focus change and touches no content) and
+    /// `openInNewPane`. `applyRestoreSnapshot` builds its paned sessions as
+    /// `.spawning` directly instead of routing through here.
+    private func startIfDormant(_ sessionId: OpenSession.ID) {
+        guard let session = openSessions.first(where: { $0.id == sessionId }),
+              session.status == .dormant else { return }
+        session.status = .spawning
+    }
+
     /// Show `sessionId` in the focused pane, honoring one-session-one-pane:
     /// - `panes` empty (fresh launch) → seed the first pane with this session
     ///   at paneDefaultWidth.
@@ -1462,6 +1486,7 @@ final class SessionStore {
             // session open.
             panes = [PaneSlot(content: .session(sessionId), preferredWidth: Self.paneDefaultWidth)]
             focusedPaneIndex = 0
+            startIfDormant(sessionId)
             syncSelectionToFocusedPane()
             return
         }
@@ -1474,6 +1499,7 @@ final class SessionStore {
             return
         }
         panes[focusedPaneIndex].content = .session(sessionId)
+        startIfDormant(sessionId)
         moveRowFollowingPaneAssignment(sessionId)
         syncSelectionToFocusedPane()
         makeFocusedPaneKeyResponder()
@@ -1567,6 +1593,7 @@ final class SessionStore {
         normalizePaneWeightsToVisualWidths()
         let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
         panes.append(PaneSlot(content: .session(sessionId), preferredWidth: width))
+        startIfDormant(sessionId)
         // Sort the new pane to where its ROW already sits, rather than moving
         // the row to the right end where the append put it. This is the one
         // assignment route where the user aimed at the row (Cmd+click on a
@@ -1702,20 +1729,52 @@ final class SessionStore {
 
     // MARK: - Launch restore
 
-    /// Snapshot the current pane strip for quit-time persistence. Only
-    /// sessions a pane references are included — see `SessionRestoreSnapshot`.
+    /// Snapshot the sidebar's open block and the pane strip for quit-time
+    /// persistence. **Every** open session is captured, in `openSessions`
+    /// order — that is the order the open block's SESSION rows are drawn in,
+    /// top to bottom, and restoring it is the reason sessions are emitted
+    /// from `openSessions` rather than walked out of `panes`. Two things that
+    /// order does not cover: `.launcher` rows are interleaved into the block
+    /// afterwards from `panes` (and are captured from `panes` too), and the
+    /// sidebar filter can hide open rows without reordering them. See
+    /// `SessionRestoreSnapshot`.
     func captureRestoreSnapshot() -> SessionRestoreSnapshot {
         // preferredWidth is a weight until this runs; the snapshot stores
         // absolute pt measured against the live window.
         normalizePaneWeightsToVisualWidths()
 
         var sessions: [SessionRestoreSnapshot.Session] = []
-        var panesOut: [SessionRestoreSnapshot.Pane] = []
         var seenResumeIds = Set<String>()
+        // Dedupe by resumeId: `SessionRestoreSnapshot.sanitized`'s doc asserts
+        // "capture cannot emit a duplicate", and this clause is the whole
+        // reason that holds.
+        for open in openSessions where seenResumeIds.insert(open.resumeId).inserted {
+            let origin: SessionRestoreSnapshot.Session.Origin
+            switch open.origin {
+            case .local(let url):
+                origin = .local(path: url.path)
+            case .remote(let host, let path):
+                origin = .remote(host: host, path: path.path)
+            case .teleportedFrom(let cloudId, let path):
+                origin = .teleported(cloudSessionId: cloudId, path: path.path)
+            }
+            sessions.append(SessionRestoreSnapshot.Session(
+                resumeId: open.resumeId,
+                title: open.title,
+                project: open.project,
+                origin: origin,
+                permissionMode: open.permissionMode,
+                model: open.model,
+                effortLevel: open.effortLevel,
+                providerId: open.customApi?.id,
+                lastActiveAt: open.lastActiveAt
+            ))
+        }
+
+        var panesOut: [SessionRestoreSnapshot.Pane] = []
         // Silently skipping a missing session without this would shift focus
         // onto whatever pane slid left into the stored index.
         var droppedBeforeFocus = 0
-
         for (index, slot) in panes.enumerated() {
             switch slot.content {
             case .launcher:
@@ -1726,28 +1785,6 @@ final class SessionStore {
                     continue
                 }
                 panesOut.append(.init(content: .session(resumeId: open.resumeId), width: slot.preferredWidth))
-                if seenResumeIds.insert(open.resumeId).inserted {
-                    let origin: SessionRestoreSnapshot.Session.Origin
-                    switch open.origin {
-                    case .local(let url):
-                        origin = .local(path: url.path)
-                    case .remote(let host, let path):
-                        origin = .remote(host: host, path: path.path)
-                    case .teleportedFrom(let cloudId, let path):
-                        origin = .teleported(cloudSessionId: cloudId, path: path.path)
-                    }
-                    sessions.append(SessionRestoreSnapshot.Session(
-                        resumeId: open.resumeId,
-                        title: open.title,
-                        project: open.project,
-                        origin: origin,
-                        permissionMode: open.permissionMode,
-                        model: open.model,
-                        effortLevel: open.effortLevel,
-                        providerId: open.customApi?.id,
-                        lastActiveAt: open.lastActiveAt
-                    ))
-                }
             }
         }
 
@@ -1760,9 +1797,10 @@ final class SessionStore {
 
     /// Rebuild `openSessions` + `panes` from a quit-time snapshot. This is
     /// where sanitization happens — callers hand over the raw stored blob and
-    /// every drop rule (missing transcript, duplicate pane, pane cap, focus
-    /// clamp) is resolved here, so there is exactly one place a restore can
-    /// decide something is unusable.
+    /// every drop rule is resolved here, so there is exactly one place a
+    /// restore can decide something is unusable. The rules are enumerated on
+    /// `SessionRestoreSnapshot.sanitized` and deliberately not repeated here;
+    /// a copy of that list is a copy that goes stale.
     func applyRestoreSnapshot(_ snapshot: SessionRestoreSnapshot) {
         let clean = snapshot.sanitized(
             paneCap: Self.paneAbsoluteCap,
@@ -1784,6 +1822,13 @@ final class SessionStore {
         }
 
         let providers = ModelProviderStore.load()
+        // A session a pane will mount gets `.spawning` and its overlay; the
+        // rest come back `.dormant` — an open row with no shim, promoted by
+        // `startIfDormant` the first time a pane takes it. See
+        // `OpenSession.Status.dormant` for why the two cannot be one state.
+        let panedResumeIds: Set<String> = Set(clean.panes.compactMap {
+            if case .session(let id) = $0.content { return id } else { return nil }
+        })
         var byResumeId: [String: OpenSession] = [:]
         var restored: [OpenSession] = []
         for s in clean.sessions {
@@ -1802,7 +1847,7 @@ final class SessionStore {
                 resumeId: s.resumeId,
                 title: s.title,
                 project: s.project,
-                status: .spawning,
+                status: panedResumeIds.contains(s.resumeId) ? .spawning : .dormant,
                 lastActiveAt: s.lastActiveAt,
                 permissionMode: Self.clampedPermissionMode(s.permissionMode),
                 model: s.model,
@@ -1835,7 +1880,13 @@ final class SessionStore {
         // `notice` so the success and failure lines share a lifetime — a
         // report of "my panes didn't come back" is diagnosable only if both
         // outcomes survive in the log.
-        logger.notice("applyRestoreSnapshot: restored \(self.panes.count) pane(s) / \(self.openSessions.count) session(s) from \(snapshot.panes.count) stored")
+        // Count the dormant rows off the sessions themselves rather than as
+        // `openSessions.count - panedResumeIds.count`: that subtraction is
+        // right only while sanitize guarantees paned ⊆ sessions with one pane
+        // per resumeId, and a log line that quietly depends on an invariant
+        // two files away is one that will read plausibly while being wrong.
+        let dormantCount = restored.count { $0.status == .dormant }
+        logger.notice("applyRestoreSnapshot: restored \(self.panes.count) pane(s) / \(self.openSessions.count) session(s) (\(dormantCount) dormant) from \(snapshot.panes.count) pane(s) / \(snapshot.sessions.count) session(s) stored")
     }
 
     /// Re-apply the bypass-permissions opt-in to a mode that came from disk.
@@ -1863,7 +1914,10 @@ final class SessionStore {
     ///
     /// The consume-before-apply order is load-bearing: a snapshot that crashes
     /// the restore would otherwise be replayed on every launch forever, and
-    /// each replay tries to spawn N shims. This is a factory instead of work
+    /// each replay tries to spawn a shim per PANED session (the unpaned ones
+    /// come back `.dormant` and spawn nothing).
+    ///
+    /// This is a factory instead of work
     /// inside `init()` because `_SidebarLogicProbe` constructs bare
     /// `SessionStore()`s all over, and restoring inside `init` would contaminate
     /// every one of those with the developer's real saved layout.
