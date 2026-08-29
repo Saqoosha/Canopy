@@ -15,7 +15,19 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// No session at this position — an empty pane slot or a launcher pane.
     /// Only reachable on the pad; every sidebar open row has a session.
     case empty
-    /// Alive, nothing in flight, nothing owed to the user.
+    /// Alive, nothing in flight, nothing owed to the user — or a `.dormant`
+    /// row, which has no process behind it at all. `idle` says "nothing is
+    /// owed to you", not "a process is up". That widening is deliberate, but
+    /// NOT for the reason a first draft of this line gave: a dormant session
+    /// can never reach the pad (`MacroPadController` derives its states from
+    /// `panes`, and no route leaves a dormant session in one: the three
+    /// assignment routes wake it, and `applyRestoreSnapshot` builds its paned
+    /// sessions `.spawning` directly), so a `.dormant`
+    /// case would be `.empty`'s mirror — screen-only — and would cost no LED
+    /// colour. The actual argument is that the user resolves a dormant row
+    /// and an idle one the same way, by clicking it, so the distinction earns
+    /// no separate signal; against that, a new case costs handling at every
+    /// site that switches over this enum.
     case idle
     /// Claude is generating (`isThinking`), or the shim is still coming up
     /// (`status == .spawning`). Deliberately one state: spawning is a few

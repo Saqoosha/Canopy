@@ -2,13 +2,16 @@ import Foundation
 import Observation
 import WebKit
 
-/// One open session: live shim + webview, plus the metadata that the sidebar
-/// row needs to render. Owned strongly by `SessionStore.openSessions`. When the
+/// One open session: live shim + webview — except while `.dormant`, which is
+/// an open row with neither (see `Status`) — plus the metadata that the
+/// sidebar row needs to render. Owned strongly by `SessionStore.openSessions`. When the
 /// user closes a session (× button), the store drops the OpenSession; the
 /// shim is stopped and the webview is released as a side effect.
 ///
-/// "Open" is the user-visible state: the session row in the sidebar shows the
-/// filled `desktopcomputer` icon and (on hover) the close button. A *closed*
+/// "Open" is the user-visible state: the session row in the sidebar renders an
+/// `ActivityDot` driven by `SessionActivity` and (on hover) the close button.
+/// (`desktopcomputer` is the CLOSED-row icon; `Sidebar.iconView` routes every
+/// open row to `ActivityDot` and marks the other branch unreachable.) A *closed*
 /// session is not represented by an OpenSession at all — it's a `SessionEntry`
 /// (local JSONL) or a `RemoteSession` (cloud) instead. See `SidebarRow`.
 @Observable
@@ -51,6 +54,31 @@ final class OpenSession: Identifiable, Hashable {
         /// session immediately, so the row disappears rather than offering a
         /// retry.
         case crashed(exitCode: Int32)
+        /// Open row, no shim behind it — the state a launch-restored session
+        /// starts in when no pane in the SANITIZED snapshot refers to it. That
+        /// is wider than "no pane at quit": a pane lost to `paneCap`, or to the
+        /// duplicate-resumeId rule, demotes its session here too.
+        ///
+        /// It exists because a `ShimProcess` is only ever created by
+        /// `WebViewContainer`, which mounts only inside a pane. Restoring an
+        /// unpaned session as `.spawning` would leave it there until a pane
+        /// took it — arbitrarily long — and `SessionActivity` renders
+        /// `.spawning` as the breathing cyan of a session that is working, so
+        /// the row would read as busy with nothing running. `.dormant` falls
+        /// through that ladder to `.idle` instead, which is what the row is.
+        ///
+        /// The state is erased by `SessionStore.startIfDormant(_:)` the
+        /// moment a pane takes the session, so it is never seen by a mounted
+        /// `SessionContainer`. What it costs versus a session that stayed
+        /// open and RUNNING across the relaunch: no shim, so nothing resumes
+        /// until a pane takes it. Note that is not the same as "until the row
+        /// is clicked" — `closeSession` promotes the next open session when
+        /// the closed one held the only pane, and Cmd+Shift+[/] and
+        /// Cmd+Ctrl+1..9 assign a pane without a click on the row. A session
+        /// that was ALREADY dormant at quit loses nothing here; it had no
+        /// shim to lose. That is the deliberate trade — the alternative is
+        /// spawning one Node subprocess per open session at launch.
+        case dormant
     }
 
     let id: UUID
@@ -89,10 +117,13 @@ final class OpenSession: Identifiable, Hashable {
     /// still running. Feeds `SessionActivity.of` as the `background` rung.
     /// Mutually exclusive with `isThinking` — only true between turns.
     var isWaiting: Bool = false
-    /// The shim subprocess. Strong reference; nil only between init and start.
+    /// The shim subprocess. Strong reference; nil between init and start, and
+    /// for the whole of `.dormant` — a launch-restored session with no pane
+    /// has no shim until a pane takes it.
     var shim: ShimProcess?
     /// The WKWebView mounted into the detail pane's ZStack. Strong reference;
-    /// nil only between init and the first SessionContainer render.
+    /// nil between init and the first SessionContainer render, and for the
+    /// whole of `.dormant` — which never reaches a SessionContainer.
     var webView: WKWebView?
 
     init(

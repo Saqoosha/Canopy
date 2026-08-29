@@ -886,7 +886,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let stopping = relaunching ? "Restarting" : "Quitting"
             let alert = NSAlert()
             alert.messageText = relaunching ? "Restart Canopy" : "Active Sessions Running"
-            alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. \(stopping) will stop all sessions.\n\nSave and \(verb) restores this pane layout and these sessions next launch."
+            alert.informativeText = "\(count) session\(count == 1 ? " is" : "s are") still running. \(stopping) will stop all sessions.\n\nSave and \(verb) restores this pane layout and your open sessions next launch."
             alert.addButton(withTitle: "Save and \(verb)")
             alert.addButton(withTitle: verb)
             alert.addButton(withTitle: "Cancel")
@@ -914,8 +914,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return .terminateCancel
             }
         }
-        // No active sessions → no alert, shouldSaveRestoreSnapshot stays false
-        // (nothing to restore).
+        // No active sessions → no alert, shouldSaveRestoreSnapshot stays false.
+        // That used to mean "nothing to restore" and no longer quite does: a
+        // `.dormant` session is an open row with no shim, so a store holding
+        // only those reaches here with rows worth saving and gets none of them
+        // saved. What gates it is `closeSession`'s promotion, and the
+        // condition is narrower than it looks: it fires only when the closed
+        // session WAS the selection (`else if case .session(let sel) =
+        // selection, sel == id`), which in the ordinary single-strip case it
+        // is — so closing paned sessions one by one keeps waking the next
+        // dormant row, and this state is not reached at all. Two strip shapes
+        // defeat it. A surviving launcher pane: `panes` never empties, so the
+        // branch that promotes is never taken. And an ALREADY-empty strip:
+        // `closePane` left `selection == .launcher`, so the closed session is
+        // not the selection and nothing is promoted. Either way, closing the
+        // last shim-backed session leaves dormant rows and no shim. A restore
+        // itself cannot produce it, because `SessionRestoreSnapshot.isEmpty` still requires
+        // a surviving session pane and so guarantees at least one shim at
+        // launch. Accepted, not overlooked — those rows did not survive a
+        // relaunch at all before the open block became restorable, and
+        // widening this gate means an alert that says "N sessions are still
+        // running" when none are.
+        //
+        // A neighbouring case is NOT gated here and is worth knowing about:
+        // with a shim still running but no SESSION pane left in the strip
+        // (Cmd+N over the last one, or closing it while a launcher pane
+        // stays), the prompt DOES fire, and `applicationWillTerminate` then
+        // discards the capture because `SessionRestoreSnapshot.isEmpty` is
+        // pane-based. The outcome matches what the user got before this
+        // feature — nothing comes back — but the capture now carries real
+        // sessions on the way to the bin, and that branch logs nothing.
 
         // If "Restart Now" triggered this terminate, spawn the waiter now —
         // before the run loop starts winding down — so the failure alert is

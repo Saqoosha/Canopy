@@ -4796,14 +4796,16 @@ enum SidebarLogicProbe {
         do {
             func snapSession(
                 _ id: String,
-                origin: SessionRestoreSnapshot.Session.Origin = .local(path: "/tmp/probe")
+                origin: SessionRestoreSnapshot.Session.Origin = .local(path: "/tmp/probe"),
+                title: String? = nil,
+                permissionMode: PermissionMode = .acceptEdits
             ) -> SessionRestoreSnapshot.Session {
                 SessionRestoreSnapshot.Session(
                     resumeId: id,
-                    title: id,
+                    title: title ?? id,
                     project: "probe",
                     origin: origin,
-                    permissionMode: .acceptEdits,
+                    permissionMode: permissionMode,
                     model: nil,
                     effortLevel: nil,
                     providerId: nil,
@@ -4897,9 +4899,15 @@ enum SidebarLogicProbe {
                 if case .session(let id) = pane.content { return id }
                 return nil
             })
-            record("restore: a session stranded by the cap is dropped from sessions too",
-                   afterCap.sessions.count == referenced.count
-                       && Set(afterCap.sessions.map(\.resumeId)) == referenced)
+            // A pane lost to the cap demotes its session to a dormant row now
+            // rather than erasing it — the whole point of restoring the open
+            // block and not just the strip. Assert BOTH halves: the sessions
+            // survive, and the panes really were capped, or a sanitize that
+            // stopped capping would read as this rule working.
+            record("restore: a session stranded by the cap survives as an unpaned row",
+                   afterCap.sessions.map(\.resumeId) == ["c0", "c1", "c2", "c3"]
+                       && referenced.sorted() == ["c0", "c1"],
+                   "sessions=\(afterCap.sessions.map(\.resumeId)) paned=\(referenced.sorted())")
 
             let launcherOnly = SessionRestoreSnapshot(
                 sessions: [snapSession("gone")],
@@ -4908,7 +4916,44 @@ enum SidebarLogicProbe {
             )
             let afterLauncherOnly = launcherOnly.sanitized(paneCap: 5) { _ in false }
             record("restore: no surviving session pane collapses the snapshot to empty",
-                   afterLauncherOnly.isEmpty)
+                   afterLauncherOnly.isEmpty && afterLauncherOnly.panes.isEmpty
+                       && afterLauncherOnly.sessions.isEmpty
+                       && afterLauncherOnly.focusedPaneIndex == 0,
+                   "panes=\(afterLauncherOnly.panes.count) sessions=\(afterLauncherOnly.sessions.count)")
+
+            // A strip of nothing but launchers still collapses even when its
+            // session is alive on disk, and this is the boundary that was moved
+            // and moved back: basing the collapse on a surviving SESSION would
+            // keep this snapshot, and the launch it produces has no shim, so
+            // the quit prompt that writes the snapshot never fires again. The
+            // fixture must be launcher-only for real — reusing `launcherOnly`
+            // above does not test this, because that one carries a session pane.
+            let trueLauncherOnly = SessionRestoreSnapshot(
+                sessions: [snapSession("live")],
+                panes: [snapPane(nil), snapPane(nil)],
+                focusedPaneIndex: 1
+            )
+            let afterTrueLauncherOnly = trueLauncherOnly.sanitized(paneCap: 5, sessionIsResumable: always)
+            record("restore: a launcher-only strip collapses even when its session survives",
+                   afterTrueLauncherOnly.isEmpty && afterTrueLauncherOnly.sessions.isEmpty
+                       && afterTrueLauncherOnly.panes.isEmpty,
+                   "sessions=\(afterTrueLauncherOnly.sessions.map(\.resumeId)) "
+                       + "panes=\(afterTrueLauncherOnly.panes.count)")
+
+            // The unpaned survivor rule, in the shape that isolates it from
+            // the cap: two resumable sessions, only one of them paned. The
+            // unpaned one is kept as a dormant row and the strip still holds a
+            // session pane, so nothing collapses.
+            let unpanedSurvivor = SessionRestoreSnapshot(
+                sessions: [snapSession("paned"), snapSession("unpaned")],
+                panes: [snapPane("paned")],
+                focusedPaneIndex: 0
+            )
+            let afterUnpaned = unpanedSurvivor.sanitized(paneCap: 5, sessionIsResumable: always)
+            record("restore: a session no pane refers to is kept, not dropped",
+                   afterUnpaned.sessions.map(\.resumeId) == ["paned", "unpaned"]
+                       && afterUnpaned.panes.count == 1,
+                   "sessions=\(afterUnpaned.sessions.map(\.resumeId)) panes=\(afterUnpaned.panes.count)")
 
             var mismatched = original
             mismatched.version = SessionRestoreSnapshot.currentVersion + 1
@@ -4965,26 +5010,36 @@ enum SidebarLogicProbe {
 
             // Duplicate session entries: capture cannot emit them, but the
             // blob is hand-editable JSON and sanitize is the laundering point.
+            // Distinguishable twins: field-identical ones make "keeps only the
+            // first" indistinguishable from "keeps only the last", and the rule
+            // list states the first. A count alone pins neither.
             let dupSessions = SessionRestoreSnapshot(
-                sessions: [snapSession("twin"), snapSession("twin")],
+                sessions: [snapSession("twin", title: "First"), snapSession("twin", title: "Second")],
                 panes: [snapPane("twin")],
                 focusedPaneIndex: 0
             )
             let afterDupSessions = dupSessions.sanitized(paneCap: 5, sessionIsResumable: always)
-            record("restore: duplicate session entries collapse to one",
-                   afterDupSessions.sessions.count == 1,
-                   "got \(afterDupSessions.sessions.count)")
+            record("restore: duplicate session entries collapse to the FIRST",
+                   afterDupSessions.sessions.count == 1
+                       && afterDupSessions.sessions.first?.title == "First",
+                   "got \(afterDupSessions.sessions.map(\.title))")
 
             // A launcher-only strip must read as empty at BOTH ends, so the
             // quit path normalizes the window frame instead of saving a
             // snapshot the next launch will reject.
             record("restore: a launcher-only strip is empty, so it is never saved",
                    SessionRestoreSnapshot(sessions: [], panes: [snapPane(nil)], focusedPaneIndex: 0).isEmpty)
+            // This kills `sessions.isEmpty` as a stand-in for the predicate:
+            // sessions with no session pane are still EMPTY, the boundary that
+            // was widened and reverted. `panes.isEmpty` is killed by the record
+            // above, and the NOT-empty direction by `onePane`, further up.
+            record("restore: sessions with no session pane are still empty",
+                   SessionRestoreSnapshot(sessions: [snapSession("only")],
+                                          panes: [snapPane(nil)],
+                                          focusedPaneIndex: 0).isEmpty)
 
-            // The capture half. `applyRestoreSnapshot` can't be exercised here
-            // — it resolves `resumableOnDisk` against the real filesystem and
-            // would drop every synthetic fixture — so capture is pinned on its
-            // own, plus the round-trip property that matters at the seam: what
+            // The capture half, pinned on its own, plus the round-trip
+            // property that matters at the seam: what
             // capture emits must already survive sanitize untouched. A capture
             // that needed cleaning up would mean the two halves disagree about
             // the shape, and the disagreement would only ever show as silently
@@ -5005,7 +5060,20 @@ enum SidebarLogicProbe {
                 project: "mbp:dir",
                 status: .live
             )
-            capStore._probeSeedOpenSessions([capLocal, capRemote])
+            // A third session that is open and NOT paned — the case capture
+            // used to drop on the floor. Seeded in the MIDDLE, deliberately:
+            // seeded last, "sidebar row order" and "paned first, then unpaned"
+            // produce the identical list, so the order assertion below would
+            // pass under an implementation that walked `panes` and appended the
+            // leftovers. From the middle only row order gives this answer.
+            let capUnpaned = OpenSession(
+                origin: .local(cwd),
+                resumeId: "cap-unpaned",
+                title: "Cap Unpaned",
+                project: "ProjectCap",
+                status: .dormant
+            )
+            capStore._probeSeedOpenSessions([capLocal, capUnpaned, capRemote])
             capStore.openInFocusedPane(capLocal.id)
             _ = capStore.openInNewPane(capRemote.id)
             _ = capStore.openLauncherInNewPane()
@@ -5018,14 +5086,50 @@ enum SidebarLogicProbe {
                        && captured.panes[2].content == .launcher
                        && captured.focusedPaneIndex == 2,
                    "panes=\(captured.panes.map(\.content)) focus=\(captured.focusedPaneIndex)")
-            record("restore: capture stores one session per paned session, in pane order",
-                   captured.sessions.map(\.resumeId) == ["cap-local", "cap-remote"],
+            record("restore: capture stores every OPEN session, in sidebar row order",
+                   captured.sessions.map(\.resumeId) == ["cap-local", "cap-unpaned", "cap-remote"],
                    "got \(captured.sessions.map(\.resumeId))")
+            // The unpaned one must not acquire a pane on the way through, or
+            // restore would mount a shim for a session that had none. This one
+            // is close to tautological — `panesOut` is built by iterating
+            // `panes`, so only a capture that synthesised panes inside the
+            // session loop could fail it. Kept as a cheap statement of intent,
+            // not counted on as coverage.
+            record("restore: capture leaves an unpaned session out of the pane strip",
+                   !captured.panes.contains { $0.content == .session(resumeId: "cap-unpaned") })
+
+            // On the "row order vs pane order" question the fixture cannot go
+            // further, and the reason is a property rather than a gap: the two
+            // orders are held in lockstep for PANED sessions by
+            // `syncPaneOrderToRows` / `moveRowFollowingPaneAssignment`, and a
+            // drag re-sorts the panes to match the rows, so no sequence of
+            // operations makes them disagree. What the middle-seeded fixture
+            // above pins is the only part that is decidable — where an UNPANED
+            // session lands — which is exactly the part this PR added.
+
+            // The dedupe on capture, which `sanitized`'s doc leans on by name
+            // ("capture cannot emit a duplicate"). A stated invariant with
+            // nothing behind it is the shape this repo has been bitten by.
+            let dupCapStore = SessionStore()
+            let dupA = OpenSession(origin: .local(cwd), resumeId: "same-id",
+                                   title: "Dup A", project: "ProjectCap", status: .live)
+            let dupB = OpenSession(origin: .local(cwd), resumeId: "same-id",
+                                   title: "Dup B", project: "ProjectCap", status: .live)
+            dupCapStore._probeSeedOpenSessions([dupA, dupB])
+            dupCapStore.openInFocusedPane(dupA.id)
+            let dupCaptured = dupCapStore.captureRestoreSnapshot()
+            record("restore: capture emits one session per resumeId",
+                   dupCaptured.sessions.map(\.title) == ["Dup A"],
+                   "got \(dupCaptured.sessions.map(\.title))")
+            // By resumeId, not by index: `record` does not abort, so a hard
+            // subscript on a regressed capture traps here and the probe job
+            // reports "the app never launched" instead of "an assertion failed".
+            let capturedRemote = captured.sessions.first { $0.resumeId == "cap-remote" }
             record("restore: capture carries permission mode and a remote origin across",
                    captured.sessions.first?.permissionMode == .plan
-                       && captured.sessions.last?.origin == .remote(host: "mbp", path: "/remote/dir"),
+                       && capturedRemote?.origin == .remote(host: "mbp", path: "/remote/dir"),
                    "mode=\(String(describing: captured.sessions.first?.permissionMode)) "
-                       + "origin=\(String(describing: captured.sessions.last?.origin))")
+                       + "origin=\(String(describing: capturedRemote?.origin))")
             record("restore: a captured snapshot already survives sanitize unchanged",
                    captured.sanitized(paneCap: SessionStore.paneAbsoluteCap, sessionIsResumable: always)
                        == captured)
@@ -5082,6 +5186,288 @@ enum SidebarLogicProbe {
             record("restore: a teleported origin keeps its cloud id and path in order",
                    teleOrigin == .teleported(cloudSessionId: "cloud-77", path: cwd.path),
                    "got \(String(describing: teleOrigin))")
+
+            // `.dormant` is only honest while nothing is mounted, so all three
+            // routes that hand a session to a pane have to wake it. Assert the
+            // state first: `capUnpaned` was built `.dormant` by the fixture, so
+            // without this line the promotion assertion below would pass
+            // vacuously on a session that was already `.spawning`.
+            record("restore: an unpaned session is still dormant before a pane takes it",
+                   capUnpaned.status == .dormant)
+            capStore.openInFocusedPane(capUnpaned.id)
+            record("restore: taking a dormant session into a pane starts it",
+                   capUnpaned.status == .spawning,
+                   "got \(String(describing: capUnpaned.status))")
+            // The negative half: a session that was NOT dormant must come
+            // through untouched. Dropping the `.dormant` clause from
+            // `startIfDormant`'s guard would reset every session to `.spawning`
+            // on every plain sidebar click — SpawningOverlay and a working dot
+            // on a session that never stopped running.
+            //
+            // Read the routes, not the adjacency: `capLocal` was paned by the
+            // SEED branch back at fixture setup and `capRemote` by the APPEND,
+            // neither by the `openInFocusedPane(capUnpaned.id)` call just above.
+            // One `.live` session is not enough, but be precise about which
+            // mutation shows it. Deleting the `.dormant` clause from
+            // `startIfDormant`'s single guard IS caught by `capLocal` alone,
+            // since the seed branch calls it too. What `capLocal` alone misses
+            // is a leak introduced at the CALL SITES — promotion inlined
+            // without the guard at the content-swap and append branches, with
+            // the seed branch left intact; measured, and green with only
+            // `capLocal`. The content-swap branch is covered by `swapLive`.
+            record("restore: the seed branch leaves a non-dormant session alone",
+                   capLocal.status == .live,
+                   "got \(String(describing: capLocal.status))")
+            record("restore: the new-pane branch leaves a non-dormant session alone",
+                   capRemote.status == .live,
+                   "got \(String(describing: capRemote.status))")
+            // Route 2 of 3: the append, which has its own construction site.
+            // Assert the return value too — this fixture depends on staying
+            // under `paneAbsoluteCap`, and a bounce would otherwise be reported
+            // as "the wake didn't happen".
+            let wakeNew = OpenSession(
+                origin: .local(cwd),
+                resumeId: "wake-new",
+                title: "Wake New",
+                project: "ProjectCap",
+                status: .dormant
+            )
+            capStore._probeSeedOpenSessions([capLocal, capRemote, capUnpaned, wakeNew])
+            let wakeNewTookAPane = capStore.openInNewPane(wakeNew.id)
+            record("restore: opening a dormant session in a NEW pane starts it too",
+                   wakeNewTookAPane && wakeNew.status == .spawning,
+                   "tookPane=\(wakeNewTookAPane) status=\(String(describing: wakeNew.status))")
+            // Route 3 of 3: the empty-panes seed branch. Reached whenever a
+            // session is assigned to an empty strip — `closeSession`'s own
+            // promotion (the dominant one, and no click on the dormant row at
+            // all), Cmd+Ctrl+1..9, or a click after the strip was emptied by
+            // hand. Never by a restore coming back with no panes, as an earlier
+            // draft of this comment said: `sanitized`'s `hasSessionPane` guard
+            // makes that impossible. Needs its own store, not `capStore`,
+            // which already holds several.
+            let seedStore = SessionStore()
+            let wakeSeed = OpenSession(
+                origin: .local(cwd),
+                resumeId: "wake-seed",
+                title: "Wake Seed",
+                project: "ProjectCap",
+                status: .dormant
+            )
+            seedStore._probeSeedOpenSessions([wakeSeed])
+            seedStore.openInFocusedPane(wakeSeed.id)
+            record("restore: the empty-panes seed branch starts a dormant session too",
+                   seedStore.panes.count == 1 && wakeSeed.status == .spawning,
+                   "panes=\(seedStore.panes.count) status=\(String(describing: wakeSeed.status))")
+            // The content-swap branch's negative, which the two `.live`
+            // assertions above cannot reach: `seedStore` now has a pane, so
+            // this call swaps content rather than seeding.
+            let swapLive = OpenSession(
+                origin: .local(cwd),
+                resumeId: "swap-live",
+                title: "Swap Live",
+                project: "ProjectCap",
+                status: .live
+            )
+            seedStore._probeSeedOpenSessions([wakeSeed, swapLive])
+            seedStore.openInFocusedPane(swapLive.id)
+            record("restore: the content-swap branch leaves a non-dormant session alone",
+                   swapLive.status == .live,
+                   "got \(String(describing: swapLive.status))")
+
+            // `startIfDormant` sits BELOW `openInNewPane`'s cap guard, and the
+            // ordering is the whole point: promoted above it, a Cmd+click that
+            // bounces off the cap would leave the session `.spawning` with no
+            // pane and no shim — the permanently breathing "working" dot
+            // `.dormant` exists to prevent, and unrecoverable without paning it.
+            // The cap comes from the constant, never a literal: it moved 5 → 6
+            // once already and a re-typed value asserts only that nobody
+            // changed their mind.
+            let capStore4 = SessionStore()
+            let bounced = OpenSession(
+                origin: .local(cwd),
+                resumeId: "bounced",
+                title: "Bounced",
+                project: "ProjectCap",
+                status: .dormant
+            )
+            capStore4._probeSeedOpenSessions([bounced])
+            // Bounded, not `while panes.count < cap`: that loop's termination
+            // depends on `openLauncherInNewPane` always succeeding below the
+            // cap, and if a guard is ever added there the probe hangs to CI's
+            // `timeout-minutes`, which reports as "the app never launched" —
+            // the one bucket ci.yml's summary-line check exists to keep apart.
+            for _ in 0..<SessionStore.paneAbsoluteCap {
+                _ = capStore4.openLauncherInNewPane()
+            }
+            let bounceTookAPane = capStore4.openInNewPane(bounced.id)
+            record("restore: a dormant session bounced by the pane cap stays dormant",
+                   !bounceTookAPane && bounced.status == .dormant
+                       && capStore4.panes.count == SessionStore.paneAbsoluteCap,
+                   "tookPane=\(bounceTookAPane) status=\(String(describing: bounced.status)) "
+                       + "panes=\(capStore4.panes.count)")
+
+            // `.dormant`'s whole reason to exist over reusing `.spawning` is
+            // that it reads as `.idle` rather than as the breathing cyan of a
+            // working session. That claim lives in a fall-through — `of` has no
+            // `.dormant` arm — so nothing would fail if someone added one.
+            let dormantForDot = OpenSession(
+                origin: .local(cwd),
+                resumeId: "dot-dormant",
+                title: "Dot",
+                project: "ProjectCap",
+                status: .dormant
+            )
+            record("restore: a dormant session reads as idle, not working",
+                   SessionActivity.of(dormantForDot, isUnread: false) == .idle,
+                   "got \(SessionActivity.of(dormantForDot, isUnread: false))")
+
+            // `applyRestoreSnapshot` was long documented as un-probe-able
+            // because `resumableOnDisk` hits the real filesystem and would drop
+            // synthetic fixtures. That is true only of LOCAL sessions: a remote
+            // one is accepted unchecked (asserted above), so a remote-origin
+            // fixture drives the whole apply path with no filesystem setup at
+            // all. What that buys is the one line this feature is: the
+            // paned/unpaned status split, which every other assertion here
+            // leaves free to be inverted.
+            let applyStore = SessionStore()
+            applyStore.applyRestoreSnapshot(SessionRestoreSnapshot(
+                sessions: [
+                    snapSession("ap-paned", origin: .remote(host: "h", path: "/a")),
+                    snapSession("ap-unpaned", origin: .remote(host: "h", path: "/b")),
+                ],
+                panes: [snapPane("ap-paned", 700)],
+                focusedPaneIndex: 0
+            ))
+            let applyPaned = applyStore.openSessions.first { $0.resumeId == "ap-paned" }
+            let applyUnpaned = applyStore.openSessions.first { $0.resumeId == "ap-unpaned" }
+            record("restore: apply gives the paned session a shim-bound .spawning",
+                   applyPaned?.status == .spawning,
+                   "got \(String(describing: applyPaned?.status))")
+            record("restore: apply gives the unpaned session .dormant",
+                   applyUnpaned?.status == .dormant,
+                   "got \(String(describing: applyUnpaned?.status))")
+            record("restore: apply keeps the snapshot's session order and panes only the paned one",
+                   applyStore.openSessions.map(\.resumeId) == ["ap-paned", "ap-unpaned"]
+                       && applyStore.panes.count == 1
+                       && applyStore.panes.first?.preferredWidth == 700,
+                   "sessions=\(applyStore.openSessions.map(\.resumeId)) "
+                       + "panes=\(applyStore.panes.count)")
+
+            // The second round trip, which is what a user gets by restoring and
+            // quitting again without touching anything. Nothing else pins that
+            // dormant rows survive it — capture's own seam assertion runs on a
+            // hand-built store, not on one apply produced.
+            let reCaptured = applyStore.captureRestoreSnapshot()
+            record("restore: apply then capture reproduces the sessions and the strip",
+                   reCaptured.sessions.map(\.resumeId) == ["ap-paned", "ap-unpaned"]
+                       && reCaptured.panes.map(\.content) == [.session(resumeId: "ap-paned")],
+                   "sessions=\(reCaptured.sessions.map(\.resumeId)) panes=\(reCaptured.panes.map(\.content))")
+
+            // A snapshot that sanitize collapses leaves the store untouched.
+            // What this does NOT pin is `applyRestoreSnapshot`'s own
+            // `guard !clean.isEmpty` — measured: deleting that guard keeps the
+            // suite green, because `sanitized` has already returned an empty
+            // snapshot by then, so the code below it builds nothing either way.
+            // The guard's remaining job is the log line, and a log line is not
+            // reachable from here. Nor does it kill apply reading the RAW
+            // snapshot — also measured; that mutation is MASKED by the guard
+            // itself, since a launcher-only snapshot is `isEmpty` either way.
+            // The `applyLaunderStore` fixture below is what pins the
+            // sanitize call.
+            let applyEmptyStore = SessionStore()
+            applyEmptyStore.applyRestoreSnapshot(SessionRestoreSnapshot(
+                sessions: [snapSession("ap-none", origin: .remote(host: "h", path: "/a"))],
+                panes: [snapPane(nil)],
+                focusedPaneIndex: 0
+            ))
+            record("restore: apply restores nothing when sanitize collapses the snapshot",
+                   applyEmptyStore.openSessions.isEmpty && applyEmptyStore.panes.isEmpty,
+                   "sessions=\(applyEmptyStore.openSessions.count) panes=\(applyEmptyStore.panes.count)")
+
+            // Apply must launder its input, not trust it: a pane whose session
+            // is unresumable has to be gone from the strip. Skipping the
+            // `sanitized` call keeps the whole suite green otherwise — the
+            // pure assertions above test `sanitized` in isolation and never
+            // establish that apply calls it.
+            let applyLaunderStore = SessionStore()
+            applyLaunderStore.applyRestoreSnapshot(SessionRestoreSnapshot(
+                sessions: [
+                    snapSession("ap-ghost", origin: .local(path: "/nonexistent-probe-path-9f3a")),
+                    snapSession("ap-alive", origin: .remote(host: "h", path: "/a")),
+                ],
+                panes: [snapPane("ap-ghost", 300), snapPane("ap-alive", 400)],
+                focusedPaneIndex: 1
+            ))
+            record("restore: apply drops a pane whose session is unresumable",
+                   applyLaunderStore.openSessions.map(\.resumeId) == ["ap-alive"]
+                       && applyLaunderStore.panes.count == 1
+                       && applyLaunderStore.panes.first?.preferredWidth == 400,
+                   "sessions=\(applyLaunderStore.openSessions.map(\.resumeId)) "
+                       + "panes=\(applyLaunderStore.panes.map(\.preferredWidth))")
+
+            // Two paned sessions, the pane order REVERSED against the session
+            // order, so the pane→session mapping and the focus index are both
+            // decidable. With one pane neither is: any mapping and any clamp
+            // give the same answer.
+            let applyOrderStore = SessionStore()
+            applyOrderStore.applyRestoreSnapshot(SessionRestoreSnapshot(
+                sessions: [
+                    snapSession("ap2-a", origin: .remote(host: "h", path: "/a")),
+                    snapSession("ap2-b", origin: .remote(host: "h", path: "/b")),
+                ],
+                panes: [snapPane("ap2-b", 400), snapPane("ap2-a", 500)],
+                focusedPaneIndex: 1
+            ))
+            let ap2a = applyOrderStore.openSessions.first { $0.resumeId == "ap2-a" }
+            let ap2b = applyOrderStore.openSessions.first { $0.resumeId == "ap2-b" }
+            record("restore: apply binds each pane to ITS session, not to whichever came first",
+                   ap2b.map { applyOrderStore.paneIndex(forSession: $0.id) } == 0
+                       && ap2a.map { applyOrderStore.paneIndex(forSession: $0.id) } == 1,
+                   "b=\(String(describing: ap2b.map { applyOrderStore.paneIndex(forSession: $0.id) })) "
+                       + "a=\(String(describing: ap2a.map { applyOrderStore.paneIndex(forSession: $0.id) }))")
+            record("restore: apply carries the stored focus rather than resetting to 0",
+                   applyOrderStore.focusedPaneIndex == 1
+                       && ap2a.map { applyOrderStore.selection == .session($0.id) } == true,
+                   "focus=\(applyOrderStore.focusedPaneIndex)")
+
+            // The bypass-permissions clamp, which `clampedPermissionMode`'s own
+            // doc calls the third route to a `PermissionMode` and the only one
+            // whose input is hand-editable JSON.
+            //
+            // The opt-in is FORCED off for the duration, and that is the whole
+            // assertion: expressed against whatever the machine happens to
+            // have (`clamped == optIn ? .bypassPermissions : .acceptEdits`)
+            // this passes with the clamp deleted on any machine that has the
+            // opt-in ON — measured, on this one.
+            //
+            // `defer`, not two statements after the read, and not because a
+            // trap is likely: this write goes through `CanopySettings.save()`
+            // to `~/Library/Application Support/Canopy/settings.json`, which is
+            // named after the APP and so is shared with the installed Release
+            // build. Every other real key the probe touches is a per-bundle-id
+            // UserDefaults domain; this one is not, so a trap here would leave
+            // the user's installed Canopy with its bypass opt-in forced off.
+            // `defaultPermissionMode` is restored too, because the opt-in's
+            // `didSet` clamps it as a side effect.
+            let savedBypassOptIn = CanopySettings.shared.allowDangerouslySkipPermissions
+            let savedDefaultMode = CanopySettings.shared.defaultPermissionMode
+            defer {
+                CanopySettings.shared.allowDangerouslySkipPermissions = savedBypassOptIn
+                CanopySettings.shared.defaultPermissionMode = savedDefaultMode
+            }
+            CanopySettings.shared.allowDangerouslySkipPermissions = false
+            let applyClampStore = SessionStore()
+            applyClampStore.applyRestoreSnapshot(SessionRestoreSnapshot(
+                sessions: [snapSession("ap-bypass",
+                                       origin: .remote(host: "h", path: "/a"),
+                                       permissionMode: .bypassPermissions)],
+                panes: [snapPane("ap-bypass")],
+                focusedPaneIndex: 0
+            ))
+            let clamped = applyClampStore.openSessions.first?.permissionMode
+            record("restore: apply clamps a stored .bypassPermissions when the opt-in is off",
+                   clamped == .acceptEdits,
+                   "got \(String(describing: clamped))")
         }
 
         // Summary. Note `grep -c 'record('` does NOT equal this count: the
