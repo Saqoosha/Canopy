@@ -755,6 +755,44 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             env["PATH"] = (newPaths + [currentPath]).joined(separator: ":")
         }
 
+        // Hand back the name this session was last known by. A peer name lives
+        // only as long as the CLI process that published it — the CLI deletes
+        // its `~/.claude/sessions/<pid>.json` on exit — so without this a
+        // `/rename` is lost on every restart and the CLI derives a fresh name.
+        //
+        // The CLI reads `CLAUDE_CODE_SESSION_NAME` (measured on 2.1.239: the
+        // record comes back with that name and no `nameSource` field). It
+        // reaches the CLI by inheritance — extension.js is what spawns it, and
+        // Canopy only ever sets the shim's environment.
+        //
+        // That restored name is deliberately NOT re-pinned:
+        // `PeerNameStore.isPinned` returns false for an absent source. What
+        // makes the name survive the restart after this one is simply that the
+        // store entry driving this restore is still there — nothing prunes it
+        // below the cap.
+        //
+        // Only on resume, because a brand-new session has no id to look up
+        // yet; and never for a remote session, whose CLI runs on the other
+        // machine where this variable does not reach — and which is not a peer
+        // in the first place (see the peer-name learnings).
+        if remoteHost == nil,
+           let resumeId = resumeSessionId,
+           let remembered = PeerNameStore.shared.savedName(forSessionId: resumeId) {
+            env["CLAUDE_CODE_SESSION_NAME"] = remembered
+            // `notice`, not `info`: `info` is ring-buffer only and gone by
+            // the time anyone reads back a "my name was not restored" report.
+            logger.notice("restoring peer name for session")
+        } else {
+            // Never inherit this from the shell that launched Canopy: it
+            // would name every new session identically, and the CLI would
+            // then have to rename them apart as collisions. Not a persistence
+            // hazard — `isPinned` refuses an absent `nameSource`, so none of
+            // those names would be stored — but the sidebar would show one
+            // name on every row. Same inheritance hazard
+            // `SessionTitleGenerator` scrubs `CLAUDE_CODE_ENTRYPOINT` for.
+            env.removeValue(forKey: "CLAUDE_CODE_SESSION_NAME")
+        }
+
         // Write model/effort to ~/.claude/settings.json before CLI starts.
         // Remote sessions skip this: the CLI runs on the remote host and reads
         // the remote ~/.claude/settings.json, so a local write only pollutes
@@ -907,6 +945,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func stop() {
         isIntentionalStop = true
         guard let proc = process, proc.isRunning else { return }
+
+        // Capture the peer name before the CLI deletes its record on exit.
+        // Renames are only ever seen by the poll (an in-place write fires no
+        // directory event), so without this a `/rename` followed by closing
+        // the session inside one poll interval is lost. One small directory
+        // read, on a path that is already about to tear down a process tree.
+        PeerNameStore.shared.captureNow()
+
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         stdinPipe?.fileHandleForWriting.closeFile()

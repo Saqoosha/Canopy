@@ -41,7 +41,9 @@ final class PeerNameStore {
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var started = false
 
-    private init() {}
+    private init() {
+        savedNames = Self.loadSavedNames()
+    }
 
     /// The peer name for a session, or nil when that session is not currently
     /// running under a name Canopy can see.
@@ -73,10 +75,15 @@ final class PeerNameStore {
     /// `@Observable` notifies on every assignment, equal or not, and this
     /// runs on a timer — so an unconditional store would redraw every sidebar
     /// row and pane header a few times a minute for nothing.
-    private func apply(_ map: [String: String]) {
-        guard map != namesBySessionId else { return }
-        logger.notice("peer names: \(map.count, privacy: .public) live session(s)")
-        namesBySessionId = map
+    /// Remembering runs BEFORE the equality guard: a name can already be on
+    /// screen and still not be in the store yet, which is exactly the state
+    /// right after launch.
+    private func apply(_ live: [String: LiveName]) {
+        rememberPinnedNames(in: live)
+        let names = live.mapValues { $0.name }
+        guard names != namesBySessionId else { return }
+        logger.notice("peer names: \(names.count, privacy: .public) live session(s)")
+        namesBySessionId = names
     }
 
     /// One record of `~/.claude/sessions/<pid>.json`. Deliberately a subset:
@@ -89,6 +96,43 @@ final class PeerNameStore {
         /// Epoch milliseconds. Read only to break a duplicate-`sessionId`
         /// tie; see `readDirectory`.
         let startedAt: Double?
+        /// `"user"`, `"derived"`, `"collision"`, or absent. See `isPinned`.
+        let nameSource: String?
+    }
+
+    /// One live session's published name, as read off disk.
+    struct LiveName: Equatable {
+        let name: String
+        /// `"user"`, `"derived"`, `"collision"`, or nil. See `isPinned`.
+        let nameSource: String?
+    }
+
+    /// Whether a published name should outlive the process that published it.
+    ///
+    /// `nameSource` takes four states, three of them measured on 2.1.239:
+    /// `"user"` after a `/rename`, `"derived"` for a name the CLI generated
+    /// from the cwd, and ABSENT when the name arrived in
+    /// `CLAUDE_CODE_SESSION_NAME`. `"collision"` appears in the binary beside
+    /// `"derived"` and is treated the same here; it was not reproduced.
+    ///
+    /// (An earlier version of this comment claimed the field is written ONLY
+    /// for `derived`/`collision`. That over-generalised a single grep hit —
+    /// one write path spells the others `void 0` — and under it `"user"`
+    /// would be unreachable and this whole type would persist nothing.)
+    ///
+    /// Only `"user"` pins. **An absent source deliberately does not**, and the
+    /// reason is worth stating because the opposite looks necessary: a name
+    /// Canopy restored comes back with no `nameSource`, so it seems it must be
+    /// re-pinned or it would be forgotten. It would not. `savedNames` is never
+    /// pruned below the cap, so the entry that drove the restore is still
+    /// there and drives the next one too. Pinning the absent case buys
+    /// nothing and costs a real bug: `CLAUDE_CODE_SESSION_NAME` is set on the
+    /// shim once and inherited by every CLI it spawns afterwards, so a
+    /// `/clear` or `/resume` republishes that name under a DIFFERENT
+    /// sessionId — which would then be persisted as if the user had chosen
+    /// it.
+    nonisolated static func isPinned(nameSource: String?) -> Bool {
+        nameSource == "user"
     }
 
     private nonisolated static var sessionsDirectory: URL {
@@ -123,7 +167,7 @@ final class PeerNameStore {
     /// `startedAt` wins; a record missing the field loses to any record that
     /// has one, since a file old enough to predate it is the likelier
     /// leftover.
-    private nonisolated static func readDirectory() -> [String: String]? {
+    private nonisolated static func readDirectory() -> [String: LiveName]? {
         let dir = sessionsDirectory
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: dir,
@@ -133,7 +177,7 @@ final class PeerNameStore {
             return nil
         }
 
-        var best: [String: (startedAt: Double, name: String)] = [:]
+        var best: [String: (startedAt: Double, live: LiveName)] = [:]
         for url in entries where url.pathExtension == "json" {
             guard
                 let data = try? Data(contentsOf: url),
@@ -143,9 +187,92 @@ final class PeerNameStore {
             else { continue }
             let startedAt = record.startedAt ?? -.greatestFiniteMagnitude
             if let existing = best[record.sessionId], existing.startedAt >= startedAt { continue }
-            best[record.sessionId] = (startedAt, name)
+            best[record.sessionId] = (startedAt, LiveName(name: name, nameSource: record.nameSource))
         }
-        return best.mapValues { $0.name }
+        return best.mapValues { $0.live }
+    }
+
+    /// Read and apply the directory synchronously.
+    ///
+    /// For the one caller that cannot wait for the next poll: `ShimProcess`
+    /// is about to stop a CLI, and stopping it deletes the record. A
+    /// `/rename` is an in-place write that fires no directory event, so the
+    /// name is seen only by the poll — and closing the session inside that
+    /// window would take the record away before it was ever observed, losing
+    /// exactly the rename this type exists to keep. Everything else goes
+    /// through `refresh`, which reads off the main actor.
+    func captureNow() {
+        guard let map = Self.readDirectory() else { return }
+        apply(map)
+    }
+
+    // MARK: - Remembering across restarts
+
+    /// A name lives only as long as the CLI process that published it — the
+    /// record is deleted on exit — so without this a `/rename` is lost the
+    /// next time Canopy launches, and the CLI generates a fresh `derived`
+    /// name. Keyed by `sessionId`, so a session gets its own name back and
+    /// only its own.
+    private static let storeKey = "peerNames.v1"
+
+    /// A ceiling against unbounded growth, not a working limit: reaching it
+    /// takes a thousand separately renamed sessions, and a full store is about
+    /// 80 KB.
+    ///
+    /// The cap is set high precisely because the trim order is imperfect and
+    /// cannot easily be made better. `savedAt` is when the name was last
+    /// SET, not when the session was last used, so at the cap a daily-driver
+    /// session renamed months ago would be evicted before a session renamed
+    /// yesterday and never opened again — losing exactly the name this feature
+    /// exists to keep. Touching `savedAt` on read was the obvious repair and
+    /// was rejected: it turns every session spawn into a UserDefaults write,
+    /// and "spawned" is not "used" either, so it buys an imperfect order at
+    /// the cost of a new write path.
+    private static let maxStoredNames = 1000
+
+    private struct StoredName: Codable {
+        let name: String
+        let savedAt: Date
+    }
+
+    @ObservationIgnored private var savedNames: [String: StoredName] = [:]
+
+    /// The name to hand a CLI at spawn for this session, if one was ever set.
+    /// `ShimProcess` reads this; nothing on screen does.
+    func savedName(forSessionId sessionId: String) -> String? {
+        guard !sessionId.isEmpty else { return nil }
+        return savedNames[sessionId]?.name
+    }
+
+    /// A corrupt blob degrades to empty and is then overwritten by the next
+    /// save — deliberately unlike `SessionTitleStore`, which parks the bytes
+    /// and refuses to write. The stakes differ: a lost title leaves a sidebar
+    /// row unreadable with no way to recover it, while a lost peer name just
+    /// means the CLI generates one and you rename again.
+    private static func loadSavedNames() -> [String: StoredName] {
+        guard let data = UserDefaults.standard.data(forKey: storeKey) else { return [:] }
+        return (try? JSONDecoder().decode([String: StoredName].self, from: data)) ?? [:]
+    }
+
+    private func rememberPinnedNames(in live: [String: LiveName]) {
+        var changed = false
+        for (sessionId, entry) in live {
+            guard Self.isPinned(nameSource: entry.nameSource) else { continue }
+            guard savedNames[sessionId]?.name != entry.name else { continue }
+            savedNames[sessionId] = StoredName(name: entry.name, savedAt: Date())
+            changed = true
+        }
+        guard changed else { return }
+
+        if savedNames.count > Self.maxStoredNames {
+            let doomed = savedNames
+                .sorted { $0.value.savedAt < $1.value.savedAt }
+                .prefix(savedNames.count - Self.maxStoredNames)
+            for (key, _) in doomed { savedNames.removeValue(forKey: key) }
+        }
+        guard let data = try? JSONEncoder().encode(savedNames) else { return }
+        UserDefaults.standard.set(data, forKey: Self.storeKey)
+        logger.notice("peer names remembered: \(self.savedNames.count, privacy: .public)")
     }
 
     // MARK: - Watching
