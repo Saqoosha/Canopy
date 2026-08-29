@@ -31,6 +31,10 @@ struct CanopyApp: App {
             // hand, with no `SessionStore.shared` lookup. Fires once per
             // window; `startMacroPad` is idempotent.
             .task { appDelegate.startMacroPad(store: sidebarStore) }
+            // Reads ~/.claude/sessions for the names other Claude sessions use
+            // to message these ones. Idempotent, so a re-run of this .task is
+            // harmless; it watches and polls for the process lifetime.
+            .task { PeerNameStore.shared.start() }
             .sheet(item: Binding(
                 get: { sidebarStore.renameTarget },
                 set: { if $0 == nil { sidebarStore.cancelRename() } }

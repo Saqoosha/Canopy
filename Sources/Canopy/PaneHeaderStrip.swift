@@ -58,6 +58,22 @@ struct PaneHeaderStrip: View {
 
     let title: String
     let project: String
+    /// Peer name for this pane's session, when it is running under one. A
+    /// launcher pane passes nil — it has no session, so it has no peer.
+    ///
+    /// This rides the title line instead of taking a line of its own, which
+    /// is the opposite of what the sidebar does with the same string. Both
+    /// follow from width: a pane is hundreds of points across and the chip
+    /// never crowds the title, while a 280pt sidebar row cannot seat both.
+    /// The strip is also sized for two lines, and a third would change the
+    /// height every `closeButtonHitRect` precondition is written against.
+    ///
+    /// The render site gives it `layoutPriority(-1)` so it compresses before
+    /// the title does. It still contributes incompressible chrome — its
+    /// border and padding — to the header's `HStack`, which is the subject of
+    /// that method's third precondition. The bound is unchanged in kind; it
+    /// is only tighter by the width of a chip.
+    var peerName: String? = nil
     let showCloseButton: Bool
     /// Extra leading inset the *leftmost* pane header takes so its title stays
     /// clear of the traffic-light cluster + collapsed-sidebar toggle. Panes at
@@ -113,10 +129,16 @@ struct PaneHeaderStrip: View {
     var body: some View {
         HStack(spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                HStack(spacing: 5) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let peerName {
+                        PeerNameChip(name: peerName)
+                            .layoutPriority(-1)
+                    }
+                }
                 if !project.isEmpty {
                     Text(project)
                         .font(.system(size: 11))
