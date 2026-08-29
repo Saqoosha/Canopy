@@ -583,6 +583,19 @@ private struct SidebarRowView: View {
                     .foregroundStyle(titleColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                // Directly under the title, above the project: a peer name is
+                // read while deciding which session to message, so every open
+                // row is a candidate and the names want to form a column the
+                // eye can run down. The project line is read once, when the
+                // session is opened, so it takes the bottom slot.
+                //
+                // Only an open row can have one — a closed session has no
+                // process and so no entry in `~/.claude/sessions` — which is
+                // what keeps Recents at their current two-line height.
+                if let peerName {
+                    PeerNameChip(name: peerName)
+                        .padding(.top, 1)
+                }
                 // A launcher row has no project, and an empty Text would still
                 // reserve the second line's height.
                 if !row.project.isEmpty {
@@ -685,6 +698,13 @@ private struct SidebarRowView: View {
         case .launcher: return .secondary
         case .closedLocal, .closedCloud: return .secondary
         }
+    }
+
+    /// Nil for every row but `.open`: `PeerNameStore` is keyed by the
+    /// `sessionId` of a *running* CLI, and a closed row has none.
+    private var peerName: String? {
+        guard case .open(let session) = row else { return nil }
+        return PeerNameStore.shared.name(forResumeId: session.resumeId)
     }
 
     private var subtitleColor: Color { .secondary }

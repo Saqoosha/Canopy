@@ -103,6 +103,7 @@ struct Detail: View {
                         PaneHeaderStrip(
                             title: session.title.isEmpty ? "Untitled" : session.title,
                             project: session.project,
+                            peerName: PeerNameStore.shared.name(forResumeId: session.resumeId),
                             showCloseButton: store.panes.count > 1,
                             leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,
                             onClose: { store.closePane(at: index) }
