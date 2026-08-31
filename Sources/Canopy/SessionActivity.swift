@@ -67,9 +67,19 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
         return .idle
     }
 
-    /// A sine breathe between `floorPercent` and full, over `periodMs`.
-    /// Replaced a 1 Hz square blink after the square wave was seen on real
-    /// hardware and judged too harsh.
+    /// A breathe between `floorPercent` and full, over `periodMs`. Replaced
+    /// a 1 Hz square blink after the square wave was seen on real hardware
+    /// and judged too harsh.
+    ///
+    /// Not a sine any more, and this side does not get to say what it is:
+    /// the firmware owns the shape and currently builds `exp(sin)` --
+    /// narrow peak, wide trough, so the breath dwells at the bottom rather
+    /// than at the top where the eye is least able to see a change. A raw
+    /// sine was judged wrong on a lit pad against five alternatives shown
+    /// side by side, which matches what Ladyada found scoping a MacBook
+    /// sleep light in 2006 and what a 2016 photodiode capture of one
+    /// confirmed. See `PULSE_CURVE` in the MacroPad firmware; nothing here
+    /// changes if that shape is retuned.
     struct Breath: Equatable, Sendable {
         let periodMs: Int
         /// Trough as a percentage of the state's color. The smaller it is, the
@@ -83,11 +93,20 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// blinks cancel out in peripheral vision, which is the only vision the
     /// pad gets when it's doing its job. Three states animate now, and the
     /// rule survives in a stronger form because the amplitudes are a ladder,
-    /// not a set: a floor of 50 barely moves and reads as static from the
+    /// not a set: a shallow floor barely moves and reads as static from the
     /// corner of the eye, while a floor of 10 swings nearly the whole range.
     /// The floors were picked by watching a real pad from peripheral vision
     /// and checking that only orange still called out — measured, not
     /// reasoned. `breathIsOrdered` is the invariant that keeps it that way.
+    ///
+    /// **`working` moved from 50 to 40 and the ladder is now 40/40/10**, so
+    /// it and `background` differ by hue alone. That was judged on a lit pad
+    /// under the current curve and period, and it is worth knowing what it
+    /// spends: the original 50 was chosen precisely so `working` read as
+    /// static in peripheral vision, and at 40 it does not. `breathIsOrdered`
+    /// still passes — it only requires `asking` to be strictly deepest — so
+    /// nothing catches this if the judgement is ever regretted. The number
+    /// to put back is 50.
     ///
     /// This is a second axis, deliberately orthogonal to hue: amplitude
     /// encodes urgency, hue encodes state. Amplitude is never the *sole*
@@ -95,9 +114,14 @@ enum SessionActivity: Equatable, Sendable, CaseIterable {
     /// the "hue only" rule in `ledColor` still holds.
     var breath: Breath? {
         switch self {
-        case .working: return Breath(periodMs: 2000, floorPercent: 50)
-        case .background: return Breath(periodMs: 2000, floorPercent: 40)
-        case .asking: return Breath(periodMs: 2000, floorPercent: 10)
+        // 2500 ms rather than 2000, chosen on a lit pad against a sweep of
+        // 2/3/4/5/6/8 s shown on the six keys at once. 2000 is 30 breaths a
+        // minute, outside the 12-20 a resting adult does; a measured MacBook
+        // sleep light runs at about 12. This lands at 24 -- slower than
+        // before, still quick enough that `asking` reads as a request.
+        case .working: return Breath(periodMs: 2500, floorPercent: 40)
+        case .background: return Breath(periodMs: 2500, floorPercent: 40)
+        case .asking: return Breath(periodMs: 2500, floorPercent: 10)
         case .empty, .idle, .unread, .error: return nil
         }
     }
