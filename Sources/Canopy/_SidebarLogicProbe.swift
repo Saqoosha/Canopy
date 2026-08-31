@@ -4373,9 +4373,18 @@ enum SidebarLogicProbe {
         // on current hardware and shows up as dark keys on an old pad.
         do {
             let asking = MacroPadController.command(for: .asking, at: 0, protocolVersion: 2)
+            // The period and floor are DERIVED from the state, never re-typed:
+            // this pins the version gate, not the tuning. Spelling 2000/10 here
+            // made a breath retune report itself as a broken gate.
+            let askingBreath = SessionActivity.asking.breath
             record("macropad gate: v2 breathes",
-                   asking == .breathe(index: 0, rgb: 0xFF8000, periodMs: 2000, floorPercent: 10),
-                   "got \(asking)")
+                   askingBreath.map {
+                       asking == .breathe(index: 0,
+                                          rgb: 0xFF8000,
+                                          periodMs: $0.periodMs,
+                                          floorPercent: $0.floorPercent)
+                   } ?? false,
+                   "got \(asking), breath \(String(describing: askingBreath))")
             record("macropad gate: v1 degrades to a steady colour",
                    MacroPadController.command(for: .asking, at: 0, protocolVersion: 1)
                        == .color(index: 0, rgb: 0xFF8000))
