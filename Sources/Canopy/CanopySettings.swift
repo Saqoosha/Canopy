@@ -53,6 +53,20 @@ final class CanopySettings {
     var macroPadRemoteHost: String = "" {
         didSet { save() }
     }
+    /// Whether the pad is mounted rotated 180°, so the key that used to be
+    /// first is now last. Reverses BOTH data-flow directions at once — the
+    /// LED a pane lights and the pane a key focuses — because both ask
+    /// `MacroPadController.paneIndex(forKey:keyCount:reversed:)` the same
+    /// key→pane question (the LED loop is written that way round too), and a
+    /// pad whose lights and keys disagreed would be worse than either
+    /// orientation.
+    ///
+    /// The reversal is over the pad's whole key count, not over the pane
+    /// count: pane *p* stays on key `keyCount - 1 - p` however many panes are
+    /// open, instead of the whole block sliding as panes open and close.
+    var macroPadReversed: Bool = false {
+        didSet { save() }
+    }
     /// Global LED brightness 0–100. The firmware multiplies this into every
     /// channel, so colors are sent full-scale and this is the only dimming
     /// knob — pre-dimming a color would dim it twice.
@@ -83,6 +97,18 @@ final class CanopySettings {
 
     let filePath: URL
 
+    /// Suppresses `save()` while `load()` is assigning. Every property's
+    /// `didSet` calls `save()`, and `save()` writes EVERY key from memory —
+    /// so before this, loading `canopy.macroPadReversed` (line 1 of many)
+    /// wrote the not-yet-loaded default of `canopy.defaultPermissionMode` to
+    /// disk, and only the later assignment's own `save()` repaired it. The
+    /// repair was by adjacency, not by construction: a write failure or a
+    /// future early return between the two would have left the user's
+    /// permission mode replaced by the default. `load()` now writes once, at
+    /// the end, which also keeps the legacy-key retirement in `save()` firing
+    /// on the first launch after a migration rather than on the next edit.
+    private var isLoading = false
+
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let canopyDir = appSupport.appendingPathComponent("Canopy")
@@ -91,6 +117,10 @@ final class CanopySettings {
     }
 
     private func load() {
+        isLoading = true
+        // `defer` and not a plain assignment at the end: the guard below
+        // returns early on a missing or unparseable file.
+        defer { isLoading = false }
         guard let data = try? Data(contentsOf: filePath),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
@@ -127,6 +157,14 @@ final class CanopySettings {
         if storedSourceRaw == "remote", macroPadSource.isOff {
             logger.notice("MacroPad: stored source was \"remote\" but canopy.macroPadRemoteHost could not be parsed; falling back to Off")
         }
+        if let reversed = dict["canopy.macroPadReversed"] as? Bool {
+            macroPadReversed = reversed
+        } else if dict["canopy.macroPadReversed"] != nil {
+            // Same reasoning as the `remote` fallback above: settings.json is
+            // hand-editable, and the next save overwrites the bad value with
+            // the default, so without this the edit vanishes with no trail.
+            logger.notice("MacroPad: canopy.macroPadReversed is not a boolean; ignoring it and keeping \(self.macroPadReversed, privacy: .public)")
+        }
         if let brightness = dict["canopy.macroPadBrightness"] as? Int { macroPadBrightness = min(100, max(0, brightness)) }
         if let raw = dict["canopy.defaultPermissionMode"] as? String,
            let mode = PermissionMode(rawValue: raw)
@@ -148,9 +186,15 @@ final class CanopySettings {
             defaultPermissionMode = .acceptEdits
         }
         logger.info("Loaded settings: allowBypass=\(self.allowDangerouslySkipPermissions, privacy: .public)")
+        // One write for the whole load, after every value is in place, so any
+        // migration or clamp above reaches disk without the intermediate
+        // states doing so first.
+        isLoading = false
+        save()
     }
 
     private func save() {
+        guard !isLoading else { return }
         var dict = loadCurrentDict()
         dict["claudeCode.allowDangerouslySkipPermissions"] = allowDangerouslySkipPermissions
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
@@ -162,6 +206,7 @@ final class CanopySettings {
         // Assigning nil removes it, so a downgrade sees a fresh install
         // rather than a stale boolean fighting the selector.
         dict["canopy.macroPadEnabled"] = nil
+        dict["canopy.macroPadReversed"] = macroPadReversed
         dict["canopy.macroPadBrightness"] = macroPadBrightness
         dict["canopy.defaultPermissionMode"] = defaultPermissionMode.rawValue
         writeDict(dict)

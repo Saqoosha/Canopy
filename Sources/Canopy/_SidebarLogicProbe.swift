@@ -4398,6 +4398,91 @@ enum SidebarLogicProbe {
                        == .color(index: 3, rgb: SessionActivity.idle.ledColor))
         }
 
+        // --- Flipped pad. What this block does NOT pin, so it cannot be
+        // read as coverage. Nothing here reaches `MacroPadController` as an
+        // instance — `refresh()`, `handleKey` and `pushStates` are private on
+        // a `@MainActor` class holding a live `SessionStore` and a concrete
+        // device — so all of the following ship green: deleting
+        // `Self.paneIndex(...)` from either call site (measured), passing
+        // `panes.count` instead of the key count at either, `pushStates`
+        // sending element *i* somewhere other than wire index *i*, and
+        // hoisting `reversed` out of `refresh()`'s tracked closure, which is
+        // the whole mechanism by which the Settings toggle relights the pad.
+        // The `canopy.macroPadReversed` load/save round trip is out of reach
+        // for the reason recorded at the settings note further down.
+        //
+        // An earlier version of this comment claimed the load-bearing
+        // property is that the mapping is its own inverse. Both call sites ask
+        // key→pane, so they agree by sharing one call; any bijection would do
+        // the same.
+        //
+        // `keys` is a fixture width, not a pinned constant: the pad's width
+        // comes off the wire in `HELLO`, and nothing here reads
+        // `SessionStore.paneAbsoluteCap` — which is also 6, deliberately
+        // (panes cap where the pad's keys run out).
+        do {
+            let keys = 6
+            record("macropad flip: off is the identity",
+                   (0..<keys).allSatisfy {
+                       MacroPadController.paneIndex(forKey: $0, keyCount: keys, reversed: false) == $0
+                   })
+            record("macropad flip: the ends swap",
+                   MacroPadController.paneIndex(forKey: 0, keyCount: keys, reversed: true) == keys - 1
+                       && MacroPadController.paneIndex(forKey: keys - 1, keyCount: keys, reversed: true) == 0)
+            record("macropad flip: is its own inverse",
+                   (0..<keys).allSatisfy { key in
+                       let pane = MacroPadController.paneIndex(forKey: key, keyCount: keys, reversed: true)
+                       return MacroPadController.paneIndex(forKey: pane, keyCount: keys, reversed: true) == key
+                   })
+            // Implied by the involution above: an image outside the range
+            // would be passed through unchanged, so `f(f(k)) == k` would
+            // already have failed. Kept as a statement of the contract.
+            record("macropad flip: every key is reached exactly once",
+                   Set((0..<keys).map {
+                       MacroPadController.paneIndex(forKey: $0, keyCount: keys, reversed: true)
+                   }) == Set(0..<keys))
+            // An interior key's mirror. It and the suffix filters below
+            // overlap: given the ends and the involution, each is derivable
+            // from the other, so neither is the load-bearing one and dropping
+            // either leaves the group still determining `keyCount - 1 - index`
+            // at this width. Dropping BOTH does not — the end-swapping
+            // involution `{0↔5, 1↔2, 3↔4}` satisfies everything else here.
+            record("macropad flip: an interior key mirrors",
+                   MacroPadController.paneIndex(forKey: 1, keyCount: keys, reversed: true) == keys - 2
+                       && MacroPadController.paneIndex(forKey: 2, keyCount: keys, reversed: true) == keys - 3)
+            // Kept as an executable statement of where the blank keys sit;
+            // see the interior assertion above for why the two overlap. Which
+            // count the call sites reverse over is not reachable from here at
+            // all — see the block comment.
+            record("macropad flip: paned keys are a fixed suffix",
+                   (0..<keys).filter {
+                       MacroPadController.paneIndex(forKey: $0, keyCount: keys, reversed: true) < 2
+                   } == [keys - 2, keys - 1]
+                       && (0..<keys).filter {
+                           MacroPadController.paneIndex(forKey: $0, keyCount: keys, reversed: true) < 3
+                       } == [keys - 3, keys - 2, keys - 1])
+            // A pad that reported no keys, or an index the callers already
+            // refused, must pass through rather than be invented into range.
+            //
+            // The zero-key case pins nothing and is kept as documentation:
+            // `keyCount > 0` is implied by `index >= 0 && index < keyCount`,
+            // so it can never be the decisive clause for any input and
+            // deleting it is an inert mutation. The out-of-range one below is
+            // the load-bearing half — the only assertion that fails when
+            // either range guard is dropped, in either direction, which is
+            // also why both directions share one `record`.
+            record("macropad flip: a zero-key pad passes through",
+                   MacroPadController.paneIndex(forKey: 2, keyCount: 0, reversed: true) == 2)
+            record("macropad flip: an out-of-range index passes through",
+                   MacroPadController.paneIndex(forKey: keys, keyCount: keys, reversed: true) == keys
+                       && MacroPadController.paneIndex(forKey: -1, keyCount: keys, reversed: true) == -1)
+            // The only assertion run at a width other than 6, which is what
+            // makes it the one that catches a body reversing over a hardcoded
+            // width instead of the `keyCount` it was passed.
+            record("macropad flip: an odd pad's middle key is fixed",
+                   MacroPadController.paneIndex(forKey: 2, keyCount: 5, reversed: true) == 2)
+        }
+
         // --- Reset-loop detection. This never fired at its original window,
         // and nothing noticed for a whole review round.
         do {
