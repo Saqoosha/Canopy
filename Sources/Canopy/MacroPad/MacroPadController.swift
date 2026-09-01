@@ -341,7 +341,9 @@ struct MacroPadResetLoopDetector {
 /// The gesture is the two OUTERMOST keys held together — on any pad wider
 /// than two they are not adjacent, which is what makes them hard to strike
 /// simultaneously by accident. (An earlier draft also claimed they are not the
-/// keys in constant use. They are: key 0 is pane 1.) That non-adjacency is why
+/// keys in constant use. They are: key 0 stands for pane index 0, or pane
+/// index `keyCount - 1` when `macroPadReversed` is set — so at least one end
+/// is a pane in constant use whichever way round the pad sits.) That non-adjacency is why
 /// `minimumKeyCount` is 3 and not 2 — at two keys the "ends" are the only
 /// adjacent pair, so the one property the gesture rests on is void exactly
 /// there.
@@ -398,9 +400,9 @@ struct MacroPadSleepChord {
     /// Out-of-range indices are dropped rather than recorded, so `pressedSince`
     /// cannot become the one place wire garbage accumulates without bound —
     /// the second door CLAUDE.md's "the same forgery can have two doors"
-    /// learning is about. (`focusPane` bounds the same index against the PANE
-    /// count, which is a different number and can be the larger of the two, so
-    /// it was never a bound on this.) The guard is observable only through
+    /// learning is about. (`focusPane` bounds a PANE index — since
+    /// `macroPadReversed` it is not even the same number as this one — against
+    /// a different count entirely, so it was never a bound on this.) The guard is observable only through
     /// `trackedKeyCount`; without that the probe cannot tell it from its
     /// absence — measured, not assumed.
     mutating func note(index: Int, pressed: Bool, at now: Date) {
@@ -493,12 +495,17 @@ enum MacroPadSleepChordTimerAction: Equatable {
 /// Binds Canopy's session state to the MacroPad: pane activity out as LED
 /// colors, key presses back in as pane focus.
 ///
-/// Mapping is **pane index → key index**, which is Cmd+1..9's meaning, not
-/// Cmd+Ctrl+1..9's. Panes cap at 6 (`SessionStore.paneAbsoluteCap`), which is
-/// what the 6-key pad covers, so every pane now reaches a key. A narrower pad
-/// covers a prefix and the keys past `panes.count` are blanked rather than
-/// skipped. Nothing here hardcodes a width — the count comes off the wire in
-/// `HELLO`.
+/// Key *N* stands for pane *N* — Cmd+1..9's meaning, not Cmd+Ctrl+1..9's — or
+/// pane `keyCount - 1 - N` when `macroPadReversed` is set for a pad mounted
+/// rotated 180°. That correspondence is computed in one direction only, by
+/// `paneIndex(forKey:keyCount:reversed:)`. Panes cap at 6
+/// (`SessionStore.paneAbsoluteCap`), which is what the 6-key pad covers, so
+/// every pane reaches a key; keys with no pane behind them are blanked rather
+/// than skipped. The flip exists to cancel the mount, so what stays put is the
+/// position as SEEN — pane 0 answers on the key that looks first either way,
+/// and the blanks stay at the far side of it — not the wire index, which moves
+/// to the other end of the board. Nothing here hardcodes a width — the count
+/// comes off the wire in `HELLO`.
 @MainActor
 final class MacroPadController {
     /// The count used whenever the device has not told us one — which is not
@@ -605,11 +612,20 @@ final class MacroPadController {
     /// cross into the main-actor hop, and an `ObjectIdentifier` could be
     /// reused by a freshly allocated timer at the same address.
     private var chordTimerGeneration = 0
+    /// One entry per KEY, never per pane — `pushStates` sends element *i* at
+    /// wire index *i*. Under `macroPadReversed` the two differ, so a `states`
+    /// built or read by pane index lights the wrong key silently rather than
+    /// trapping. `refresh()` is the only writer and it goes through
+    /// `paneIndex(forKey:keyCount:reversed:)`.
     private var states: [SessionActivity] = []
     private var tracker = MacroPadUnreadTracker()
     private var watchdogTimer: Timer?
     private var helloIsHostInitiated = false
     private var lastSource: MacroPadSource?
+    /// Last orientation `refresh()` saw, so a change can be logged once.
+    /// Optional so the first refresh adopts silently rather than announcing
+    /// an orientation nobody just chose.
+    private var lastReversed: Bool?
     /// Which session was last acted on, and the act's place in the order —
     /// one value because they are one fact, and because two stored properties
     /// let a stamp site advance one without the other. Read through
@@ -824,9 +840,26 @@ final class MacroPadController {
         // switching source takes effect without its own observer.
         let source = settings.macroPadSource
         let brightness = settings.macroPadBrightness
+        // Read here, inside the tracked closure, so flipping the toggle in
+        // Settings re-runs `refresh()` on the next main-actor turn (see
+        // `track()`'s `onChange`) and relights the pad — the same mechanism
+        // `macroPadSource` relies on.
+        let reversed = settings.macroPadReversed
         let panes = store.panes
         let openSessions = store.openSessions
 
+        if lastReversed != reversed {
+            // Every other MacroPad state that can surprise a user gets a
+            // `notice` — protocol degrade, implausible key count, refused key,
+            // reset loop, remote-host fallback. Orientation had none, so a
+            // "I turned it on and nothing changed" report could not be told
+            // apart from `refresh()` never re-running. On change only, so it
+            // cannot become per-refresh noise.
+            if lastReversed != nil {
+                logger.notice("MacroPad orientation: reversed=\(reversed, privacy: .public)")
+            }
+            lastReversed = reversed
+        }
         if lastSource != source {
             // A switch Canopy performed will produce a `HELLO` that is not a
             // firmware reboot.
@@ -936,7 +969,13 @@ final class MacroPadController {
         }
 
         let sessionsById = Dictionary(openSessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        states = (0..<effectiveKeyCount).map { index -> SessionActivity in
+        let keys = effectiveKeyCount
+        // `states` is indexed by KEY, not by pane — `pushStates` sends each
+        // element at its own offset — so the flip is applied here on the way
+        // out and again in `handleKey` on the way in, both through
+        // `paneIndex(forKey:keyCount:reversed:)`.
+        states = (0..<keys).map { keyIndex -> SessionActivity in
+            let index = Self.paneIndex(forKey: keyIndex, keyCount: keys, reversed: reversed)
             guard index < panes.count,
                   case .session(let id) = panes[index].content,
                   let session = sessionsById[id]
@@ -1009,6 +1048,39 @@ final class MacroPadController {
             periodMs: breath.periodMs,
             floorPercent: breath.floorPercent
         )
+    }
+
+    /// Which pane the physical key at `index` stands for.
+    ///
+    /// Both data-flow directions call THIS function — `refresh()` to build
+    /// `states`, `handleKey` to pick a pane — so the lights and the keys agree
+    /// by sharing one call with the same width and flag, not by any property
+    /// of the arithmetic. Nothing converts pane→key. The two reads are not
+    /// simultaneous, so a press right after the Settings toggle can map under
+    /// the new orientation against LEDs still showing the old.
+    ///
+    /// Reverses over `keyCount`, never over the pane count: pane *p* stays on
+    /// key `keyCount - 1 - p` however many panes are open, instead of the
+    /// whole block sliding as panes open and close.
+    ///
+    /// Out-of-range input passes through unmapped, which on the way IN means
+    /// the flip does not apply to it. An earlier draft justified that by
+    /// saying the callers had already bounded the index; they have not.
+    /// `acceptsKey` accepts every index until the pad reports a positive
+    /// count, on purpose, while `handleKey` maps with `effectiveKeyCount` —
+    /// so a reported `0` leaves every press unflipped, and an assumed count
+    /// leaves the keys past it unflipped while the keys below it flip among
+    /// themselves. Those presses reach `focusPane` exactly as they did before
+    /// this feature existed, and may well name a real pane. The LED side
+    /// shifts under an assumed count too: pane 0 sits on key
+    /// `assumedKeyCount - 1` until a width arrives. On the way OUT the
+    /// pass-through is unreachable — `refresh()` iterates
+    /// `0..<effectiveKeyCount`. (`keyCount > 0` in the guard is implied by the
+    /// range checks and can never be the deciding clause; it is kept for
+    /// readability.)
+    static func paneIndex(forKey index: Int, keyCount: Int, reversed: Bool) -> Int {
+        guard reversed, keyCount > 0, index >= 0, index < keyCount else { return index }
+        return keyCount - 1 - index
     }
 
     /// Whether a key index off the wire is one this pad can actually have.
@@ -1498,6 +1570,15 @@ final class MacroPadController {
             setAsleep(false)
             return
         }
+        // The chord takes the RAW wire index on purpose: its ends are the
+        // two outermost keys, which are the same pair of keys whichever way
+        // the pad is turned around. Mapping here would be a genuine no-op —
+        // but only because the chord's own `ends` is exactly `(0, keyCount-1)`
+        // and `holdDeadline` is symmetric in the pair. (When the pad has
+        // reported no width the chord has no ends and records nothing, so the
+        // question does not arise there.) A chord that ever distinguished
+        // WHICH end arrived, or whose ends were not the extremes, would need
+        // the mapping.
         chord.note(index: index, pressed: pressed, at: Date())
         updateSleepChordTimer()
         guard pressed else { return }
@@ -1518,7 +1599,9 @@ final class MacroPadController {
         // their release edge, costing immediacy on two keys rather than all
         // six. That is a behaviour change and belongs to a decision, not to a
         // review round.
-        focusPane(index)
+        focusPane(Self.paneIndex(forKey: index,
+                                 keyCount: effectiveKeyCount,
+                                 reversed: settings.macroPadReversed))
     }
 
     /// Arms, re-aims, or retires the hold timer. The watchdog cannot carry
@@ -1721,7 +1804,16 @@ final class MacroPadController {
     }
 
     private func focusPane(_ index: Int) {
-        guard store.panes.indices.contains(index) else { return }
+        guard store.panes.indices.contains(index) else {
+            // `notice`, like `handleKey`'s refusal: this drops input the user
+            // is physically producing, and it is the only line separating
+            // "that pane isn't open", "the orientation toggle is the wrong way
+            // round" and "the subsystem is broken". The flip is why it earns a
+            // line now — unflipped the dead keys collect at the high end,
+            // flipped they collect at the end the hand reaches first.
+            logger.notice("MacroPad: key mapped to pane \(index, privacy: .public) but only \(self.store.panes.count, privacy: .public) panes are open; ignoring")
+            return
+        }
         // Covers the same-pane repress `refresh()`'s focus-change tracking
         // cannot see (no session change to notice) — see `noteInteraction`'s
         // doc. For the ordinary cross-pane press this duplicates what
