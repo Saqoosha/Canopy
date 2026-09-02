@@ -32,6 +32,20 @@ final class CanopySettings {
     var recapEnabled: Bool = true {
         didSet { save() }
     }
+    /// Keep each open pane's prompt cache warm while the user is away
+    /// (see `KeepAliveCoordinator`).
+    ///
+    /// Defaults on, unlike a typical "spends money" toggle, because it
+    /// spends money only to avoid spending more: a refresh costs a small
+    /// fraction of the cache write it prevents (see `KeepAliveCoordinator`
+    /// for the ratio, why it depends on the model, and the one refresh it
+    /// does not describe), so any session the user returns to is cheaper
+    /// with this on. The toggle exists for the case
+    /// the arithmetic cannot cover — sessions parked and never resumed,
+    /// where every refresh is pure loss.
+    var keepAliveEnabled: Bool = true {
+        didSet { save() }
+    }
     /// Which pad this Canopy drives: none, the local USB one, or a bridge on
     /// another Mac. Replaces the old `macroPadEnabled` boolean, which is read
     /// once at load for migration and then never written again.
@@ -140,6 +154,9 @@ final class CanopySettings {
         if let recap = dict["canopy.recapEnabled"] as? Bool {
             recapEnabled = recap
         }
+        if let keepAlive = dict["canopy.keepAliveEnabled"] as? Bool {
+            keepAliveEnabled = keepAlive
+        }
         let storedSourceRaw = dict["canopy.macroPadSource"] as? String
         macroPadRemoteHost = (dict["canopy.macroPadRemoteHost"] as? String) ?? ""
         macroPadSource = MacroPadSource.migrated(
@@ -200,6 +217,7 @@ final class CanopySettings {
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
         dict["claudeCode.respectGitIgnore"] = respectGitIgnore
         dict["canopy.recapEnabled"] = recapEnabled
+        dict["canopy.keepAliveEnabled"] = keepAliveEnabled
         dict["canopy.macroPadSource"] = macroPadSource.rawValue
         dict["canopy.macroPadRemoteHost"] = macroPadRemoteHost
         // Retire the pre-source key on the first save after migration.

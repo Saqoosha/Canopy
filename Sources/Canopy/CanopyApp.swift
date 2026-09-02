@@ -449,6 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installPaneFocusClickMonitor()
         installKeyTypingMonitor()
         RecapCoordinator.shared.start()
+        KeepAliveCoordinator.shared.start()
 
         // SwiftUI may make the first window main before our observer is
         // registered, in which case `didBecomeMainNotification` fires
