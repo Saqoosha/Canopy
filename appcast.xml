@@ -6,6 +6,35 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>2.23.0</title>
+            <pubDate>Wed, 02 Sep 2026 17:47:01 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>101</sparkle:version>
+            <sparkle:shortVersionString>2.23.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Features
+
+- **Idle sessions now keep their conversation cached.** Every 55 minutes, each open pane whose session has gone quiet sends a short message and gets a one-word reply, so its prompt cache stays warm instead of lapsing. Rebuilding a lapsed cache costs roughly 20x what keeping one warm does, so coming back to a session you left overnight is cheaper with this on — by a margin measured in days, not hours.
+
+  The refresh turns are hidden from the transcript, both while the session is open and when you reopen it later, and they do not light up the sidebar or the MacroPad. They do stay in that conversation's own history, which is what makes the cache hit work at all.
+
+  Closing a pane stops refreshing it, and quitting stops all of them. There is a toggle in Settings if you would rather it were off.
+
+### Changes
+
+- Canopy declines to refresh a session that is busy, that is waiting on a permission prompt or a question, that runs against a custom API endpoint, or whose 5-hour usage window is above 80% — and it picks that last one back up once the window resets.
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.23.0/Canopy-2.23.0.dmg" length="3353180" type="application/octet-stream" sparkle:edSignature="I+zA5wvljVb1nahmxd+epqBevj20GYE2gaKflJ2JGiPi437DQbDvGVf0kDoQKXFyT2w7zwP+gOXgufXwaLJ3BQ=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.23.0/Canopy101-100.delta" sparkle:deltaFrom="100" length="245722" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="W95YXODxeZ4LFJkWNJJle1p9m6B1luEVfrpikaJiBufxfSFWMvE1Djr4I1P8EglTrwjTK3Xs01LYf+KPLK8JCQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.23.0/Canopy101-99.delta" sparkle:deltaFrom="99" length="267194" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="3tfFe2BZIi1grMIvWkRav7AhZQ/EQh2l5XpK/fb/ryLTsB2qwVTgBnQlDfEH3Ygohl//evtW6dQnQMlq3k+XCQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.23.0/Canopy101-98.delta" sparkle:deltaFrom="98" length="273598" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="97Ogli2kiul3xc6ktFFDyWSqOf1TEuTSnu/Ts5/eM9jzacciE58sjAUHwNZt4YgC8Msze0lNkxiyfeX7l2KnCA=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.23.0/Canopy101-97.delta" sparkle:deltaFrom="97" length="274198" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="tkkdKqmoaX5fUhfeqP0nUWLwCooivwXcbSRXUWR5xo5GNyMfuk/NzMHTCXWxCWUq6ZQE2S/D83gcvzt3jyfoAA=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.23.0/Canopy101-96.delta" sparkle:deltaFrom="96" length="307406" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="HtsveHbbLBIC2YnXLeKsmSpmFDOQhEqtCbpZwKwMuXmuHDXX1eQAwnEljYl2/o2sWPA98L68S5YxRH6z5pEyDA=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>2.22.0</title>
             <pubDate>Wed, 02 Sep 2026 11:18:20 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -27,7 +56,7 @@
 
 - With a custom model provider, the Fable row has no mapping to fall back on and will not resolve. This is unchanged from 2.21.0, which already listed a Fable entry.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.22.0/Canopy-2.22.0.dmg" length="3334773" type="application/octet-stream" sparkle:edSignature="75kScr3nl0xADFbcMK4AiX4IyHHbFBHk8mtW/Et2uOJ2iCy2guvD9WzO6UqCmPCedy/KibCeNpjt+qkY772NDQ=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.23.0/Canopy-2.22.0.dmg" length="3334791" type="application/octet-stream" sparkle:edSignature="2k3tK0wDGQGBUIqa+ckyxHoqcTfIF+YWjQuDMziB6NYmAvNEu9wF976HIrRLpUOpbGZOgmVeTQYmw9+Xhk0wDg=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.22.0/Canopy100-99.delta" sparkle:deltaFrom="99" length="155014" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="3vMipJIVqK468qK+JIeFvxDbfvy4usCvB3q2l1ggIxWVnzZYveOXSBmM8T2Ze4PTDDWViwFfBNMoPxqxK0GGDg=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.22.0/Canopy100-98.delta" sparkle:deltaFrom="98" length="220262" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="gKZ/TRhgFen/b/5+XmnHURkYP5iVHP7mxV0rMTK7vI91mfc+z0yvmVxeEC+F/Vr8mdsdfVBUFfsbvbynX3UFAA=="/>
@@ -53,36 +82,13 @@
 ### Bug Fixes
 - Settings are written once, after loading finishes, instead of after each individual value is read. Previously a load that was interrupted partway could leave a preference on disk replaced by its default.
 ]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.22.0/Canopy-2.21.0.dmg" length="3335055" type="application/octet-stream" sparkle:edSignature="uaEFpp9SaU/zgxBKtZURkJWKTIoxxFTOILdGD6e+mdhjP4ope2SRf1/Uw8cLvtsz/g4Pg8xA1k4l4TrCMjxgBw=="/>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.23.0/Canopy-2.21.0.dmg" length="3335035" type="application/octet-stream" sparkle:edSignature="rkjtoKv7sI4R6HD1uy54rJOSUi3f4FrpJvbDcKvWxK6NnTgDga9j1UyDw4mcKoLtGGLqxbnGAQC/7Hj4nQnwCg=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.21.0/Canopy99-98.delta" sparkle:deltaFrom="98" length="186838" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="cWPGFo1wfhLqpMIvsacX0kGVp4BR7lnjx4wVPtTPz+acm0rqM0CoPcpzR/vgXacUm0qnI97x2+tol2UjiGDLCA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.21.0/Canopy99-97.delta" sparkle:deltaFrom="97" length="189458" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="fmunz29h9TouVLPRvwyZVXRodEpIKOPS0mlcGbAgfLhTkbVUE0fue7RfMIPutstC4D0HRQibzJyDfen1rvlfBQ=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.21.0/Canopy99-96.delta" sparkle:deltaFrom="96" length="253274" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="V0QU2LcqnalTQijfipWevNnLVlgtOclGqQfpTNTTTs7t6XHoXFpdEzBn8DmOp5OAA4KYQlSl8dgyyQpzyAtSDA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.21.0/Canopy99-95.delta" sparkle:deltaFrom="95" length="320134" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="wq64q/3gls+gAK1qWFwSLTIg/4+8fypgfyYx/OJa0KTQZ3MS0qQePxtIgS6zX5rS4Seh23u1Q4oqPccZ+so4Ag=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.21.0/Canopy99-93.delta" sparkle:deltaFrom="93" length="521702" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="BUWBQdIgsjxvbPkz0zGxAQgeKHIEwmac3ZYwBS9yultEG8v9OZ9C1t7vzIklHGM1NoP7iRW/6kreK7r+uciVAw=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>2.20.2</title>
-            <pubDate>Tue, 01 Sep 2026 00:17:12 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>98</sparkle:version>
-            <sparkle:shortVersionString>2.20.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Changes
-
-- The MacroPad's LEDs breathe more slowly — 2500 ms per cycle instead of 2000. The old period was about 30 breaths a minute, faster than a resting person breathes; the slower one is calmer to sit beside.
-- A working session's key breathes deeper than before, so it reads as active rather than nearly static from the corner of your eye, and it separates from a background task by color alone.
-- The shape of the breath itself lives in the MacroPad firmware, which now uses a curve with a narrow peak and a wide trough instead of a raw sine. Flash the latest firmware to get it; the slower period applies either way.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.22.0/Canopy-2.20.2.dmg" length="3333126" type="application/octet-stream" sparkle:edSignature="DGdj7cDYrddGBF/JSk3UjsOVMBDOmWDmeK2J6HdXOSGOjKWdUE95KXEpZA2WKR/fAycZXqRLqNnU3rP2yhsMDQ=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.20.2/Canopy98-97.delta" sparkle:deltaFrom="97" length="79654" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="i4ActPZyCj+9cEVkoE6p7g5/3v5pZj1dlHJTfqMZDhvihuSX9uhA8nJvRbxEUZigOH+sG4089H1ETCPjyDkiBA=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.20.2/Canopy98-96.delta" sparkle:deltaFrom="96" length="234010" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="VeTQgV89vwHMo8/jSo/Igj0onjAb7Fj4wEqXBIXDkEGff2unVQ2Mc8w3xCoIRPcPktIncIwEvqeNfXOp//DmDw=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.20.2/Canopy98-95.delta" sparkle:deltaFrom="95" length="308090" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="rGczOi9pWwu0Z3WsDZgArAJWBQTgcGRLwVDZUjswTTQ1pma9AndbGchKxrqIT+18MxRMZxvWP6qHStLuGqvlBw=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.20.2/Canopy98-93.delta" sparkle:deltaFrom="93" length="517818" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="ssXix5XNn39fVj/RV1RhpveE7q2F/B8pCv4zHvlXeIebsAMj6MRQamwW2+PpFnu8ri77F3fVTWzZYjnYhP6eDA=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v2.20.2/Canopy98-92.delta" sparkle:deltaFrom="92" length="571034" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="O5YE7zpsvqJ50Zek9HLrTjq+2oO440fYIsho15Lzs8FSyNJxU6eyZpJxV8bOQw/EXTCYGtRpBEwcFrZ8Z56HAw=="/>
             </sparkle:deltas>
         </item>
         <item>
