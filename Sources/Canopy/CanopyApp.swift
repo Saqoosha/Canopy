@@ -230,7 +230,11 @@ struct CanopyApp: App {
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let model = UserDefaults.standard.string(forKey: "launcher.model").flatMap { $0.isEmpty ? nil : $0 }
+        // Through the same retirement map the Picker applies — this path can run
+        // before any launcher pane has mounted, so it cannot rely on that write-back.
+        let model = UserDefaults.standard.string(forKey: "launcher.model")
+            .flatMap { $0.isEmpty ? nil : $0 }
+            .map(LauncherView.migratingRetiredModel)
         let effort = UserDefaults.standard.string(forKey: "launcher.effortLevel").flatMap { $0.isEmpty ? nil : $0 }
         // Use the same recents-default preference as sidebar reopens —
         // bypassing it here would leave the menu's "Open Folder…" entry as

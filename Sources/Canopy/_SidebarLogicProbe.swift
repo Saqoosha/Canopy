@@ -6087,6 +6087,41 @@ enum SidebarLogicProbe {
             }
         }
 
+        // MARK: - Launcher model retirement map
+        do {
+            // Derived from the production constants, never re-typed: a fixture that
+            // spells the ids inline asserts only that nobody changed their mind.
+            for row in LauncherView._probeModelOptions where !row.isEmpty {
+                record("model map: a listed row is left alone (\(row))",
+                       LauncherView.migratingRetiredModel(row) == row)
+            }
+
+            // The property that matters is closure, not any one pair: every id the
+            // list has ever shipped must land on a row the list still offers, or the
+            // Picker comes up blank for whoever had it stored.
+            let listed = Set(LauncherView._probeModelOptions)
+            var unlisted: [String] = []
+            for old in LauncherView._probeRetiredModelIds {
+                let mapped = LauncherView.migratingRetiredModel(old)
+                if !listed.contains(mapped) { unlisted.append("\(old)→\(mapped)") }
+            }
+            record("model map: every retired id lands on a listed row",
+                   unlisted.isEmpty, unlisted.joined(separator: ", "))
+
+            // Idempotent, because `onAppear` runs on every launcher mount and Cmd+O
+            // reads the same stored value independently.
+            var unstable: [String] = []
+            for old in LauncherView._probeRetiredModelIds {
+                let once = LauncherView.migratingRetiredModel(old)
+                if LauncherView.migratingRetiredModel(once) != once { unstable.append(old) }
+            }
+            record("model map: migrating twice is migrating once",
+                   unstable.isEmpty, unstable.joined(separator: ", "))
+
+            record("model map: an unknown id passes through untouched",
+                   LauncherView.migratingRetiredModel("some-future-model") == "some-future-model")
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

@@ -85,6 +85,26 @@ struct LauncherView: View {
         "sonnet[1m]": "sonnet",
     ]
 
+    /// The row that now covers a stored id; identity for ids still listed.
+    ///
+    /// BOTH readers of `launcher.model` must go through this. The Picker migrates in
+    /// `onAppear` and writes the result back, so its own reads self-heal after one
+    /// mount — but `CanopyApp.sidebarOpenFolder()` (Cmd+O) can spawn a session before
+    /// any launcher pane has ever mounted, notably on a restore launch. A value that
+    /// never met that write-back would reach the CLI as a retired pin, so the two
+    /// entry points would disagree about which model the same stored string means.
+    static func migratingRetiredModel(_ stored: String) -> String {
+        retiredModelMigrations[stored] ?? stored
+    }
+
+    #if DEBUG
+    /// Read-only views for `_SidebarLogicProbe`, so its fixtures derive from these
+    /// constants instead of re-typing their values — a re-typed id asserts only that
+    /// nobody changed their mind, and goes stale on the first legitimate edit.
+    static var _probeModelOptions: [String] { modelOptions }
+    static var _probeRetiredModelIds: [String] { Array(retiredModelMigrations.keys) }
+    #endif
+
     /// Row height for list items (used to calculate fixed list height)
     private static let rowHeight: CGFloat = 34
     private static let listRowCount = 10
@@ -133,7 +153,8 @@ struct LauncherView: View {
         .onAppear {
             // Move a selection made in an older build onto an id this Picker still
             // lists, so the control comes up populated rather than blank.
-            if let migrated = Self.retiredModelMigrations[model] { model = migrated }
+            let migrated = Self.migratingRetiredModel(model)
+            if migrated != model { model = migrated }
             loadData()
             Task { await updater.checkForUpdate() }
         }
