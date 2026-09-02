@@ -50,8 +50,11 @@ enum ClaudeSessionHistory {
     /// symptom this pair exists to fix, so that case logs rather than passing
     /// unremarked.
     ///
-    /// Must exceed `maxSessionsToKeep`, or the target is unreachable by
-    /// construction and every list comes back short — pinned by the probe.
+    /// Must exceed `maxSessionsToKeep` — pinned by the probe. At equality the
+    /// walk stops at the exact point a run with zero drops would have filled
+    /// the list, so any drop at all costs a row, which is the bug above with
+    /// a different constant on it. The margin is what absorbs the drops, and
+    /// how much margin is enough is the survival ratio measured above.
     static let maxSessionsToScan = 400
 
     /// Mirrors the current Claude CLI encoding: every character that is not a letter,
