@@ -49,14 +49,41 @@ struct LauncherView: View {
     /// by its seconds-precision timestamp).
     @State private var suggestedWorktreeBranch = GitWorktree.suggestedBranchName()
 
-    // Explicit Opus IDs (not the "opus" alias) for clean version pinning + display.
-    // NOTE: the full ID alone does NOT keep you on the 200K tier — for 1M-eligible
-    // accounts the CLI upgrades any opus model to "[1m]" at runtime. The actual 200K
-    // enforcement is the CLAUDE_CODE_DISABLE_1M_CONTEXT env var set in ShimProcess for
-    // non-"[1m]" opus selections. Entries carrying "[1m]" stay on the 1M tier.
-    private static let modelOptions = ["", "claude-fable-5", "claude-opus-4-8", "opus[1m]", "claude-opus-4-7", "claude-opus-4-7[1m]", "sonnet", "sonnet[1m]", "haiku"]
+    // Bare family aliases, so a row tracks the latest model in its family with no
+    // release-day edit here. Measured 2026-09-02 on CLI 2.1.239: "fable" resolves to
+    // claude-fable-5-1, "opus" to claude-opus-5, "sonnet" to claude-sonnet-5. The alias
+    // also sidesteps a CLI version floor — that same CLI REJECTS the explicit id
+    // claude-fable-5-1 ("version 2.1.251 or newer is required") while accepting "fable".
+    // The cost is that a row's meaning moves under the user: these are NOT version pins,
+    // and there is deliberately no way to ask for an older version from this Picker.
+    //
+    // NOTE: an id alone does NOT select the 200K tier — on a 1M-eligible account the CLI
+    // serves 1M whatever was asked for. The 200K enforcement is the
+    // CLAUDE_CODE_DISABLE_1M_CONTEXT env var ShimProcess sets for non-"[1m]" *opus*
+    // selections, which is what makes "opus" 200K and "opus[1m]" 1M (both measured).
+    // "sonnet[1m]" is deliberately absent: that gate is opus-only, so "sonnet" and
+    // "sonnet[1m]" both measured contextWindow 1,000,000 and the second row said nothing.
+    private static let modelOptions = ["", "fable", "opus", "opus[1m]", "sonnet", "haiku"]
     private static let effortOptions = ["", "low", "medium", "high", "xhigh", "max"]
     private static let permissionModes: [PermissionMode] = [.default, .plan, .auto, .acceptEdits, .dontAsk]
+
+    /// Model ids `modelOptions` used to offer, mapped to the row that now covers them.
+    /// A persisted `launcher.model` absent from the list renders as an EMPTY Picker
+    /// selection — not as the old value — so every removal from `modelOptions` needs a
+    /// row here or the upgrade silently blanks the control. Keys are every id the list
+    /// has ever carried (`git log -S modelOptions`), including two that existed only in
+    /// an unreleased tree; a stale key costs nothing, a missing one blanks the Picker.
+    /// The version pins collapse onto their family alias, which is the whole point of
+    /// the move to aliases — someone pinned to Fable 5 now follows Fable.
+    private static let retiredModelMigrations = [
+        "claude-fable-5": "fable",
+        "claude-fable-5-1": "fable",
+        "claude-opus-4-7": "opus",
+        "claude-opus-4-7[1m]": "opus[1m]",
+        "claude-opus-4-8": "opus",
+        "claude-opus-5": "opus",
+        "sonnet[1m]": "sonnet",
+    ]
 
     /// Row height for list items (used to calculate fixed list height)
     private static let rowHeight: CGFloat = 34
@@ -104,9 +131,9 @@ struct LauncherView: View {
         .defaultScrollAnchor(.center)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .onAppear {
-            // Migrate the dropped bare "opus" alias (older builds offered it) to the
-            // explicit 200K id so the Picker shows a matching selection after upgrade.
-            if model == "opus" { model = "claude-opus-4-8" }
+            // Move a selection made in an older build onto an id this Picker still
+            // lists, so the control comes up populated rather than blank.
+            if let migrated = Self.retiredModelMigrations[model] { model = migrated }
             loadData()
             Task { await updater.checkForUpdate() }
         }
@@ -408,16 +435,10 @@ struct LauncherView: View {
     }
 
     private static func modelDisplayName(_ alias: String) -> String {
-        // Explicit full model IDs map to their short marketing name. The latest shows
-        // plainly as "Opus"; older pinned versions keep their version number.
-        switch alias {
-        case "claude-fable-5": return "Fable"
-        case "claude-opus-4-8": return "Opus"
-        case "claude-opus-4-7": return "Opus 4.7"
-        case "claude-opus-4-7[1m]": return "Opus 4.7 (1M)"
-        default: break
-        }
-        // "opus" → "Opus", "opus[1m]" → "Opus (1M)", "sonnet[1m]" → "Sonnet (1M)"
+        // Every row is a bare family alias, so the shared variant split covers all of
+        // them and no per-id case is needed: "fable" → "Fable", "opus" → "Opus",
+        // "opus[1m]" → "Opus (1M)". The Picker tags "" as "Auto" itself and iterates
+        // `dropFirst()`, so the empty option never reaches here.
         let (base, suffix) = ModelNameFormatter.splitVariant(alias)
         guard !base.isEmpty else { return alias }
         return base.prefix(1).uppercased() + String(base.dropFirst()) + suffix
