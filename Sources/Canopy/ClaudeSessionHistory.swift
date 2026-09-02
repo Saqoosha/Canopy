@@ -456,6 +456,12 @@ enum ClaudeSessionHistory {
             "<task-notification", "<system-reminder",
             "[Request interrupted",
             "This session is being continued",
+            // Canopy's own prompt-cache keep-alive. It is a REAL user record
+            // in the JSONL, and this loader reads a TAIL window — so a
+            // session kept warm overnight is dominated by refreshes, and the
+            // title generator would be fed those instead of the user's work.
+            // Derived from the constant so the two cannot drift.
+            KeepAliveGate.promptPrefix,
         ]
         var prompts: [String] = []
         for line in text.split(separator: "\n") {

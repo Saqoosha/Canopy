@@ -3506,6 +3506,305 @@ enum SidebarLogicProbe {
                    !RecapScript.setCall(text: "line1\nline2").contains("\n"))
         }
 
+        // MARK: - Prompt-cache keep-alive (see KeepAliveGate / KeepAliveCoordinator)
+        //
+        // Every number here is DERIVED from the production constant rather
+        // than re-typed. The probe has already been burned twice by fixtures
+        // that spelled a value inline: when the constant moved, the failure
+        // accused the property being pinned instead of the number that went
+        // stale. What is worth pinning is that the boundary holds wherever
+        // it sits.
+        do {
+            let interval = KeepAliveGate.defaultInterval
+            let ceiling = KeepAliveGate.rateLimitCeiling
+            let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+            var gate = KeepAliveGate()
+
+            // --- Nothing cached yet
+            record("KeepAliveGate declines a shim with no API activity",
+                   gate.ineligibilityReason(now: t0, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+
+            // --- The freshness boundary, asserted on BOTH sides
+            gate.noteActivity(at: t0)
+            record("KeepAliveGate declines while the cache is still fresh",
+                   gate.ineligibilityReason(now: t0.addingTimeInterval(interval - 1), interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+            record("KeepAliveGate permits exactly at the interval",
+                   gate.ineligibilityReason(now: t0.addingTimeInterval(interval), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+            record("KeepAliveGate permits past the interval",
+                   gate.ineligibilityReason(now: t0.addingTimeInterval(interval * 2), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+
+            // --- The rate-limit ceiling, both sides
+            let due = t0.addingTimeInterval(interval)
+            record("KeepAliveGate permits just below the rate-limit ceiling",
+                   gate.ineligibilityReason(now: due, interval: interval, rateLimitPct: ceiling - 1, hasCustomApi: false) == nil)
+            record("KeepAliveGate declines at the rate-limit ceiling",
+                   gate.ineligibilityReason(now: due, interval: interval, rateLimitPct: ceiling, hasCustomApi: false) != nil)
+            record("KeepAliveGate declines above the rate-limit ceiling",
+                   gate.ineligibilityReason(now: due, interval: interval, rateLimitPct: 100, hasCustomApi: false) != nil)
+
+            // --- Freshness is checked before the ceiling, so a fresh
+            // session at 100% reports the cheap reason, not the quota one.
+            // Ordering is a documented property of the gate, not an
+            // accident of how the conditions happen to be written.
+            record("KeepAliveGate reports freshness ahead of the quota ceiling",
+                   gate.ineligibilityReason(now: t0, interval: interval, rateLimitPct: 100, hasCustomApi: false)?
+                       .contains("fresh") == true)
+
+            // --- The custom-provider carve-out outranks everything, including
+            // an otherwise-due session with quota to spare.
+            record("KeepAliveGate declines a custom API provider even when due",
+                   gate.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: true) != nil)
+            record("KeepAliveGate names the custom-provider carve-out",
+                   gate.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: true)?
+                       .contains("5m") == true)
+
+            // --- Sending restarts the window and advances the counter
+            var sent = KeepAliveGate()
+            sent.noteActivity(at: t0)
+            record("KeepAliveGate starts with no refreshes sent", sent.sentCount == 0)
+            sent.noteKeepAliveSent(at: due)
+            record("KeepAliveGate counts a sent refresh", sent.sentCount == 1)
+            record("KeepAliveGate restarts the window from the refresh",
+                   sent.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+            record("KeepAliveGate comes due again one interval after the refresh",
+                   sent.ineligibilityReason(now: due.addingTimeInterval(interval), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+
+            // --- isKeepAliveEcho: the swallow's only handle on "this turn
+            // is ours". A keep-alive turn has an ordinary model id, so
+            // unlike the recap there is no `<synthetic>` tag to fall back
+            // on and a miss here means the reply is swallowed while the
+            // prompt stays visible.
+            func echoBlocks(_ text: String) -> [String: Any] {
+                ["type": "user", "message": [
+                    "role": "user",
+                    "content": [["type": "text", "text": text]],
+                ] as [String: Any]]
+            }
+            func echoString(_ text: String) -> [String: Any] {
+                ["type": "user", "message": ["role": "user", "content": text] as [String: Any]]
+            }
+            record("isKeepAliveEcho matches the injected prompt in block form",
+                   ShimProcess.isKeepAliveEcho(echoBlocks(KeepAliveGate.promptText)))
+            record("isKeepAliveEcho matches the injected prompt in string form",
+                   ShimProcess.isKeepAliveEcho(echoString(KeepAliveGate.promptText)))
+            record("isKeepAliveEcho tolerates surrounding whitespace",
+                   ShimProcess.isKeepAliveEcho(echoBlocks("\n  " + KeepAliveGate.promptText + "  \n")))
+            // The substring trap `isRecapEcho` already documents: a user
+            // pasting a transcript excerpt, or filing a bug about this
+            // feature, must not have their message deleted.
+            record("isKeepAliveEcho refuses a message merely QUOTING the prompt",
+                   !ShimProcess.isKeepAliveEcho(echoBlocks("why did Canopy send \"" + KeepAliveGate.promptText + "\"?")))
+            record("isKeepAliveEcho refuses an unrelated prompt",
+                   !ShimProcess.isKeepAliveEcho(echoBlocks("fix the failing test")))
+            record("isKeepAliveEcho refuses a message with no message payload",
+                   !ShimProcess.isKeepAliveEcho(["type": "user"]))
+
+            // --- The prompt's TAG is load-bearing twice over: the
+            // prompt-history skip list matches on it, and the replay filter
+            // matches the whole text. Assert the relationship, not the prose
+            // — a reword should not turn a spelling change into a red test.
+            record("keep-alive prompt opens with the shared tag",
+                   KeepAliveGate.promptText.hasPrefix(KeepAliveGate.promptPrefix))
+
+            // --- The constants themselves. Deriving every fixture from them
+            // means every assertion above passes for ANY value they hold,
+            // including feature-destroying ones: set the interval past the
+            // CLI's 1h TTL and every refresh buys a full write instead of a
+            // hit — the exact inversion the gate's doc says should cause
+            // this feature to be deleted — with the probe still green. The
+            // 3600 below is the CLI's TTL, an external fact this code has no
+            // constant for, so writing it here is not a re-typing.
+            record("keep-alive interval stays inside the CLI's 1h cache TTL",
+                   KeepAliveGate.defaultInterval < 3600 && KeepAliveGate.defaultInterval > 0)
+            record("rate-limit ceiling is a percentage that can actually gate",
+                   (1...99).contains(KeepAliveGate.rateLimitCeiling))
+
+            // --- A non-finite interval must not trap inside a pure value
+            // type. `Int(_: Double)` traps on one, and the decline-reason
+            // string builds two. Not reachable through
+            // `CANOPY_KEEPALIVE_MINUTES` today — the coordinator rejects a
+            // non-finite value first — so this pins the pure type refusing
+            // to depend on a caller's validation, not a live crash.
+            var infGate = KeepAliveGate()
+            infGate.noteActivity(at: t0)
+            record("KeepAliveGate refuses a non-finite interval instead of trapping",
+                   infGate.ineligibilityReason(now: due, interval: .infinity, rateLimitPct: 0, hasCustomApi: false) != nil)
+            record("KeepAliveGate refuses a zero interval",
+                   infGate.ineligibilityReason(now: due, interval: 0, rateLimitPct: 0, hasCustomApi: false) != nil)
+
+            // --- Which sessions count as running on a custom endpoint.
+            //
+            // The first version of this block computed its expectation with
+            // the SAME expression the implementation uses, so deleting the
+            // whole inherited-environment branch left it green on every
+            // machine where the variable is unset — which is every CI
+            // runner. A test that mirrors the code measures nothing.
+            //
+            // These use real `ModelProvider` values instead. The env half
+            // still cannot be asserted without mutating the process
+            // environment, and is deliberately left unpinned rather than
+            // mirrored; `sessionUsesCustomEndpoint` carries the reasoning.
+            var enabledProvider = ModelProvider()
+            enabledProvider.baseURL = "https://example.invalid/v1"
+            var emptyProvider = ModelProvider()
+            emptyProvider.baseURL = ""
+            record("an enabled provider counts as a custom endpoint",
+                   ShimProcess.sessionUsesCustomEndpoint(enabledProvider))
+            // The bug this replaced: testing mere presence declined a
+            // selected-but-empty provider forever, on a session that
+            // actually runs on ordinary subscriber auth.
+            record("a provider with an empty baseURL does not count",
+                   !ShimProcess.sessionUsesCustomEndpoint(emptyProvider)
+                       || !(ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"] ?? "").isEmpty)
+
+            // --- **An attempt costs an interval whether or not it worked.**
+            // A rollback that made a FAILED refresh retry immediately was
+            // written, shipped for one round, and removed: nothing else
+            // holds the session back afterwards — the latch is cleared and
+            // `isWorking` never rose, because every keep-alive frame is
+            // dropped ahead of `trackWorkingState` — so the retry cadence
+            // collapsed from the 55-minute interval to the coordinator's
+            // 60-second tick. Against a standing 429 that is one real
+            // injected turn per minute all night. These assertions are what
+            // turn re-introducing it red.
+            var attemptGate = KeepAliveGate()
+            attemptGate.noteActivity(at: t0)
+            let dueNow = t0.addingTimeInterval(interval)
+            record("KeepAliveGate is due before an attempted refresh",
+                   attemptGate.ineligibilityReason(now: dueNow, interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+            attemptGate.noteKeepAliveSent(at: dueNow)
+            record("KeepAliveGate blocks immediately after an attempt",
+                   attemptGate.ineligibilityReason(now: dueNow, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+            // A tick later — the storm's cadence — it must still refuse.
+            record("KeepAliveGate still refuses one tick after an attempt",
+                   attemptGate.ineligibilityReason(now: dueNow.addingTimeInterval(60), interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+            record("KeepAliveGate is due again only a full interval after the attempt",
+                   attemptGate.ineligibilityReason(now: dueNow.addingTimeInterval(interval), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+            record("KeepAliveGate counts the attempt",
+                   attemptGate.sentCount == 1)
+
+            // --- The stamp never moves backwards. Its two callers read
+            // different clocks, so a regression here would grant an early
+            // refresh on nothing but skew.
+            var backGate = KeepAliveGate()
+            backGate.noteActivity(at: due)
+            backGate.noteActivity(at: t0)
+            record("KeepAliveGate never moves the activity stamp backwards",
+                   backGate.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+
+            // --- The SWALLOW. This is the part of the feature that deletes
+            // messages, and the part whose one shipped bug was a wrong
+            // swallow — reverting the `system/init` case used to leave the
+            // whole suite green while the pane spun forever.
+            func envelope(_ ioMsg: [String: Any]) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "io_message", "message": ioMsg] as [String: Any]]
+            }
+            let initMsg = envelope(["type": "system", "subtype": "init"])
+            let statusMsg = envelope(["type": "system", "subtype": "status"])
+            let lifecycleMsg = envelope(["type": "command_lifecycle"])
+            let assistantMsg = envelope(["type": "assistant"])
+            let streamMsg = envelope(["type": "stream_event"])
+            let rateLimitMsg = envelope(["type": "rate_limit_event"])
+            let okResult = envelope(["type": "result", "subtype": "success"])
+            let errResult = envelope(["type": "result", "subtype": "error_during_execution"])
+            let flaggedResult = envelope(["type": "result", "subtype": "success", "is_error": true])
+            let echoMsg = envelope(echoBlocks(KeepAliveGate.promptText))
+            let otherUserMsg = envelope(echoBlocks("fix the failing test"))
+
+            record("disposition passes everything through when no refresh is in flight",
+                   ShimProcess.keepAliveDisposition(initMsg, inFlight: false, echoSeen: false) == .passThrough)
+            // The shipped bug, now one red assertion.
+            record("disposition swallows system/init before the echo",
+                   ShimProcess.keepAliveDisposition(initMsg, inFlight: true, echoSeen: false) == .swallow)
+            record("disposition swallows command_lifecycle before the echo",
+                   ShimProcess.keepAliveDisposition(lifecycleMsg, inFlight: true, echoSeen: false) == .swallow)
+            // Measured, and deliberately NOT swallowed — it carries the
+            // permission-mode UI state and was not what set busy.
+            record("disposition passes system/status through",
+                   ShimProcess.keepAliveDisposition(statusMsg, inFlight: true, echoSeen: false) == .passThrough)
+            record("disposition marks the echo on our own prompt",
+                   ShimProcess.keepAliveDisposition(echoMsg, inFlight: true, echoSeen: false) == .swallowMarkingEcho)
+            record("disposition passes a genuine prompt racing the refresh",
+                   ShimProcess.keepAliveDisposition(otherUserMsg, inFlight: true, echoSeen: false) == .passThrough)
+            // Before the echo a turn on the wire cannot be ours; swallowing
+            // it would delete somebody else's reply.
+            record("disposition passes an assistant frame through before the echo",
+                   ShimProcess.keepAliveDisposition(assistantMsg, inFlight: true, echoSeen: false) == .passThrough)
+            record("disposition passes a stream_event through before the echo",
+                   ShimProcess.keepAliveDisposition(streamMsg, inFlight: true, echoSeen: false) == .passThrough)
+            record("disposition swallows an assistant frame after the echo",
+                   ShimProcess.keepAliveDisposition(assistantMsg, inFlight: true, echoSeen: true) == .swallow)
+            record("disposition swallows a stream_event after the echo",
+                   ShimProcess.keepAliveDisposition(streamMsg, inFlight: true, echoSeen: true) == .swallow)
+            record("disposition never swallows rate_limit_event",
+                   ShimProcess.keepAliveDisposition(rateLimitMsg, inFlight: true, echoSeen: true) == .passThrough)
+            // Claiming a result without the echo eats the next REAL turn's,
+            // and nothing else clears the webview's busy flag.
+            record("disposition abandons the flight on a result with no echo",
+                   ShimProcess.keepAliveDisposition(okResult, inFlight: true, echoSeen: false) == .abandonFlightPassingThrough)
+            record("disposition completes the flight on a successful result",
+                   ShimProcess.keepAliveDisposition(okResult, inFlight: true, echoSeen: true) == .completeFlight(refreshed: true))
+            // A failed turn is not a refresh. Recording it as one made the
+            // gate sleep past the point the cache actually lapsed, while the
+            // log said "completed".
+            record("disposition reports a failed result as NOT refreshed",
+                   ShimProcess.keepAliveDisposition(errResult, inFlight: true, echoSeen: true) == .completeFlight(refreshed: false))
+            record("disposition reports an is_error result as NOT refreshed",
+                   ShimProcess.keepAliveDisposition(flaggedResult, inFlight: true, echoSeen: true) == .completeFlight(refreshed: false))
+            record("disposition treats an unrecognised result shape as success",
+                   ShimProcess.keepAliveDisposition(envelope(["type": "result"]), inFlight: true, echoSeen: true) == .completeFlight(refreshed: true))
+
+            // --- Replay. The live swallow keeps the transcript clean only
+            // for the process that injected; the JSONL keeps a real user
+            // record plus a real reply, so reopening a session kept warm
+            // overnight replayed a dozen bubble pairs.
+            let replay: [[String: Any]] = [
+                ["type": "user", "message": ["role": "user", "content": "real question"] as [String: Any]],
+                ["type": "assistant", "message": ["role": "assistant"] as [String: Any]],
+                echoBlocks(KeepAliveGate.promptText),
+                ["type": "assistant", "message": ["role": "assistant"] as [String: Any]],
+                ["type": "user", "message": ["role": "user", "content": "another question"] as [String: Any]],
+            ]
+            let stripped = ShimProcess.strippingKeepAliveArtifacts(replay)
+            record("replay drops the keep-alive prompt and its reply",
+                   stripped.count == replay.count - 2)
+            record("replay keeps the user's own turns",
+                   stripped.filter { $0["type"] as? String == "user" }.count == 2)
+            record("replay leaves a conversation with no keep-alive untouched",
+                   ShimProcess.strippingKeepAliveArtifacts(Array(replay.prefix(2))).count == 2)
+
+            // --- Through the REPLAY ENTRY POINT, not the filter directly.
+            // The assertions above call `strippingKeepAliveArtifacts`, so
+            // unwiring it from `strippingRecapFromReplay` — the only thing
+            // that actually runs on a `get_session` response — left them all
+            // green. Same unprotected-wiring shape the disposition
+            // extraction closed one level down.
+            let envelope: [String: Any] = [
+                "type": "from-extension",
+                "message": ["response": ["messages": replay] as [String: Any]] as [String: Any],
+            ]
+            let out = ShimProcess.strippingRecapFromReplay(envelope)
+            let outMessages = ((out["message"] as? [String: Any])?["response"] as? [String: Any])?["messages"] as? [[String: Any]]
+            record("the replay entry point strips keep-alive turns, not just the filter",
+                   outMessages?.count == replay.count - 2)
+            record("the replay entry point keeps the user's own turns",
+                   outMessages?.filter { $0["type"] as? String == "user" }.count == 2)
+
+            // Only the reply IMMEDIATELY after the prompt goes. If the model
+            // ignored the instruction and used a tool, the extra records
+            // survive — erring toward showing too much, since the
+            // alternative deletes conversation nobody can get back.
+            let toolRun: [[String: Any]] = [
+                echoBlocks(KeepAliveGate.promptText),
+                ["type": "assistant", "message": ["role": "assistant"] as [String: Any]],
+                ["type": "user", "message": ["role": "user", "content": "tool result"] as [String: Any]],
+                ["type": "assistant", "message": ["role": "assistant"] as [String: Any]],
+            ]
+            let toolOut = ShimProcess.strippingKeepAliveArtifacts(toolRun)
+            record("replay keeps records beyond the immediate reply",
+                   toolOut.count == 2)
+        }
+
         // MARK: - MacroPad wire protocol / SessionActivity / unread tracker
         //
         // Pure value-type coverage for the pad's host-side contract. The
