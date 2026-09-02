@@ -16,8 +16,43 @@ enum ClaudeSessionHistory {
     private static let claudeDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/projects")
 
-    /// Maximum number of sessions to parse (sorted by most recent first).
-    private static let maxSessionsToParse = 50
+    /// How many sessions the history list holds, counted in rows that
+    /// SURVIVE the filters in `loadAllSessions` — never in files read.
+    ///
+    /// The cap used to be the second thing, and the gap between them widens
+    /// the more the machine is used. Automated runs (`entrypoint: "sdk-*"` —
+    /// sub-agents, `/security-review`, title generation) each write a JSONL
+    /// and are dropped on sight, but a budget spent before the filter is
+    /// spent all the same: measured 2026-09-03 over 1,555 openable sessions,
+    /// the newest 50 FILES held 41 automated ones and yielded **9 rows**, so
+    /// 82% of the list went to sessions that can never be shown. The symptom
+    /// is a sidebar that empties as sub-agent use grows, with nothing else to
+    /// point at.
+    ///
+    /// Non-private, with `maxSessionsToScan`, so the probe can assert the one
+    /// relationship between them rather than restating either value.
+    static let maxSessionsToKeep = 50
+
+    /// Ceiling on files read while collecting `maxSessionsToKeep`, so a
+    /// corpus with a poor survival ratio cannot turn one refresh into a walk
+    /// of the whole tree.
+    ///
+    /// Reaching the target costs `1 / ratio` files, and that ratio is a
+    /// property of how the machine is used rather than a constant — measured
+    /// here at ~18%, so 50 rows cost 275 files and 25.6 MiB of header reads,
+    /// against 50 files and 4.2 MiB before. This sits ~1.5× above that walk;
+    /// its own worst case, 400 files, is 38.3 MiB. Both `loadAllSessions`
+    /// callers `Task.detached`, so none of it is on the main thread —
+    /// `loadSessionsFromDir` is the synchronous path, and it is uncapped for
+    /// a separate reason argued on `metadataMaxScanSize`.
+    ///
+    /// Reaching it returns a SHORT list, which is the same silent-shrink
+    /// symptom this pair exists to fix, so that case logs rather than passing
+    /// unremarked.
+    ///
+    /// Must exceed `maxSessionsToKeep`, or the target is unreachable by
+    /// construction and every list comes back short — pinned by the probe.
+    static let maxSessionsToScan = 400
 
     /// Mirrors the current Claude CLI encoding: every character that is not a letter,
     /// digit, or `_` collapses to `-`. Examples: `/.config` → `--config`,
@@ -200,34 +235,74 @@ enum ClaudeSessionHistory {
             }
         }
 
-        // Phase 2: sort by date, take top N
-        candidates.sort { $0.modDate > $1.modDate }
-        let topCandidates = candidates.prefix(maxSessionsToParse)
-
-        // Phase 3: resolve each session's on-disk project dir via
+        // Phase 2 + 3: newest first, then read headers until enough rows
+        // SURVIVE — the drops below are what the budget must not be spent on.
+        // Each survivor resolves its on-disk project dir via
         // `resolveProjectPath` (extracted cwd vs storage-folder encoding).
-        var entries: [SessionEntry] = []
-        for candidate in topCandidates {
+        candidates.sort { $0.modDate > $1.modDate }
+
+        let selection = selectNewest(
+            candidates,
+            keep: maxSessionsToKeep,
+            scanLimit: maxSessionsToScan
+        ) { candidate -> SessionEntry? in
             let metadata = extractMetadata(fromPath: candidate.path)
-            guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { continue }
+            guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { return nil }
             let projectPath = resolveProjectPath(
                 extractedCwd: metadata.cwd,
                 projectEncoded: candidate.projectEncoded
             )
-            guard fm.fileExists(atPath: projectPath) else { continue }
-            let projectDirectory = URL(fileURLWithPath: projectPath)
+            guard fm.fileExists(atPath: projectPath) else { return nil }
             let title = SessionTitleStore.title(forSessionId: candidate.sessionId)
                 ?? metadata.title
 
-            entries.append(SessionEntry(
+            return SessionEntry(
                 id: candidate.sessionId,
                 title: title,
                 timestamp: candidate.modDate,
-                projectDirectory: projectDirectory
-            ))
+                projectDirectory: URL(fileURLWithPath: projectPath)
+            )
         }
 
-        return entries
+        if selection.kept.count < maxSessionsToKeep, selection.scanned >= maxSessionsToScan {
+            logger.notice("""
+                Session scan hit its ceiling: \(selection.scanned, privacy: .public) files read, \
+                \(selection.kept.count, privacy: .public) of \(maxSessionsToKeep, privacy: .public) rows kept, \
+                \(candidates.count, privacy: .public) candidates on disk
+                """)
+        }
+
+        return selection.kept
+    }
+
+    /// Walk `candidates` in order, keeping whatever `evaluate` accepts, and
+    /// stop at whichever comes first: `keep` accepted, or `scanLimit`
+    /// evaluated.
+    ///
+    /// The first of those two is the whole point, and it is the half a
+    /// `prefix(keep)` placed ahead of the filter silently gets wrong: that
+    /// stops on items READ, so every rejected item costs a row. `scanLimit`
+    /// only bounds the damage when nearly everything is rejected.
+    ///
+    /// Pure, and generic at both ends, so the probe can pin that contract
+    /// with a synthetic predicate rather than a `~/.claude/projects/` tree.
+    /// `scanned` comes back because "short list" and "short list because we
+    /// gave up" are different states, and only the caller can say which one
+    /// deserves a log line.
+    static func selectNewest<Candidate, Kept>(
+        _ candidates: [Candidate],
+        keep: Int,
+        scanLimit: Int,
+        evaluate: (Candidate) -> Kept?
+    ) -> (kept: [Kept], scanned: Int) {
+        var kept: [Kept] = []
+        var scanned = 0
+        for candidate in candidates {
+            if kept.count >= keep || scanned >= scanLimit { break }
+            scanned += 1
+            if let value = evaluate(candidate) { kept.append(value) }
+        }
+        return (kept, scanned)
     }
 
     /// Walk every JSONL across `~/.claude/projects/` and return a map of
@@ -639,12 +714,16 @@ enum ClaudeSessionHistory {
     /// file that stops mid-record; corpus-wide the tail read shrinks, because
     /// escalated files start theirs later.) Over the openable population
     /// (see `metadataMaxScanSize`) 31 of 1,047 escalate, and the whole-corpus
-    /// read moves 105,103,370 → 112,112,155 bytes; over the newest 50 that
-    /// `maxSessionsToParse` keeps, 15 escalate and it moves 5,536,876 →
-    /// 7,365,828, because a day spent running `/security-review` fills that
-    /// window with exactly the sessions that need escalating. **The uncapped
-    /// path is also the main-thread one**: `loadAllSessions`'s two callers
-    /// both `Task.detached` and it caps at 50, while `loadSessionsFromDir` is
+    /// read moves 105,103,370 → 112,112,155 bytes; over the newest 50 FILES —
+    /// the window `loadAllSessions` read at the time — 15 escalate and it
+    /// moves 5,536,876 → 7,365,828, because a day spent running
+    /// `/security-review` fills that window with exactly the sessions that
+    /// need escalating. That window is wider now, and disproportionately so
+    /// for this cost: it reads until `maxSessionsToKeep` rows survive, and
+    /// the files it therefore reads on top are the automated ones, which are
+    /// the escalating ones. **The uncapped path is also the main-thread
+    /// one**: `loadAllSessions`'s two callers both `Task.detached` and it
+    /// caps its scan at `maxSessionsToScan`, while `loadSessionsFromDir` is
     /// reached synchronously from `LauncherView.latestSession(for:)` — a
     /// SwiftUI `View`, so main-actor — over every JSONL in one project folder.
     /// Measured worst *project* folder here: 159 files, 16.6 → 17.8 MiB. The
