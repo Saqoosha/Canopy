@@ -551,6 +551,75 @@ enum SidebarLogicProbe {
                arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } == "first block second block",
                "got \(arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
 
+        // MARK: - Session selection budget (the sidebar's shrinking list)
+        //
+        // `loadAllSessions` used to `prefix(50)` the candidates and only then
+        // drop the automated ones, so every dropped file cost a row: measured
+        // 2026-09-03, the newest 50 files held 41 `sdk-*` sessions and the
+        // sidebar showed 9. These pin the budget as rows KEPT, which is the
+        // single property that fix turns on — reinstate the `prefix` and the
+        // first assertion goes red on its own.
+        //
+        // Synthetic predicate on purpose: `evaluate` in production reads a
+        // JSONL header, and a fixture tree big enough to exercise a ceiling of
+        // 400 would be the slowest thing in this probe by an order of
+        // magnitude. The numbers below are the selector's own inputs, not
+        // copies of the production caps, so there is nothing here to drift.
+        let selectorInput = Array(0..<100)
+        let everyFifth: (Int) -> String? = { $0 % 5 == 0 ? "keep-\($0)" : nil }
+
+        let budgeted = ClaudeSessionHistory.selectNewest(
+            selectorInput, keep: 10, scanLimit: 1000, evaluate: everyFifth
+        )
+        // 46, not 50: the tenth survivor is at index 45 and the walk stops on
+        // it rather than finishing the block of five. A `prefix(keep)` ahead
+        // of the filter reads 10 and keeps 2, so the two numbers together are
+        // what separate the fix from the bug.
+        record("selection: the budget counts rows kept, not files read",
+               budgeted.kept.count == 10 && budgeted.scanned == 46,
+               "kept=\(budgeted.kept.count) scanned=\(budgeted.scanned)")
+        record("selection: survivors keep candidate order",
+               budgeted.kept.first == "keep-0" && budgeted.kept.last == "keep-45",
+               "first=\(budgeted.kept.first ?? "nil") last=\(budgeted.kept.last ?? "nil")")
+
+        let ceilinged = ClaudeSessionHistory.selectNewest(
+            selectorInput, keep: 10, scanLimit: 20, evaluate: everyFifth
+        )
+        record("selection: the scan ceiling stops a poor survival ratio",
+               ceilinged.kept.count == 4 && ceilinged.scanned == 20,
+               "kept=\(ceilinged.kept.count) scanned=\(ceilinged.scanned)")
+
+        // The other half of "stop on kept": stopping late is as wrong as
+        // stopping early, and only this catches a selector that always runs
+        // to its ceiling.
+        let allAccepted = ClaudeSessionHistory.selectNewest(
+            selectorInput, keep: 10, scanLimit: 1000, evaluate: { "keep-\($0)" }
+        )
+        record("selection: nothing is read past the keep target",
+               allAccepted.kept.count == 10 && allAccepted.scanned == 10,
+               "kept=\(allAccepted.kept.count) scanned=\(allAccepted.scanned)")
+
+        let exhausted = ClaudeSessionHistory.selectNewest(
+            Array(0..<3), keep: 10, scanLimit: 1000, evaluate: { "keep-\($0)" }
+        )
+        record("selection: running out of candidates is not hitting a limit",
+               exhausted.kept.count == 3 && exhausted.scanned == 3,
+               "kept=\(exhausted.kept.count) scanned=\(exhausted.scanned)")
+
+        let zeroKeep = ClaudeSessionHistory.selectNewest(
+            selectorInput, keep: 0, scanLimit: 1000, evaluate: everyFifth
+        )
+        record("selection: a zero keep target evaluates nothing",
+               zeroKeep.kept.isEmpty && zeroKeep.scanned == 0,
+               "kept=\(zeroKeep.kept.count) scanned=\(zeroKeep.scanned)")
+
+        // A ceiling at or below the keep target makes the target unreachable,
+        // and the failure is the silent short list this whole block exists
+        // for. Read from the constants so it pins the relationship itself.
+        record("selection: the production scan ceiling clears the keep target",
+               ClaudeSessionHistory.maxSessionsToScan > ClaudeSessionHistory.maxSessionsToKeep,
+               "scan=\(ClaudeSessionHistory.maxSessionsToScan) keep=\(ClaudeSessionHistory.maxSessionsToKeep)")
+
         // cwd resolution: `relocated` events (session moved into a git worktree)
         // must override the stale initial cwd; otherwise `--resume` spawns the
         // CLI in the wrong project folder and the CLI creates an empty session.
