@@ -204,8 +204,9 @@ enum ClaudeSessionHistory {
     }
 
     /// Load sessions across all projects, sorted by most recent.
-    /// Collects file metadata first (no file reads), sorts by date,
-    /// then parses only the top N candidates for title extraction.
+    /// Collects file metadata first (no file reads), sorts by date, then
+    /// parses headers newest-first until `maxSessionsToKeep` sessions have
+    /// SURVIVED the filters below — bounded by `maxSessionsToScan`.
     static func loadAllSessions() -> [SessionEntry] {
         guard FileManager.default.fileExists(atPath: claudeDir.path) else { return [] }
 
@@ -267,7 +268,12 @@ enum ClaudeSessionHistory {
             )
         }
 
-        if selection.kept.count < maxSessionsToKeep, selection.scanned >= maxSessionsToScan {
+        // Stopping EARLY is the whole signal: a walk that reached the end of
+        // the candidates read everything there was, and a short list then just
+        // means the disk holds nothing more. `scanned >= maxSessionsToScan`
+        // cannot tell those apart when the corpus happens to be exactly that
+        // size, which is the distinction `selectNewest` returns `scanned` for.
+        if selection.kept.count < maxSessionsToKeep, selection.scanned < candidates.count {
             logger.notice("""
                 Session scan hit its ceiling: \(selection.scanned, privacy: .public) files read, \
                 \(selection.kept.count, privacy: .public) of \(maxSessionsToKeep, privacy: .public) rows kept, \

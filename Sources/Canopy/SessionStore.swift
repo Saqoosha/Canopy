@@ -291,7 +291,8 @@ final class SessionStore {
             // Only closed rows need this: they read their label from
             // `SessionTitleStore` when `ClaudeSessionHistory` loads them, while
             // an open row was just updated in place above. Reloading anyway
-            // re-parses up to 50 JSONLs for nothing.
+            // re-parses JSONL headers for nothing, up to
+            // `ClaudeSessionHistory.maxSessionsToScan` of them.
             Task { await refreshRecents() }
         }
     }
