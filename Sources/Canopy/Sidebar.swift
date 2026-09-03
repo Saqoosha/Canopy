@@ -595,6 +595,12 @@ private struct SidebarRowView: View {
                 if let peerName {
                     PeerNameChip(name: peerName)
                         .padding(.top, 1)
+                        // Hang the border so the chip's TEXT keeps the column
+                        // the title and project lines make; without it the
+                        // chip's own padding indents the middle line by
+                        // `textInset` and breaks the straight edge that is the
+                        // whole reason the name sits on its own line here.
+                        .padding(.leading, -PeerNameChip.textInset)
                 }
                 // A launcher row has no project, and an empty Text would still
                 // reserve the second line's height. `displayProject`, not
