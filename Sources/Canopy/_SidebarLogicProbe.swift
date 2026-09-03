@@ -1270,7 +1270,6 @@ enum SidebarLogicProbe {
         record("repoName: plain dir → folder name",
                GitWorktree.repoName(for: URL(fileURLWithPath: "/repos/Canopy")) == "Canopy")
 
-        // The filter and grouping key must NOT pick up the branch: appending it
         // jj reports "<bookmark> (modified)"; only the bookmark belongs in a
         // row subtitle. Found on screen, not by the probe — the whole suite was
         // green while the sidebar read "Canopy · main (modified)".
@@ -1286,6 +1285,20 @@ enum SidebarLogicProbe {
                GitWorktree.projectDisplayName(
                    for: URL(fileURLWithPath: "/repos/Canopy"), branch: "main (modified)")
                    == "Canopy · main")
+
+        // A teleported session's `project` was chosen by the teleport — the
+        // cloud repo's "owner/name" when the local cwd was too ambiguous to
+        // name the work — so recomputing it from that same cwd throws away the
+        // label and returns the folder name it was picked to avoid.
+        record("projectLabel: a teleported session keeps its chosen label",
+               {
+                   let s = OpenSession(
+                       origin: .teleportedFrom(cloudSessionId: "cloud-1",
+                                               localPath: URL(fileURLWithPath: "/tmp/ambiguous")),
+                       resumeId: "tp", title: "t", project: "owner/name", status: .live)
+                   s.statusBar.gitBranch = "main"
+                   return s.projectLabel == "owner/name"
+               }())
 
         // The filter and grouping key must NOT pick up the branch: appending it
         // to `SidebarRow.project` splits one repository into a bucket and a

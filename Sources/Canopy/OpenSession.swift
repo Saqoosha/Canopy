@@ -95,14 +95,21 @@ final class OpenSession: Identifiable, Hashable {
     /// The subtitle shown by the sidebar row and the pane header. Prefers the
     /// branch the VCS actually reports — `statusBar.gitBranch`, refreshed after
     /// every turn — over `projectDisplayName`'s folder-name guess, so two panes
-    /// on two branches of one repo no longer render the same text. A remote
-    /// session keeps `project` verbatim: its label is `host:dir`, not a path
-    /// this machine can resolve.
+    /// on two branches of one repo no longer render the same text.
+    ///
+    /// **Only a `.local` origin is recomputed.** A remote session's `project`
+    /// is `host:dir`, not a path this machine can resolve. A teleported one
+    /// carries a label the teleport chose on purpose — the cloud repo's
+    /// `owner/name` when the local cwd was too ambiguous to name the work
+    /// (`SessionStore.teleport`) — and recomputing would throw that away in
+    /// favour of the very folder name it was picked to avoid, while
+    /// `SpawningOverlay` kept showing the original and the subtitle visibly
+    /// flipped between them.
     var projectLabel: String {
         switch origin {
-        case .local(let dir), .teleportedFrom(_, let dir):
+        case .local(let dir):
             return GitWorktree.projectDisplayName(for: dir, branch: statusBar.gitBranch)
-        case .remote:
+        case .remote, .teleportedFrom:
             return project
         }
     }
