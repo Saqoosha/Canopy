@@ -84,9 +84,10 @@ enum ClaudeSessionHistory {
     }
 
     /// Every folder-name variant that may hold sessions for `path`, in preference order.
-    /// Current CLI encoding is tried first; legacy form is included only when it differs
-    /// and still points at a real folder on disk. Both must be consulted because users
-    /// can have sessions written by multiple CLI versions for the same directory.
+    /// Current CLI encoding is tried first; the legacy form is included whenever it
+    /// differs — purely lexical, no disk check, which the doc used to claim. Both must
+    /// be consulted because users can have sessions written by multiple CLI versions
+    /// for the same directory.
     static func encodedFolderCandidates(for path: String) -> [String] {
         let strict = encodePath(path)
         let legacy = encodePathLegacy(path)
@@ -94,8 +95,11 @@ enum ClaudeSessionHistory {
     }
 
     /// True when a transcript for `id` exists under any encoding variant of
-    /// `directory`. Used by launch restore to drop sessions whose JSONL is
-    /// gone.
+    /// `directory` — or, as a fallback, anywhere under `~/.claude/projects`,
+    /// for a session that has relocated since it was spawned. On that fallback
+    /// `directory` selects nothing — the encoded lookup keyed on it is only a
+    /// fast path; see `scanForTranscript`. Used by launch restore to drop sessions whose
+    /// JSONL is gone.
     ///
     /// What a restored session with a missing JSONL would actually do is NOT
     /// established, and two rounds of review each replaced one confident
@@ -109,7 +113,9 @@ enum ClaudeSessionHistory {
     /// the pane here means the question never has to be answered. Both
     /// encodings are consulted for the same reason
     /// `encodedFolderCandidates` exists: older CLI versions wrote the other
-    /// folder name for the same directory.
+    /// folder name for the same directory. Since the scan landed that is a
+    /// SPEED statement rather than a correctness one — the fallback would find
+    /// a legacy-folder transcript anyway.
     static func sessionFileExists(id: String, directory: URL) -> Bool {
         for folder in encodedFolderCandidates(for: directory.path) {
             let url = claudeDir
@@ -117,7 +123,97 @@ enum ClaudeSessionHistory {
                 .appendingPathComponent("\(id).jsonl")
             if FileManager.default.fileExists(atPath: url.path) { return true }
         }
-        return false
+        return scanForTranscript(sessionId: id) != nil
+    }
+
+    /// Find `<sessionId>.jsonl` under any project folder.
+    ///
+    /// The fallback for a session that MOVED. `EnterWorktree` changes the
+    /// CLI's cwd mid-session and the CLI relocates the whole transcript to the
+    /// new directory's encoded folder — measured on 2.1.258, where the old
+    /// folder was left holding only `memory/` (which was all it had left to
+    /// hold; a folder with several sessions keeps the ones that did not move).
+    /// Every `encodedFolderCandidates` entry for the ORIGINAL directory then
+    /// misses, and each of the four lookups that reach here failed on its own,
+    /// silently: launch restore (`sessionFileExists`) dropped the session as
+    /// unresumable; `ShimProcess.jsonlPath` starved the background-task
+    /// reconcile of the file it scans for completion markers and the
+    /// init-time `historicToolUseIds` / recap seed of the file it snapshots;
+    /// `loadUserPrompts` seeded title generation from an empty history; and
+    /// `countMessages` reported zero.
+    ///
+    /// The population is every entry under `~/.claude/projects`, wider than
+    /// `loadAllSessions`, which additionally skips the folder named `-`, skips
+    /// `*observer-sessions`, and requires a UUID filename (the other loaders in
+    /// this file apply fewer of those, or none). Deliberate: those
+    /// filters exist to shape a LIST, and a lookup by exact id has nothing to
+    /// shape — a UUID colliding inside an excluded folder is not a case worth
+    /// carrying three more conditions for. It does mean a hit in one of those
+    /// folders would be returned as the session's transcript.
+    ///
+    /// Keyed on the session id, the one thing relocation does not change, so
+    /// it needs no signal from the CLI. It gets none either: measured on
+    /// 2.1.258 against a real `EnterWorktree` call, the stream-json wire
+    /// carries no `relocated` frame and `system/init` is not re-emitted with
+    /// the new `cwd`. Note the narrow scope: `init` IS re-emitted on a
+    /// mid-session `/model` switch, so "it is emitted once" would be false —
+    /// what was measured is that a RELOCATION does not re-emit it.
+    ///
+    /// Always the fallback, never the primary lookup: one directory listing
+    /// plus a `fileExists` per entry and, on a hit, a stat — 193 folders and
+    /// ~5 ms here, against at most two stats for the encoded path (strict and
+    /// legacy). The `fileExists` is not redundant with the stat and has to come
+    /// first: `attributesOfItem` SUCCEEDS on a dangling symlink where
+    /// `fileExists` returns false (measured), so the stat alone would return a
+    /// path `FileHandle` cannot open — resolvable, and therefore never reaching
+    /// the reconcile's bulk-clear escape hatch, which is the same stuck
+    /// hourglass the tiebreak below exists to prevent.
+    ///
+    /// **The scan does not stop at the first hit, because one id can sit in
+    /// two folders and `contentsOfDirectory` has no defined order.** Measured
+    /// on this machine: of 1,860 transcripts across those 193 folders, one id
+    /// exists twice — a 110-byte title-only stub beside the real 13.5 KB
+    /// transcript. First-hit-wins would pick either, differently between
+    /// calls, and picking the stub is not a cosmetic loss: the background
+    /// reconcile would scan a file whose completion markers never arrive, so
+    /// the hourglass sticks forever WITH a resolvable path, never reaching
+    /// the bulk-clear escape hatch that exists for the unresolvable case.
+    /// The most recently MODIFIED copy wins, the same shape as the peer-name
+    /// store's newest-`startedAt` rule. It is a heuristic and weaker than that
+    /// one: `startedAt` is written once, while an mtime moves on any later
+    /// append, so a stale copy that receives a late record after the live
+    /// session goes idle would win. On the real duplicate measured here it does
+    /// pick the live transcript (stub 17:27, real 17:49).
+    static func scanForTranscript(sessionId: String) -> String? {
+        guard !sessionId.isEmpty else { return nil }
+        let fm = FileManager.default
+        guard let folders = try? fm.contentsOfDirectory(atPath: claudeDir.path) else { return nil }
+        var best: (path: String, modified: Date)?
+        for folder in folders {
+            let path = claudeDir
+                .appendingPathComponent(folder)
+                .appendingPathComponent("\(sessionId).jsonl").path
+            guard fm.fileExists(atPath: path) else { continue }
+            // A file whose mtime cannot be read still counts as a hit —
+            // `.distantPast` loses every tiebreak but beats returning nil.
+            // Stat the RESOLVED path: `fileExists` follows a symlink but
+            // `attributesOfItem` does not (which is why it succeeds on a
+            // dangling one), so a symlinked transcript would otherwise be
+            // ranked by the link's own mtime — frozen while the target grows,
+            // losing every tiebreak to a stale real copy.
+            let statPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+            let modified = (try? fm.attributesOfItem(atPath: statPath))?[.modificationDate] as? Date
+                ?? .distantPast
+            // The path is a second key, not decoration: two mtimes CAN be
+            // equal (copies written in the same second, or two unreadable ones
+            // both defaulting), and without it those fall back to
+            // `contentsOfDirectory` order — the nondeterminism this whole
+            // tiebreak exists to remove.
+            if best == nil || (modified, path) > (best!.modified, best!.path) {
+                best = (path, modified)
+            }
+        }
+        return best?.path
     }
 
     /// Decode encoded project directory name back to path.
@@ -436,7 +532,11 @@ enum ClaudeSessionHistory {
     }
 
     /// Count user + assistant messages in a session transcript file.
-    static func countMessages(sessionId: String, directory: URL) -> Int {
+    /// `allowRelocationScan`: see `loadUserPrompts`. A remote session must
+    /// not count a local transcript that happens to share its id.
+    static func countMessages(
+        sessionId: String, directory: URL, allowRelocationScan: Bool = true
+    ) -> Int {
         let fm = FileManager.default
         var filePath: String?
         for encoded in encodedFolderCandidates(for: directory.path) {
@@ -448,7 +548,11 @@ enum ClaudeSessionHistory {
                 break
             }
         }
-        guard let filePath, let handle = FileHandle(forReadingAtPath: filePath) else { return 0 }
+        // Relocation fallback — see `scanForTranscript`.
+        // Without it a relocated session's status bar reports 0 messages.
+        let resolved = filePath
+            ?? (allowRelocationScan ? scanForTranscript(sessionId: sessionId) : nil)
+        guard let filePath = resolved, let handle = FileHandle(forReadingAtPath: filePath) else { return 0 }
         defer { try? handle.close() }
 
         var count = 0
@@ -468,7 +572,16 @@ enum ClaudeSessionHistory {
     /// context on resume. Skips meta records, slash-command wrappers, and
     /// tool-result-only user lines. Callers cap the result (see
     /// `ShimProcess.trimmedPromptHistory`).
-    static func loadUserPrompts(sessionId: String, directory: URL) -> [String] {
+    /// `allowRelocationScan` is the caller's answer to "is this session's
+    /// transcript on THIS machine at all". An SSH session's is not, so the
+    /// scan is guaranteed to miss — and worse than wasted: a teleported
+    /// session, or one that used to run locally, leaves a local transcript
+    /// under the SAME id, and the scan would seed a remote session's titles
+    /// from it. `ShimProcess` passes `remoteHost == nil`, the same gate its
+    /// neighbouring lookups already carry.
+    static func loadUserPrompts(
+        sessionId: String, directory: URL, allowRelocationScan: Bool = true
+    ) -> [String] {
         let fm = FileManager.default
         for encoded in encodedFolderCandidates(for: directory.path) {
             let candidate = claudeDir
@@ -478,7 +591,14 @@ enum ClaudeSessionHistory {
                 return loadUserPrompts(atPath: candidate)
             }
         }
-        return []
+        // Same relocation fallback the other lookups take — see
+        // `scanForTranscript`. This one is the title generator's only seed, so
+        // without it a session that entered a worktree names itself from an
+        // empty history, which is the vacuous-title failure the title-
+        // generation learnings describe.
+        guard allowRelocationScan,
+              let moved = scanForTranscript(sessionId: sessionId) else { return [] }
+        return loadUserPrompts(atPath: moved)
     }
 
     /// Bounded read: session JSONLs grow to tens of MB and this runs in

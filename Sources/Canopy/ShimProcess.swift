@@ -321,8 +321,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// the next pass re-reads it, bounded by that line's length.
     ///
     /// The file read is off-main. What runs ON main per tick is
-    /// `sessionJSONLPath()` (one `fileExists`, two if the strict encoded
-    /// folder misses and the legacy one is tried) and then, in
+    /// `sessionJSONLPath()` — one `fileExists` on the remembered path once it
+    /// has resolved, but a full `scanForTranscript` (a directory listing plus
+    /// a stat per project folder) on every tick while it has NOT, because only
+    /// hits are remembered — and then, in
     /// `applyBgReconcile`, one `jsonlTailHasCompletion` substring search over
     /// the whole scanned region PER PENDING ID. That search is the dominant
     /// cost, and on the first pass it runs over the megabyte above.
@@ -1056,7 +1058,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // server") is the only input and produces junk titles.
             self.promptHistory = Self.trimmedPromptHistory(
                 ClaudeSessionHistory.loadUserPrompts(
-                    sessionId: resumeSessionId, directory: workingDirectory
+                    sessionId: resumeSessionId, directory: workingDirectory,
+                    allowRelocationScan: remoteHost == nil
                 )
             )
         }
@@ -1066,9 +1069,34 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
         statusBarData?.remoteHost = remoteHost
         let dir = workingDirectory
+        // Same relocation follow as the per-turn refresh, for the session that
+        // arrives already moved rather than moving while Canopy watches: a
+        // launch-restore snapshot stores the session's `origin.path`, which is
+        // the directory it was SPAWNED in, so a session that entered a
+        // worktree before the last quit comes back pointing at the root.
+        //
+        // Both the lookup and the read run off-main here; at the per-turn site
+        // only the lookup is on the main actor, and it is cheap there ONCE the
+        // path has resolved — before that, and for the whole life of a session
+        // whose file never appears, it is this same full scan every turn,
+        // because only hits are remembered. Here there is nothing to reuse yet,
+        // so an on-main lookup would be `jsonlPath`'s full scan fallback at
+        // every spawn — a brand-new session has no transcript, so the encoded
+        // candidates always miss and the scan always runs. Note this is the only
+        // lookup in this initializer that was moved: `Self.jsonlPath` for the
+        // historic-tool-use-id snapshot, `loadUserPrompts` and `countMessages`
+        // are all still synchronous on main and all three now reach the same
+        // scan, so a brand-new session pays it three times on main (~5 ms each
+        // here). Moving this one off removes a fourth; it does not make the
+        // other three cheap.
+        let sid = resumeSessionId
+        let isLocal = remoteHost == nil
         nonisolated(unsafe) let barData = statusBarData
         DispatchQueue.global(qos: .utility).async {
-            let vcsInfo = Self.detectVCSInfo(at: dir)
+            let effective = Self.effectiveVCSDirectory(
+                sessionId: sid, isLocal: isLocal, workingDirectory: dir
+            )
+            let vcsInfo = Self.detectVCSInfo(at: effective)
             DispatchQueue.main.async {
                 // Assign on the nil branch too. Returning early instead leaves
                 // the previous value standing, so a session that starts on a
@@ -1092,7 +1120,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         UserDefaults.standard.removeObject(forKey: "statusBar.maxOutputTokens.\(workingDirectory.path)")
         if let sessionId = resumeSessionId {
             statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
-                sessionId: sessionId, directory: workingDirectory
+                sessionId: sessionId, directory: workingDirectory,
+                allowRelocationScan: remoteHost == nil
             )
             // Snapshot every historic `toolu_…` id in the existing JSONL so
             // `detectBackgroundTaskLaunch` can skip CLI replays of already-
@@ -3225,15 +3254,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             guard trigger.allowsBulkClear else {
                 // Nothing to scan and nothing this pass is allowed to assume.
                 // Deliberately not disarming the timer: the path can start
-                // resolving later in a session's life (it needs the session
-                // id, which arrives after launch). What a tick that keeps
+                // resolving later in a session's life. What a tick that keeps
                 // landing here costs depends on WHY the path is nil: on an
                 // SSH remote, nothing at all — `sessionJSONLPath()` returns
                 // at its `remoteHost` guard before touching the filesystem —
                 // though the tick then never stops, because that guard can
-                // never start passing. Locally it is the `fileExists` probe
-                // described on `bgIdleBackstopInterval`, and that case ends
-                // once the session id resolves.
+                // never start passing. Locally it is the unresolved-path cost
+                // described on `bgIdleBackstopInterval` — a full
+                // `scanForTranscript` per tick, not a stat, because only hits
+                // are remembered — and that case ends when the FILE appears,
+                // not when the id does: a brand-new session's placeholder
+                // resumeId is non-empty from spawn, so those are different
+                // moments.
                 logger.debug("[bg] idle backstop skipped (no JSONL access)")
                 return
             }
@@ -3388,14 +3420,89 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func sessionJSONLPath() -> String? {
         guard remoteHost == nil else { return nil }
         guard let sid = activeSessionId ?? resumeSessionId, !sid.isEmpty else { return nil }
-        return Self.jsonlPath(sessionId: sid, workingDirectory: workingDirectory)
+        // A hit is remembered so the 15 s reconcile tick keeps paying one
+        // `fileExists` rather than `jsonlPath`'s scan fallback. The existence
+        // check is what makes the cache self-invalidating: a relocation moves
+        // the file out from under this path, the check fails, and the next
+        // resolve finds it in its new folder. Keyed by session id because a
+        // `/resume` can mint a new one mid-process, and the old id's path
+        // would then be a live file for a different conversation.
+        let decision = ResolvedJSONLCache.decide(
+            cached: resolvedJSONL,
+            sessionId: sid,
+            exists: FileManager.default.fileExists(atPath:)
+        )
+        if case .reuse(let path) = decision { return path }
+        let found = Self.jsonlPath(sessionId: sid, workingDirectory: workingDirectory)
+        resolvedJSONL = found.map { (sid, $0) }
+        return found
     }
+
+    /// The cache decision behind `sessionJSONLPath()`, split out so the probe
+    /// can pin it — it needs a live shim otherwise, and it is the one piece of
+    /// this feature whose failure is the feature's own motivating bug coming
+    /// back. Dropping the existence check leaves the reconcile scanning a path
+    /// the relocation moved away, FOR THE LIFE OF THE PROCESS: a resolvable
+    /// but dead path never reaches the wake-path bulk clear that exists for
+    /// the unresolvable case, so the hourglass sticks permanently. Dropping
+    /// the id check hands the reconcile a live file belonging to a different
+    /// conversation after a `/resume` mints a new id.
+    ///
+    /// Same shape as `RecapGate` / `KeepAliveGate`: a pure decision with the
+    /// filesystem injected, because both failures above are silent and
+    /// neither is reachable from an assertion while the logic lives inline.
+    enum ResolvedJSONLCache {
+        enum Decision: Equatable {
+            /// The remembered path is still good; skip the lookup.
+            case reuse(String)
+            /// Nothing usable remembered — resolve, then remember the hit.
+            case resolve
+        }
+
+        static func decide(
+            cached: (sessionId: String, path: String)?,
+            sessionId: String,
+            exists: (String) -> Bool
+        ) -> Decision {
+            guard let cached, cached.sessionId == sessionId else { return .resolve }
+            return exists(cached.path) ? .reuse(cached.path) : .resolve
+        }
+    }
+
+    /// Last successfully resolved JSONL path and the session id it belongs to.
+    /// Only ever holds a path that existed when it was written — see
+    /// `sessionJSONLPath()` for why that is the whole invalidation strategy.
+    ///
+    /// The whole FEATURE rests on relocation being a MOVE, and this cache is
+    /// only where that shows up most sharply: the old path stops existing, so
+    /// the check fails and the next resolve finds the file in its new folder.
+    /// A CLI that copied instead, or left a stub behind, would defeat the
+    /// primary lookup too — the stub under the spawn folder wins the encoded
+    /// stat and `relocatedWorkingDirectory` then answers "no move" from the
+    /// folder guard, cache or no cache. Here it would keep this entry alive
+    /// forever with nothing in THIS cache able to notice — the reconcile would
+    /// scan a file that never grows and the branch label would stay on the
+    /// spawn directory. Measured as a move on 2.1.258; recorded as the
+    /// dependency it is rather than guarded against, since nothing here can
+    /// distinguish a stub from the real file.
+    private var resolvedJSONL: (sessionId: String, path: String)?
 
     /// Static form of `sessionJSONLPath()` for callers that don't have an
     /// instance handy yet (init-time historic-id snapshot). Returns the first
     /// existing `~/.claude/projects/<encoded>/<sid>.jsonl` path across the
-    /// encoded-folder candidates, or nil when the session log isn't on disk
-    /// (brand-new session, or a folder-encoding drift the CLI doesn't cover).
+    /// encoded-folder candidates, else the one the directory scan finds, else
+    /// nil when the session log isn't on disk at all (a brand-new session
+    /// whose CLI hasn't flushed its first record yet).
+    ///
+    /// **The encoded folder is derived from `workingDirectory`, which is frozen
+    /// at spawn — and a session can MOVE**, taking its transcript with it. What
+    /// that costs *here* is the background-task reconcile losing the file it
+    /// scans for completion markers, and `init`'s `historicToolUseIds` / recap
+    /// seed losing the file it snapshots — both silently. (Title generation
+    /// and the message count break the same way but resolve independently;
+    /// they take the fallback at their own call sites.) The measurement, and
+    /// why the session id is the only usable key, are on
+    /// `ClaudeSessionHistory.scanForTranscript`.
     static func jsonlPath(sessionId: String, workingDirectory: URL) -> String? {
         guard !sessionId.isEmpty else { return nil }
         let home = NSHomeDirectory()
@@ -3406,7 +3513,160 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return path
             }
         }
-        return nil
+        // The scan is shared with `sessionFileExists`, which needs the same
+        // fallback for the same reason: see `ClaudeSessionHistory` for the
+        // measurement and for why the id is the only usable key. It stays a
+        // fallback partly because `jsonlPath` runs on the main actor here —
+        // callers that poll hold the resolved path rather than re-asking, see
+        // `sessionJSONLPath()`.
+        return ClaudeSessionHistory.scanForTranscript(sessionId: sessionId)
+    }
+
+    /// The directory the VCS refresh should actually read, composed from
+    /// `jsonlPath` above and `relocatedWorkingDirectory` below. The `init`
+    /// site calls this form; the per-turn site calls the path-taking overload
+    /// beneath it, having already resolved and cached the path. So the
+    /// composition — the `jsonlPath` → `relocatedWorkingDirectory` chain and
+    /// the fall back to the frozen directory — is pinned once instead of
+    /// duplicated in two shapes neither of which an assertion could reach.
+    ///
+    /// The remote gate below is reached only from the `init` form; the
+    /// per-turn site is gated upstream by `sessionJSONLPath()`'s own
+    /// `remoteHost` guard returning nil. It is not an optimisation. An SSH session's transcript is
+    /// on the other machine, so every local lookup is guaranteed to miss and
+    /// then pay the full scan at each spawn — and worse, if a local transcript
+    /// happens to carry the same id (a teleported session, or one that used to
+    /// run locally) this would hand `detectVCSInfo` a LOCAL directory for a
+    /// REMOTE session and the branch label would be confidently wrong.
+    ///
+    /// `lookup` and `relocated` are injected so the probe can drive the
+    /// composition without a filesystem; the call site takes the defaults.
+    static func effectiveVCSDirectory(
+        sessionId: String?,
+        isLocal: Bool,
+        workingDirectory: URL,
+        lookup: (String, URL) -> String? = { ShimProcess.jsonlPath(sessionId: $0, workingDirectory: $1) },
+        relocated: (String, URL) -> URL? = {
+            ShimProcess.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: $1)
+        }
+    ) -> URL {
+        guard isLocal, let sessionId, !sessionId.isEmpty else { return workingDirectory }
+        return effectiveVCSDirectory(
+            jsonlPath: lookup(sessionId, workingDirectory),
+            workingDirectory: workingDirectory,
+            relocated: relocated
+        )
+    }
+
+    /// The half of the above that the per-turn site needs: it has already
+    /// resolved and cached the path on the main actor, so it must not re-run
+    /// the lookup. Taking the path rather than a session id is what keeps that
+    /// site from passing a placeholder id to satisfy a signature.
+    static func effectiveVCSDirectory(
+        jsonlPath: String?,
+        workingDirectory: URL,
+        relocated: (String, URL) -> URL? = {
+            ShimProcess.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: $1)
+        }
+    ) -> URL {
+        guard let jsonlPath else { return workingDirectory }
+        return relocated(jsonlPath, workingDirectory) ?? workingDirectory
+    }
+
+    /// The directory a session has MOVED to since spawn, or nil when it is
+    /// still where `workingDirectory` says. See
+    /// `ClaudeSessionHistory.scanForTranscript` for what moves a session and
+    /// why nothing on the wire reports it.
+    ///
+    /// The cheap half is the guard: a relocated transcript lives under a
+    /// folder that is not one of `workingDirectory`'s encodings, so a string
+    /// comparison answers "did it move?" without reading the file. Only after
+    /// that does this pay for `ClaudeSessionHistory.cwd(atPath:)`, which
+    /// returns the latest `relocated` record's `relocatedCwd`, else the header
+    /// `cwd` — which is why the equality guard below is not redundant.
+    ///
+    /// So a session that never moves costs one folder-name comparison per
+    /// turn. **A session that HAS moved pays `extractMetadata`'s head read
+    /// plus a 32 KB tail on every turn for the rest of its life** — up to
+    /// `metadataHeadSize` and, on escalation, `metadataMaxScanSize`; less than
+    /// that only on a transcript smaller than the window, which the measured
+    /// population is emphatically not (10–46 MB, see below) — off the main
+    /// actor. That is the common case for this feature, not an edge,
+    /// and it is uncached: the answer is re-derived per turn because a session
+    /// can move again.
+    ///
+    /// **The file's own answer is reconciled against the folder, not trusted
+    /// over it.** `cwd(atPath:)` reads a bounded window, so a `relocated`
+    /// record that has scrolled past the 32 KB tail leaves it reporting the
+    /// SPAWN directory — and the header `cwd` is never rewritten, so the
+    /// transcript of a long-moved session says it is still at the root.
+    /// Measured across the four real relocated transcripts on this machine
+    /// (10–46 MB, 115–348 `relocated` records each): the last such record sits
+    /// within the tail for only 83–91% of record positions, so roughly one
+    /// turn in ten would report "no move" and flick the branch label back to
+    /// the root. That last step is inferred from the measurement, not watched
+    /// on a device. `ClaudeSessionHistory.resolveProjectPath`
+    /// already owns exactly this tension and prefers the decoded folder when
+    /// it resolves on disk. **That recovery is bounded by `decodePath`**,
+    /// which joins only a few `-`-separated tokens and cannot restore a space,
+    /// so a worktree under a path like `/Users/me/My Projects/repo` falls back
+    /// to the stale cwd and keeps the pre-fix behaviour. Known and unfixed:
+    /// widening `decodePath` changes a function with other callers. Deciding
+    /// this a second time here is the mechanism the fix removes — and what
+    /// deciding it wrongly would have produced
+    /// that. Passing a non-nil `extractedCwd` is load-bearing, but only
+    /// for one half of it: it makes that helper's final `return decoded`
+    /// unreachable, so a decoded folder name is never synthesised out of thin
+    /// air. The extracted cwd itself comes back UNCHECKED from two of the
+    /// three reachable branches — so a worktree deleted out from under a live
+    /// session still reaches `detectVCSInfo`, which answers nil for it and
+    /// blanks the pill rather than falling back to the spawn branch. Known,
+    /// unguarded, and the reason is that the guard is one more thing that can
+    /// be wrong; it is recorded here instead of asserted away.
+    ///
+    /// Symlinks are resolved on both sides because they are not hypothetical
+    /// here: `~/Documents/repos` is a symlink to `~/repos` on this machine and
+    /// BOTH spellings exist as project folders, with three real transcripts
+    /// carrying a `relocatedCwd` spelled the other way from their own folder.
+    /// Compared unresolved, those report a move on every turn — buying a full
+    /// header read and a `git`/`jj` subprocess each time for a directory that
+    /// never changed.
+    static func relocatedWorkingDirectory(jsonlPath: String, workingDirectory: URL) -> URL? {
+        let folder = URL(fileURLWithPath: jsonlPath).deletingLastPathComponent().lastPathComponent
+        // BOTH spellings, because the cheap exit has to cover the same ground
+        // the expensive comparison at the bottom does. Measured here: three of
+        // the four real relocated transcripts on this machine are stored under
+        // the `~/repos` encoding while their own cwd says `~/Documents/repos`,
+        // which is a symlink to it. Comparing only the raw spelling never
+        // short-circuits for a session opened by the other name, so it pays a
+        // full `extractMetadata` read plus `decodePath`'s filesystem walk every
+        // turn — forever, on a session that never moved — and only the final
+        // resolved comparison catches it. The answer was right; the documented
+        // "one folder-name comparison per turn" was not.
+        let resolvedWorkingDirectory = workingDirectory.resolvingSymlinksInPath().path
+        var candidates = ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.path)
+        if resolvedWorkingDirectory != workingDirectory.path {
+            candidates += ClaudeSessionHistory.encodedFolderCandidates(for: resolvedWorkingDirectory)
+        }
+        guard !candidates.contains(folder) else { return nil }
+        guard let cwd = ClaudeSessionHistory.cwd(atPath: jsonlPath), !cwd.isEmpty else { return nil }
+        let resolved = ClaudeSessionHistory.resolveProjectPath(
+            extractedCwd: cwd, projectEncoded: folder
+        )
+        let moved = URL(fileURLWithPath: resolved).standardizedFileURL.resolvingSymlinksInPath()
+        let frozen = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        // Compare the PATH STRINGS, not the URLs. `standardizedFileURL` marks
+        // an existing directory with a trailing slash while
+        // `resolvingSymlinksInPath()` on a path that went through a symlink
+        // does not, so the two sides disagree on the marker whenever exactly
+        // one of them was spelled through a link — and `URL` equality is over
+        // the whole absoluteString, not the path. Non-symlinked spellings do
+        // compare equal either way, which is precisely why nothing caught this
+        // in the first round: every fixture then was built from paths that do
+        // not exist. The probe's symlink assertion is built from real
+        // directories and went red immediately.
+        guard moved.path != frozen.path else { return nil }
+        return moved
     }
 
     /// Read the given JSONL from byte 0 up to `upToOffset` (or EOF, whichever
@@ -4411,9 +4671,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             // Refresh VCS branch (user may have switched branches during session)
             // Dispatch to background to avoid blocking main thread with subprocess calls
+            //
+            // The branch is read from where the session IS, not from where it
+            // started: `EnterWorktree` moves the CLI's cwd mid-session, and
+            // `workingDirectory` is `let`. Reading the frozen directory left
+            // the sidebar and pane header naming the branch the session had
+            // just left — on exactly the workflow the branch label was added
+            // for, where the user opens a session at the repo root and then
+            // asks the agent to move into a worktree.
             let dir = workingDirectory
+            // The lookup is already resolved and cached here, so this site
+            // injects it rather than re-running `jsonlPath` off-main.
+            let logPath = sessionJSONLPath()
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                let vcsInfo = Self.detectVCSInfo(at: dir)
+                let effective = Self.effectiveVCSDirectory(
+                    jsonlPath: logPath, workingDirectory: dir
+                )
+                let vcsInfo = Self.detectVCSInfo(at: effective)
                 DispatchQueue.main.async {
                     // Assign on the nil branch too — see the init-time refresh
                     // for why an early return here would strand a branch name
