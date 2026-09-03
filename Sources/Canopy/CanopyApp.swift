@@ -793,6 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Quit, and only our own files — see `WebViewContainer.purgeOwnEntryFiles`.
         WebViewContainer.purgeOwnEntryFiles()
         macroPad?.shutdown()
+        rosterPublisher?.stop()
         if let monitor = cmdWMonitor {
             NSEvent.removeMonitor(monitor)
             cmdWMonitor = nil

@@ -6,9 +6,18 @@ import os.log
 /// Publishes this Mac's panes to the relay whenever they change.
 ///
 /// The tracking shape is `MacroPadController`'s: one `withObservationTracking`
-/// pass that reads everything the snapshot needs and re-arms itself. That
-/// controller is the precedent for turning `SessionActivity` into an output,
-/// and a second shape here would be a second thing to keep correct.
+/// pass that does the real work — decide, connect if needed, compose the
+/// snapshot, send — and re-arms itself on the next change. That is
+/// `MacroPadController.refresh()`'s own subtlety, copied deliberately:
+/// *every* property read inside the tracked closure is what re-arms the
+/// observation, including `settings.rosterEnabled` and
+/// `settings.rosterEndpoint` (both read from `publish()`), which is why
+/// flipping the toggle or editing the endpoint in Settings wakes this on its
+/// own, with no separate observer. An earlier revision tracked a discarded
+/// `snapshot()` and called `publish()` only from `onChange` — that read
+/// pane data but never the settings gate, so the toggle did nothing until
+/// some unrelated pane mutation happened to fire `onChange` afterwards, and
+/// `start()` armed tracking without ever publishing once.
 ///
 /// A snapshot is always FULL. The Durable Object replaces rather than merges,
 /// so a dropped update cannot leave a closed pane on the phone forever.
@@ -30,7 +39,6 @@ final class RosterPublisher {
     func start() {
         guard !running else { return }
         running = true
-        connectIfConfigured()
         observe()
     }
 
@@ -38,15 +46,16 @@ final class RosterPublisher {
         running = false
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+        stateSince.removeAll()
+        lastStates.removeAll()
     }
 
     private func observe() {
         withObservationTracking {
-            _ = snapshot()
+            publish()
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self, self.running else { return }
-                self.publish()
                 self.observe()
             }
         }
@@ -113,8 +122,10 @@ final class RosterPublisher {
         let indexes = RosterSnapshot.paneIndexes(in: store.panes)
         let now = Int(Date().timeIntervalSince1970)
         var rows: [RosterSnapshot.Pane] = []
+        var liveIds: Set<OpenSession.ID> = []
         for session in store.openSessions {
             guard let paneIndex = indexes[session.id] else { continue }
+            liveIds.insert(session.id)
             let activity = SessionActivity.of(
                 session, isUnread: store.unreadSessionIds.contains(session.id))
             let wire = RosterSnapshot.wireState(for: activity)
@@ -133,6 +144,13 @@ final class RosterPublisher {
                 model: session.statusBar.model,
                 messageCount: session.statusBar.messageCount))
         }
+        // `OpenSession.ID` is a fresh UUID minted per process and never
+        // reused, so without this both dictionaries grow for the life of a
+        // long-running Canopy — one stranded entry per session that ever
+        // closed. Every emitted row's id is in `liveIds`, so this only ever
+        // drops sessions that are no longer part of the snapshot.
+        stateSince = stateSince.filter { liveIds.contains($0.key) }
+        lastStates = lastStates.filter { liveIds.contains($0.key) }
         let limits = SharedRateLimitData.shared
         return RosterSnapshot(
             machineId: machineId,
@@ -146,7 +164,23 @@ final class RosterPublisher {
     }
 
     private func publish() {
-        guard settings.rosterEnabled, let snapshot = snapshot() else { return }
+        // Read unconditionally, ahead of every other branch below, so this
+        // property always participates in re-arming the observation — the
+        // toggle must be able to wake this on its own, off or on.
+        guard settings.rosterEnabled else {
+            // The toggle just went off (or was already off and something
+            // else woke this pass). Either way, an open socket now
+            // represents a decision the user reversed — close it rather
+            // than merely declining to send into it.
+            if task != nil {
+                task?.cancel(with: .goingAway, reason: nil)
+                task = nil
+                stateSince.removeAll()
+                lastStates.removeAll()
+            }
+            return
+        }
+        guard let snapshot = snapshot() else { return }
         if task == nil { connectIfConfigured() }
         guard let task,
               let data = try? JSONEncoder().encode(snapshot),
