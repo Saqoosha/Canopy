@@ -109,6 +109,23 @@ final class CanopySettings {
         didSet { save() }
     }
 
+    /// Shown in the phone's roster and, later, in notification text. Empty
+    /// means "use the Mac's own name" — see `MachineIdentity`.
+    var machineDisplayName: String = "" {
+        didSet { save() }
+    }
+
+    /// Off by default. Publishing dials out to a third-party endpoint, so it
+    /// is opt-in the way `allowDangerouslySkipPermissions` is.
+    var rosterEnabled: Bool = false {
+        didSet { save() }
+    }
+
+    /// The relay's base URL, e.g. `https://canopy-mobile-relay.example.workers.dev`.
+    var rosterEndpoint: String = "" {
+        didSet { save() }
+    }
+
     let filePath: URL
 
     /// Suppresses `save()` while `load()` is assigning. Every property's
@@ -195,6 +212,15 @@ final class CanopySettings {
             // don't get a surprise "acceptEdits" default for recents.
             defaultPermissionMode = migrated
         }
+        if let name = dict["canopy.machineDisplayName"] as? String {
+            machineDisplayName = name
+        }
+        if let rosterOn = dict["canopy.rosterEnabled"] as? Bool {
+            rosterEnabled = rosterOn
+        }
+        if let endpoint = dict["canopy.rosterEndpoint"] as? String {
+            rosterEndpoint = endpoint
+        }
         // Re-clamp on load: if a stale settings.json paired bypass with a
         // disabled opt-in (manual edit, downgrade, etc.) the launcher
         // Picker would silently drop bypass while the recents default
@@ -227,6 +253,9 @@ final class CanopySettings {
         dict["canopy.macroPadReversed"] = macroPadReversed
         dict["canopy.macroPadBrightness"] = macroPadBrightness
         dict["canopy.defaultPermissionMode"] = defaultPermissionMode.rawValue
+        dict["canopy.machineDisplayName"] = machineDisplayName
+        dict["canopy.rosterEnabled"] = rosterEnabled
+        dict["canopy.rosterEndpoint"] = rosterEndpoint
         writeDict(dict)
     }
 

@@ -1570,6 +1570,28 @@ enum SidebarLogicProbe {
                (try? JSONDecoder().decode(
                    RosterSnapshot.self, from: Data(rosterJSON.utf8)))?.panes.first?.state == "asking")
 
+        // The display name falls back rather than going blank: an empty Settings
+        // field must not publish an unnamed Mac to a roster whose whole job is
+        // telling two Macs apart.
+        record("machine: a set display name wins",
+               MachineIdentity.resolvedDisplayName(setting: "Studio", fallback: "host") == "Studio")
+        record("machine: an empty setting falls back",
+               MachineIdentity.resolvedDisplayName(setting: "", fallback: "host") == "host")
+        record("machine: a whitespace-only setting falls back",
+               MachineIdentity.resolvedDisplayName(setting: "   ", fallback: "host") == "host")
+        record("machine: a set name is trimmed",
+               MachineIdentity.resolvedDisplayName(setting: "  Studio  ", fallback: "host") == "Studio")
+        // The id is what getByName keys on. A blank one would collide every Mac
+        // into one Durable Object.
+        //
+        // If present, it is a 36-character UUID. Presence itself is NOT asserted:
+        // CI runs on a GitHub `macos-26` VM and whether that exposes
+        // IOPlatformExpertDevice was never measured, so asserting presence would
+        // turn CI red on a property of the runner rather than of the code. The nil
+        // case is handled by the publisher's own guard, which is where it matters.
+        record("machine: a stable id, if present, is a 36-character UUID",
+               MachineIdentity.stableId().map { $0.count == 36 } ?? true)
+
         // Title-generation context: prompt extraction from session JSONL
         // (resume seeding) and first-prompt pinning (anti-drift). Noise
         // fixtures mirror the real records the CLI writes — a slash-command

@@ -169,6 +169,22 @@ private struct GeneralSettingsTab: View {
                 SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Local USB connects automatically when the pad is plugged in; Remote bridge reaches a pad on another Mac running scripts/macropad-bridge.sh. A small indicator at the bottom of the sidebar shows the link state, and clicking it switches source without coming here. Turn on \"Pad is rotated 180°\" when the pad is mounted upside-down relative to its printed key order, so the leftmost pane lights and answers on the key that now looks leftmost.")
             }
             .onAppear { hostDraft = settings.macroPadRemoteHost }
+
+            Section("Mobile") {
+                Toggle("Publish this Mac's panes", isOn: $settings.rosterEnabled)
+                TextField("Relay URL", text: $settings.rosterEndpoint)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(!settings.rosterEnabled)
+                TextField("This Mac's name", text: $settings.machineDisplayName,
+                          prompt: Text(MachineIdentity.defaultDisplayName()))
+                    .textFieldStyle(.roundedBorder)
+                SecureField("Relay secret", text: $relaySecret)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { MachineIdentity.storeRelaySecret(relaySecret) }
+                Text("Shown on the phone. Leave empty to use the Mac's own name. The secret is kept in the Keychain, not in settings.json — that file is plaintext and is shared with the installed Release build.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }
@@ -176,6 +192,7 @@ private struct GeneralSettingsTab: View {
     @State private var hostDraft: String = ""
     @State private var hostError: String?
     @FocusState private var hostFieldFocused: Bool
+    @State private var relaySecret: String = ""
 
     /// Validates at the boundary so nothing downstream ever re-parses. An
     /// unparseable value is refused rather than stored — the settings file is
