@@ -55,6 +55,13 @@ enum SidebarRow: Identifiable, Hashable {
         }
     }
 
+    /// The project a row belongs to — **the filter and grouping key, never the
+    /// rendered subtitle**. `SidebarFilter.apply(to:)` compares it,
+    /// `SidebarFilter.projects(in:)` builds the picker's options from it, and
+    /// `Sidebar`'s `.project` grouping buckets on it, so anything that varies
+    /// within one repository must stay out: appending the branch here splits
+    /// one project into a bucket and a picker entry per branch. Use
+    /// `displayProject` for anything the user reads.
     var project: String {
         switch self {
         case .open(let s):
@@ -72,6 +79,17 @@ enum SidebarRow: Identifiable, Hashable {
             // doesn't reserve space for a second line it has nothing to say on.
             return ""
         }
+    }
+
+    /// What the row's subtitle actually shows. Identical to `project` except
+    /// for an open session, which appends the branch its VCS reports so two
+    /// panes on two branches of one repo are distinguishable. Deliberately a
+    /// second property rather than a change to `project`: the two answers
+    /// serve opposite needs — grouping wants the coarsest label that still
+    /// names the repo, the subtitle wants the finest one that names the work.
+    var displayProject: String {
+        if case .open(let s) = self { return s.projectLabel }
+        return project
     }
 
     /// Drives the closed-block sort order only. The open block ignores

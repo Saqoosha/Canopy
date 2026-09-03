@@ -1068,10 +1068,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let dir = workingDirectory
         nonisolated(unsafe) let barData = statusBarData
         DispatchQueue.global(qos: .utility).async {
-            guard let vcsInfo = Self.detectVCSInfo(at: dir) else { return }
+            let vcsInfo = Self.detectVCSInfo(at: dir)
             DispatchQueue.main.async {
-                barData?.vcsType = vcsInfo.type
-                barData?.gitBranch = vcsInfo.branch
+                // Assign on the nil branch too. Returning early instead leaves
+                // the previous value standing, so a session that starts on a
+                // branch and later detaches goes on naming the branch it is no
+                // longer on — the same false claim rejecting the literal
+                // "HEAD" was added to remove, only now invisible.
+                barData?.vcsType = vcsInfo?.type ?? .unknown
+                barData?.gitBranch = vcsInfo?.branch ?? ""
             }
         }
         // Restore cached context limits for immediate display on session resume
@@ -4408,10 +4413,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Dispatch to background to avoid blocking main thread with subprocess calls
             let dir = workingDirectory
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                guard let vcsInfo = Self.detectVCSInfo(at: dir) else { return }
+                let vcsInfo = Self.detectVCSInfo(at: dir)
                 DispatchQueue.main.async {
-                    self?.statusBarData?.vcsType = vcsInfo.type
-                    self?.statusBarData?.gitBranch = vcsInfo.branch
+                    // Assign on the nil branch too — see the init-time refresh
+                    // for why an early return here would strand a branch name
+                    // the session has since left.
+                    self?.statusBarData?.vcsType = vcsInfo?.type ?? .unknown
+                    self?.statusBarData?.gitBranch = vcsInfo?.branch ?? ""
                 }
             }
             // Refresh rate limits after each turn
@@ -4735,10 +4743,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return (.jj, "")
         }
 
-        // Fall back to git
+        // Fall back to git. `--abbrev-ref HEAD` answers the literal string
+        // "HEAD" on a detached checkout rather than failing, so a bare
+        // non-empty check rendered a `🌿 HEAD` pill that names nothing —
+        // measured in this repo, which is jj-colocated and therefore detached
+        // in git terms. A git worktree of a jj repo reaches this branch for
+        // real: the linked worktree has no `.jj/` of its own, so the jj probe
+        // above misses and every session in it drew that pill. A detached
+        // checkout genuinely has no branch, so report none and let the pill
+        // hide rather than showing a word the user cannot act on.
         if let branch = runCommand("/usr/bin/git", args: ["rev-parse", "--abbrev-ref", "HEAD"], at: directory) {
             let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return (.git, trimmed) }
+            if !trimmed.isEmpty, trimmed != "HEAD" { return (.git, trimmed) }
         }
 
         return nil

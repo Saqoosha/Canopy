@@ -349,6 +349,17 @@ final class PeerNameStore {
 /// `/rename` breaks the one thing the sidebar placement buys, which is a
 /// column the eye can run straight down.
 struct PeerNameChip: View {
+    /// Gap between the chip's frame and its text. A caller that stacks the chip
+    /// in a COLUMN with plain labels offsets its leading edge by this, so the
+    /// border hangs into the margin and the text keeps the column — the
+    /// optical alignment a border needs, since the eye follows the text and not
+    /// the box. Read it rather than spelling `4` at the call site: the two have
+    /// to move together, and nothing would fail if they drifted.
+    ///
+    /// A caller that puts the chip on the SAME line as other text (the pane
+    /// header) must not apply it — there is no column there to keep.
+    static let textInset: CGFloat = 4
+
     let name: String
 
     var body: some View {
@@ -357,7 +368,7 @@ struct PeerNameChip: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.tail)
-            .padding(.horizontal, 4)
+            .padding(.horizontal, Self.textInset)
             .padding(.vertical, 0.5)
             .overlay(
                 RoundedRectangle(cornerRadius: 4)

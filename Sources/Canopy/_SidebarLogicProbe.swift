@@ -1245,6 +1245,77 @@ enum SidebarLogicProbe {
                    for: GitWorktree.worktreesRoot.appendingPathComponent("orphan-branch"))
                    == "orphan-branch")
 
+        // VCS-reported branch wins over the folder-name guess when present.
+        // Fixture folder "feature-foo" vs branch "feature/foo" — the slash
+        // flatten that `git worktree add -b` does — so a match is not
+        // accidental equality of the two strings.
+        let managedFeatureFoo = GitWorktree.worktreesRoot
+            .appendingPathComponent("Canopy/feature-foo")
+        record("projectDisplayName: no branch keeps folder guess",
+               GitWorktree.projectDisplayName(for: managedFeatureFoo) == "Canopy · feature-foo")
+        record("projectDisplayName: non-empty branch wins over folder",
+               GitWorktree.projectDisplayName(for: managedFeatureFoo, branch: "feature/foo")
+                   == "Canopy · feature/foo"
+                   && GitWorktree.projectDisplayName(for: managedFeatureFoo, branch: "feature/foo")
+                       != "Canopy · feature-foo")
+        record("projectDisplayName: empty-string branch falls back to guess",
+               GitWorktree.projectDisplayName(for: managedFeatureFoo, branch: "")
+                   == "Canopy · feature-foo")
+        record("projectDisplayName: branch on plain repo → folder · branch",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/Canopy"), branch: "main")
+                   == "Canopy · main")
+        record("repoName: managed worktree → repo, not folder",
+               GitWorktree.repoName(for: managedFeatureFoo) == "Canopy")
+        record("repoName: plain dir → folder name",
+               GitWorktree.repoName(for: URL(fileURLWithPath: "/repos/Canopy")) == "Canopy")
+
+        // jj reports "<bookmark> (modified)"; only the bookmark belongs in a
+        // row subtitle. Found on screen, not by the probe — the whole suite was
+        // green while the sidebar read "Canopy · main (modified)".
+        record("branchNameOnly: strips jj's (modified)",
+               GitWorktree.branchNameOnly("main (modified)") == "main")
+        record("branchNameOnly: strips jj's (empty)",
+               GitWorktree.branchNameOnly("main (empty)") == "main")
+        record("branchNameOnly: a plain branch is untouched",
+               GitWorktree.branchNameOnly("feature/foo") == "feature/foo")
+        record("branchNameOnly: parens that are not the suffix survive",
+               GitWorktree.branchNameOnly("fix (wip) thing") == "fix (wip) thing")
+        record("projectDisplayName: a jj status suffix never reaches the label",
+               GitWorktree.projectDisplayName(
+                   for: URL(fileURLWithPath: "/repos/Canopy"), branch: "main (modified)")
+                   == "Canopy · main")
+
+        // A teleported session's `project` was chosen by the teleport — the
+        // cloud repo's "owner/name" when the local cwd was too ambiguous to
+        // name the work — so recomputing it from that same cwd throws away the
+        // label and returns the folder name it was picked to avoid.
+        record("projectLabel: a teleported session keeps its chosen label",
+               {
+                   let s = OpenSession(
+                       origin: .teleportedFrom(cloudSessionId: "cloud-1",
+                                               localPath: URL(fileURLWithPath: "/tmp/ambiguous")),
+                       resumeId: "tp", title: "t", project: "owner/name", status: .live)
+                   s.statusBar.gitBranch = "main"
+                   return s.projectLabel == "owner/name"
+               }())
+
+        // The filter and grouping key must NOT pick up the branch: appending it
+        // to `SidebarRow.project` splits one repository into a bucket and a
+        // picker entry per branch. A first revision of this feature did exactly
+        // that, and the eight project-filter assertions below caught it.
+        record("SidebarRow.project stays branch-free; displayProject carries it",
+               {
+                   let s = OpenSession(
+                       origin: .local(GitWorktree.worktreesRoot
+                           .appendingPathComponent("Canopy/feature-foo")),
+                       resumeId: "row-label", title: "t", project: "Canopy", status: .live)
+                   s.statusBar.gitBranch = "feature/foo"
+                   let row = SidebarRow.open(s)
+                   return row.project == "Canopy"
+                       && row.displayProject == "Canopy · feature/foo"
+               }())
+
         record("isManagedWorktree: managed layout → true",
                GitWorktree.isManagedWorktree(
                    GitWorktree.worktreesRoot.appendingPathComponent("Canopy/fix-foo")))

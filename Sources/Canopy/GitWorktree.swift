@@ -13,14 +13,58 @@ enum GitWorktree {
     /// Display label for a session directory. Recognized worktree layouts
     /// (managed root, `<repo>-worktrees` sibling, and in-repo
     /// `<repo>/.claude/worktrees/<branch>`) surface the repository the
-    /// worktree belongs to ("Canopy · fix-foo" — the second part is the
-    /// worktree FOLDER name, i.e. the branch with `/` flattened to `-`).
-    /// Worktrees anywhere else fall back to the plain folder name by design.
-    static func projectDisplayName(for dir: URL) -> String {
+    /// worktree belongs to ("Canopy · fix-foo").
+    ///
+    /// **`branch` is the VCS's own answer and always wins when present**, and
+    /// passing it is what makes this function stop guessing. Without it the
+    /// second component is the worktree FOLDER name, which only *usually*
+    /// equals the branch: `git worktree add -b feature/foo` flattens the `/`
+    /// to `-` in the directory name, a later `git switch` inside the worktree
+    /// moves the branch while the folder name is frozen, and a checkout that
+    /// is not one of the three recognized layouts produces no branch guess at
+    /// all. Those cases are why a live session should pass its
+    /// `StatusBarData.gitBranch`; a closed row has no process to ask, so it
+    /// keeps the guess rather than showing nothing.
+    ///
+    /// Worktrees outside the recognized layouts fall back to the plain folder
+    /// name by design.
+    static func projectDisplayName(for dir: URL, branch: String? = nil) -> String {
+        if let branch {
+            let name = branchNameOnly(branch)
+            if !name.isEmpty { return "\(repoName(for: dir)) · \(name)" }
+        }
         if let parts = worktreeParts(for: dir) {
             return "\(parts.repo) · \(parts.branch)"
         }
         return dir.standardizedFileURL.lastPathComponent
+    }
+
+    /// Strip the working-copy status `ShimProcess.detectVCSInfo` appends on the
+    /// jj path, where the value it reports is `"<bookmark> (empty)"` or
+    /// `"<bookmark> (modified)"`. That suffix belongs on the status bar's pill,
+    /// which already shows it — carried into a row subtitle it reads as part of
+    /// the branch name, duplicates what is on screen a few points below, and
+    /// changes as the user edits, so the label would flicker between two
+    /// spellings of the same branch. Measured on this repo, which is
+    /// jj-colocated: the subtitle rendered `Canopy · main (modified)`.
+    ///
+    /// Only the two literals that function can produce are stripped, and only
+    /// as a suffix, so a git branch that genuinely contains parentheses is left
+    /// alone. A jj working copy with no bookmark reports a change id instead;
+    /// that is kept, since it still names the change the pane is on.
+    static func branchNameOnly(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespaces)
+        for suffix in [" (empty)", " (modified)"] where s.hasSuffix(suffix) {
+            s = String(s.dropLast(suffix.count))
+        }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The repository a directory belongs to, with no branch component: the
+    /// owning repo for a recognized worktree layout, else the folder's own
+    /// name. Path shape only, so it stays cheap enough for a per-row render.
+    static func repoName(for dir: URL) -> String {
+        worktreeParts(for: dir)?.repo ?? dir.standardizedFileURL.lastPathComponent
     }
 
     /// True when `dir` is a Canopy-recognized worktree — the managed root
