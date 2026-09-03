@@ -1069,15 +1069,466 @@ enum SidebarLogicProbe {
         record("historic ids: multiple hits on one line",
                multiIds.count == 2)
 
-        // jsonlPath: pure static resolver. Cheap to lock the two nil
-        // branches without any filesystem setup.
+        // jsonlPath: the empty-id guard needs no filesystem setup. The second
+        // assertion no longer pins only the encoded-folder miss — since the
+        // scan fallback landed it means "neither encoding NOR any project
+        // folder holds this id", which is why the id has to be one that
+        // cannot exist rather than merely one this cwd doesn't own.
         record("jsonlPath: empty sessionId → nil",
                ShimProcess.jsonlPath(sessionId: "", workingDirectory: URL(fileURLWithPath: "/tmp/probe")) == nil)
-        record("jsonlPath: unknown cwd → nil",
+        // The id has to be minted, not typed: it is now checked against every
+        // folder on the developer's real disk, and a hand-made fixture could
+        // plausibly carry the old all-`a` literal.
+        record("jsonlPath: an id present under no project folder at all → nil",
                ShimProcess.jsonlPath(
-                   sessionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                   sessionId: UUID().uuidString,
                    workingDirectory: URL(fileURLWithPath: "/definitely/not/here-xyz")
                ) == nil)
+
+        // Relocation: `EnterWorktree` moves the CLI's cwd mid-session and the
+        // CLI moves the whole transcript with it, while `workingDirectory`
+        // stays frozen at spawn. Nothing on the wire reports it — the
+        // measurement lives on `ClaudeSessionHistory.scanForTranscript` and is
+        // deliberately not restated here, because the first draft of this
+        // comment restated it and got it wrong in the same commit that wrote
+        // it, by restating it as "`system/init` is emitted once" — which
+        // contradicts this repo's own record of the `/model` switch. The
+        // corrected claim lives on `scanForTranscript`; a fourth copy here is
+        // how the third one went wrong.
+        //
+        // **What this block does NOT pin: either CALL SITE.** The two VCS
+        // refreshes in `ShimProcess` — one in `init`, one in the `result`
+        // branch — are the whole user-visible feature, and reverting either
+        // to `detectVCSInfo(at: workingDirectory)` leaves every assertion
+        // here green, measured. Both need a live shim, so they were verified
+        // on device instead, against a planted launch-restore snapshot for a
+        // session that had already entered a worktree: the fixed build
+        // rendered `tmp-reloc-probe · worktree-reloc-check` in the pane
+        // header, the sidebar row and the status-bar pill, and the reverted
+        // one rendered `tmp-reloc-probe · main` in all three. Read the
+        // assertions below as pinning the PARTS, never the wiring.
+        //
+        // `relocatedWorkingDirectory` takes the path as a parameter and reads
+        // only the parent's NAME about the path's LOCATION (it reads the
+        // file's contents too), so a fixture folder anywhere exercises it —
+        // no writing into the real `~/.claude/projects` for any of them. (No count
+        // here on purpose: it has gone stale twice already.)
+        let relocFrozen = URL(fileURLWithPath: "/tmp/probe/reloc-root")
+        let relocEncoded = ClaudeSessionHistory.encodedFolderCandidates(for: relocFrozen.path)[0]
+        let relocMovedJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/reloc-root"}
+        {"type":"relocated","sessionId":"probe","relocatedCwd":"/tmp/probe/reloc-root/.claude/worktrees/wt"}
+        """
+        // Folder name == this cwd's own encoding: the session has NOT moved,
+        // and the guard must answer that before opening anything. The fixture
+        // deliberately CONTAINS a relocation record, so a missing guard
+        // returns the worktree instead of nil — without the record the
+        // cwd-equality guard below would yield nil anyway, and the assertion
+        // would pass with or without the guard it is here to pin.
+        if let samePath = writeProbeJSONL(relocMovedJSONL, inFolderNamed: relocEncoded) {
+            record("relocate: a transcript in this cwd's own encoded folder reports no move",
+                   ShimProcess.relocatedWorkingDirectory(
+                       jsonlPath: samePath, workingDirectory: relocFrozen
+                   ) == nil)
+        }
+        // Foreign folder: the file is now the authority on where the session is.
+        // The folder is named by the ACTUAL encoding of the relocated cwd,
+        // which is the shape a real relocation leaves behind — a literal like
+        // "some-other-encoded-folder" reaches the same answer through
+        // `resolveProjectPath`'s raw fallback instead of its agreement branch,
+        // so it asserted the right result off the wrong path. Note this still
+        // does not DISTINGUISH those branches: both return the extracted cwd.
+        let relocMovedFolder = ClaudeSessionHistory.encodedFolderCandidates(
+            for: "/tmp/probe/reloc-root/.claude/worktrees/wt"
+        )[0]
+        if let movedPath = writeProbeJSONL(relocMovedJSONL, inFolderNamed: relocMovedFolder) {
+            record("relocate: a transcript in a foreign folder yields the relocated cwd",
+                   ShimProcess.relocatedWorkingDirectory(
+                       jsonlPath: movedPath, workingDirectory: relocFrozen
+                   )?.path == "/tmp/probe/reloc-root/.claude/worktrees/wt")
+        }
+        // A foreign folder is evidence of a move, not proof of one — the two
+        // encodings are not exhaustive of every folder the CLI has ever
+        // written. When the file's own answer matches the frozen directory,
+        // that is the answer, and reporting a move here would re-run
+        // `detectVCSInfo` against the directory it already had.
+        let relocSameCwdJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/reloc-root"}
+        """
+        if let sameCwdPath = writeProbeJSONL(relocSameCwdJSONL, inFolderNamed: "another-foreign-folder") {
+            record("relocate: a foreign folder whose cwd still matches reports no move",
+                   ShimProcess.relocatedWorkingDirectory(
+                       jsonlPath: sameCwdPath, workingDirectory: relocFrozen
+                   ) == nil)
+        }
+        // No `relocated` record at all: the plain `cwd` field still decides.
+        // Described by its INPUT, because no real producer of this state has
+        // been identified — a transcript in a foreign folder whose header
+        // names a third directory, where neither the folder nor the frozen dir
+        // is that directory. It is specifically NOT the scrolled-past-the-tail
+        // relocation: a moved transcript's header is never rewritten, so it
+        // names the SPAWN directory and this branch would report no move. That
+        // case is reconciled by `resolveProjectPath` — see
+        // `relocatedWorkingDirectory`. (Genuine encoding drift is not it
+        // either: there the header and the frozen dir name the same
+        // directory, so the equality guard answers first.)
+        let relocPlainCwdJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/elsewhere"}
+        """
+        if let plainPath = writeProbeJSONL(relocPlainCwdJSONL, inFolderNamed: "third-foreign-folder") {
+            record("relocate: with no relocated record the cwd field still answers",
+                   ShimProcess.relocatedWorkingDirectory(
+                       jsonlPath: plainPath, workingDirectory: relocFrozen
+                   )?.path == "/tmp/probe/elsewhere")
+        }
+        // Unreadable file → nil, so a transient read failure leaves the label
+        // on the frozen directory rather than blanking the branch.
+        record("relocate: an unreadable transcript reports no move",
+               ShimProcess.relocatedWorkingDirectory(
+                   jsonlPath: "/tmp/canopy-probe-does-not-exist-9f3a/x.jsonl",
+                   workingDirectory: relocFrozen
+               ) == nil)
+
+        // The middle gap: the transcript sits in a foreign folder but its own
+        // cwd still names the SPAWN directory, because the `relocated` record
+        // scrolled past `extractMetadata`'s tail window and the header is
+        // never rewritten. Trusting the file here reported "no move" for
+        // roughly one turn in ten on real transcripts. The folder must name a
+        // directory that EXISTS, since that is the condition on which
+        // `resolveProjectPath` prefers it.
+        let gapReal = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CanopyProbeGap-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: gapReal, withIntermediateDirectories: true)
+        let gapFolder = ClaudeSessionHistory.encodedFolderCandidates(for: gapReal.path)[0]
+        let gapJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"/tmp/probe/reloc-root"}
+        """
+        if let gapPath = writeProbeJSONL(gapJSONL, inFolderNamed: gapFolder) {
+            record("relocate: a stale cwd loses to the folder the transcript actually lives in",
+                   ShimProcess.relocatedWorkingDirectory(
+                       jsonlPath: gapPath, workingDirectory: relocFrozen
+                   )?.path == gapReal.standardizedFileURL.resolvingSymlinksInPath().path,
+                   "folder \(gapFolder) decodes to an existing directory")
+        }
+        try? FileManager.default.removeItem(at: gapReal)
+
+        // A cwd that differs only by a symlink is the SAME directory, and
+        // saying otherwise costs a header read and a git subprocess every
+        // turn forever. Not hypothetical — `~/Documents/repos` is a symlink to
+        // `~/repos` here and both spellings exist as project folders.
+        let linkTarget = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CanopyProbeLinkTarget-\(UUID().uuidString)")
+        let linkAlias = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CanopyProbeLinkAlias-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: linkTarget, withIntermediateDirectories: true)
+        try? FileManager.default.createSymbolicLink(at: linkAlias, withDestinationURL: linkTarget)
+        let aliasJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"\(linkAlias.path)"}
+        """
+        if let aliasPath = writeProbeJSONL(aliasJSONL, inFolderNamed: "symlink-foreign-folder") {
+            record("relocate: a cwd spelled through a symlink is not a move",
+                   ShimProcess.relocatedWorkingDirectory(
+                       jsonlPath: aliasPath, workingDirectory: linkTarget
+                   ) == nil)
+        }
+        // The MIRROR of that, which is the direction the real case runs: the
+        // frozen directory is the alias spelling (it comes from
+        // `OpenSession.origin`, i.e. a directory picker or a restore snapshot)
+        // while the transcript names the target. Only the `moved` side was
+        // pinned before, so dropping the resolve from the `frozen` side left
+        // the suite green while reporting a move on every turn.
+        let targetJSONL = """
+        {"type":"user","message":{"role":"user","content":"hello"},"cwd":"\(linkTarget.path)"}
+        """
+        if let targetPath = writeProbeJSONL(targetJSONL, inFolderNamed: "symlink-mirror-folder") {
+            record("relocate: a FROZEN dir spelled through a symlink is not a move either",
+                   ShimProcess.relocatedWorkingDirectory(
+                       jsonlPath: targetPath, workingDirectory: linkAlias
+                   ) == nil)
+        }
+        try? FileManager.default.removeItem(at: linkAlias)
+        try? FileManager.default.removeItem(at: linkTarget)
+        // Every `inFolderNamed:` fixture above sits under one root, so this
+        // one call is the whole cleanup.
+        try? FileManager.default.removeItem(at: probeFolderFixtureRoot)
+
+        // The composition both VCS refreshes run. Neither call site is
+        // reachable from here — see the note at the top of this block — but
+        // everything AROUND the `detectVCSInfo` hand-off is, and it is where
+        // the remote gate lives. A local transcript carrying a remote
+        // session's id would otherwise name a local directory for a session
+        // running on another machine.
+        let vcsFrozen = URL(fileURLWithPath: "/tmp/probe/vcs-frozen")
+        let vcsMoved = URL(fileURLWithPath: "/tmp/probe/vcs-moved")
+        record("vcs dir: a remote session never leaves the frozen directory",
+               ShimProcess.effectiveVCSDirectory(
+                   sessionId: "sid", isLocal: false, workingDirectory: vcsFrozen,
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+               ) == vcsFrozen)
+        record("vcs dir: no session id yet leaves the frozen directory",
+               ShimProcess.effectiveVCSDirectory(
+                   sessionId: nil, isLocal: true, workingDirectory: vcsFrozen,
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+               ) == vcsFrozen)
+        record("vcs dir: an empty session id leaves the frozen directory",
+               ShimProcess.effectiveVCSDirectory(
+                   sessionId: "", isLocal: true, workingDirectory: vcsFrozen,
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+               ) == vcsFrozen)
+        record("vcs dir: an unresolvable transcript leaves the frozen directory",
+               ShimProcess.effectiveVCSDirectory(
+                   sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
+                   lookup: { _, _ in nil }, relocated: { _, _ in vcsMoved }
+               ) == vcsFrozen)
+        record("vcs dir: a session that did not move leaves the frozen directory",
+               ShimProcess.effectiveVCSDirectory(
+                   sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in nil }
+               ) == vcsFrozen)
+        record("vcs dir: a relocated session reads from where it moved to",
+               ShimProcess.effectiveVCSDirectory(
+                   sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+               ) == vcsMoved)
+        // The per-turn overload skips the lookup entirely, because that site
+        // has already resolved and cached the path on the main actor.
+        record("vcs dir: the path-taking form follows a move without a lookup",
+               ShimProcess.effectiveVCSDirectory(
+                   jsonlPath: "/tmp/probe/found.jsonl", workingDirectory: vcsFrozen,
+                   relocated: { _, _ in vcsMoved }
+               ) == vcsMoved)
+        record("vcs dir: the path-taking form with no path stays frozen",
+               ShimProcess.effectiveVCSDirectory(
+                   jsonlPath: nil, workingDirectory: vcsFrozen,
+                   relocated: { _, _ in vcsMoved }
+               ) == vcsFrozen)
+
+        // The resolved-path cache. Its existence check is the whole
+        // invalidation strategy and deleting it reintroduces this feature's
+        // own bug — the reconcile scanning a path the relocation moved away,
+        // permanently, because a resolvable-but-dead path never reaches the
+        // wake-path bulk clear.
+        typealias JSONLCache = ShimProcess.ResolvedJSONLCache
+        record("jsonl cache: nothing remembered → resolve",
+               JSONLCache.decide(cached: nil, sessionId: "a", exists: { _ in true }) == .resolve)
+        record("jsonl cache: a live remembered path is reused",
+               JSONLCache.decide(cached: ("a", "/p.jsonl"), sessionId: "a", exists: { _ in true })
+                   == .reuse("/p.jsonl"))
+        record("jsonl cache: a path that has moved away is re-resolved",
+               JSONLCache.decide(cached: ("a", "/p.jsonl"), sessionId: "a", exists: { _ in false })
+                   == .resolve)
+        record("jsonl cache: a different session id is never reused",
+               JSONLCache.decide(cached: ("a", "/p.jsonl"), sessionId: "b", exists: { _ in true })
+                   == .resolve)
+
+        // Legacy folder encoding: every other fixture that reaches
+        // `encodedFolderCandidates` uses paths with no `.` and no space, so `strict == legacy` and the two-candidate
+        // branch never runs. Since the scan landed, losing that branch stops
+        // being a miss and becomes a silent full directory scan on the main
+        // actor for every session in a legacy-encoded folder.
+        let legacyDir = URL(fileURLWithPath: "/tmp/probe/my.repo-\(UUID().uuidString)")
+        let legacyCandidates = ClaudeSessionHistory.encodedFolderCandidates(for: legacyDir.path)
+        record("encoding: a path with a dot yields BOTH candidates",
+               legacyCandidates.count == 2, "got \(legacyCandidates)")
+        let legacyId = UUID().uuidString
+        let legacyProjectDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects")
+            .appendingPathComponent(legacyCandidates.count == 2 ? legacyCandidates[1] : "unused")
+        try? FileManager.default.createDirectory(at: legacyProjectDir, withIntermediateDirectories: true)
+        let legacyTranscript = legacyProjectDir.appendingPathComponent("\(legacyId).jsonl")
+        try? Data("{}\n".utf8).write(to: legacyTranscript)
+        // A decoy under a foreign folder, written SECOND so it is newer. The
+        // scan resolves to the newest copy, so only a lookup that actually
+        // consults the legacy candidate can return the legacy path — without
+        // the decoy the scan rescues the answer and the assertion passes with
+        // the candidate branch deleted.
+        let legacyDecoyDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects")
+            .appendingPathComponent("-canopy-probe-legacy-decoy-\(legacyId)")
+        try? FileManager.default.createDirectory(at: legacyDecoyDir, withIntermediateDirectories: true)
+        let legacyDecoy = legacyDecoyDir.appendingPathComponent("\(legacyId).jsonl")
+        try? Data("{}\n".utf8).write(to: legacyDecoy)
+        record("jsonlPath: the LEGACY encoding is consulted before the scan",
+               ShimProcess.jsonlPath(sessionId: legacyId, workingDirectory: legacyDir)
+                   == legacyTranscript.path,
+               "legacy folder \(legacyProjectDir.lastPathComponent), newer decoy present")
+        try? FileManager.default.removeItem(at: legacyDecoy)
+        try? FileManager.default.removeItem(at: legacyDecoyDir)
+        try? FileManager.default.removeItem(at: legacyTranscript)
+        try? FileManager.default.removeItem(at: legacyProjectDir)
+
+        // The empty-id guards mask each other, so neither is pinned by the
+        // `jsonlPath` assertion near the top of this block. Pin the inner one
+        // directly; the outer one stays unpinned and unremarked, because
+        // deleting it changes no answer while the inner guard stands.
+        record("scanForTranscript: an empty session id → nil",
+               ClaudeSessionHistory.scanForTranscript(sessionId: "") == nil)
+
+        // The relocation scan must not run for a session whose transcript is
+        // on another machine. Not merely wasted work: a teleported session, or
+        // one that used to run locally, leaves a LOCAL transcript under the
+        // same id, and without the gate a remote session would seed its titles
+        // and its message count from that copy.
+        let remoteId = UUID().uuidString
+        let remoteFrozen = URL(fileURLWithPath: "/tmp/probe/remote-\(remoteId)")
+        let remoteProjectDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects")
+            .appendingPathComponent("-canopy-probe-remote-\(remoteId)")
+        try? FileManager.default.createDirectory(at: remoteProjectDir, withIntermediateDirectories: true)
+        let remoteTranscript = remoteProjectDir.appendingPathComponent("\(remoteId).jsonl")
+        let remoteFixture = """
+        {"type":"user","message":{"role":"user","content":"local leftovers"}}
+        {"type":"assistant","message":{"role":"assistant","content":"ok"}}
+        """
+        try? Data(remoteFixture.utf8).write(to: remoteTranscript)
+        record("relocate: a remote session does not seed titles from a local transcript",
+               ClaudeSessionHistory.loadUserPrompts(
+                   sessionId: remoteId, directory: remoteFrozen, allowRelocationScan: false
+               ).isEmpty)
+        record("relocate: a remote session does not count a local transcript",
+               ClaudeSessionHistory.countMessages(
+                   sessionId: remoteId, directory: remoteFrozen, allowRelocationScan: false
+               ) == 0)
+        // …and the same fixture DOES resolve with the scan allowed, so the two
+        // above cannot be passing merely because the fixture is unreadable.
+        record("relocate: the same fixture resolves with the scan allowed",
+               ClaudeSessionHistory.countMessages(
+                   sessionId: remoteId, directory: remoteFrozen, allowRelocationScan: true
+               ) == 2)
+        try? FileManager.default.removeItem(at: remoteTranscript)
+        try? FileManager.default.removeItem(at: remoteProjectDir)
+
+        // The scan half needs the real `~/.claude/projects`, because
+        // `ClaudeSessionHistory.scanForTranscript` resolves against the
+        // hardcoded `claudeDir`. Same pattern the
+        // restore block uses: write into a project folder that is NOT either
+        // encoding of the working directory, which is exactly what a
+        // relocation leaves behind.
+        let scanId = UUID().uuidString
+        let scanFrozen = URL(fileURLWithPath: "/tmp/probe/scan-root-\(scanId)")
+        let scanProjectDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects")
+            .appendingPathComponent("-canopy-probe-relocated-\(scanId)")
+        record("jsonlPath: before the fixture exists the id resolves nowhere",
+               ShimProcess.jsonlPath(sessionId: scanId, workingDirectory: scanFrozen) == nil)
+        try? FileManager.default.createDirectory(at: scanProjectDir, withIntermediateDirectories: true)
+        let scanTranscript = scanProjectDir.appendingPathComponent("\(scanId).jsonl")
+        try? Data("{}\n".utf8).write(to: scanTranscript)
+        record("jsonlPath: a transcript under a foreign project folder is found by the scan",
+               ShimProcess.jsonlPath(sessionId: scanId, workingDirectory: scanFrozen) == scanTranscript.path,
+               "no encoding of \(scanFrozen.path) names that folder")
+        try? FileManager.default.removeItem(at: scanTranscript)
+        record("jsonlPath: removing it makes the id unresolvable again",
+               ShimProcess.jsonlPath(sessionId: scanId, workingDirectory: scanFrozen) == nil)
+
+        // Precedence: the encoded stat is the PRIMARY lookup and the scan is
+        // the fallback, never the other way round. Inverting the two leaves
+        // every other assertion green while turning each lookup into a
+        // directory listing plus a stat per folder on the main actor — so
+        // plant the same id under BOTH the encoded folder for this working
+        // directory and a foreign one, and assert which path comes back.
+        // Written second so the foreign folder is the NEWER file, which is
+        // what makes an INVERTED-PRECEDENCE scan fail deterministically rather
+        // than by luck: newest-mtime would return the foreign copy every time.
+        // (It says nothing about a first-hit-wins scan, whose answer depends
+        // on enumeration order — that one is pinned by the pair below.)
+        let encodedProjectDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects")
+            .appendingPathComponent(ClaudeSessionHistory.encodedFolderCandidates(for: scanFrozen.path)[0])
+        try? FileManager.default.createDirectory(at: encodedProjectDir, withIntermediateDirectories: true)
+        let encodedTranscript = encodedProjectDir.appendingPathComponent("\(scanId).jsonl")
+        try? Data("{}\n".utf8).write(to: encodedTranscript)
+        try? Data("{}\n".utf8).write(to: scanTranscript)
+        record("jsonlPath: the encoded folder wins over the scan",
+               ShimProcess.jsonlPath(sessionId: scanId, workingDirectory: scanFrozen) == encodedTranscript.path)
+        try? FileManager.default.removeItem(at: encodedTranscript)
+        try? FileManager.default.removeItem(at: encodedProjectDir)
+
+        // Two folders holding one id: newest mtime wins, so a stale stub can
+        // never outrank the live transcript. Measured on this machine as a
+        // state that actually occurs — see `scanForTranscript`.
+        let staleProjectDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects")
+            .appendingPathComponent("-canopy-probe-stale-\(scanId)")
+        try? FileManager.default.createDirectory(at: staleProjectDir, withIntermediateDirectories: true)
+        let staleTranscript = staleProjectDir.appendingPathComponent("\(scanId).jsonl")
+        try? Data("{}\n".utf8).write(to: staleTranscript)
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: staleTranscript.path
+        )
+        record("scanForTranscript: the newest of two copies wins",
+               ClaudeSessionHistory.scanForTranscript(sessionId: scanId) == scanTranscript.path,
+               "the more recently written copy wins; stale copy at \(staleProjectDir.lastPathComponent)")
+        // And the other way round, so the assertion above cannot be passing on
+        // whatever order the filesystem happened to enumerate.
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: scanTranscript.path
+        )
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()], ofItemAtPath: staleTranscript.path
+        )
+        record("scanForTranscript: reversing which copy is newest reverses the winner",
+               ClaudeSessionHistory.scanForTranscript(sessionId: scanId) == staleTranscript.path)
+
+        // Equal mtimes are reachable — two copies written in the same second,
+        // or two whose attributes cannot be read — and without a second key
+        // they fall back to `contentsOfDirectory` order, which is the
+        // nondeterminism the tiebreak exists to remove. Assert the total order
+        // by naming the winner rather than by repeating the call, since
+        // `contentsOfDirectory` is stable within a process and a repetition
+        // test would pass under first-enumerated-wins too.
+        //
+        // **It still does not pin the path key.** Measured: deleting `path`
+        // from `(modified, path) > (best!.modified, best!.path)` leaves the
+        // whole suite green, because on this machine the enumeration order
+        // happens to agree with path order for these two folders — and nothing
+        // here can make it disagree, since `contentsOfDirectory`'s order is
+        // not ours to choose. What this assertion pins is that equal mtimes
+        // resolve to ONE named file at all; the second key survives its own
+        // mutation, recorded here so the green does not read as coverage.
+        let sameStamp = Date(timeIntervalSince1970: 1_000_000)
+        for path in [scanTranscript.path, staleTranscript.path] {
+            try? FileManager.default.setAttributes([.modificationDate: sameStamp], ofItemAtPath: path)
+        }
+        record("scanForTranscript: equal mtimes break on the path, not on enumeration order",
+               ClaudeSessionHistory.scanForTranscript(sessionId: scanId)
+                   == max(scanTranscript.path, staleTranscript.path),
+               "expected the greater path of the two equal-mtime copies")
+
+        // A dangling symlink is NOT a transcript. `attributesOfItem` succeeds
+        // on one where `fileExists` returns false and `FileHandle` cannot open
+        // it, so a stat-only scan would return a path that resolves but never
+        // reads — resolvable, and therefore never reaching the reconcile's
+        // bulk-clear escape hatch.
+        try? FileManager.default.removeItem(at: staleTranscript)
+        try? FileManager.default.createSymbolicLink(
+            at: staleTranscript, withDestinationURL: staleProjectDir.appendingPathComponent("gone.jsonl")
+        )
+        record("scanForTranscript: a dangling symlink is not a transcript",
+               ClaudeSessionHistory.scanForTranscript(sessionId: scanId) == scanTranscript.path,
+               "dangling link sits in \(staleProjectDir.lastPathComponent)")
+        try? FileManager.default.removeItem(at: staleTranscript)
+        try? FileManager.default.removeItem(at: staleProjectDir)
+
+        // The other two lookups that resolve independently of `jsonlPath`.
+        // Both were left on the encoded-only path in the first revision while
+        // three comments claimed the title generator had been recovered, so
+        // these assert the fallback at the two call sites rather than at the
+        // shared helper.
+        try? Data("""
+        {"type":"user","message":{"role":"user","content":"the first prompt"}}
+        {"type":"assistant","message":{"role":"assistant","content":"ok"}}
+        """.utf8).write(to: scanTranscript)
+        record("relocate: title-generation prompts survive the move",
+               ClaudeSessionHistory.loadUserPrompts(
+                   sessionId: scanId, directory: scanFrozen
+               ) == ["the first prompt"],
+               "got \(ClaudeSessionHistory.loadUserPrompts(sessionId: scanId, directory: scanFrozen))")
+        record("relocate: the message count survives the move",
+               ClaudeSessionHistory.countMessages(sessionId: scanId, directory: scanFrozen) == 2)
+
+        try? FileManager.default.removeItem(at: scanTranscript)
+        try? FileManager.default.removeItem(at: scanProjectDir)
 
         // Title-generation context: prompt extraction from session JSONL
         // (resume seeding) and first-prompt pinning (anti-drift). Noise
@@ -5533,7 +5984,20 @@ enum SidebarLogicProbe {
             // `sessionFileExists` with `return true` left the whole suite
             // green. Point at a directory that DOES exist so the JSONL check
             // is the only thing left to decide the answer, and write a real
-            // transcript to pin the true branch and the folder encoding.
+            // transcript to pin the true branch.
+            //
+            // These no longer pin the FOLDER ENCODING, and the widening is
+            // deliberate: since `sessionFileExists` gained the relocation scan,
+            // deleting its whole `encodedFolderCandidates` loop leaves all
+            // four of these green, because the scan finds the file wherever it
+            // sits. What survives is the weaker property — a transcript exists
+            // for this id, or it does not. Nothing pins the encoded loop here
+            // and nothing needs to: for a `Bool` answer it is purely a fast
+            // path, so deleting it changes no result. (The precedence
+            // assertion in the relocation block pins the equivalent ordering
+            // in `ShimProcess.jsonlPath`, where the loop DOES decide which
+            // path comes back — that is a different function, not a transfer
+            // of coverage to this one.)
             let realDir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("CanopyProbe-\(UUID().uuidString)")
             try? FileManager.default.createDirectory(at: realDir, withIntermediateDirectories: true)
@@ -5557,6 +6021,25 @@ enum SidebarLogicProbe {
                    !SessionRestoreSnapshot.resumableOnDisk(
                        snapSession(presentId, origin: .local(path: realDir.path))))
             try? FileManager.default.removeItem(at: projectDir)
+
+            // A session that entered a worktree mid-run is captured under the
+            // directory it was SPAWNED in, while the CLI has moved its
+            // transcript to the worktree's encoded folder. Before the scan
+            // fallback that read as "the transcript is gone" and the pane was
+            // dropped from the restore — the session did not come back at all,
+            // which is why it never got as far as showing a stale label.
+            let movedDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude/projects")
+                .appendingPathComponent("-canopy-probe-moved-\(presentId)")
+            try? FileManager.default.createDirectory(at: movedDir, withIntermediateDirectories: true)
+            let movedTranscript = movedDir.appendingPathComponent("\(presentId).jsonl")
+            try? Data("{}\n".utf8).write(to: movedTranscript)
+            record("restore: a session whose transcript moved to another folder is still resumable",
+                   SessionRestoreSnapshot.resumableOnDisk(
+                       snapSession(presentId, origin: .local(path: realDir.path))),
+                   "no encoding of \(realDir.path) names \(movedDir.lastPathComponent)")
+            try? FileManager.default.removeItem(at: movedTranscript)
+            try? FileManager.default.removeItem(at: movedDir)
             try? FileManager.default.removeItem(at: realDir)
 
             // Duplicate session entries: capture cannot emit them, but the
@@ -6583,6 +7066,33 @@ enum SidebarLogicProbe {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("canopy-probe-\(UUID().uuidString).jsonl")
         do {
+            try contents.write(to: url, atomically: true, encoding: .utf8)
+            return url.path
+        } catch {
+            return nil
+        }
+    }
+
+    /// The one root every `inFolderNamed:` fixture lives under, so the caller
+    /// can remove them all with a single `removeItem` — the flat
+    /// `writeProbeJSONL(_:)` leaks loose files, and leaking a directory tree
+    /// per fixture is a worse version of the same habit. Suffixed per process
+    /// because two probe runs would otherwise share it and the first to reach
+    /// the cleanup would delete the other's live fixtures mid-assertion.
+    static let probeFolderFixtureRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("canopy-probe-folders-\(ProcessInfo.processInfo.processIdentifier)")
+
+    /// Same, but with control over the PARENT FOLDER'S NAME — the only thing
+    /// `ShimProcess.relocatedWorkingDirectory` reads about the path's
+    /// location. A unique directory sits above it so two fixtures can claim
+    /// the same folder name without colliding.
+    private static func writeProbeJSONL(_ contents: String, inFolderNamed folder: String) -> String? {
+        let dir = probeFolderFixtureRoot
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent(folder)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("\(UUID().uuidString).jsonl")
             try contents.write(to: url, atomically: true, encoding: .utf8)
             return url.path
         } catch {
