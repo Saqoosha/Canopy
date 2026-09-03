@@ -64,14 +64,14 @@ Per pane:
 
 | Field | Source | Status |
 |---|---|---|
-| activity state (6 values) | `SessionActivity` | exists — already drives the sidebar dots and the MacroPad LEDs |
+| activity state | `SessionActivity` | exists — already drives the sidebar dots and the MacroPad LEDs. Seven cases, six of which can reach a roster row: `.empty` is a MacroPad key with no pane behind it, and a row only exists for a pane that holds a session |
 | title, project · branch | `OpenSession.title` / `projectLabel` | exists |
 | context %, model, message count | `StatusBarData` | exists |
 | time in state | — | **new**: `SessionActivity` is computed and carries no stamp |
 
 Per Mac: quota (5-hour and weekly) from `SharedRateLimitData.shared` — exists, and it is per-Mac, which is the point.
 
-**The roster carries no conversation content.** "What it is doing right now" was considered at three levels — tool name only, tool name plus target, last assistant message — and cut to nothing for v1. The six states already separate *generating* from *waiting on a background task* from *waiting on a human*, and `StatusBarData.subagents` already says how many subagents are running. A current-tool tracker is a documented extension point, in the shape `SubagentTracker` already uses to build rows from the io_message stream; it is not v1.
+**The roster carries no conversation content.** "What it is doing right now" was considered at three levels — tool name only, tool name plus target, last assistant message — and cut to nothing for v1. The six reachable states already separate *generating* from *waiting on a background task* from *waiting on a human*, and `StatusBarData.subagents` already says how many subagents are running. A current-tool tracker is a documented extension point, in the shape `SubagentTracker` already uses to build rows from the io_message stream; it is not v1.
 
 The notification path is a separate matter and does carry content: a permission request's text already crosses the network today through Pager's `/request`, and the hook stand-down below moves that same text from the hook to Canopy. Same content, different sender — not new exposure, but the roster's guarantee does not extend to notifications.
 

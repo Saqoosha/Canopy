@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- **The roster carries no conversation content.** Six activity states, titles, project/branch, context %, model, message count, quota, time-in-state. Nothing else. A current-tool tracker is a documented extension point and is not in this plan.
+- **The roster carries no conversation content.** Activity state, titles, project/branch, context %, model, message count, quota, time-in-state. Nothing else. `SessionActivity` has SEVEN cases; six can reach a roster row. `.empty` is a MacroPad key with no pane behind it, so a row can never carry it — but `wireState` still covers it, because a `default:` would swallow a future case silently. A current-tool tracker is a documented extension point and is not in this plan.
 - **`state.acceptWebSocket(ws)`, never `ws.accept()`.** Hibernation is the difference between free and billing up to 15 minutes per idle connection.
 - **Durable Objects must be SQLite-backed** (`new_sqlite_classes` in the migration) — that is the only kind available on the Workers Free plan.
 - **Stable machine id is `IOPlatformUUID`**, never the hostname. Display name is a separate field.
@@ -1604,5 +1604,5 @@ Carried from the spec, so an executor does not add them unasked:
 
 - Canopy-originated notifications and the hook change in the Pager repo — **build-order steps 4-5, a separate plan.**
 - Reply. Nothing here injects a prompt.
-- Any current-tool or transcript content in the roster. The six states are the whole contract.
+- Any current-tool or transcript content in the roster. The six reachable states are the whole contract.
 - A phone-side rename. The display name is a Canopy setting; the spec records why.
