@@ -122,10 +122,16 @@ final class RosterPublisher {
         let indexes = RosterSnapshot.paneIndexes(in: store.panes)
         let now = Int(Date().timeIntervalSince1970)
         var rows: [RosterSnapshot.Pane] = []
-        var liveIds: Set<OpenSession.ID> = []
+        // Liveness is "still in `store.openSessions`", not "got a row this
+        // pass" — an open session with no pane (`.dormant`, or displaced by
+        // `openInFocusedPane`'s content-swap branch) is real and paneless is
+        // routine, not closed. Keying off the emitted rows pruned exactly
+        // those sessions' stamps, so giving one back its pane later read as
+        // a brand-new state and reset `stateSince` to "0s" — losing the one
+        // fact this field exists to keep.
+        let liveIds = Set(store.openSessions.map(\.id))
         for session in store.openSessions {
             guard let paneIndex = indexes[session.id] else { continue }
-            liveIds.insert(session.id)
             let activity = SessionActivity.of(
                 session, isUnread: store.unreadSessionIds.contains(session.id))
             let wire = RosterSnapshot.wireState(for: activity)
@@ -147,8 +153,8 @@ final class RosterPublisher {
         // `OpenSession.ID` is a fresh UUID minted per process and never
         // reused, so without this both dictionaries grow for the life of a
         // long-running Canopy — one stranded entry per session that ever
-        // closed. Every emitted row's id is in `liveIds`, so this only ever
-        // drops sessions that are no longer part of the snapshot.
+        // closed. Pruned means removed from `store.openSessions`, never
+        // merely absent from `rows` this pass — see `liveIds` above.
         stateSince = stateSince.filter { liveIds.contains($0.key) }
         lastStates = lastStates.filter { liveIds.contains($0.key) }
         let limits = SharedRateLimitData.shared
