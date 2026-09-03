@@ -45,19 +45,40 @@ enum MachineIdentity {
     /// Write the relay secret to the Keychain. Deleting first is what makes
     /// this an upsert — `SecItemAdd` on an existing item fails with
     /// `errSecDuplicateItem` rather than replacing it.
+    ///
+    /// The empty-secret guard runs BEFORE the delete, deliberately: an empty
+    /// submit is the natural result of tabbing through the Settings form and
+    /// pressing Return with the (never-seeded, so always blank-looking)
+    /// SecureField untouched. That must be a no-op, not a silent delete of a
+    /// working secret — see the Settings field's stored-secret indicator,
+    /// which is the other half of this fix.
     static func storeRelaySecret(_ secret: String) {
+        guard !secret.isEmpty else { return }
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "sh.saqoo.Canopy.roster",
             kSecAttrAccount as String: NSUserName(),
         ]
         SecItemDelete(base as CFDictionary)
-        guard !secret.isEmpty else { return }
         var add = base
         add[kSecValueData as String] = Data(secret.utf8)
         let status = SecItemAdd(add as CFDictionary, nil)
         if status != errSecSuccess {
             logger.error("could not store the relay secret: \(status, privacy: .public)")
         }
+    }
+
+    /// Whether a relay secret is currently stored — never returns the value
+    /// itself (`kSecReturnData: false`), so the Settings field can say
+    /// "A secret is stored" without ever reading it back.
+    static func hasRelaySecret() -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "sh.saqoo.Canopy.roster",
+            kSecAttrAccount as String: NSUserName(),
+            kSecReturnData as String: false,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 }

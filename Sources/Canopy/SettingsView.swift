@@ -180,11 +180,26 @@ private struct GeneralSettingsTab: View {
                     .textFieldStyle(.roundedBorder)
                 SecureField("Relay secret", text: $relaySecret)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { MachineIdentity.storeRelaySecret(relaySecret) }
+                    .focused($relaySecretFocused)
+                    .onSubmit { commitRelaySecret() }
+                    .onChange(of: relaySecretFocused) { _, focused in
+                        // Clicking away must commit too, not just Return —
+                        // otherwise a typed secret that the user tabs past
+                        // is silently discarded with no feedback.
+                        if !focused { commitRelaySecret() }
+                    }
+                // Never reads the secret back into the field (a SecureField
+                // bound to a Keychain read would defeat the point of a
+                // SecureField) — this is the only signal the field gives
+                // about whether anything is actually stored.
+                Text(hasStoredSecret ? "A secret is stored." : "No secret stored.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Text("Shown on the phone. Leave empty to use the Mac's own name. The secret is kept in the Keychain, not in settings.json — that file is plaintext and is shared with the installed Release build.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .onAppear { hasStoredSecret = MachineIdentity.hasRelaySecret() }
         }
         .formStyle(.grouped)
     }
@@ -193,6 +208,18 @@ private struct GeneralSettingsTab: View {
     @State private var hostError: String?
     @FocusState private var hostFieldFocused: Bool
     @State private var relaySecret: String = ""
+    @FocusState private var relaySecretFocused: Bool
+    @State private var hasStoredSecret: Bool = false
+
+    /// A blank submit (the natural result of tabbing through with the
+    /// never-seeded, always-blank-looking SecureField untouched) must be a
+    /// no-op, never a delete — `MachineIdentity.storeRelaySecret` already
+    /// guards that on its own end; this just keeps the indicator in sync
+    /// whichever way the guard resolves.
+    private func commitRelaySecret() {
+        MachineIdentity.storeRelaySecret(relaySecret)
+        hasStoredSecret = MachineIdentity.hasRelaySecret()
+    }
 
     /// Validates at the boundary so nothing downstream ever re-parses. An
     /// unparseable value is refused rather than stored — the settings file is

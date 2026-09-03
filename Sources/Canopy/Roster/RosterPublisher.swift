@@ -10,14 +10,17 @@ import os.log
 /// snapshot, send — and re-arms itself on the next change. That is
 /// `MacroPadController.refresh()`'s own subtlety, copied deliberately:
 /// *every* property read inside the tracked closure is what re-arms the
-/// observation, including `settings.rosterEnabled` and
-/// `settings.rosterEndpoint` (both read from `publish()`), which is why
-/// flipping the toggle or editing the endpoint in Settings wakes this on its
-/// own, with no separate observer. An earlier revision tracked a discarded
-/// `snapshot()` and called `publish()` only from `onChange` — that read
-/// pane data but never the settings gate, so the toggle did nothing until
-/// some unrelated pane mutation happened to fire `onChange` afterwards, and
-/// `start()` armed tracking without ever publishing once.
+/// observation, including `settings.rosterEnabled`, which is why flipping
+/// the toggle in Settings wakes this on its own, with no separate observer.
+/// `settings.rosterEndpoint` is read only inside `connectIfConfigured()`,
+/// which `publish()` calls only when `task == nil` — once connected it
+/// drops out of the tracked set, so editing the endpoint takes effect on
+/// the next reconnect (a toggle off/on, or the socket dropping on its own),
+/// not immediately. An earlier revision tracked a discarded `snapshot()`
+/// and called `publish()` only from `onChange` — that read pane data but
+/// never the settings gate, so the toggle did nothing until some unrelated
+/// pane mutation happened to fire `onChange` afterwards, and `start()`
+/// armed tracking without ever publishing once.
 ///
 /// A snapshot is always FULL. The Durable Object replaces rather than merges,
 /// so a dropped update cannot leave a closed pane on the phone forever.
