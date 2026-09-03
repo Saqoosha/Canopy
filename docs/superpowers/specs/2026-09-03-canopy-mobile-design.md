@@ -66,10 +66,10 @@ Per pane:
 |---|---|---|
 | activity state | `SessionActivity` | exists — already drives the sidebar dots and the MacroPad LEDs. Seven cases, six of which can reach a roster row: `.empty` is a MacroPad key with no pane behind it, and a row only exists for a pane that holds a session |
 | title, project · branch | `OpenSession.title` / `projectLabel` | exists |
-| context %, model, message count | `StatusBarData` | exists |
+| context %, model, message count | `StatusBarData` | exists — carried Mac → Worker → phone, but deliberately not rendered on the phone for now; nothing would notice if any of the three were wrong |
 | time in state | — | **new**: `SessionActivity` is computed and carries no stamp |
 
-Per Mac: quota (5-hour and weekly) from `SharedRateLimitData.shared` — exists, and it is per-Mac, which is the point.
+Per account: quota (5-hour and weekly) from `SharedRateLimitData.shared` — exists. `SharedRateLimitData`'s own doc comment says rate limits are per-account, not per-session, so two Macs signed into the same account report identical figures. The phone renders it once, above the machine list, taken from whichever loaded snapshot has the newest `publishedAt`, rather than repeating it under each machine's header where a staler Mac's copy could disagree with a fresher one.
 
 **The roster carries no conversation content.** "What it is doing right now" was considered at three levels — tool name only, tool name plus target, last assistant message — and cut to nothing for v1. The six reachable states already separate *generating* from *waiting on a background task* from *waiting on a human*, and `StatusBarData.subagents` already says how many subagents are running. A current-tool tracker is a documented extension point, in the shape `SubagentTracker` already uses to build rows from the io_message stream; it is not v1.
 
