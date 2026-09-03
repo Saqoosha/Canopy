@@ -597,9 +597,11 @@ private struct SidebarRowView: View {
                         .padding(.top, 1)
                 }
                 // A launcher row has no project, and an empty Text would still
-                // reserve the second line's height.
-                if !row.project.isEmpty {
-                    Text(row.project)
+                // reserve the second line's height. `displayProject`, not
+                // `project`: the latter is the filter and grouping key and must
+                // not carry the branch.
+                if !row.displayProject.isEmpty {
+                    Text(row.displayProject)
                         .font(.system(size: 11))
                         .foregroundStyle(subtitleColor)
                         .lineLimit(1)

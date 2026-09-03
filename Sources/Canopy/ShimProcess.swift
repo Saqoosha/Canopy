@@ -4735,10 +4735,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return (.jj, "")
         }
 
-        // Fall back to git
+        // Fall back to git. `--abbrev-ref HEAD` answers the literal string
+        // "HEAD" on a detached checkout rather than failing, so a bare
+        // non-empty check rendered a `🌿 HEAD` pill that names nothing —
+        // measured in this repo, which is jj-colocated and therefore detached
+        // in git terms. A git worktree of a jj repo reaches this branch for
+        // real: the linked worktree has no `.jj/` of its own, so the jj probe
+        // above misses and every session in it drew that pill. A detached
+        // checkout genuinely has no branch, so report none and let the pill
+        // hide rather than showing a word the user cannot act on.
         if let branch = runCommand("/usr/bin/git", args: ["rev-parse", "--abbrev-ref", "HEAD"], at: directory) {
             let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return (.git, trimmed) }
+            if !trimmed.isEmpty, trimmed != "HEAD" { return (.git, trimmed) }
         }
 
         return nil

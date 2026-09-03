@@ -102,7 +102,7 @@ struct Detail: View {
                         // generic ("Canopy") in `windowTitle`.
                         PaneHeaderStrip(
                             title: session.title.isEmpty ? "Untitled" : session.title,
-                            project: session.project,
+                            project: session.projectLabel,
                             peerName: PeerNameStore.shared.name(forResumeId: session.resumeId),
                             showCloseButton: store.panes.count > 1,
                             leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,

@@ -91,6 +91,22 @@ final class OpenSession: Identifiable, Hashable {
     /// directory's `lastPathComponent`, but a teleport may set it to the
     /// remote repo name (e.g. "owner/name") if the local cwd is ambiguous.
     var project: String
+
+    /// The subtitle shown by the sidebar row and the pane header. Prefers the
+    /// branch the VCS actually reports — `statusBar.gitBranch`, refreshed after
+    /// every turn — over `projectDisplayName`'s folder-name guess, so two panes
+    /// on two branches of one repo no longer render the same text. A remote
+    /// session keeps `project` verbatim: its label is `host:dir`, not a path
+    /// this machine can resolve.
+    var projectLabel: String {
+        switch origin {
+        case .local(let dir), .teleportedFrom(_, let dir):
+            return GitWorktree.projectDisplayName(for: dir, branch: statusBar.gitBranch)
+        case .remote:
+            return project
+        }
+    }
+
     var status: Status
     /// Updated whenever the user selects this row or sends a message. Drives
     /// the sidebar's "open block" sort order.
