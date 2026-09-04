@@ -3338,19 +3338,43 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             : text
     }
 
-    /// Render a `tool_permission_request`'s `inputs` payload as text for the
-    /// asking push — the tool name alone doesn't say what's being asked, the
-    /// input does. Compact, sorted-key JSON so the rendering is deterministic;
-    /// empty string on nil/absent/non-encodable input, which the call site
+    /// Render a `tool_permission_request`'s `inputs` payload for the asking
+    /// push — the tool name alone doesn't say what's being asked, the input
+    /// does. **Markdown, not JSON**: the phone renders these bodies as
+    /// Markdown, and a compact JSON object of a shell pipeline arrives as one
+    /// unbroken line with every newline spelled `\n`, which is unreadable at
+    /// phone width (measured on device 2026-09-04). A fenced block keeps the
+    /// command's own line breaks and gets a monospaced font for free.
+    ///
+    /// Empty string on nil/absent/non-encodable input, which the call site
     /// reads as "nothing to show" and falls back to the session title.
-    // Not `private` so `_SidebarLogicProbe` can pin it: it is a pure helper
-    // on a wire path, which is this repo's bar for being asserted.
     static func renderedToolInput(_ inputs: Any?) -> String {
-        guard let inputs,
-              JSONSerialization.isValidJSONObject(inputs),
-              let data = try? JSONSerialization.data(withJSONObject: inputs, options: [.sortedKeys])
+        guard let dict = inputs as? [String: Any] else {
+            // Not an object (or nil): fall back to JSON if it encodes at all,
+            // rather than inventing a shape for something unseen.
+            guard let inputs,
+                  JSONSerialization.isValidJSONObject(inputs),
+                  let data = try? JSONSerialization.data(withJSONObject: inputs, options: [.sortedKeys]),
+                  let text = String(data: data, encoding: .utf8)
+            else { return "" }
+            return text
+        }
+        // `command` is Bash's, and it is the one input people read as code.
+        // Everything else keeps sorted-key JSON so one payload still has
+        // exactly one rendering.
+        if let command = dict["command"] as? String, !command.isEmpty {
+            var out = "```sh\n" + command + "\n```"
+            if let description = dict["description"] as? String, !description.isEmpty {
+                out += "\n\n" + description
+            }
+            return out
+        }
+        guard JSONSerialization.isValidJSONObject(dict),
+              let data = try? JSONSerialization.data(withJSONObject: dict,
+                                                     options: [.sortedKeys, .prettyPrinted]),
+              let text = String(data: data, encoding: .utf8)
         else { return "" }
-        return String(data: data, encoding: .utf8) ?? ""
+        return "```json\n" + text + "\n```"
     }
 
     private func updateWindowTitle(_ title: String) {

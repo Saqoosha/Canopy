@@ -4595,14 +4595,23 @@ enum SidebarLogicProbe {
               ShimProcess.truncatedNotificationBody(String(repeating: "x", count: 5000),
                                                     maxLength: 3000).count == 3000)
 
-        record("tool input: sorted keys, so one payload has exactly one rendering",
-              ShimProcess.renderedToolInput(["b": 1, "a": 2] as [String: Any]) == #"{"a":2,"b":1}"#)
+        record("tool input: a command becomes a fenced shell block, newlines intact",
+              ShimProcess.renderedToolInput(["command": "ls -l\nwc -l"] as [String: Any])
+                  == "```sh\nls -l\nwc -l\n```")
+        record("tool input: the description follows the block as prose",
+              ShimProcess.renderedToolInput(["command": "ls", "description": "List"] as [String: Any])
+                  == "```sh\nls\n```\n\nList")
+        record("tool input: an empty command is not a command",
+              ShimProcess.renderedToolInput(["command": "", "a": 1] as [String: Any]).hasPrefix("```json"))
+        record("tool input: a non-Bash payload keeps sorted keys, so one payload has one rendering",
+              ShimProcess.renderedToolInput(["b": 1, "a": 2] as [String: Any])
+                  == "```json\n{\n  \"a\" : 2,\n  \"b\" : 1\n}\n```")
         record("tool input: nil renders empty, which the caller reads as no input",
               ShimProcess.renderedToolInput(nil).isEmpty)
         record("tool input: a non-JSON-object renders empty rather than trapping",
               ShimProcess.renderedToolInput("a bare string").isEmpty)
         record("tool input: an empty object renders, and is not the nil case",
-              ShimProcess.renderedToolInput([String: Any]()) == "{}")
+              ShimProcess.renderedToolInput([String: Any]()) == "```json\n{\n\n}\n```")
 
         // MARK: - MacroPad wire protocol / SessionActivity / unread tracker
         //
