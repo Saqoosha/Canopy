@@ -903,11 +903,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         let result: [String: Any]
         switch decision {
-        case "allow":
+        case "allow", "allowAlways":
             let updatedInput: Any = pendingPermissionRequestInputs[requestId] ?? [String: Any]()
+            // "Always" is not a third behavior — it is `allow` carrying the
+            // CLI's proposed rules, which is exactly what the extension's own
+            // button sends. An empty proposal degrades to a plain allow and
+            // says so in the log; the phone is not supposed to offer the
+            // choice in that case (`allowAlways` in the push tells it so), and
+            // a decision arriving anyway must not silently claim to have
+            // written a rule it had none for.
+            let rules = decision == "allowAlways"
+                ? (pendingPermissionRequestSuggestions[requestId] ?? [])
+                : []
+            if decision == "allowAlways", rules.isEmpty {
+                logger.notice("roster decision allowAlways: no rules proposed for requestId \(requestId, privacy: .public); applying a plain allow")
+            }
             result = [
                 "behavior": "allow",
-                "updatedPermissions": [] as [Any],
+                "updatedPermissions": rules,
                 "updatedInput": updatedInput,
             ]
         case "deny":
@@ -1269,6 +1282,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// button does the same (see the capture doc's "verbatim" example), and
     /// a phone decision has nothing of its own to put there.
     private var pendingPermissionRequestInputs: [String: Any] = [:]
+    /// The CLI's own `addRules` proposal per outstanding request, kept so an
+    /// "always allow" from the phone can echo it back verbatim. Empty or
+    /// absent means the CLI proposed nothing, and the phone is told not to
+    /// offer the choice at all rather than being given a button that quietly
+    /// behaves like plain Allow.
+    private var pendingPermissionRequestSuggestions: [String: [Any]] = [:]
 
     /// Subset of `pendingPermissionRequestIds` whose `toolName` is
     /// `AskUserQuestion`. Tracked separately so resolving/cancelling an
@@ -3413,6 +3432,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         {
             let isNewPermissionRequest = pendingPermissionRequestIds.insert(requestId).inserted
             pendingPermissionRequestInputs[requestId] = request["inputs"]
+            // The CLI computes the rule that "always allow" would write, and
+            // the extension's own webview just hands it straight back — it
+            // constructs its request object as
+            // `new ni(channelId, toolName, inputs, suggestions)` and its
+            // Allow-Always button calls `accept(inputs, suggestions)` (read
+            // out of webview/index.js at 2.1.90). So Canopy never composes a
+            // permission rule of its own; it echoes the one the CLI proposed,
+            // which is the whole reason this is safe to answer from a phone.
+            pendingPermissionRequestSuggestions[requestId] = request["suggestions"] as? [Any]
             let toolName = request["toolName"] as? String ?? ""
             if toolName == "AskUserQuestion" {
                 pendingAskUserQuestionRequestIds.insert(requestId)
@@ -3434,11 +3462,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 let requestSummary = rendered.isEmpty
                     ? (sessionTitle.isEmpty ? "A session is waiting" : sessionTitle)
                     : Self.truncatedNotificationBody(rendered, maxLength: 2000)
+                let hasRules = !(pendingPermissionRequestSuggestions[requestId] ?? []).isEmpty
                 RosterNotifier.post(kind: .asking,
                                     sessionId: session.id.uuidString,
                                     title: toolName.isEmpty ? "Canopy — needs you" : "Canopy — \(toolName)",
                                     body: requestSummary,
-                                    requestId: requestId)
+                                    requestId: requestId,
+                                    allowAlways: hasRules)
             }
             refreshAskingState()
             return
@@ -3454,6 +3484,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            pendingPermissionRequestIds.remove(targetRequestId) != nil
         {
             pendingPermissionRequestInputs.removeValue(forKey: targetRequestId)
+            pendingPermissionRequestSuggestions.removeValue(forKey: targetRequestId)
             clearAskUserQuestionFlagIfMatching(targetRequestId)
             refreshAskingState()
         }
@@ -3478,6 +3509,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         else { return }
         guard pendingPermissionRequestIds.remove(requestId) != nil else { return }
         pendingPermissionRequestInputs.removeValue(forKey: requestId)
+        pendingPermissionRequestSuggestions.removeValue(forKey: requestId)
         clearAskUserQuestionFlagIfMatching(requestId)
         refreshAskingState()
     }

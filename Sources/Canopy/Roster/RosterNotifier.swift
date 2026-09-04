@@ -46,7 +46,12 @@ enum RosterNotifier {
     ///   requires it on an `.asking` push, rejects it on a `.completed` one,
     ///   and forwards it into the APNs payload, where the notification
     ///   category's Allow/Deny actions send it back to `POST /decide`.
-    static func post(kind: Kind, sessionId: String, title: String, body: String, requestId: String? = nil) {
+    /// - Parameter allowAlways: whether the CLI proposed a rule for this ask.
+    ///   Sent so the phone can offer "Always" only when there is something to
+    ///   write — a button that silently degrades to a plain Allow would tell
+    ///   the user they had made a standing decision they had not.
+    static func post(kind: Kind, sessionId: String, title: String, body: String,
+                     requestId: String? = nil, allowAlways: Bool = false) {
         guard let (machineId, url, secret) = resolvedTarget() else { return }
 
         var request = URLRequest(url: url)
@@ -62,6 +67,7 @@ enum RosterNotifier {
         ]
         if let requestId {
             payload["requestId"] = requestId
+            payload["allowAlways"] = allowAlways
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         URLSession.shared.dataTask(with: request) { _, response, error in
