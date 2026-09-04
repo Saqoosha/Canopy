@@ -34,6 +34,14 @@ final class RosterPublisher {
     private var lastStates: [OpenSession.ID: String] = [:]
     private var running = false
 
+    /// The endpoint `task` was built against, so a later edit to
+    /// `settings.rosterEndpoint` can be noticed. Nil whenever `task` is.
+    private var connectedEndpoint: String?
+
+    /// Guards the single resend in the send-failure handler against looping
+    /// when the network is down.
+    private var resendingAfterFailure = false
+
     /// The live publisher, for callers that cannot reach the `AppDelegate`
     /// instance holding it.
     ///
@@ -64,6 +72,7 @@ final class RosterPublisher {
     func stop() {
         running = false
         if RosterPublisher.current === self { RosterPublisher.current = nil }
+        connectedEndpoint = nil
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         stateSince.removeAll()
@@ -118,6 +127,7 @@ final class RosterPublisher {
         let task = URLSession.shared.webSocketTask(with: request)
         task.resume()
         self.task = task
+        connectedEndpoint = settings.rosterEndpoint
         logger.notice("roster: connected as \(machineId, privacy: .public)")
     }
 
@@ -221,6 +231,22 @@ final class RosterPublisher {
             }
             return
         }
+        // Read unconditionally, for the same reason `rosterEnabled` is: it is
+        // otherwise touched only inside `connectIfConfigured()`, which runs
+        // only while `task == nil`, so the property DROPS OUT of the tracked
+        // set the moment a socket exists. Typing a URL is what exposes that:
+        // an early keystroke can already parse, a socket opens against the
+        // fragment, and every remaining keystroke then wakes nothing — the
+        // roster stays pointed at a partial host until a pane changes or the
+        // toggle is cycled. Found by review on PR #177.
+        let endpoint = settings.rosterEndpoint
+        if task != nil, endpoint != connectedEndpoint {
+            // The user edited the URL under a live socket. Drop it rather
+            // than keep publishing to the host they just stopped naming.
+            task?.cancel(with: .goingAway, reason: nil)
+            task = nil
+            connectedEndpoint = nil
+        }
         guard let snapshot = snapshot() else { return }
         if task == nil { connectIfConfigured() }
         guard let task,
@@ -228,12 +254,35 @@ final class RosterPublisher {
               let text = String(data: data, encoding: .utf8)
         else { return }
         task.send(.string(text)) { [weak self] error in
-            guard let error else { return }
             Task { @MainActor in
+                guard let self else { return }
+                guard let error else {
+                    // A send got through, so the next failure is allowed its
+                    // own single resend.
+                    self.resendingAfterFailure = false
+                    return
+                }
                 // Drop the socket so the next change reconnects. A send error
                 // on a hibernated peer is routine, not a fault.
-                self?.logger.notice("roster: send failed, will reconnect: \(error.localizedDescription, privacy: .public)")
-                self?.task = nil
+                self.logger.notice("roster: send failed, will reconnect: \(error.localizedDescription, privacy: .public)")
+                self.task = nil
+                self.connectedEndpoint = nil
+                // Resend ONCE. Without this the dropped snapshot waits for the
+                // next state change, and if the failed one WAS the last change
+                // — entering `asking`, or a pane closing — the phone shows the
+                // preceding state until something else happens. Found by
+                // review on PR #177.
+                //
+                // The latch is cleared by a SUCCESSFUL send above, never here:
+                // `publish()` returns as soon as the send is in flight, so
+                // clearing it on the way out would leave it open by the time
+                // the retry's own failure arrived, and a down network would
+                // loop. Held closed, a second failure simply stops, leaving
+                // the old behaviour — and `publishedAt` staleness already
+                // makes a long gap visible on the phone.
+                guard !self.resendingAfterFailure else { return }
+                self.resendingAfterFailure = true
+                self.publish()
             }
         }
     }
