@@ -9,11 +9,20 @@ struct SettingsView: View {
             PermissionsSettingsTab()
                 .tabItem { Label("Permissions", systemImage: "lock.shield") }
 
-            RemoteSettingsTab()
-                .tabItem { Label("Remote", systemImage: "network") }
-
             ProvidersSettingsTab()
                 .tabItem { Label("Providers", systemImage: "server.rack") }
+
+            // MacroPad and Mobile are whole features, not stray preferences,
+            // and General had grown to eleven controls carrying both. General
+            // is for the small toggles with nowhere else to live.
+            MacroPadSettingsTab()
+                .tabItem { Label("MacroPad", systemImage: "keyboard") }
+
+            MobileSettingsTab()
+                .tabItem { Label("Mobile", systemImage: "iphone") }
+
+            RemoteSettingsTab()
+                .tabItem { Label("Remote", systemImage: "network") }
         }
         .frame(width: 460)
         .fixedSize()
@@ -69,6 +78,24 @@ private struct GeneralSettingsTab: View {
                     )
             }
 
+
+        }
+        .formStyle(.grouped)
+    }
+
+
+}
+
+// MARK: - MacroPad
+
+/// The USB/bridge key pad. Its own tab because it is four controls about one
+/// piece of hardware, and because none of them mean anything to someone
+/// without a pad — they were the bulk of what made General unreadable.
+private struct MacroPadSettingsTab: View {
+    @Bindable private var settings = CanopySettings.shared
+
+    var body: some View {
+        Form {
             Section {
                 Picker("MacroPad", selection: Binding(
                     get: { settings.macroPadSource.rawValue },
@@ -169,8 +196,56 @@ private struct GeneralSettingsTab: View {
                 SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Local USB connects automatically when the pad is plugged in; Remote bridge reaches a pad on another Mac running scripts/macropad-bridge.sh. A small indicator at the bottom of the sidebar shows the link state, and clicking it switches source without coming here. Turn on \"Pad is rotated 180°\" when the pad is mounted upside-down relative to its printed key order, so the leftmost pane lights and answers on the key that now looks leftmost.")
             }
             .onAppear { hostDraft = settings.macroPadRemoteHost }
+        }
+        .formStyle(.grouped)
+    }
 
-            Section("Mobile") {
+    @State private var hostDraft: String = ""
+    @State private var hostError: String?
+    @FocusState private var hostFieldFocused: Bool
+
+    /// Validates at the boundary so nothing downstream ever re-parses. An
+    /// unparseable value is refused rather than stored — the settings file is
+    /// the only other way in, and `CanopySettings.load` re-validates that.
+    private func commitHost() {
+        let trimmed = hostDraft.trimmingCharacters(in: .whitespaces)
+        hostDraft = trimmed
+
+        guard !trimmed.isEmpty else {
+            hostError = nil
+            settings.macroPadRemoteHost = ""
+            // The selector cannot stay on a source with no address. It moves
+            // to `.off`, never `.local` — silently connecting to a different
+            // pad than the one configured is the worst outcome available.
+            if case .remote = settings.macroPadSource { settings.macroPadSource = .off }
+            return
+        }
+        guard let endpoint = MacroPadRemoteEndpoint.parse(trimmed) else {
+            hostError = "Use host or host:port, e.g. mbp:8765."
+            return
+        }
+        hostError = nil
+        settings.macroPadRemoteHost = trimmed
+        // Re-resolve a live remote selection so an edited port takes effect
+        // without a second trip through the Picker.
+        if case .remote = settings.macroPadSource { settings.macroPadSource = .remote(endpoint) }
+    }
+}
+
+// MARK: - Mobile
+
+/// Publishing this Mac to the phone: the roster, the relay it reaches, and
+/// the name and secret that identify this machine to it. Its own tab because
+/// it is the Mac-side half of a whole feature, and because it will keep
+/// growing while General should not.
+private struct MobileSettingsTab: View {
+    @Bindable private var settings = CanopySettings.shared
+
+    var body: some View {
+        Form {
+            // No section title: the tab is already called Mobile, and a
+            // header repeating it reads as a second, narrower grouping.
+            Section {
                 Toggle("Publish this Mac's panes", isOn: $settings.rosterEnabled)
                 TextField("Relay URL", text: $settings.rosterEndpoint)
                     .textFieldStyle(.roundedBorder)
@@ -204,9 +279,6 @@ private struct GeneralSettingsTab: View {
         .formStyle(.grouped)
     }
 
-    @State private var hostDraft: String = ""
-    @State private var hostError: String?
-    @FocusState private var hostFieldFocused: Bool
     @State private var relaySecret: String = ""
     @FocusState private var relaySecretFocused: Bool
     @State private var hasStoredSecret: Bool = false
@@ -221,33 +293,6 @@ private struct GeneralSettingsTab: View {
         MachineIdentity.storeRelaySecret(relaySecret)
         hasStoredSecret = MachineIdentity.hasRelaySecret()
         RosterPublisher.current?.secretChanged()
-    }
-
-    /// Validates at the boundary so nothing downstream ever re-parses. An
-    /// unparseable value is refused rather than stored — the settings file is
-    /// the only other way in, and `CanopySettings.load` re-validates that.
-    private func commitHost() {
-        let trimmed = hostDraft.trimmingCharacters(in: .whitespaces)
-        hostDraft = trimmed
-
-        guard !trimmed.isEmpty else {
-            hostError = nil
-            settings.macroPadRemoteHost = ""
-            // The selector cannot stay on a source with no address. It moves
-            // to `.off`, never `.local` — silently connecting to a different
-            // pad than the one configured is the worst outcome available.
-            if case .remote = settings.macroPadSource { settings.macroPadSource = .off }
-            return
-        }
-        guard let endpoint = MacroPadRemoteEndpoint.parse(trimmed) else {
-            hostError = "Use host or host:port, e.g. mbp:8765."
-            return
-        }
-        hostError = nil
-        settings.macroPadRemoteHost = trimmed
-        // Re-resolve a live remote selection so an edited port takes effect
-        // without a second trip through the Picker.
-        if case .remote = settings.macroPadSource { settings.macroPadSource = .remote(endpoint) }
     }
 }
 
