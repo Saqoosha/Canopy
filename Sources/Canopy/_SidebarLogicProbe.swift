@@ -1567,7 +1567,7 @@ enum SidebarLogicProbe {
             machineId: "AAAA-1111", displayName: "Mac Studio",
             publishedAt: 1_700_000_000, sessionPct: 43, weeklyPct: 25,
             panes: [RosterSnapshot.Pane(
-                sessionId: "s1", paneIndex: 0, title: "T", project: "P · main",
+                sessionId: "s1", resumeId: "r1", paneIndex: 0, title: "T", project: "P · main",
                 state: "asking", stateSince: 1_699_999_000,
                 contextPct: 17, model: "opus", messageCount: 42)])
         let rosterJSON = (try? JSONEncoder().encode(rosterFixture)).flatMap {
@@ -1580,6 +1580,130 @@ enum SidebarLogicProbe {
         record("roster: JSON round-trips",
                (try? JSONDecoder().decode(
                    RosterSnapshot.self, from: Data(rosterJSON.utf8)))?.panes.first?.state == "asking")
+
+        // Roster reply routing: which open session an envelope from the phone
+        // addresses, matched on `OpenSession.ID` — minted per process, so an
+        // id from a previous launch must find nothing rather than fall back
+        // to some other session.
+        do {
+            let a = OpenSession(
+                origin: .local(cwd),
+                resumeId: "reply-A",
+                title: "Reply A",
+                project: "ProjectA",
+                status: .live,
+                lastActiveAt: now
+            )
+            let good = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "do the thing")
+            record("roster reply: routes to the addressed session",
+                   RosterReply.target(for: good, in: [a])?.id == a.id)
+
+            let blank = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "   ")
+            record("roster reply: refuses whitespace-only text",
+                   RosterReply.target(for: blank, in: [a]) == nil)
+
+            let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x")
+            record("roster reply: refuses a non-reply envelope",
+                   RosterReply.target(for: wrongType, in: [a]) == nil)
+
+            let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x")
+            record("roster reply: an id from a previous launch matches nothing",
+                   RosterReply.target(for: stale, in: [a]) == nil)
+
+            // Every fixture above uses a single-session array, so none of
+            // them could catch "picked the wrong session out of several" —
+            // a `sessions.first` bug would pass every one of them. Add a
+            // second open session and check both that the SECOND one is
+            // reachable (not just whichever is first) and that an id
+            // belonging to neither still matches nothing.
+            let b = OpenSession(
+                origin: .local(cwd),
+                resumeId: "reply-B",
+                title: "Reply B",
+                project: "ProjectB",
+                status: .live,
+                lastActiveAt: now
+            )
+            let addressesB = ReplyEnvelope(type: "reply", sessionId: b.id.uuidString, text: "for B")
+            record("roster reply: with two sessions open, routes to the SECOND when addressed",
+                   RosterReply.target(for: addressesB, in: [a, b])?.id == b.id)
+
+            let addressesNeither = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "for neither")
+            record("roster reply: with two sessions open, an id matching neither finds nothing",
+                   RosterReply.target(for: addressesNeither, in: [a, b]) == nil)
+        }
+
+        // Roster decision routing: which open session a phone-side
+        // Allow/Deny addresses. Mirrors the reply block above — same
+        // per-process id rule, same two-session shape so a `sessions.first`
+        // bug can't hide behind a single-element fixture — plus the
+        // decision-value check `target` has no counterpart for.
+        do {
+            let a = OpenSession(
+                origin: .local(cwd),
+                resumeId: "decision-A",
+                title: "Decision A",
+                project: "ProjectA",
+                status: .live,
+                lastActiveAt: now
+            )
+            let good = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
+                                         requestId: "abc123", decision: "allow")
+            record("roster decision: routes to the addressed session",
+                   RosterReply.decisionTarget(for: good, in: [a])?.id == a.id)
+
+            // Every value the router accepts must route. The gate and
+            // `ShimProcess.applyPermissionDecision`'s switch are two lists in
+            // two files, and adding `allowAlways` to the shim and the relay
+            // while missing this one was measured on device: the decision was
+            // dropped and reported as "no open session matches".
+            for value in RosterReply.acceptedDecisions.sorted() {
+                let env = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
+                                            requestId: "abc123", decision: value)
+                record("roster decision: \(value) routes to the addressed session",
+                       RosterReply.decisionTarget(for: env, in: [a])?.id == a.id)
+            }
+            record("roster decision: allowAlways is one of the accepted values",
+                   RosterReply.acceptedDecisions.contains("allowAlways"))
+
+            let badValue = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
+                                             requestId: "abc123", decision: "allow_always")
+            record("roster decision: refuses an unknown decision value",
+                   RosterReply.decisionTarget(for: badValue, in: [a]) == nil)
+
+            let blankId = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
+                                            requestId: "", decision: "deny")
+            record("roster decision: refuses an envelope whose requestId is empty",
+                   RosterReply.decisionTarget(for: blankId, in: [a]) == nil)
+
+            let stale = DecisionEnvelope(type: "decision", sessionId: UUID().uuidString,
+                                          requestId: "abc123", decision: "allow")
+            record("roster decision: a session id from a previous launch matches nothing",
+                   RosterReply.decisionTarget(for: stale, in: [a]) == nil)
+
+            // As with the reply block: a single-session array can't catch
+            // "picked the wrong session out of several" — a `sessions.first`
+            // bug would pass every assertion above. This is the reply
+            // block's own deferred minor, folded in here per the brief so
+            // the same gap isn't left twice.
+            let b = OpenSession(
+                origin: .local(cwd),
+                resumeId: "decision-B",
+                title: "Decision B",
+                project: "ProjectB",
+                status: .live,
+                lastActiveAt: now
+            )
+            let addressesB = DecisionEnvelope(type: "decision", sessionId: b.id.uuidString,
+                                               requestId: "def456", decision: "deny")
+            record("roster decision: with two sessions open, routes to the SECOND when addressed",
+                   RosterReply.decisionTarget(for: addressesB, in: [a, b])?.id == b.id)
+
+            let addressesNeither = DecisionEnvelope(type: "decision", sessionId: UUID().uuidString,
+                                                      requestId: "ghi789", decision: "allow")
+            record("roster decision: with two sessions open, an id matching neither finds nothing",
+                   RosterReply.decisionTarget(for: addressesNeither, in: [a, b]) == nil)
+        }
 
         // The display name falls back rather than going blank: an empty Settings
         // field must not publish an unnamed Mac to a roster whose whole job is
@@ -4468,6 +4592,53 @@ enum SidebarLogicProbe {
             record("replay keeps records beyond the immediate reply",
                    toolOut.count == 2)
         }
+
+        // MARK: - Notification push body (roster push path)
+
+        // Canopy cuts BEFORE the relay's own 3000-char cap, so Canopy's cut
+        // point is what the user sees; and an asking push's text IS the tool
+        // input, which has to render the same way every time or two identical
+        // asks read as two different ones.
+        record("notify body: shorter than the cap is untouched",
+               ShimProcess.truncatedNotificationBody("hello", maxBytes: 10) == "hello")
+        record("notify body: exactly the cap is untouched",
+               ShimProcess.truncatedNotificationBody("0123456789", maxBytes: 10) == "0123456789")
+        record("notify body: one over the cap is cut to the cap, ellipsis included",
+               ShimProcess.truncatedNotificationBody("0123456789A", maxBytes: 10) == "0123456...")
+        record("notify body: the result never exceeds the cap",
+               ShimProcess.truncatedNotificationBody(String(repeating: "x", count: 5000),
+                                                     maxBytes: 3000).utf8.count == 3000)
+        // The whole point of counting bytes: 12 Japanese characters are 36
+        // UTF-8 bytes, and APNs counts those, not the 12. A character-based
+        // cut passed a body four times the size it thought it was sending.
+        record("notify body: multibyte text is measured in BYTES, not characters",
+               ShimProcess.truncatedNotificationBody(String(repeating: "あ", count: 12),
+                                                     maxBytes: 20).utf8.count <= 20)
+        record("notify body: a multibyte cut lands on a character boundary",
+               ShimProcess.truncatedNotificationBody(String(repeating: "あ", count: 12),
+                                                     maxBytes: 20) == "あああああ...")
+        record("notify body: an emoji is never split in half",
+               ShimProcess.truncatedNotificationBody("🍎🍎🍎", maxBytes: 9) == "🍎...")
+        record("notify body: a budget too small for the ellipsis yields empty, not a crash",
+               ShimProcess.truncatedNotificationBody("あああ", maxBytes: 2).isEmpty)
+
+        record("tool input: a command becomes a fenced shell block, newlines intact",
+              ShimProcess.renderedToolInput(["command": "ls -l\nwc -l"] as [String: Any])
+                  == "```sh\nls -l\nwc -l\n```")
+        record("tool input: the description follows the block as prose",
+              ShimProcess.renderedToolInput(["command": "ls", "description": "List"] as [String: Any])
+                  == "```sh\nls\n```\n\nList")
+        record("tool input: an empty command is not a command",
+              ShimProcess.renderedToolInput(["command": "", "a": 1] as [String: Any]).hasPrefix("```json"))
+        record("tool input: a non-Bash payload keeps sorted keys, so one payload has one rendering",
+              ShimProcess.renderedToolInput(["b": 1, "a": 2] as [String: Any])
+                  == "```json\n{\n  \"a\" : 2,\n  \"b\" : 1\n}\n```")
+        record("tool input: nil renders empty, which the caller reads as no input",
+              ShimProcess.renderedToolInput(nil).isEmpty)
+        record("tool input: a non-JSON-object renders empty rather than trapping",
+              ShimProcess.renderedToolInput("a bare string").isEmpty)
+        record("tool input: an empty object renders, and is not the nil case",
+              ShimProcess.renderedToolInput([String: Any]()) == "```json\n{\n\n}\n```")
 
         // MARK: - MacroPad wire protocol / SessionActivity / unread tracker
         //

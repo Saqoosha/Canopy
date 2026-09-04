@@ -10,6 +10,11 @@ import Foundation
 struct RosterSnapshot: Codable, Equatable {
     struct Pane: Codable, Equatable {
         let sessionId: String
+        /// The CLI's own session id, which survives a Canopy restart while
+        /// `sessionId` above does not. Optional because it is backfilled a
+        /// moment after spawn — a pane published in that window has none yet,
+        /// and the phone falls back to `sessionId` rather than showing nothing.
+        let resumeId: String?
         let paneIndex: Int
         let title: String
         let project: String

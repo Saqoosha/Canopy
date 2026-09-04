@@ -3,6 +3,12 @@ import Observation
 import Security
 import os.log
 
+/// The one field `receiveReplies` needs to pick which of the two envelope
+/// decoders to try — see the call site for why a peek beats trying both.
+private struct RosterEnvelopeKind: Codable {
+    let type: String
+}
+
 /// Publishes this Mac's panes to the relay whenever they change.
 ///
 /// The tracking shape is `MacroPadController`'s: one `withObservationTracking`
@@ -41,6 +47,15 @@ final class RosterPublisher {
     /// Guards the single resend in the send-failure handler against looping
     /// when the network is down.
     private var resendingAfterFailure = false
+
+    /// Called with each reply that arrives down the publisher socket. Set by
+    /// `AppDelegate` at start, because the publisher owns the connection but
+    /// not the sessions.
+    var onReply: ((ReplyEnvelope) -> Void)?
+
+    /// Called with each permission decision that arrives down the publisher
+    /// socket. Set alongside `onReply`, same reason.
+    var onDecision: ((DecisionEnvelope) -> Void)?
 
     /// The live publisher, for callers that cannot reach the `AppDelegate`
     /// instance holding it.
@@ -141,6 +156,79 @@ final class RosterPublisher {
         self.task = task
         connectedEndpoint = settings.rosterEndpoint
         logger.notice("roster: connected as \(machineId, privacy: .public)")
+        receiveReplies(on: task)
+    }
+
+    /// Reads replies typed on the phone off the publisher socket, one at a
+    /// time, for the life of `task`.
+    ///
+    /// Re-arms itself after every message, but only while `self.task` is
+    /// still the SAME task it was armed on — `publish()` and `secretChanged()`
+    /// both drop `task` (to nil, or to a fresh one) on an endpoint change or
+    /// a send failure, and a stale receive loop re-arming itself on the
+    /// socket they just tore down would leak a second reader racing the new
+    /// one. A failed receive (the socket closing) ends this loop only; the
+    /// next `connectIfConfigured()` call arms a fresh one on the new task,
+    /// so there is deliberately no retry here.
+    private func receiveReplies(on task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
+            switch result {
+            case .success(let message):
+                // Two envelope shapes travel this socket now — a typed
+                // reply and a permission decision — and they don't share a
+                // decoder: `ReplyEnvelope` requires `text`, `DecisionEnvelope`
+                // requires `requestId`/`decision`, so a decode attempt for
+                // the wrong shape fails rather than silently producing a
+                // half-populated value. Peek `type` first rather than
+                // trying both decoders in sequence, so an unrecognized
+                // future `type` is a no-op instead of two failed decodes.
+                if case .string(let text) = message,
+                   let data = text.data(using: .utf8),
+                   let kind = try? JSONDecoder().decode(RosterEnvelopeKind.self, from: data) {
+                    switch kind.type {
+                    case "reply":
+                        if let envelope = try? JSONDecoder().decode(ReplyEnvelope.self, from: data) {
+                            Task { @MainActor in self?.onReply?(envelope) }
+                        }
+                    case "decision":
+                        if let envelope = try? JSONDecoder().decode(DecisionEnvelope.self, from: data) {
+                            Task { @MainActor in self?.onDecision?(envelope) }
+                        }
+                    default:
+                        break
+                    }
+                }
+                Task { @MainActor in
+                    guard let self, self.task === task else { return }
+                    self.receiveReplies(on: task)
+                }
+            case .failure(let error):
+                // The socket is dead and this loop ends here — silently, if
+                // we don't log it. Before this, an idle Mac lost its reply
+                // path invisibly (this is the only trigger for reconnecting;
+                // `connectIfConfigured()` only runs from `publish()`, which
+                // only fires on an observed pane/settings change, and an
+                // idle Mac has neither), and the phone went on to report "No
+                // Mac is connected — it may be asleep" about a Mac that was
+                // awake the whole time. Deliberately no ping, no timer, no
+                // reconnect loop here: recovery is still the next observed
+                // state change, same as before this fix — this only makes
+                // that limitation visible instead of silent.
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.logger.notice("roster: receive failed, socket presumed dead: \(error.localizedDescription, privacy: .public)")
+                    // Only clear OUR state if `task` is still the one this
+                    // closure was armed on — `publish()`/`secretChanged()`
+                    // may have already replaced it with a fresh, live
+                    // socket, and clobbering that would silently kill a
+                    // working connection instead of the dead one that
+                    // actually failed.
+                    guard self.task === task else { return }
+                    self.task = nil
+                    self.connectedEndpoint = nil
+                }
+            }
+        }
     }
 
     /// The relay secret, from the Keychain.
@@ -171,6 +259,10 @@ final class RosterPublisher {
         return secret
     }
 
+    /// The relay secret, for `RosterNotifier`, which posts over HTTP rather
+    /// than the socket and so cannot reuse the connection's own header.
+    static func sharedSecretForNotifier() -> String? { sharedSecret() }
+
     /// Composes the full snapshot. Reading every property here is what arms
     /// the observation above — a field read only inside `publish()` would not
     /// trigger a re-publish when it changed.
@@ -198,6 +290,15 @@ final class RosterPublisher {
             }
             rows.append(RosterSnapshot.Pane(
                 sessionId: session.id.uuidString,
+                // `sessionId` above is minted per Canopy process, so it dies
+                // with a restart and takes every stored notification's link to
+                // this session with it — the phone showed a stale, empty
+                // conversation and read as "the push never arrived" (measured
+                // 2026-09-05). `resumeId` is the CLI's own id and survives, so
+                // the phone groups history by it. Routing still uses the
+                // process id, because a reply has to address a LIVE session
+                // and only that id can.
+                resumeId: session.resumeId.isEmpty ? nil : session.resumeId,
                 paneIndex: paneIndex,
                 title: session.title,
                 project: session.projectLabel,
