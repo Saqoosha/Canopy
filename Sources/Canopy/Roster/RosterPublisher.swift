@@ -171,6 +171,10 @@ final class RosterPublisher {
         return secret
     }
 
+    /// The relay secret, for `RosterNotifier`, which posts over HTTP rather
+    /// than the socket and so cannot reuse the connection's own header.
+    static func sharedSecretForNotifier() -> String? { sharedSecret() }
+
     /// Composes the full snapshot. Reading every property here is what arms
     /// the observation above — a field read only inside `publish()` would not
     /// trigger a re-publish when it changed.
