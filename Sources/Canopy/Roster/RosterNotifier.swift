@@ -41,20 +41,48 @@ enum RosterNotifier {
     /// doc for why the two must not disagree.
     static var willPost: Bool { resolvedTarget() != nil }
 
-    static func post(kind: Kind, sessionId: String, title: String, body: String) {
+    /// - Parameter requestId: carried only by `.asking` pushes, so a later
+    ///   Allow/Deny reply from the phone has something to answer. The relay
+    ///   requires it on an `.asking` push, rejects it on a `.completed` one,
+    ///   and forwards it into the APNs payload, where the notification
+    ///   category's Allow/Deny actions send it back to `POST /decide`.
+    /// - Parameter allowAlways: whether the CLI proposed a rule for this ask.
+    ///   Sent so the phone can offer "Always" only when there is something to
+    ///   write — a button that silently degrades to a plain Allow would tell
+    ///   the user they had made a standing decision they had not.
+    /// - Parameter resumeId: the CLI's own session id, which survives a
+    ///   Canopy restart. The phone groups a session's history by it; without
+    ///   it every restart orphans everything stored so far.
+    /// - Parameter answerable: false for an ask that Allow/Deny cannot
+    ///   resolve — an `AskUserQuestion`, whose answer is text the model asked
+    ///   for. The phone then shows the ask without buttons rather than
+    ///   offering two that cannot work.
+    static func post(kind: Kind, sessionId: String, resumeId: String? = nil,
+                     title: String, body: String,
+                     requestId: String? = nil, allowAlways: Bool = false,
+                     answerable: Bool = true) {
         guard let (machineId, url, secret) = resolvedTarget() else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+        var payload: [String: Any] = [
             "machine": machineId,
             "sessionId": sessionId,
             "title": title,
             "body": body,
             "kind": kind.rawValue,
-        ])
+        ]
+        if let resumeId, !resumeId.isEmpty {
+            payload["resumeId"] = resumeId
+        }
+        if let requestId {
+            payload["requestId"] = requestId
+            payload["allowAlways"] = allowAlways
+            payload["answerable"] = answerable
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         URLSession.shared.dataTask(with: request) { _, response, error in
             if let error {
                 logger.notice("roster notify failed: \(error.localizedDescription, privacy: .public)")

@@ -14,6 +14,24 @@ struct ReplyEnvelope: Codable {
     let text: String
 }
 
+/// A permission decision made on the phone, arriving down the publisher
+/// socket.
+///
+/// The wire shape is fixed by the relay Worker (Task 7): `{"type":
+/// "decision","sessionId":"<uuid string>","requestId":"<hex>","decision":
+/// "allow"|"deny"}`. The Worker already rejects a `decision` outside that
+/// set with 400 and never forwards `"allow_always"` — see
+/// `docs/superpowers/specs/2026-09-04-permission-response-capture.md` for
+/// why that third value is not a legal `behavior` at all. `decisionTarget`
+/// refuses it again for the same reason `target` refuses blank text: a wire
+/// contract is not a guarantee.
+struct DecisionEnvelope: Codable {
+    let type: String
+    let sessionId: String
+    let requestId: String
+    let decision: String
+}
+
 enum RosterReply {
     /// Which open session an envelope addresses, or nil.
     ///
@@ -27,6 +45,36 @@ enum RosterReply {
                         in sessions: [OpenSession]) -> OpenSession? {
         guard envelope.type == "reply",
               !envelope.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let id = UUID(uuidString: envelope.sessionId)
+        else { return nil }
+        return sessions.first { $0.id == id }
+    }
+
+    /// Which open session a permission decision addresses, or nil.
+    ///
+    /// Matches `target(for:in:)`'s session-routing rule exactly — an id from
+    /// a previous launch finds nothing rather than falling back to whatever
+    /// session happens to be asking right now. This function only answers
+    /// "which session"; it says nothing about whether `requestId` is still
+    /// outstanding on that session's shim. That check — the one that
+    /// actually matters, since a stale id must never be applied to whatever
+    /// permission request is outstanding NOW — happens on the `ShimProcess`
+    /// side, in `applyPermissionDecision`, which is the only place holding
+    /// `pendingPermissionRequestIds`.
+    /// The decision values this router will carry. **One list, checked in one
+    /// place** — the previous spelling repeated `"allow"` and `"deny"` inline
+    /// here while `ShimProcess.applyPermissionDecision` had its own switch, so
+    /// adding `allowAlways` to the shim and the relay left this gate quietly
+    /// dropping it. What made that cost a whole diagnosis is the caller's log
+    /// line: a nil return is reported as "no open session matches", which
+    /// names the one thing that was fine.
+    static let acceptedDecisions: Set<String> = ["allow", "deny", "allowAlways"]
+
+    static func decisionTarget(for envelope: DecisionEnvelope,
+                                in sessions: [OpenSession]) -> OpenSession? {
+        guard envelope.type == "decision",
+              !envelope.requestId.isEmpty,
+              Self.acceptedDecisions.contains(envelope.decision),
               let id = UUID(uuidString: envelope.sessionId)
         else { return nil }
         return sessions.first { $0.id == id }

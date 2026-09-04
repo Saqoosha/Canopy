@@ -860,6 +860,126 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         phoneReplyTimeout = nil
     }
 
+    /// The verbatim text the CC extension's own Deny button sends, captured
+    /// 2026-09-04 from a real click —
+    /// `docs/superpowers/specs/2026-09-04-permission-response-capture.md`.
+    /// The model receives this as the tool result; it is what makes the
+    /// model stop and explain rather than silently retry. Not decoration —
+    /// do not reword it.
+    private static let permissionDenyMessage =
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+
+    /// Answers an outstanding permission request from the phone.
+    ///
+    /// NOT a user turn. It takes no busy-shim guard, sets no reply latch,
+    /// and writes nothing to the transcript — it answers a request the CLI
+    /// is already blocked on, not a conversation turn. Routing is by
+    /// `requestId`, which is per process: a decision for an id no longer in
+    /// `pendingPermissionRequestIds` is dropped and logged, never applied to
+    /// whatever is outstanding NOW, because that would approve a tool the
+    /// user never saw. (`RosterReply.decisionTarget` has already picked the
+    /// SESSION by the time this runs; this is the second, narrower check —
+    /// the one request id — that only this shim's own pending set can
+    /// answer.)
+    ///
+    /// Builds the exact envelope
+    /// `docs/superpowers/specs/2026-09-04-permission-response-capture.md`
+    /// captured from the real webview's Allow/Deny buttons — outer
+    /// `type: "response"`, decision at `response.result.behavior` — and
+    /// feeds it through `trackPermissionResponse`, the same function a real
+    /// click's `userContentController` callback runs, so the pending id,
+    /// the AskUserQuestion flag, and the raised-hand icon all clear exactly
+    /// as they would for a click at this Mac. Then forwards it to the shim
+    /// the same way `userContentController` forwards every webview→host
+    /// message it doesn't special-case.
+    ///
+    /// Returns whether it was applied, so the caller can log a refusal
+    /// rather than leave the phone believing a decision landed.
+    @discardableResult
+    func applyPermissionDecision(requestId: String, decision: String) -> Bool {
+        // An AskUserQuestion's `inputs` is the QUESTION, not an answer, so
+        // echoing it back as `updatedInput` resolves the request with the
+        // prompt itself and the tool never receives what it asked for. Worse,
+        // the `cancel_request` below would then hide the real prompt on the
+        // Mac, leaving nowhere to answer it. Refuse here, and the push does
+        // not offer the buttons in the first place (`answerable` below).
+        guard !pendingAskUserQuestionRequestIds.contains(requestId) else {
+            logger.notice("roster decision refused: requestId \(requestId, privacy: .public) is an AskUserQuestion, which has no allow/deny answer")
+            return false
+        }
+        guard pendingPermissionRequestIds.contains(requestId) else {
+            logger.notice("roster decision refused: requestId \(requestId, privacy: .public) not outstanding on this shim")
+            return false
+        }
+        let result: [String: Any]
+        switch decision {
+        case "allow", "allowAlways":
+            let updatedInput: Any = pendingPermissionRequestInputs[requestId] ?? [String: Any]()
+            // "Always" is not a third behavior — it is `allow` carrying the
+            // CLI's proposed rules, which is exactly what the extension's own
+            // button sends. An empty proposal degrades to a plain allow and
+            // says so in the log; the phone is not supposed to offer the
+            // choice in that case (`allowAlways` in the push tells it so), and
+            // a decision arriving anyway must not silently claim to have
+            // written a rule it had none for.
+            let rules = decision == "allowAlways"
+                ? (pendingPermissionRequestSuggestions[requestId] ?? [])
+                : []
+            if decision == "allowAlways", rules.isEmpty {
+                logger.notice("roster decision allowAlways: no rules proposed for requestId \(requestId, privacy: .public); applying a plain allow")
+            }
+            result = [
+                "behavior": "allow",
+                "updatedPermissions": rules,
+                "updatedInput": updatedInput,
+            ]
+        case "deny":
+            result = [
+                "behavior": "deny",
+                "interrupt": true,
+                "message": Self.permissionDenyMessage,
+            ]
+        default:
+            logger.notice("roster decision refused: unrecognized decision \(decision, privacy: .public) for requestId \(requestId, privacy: .public)")
+            return false
+        }
+        let response: [String: Any] = [
+            "type": "response",
+            "requestId": requestId,
+            "response": [
+                "type": "tool_permission_response",
+                "result": result,
+            ] as [String: Any],
+        ]
+        trackPermissionResponse(response)
+        sendToShim(["type": "webview_message", "message": response])
+        // Take the prompt off the Mac's screen. The extension resolves the
+        // request and the tool runs, but nothing tells the WEBVIEW that its
+        // own dialog is spent — measured on device 2026-09-04: a phone Allow
+        // dispatched the Bash tool at once (`tool_dispatch_start`,
+        // `permissionDecisionMs=143442`) while the Allow/Deny buttons stayed
+        // on screen, so the round trip read as "nothing happened". The user
+        // then pressed the stale Deny, and a second, contradicting response
+        // for the same requestId went in behind a tool that had already run.
+        // `cancel_request` is the extension's own verb for retracting a
+        // prompt (see `trackPermissionState`), so the webview already knows
+        // how to hide on it and no new UI contract is invented here.
+        sendToWebView([
+            "type": "cancel_request",
+            "targetRequestId": requestId,
+        ] as [String: Any])
+        // The approved tool is only now about to run, but the pending id is
+        // already gone and `isWorking` is still false — so without this stamp
+        // the next `KeepAliveCoordinator` tick passes every gate and injects a
+        // refresh prompt into the middle of the turn this decision just
+        // resumed. A remote decision reaches that window in its NORMAL case:
+        // the session has been idle long enough to qualify precisely because
+        // the user was away, which is why they answered from the phone.
+        keepAliveGate.noteActivity(at: Date())
+        logger.notice("roster decision \(decision, privacy: .public): applied to requestId \(requestId, privacy: .public)")
+        return true
+    }
+
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog or the evidence flags behind.
     private func endKeepAliveFlight() {
@@ -1164,6 +1284,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// When non-empty the user is being asked to approve something; the
     /// sidebar shows a "raised hand" icon while at least one is outstanding.
     private var pendingPermissionRequestIds = Set<String>()
+
+    /// Each outstanding request's `inputs` payload, keyed the same as
+    /// `pendingPermissionRequestIds` and cleared everywhere that set is
+    /// cleared. Exists so `applyPermissionDecision` can echo the tool's
+    /// input back as `updatedInput` on an Allow — the real webview's Allow
+    /// button does the same (see the capture doc's "verbatim" example), and
+    /// a phone decision has nothing of its own to put there.
+    private var pendingPermissionRequestInputs: [String: Any] = [:]
+    /// The CLI's own `addRules` proposal per outstanding request, kept so an
+    /// "always allow" from the phone can echo it back verbatim. Empty or
+    /// absent means the CLI proposed nothing, and the phone is told not to
+    /// offer the choice at all rather than being given a button that quietly
+    /// behaves like plain Allow.
+    private var pendingPermissionRequestSuggestions: [String: [Any]] = [:]
 
     /// Subset of `pendingPermissionRequestIds` whose `toolName` is
     /// `AskUserQuestion`. Tracked separately so resolving/cancelling an
@@ -1593,6 +1727,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // so a reconnecting shim always reports "-" here even though the
         // session already has a pane — accepted, since the value is advisory
         // and this only misses on that one path.
+        // Decided ONCE, at spawn. Pager's hooks read it for the life of the
+        // CLI, so turning the roster off, clearing the Keychain secret, or
+        // editing the endpoint mid-session leaves every already-running
+        // session exporting it while Canopy has stopped posting — a
+        // permission request from one of those then reaches neither Pager nor
+        // the phone. Known and accepted: an environment variable cannot be
+        // revoked after spawn, and the alternative (the hook asking Canopy at
+        // request time) is a different mechanism, not a fix to this one.
+        // Restarting the session clears it. The same gap opens when the relay
+        // answers 503 because no device is registered.
         if RosterNotifier.willPost {
             env["CANOPY_PANE"] = boundSession
                 .flatMap { session in SessionStore.shared?.paneIndex(forSession: session.id) }
@@ -3213,6 +3357,71 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             : title
     }
 
+    /// Cut a roster push body to `maxLength`, same ellipsis convention as
+    /// `truncatedTitle`. The relay caps a notification body at 3000
+    /// characters; this runs first so that cap is never what decides what
+    /// the user sees — Canopy's own cut point always wins.
+    static func truncatedNotificationBody(_ text: String, maxBytes: Int) -> String {
+        // **Bytes, not characters.** APNs caps the whole payload at 4 KB of
+        // JSON, and one Japanese character is 3 UTF-8 bytes while an emoji is
+        // 4 — so a body inside a 3000-CHARACTER budget can be 12 KB on the
+        // wire and APNs drops the notification outright. Cutting on a
+        // Character boundary keeps the result valid text; the ellipsis is
+        // inside the budget, not added past it.
+        guard text.utf8.count > maxBytes else { return text }
+        let ellipsis = "..."
+        let budget = maxBytes - ellipsis.utf8.count
+        guard budget > 0 else { return "" }
+        var out = ""
+        var used = 0
+        for ch in text {
+            let n = String(ch).utf8.count
+            if used + n > budget { break }
+            out.append(ch)
+            used += n
+        }
+        return out + ellipsis
+    }
+
+    /// Render a `tool_permission_request`'s `inputs` payload for the asking
+    /// push — the tool name alone doesn't say what's being asked, the input
+    /// does. **Markdown, not JSON**: the phone renders these bodies as
+    /// Markdown, and a compact JSON object of a shell pipeline arrives as one
+    /// unbroken line with every newline spelled `\n`, which is unreadable at
+    /// phone width (measured on device 2026-09-04). A fenced block keeps the
+    /// command's own line breaks and gets a monospaced font for free.
+    ///
+    /// Empty string on nil/absent/non-encodable input, which the call site
+    /// reads as "nothing to show" and falls back to the session title.
+    static func renderedToolInput(_ inputs: Any?) -> String {
+        guard let dict = inputs as? [String: Any] else {
+            // Not an object (or nil): fall back to JSON if it encodes at all,
+            // rather than inventing a shape for something unseen.
+            guard let inputs,
+                  JSONSerialization.isValidJSONObject(inputs),
+                  let data = try? JSONSerialization.data(withJSONObject: inputs, options: [.sortedKeys]),
+                  let text = String(data: data, encoding: .utf8)
+            else { return "" }
+            return text
+        }
+        // `command` is Bash's, and it is the one input people read as code.
+        // Everything else keeps sorted-key JSON so one payload still has
+        // exactly one rendering.
+        if let command = dict["command"] as? String, !command.isEmpty {
+            var out = "```sh\n" + command + "\n```"
+            if let description = dict["description"] as? String, !description.isEmpty {
+                out += "\n\n" + description
+            }
+            return out
+        }
+        guard JSONSerialization.isValidJSONObject(dict),
+              let data = try? JSONSerialization.data(withJSONObject: dict,
+                                                     options: [.sortedKeys, .prettyPrinted]),
+              let text = String(data: data, encoding: .utf8)
+        else { return "" }
+        return "```json\n" + text + "\n```"
+    }
+
     private func updateWindowTitle(_ title: String) {
         sessionTitle = title
         // Sidebar shell: SwiftUI's `.navigationTitle` on Detail and the
@@ -3248,7 +3457,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            request["type"] as? String == "tool_permission_request"
         {
             let isNewPermissionRequest = pendingPermissionRequestIds.insert(requestId).inserted
-            if request["toolName"] as? String == "AskUserQuestion" {
+            pendingPermissionRequestInputs[requestId] = request["inputs"]
+            // The CLI computes the rule that "always allow" would write, and
+            // the extension's own webview just hands it straight back — it
+            // constructs its request object as
+            // `new ni(channelId, toolName, inputs, suggestions)` and its
+            // Allow-Always button calls `accept(inputs, suggestions)` (read
+            // out of webview/index.js at 2.1.90). So Canopy never composes a
+            // permission rule of its own; it echoes the one the CLI proposed,
+            // which is the whole reason this is safe to answer from a phone.
+            pendingPermissionRequestSuggestions[requestId] = request["suggestions"] as? [Any]
+            let toolName = request["toolName"] as? String ?? ""
+            if toolName == "AskUserQuestion" {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
             // A raised hand is the one state where the notification is worth
@@ -3259,10 +3479,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // membership every time this runs, but must not buzz the phone a
             // second time for a hand that was already raised.
             if isNewPermissionRequest, let session = boundSession {
+                // The tool's input is what makes this worth reading over the
+                // plain "a session is waiting" — falls back to the session
+                // title when there's nothing to render (no inputs, or an
+                // object JSONSerialization can't encode), same fallback the
+                // old body used unconditionally.
+                let rendered = Self.renderedToolInput(request["inputs"])
+                let requestSummary = rendered.isEmpty
+                    ? (sessionTitle.isEmpty ? "A session is waiting" : sessionTitle)
+                    : Self.truncatedNotificationBody(rendered, maxBytes: 2000)
+                let hasRules = !(pendingPermissionRequestSuggestions[requestId] ?? []).isEmpty
                 RosterNotifier.post(kind: .asking,
                                     sessionId: session.id.uuidString,
-                                    title: "Canopy — needs you",
-                                    body: sessionTitle.isEmpty ? "A session is waiting" : sessionTitle)
+                                    resumeId: session.resumeId,
+                                    title: toolName.isEmpty ? "Canopy — needs you" : "Canopy — \(toolName)",
+                                    body: requestSummary,
+                                    requestId: requestId,
+                                    allowAlways: hasRules,
+                                    answerable: toolName != "AskUserQuestion")
             }
             refreshAskingState()
             return
@@ -3277,6 +3511,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let targetRequestId = inner["targetRequestId"] as? String,
            pendingPermissionRequestIds.remove(targetRequestId) != nil
         {
+            pendingPermissionRequestInputs.removeValue(forKey: targetRequestId)
+            pendingPermissionRequestSuggestions.removeValue(forKey: targetRequestId)
             clearAskUserQuestionFlagIfMatching(targetRequestId)
             refreshAskingState()
         }
@@ -3300,6 +3536,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let requestId = webviewMessage["requestId"] as? String
         else { return }
         guard pendingPermissionRequestIds.remove(requestId) != nil else { return }
+        pendingPermissionRequestInputs.removeValue(forKey: requestId)
+        pendingPermissionRequestSuggestions.removeValue(forKey: requestId)
         clearAskUserQuestionFlagIfMatching(requestId)
         refreshAskingState()
     }
@@ -3311,6 +3549,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
         pendingPermissionRequestIds.removeAll()
+        pendingPermissionRequestInputs.removeAll()
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
@@ -4725,7 +4964,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "result":
             if isWorking {
                 isWorking = false
-                postTaskCompletedNotification()
+                postTaskCompletedNotification(finalText: ioMsg["result"] as? String)
             }
             // Backstop: the turn has finished either way, so nothing should
             // still be treating a reply as in flight. The ordinary path
@@ -5115,7 +5354,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "statusBar.maxOutputTokens.v2.\(directory.path)"
     }
 
-    private func postTaskCompletedNotification() {
+    /// - Parameter finalText: the `result` frame's own `result` field — the
+    ///   model's last message. Passed in rather than accumulated: the frame is
+    ///   already in hand at this call site, so there is no stream to buffer and
+    ///   no JSONL to re-read, and therefore no race with the CLI's flush.
+    private func postTaskCompletedNotification(finalText: String?) {
         let body = sessionTitle.isEmpty ? "Task completed" : "\(sessionTitle) — completed"
 
         // The phone is pushed unconditionally, while the LOCAL banner keeps its
@@ -5127,11 +5370,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // the control for that, and gating on activity here would reproduce the
         // MacroPad unread bug where "app is frontmost" was mistaken for "a human
         // is looking".
+        //
+        // The LOCAL banner keeps showing the plain summary (`body` above,
+        // unchanged) — only the push gains the assistant's actual text, cut to
+        // the same length the relay itself enforces so Canopy's own truncation
+        // point (with an explicit ellipsis) is what the user sees, not
+        // whatever the relay's raw 3000-character cap happens to do to it. A
+        // turn that produced no text keeps the old summary rather than
+        // sending an empty push.
         if let session = boundSession {
+            let pushBody = finalText?.isEmpty == false
+                ? Self.truncatedNotificationBody(finalText!, maxBytes: 2400)
+                : body
             RosterNotifier.post(kind: .completed,
                                 sessionId: session.id.uuidString,
+                                resumeId: session.resumeId,
                                 title: "Canopy",
-                                body: body)
+                                body: pushBody)
         }
 
         guard !NSApp.isActive else { return }
