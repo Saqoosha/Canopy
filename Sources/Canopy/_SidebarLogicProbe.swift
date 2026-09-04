@@ -1581,6 +1581,36 @@ enum SidebarLogicProbe {
                (try? JSONDecoder().decode(
                    RosterSnapshot.self, from: Data(rosterJSON.utf8)))?.panes.first?.state == "asking")
 
+        // Roster reply routing: which open session an envelope from the phone
+        // addresses, matched on `OpenSession.ID` — minted per process, so an
+        // id from a previous launch must find nothing rather than fall back
+        // to some other session.
+        do {
+            let a = OpenSession(
+                origin: .local(cwd),
+                resumeId: "reply-A",
+                title: "Reply A",
+                project: "ProjectA",
+                status: .live,
+                lastActiveAt: now
+            )
+            let good = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "do the thing")
+            record("roster reply: routes to the addressed session",
+                   RosterReply.target(for: good, in: [a])?.id == a.id)
+
+            let blank = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "   ")
+            record("roster reply: refuses whitespace-only text",
+                   RosterReply.target(for: blank, in: [a]) == nil)
+
+            let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x")
+            record("roster reply: refuses a non-reply envelope",
+                   RosterReply.target(for: wrongType, in: [a]) == nil)
+
+            let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x")
+            record("roster reply: an id from a previous launch matches nothing",
+                   RosterReply.target(for: stale, in: [a]) == nil)
+        }
+
         // The display name falls back rather than going blank: an empty Settings
         // field must not publish an unnamed Mac to a roster whose whole job is
         // telling two Macs apart.

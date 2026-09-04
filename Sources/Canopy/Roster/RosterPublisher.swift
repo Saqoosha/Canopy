@@ -42,6 +42,11 @@ final class RosterPublisher {
     /// when the network is down.
     private var resendingAfterFailure = false
 
+    /// Called with each reply that arrives down the publisher socket. Set by
+    /// `AppDelegate` at start, because the publisher owns the connection but
+    /// not the sessions.
+    var onReply: ((ReplyEnvelope) -> Void)?
+
     /// The live publisher, for callers that cannot reach the `AppDelegate`
     /// instance holding it.
     ///
@@ -141,6 +146,33 @@ final class RosterPublisher {
         self.task = task
         connectedEndpoint = settings.rosterEndpoint
         logger.notice("roster: connected as \(machineId, privacy: .public)")
+        receiveReplies(on: task)
+    }
+
+    /// Reads replies typed on the phone off the publisher socket, one at a
+    /// time, for the life of `task`.
+    ///
+    /// Re-arms itself after every message, but only while `self.task` is
+    /// still the SAME task it was armed on — `publish()` and `secretChanged()`
+    /// both drop `task` (to nil, or to a fresh one) on an endpoint change or
+    /// a send failure, and a stale receive loop re-arming itself on the
+    /// socket they just tore down would leak a second reader racing the new
+    /// one. A failed receive (the socket closing) ends this loop only; the
+    /// next `connectIfConfigured()` call arms a fresh one on the new task,
+    /// so there is deliberately no retry here.
+    private func receiveReplies(on task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
+            guard case .success(let message) = result else { return }
+            if case .string(let text) = message,
+               let data = text.data(using: .utf8),
+               let envelope = try? JSONDecoder().decode(ReplyEnvelope.self, from: data) {
+                Task { @MainActor in self?.onReply?(envelope) }
+            }
+            Task { @MainActor in
+                guard let self, self.task === task else { return }
+                self.receiveReplies(on: task)
+            }
+        }
     }
 
     /// The relay secret, from the Keychain.
