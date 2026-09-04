@@ -31,6 +31,9 @@ struct CanopyApp: App {
             // hand, with no `SessionStore.shared` lookup. Fires once per
             // window; `startMacroPad` is idempotent.
             .task { appDelegate.startMacroPad(store: sidebarStore) }
+            // Same reasoning as the MacroPad task above: fires once per
+            // window, `startRosterPublisher` is idempotent.
+            .task { appDelegate.startRosterPublisher(store: sidebarStore) }
             // Reads ~/.claude/sessions for the names other Claude sessions use
             // to message these ones. Idempotent, so a re-run of this .task is
             // harmless; it watches and polls for the process lifetime.
@@ -393,6 +396,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = MacroPadController(store: store)
         macroPad = controller
         controller.start()
+    }
+
+    /// Publishes this Mac's panes to the roster relay. Created once, on the
+    /// first window's `.task`, the same way and for the same reason as
+    /// `macroPad` above: `applicationDidFinishLaunching` runs before the
+    /// store is unambiguously alive and in hand, and this is idempotent so a
+    /// second window's `.task` is harmless.
+    private var rosterPublisher: RosterPublisher?
+
+    @MainActor
+    func startRosterPublisher(store: SessionStore) {
+        guard rosterPublisher == nil else { return }
+        let publisher = RosterPublisher(store: store, settings: CanopySettings.shared)
+        rosterPublisher = publisher
+        publisher.start()
     }
 
     /// UserDefaults key holding the last main-window frame. We persist
@@ -775,6 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Quit, and only our own files — see `WebViewContainer.purgeOwnEntryFiles`.
         WebViewContainer.purgeOwnEntryFiles()
         macroPad?.shutdown()
+        rosterPublisher?.stop()
         if let monitor = cmdWMonitor {
             NSEvent.removeMonitor(monitor)
             cmdWMonitor = nil

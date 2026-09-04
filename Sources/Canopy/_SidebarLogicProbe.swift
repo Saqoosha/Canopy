@@ -1530,6 +1530,79 @@ enum SidebarLogicProbe {
         try? FileManager.default.removeItem(at: scanTranscript)
         try? FileManager.default.removeItem(at: scanProjectDir)
 
+        // Roster wire encoding. The six activity states are a contract with the
+        // phone: renaming a case silently changes what the roster renders, and
+        // nothing else in this repo would notice.
+        record("roster: every activity state has a distinct wire name",
+               Set(SessionActivity.allCases.map(RosterSnapshot.wireState(for:))).count
+                   == SessionActivity.allCases.count)
+        // Every case pinned by exact value, not two of them: the phone reads
+        // these strings, so renaming `idle`/`working`/`unread`/`error` used to
+        // pass this block while silently breaking the wire. Found by review
+        // on PR #177 — the uniqueness assertion above cannot catch a rename,
+        // because a rename keeps them unique.
+        let expectedWireNames: [(SessionActivity, String)] = [
+            (.empty, "empty"), (.idle, "idle"), (.working, "working"),
+            (.background, "background"), (.asking, "asking"),
+            (.unread, "unread"), (.error, "error"),
+        ]
+        record("roster: every wire name is pinned to its exact string",
+               expectedWireNames.allSatisfy { RosterSnapshot.wireState(for: $0.0) == $0.1 })
+        record("roster: the pinned list covers every activity case",
+               expectedWireNames.count == SessionActivity.allCases.count)
+
+        // A launcher pane has no session, so it must not produce a row — the phone
+        // would render a nameless entry it can never act on.
+        let rosterPanes = [
+            PaneSlot(content: .launcher, preferredWidth: 100),
+            PaneSlot(content: .session(UUID()), preferredWidth: 100),
+        ]
+        record("roster: a launcher pane yields no row",
+               RosterSnapshot.paneIndexes(in: rosterPanes).count == 1)
+        record("roster: the index is the pane's position, not the row's",
+               RosterSnapshot.paneIndexes(in: rosterPanes).first?.value == 1)
+
+        // JSON round-trip: the phone decodes this, so a key rename is a break.
+        let rosterFixture = RosterSnapshot(
+            machineId: "AAAA-1111", displayName: "Mac Studio",
+            publishedAt: 1_700_000_000, sessionPct: 43, weeklyPct: 25,
+            panes: [RosterSnapshot.Pane(
+                sessionId: "s1", paneIndex: 0, title: "T", project: "P · main",
+                state: "asking", stateSince: 1_699_999_000,
+                contextPct: 17, model: "opus", messageCount: 42)])
+        let rosterJSON = (try? JSONEncoder().encode(rosterFixture)).flatMap {
+            String(data: $0, encoding: .utf8)
+        } ?? ""
+        record("roster: JSON carries the keys the phone reads",
+               rosterJSON.contains("\"machineId\"") && rosterJSON.contains("\"stateSince\"")
+                   && rosterJSON.contains("\"paneIndex\""),
+               "got \(rosterJSON.prefix(120))")
+        record("roster: JSON round-trips",
+               (try? JSONDecoder().decode(
+                   RosterSnapshot.self, from: Data(rosterJSON.utf8)))?.panes.first?.state == "asking")
+
+        // The display name falls back rather than going blank: an empty Settings
+        // field must not publish an unnamed Mac to a roster whose whole job is
+        // telling two Macs apart.
+        record("machine: a set display name wins",
+               MachineIdentity.resolvedDisplayName(setting: "Studio", fallback: "host") == "Studio")
+        record("machine: an empty setting falls back",
+               MachineIdentity.resolvedDisplayName(setting: "", fallback: "host") == "host")
+        record("machine: a whitespace-only setting falls back",
+               MachineIdentity.resolvedDisplayName(setting: "   ", fallback: "host") == "host")
+        record("machine: a set name is trimmed",
+               MachineIdentity.resolvedDisplayName(setting: "  Studio  ", fallback: "host") == "Studio")
+        // The id is what getByName keys on. A blank one would collide every Mac
+        // into one Durable Object.
+        //
+        // If present, it is a 36-character UUID. Presence itself is NOT asserted:
+        // CI runs on a GitHub `macos-26` VM and whether that exposes
+        // IOPlatformExpertDevice was never measured, so asserting presence would
+        // turn CI red on a property of the runner rather than of the code. The nil
+        // case is handled by the publisher's own guard, which is where it matters.
+        record("machine: a stable id, if present, is a 36-character UUID",
+               MachineIdentity.stableId().map { $0.count == 36 } ?? true)
+
         // Title-generation context: prompt extraction from session JSONL
         // (resume seeding) and first-prompt pinning (anti-drift). Noise
         // fixtures mirror the real records the CLI writes — a slash-command
