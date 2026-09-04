@@ -215,10 +215,12 @@ private struct GeneralSettingsTab: View {
     /// never-seeded, always-blank-looking SecureField untouched) must be a
     /// no-op, never a delete — `MachineIdentity.storeRelaySecret` already
     /// guards that on its own end; this just keeps the indicator in sync
-    /// whichever way the guard resolves.
+    /// whichever way the guard resolves. Storing alone is not enough because
+    /// the Keychain is not observable — tell the roster publisher so it reconnects.
     private func commitRelaySecret() {
         MachineIdentity.storeRelaySecret(relaySecret)
         hasStoredSecret = MachineIdentity.hasRelaySecret()
+        RosterPublisher.current?.secretChanged()
     }
 
     /// Validates at the boundary so nothing downstream ever re-parses. An

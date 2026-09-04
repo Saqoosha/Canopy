@@ -34,6 +34,21 @@ final class RosterPublisher {
     private var lastStates: [OpenSession.ID: String] = [:]
     private var running = false
 
+    /// The live publisher, for callers that cannot reach the `AppDelegate`
+    /// instance holding it.
+    ///
+    /// Settings needs to poke this after a Keychain write (see
+    /// `secretChanged()`), and the obvious route — `NSApp.delegate as?
+    /// AppDelegate` — is WRONG here. Measured 2026-09-04: inside
+    /// `AppDelegate.startRosterPublisher`, `NSApp.delegate === self` is
+    /// **false**, so SwiftUI's `@NSApplicationDelegateAdaptor` hands the
+    /// scene a different instance from the one installed on `NSApp`. That
+    /// route therefore reached a second `AppDelegate` whose
+    /// `rosterPublisher` is nil, and did nothing at all — silently, which
+    /// is the same invisible-failure shape `secretChanged()` exists to fix.
+    /// Weak so quitting still deallocates the publisher.
+    private(set) static weak var current: RosterPublisher?
+
     init(store: SessionStore, settings: CanopySettings) {
         self.store = store
         self.settings = settings
@@ -42,15 +57,32 @@ final class RosterPublisher {
     func start() {
         guard !running else { return }
         running = true
+        RosterPublisher.current = self
         observe()
     }
 
     func stop() {
         running = false
+        if RosterPublisher.current === self { RosterPublisher.current = nil }
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         stateSince.removeAll()
         lastStates.removeAll()
+    }
+
+    /// Called when the relay secret in the Keychain has just changed.
+    ///
+    /// The Keychain is not observable, so a save in Settings moves nothing
+    /// this publisher's `withObservationTracking` pass reads, and
+    /// `connectIfConfigured()` is only reached from `publish()`, which only
+    /// runs on an observed change. Without this, a first-time setup stayed
+    /// disconnected until some unrelated pane or settings mutation happened
+    /// to wake the closure — in practice, until the next launch.
+    func secretChanged() {
+        guard running else { return }
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        publish()
     }
 
     private func observe() {
