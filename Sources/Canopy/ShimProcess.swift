@@ -930,6 +930,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ]
         trackPermissionResponse(response)
         sendToShim(["type": "webview_message", "message": response])
+        // The approved tool is only now about to run, but the pending id is
+        // already gone and `isWorking` is still false — so without this stamp
+        // the next `KeepAliveCoordinator` tick passes every gate and injects a
+        // refresh prompt into the middle of the turn this decision just
+        // resumed. A remote decision reaches that window in its NORMAL case:
+        // the session has been idle long enough to qualify precisely because
+        // the user was away, which is why they answered from the phone.
+        keepAliveGate.noteActivity(at: Date())
         logger.notice("roster decision \(decision, privacy: .public): applied to requestId \(requestId, privacy: .public)")
         return true
     }
@@ -1675,6 +1683,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // so a reconnecting shim always reports "-" here even though the
         // session already has a pane — accepted, since the value is advisory
         // and this only misses on that one path.
+        // Decided ONCE, at spawn. Pager's hooks read it for the life of the
+        // CLI, so turning the roster off, clearing the Keychain secret, or
+        // editing the endpoint mid-session leaves every already-running
+        // session exporting it while Canopy has stopped posting — a
+        // permission request from one of those then reaches neither Pager nor
+        // the phone. Known and accepted: an environment variable cannot be
+        // revoked after spawn, and the alternative (the hook asking Canopy at
+        // request time) is a different mechanism, not a fix to this one.
+        // Restarting the session clears it. The same gap opens when the relay
+        // answers 503 because no device is registered.
         if RosterNotifier.willPost {
             env["CANOPY_PANE"] = boundSession
                 .flatMap { session in SessionStore.shared?.paneIndex(forSession: session.id) }
@@ -3310,7 +3328,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// input does. Compact, sorted-key JSON so the rendering is deterministic;
     /// empty string on nil/absent/non-encodable input, which the call site
     /// reads as "nothing to show" and falls back to the session title.
-    private static func renderedToolInput(_ inputs: Any?) -> String {
+    // Not `private` so `_SidebarLogicProbe` can pin it: it is a pure helper
+    // on a wire path, which is this repo's bar for being asserted.
+    static func renderedToolInput(_ inputs: Any?) -> String {
         guard let inputs,
               JSONSerialization.isValidJSONObject(inputs),
               let data = try? JSONSerialization.data(withJSONObject: inputs, options: [.sortedKeys])

@@ -43,8 +43,9 @@ enum RosterNotifier {
 
     /// - Parameter requestId: carried only by `.asking` pushes, so a later
     ///   Allow/Deny reply from the phone has something to answer. The relay
-    ///   does not read this field yet — it rides along unused until the relay
-    ///   side is built, which is the intended intermediate state.
+    ///   requires it on an `.asking` push, rejects it on a `.completed` one,
+    ///   and forwards it into the APNs payload, where the notification
+    ///   category's Allow/Deny actions send it back to `POST /decide`.
     static func post(kind: Kind, sessionId: String, title: String, body: String, requestId: String? = nil) {
         guard let (machineId, url, secret) = resolvedTarget() else { return }
 

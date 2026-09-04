@@ -4579,6 +4579,31 @@ enum SidebarLogicProbe {
                    toolOut.count == 2)
         }
 
+        // MARK: - Notification push body (roster push path)
+
+        // Canopy cuts BEFORE the relay's own 3000-char cap, so Canopy's cut
+        // point is what the user sees; and an asking push's text IS the tool
+        // input, which has to render the same way every time or two identical
+        // asks read as two different ones.
+        record("notify body: shorter than the cap is untouched",
+              ShimProcess.truncatedNotificationBody("hello", maxLength: 10) == "hello")
+        record("notify body: exactly the cap is untouched",
+              ShimProcess.truncatedNotificationBody("0123456789", maxLength: 10) == "0123456789")
+        record("notify body: one over the cap is cut to the cap, ellipsis included",
+              ShimProcess.truncatedNotificationBody("0123456789A", maxLength: 10) == "0123456...")
+        record("notify body: the result never exceeds the cap",
+              ShimProcess.truncatedNotificationBody(String(repeating: "x", count: 5000),
+                                                    maxLength: 3000).count == 3000)
+
+        record("tool input: sorted keys, so one payload has exactly one rendering",
+              ShimProcess.renderedToolInput(["b": 1, "a": 2] as [String: Any]) == #"{"a":2,"b":1}"#)
+        record("tool input: nil renders empty, which the caller reads as no input",
+              ShimProcess.renderedToolInput(nil).isEmpty)
+        record("tool input: a non-JSON-object renders empty rather than trapping",
+              ShimProcess.renderedToolInput("a bare string").isEmpty)
+        record("tool input: an empty object renders, and is not the nil case",
+              ShimProcess.renderedToolInput([String: Any]()) == "{}")
+
         // MARK: - MacroPad wire protocol / SessionActivity / unread tracker
         //
         // Pure value-type coverage for the pad's host-side contract. The
