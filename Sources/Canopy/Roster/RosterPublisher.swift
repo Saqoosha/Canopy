@@ -290,6 +290,15 @@ final class RosterPublisher {
             }
             rows.append(RosterSnapshot.Pane(
                 sessionId: session.id.uuidString,
+                // `sessionId` above is minted per Canopy process, so it dies
+                // with a restart and takes every stored notification's link to
+                // this session with it — the phone showed a stale, empty
+                // conversation and read as "the push never arrived" (measured
+                // 2026-09-05). `resumeId` is the CLI's own id and survives, so
+                // the phone groups history by it. Routing still uses the
+                // process id, because a reply has to address a LIVE session
+                // and only that id can.
+                resumeId: session.resumeId.isEmpty ? nil : session.resumeId,
                 paneIndex: paneIndex,
                 title: session.title,
                 project: session.projectLabel,

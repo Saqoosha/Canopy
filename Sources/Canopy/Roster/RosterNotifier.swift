@@ -50,7 +50,11 @@ enum RosterNotifier {
     ///   Sent so the phone can offer "Always" only when there is something to
     ///   write — a button that silently degrades to a plain Allow would tell
     ///   the user they had made a standing decision they had not.
-    static func post(kind: Kind, sessionId: String, title: String, body: String,
+    /// - Parameter resumeId: the CLI's own session id, which survives a
+    ///   Canopy restart. The phone groups a session's history by it; without
+    ///   it every restart orphans everything stored so far.
+    static func post(kind: Kind, sessionId: String, resumeId: String? = nil,
+                     title: String, body: String,
                      requestId: String? = nil, allowAlways: Bool = false) {
         guard let (machineId, url, secret) = resolvedTarget() else { return }
 
@@ -65,6 +69,9 @@ enum RosterNotifier {
             "body": body,
             "kind": kind.rawValue,
         ]
+        if let resumeId, !resumeId.isEmpty {
+            payload["resumeId"] = resumeId
+        }
         if let requestId {
             payload["requestId"] = requestId
             payload["allowAlways"] = allowAlways

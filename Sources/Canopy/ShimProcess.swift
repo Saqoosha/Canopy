@@ -3465,6 +3465,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 let hasRules = !(pendingPermissionRequestSuggestions[requestId] ?? []).isEmpty
                 RosterNotifier.post(kind: .asking,
                                     sessionId: session.id.uuidString,
+                                    resumeId: session.resumeId,
                                     title: toolName.isEmpty ? "Canopy — needs you" : "Canopy — \(toolName)",
                                     body: requestSummary,
                                     requestId: requestId,
@@ -5356,6 +5357,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 : body
             RosterNotifier.post(kind: .completed,
                                 sessionId: session.id.uuidString,
+                                resumeId: session.resumeId,
                                 title: "Canopy",
                                 body: pushBody)
         }

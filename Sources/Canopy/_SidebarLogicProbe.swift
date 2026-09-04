@@ -1567,7 +1567,7 @@ enum SidebarLogicProbe {
             machineId: "AAAA-1111", displayName: "Mac Studio",
             publishedAt: 1_700_000_000, sessionPct: 43, weeklyPct: 25,
             panes: [RosterSnapshot.Pane(
-                sessionId: "s1", paneIndex: 0, title: "T", project: "P · main",
+                sessionId: "s1", resumeId: "r1", paneIndex: 0, title: "T", project: "P · main",
                 state: "asking", stateSince: 1_699_999_000,
                 contextPct: 17, model: "opus", messageCount: 42)])
         let rosterJSON = (try? JSONEncoder().encode(rosterFixture)).flatMap {
