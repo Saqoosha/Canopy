@@ -413,13 +413,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         publisher.start()
         // The publisher owns the socket but not the sessions; this closure is
         // the seam between the two, so a reply arriving from the phone can
-        // reach the shim it addresses.
+        // reach the shim it addresses. Every branch that does NOT inject
+        // logs why — the phone has no other way to learn its message never
+        // landed, and `requestPhoneReply`'s own internal refusals already
+        // log a notice, so a silent `return` here would be the one gap.
+        // The session id is safe to log `.public`; the reply TEXT never is
+        // — it is user content and appears in none of these lines.
         publisher.onReply = { [weak store] envelope in
-            guard let store,
-                  let session = RosterReply.target(for: envelope, in: store.openSessions),
-                  let shim = session.shim
-            else { return }
-            shim.requestPhoneReply(text: envelope.text)
+            guard let store else { return }
+            guard let session = RosterReply.target(for: envelope, in: store.openSessions) else {
+                logger.notice("roster reply: no open session matches \(envelope.sessionId, privacy: .public)")
+                return
+            }
+            guard let shim = session.shim else {
+                logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) has no live shim")
+                return
+            }
+            if !shim.requestPhoneReply(text: envelope.text) {
+                logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) refused — \(shim.ineligibilityReasonForReply() ?? "unknown", privacy: .public)")
+            }
         }
     }
 
