@@ -701,6 +701,75 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.keepAliveTimeoutSeconds, execute: timeout)
     }
 
+    // MARK: - Phone reply
+
+    /// Why a phone reply is refused right now, or nil when it would be
+    /// injected. Mirrors `keepAliveIneligibilityReason`'s shim-state checks —
+    /// same busy-shim guard, same order — but carries none of the
+    /// keep-alive's own gates: a reply has no interval, no quota ceiling, and
+    /// no custom-endpoint carve-out to consult.
+    func ineligibilityReasonForReply() -> String? {
+        if channelId == nil { return "no channelId (session not launched yet)" }
+        if isWorking { return "session busy" }
+        if keepAliveInFlight { return "keep-alive in flight" }
+        if recapRequestInFlight { return "recap in flight" }
+        if !pendingPermissionRequestIds.isEmpty { return "permission request outstanding" }
+        if lastAssistantHadAskUserQuestion { return "session is awaiting a user answer" }
+        return nil
+    }
+
+    /// Injects a reply typed on the phone as a real user turn.
+    ///
+    /// Reuses `requestKeepAlive`'s busy-shim guard — never its swallow
+    /// latches. A keep-alive hides itself on purpose; a reply is the
+    /// opposite and must appear in the transcript and the replay exactly as
+    /// if it had been typed at this Mac, or the user cannot see what they
+    /// told the session to do.
+    ///
+    /// Returns whether it was injected, so the caller can log a refusal
+    /// rather than leave the phone believing a message landed.
+    @discardableResult
+    func requestPhoneReply(text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard !keepAliveInFlight, !recapRequestInFlight, !isWorking,
+              pendingPermissionRequestIds.isEmpty, !lastAssistantHadAskUserQuestion
+        else {
+            logger.notice("roster reply refused: \(self.ineligibilityReasonForReply() ?? "shim state changed since the gate ran", privacy: .public)")
+            return false
+        }
+        guard let channelId else {
+            logger.notice("roster reply refused: no channelId")
+            return false
+        }
+        // The same envelope `requestKeepAlive` sends, with the phone's text.
+        // `origin: ["kind": "human"]` is correct and load-bearing here: a
+        // reply IS a human's input, arriving by a different route, and the
+        // CLI records it as one — unlike the keep-alive, this turn is meant
+        // to be visible in the transcript and the replay.
+        sendToShim([
+            "type": "webview_message",
+            "message": [
+                "type": "io_message",
+                "channelId": channelId,
+                "done": false,
+                "message": [
+                    "type": "user",
+                    "session_id": "",
+                    "origin": ["kind": "human"] as [String: Any],
+                    "parent_tool_use_id": NSNull(),
+                    "uuid": UUID().uuidString.lowercased(),
+                    "message": [
+                        "role": "user",
+                        "content": [["type": "text", "text": trimmed]],
+                    ] as [String: Any],
+                ] as [String: Any],
+            ] as [String: Any],
+        ])
+        logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): injected")
+        return true
+    }
+
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog or the evidence flags behind.
     private func endKeepAliveFlight() {

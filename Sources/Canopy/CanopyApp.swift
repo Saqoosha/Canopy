@@ -411,6 +411,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let publisher = RosterPublisher(store: store, settings: CanopySettings.shared)
         rosterPublisher = publisher
         publisher.start()
+        // The publisher owns the socket but not the sessions; this closure is
+        // the seam between the two, so a reply arriving from the phone can
+        // reach the shim it addresses.
+        publisher.onReply = { [weak store] envelope in
+            guard let store,
+                  let session = RosterReply.target(for: envelope, in: store.openSessions),
+                  let shim = session.shim
+            else { return }
+            shim.requestPhoneReply(text: envelope.text)
+        }
     }
 
     /// UserDefaults key holding the last main-window frame. We persist
