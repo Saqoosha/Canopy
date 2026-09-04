@@ -1408,6 +1408,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.info("Custom API: baseURL=\(api.baseURL, privacy: .private) opus=\(api.opusModel, privacy: .public) sonnet=\(api.sonnetModel, privacy: .public) haiku=\(api.haikuModel, privacy: .public) subagent=\(api.subagentModel, privacy: .public)")
         }
 
+        // Marks this CLI session as hosted by Canopy. Claude Code's hooks inherit
+        // the CLI's environment (measured), and Pager's three hook scripts exit
+        // early when they see this — Canopy sends the notification itself, with the
+        // pane and session identity a hook cannot know. The value is informational;
+        // only its PRESENCE is load-bearing, so "-" is a legitimate value and must
+        // not be an empty string, which would read as absent.
+        //
+        // `boundSession` is set before `start()` on the main open/spawn path
+        // (WebViewContainer's fresh-shim branch binds it before the expensive
+        // `shim.start()` call), so this resolves to the real pane there. The
+        // SSH reconnect path binds `boundSession` only after `start()` returns,
+        // so a reconnecting shim always reports "-" here even though the
+        // session already has a pane — accepted, since the value is advisory
+        // and this only misses on that one path.
+        env["CANOPY_PANE"] = boundSession
+            .flatMap { session in SessionStore.shared?.paneIndex(forSession: session.id) }
+            .map(String.init) ?? "-"
+
         proc.environment = env
 
         let stdin = Pipe()
