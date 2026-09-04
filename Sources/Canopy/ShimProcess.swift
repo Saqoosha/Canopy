@@ -930,6 +930,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ]
         trackPermissionResponse(response)
         sendToShim(["type": "webview_message", "message": response])
+        // Take the prompt off the Mac's screen. The extension resolves the
+        // request and the tool runs, but nothing tells the WEBVIEW that its
+        // own dialog is spent — measured on device 2026-09-04: a phone Allow
+        // dispatched the Bash tool at once (`tool_dispatch_start`,
+        // `permissionDecisionMs=143442`) while the Allow/Deny buttons stayed
+        // on screen, so the round trip read as "nothing happened". The user
+        // then pressed the stale Deny, and a second, contradicting response
+        // for the same requestId went in behind a tool that had already run.
+        // `cancel_request` is the extension's own verb for retracting a
+        // prompt (see `trackPermissionState`), so the webview already knows
+        // how to hide on it and no new UI contract is invented here.
+        sendToWebView([
+            "type": "cancel_request",
+            "targetRequestId": requestId,
+        ] as [String: Any])
         // The approved tool is only now about to run, but the pending id is
         // already gone and `isWorking` is still false — so without this stamp
         // the next `KeepAliveCoordinator` tick passes every gate and injects a
