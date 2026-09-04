@@ -59,12 +59,26 @@ enum MachineIdentity {
             kSecAttrService as String: "sh.saqoo.Canopy.roster",
             kSecAttrAccount as String: NSUserName(),
         ]
-        SecItemDelete(base as CFDictionary)
-        var add = base
-        add[kSecValueData as String] = Data(secret.utf8)
-        let status = SecItemAdd(add as CFDictionary, nil)
-        if status != errSecSuccess {
-            logger.error("could not store the relay secret: \(status, privacy: .public)")
+        // Update in place, and add ONLY when there is nothing to update.
+        // The previous shape was delete-then-add, which loses the stored
+        // secret outright whenever the add fails — it logged and moved on,
+        // leaving the user with no secret and a Settings field that still
+        // said one was stored. Found by review on PR #177; the phone app had
+        // the same shape in its own Settings and was fixed the same day.
+        let data = Data(secret.utf8)
+        let status = SecItemUpdate(base as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = base
+            add[kSecValueData as String] = data
+            let addStatus = SecItemAdd(add as CFDictionary, nil)
+            if addStatus != errSecSuccess {
+                logger.error("could not store the relay secret: \(addStatus, privacy: .public)")
+            }
+        } else if status != errSecSuccess {
+            // Anything else is a real failure and must NOT be followed by an
+            // add: the existing item is still there and still correct.
+            logger.error("could not update the relay secret: \(status, privacy: .public)")
         }
     }
 

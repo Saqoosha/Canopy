@@ -112,7 +112,19 @@ final class RosterPublisher {
         else { return }
         components.path = "/publish"
         components.queryItems = [URLQueryItem(name: "machine", value: machineId)]
-        components.scheme = components.scheme == "http" ? "ws" : "wss"
+        // Refuse anything but https. The old `http -> ws` branch existed for
+        // a local Worker and shipped, which meant an endpoint typed with
+        // `http://` sent the relay secret as a Bearer header over an
+        // UNENCRYPTED WebSocket (CWE-319, found by review on PR #177).
+        // Deliberately no loopback carve-out: ws://127.0.0.1 could not be
+        // intercepted and would be a defensible exception, but nobody is
+        // developing the Worker locally today, and a carve-out is a second
+        // path to get wrong. Add it when someone actually needs it.
+        guard components.scheme == "https" else {
+            logger.error("roster endpoint must be https; refusing to send the secret over \(components.scheme ?? "no scheme", privacy: .public)")
+            return
+        }
+        components.scheme = "wss"
         guard let url = components.url else {
             logger.error("roster endpoint is not a usable URL")
             return

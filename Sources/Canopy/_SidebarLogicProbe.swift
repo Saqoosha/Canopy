@@ -1536,9 +1536,20 @@ enum SidebarLogicProbe {
         record("roster: every activity state has a distinct wire name",
                Set(SessionActivity.allCases.map(RosterSnapshot.wireState(for:))).count
                    == SessionActivity.allCases.count)
-        record("roster: wire names are lowercase and stable",
-               RosterSnapshot.wireState(for: .asking) == "asking"
-                   && RosterSnapshot.wireState(for: .background) == "background")
+        // Every case pinned by exact value, not two of them: the phone reads
+        // these strings, so renaming `idle`/`working`/`unread`/`error` used to
+        // pass this block while silently breaking the wire. Found by review
+        // on PR #177 — the uniqueness assertion above cannot catch a rename,
+        // because a rename keeps them unique.
+        let expectedWireNames: [(SessionActivity, String)] = [
+            (.empty, "empty"), (.idle, "idle"), (.working, "working"),
+            (.background, "background"), (.asking, "asking"),
+            (.unread, "unread"), (.error, "error"),
+        ]
+        record("roster: every wire name is pinned to its exact string",
+               expectedWireNames.allSatisfy { RosterSnapshot.wireState(for: $0.0) == $0.1 })
+        record("roster: the pinned list covers every activity case",
+               expectedWireNames.count == SessionActivity.allCases.count)
 
         // A launcher pane has no session, so it must not produce a row — the phone
         // would render a nameless entry it can never act on.
