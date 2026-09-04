@@ -3,6 +3,12 @@ import Observation
 import Security
 import os.log
 
+/// The one field `receiveReplies` needs to pick which of the two envelope
+/// decoders to try — see the call site for why a peek beats trying both.
+private struct RosterEnvelopeKind: Codable {
+    let type: String
+}
+
 /// Publishes this Mac's panes to the relay whenever they change.
 ///
 /// The tracking shape is `MacroPadController`'s: one `withObservationTracking`
@@ -46,6 +52,10 @@ final class RosterPublisher {
     /// `AppDelegate` at start, because the publisher owns the connection but
     /// not the sessions.
     var onReply: ((ReplyEnvelope) -> Void)?
+
+    /// Called with each permission decision that arrives down the publisher
+    /// socket. Set alongside `onReply`, same reason.
+    var onDecision: ((DecisionEnvelope) -> Void)?
 
     /// The live publisher, for callers that cannot reach the `AppDelegate`
     /// instance holding it.
@@ -164,10 +174,29 @@ final class RosterPublisher {
         task.receive { [weak self] result in
             switch result {
             case .success(let message):
+                // Two envelope shapes travel this socket now — a typed
+                // reply and a permission decision — and they don't share a
+                // decoder: `ReplyEnvelope` requires `text`, `DecisionEnvelope`
+                // requires `requestId`/`decision`, so a decode attempt for
+                // the wrong shape fails rather than silently producing a
+                // half-populated value. Peek `type` first rather than
+                // trying both decoders in sequence, so an unrecognized
+                // future `type` is a no-op instead of two failed decodes.
                 if case .string(let text) = message,
                    let data = text.data(using: .utf8),
-                   let envelope = try? JSONDecoder().decode(ReplyEnvelope.self, from: data) {
-                    Task { @MainActor in self?.onReply?(envelope) }
+                   let kind = try? JSONDecoder().decode(RosterEnvelopeKind.self, from: data) {
+                    switch kind.type {
+                    case "reply":
+                        if let envelope = try? JSONDecoder().decode(ReplyEnvelope.self, from: data) {
+                            Task { @MainActor in self?.onReply?(envelope) }
+                        }
+                    case "decision":
+                        if let envelope = try? JSONDecoder().decode(DecisionEnvelope.self, from: data) {
+                            Task { @MainActor in self?.onDecision?(envelope) }
+                        }
+                    default:
+                        break
+                    }
                 }
                 Task { @MainActor in
                     guard let self, self.task === task else { return }

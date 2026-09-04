@@ -1633,6 +1633,64 @@ enum SidebarLogicProbe {
                    RosterReply.target(for: addressesNeither, in: [a, b]) == nil)
         }
 
+        // Roster decision routing: which open session a phone-side
+        // Allow/Deny addresses. Mirrors the reply block above — same
+        // per-process id rule, same two-session shape so a `sessions.first`
+        // bug can't hide behind a single-element fixture — plus the
+        // decision-value check `target` has no counterpart for.
+        do {
+            let a = OpenSession(
+                origin: .local(cwd),
+                resumeId: "decision-A",
+                title: "Decision A",
+                project: "ProjectA",
+                status: .live,
+                lastActiveAt: now
+            )
+            let good = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
+                                         requestId: "abc123", decision: "allow")
+            record("roster decision: routes to the addressed session",
+                   RosterReply.decisionTarget(for: good, in: [a])?.id == a.id)
+
+            let badValue = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
+                                             requestId: "abc123", decision: "allow_always")
+            record("roster decision: refuses an unknown decision value",
+                   RosterReply.decisionTarget(for: badValue, in: [a]) == nil)
+
+            let blankId = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
+                                            requestId: "", decision: "deny")
+            record("roster decision: refuses an envelope whose requestId is empty",
+                   RosterReply.decisionTarget(for: blankId, in: [a]) == nil)
+
+            let stale = DecisionEnvelope(type: "decision", sessionId: UUID().uuidString,
+                                          requestId: "abc123", decision: "allow")
+            record("roster decision: a session id from a previous launch matches nothing",
+                   RosterReply.decisionTarget(for: stale, in: [a]) == nil)
+
+            // As with the reply block: a single-session array can't catch
+            // "picked the wrong session out of several" — a `sessions.first`
+            // bug would pass every assertion above. This is the reply
+            // block's own deferred minor, folded in here per the brief so
+            // the same gap isn't left twice.
+            let b = OpenSession(
+                origin: .local(cwd),
+                resumeId: "decision-B",
+                title: "Decision B",
+                project: "ProjectB",
+                status: .live,
+                lastActiveAt: now
+            )
+            let addressesB = DecisionEnvelope(type: "decision", sessionId: b.id.uuidString,
+                                               requestId: "def456", decision: "deny")
+            record("roster decision: with two sessions open, routes to the SECOND when addressed",
+                   RosterReply.decisionTarget(for: addressesB, in: [a, b])?.id == b.id)
+
+            let addressesNeither = DecisionEnvelope(type: "decision", sessionId: UUID().uuidString,
+                                                      requestId: "ghi789", decision: "allow")
+            record("roster decision: with two sessions open, an id matching neither finds nothing",
+                   RosterReply.decisionTarget(for: addressesNeither, in: [a, b]) == nil)
+        }
+
         // The display name falls back rather than going blank: an empty Settings
         // field must not publish an unnamed Mac to a roster whose whole job is
         // telling two Macs apart.

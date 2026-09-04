@@ -433,6 +433,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) refused — \(shim.ineligibilityReasonForReply() ?? "unknown", privacy: .public)")
             }
         }
+        // Same seam, for a permission decision instead of a typed reply.
+        // `RosterReply.decisionTarget` only answers "which session" — the
+        // narrower "is this exact requestId still outstanding" check lives
+        // in `applyPermissionDecision` itself, since only that shim's
+        // `pendingPermissionRequestIds` can answer it (routing on a session
+        // that has since moved on to a different request would otherwise
+        // silently do nothing, which `applyPermissionDecision`'s own log
+        // line covers).
+        publisher.onDecision = { [weak store] envelope in
+            guard let store else { return }
+            guard let session = RosterReply.decisionTarget(for: envelope, in: store.openSessions) else {
+                logger.notice("roster decision: no open session matches \(envelope.sessionId, privacy: .public)")
+                return
+            }
+            guard let shim = session.shim else {
+                logger.notice("roster decision: session \(envelope.sessionId, privacy: .public) has no live shim")
+                return
+            }
+            shim.applyPermissionDecision(requestId: envelope.requestId, decision: envelope.decision)
+        }
     }
 
     /// UserDefaults key holding the last main-window frame. We persist

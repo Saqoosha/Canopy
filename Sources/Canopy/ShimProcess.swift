@@ -860,6 +860,80 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         phoneReplyTimeout = nil
     }
 
+    /// The verbatim text the CC extension's own Deny button sends, captured
+    /// 2026-09-04 from a real click —
+    /// `docs/superpowers/specs/2026-09-04-permission-response-capture.md`.
+    /// The model receives this as the tool result; it is what makes the
+    /// model stop and explain rather than silently retry. Not decoration —
+    /// do not reword it.
+    private static let permissionDenyMessage =
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+
+    /// Answers an outstanding permission request from the phone.
+    ///
+    /// NOT a user turn. It takes no busy-shim guard, sets no reply latch,
+    /// and writes nothing to the transcript — it answers a request the CLI
+    /// is already blocked on, not a conversation turn. Routing is by
+    /// `requestId`, which is per process: a decision for an id no longer in
+    /// `pendingPermissionRequestIds` is dropped and logged, never applied to
+    /// whatever is outstanding NOW, because that would approve a tool the
+    /// user never saw. (`RosterReply.decisionTarget` has already picked the
+    /// SESSION by the time this runs; this is the second, narrower check —
+    /// the one request id — that only this shim's own pending set can
+    /// answer.)
+    ///
+    /// Builds the exact envelope
+    /// `docs/superpowers/specs/2026-09-04-permission-response-capture.md`
+    /// captured from the real webview's Allow/Deny buttons — outer
+    /// `type: "response"`, decision at `response.result.behavior` — and
+    /// feeds it through `trackPermissionResponse`, the same function a real
+    /// click's `userContentController` callback runs, so the pending id,
+    /// the AskUserQuestion flag, and the raised-hand icon all clear exactly
+    /// as they would for a click at this Mac. Then forwards it to the shim
+    /// the same way `userContentController` forwards every webview→host
+    /// message it doesn't special-case.
+    ///
+    /// Returns whether it was applied, so the caller can log a refusal
+    /// rather than leave the phone believing a decision landed.
+    @discardableResult
+    func applyPermissionDecision(requestId: String, decision: String) -> Bool {
+        guard pendingPermissionRequestIds.contains(requestId) else {
+            logger.notice("roster decision refused: requestId \(requestId, privacy: .public) not outstanding on this shim")
+            return false
+        }
+        let result: [String: Any]
+        switch decision {
+        case "allow":
+            let updatedInput: Any = pendingPermissionRequestInputs[requestId] ?? [String: Any]()
+            result = [
+                "behavior": "allow",
+                "updatedPermissions": [] as [Any],
+                "updatedInput": updatedInput,
+            ]
+        case "deny":
+            result = [
+                "behavior": "deny",
+                "interrupt": true,
+                "message": Self.permissionDenyMessage,
+            ]
+        default:
+            logger.notice("roster decision refused: unrecognized decision \(decision, privacy: .public) for requestId \(requestId, privacy: .public)")
+            return false
+        }
+        let response: [String: Any] = [
+            "type": "response",
+            "requestId": requestId,
+            "response": [
+                "type": "tool_permission_response",
+                "result": result,
+            ] as [String: Any],
+        ]
+        trackPermissionResponse(response)
+        sendToShim(["type": "webview_message", "message": response])
+        logger.notice("roster decision \(decision, privacy: .public): applied to requestId \(requestId, privacy: .public)")
+        return true
+    }
+
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog or the evidence flags behind.
     private func endKeepAliveFlight() {
@@ -1164,6 +1238,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// When non-empty the user is being asked to approve something; the
     /// sidebar shows a "raised hand" icon while at least one is outstanding.
     private var pendingPermissionRequestIds = Set<String>()
+
+    /// Each outstanding request's `inputs` payload, keyed the same as
+    /// `pendingPermissionRequestIds` and cleared everywhere that set is
+    /// cleared. Exists so `applyPermissionDecision` can echo the tool's
+    /// input back as `updatedInput` on an Allow — the real webview's Allow
+    /// button does the same (see the capture doc's "verbatim" example), and
+    /// a phone decision has nothing of its own to put there.
+    private var pendingPermissionRequestInputs: [String: Any] = [:]
 
     /// Subset of `pendingPermissionRequestIds` whose `toolName` is
     /// `AskUserQuestion`. Tracked separately so resolving/cancelling an
@@ -3271,6 +3353,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            request["type"] as? String == "tool_permission_request"
         {
             let isNewPermissionRequest = pendingPermissionRequestIds.insert(requestId).inserted
+            pendingPermissionRequestInputs[requestId] = request["inputs"]
             let toolName = request["toolName"] as? String ?? ""
             if toolName == "AskUserQuestion" {
                 pendingAskUserQuestionRequestIds.insert(requestId)
@@ -3311,6 +3394,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let targetRequestId = inner["targetRequestId"] as? String,
            pendingPermissionRequestIds.remove(targetRequestId) != nil
         {
+            pendingPermissionRequestInputs.removeValue(forKey: targetRequestId)
             clearAskUserQuestionFlagIfMatching(targetRequestId)
             refreshAskingState()
         }
@@ -3334,6 +3418,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let requestId = webviewMessage["requestId"] as? String
         else { return }
         guard pendingPermissionRequestIds.remove(requestId) != nil else { return }
+        pendingPermissionRequestInputs.removeValue(forKey: requestId)
         clearAskUserQuestionFlagIfMatching(requestId)
         refreshAskingState()
     }
@@ -3345,6 +3430,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
         pendingPermissionRequestIds.removeAll()
+        pendingPermissionRequestInputs.removeAll()
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
