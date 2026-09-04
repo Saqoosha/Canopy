@@ -41,20 +41,28 @@ enum RosterNotifier {
     /// doc for why the two must not disagree.
     static var willPost: Bool { resolvedTarget() != nil }
 
-    static func post(kind: Kind, sessionId: String, title: String, body: String) {
+    /// - Parameter requestId: carried only by `.asking` pushes, so a later
+    ///   Allow/Deny reply from the phone has something to answer. The relay
+    ///   does not read this field yet — it rides along unused until the relay
+    ///   side is built, which is the intended intermediate state.
+    static func post(kind: Kind, sessionId: String, title: String, body: String, requestId: String? = nil) {
         guard let (machineId, url, secret) = resolvedTarget() else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+        var payload: [String: Any] = [
             "machine": machineId,
             "sessionId": sessionId,
             "title": title,
             "body": body,
             "kind": kind.rawValue,
-        ])
+        ]
+        if let requestId {
+            payload["requestId"] = requestId
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         URLSession.shared.dataTask(with: request) { _, response, error in
             if let error {
                 logger.notice("roster notify failed: \(error.localizedDescription, privacy: .public)")

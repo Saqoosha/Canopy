@@ -3213,6 +3213,29 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             : title
     }
 
+    /// Cut a roster push body to `maxLength`, same ellipsis convention as
+    /// `truncatedTitle`. The relay caps a notification body at 3000
+    /// characters; this runs first so that cap is never what decides what
+    /// the user sees — Canopy's own cut point always wins.
+    static func truncatedNotificationBody(_ text: String, maxLength: Int) -> String {
+        text.count > maxLength
+            ? String(text.prefix(maxLength - 3)) + "..."
+            : text
+    }
+
+    /// Render a `tool_permission_request`'s `inputs` payload as text for the
+    /// asking push — the tool name alone doesn't say what's being asked, the
+    /// input does. Compact, sorted-key JSON so the rendering is deterministic;
+    /// empty string on nil/absent/non-encodable input, which the call site
+    /// reads as "nothing to show" and falls back to the session title.
+    private static func renderedToolInput(_ inputs: Any?) -> String {
+        guard let inputs,
+              JSONSerialization.isValidJSONObject(inputs),
+              let data = try? JSONSerialization.data(withJSONObject: inputs, options: [.sortedKeys])
+        else { return "" }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
     private func updateWindowTitle(_ title: String) {
         sessionTitle = title
         // Sidebar shell: SwiftUI's `.navigationTitle` on Detail and the
@@ -3248,7 +3271,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            request["type"] as? String == "tool_permission_request"
         {
             let isNewPermissionRequest = pendingPermissionRequestIds.insert(requestId).inserted
-            if request["toolName"] as? String == "AskUserQuestion" {
+            let toolName = request["toolName"] as? String ?? ""
+            if toolName == "AskUserQuestion" {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
             // A raised hand is the one state where the notification is worth
@@ -3259,10 +3283,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // membership every time this runs, but must not buzz the phone a
             // second time for a hand that was already raised.
             if isNewPermissionRequest, let session = boundSession {
+                // The tool's input is what makes this worth reading over the
+                // plain "a session is waiting" — falls back to the session
+                // title when there's nothing to render (no inputs, or an
+                // object JSONSerialization can't encode), same fallback the
+                // old body used unconditionally.
+                let rendered = Self.renderedToolInput(request["inputs"])
+                let requestSummary = rendered.isEmpty
+                    ? (sessionTitle.isEmpty ? "A session is waiting" : sessionTitle)
+                    : Self.truncatedNotificationBody(rendered, maxLength: 2000)
                 RosterNotifier.post(kind: .asking,
                                     sessionId: session.id.uuidString,
-                                    title: "Canopy — needs you",
-                                    body: sessionTitle.isEmpty ? "A session is waiting" : sessionTitle)
+                                    title: toolName.isEmpty ? "Canopy — needs you" : "Canopy — \(toolName)",
+                                    body: requestSummary,
+                                    requestId: requestId)
             }
             refreshAskingState()
             return
@@ -4725,7 +4759,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "result":
             if isWorking {
                 isWorking = false
-                postTaskCompletedNotification()
+                postTaskCompletedNotification(finalText: ioMsg["result"] as? String)
             }
             // Backstop: the turn has finished either way, so nothing should
             // still be treating a reply as in flight. The ordinary path
@@ -5115,7 +5149,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "statusBar.maxOutputTokens.v2.\(directory.path)"
     }
 
-    private func postTaskCompletedNotification() {
+    /// - Parameter finalText: the `result` frame's own `result` field — the
+    ///   model's last message. Passed in rather than accumulated: the frame is
+    ///   already in hand at this call site, so there is no stream to buffer and
+    ///   no JSONL to re-read, and therefore no race with the CLI's flush.
+    private func postTaskCompletedNotification(finalText: String?) {
         let body = sessionTitle.isEmpty ? "Task completed" : "\(sessionTitle) — completed"
 
         // The phone is pushed unconditionally, while the LOCAL banner keeps its
@@ -5127,11 +5165,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // the control for that, and gating on activity here would reproduce the
         // MacroPad unread bug where "app is frontmost" was mistaken for "a human
         // is looking".
+        //
+        // The LOCAL banner keeps showing the plain summary (`body` above,
+        // unchanged) — only the push gains the assistant's actual text, cut to
+        // the same length the relay itself enforces so Canopy's own truncation
+        // point (with an explicit ellipsis) is what the user sees, not
+        // whatever the relay's raw 3000-character cap happens to do to it. A
+        // turn that produced no text keeps the old summary rather than
+        // sending an empty push.
         if let session = boundSession {
+            let pushBody = finalText?.isEmpty == false
+                ? Self.truncatedNotificationBody(finalText!, maxLength: 3000)
+                : body
             RosterNotifier.post(kind: .completed,
                                 sessionId: session.id.uuidString,
                                 title: "Canopy",
-                                body: body)
+                                body: pushBody)
         }
 
         guard !NSApp.isActive else { return }
