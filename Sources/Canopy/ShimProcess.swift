@@ -3074,14 +3074,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let request = inner["request"] as? [String: Any],
            request["type"] as? String == "tool_permission_request"
         {
-            pendingPermissionRequestIds.insert(requestId)
+            let isNewPermissionRequest = pendingPermissionRequestIds.insert(requestId).inserted
             if request["toolName"] as? String == "AskUserQuestion" {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
             // A raised hand is the one state where the notification is worth
             // more than the roster row: it is the only state that cannot
-            // resolve itself.
-            if let session = boundSession {
+            // resolve itself. Gated on the insert actually inserting a NEW id,
+            // not on the message merely arriving — a redelivered requestId
+            // (extension resend, reconnect replay) must still update set
+            // membership every time this runs, but must not buzz the phone a
+            // second time for a hand that was already raised.
+            if isNewPermissionRequest, let session = boundSession {
                 RosterNotifier.post(kind: .asking,
                                     sessionId: session.id.uuidString,
                                     title: "Canopy — needs you",
