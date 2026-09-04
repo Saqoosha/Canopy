@@ -3078,6 +3078,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if request["toolName"] as? String == "AskUserQuestion" {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
+            // A raised hand is the one state where the notification is worth
+            // more than the roster row: it is the only state that cannot
+            // resolve itself.
+            if let session = boundSession {
+                RosterNotifier.post(kind: .asking,
+                                    sessionId: session.id.uuidString,
+                                    title: "Canopy — needs you",
+                                    body: sessionTitle.isEmpty ? "A session is waiting" : sessionTitle)
+            }
             refreshAskingState()
             return
         }
@@ -4919,10 +4928,28 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     private func postTaskCompletedNotification() {
+        let body = sessionTitle.isEmpty ? "Task completed" : "\(sessionTitle) — completed"
+
+        // The phone is pushed unconditionally, while the LOCAL banner keeps its
+        // `!NSApp.isActive` gate. They answer different questions: that gate
+        // means "Canopy is not frontmost on this Mac", which says nothing about
+        // whether a human is at this desk — walking away with Canopy frontmost
+        // is exactly the case the phone exists for. The accepted cost is a buzz
+        // while you are sitting at the Mac; the phone's own Focus settings are
+        // the control for that, and gating on activity here would reproduce the
+        // MacroPad unread bug where "app is frontmost" was mistaken for "a human
+        // is looking".
+        if let session = boundSession {
+            RosterNotifier.post(kind: .completed,
+                                sessionId: session.id.uuidString,
+                                title: "Canopy",
+                                body: body)
+        }
+
         guard !NSApp.isActive else { return }
         let content = UNMutableNotificationContent()
         content.title = "Canopy"
-        content.body = sessionTitle.isEmpty ? "Task completed" : "\(sessionTitle) — completed"
+        content.body = body
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
