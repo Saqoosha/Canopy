@@ -53,9 +53,14 @@ enum RosterNotifier {
     /// - Parameter resumeId: the CLI's own session id, which survives a
     ///   Canopy restart. The phone groups a session's history by it; without
     ///   it every restart orphans everything stored so far.
+    /// - Parameter answerable: false for an ask that Allow/Deny cannot
+    ///   resolve — an `AskUserQuestion`, whose answer is text the model asked
+    ///   for. The phone then shows the ask without buttons rather than
+    ///   offering two that cannot work.
     static func post(kind: Kind, sessionId: String, resumeId: String? = nil,
                      title: String, body: String,
-                     requestId: String? = nil, allowAlways: Bool = false) {
+                     requestId: String? = nil, allowAlways: Bool = false,
+                     answerable: Bool = true) {
         guard let (machineId, url, secret) = resolvedTarget() else { return }
 
         var request = URLRequest(url: url)
@@ -75,6 +80,7 @@ enum RosterNotifier {
         if let requestId {
             payload["requestId"] = requestId
             payload["allowAlways"] = allowAlways
+            payload["answerable"] = answerable
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         URLSession.shared.dataTask(with: request) { _, response, error in

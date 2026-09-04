@@ -897,6 +897,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// rather than leave the phone believing a decision landed.
     @discardableResult
     func applyPermissionDecision(requestId: String, decision: String) -> Bool {
+        // An AskUserQuestion's `inputs` is the QUESTION, not an answer, so
+        // echoing it back as `updatedInput` resolves the request with the
+        // prompt itself and the tool never receives what it asked for. Worse,
+        // the `cancel_request` below would then hide the real prompt on the
+        // Mac, leaving nowhere to answer it. Refuse here, and the push does
+        // not offer the buttons in the first place (`answerable` below).
+        guard !pendingAskUserQuestionRequestIds.contains(requestId) else {
+            logger.notice("roster decision refused: requestId \(requestId, privacy: .public) is an AskUserQuestion, which has no allow/deny answer")
+            return false
+        }
         guard pendingPermissionRequestIds.contains(requestId) else {
             logger.notice("roster decision refused: requestId \(requestId, privacy: .public) not outstanding on this shim")
             return false
@@ -3351,10 +3361,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `truncatedTitle`. The relay caps a notification body at 3000
     /// characters; this runs first so that cap is never what decides what
     /// the user sees — Canopy's own cut point always wins.
-    static func truncatedNotificationBody(_ text: String, maxLength: Int) -> String {
-        text.count > maxLength
-            ? String(text.prefix(maxLength - 3)) + "..."
-            : text
+    static func truncatedNotificationBody(_ text: String, maxBytes: Int) -> String {
+        // **Bytes, not characters.** APNs caps the whole payload at 4 KB of
+        // JSON, and one Japanese character is 3 UTF-8 bytes while an emoji is
+        // 4 — so a body inside a 3000-CHARACTER budget can be 12 KB on the
+        // wire and APNs drops the notification outright. Cutting on a
+        // Character boundary keeps the result valid text; the ellipsis is
+        // inside the budget, not added past it.
+        guard text.utf8.count > maxBytes else { return text }
+        let ellipsis = "..."
+        let budget = maxBytes - ellipsis.utf8.count
+        guard budget > 0 else { return "" }
+        var out = ""
+        var used = 0
+        for ch in text {
+            let n = String(ch).utf8.count
+            if used + n > budget { break }
+            out.append(ch)
+            used += n
+        }
+        return out + ellipsis
     }
 
     /// Render a `tool_permission_request`'s `inputs` payload for the asking
@@ -3461,7 +3487,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 let rendered = Self.renderedToolInput(request["inputs"])
                 let requestSummary = rendered.isEmpty
                     ? (sessionTitle.isEmpty ? "A session is waiting" : sessionTitle)
-                    : Self.truncatedNotificationBody(rendered, maxLength: 2000)
+                    : Self.truncatedNotificationBody(rendered, maxBytes: 2000)
                 let hasRules = !(pendingPermissionRequestSuggestions[requestId] ?? []).isEmpty
                 RosterNotifier.post(kind: .asking,
                                     sessionId: session.id.uuidString,
@@ -3469,7 +3495,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                     title: toolName.isEmpty ? "Canopy — needs you" : "Canopy — \(toolName)",
                                     body: requestSummary,
                                     requestId: requestId,
-                                    allowAlways: hasRules)
+                                    allowAlways: hasRules,
+                                    answerable: toolName != "AskUserQuestion")
             }
             refreshAskingState()
             return
@@ -5353,7 +5380,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // sending an empty push.
         if let session = boundSession {
             let pushBody = finalText?.isEmpty == false
-                ? Self.truncatedNotificationBody(finalText!, maxLength: 3000)
+                ? Self.truncatedNotificationBody(finalText!, maxBytes: 2400)
                 : body
             RosterNotifier.post(kind: .completed,
                                 sessionId: session.id.uuidString,

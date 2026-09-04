@@ -4600,14 +4600,27 @@ enum SidebarLogicProbe {
         // input, which has to render the same way every time or two identical
         // asks read as two different ones.
         record("notify body: shorter than the cap is untouched",
-              ShimProcess.truncatedNotificationBody("hello", maxLength: 10) == "hello")
+               ShimProcess.truncatedNotificationBody("hello", maxBytes: 10) == "hello")
         record("notify body: exactly the cap is untouched",
-              ShimProcess.truncatedNotificationBody("0123456789", maxLength: 10) == "0123456789")
+               ShimProcess.truncatedNotificationBody("0123456789", maxBytes: 10) == "0123456789")
         record("notify body: one over the cap is cut to the cap, ellipsis included",
-              ShimProcess.truncatedNotificationBody("0123456789A", maxLength: 10) == "0123456...")
+               ShimProcess.truncatedNotificationBody("0123456789A", maxBytes: 10) == "0123456...")
         record("notify body: the result never exceeds the cap",
-              ShimProcess.truncatedNotificationBody(String(repeating: "x", count: 5000),
-                                                    maxLength: 3000).count == 3000)
+               ShimProcess.truncatedNotificationBody(String(repeating: "x", count: 5000),
+                                                     maxBytes: 3000).utf8.count == 3000)
+        // The whole point of counting bytes: 12 Japanese characters are 36
+        // UTF-8 bytes, and APNs counts those, not the 12. A character-based
+        // cut passed a body four times the size it thought it was sending.
+        record("notify body: multibyte text is measured in BYTES, not characters",
+               ShimProcess.truncatedNotificationBody(String(repeating: "あ", count: 12),
+                                                     maxBytes: 20).utf8.count <= 20)
+        record("notify body: a multibyte cut lands on a character boundary",
+               ShimProcess.truncatedNotificationBody(String(repeating: "あ", count: 12),
+                                                     maxBytes: 20) == "あああああ...")
+        record("notify body: an emoji is never split in half",
+               ShimProcess.truncatedNotificationBody("🍎🍎🍎", maxBytes: 9) == "🍎...")
+        record("notify body: a budget too small for the ellipsis yields empty, not a crash",
+               ShimProcess.truncatedNotificationBody("あああ", maxBytes: 2).isEmpty)
 
         record("tool input: a command becomes a fenced shell block, newlines intact",
               ShimProcess.renderedToolInput(["command": "ls -l\nwc -l"] as [String: Any])
