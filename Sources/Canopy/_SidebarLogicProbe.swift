@@ -1609,6 +1609,28 @@ enum SidebarLogicProbe {
             let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x")
             record("roster reply: an id from a previous launch matches nothing",
                    RosterReply.target(for: stale, in: [a]) == nil)
+
+            // Every fixture above uses a single-session array, so none of
+            // them could catch "picked the wrong session out of several" —
+            // a `sessions.first` bug would pass every one of them. Add a
+            // second open session and check both that the SECOND one is
+            // reachable (not just whichever is first) and that an id
+            // belonging to neither still matches nothing.
+            let b = OpenSession(
+                origin: .local(cwd),
+                resumeId: "reply-B",
+                title: "Reply B",
+                project: "ProjectB",
+                status: .live,
+                lastActiveAt: now
+            )
+            let addressesB = ReplyEnvelope(type: "reply", sessionId: b.id.uuidString, text: "for B")
+            record("roster reply: with two sessions open, routes to the SECOND when addressed",
+                   RosterReply.target(for: addressesB, in: [a, b])?.id == b.id)
+
+            let addressesNeither = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "for neither")
+            record("roster reply: with two sessions open, an id matching neither finds nothing",
+                   RosterReply.target(for: addressesNeither, in: [a, b]) == nil)
         }
 
         // The display name falls back rather than going blank: an empty Settings

@@ -162,15 +162,42 @@ final class RosterPublisher {
     /// so there is deliberately no retry here.
     private func receiveReplies(on task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
-            guard case .success(let message) = result else { return }
-            if case .string(let text) = message,
-               let data = text.data(using: .utf8),
-               let envelope = try? JSONDecoder().decode(ReplyEnvelope.self, from: data) {
-                Task { @MainActor in self?.onReply?(envelope) }
-            }
-            Task { @MainActor in
-                guard let self, self.task === task else { return }
-                self.receiveReplies(on: task)
+            switch result {
+            case .success(let message):
+                if case .string(let text) = message,
+                   let data = text.data(using: .utf8),
+                   let envelope = try? JSONDecoder().decode(ReplyEnvelope.self, from: data) {
+                    Task { @MainActor in self?.onReply?(envelope) }
+                }
+                Task { @MainActor in
+                    guard let self, self.task === task else { return }
+                    self.receiveReplies(on: task)
+                }
+            case .failure(let error):
+                // The socket is dead and this loop ends here — silently, if
+                // we don't log it. Before this, an idle Mac lost its reply
+                // path invisibly (this is the only trigger for reconnecting;
+                // `connectIfConfigured()` only runs from `publish()`, which
+                // only fires on an observed pane/settings change, and an
+                // idle Mac has neither), and the phone went on to report "No
+                // Mac is connected — it may be asleep" about a Mac that was
+                // awake the whole time. Deliberately no ping, no timer, no
+                // reconnect loop here: recovery is still the next observed
+                // state change, same as before this fix — this only makes
+                // that limitation visible instead of silent.
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.logger.notice("roster: receive failed, socket presumed dead: \(error.localizedDescription, privacy: .public)")
+                    // Only clear OUR state if `task` is still the one this
+                    // closure was armed on — `publish()`/`secretChanged()`
+                    // may have already replaced it with a fresh, live
+                    // socket, and clobbering that would silently kill a
+                    // working connection instead of the dead one that
+                    // actually failed.
+                    guard self.task === task else { return }
+                    self.task = nil
+                    self.connectedEndpoint = nil
+                }
             }
         }
     }

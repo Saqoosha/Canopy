@@ -131,7 +131,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // `isWorking` guard is sufficient from here on. See
                 // `phoneReplyInFlight`'s doc for why the gap before this
                 // point needed its own latch.
-                phoneReplyInFlight = false
+                endPhoneReplyFlight()
                 refreshAskingState()
                 // Reconcile pending background tasks against the session
                 // JSONL: only the ids whose `<task-notification>` has
@@ -478,6 +478,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // `consumeRecapTraffic` already documents for a contended recap,
         // but reached without any user action to blame it on.
         if keepAliveInFlight { return "keep-alive in flight" }
+        // Same reasoning, for a real turn rather than a synthetic one:
+        // `isWorking` only flips true when the CLI's own frames come back
+        // through `trackWorkingState`, a network round trip after
+        // `requestPhoneReply` injects (see `phoneReplyInFlight`'s doc). A
+        // recap that reads `isWorking == false` inside that window would
+        // fire on top of the reply and its own swallow latch would eat the
+        // reply's `command_lifecycle`/`system/init` — the documented
+        // stuck-spinner bug, plus a reply whose answer never renders.
+        if phoneReplyInFlight { return "phone reply in flight" }
         return recapGate.ineligibilityReason(
             hasHistoricConversation: hasHistoricConversation,
             isRemote: remoteHost != nil
@@ -535,6 +544,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if isWorking { return "session busy" }
         if keepAliveInFlight { return "keep-alive already in flight" }
         if recapRequestInFlight { return "recap in flight" }
+        // A keep-alive reading `isWorking == false` inside the network round
+        // trip between `requestPhoneReply` injecting and the CLI's frames
+        // coming back through `trackWorkingState` (see `phoneReplyInFlight`'s
+        // doc) would inject a refresh on top of the reply, and the
+        // keep-alive's own swallow latch would eat the reply's
+        // `command_lifecycle`/`system/init` — the documented stuck-spinner
+        // bug, plus a reply whose answer never renders. A due keep-alive is
+        // most likely exactly when this fires: a reply arrives after the
+        // 55-minute idle window that made the refresh due in the first place.
+        if phoneReplyInFlight { return "phone reply in flight" }
         // **A raised hand is an IDLE state, and a refresh would answer it.**
         // `isWorking` is false while the model waits for a permission
         // decision or an AskUserQuestion reply, so without this the user
@@ -723,6 +742,32 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// the asynchrony it exists to cover.
     private var phoneReplyInFlight = false
 
+    /// Watchdog for a reply injected but never acknowledged by the CLI —
+    /// same shape and cancellation discipline as `keepAliveTimeout`, guarding
+    /// the same failure mode. Without it, an injection that draws no CLI
+    /// activity at all (a crash, a stdin write that never reaches the CLI,
+    /// anything short of the turn actually starting) leaves
+    /// `phoneReplyInFlight` latched forever — none of its three clear paths
+    /// (`isWorking` flipping true, the `result` backstop, or a reconnect's
+    /// `resetActivityState`) ever fires — and `ineligibilityReasonForReply`
+    /// refuses every later reply from that shim permanently.
+    private var phoneReplyTimeout: DispatchWorkItem?
+
+    /// Monotonic flight id, same purpose as `keepAliveGeneration`: captured
+    /// by value so a watchdog already dequeued when a later flight starts
+    /// can tell it is stale rather than clearing that later flight's latch.
+    private var phoneReplyGeneration = 0
+
+    /// 120s, matching `keepAliveTimeoutSeconds` rather than the recap's 90s:
+    /// a reply is injected on the exact same wire path as a keep-alive
+    /// (`sendToShim` writing a synthetic `user` io_message) and waits on the
+    /// same signal (`isWorking` flipping true via `trackWorkingState`), so it
+    /// can run cold for the same reason — a large cached context can take
+    /// tens of seconds to produce a first token. The recap's shorter budget
+    /// belongs to a different shape (a forked `/recap` turn, not a real turn
+    /// on the main conversation) and isn't the closer comparison here.
+    private static let phoneReplyTimeoutSeconds: TimeInterval = 120
+
     /// Why a phone reply is refused right now, or nil when it would be
     /// injected. Mirrors `keepAliveIneligibilityReason`'s shim-state checks —
     /// same busy-shim guard, same order — but carries none of the
@@ -791,7 +836,28 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             ] as [String: Any],
         ])
         logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): injected")
+
+        phoneReplyTimeout?.cancel()
+        phoneReplyGeneration &+= 1
+        let generation = phoneReplyGeneration
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.phoneReplyInFlight, self.phoneReplyGeneration == generation else { return }
+            self.endPhoneReplyFlight()
+            // Error, not notice: a latched reply refuses every later reply
+            // from this shim silently — the phone gets no indication why.
+            logger.error("roster reply \(self.keepAliveLogLabel, privacy: .public): no CLI activity after \(Self.phoneReplyTimeoutSeconds)s — unlatched")
+        }
+        phoneReplyTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.phoneReplyTimeoutSeconds, execute: timeout)
         return true
+    }
+
+    /// Tear down the flight's state in one place, so no path can clear the
+    /// latch and leave the watchdog behind.
+    private func endPhoneReplyFlight() {
+        phoneReplyInFlight = false
+        phoneReplyTimeout?.cancel()
+        phoneReplyTimeout = nil
     }
 
     /// Tear down the flight's state in one place, so no path can clear the
@@ -1501,12 +1567,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.info("Custom API: baseURL=\(api.baseURL, privacy: .private) opus=\(api.opusModel, privacy: .public) sonnet=\(api.sonnetModel, privacy: .public) haiku=\(api.haikuModel, privacy: .public) subagent=\(api.subagentModel, privacy: .public)")
         }
 
-        // Marks this CLI session as hosted by Canopy. Claude Code's hooks inherit
-        // the CLI's environment (measured), and Pager's three hook scripts exit
-        // early when they see this — Canopy sends the notification itself, with the
-        // pane and session identity a hook cannot know. The value is informational;
-        // only its PRESENCE is load-bearing, so "-" is a legitimate value and must
-        // not be an empty string, which would read as absent.
+        // Marks this CLI session as hosted by Canopy — but its presence now
+        // means something stronger than that. Claude Code's hooks inherit
+        // the CLI's environment (measured), and Pager's notify-stop.sh
+        // stands down a claude-sourced Stop event whenever it sees this var
+        // set. So exporting it unconditionally would stand Pager down for
+        // every Canopy session, including the default one, where
+        // `settings.rosterEnabled` is off and `RosterNotifier.post` never
+        // sends anything — zero notifications, not one from each side. The
+        // variable's presence therefore means "Canopy will push for this
+        // session," not merely "Canopy is hosting it," and Pager's hook
+        // depends on that stronger reading. `willPost` shares
+        // `RosterNotifier.post`'s own gate (roster enabled, a usable https
+        // endpoint, a resolvable machine id and Keychain secret) so this
+        // check and the one that actually sends cannot drift apart.
+        //
+        // The value itself is otherwise informational; only its PRESENCE is
+        // load-bearing, so "-" is a legitimate value and must not be an
+        // empty string, which would read as absent.
         //
         // `boundSession` is set before `start()` on the main open/spawn path
         // (WebViewContainer's fresh-shim branch binds it before the expensive
@@ -1515,9 +1593,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // so a reconnecting shim always reports "-" here even though the
         // session already has a pane — accepted, since the value is advisory
         // and this only misses on that one path.
-        env["CANOPY_PANE"] = boundSession
-            .flatMap { session in SessionStore.shared?.paneIndex(forSession: session.id) }
-            .map(String.init) ?? "-"
+        if RosterNotifier.willPost {
+            env["CANOPY_PANE"] = boundSession
+                .flatMap { session in SessionStore.shared?.paneIndex(forSession: session.id) }
+                .map(String.init) ?? "-"
+        }
 
         proc.environment = env
 
@@ -3259,8 +3339,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         endKeepAliveFlight()
         // A latch that survived a reconnect would silently refuse every
         // later reply — the shim that set it is gone, so nothing will ever
-        // flip `isWorking` to clear it the ordinary way.
-        phoneReplyInFlight = false
+        // flip `isWorking` to clear it the ordinary way. Also cancels the
+        // watchdog, which would otherwise fire later against a shim that no
+        // longer has anything for it to unlatch.
+        endPhoneReplyFlight()
         refreshAskingState()
         refreshWaitingState()
     }
@@ -4648,7 +4730,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Backstop: the turn has finished either way, so nothing should
             // still be treating a reply as in flight. The ordinary path
             // already cleared this the moment `isWorking` flipped true.
-            phoneReplyInFlight = false
+            // Also cancels the watchdog so it can't fire later.
+            endPhoneReplyFlight()
             // If the turn ended without any AskUserQuestion permission
             // request being tracked, the `tool_use`-stream-derived
             // `lastAssistantHadAskUserQuestion` flag is orphaned — e.g. user
