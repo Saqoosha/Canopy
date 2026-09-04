@@ -444,7 +444,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         publisher.onDecision = { [weak store] envelope in
             guard let store else { return }
             guard let session = RosterReply.decisionTarget(for: envelope, in: store.openSessions) else {
-                logger.notice("roster decision: no open session matches \(envelope.sessionId, privacy: .public)")
+                // Say which of the two it was. Reporting an envelope this
+                // router refused as "no open session matches" names the one
+                // thing that was fine, and it cost a full diagnosis round when
+                // `allowAlways` was added everywhere except that gate.
+                if !RosterReply.acceptedDecisions.contains(envelope.decision) {
+                    logger.notice("roster decision: refusing unrecognized decision \(envelope.decision, privacy: .public)")
+                } else {
+                    logger.notice("roster decision: no open session matches \(envelope.sessionId, privacy: .public)")
+                }
                 return
             }
             guard let shim = session.shim else {

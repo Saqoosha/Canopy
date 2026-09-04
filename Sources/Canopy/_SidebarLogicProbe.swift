@@ -1652,6 +1652,20 @@ enum SidebarLogicProbe {
             record("roster decision: routes to the addressed session",
                    RosterReply.decisionTarget(for: good, in: [a])?.id == a.id)
 
+            // Every value the router accepts must route. The gate and
+            // `ShimProcess.applyPermissionDecision`'s switch are two lists in
+            // two files, and adding `allowAlways` to the shim and the relay
+            // while missing this one was measured on device: the decision was
+            // dropped and reported as "no open session matches".
+            for value in RosterReply.acceptedDecisions.sorted() {
+                let env = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
+                                            requestId: "abc123", decision: value)
+                record("roster decision: \(value) routes to the addressed session",
+                       RosterReply.decisionTarget(for: env, in: [a])?.id == a.id)
+            }
+            record("roster decision: allowAlways is one of the accepted values",
+                   RosterReply.acceptedDecisions.contains("allowAlways"))
+
             let badValue = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
                                              requestId: "abc123", decision: "allow_always")
             record("roster decision: refuses an unknown decision value",

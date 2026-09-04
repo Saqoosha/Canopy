@@ -61,11 +61,20 @@ enum RosterReply {
     /// permission request is outstanding NOW — happens on the `ShimProcess`
     /// side, in `applyPermissionDecision`, which is the only place holding
     /// `pendingPermissionRequestIds`.
+    /// The decision values this router will carry. **One list, checked in one
+    /// place** — the previous spelling repeated `"allow"` and `"deny"` inline
+    /// here while `ShimProcess.applyPermissionDecision` had its own switch, so
+    /// adding `allowAlways` to the shim and the relay left this gate quietly
+    /// dropping it. What made that cost a whole diagnosis is the caller's log
+    /// line: a nil return is reported as "no open session matches", which
+    /// names the one thing that was fine.
+    static let acceptedDecisions: Set<String> = ["allow", "deny", "allowAlways"]
+
     static func decisionTarget(for envelope: DecisionEnvelope,
                                 in sessions: [OpenSession]) -> OpenSession? {
         guard envelope.type == "decision",
               !envelope.requestId.isEmpty,
-              envelope.decision == "allow" || envelope.decision == "deny",
+              Self.acceptedDecisions.contains(envelope.decision),
               let id = UUID(uuidString: envelope.sessionId)
         else { return nil }
         return sessions.first { $0.id == id }
