@@ -12,12 +12,15 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "Roster")
 enum RosterNotifier {
     enum Kind: String { case completed, asking }
 
-    static func post(kind: Kind, sessionId: String, title: String, body: String) {
+    /// Every guard `post` needs before it can actually send, minus the
+    /// network call itself — pulled out so `willPost` and `post` read from
+    /// one place and can't drift apart. `nil` means "would not send."
+    private static func resolvedTarget() -> (machineId: String, url: URL, secret: String)? {
         let settings = CanopySettings.shared
         guard settings.rosterEnabled,
               let machineId = MachineIdentity.stableId(),
               var components = URLComponents(string: settings.rosterEndpoint)
-        else { return }
+        else { return nil }
         components.path = "/notify"
         // Refuse anything but https, mirroring `RosterPublisher.connectIfConfigured()`
         // (CWE-319, PR #177): this call builds the same Bearer-secret request
@@ -25,11 +28,21 @@ enum RosterNotifier {
         // cleartext-secret hole that guard was added to close.
         guard components.scheme == "https" else {
             logger.error("roster endpoint must be https; refusing to send the secret over \(components.scheme ?? "no scheme", privacy: .public)")
-            return
+            return nil
         }
         guard let url = components.url,
               let secret = RosterPublisher.sharedSecretForNotifier()
-        else { return }
+        else { return nil }
+        return (machineId, url, secret)
+    }
+
+    /// True exactly when `post` would attempt to send. `ShimProcess` reads
+    /// this to decide whether to export `CANOPY_PANE` — see that call site's
+    /// doc for why the two must not disagree.
+    static var willPost: Bool { resolvedTarget() != nil }
+
+    static func post(kind: Kind, sessionId: String, title: String, body: String) {
+        guard let (machineId, url, secret) = resolvedTarget() else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
