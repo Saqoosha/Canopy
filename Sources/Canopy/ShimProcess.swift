@@ -126,6 +126,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // responded, we're back to thinking.
             if isWorking && !oldValue {
                 lastAssistantHadAskUserQuestion = false
+                // The turn is now known to have started — CLI frames are
+                // flowing back through `trackWorkingState`, so the ordinary
+                // `isWorking` guard is sufficient from here on. See
+                // `phoneReplyInFlight`'s doc for why the gap before this
+                // point needed its own latch.
+                phoneReplyInFlight = false
                 refreshAskingState()
                 // Reconcile pending background tasks against the session
                 // JSONL: only the ids whose `<task-notification>` has
@@ -703,6 +709,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Phone reply
 
+    /// Set the instant a reply is injected, cleared once the turn is known
+    /// to have started or finished. `isWorking` alone cannot guard
+    /// re-entrancy here: it flips true only when the CLI's own
+    /// `assistant`/`stream_event` frames come back through
+    /// `trackWorkingState` (a network round trip after injection), while a
+    /// real webview submission sets it SYNCHRONOUSLY the instant the
+    /// webview posts, inside `userContentController`. `sendToShim` writes
+    /// straight to the shim's stdin and never touches that path, so two
+    /// phone replies sent in quick succession would both see `isWorking ==
+    /// false` and both be injected, permanently, into the transcript.
+    /// Do not delete this as redundant with `isWorking` — that is exactly
+    /// the asynchrony it exists to cover.
+    private var phoneReplyInFlight = false
+
     /// Why a phone reply is refused right now, or nil when it would be
     /// injected. Mirrors `keepAliveIneligibilityReason`'s shim-state checks —
     /// same busy-shim guard, same order — but carries none of the
@@ -711,6 +731,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func ineligibilityReasonForReply() -> String? {
         if channelId == nil { return "no channelId (session not launched yet)" }
         if isWorking { return "session busy" }
+        if phoneReplyInFlight { return "reply already in flight" }
         if keepAliveInFlight { return "keep-alive in flight" }
         if recapRequestInFlight { return "recap in flight" }
         if !pendingPermissionRequestIds.isEmpty { return "permission request outstanding" }
@@ -724,7 +745,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// latches. A keep-alive hides itself on purpose; a reply is the
     /// opposite and must appear in the transcript and the replay exactly as
     /// if it had been typed at this Mac, or the user cannot see what they
-    /// told the session to do.
+    /// told the session to do. It carries its own re-entrancy latch,
+    /// `phoneReplyInFlight` — see that property's doc for why `isWorking`
+    /// cannot do this job alone.
     ///
     /// Returns whether it was injected, so the caller can log a refusal
     /// rather than leave the phone believing a message landed.
@@ -732,7 +755,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func requestPhoneReply(text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        guard !keepAliveInFlight, !recapRequestInFlight, !isWorking,
+        guard !phoneReplyInFlight, !keepAliveInFlight, !recapRequestInFlight, !isWorking,
               pendingPermissionRequestIds.isEmpty, !lastAssistantHadAskUserQuestion
         else {
             logger.notice("roster reply refused: \(self.ineligibilityReasonForReply() ?? "shim state changed since the gate ran", privacy: .public)")
@@ -742,6 +765,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.notice("roster reply refused: no channelId")
             return false
         }
+        phoneReplyInFlight = true
         // The same envelope `requestKeepAlive` sends, with the phone's text.
         // `origin: ["kind": "human"]` is correct and load-bearing here: a
         // reply IS a human's input, arriving by a different route, and the
@@ -3233,6 +3257,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // window but does not close it, and a reconnect inside it is the
         // normal case for SSH remote.
         endKeepAliveFlight()
+        // A latch that survived a reconnect would silently refuse every
+        // later reply — the shim that set it is gone, so nothing will ever
+        // flip `isWorking` to clear it the ordinary way.
+        phoneReplyInFlight = false
         refreshAskingState()
         refreshWaitingState()
     }
@@ -4617,6 +4645,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 isWorking = false
                 postTaskCompletedNotification()
             }
+            // Backstop: the turn has finished either way, so nothing should
+            // still be treating a reply as in flight. The ordinary path
+            // already cleared this the moment `isWorking` flipped true.
+            phoneReplyInFlight = false
             // If the turn ended without any AskUserQuestion permission
             // request being tracked, the `tool_use`-stream-derived
             // `lastAssistantHadAskUserQuestion` flag is orphaned — e.g. user
