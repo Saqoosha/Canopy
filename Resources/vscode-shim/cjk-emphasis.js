@@ -22,15 +22,17 @@
  * comes through byte-identical — with the one exception in KNOWN LIMITS below,
  * where the local test and CommonMark's paragraph-wide pairing disagree.
  *
- * MEASURED against 25,303 Japanese assistant text blocks from ~/.claude
+ * MEASURED against 25,307 Japanese assistant text blocks from ~/.claude
  * transcripts, judged by rendering each with micromark (the engine behind the
  * webview's renderer) and counting the ** that survive into the HTML outside
- * <code>: 1,686 blocks showed a literal ** and 37 still do, 5,227 stray runs
- * down to 77, 1,657 blocks improved, 0 made worse, and every block came back
- * with the same multiset of characters it went in with. The harness is not
- * committed — it reads the user's own transcripts — so these figures cannot be
- * re-derived from the repo; `test/cjk-emphasis.test.js` pins the multiset and
- * split-invariance properties over generated text instead.
+ * <code>: 1,689 blocks showed a literal ** and 37 still do, 5,233 stray runs
+ * down to 77, 1,660 blocks improved, 0 made worse, and every block came back
+ * with the same multiset of characters it went in with. The corpus is a live
+ * directory that grows between runs, so the totals drift by a few blocks and
+ * the harness is not committed — it reads the user's own transcripts — so
+ * these figures cannot be re-derived from the repo. What IS re-derivable is in
+ * `test/cjk-emphasis.test.js`, which pins the multiset and split-invariance
+ * properties over generated text.
  *
  * STREAMING CONTRACT: feed() accepts arbitrary chunk splits, and the
  * concatenation of every feed() plus the final end() does not depend on where
@@ -154,6 +156,7 @@ class CJKEmphasisRewriter {
         this.fenceChar = '';
         this.fenceLen = 0;
         this.codeTicks = 0;         // backtick-run length while inside inline code
+        this.inLinkDest = false;    // between a `](` and its `)`
         this.bold = false;
         // Repairs applied, for the per-turn tally. A span that fails at both
         // ends increments BOTH, so these are repair counts, not span counts.
@@ -205,7 +208,11 @@ class CJKEmphasisRewriter {
             // ---- inside a fenced block: verbatim until the closing fence ----
             if (this.inFence) {
                 if (this.atLineStart) {
-                    const close = /^ {0,3}([`~]{3,})[ \t]*(\n|$)/.exec(buf.slice(i, n));
+                    // The run must be one character repeated: CommonMark does
+                    // not let ``` ~ close a backtick fence, and a mixed-run
+                    // pattern accepted it as a four-character close, leaving the
+                    // scanner rewriting the code that followed.
+                    const close = /^ {0,3}(`{3,}|~{3,})[ \t]*(\n|$)/.exec(buf.slice(i, n));
                     if (close && (close[2] === '\n' || final)) {
                         if (close[1][0] === this.fenceChar && close[1].length >= this.fenceLen) {
                             this.inFence = false;
@@ -243,9 +250,30 @@ class CJKEmphasisRewriter {
                 continue;
             }
 
+            // ---- inside a link destination: verbatim until `)` ------------------
+            // A URL is not prose. `[参照](https://example.com/**注意。**次)` was
+            // repaired inside the parentheses, which leaves the label unchanged
+            // and silently points it at a different address — the same class of
+            // damage the non-ASCII restriction closes from the other side. Stops
+            // at the first `)` or at the end of the line, which is what an inline
+            // destination can contain anyway.
+            if (this.inLinkDest) {
+                if (ch === ')' || ch === '\n') this.inLinkDest = false;
+                out += take(i + 1);
+                continue;
+            }
+            if (ch === ']') {
+                if (i + 1 >= n && !final) return need(); // is a `(` coming?
+                if (buf[i + 1] === '(') {
+                    this.inLinkDest = true;
+                    out += take(i + 2);
+                    continue;
+                }
+            }
+
             // ---- an opening fence ----------------------------------------------
             if (this.atLineStart) {
-                const open = /^ {0,3}([`~]{3,})/.exec(buf.slice(i, n));
+                const open = /^ {0,3}(`{3,}|~{3,})/.exec(buf.slice(i, n));
                 if (open) {
                     if (i + open[0].length >= n && !final) return need(); // run may grow
                     this.inFence = true;

@@ -1804,15 +1804,51 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Read stderr — shim logs + CLI exit detection
         // Use nonisolated(unsafe) to satisfy Sendable requirements — the closure
         // only dispatches to main thread, never accesses self directly.
+        /// Reassembles whole lines out of pipe chunks. A class because the
+        /// readability handler is an escaping closure that runs on its own queue
+        /// and has to carry state across invocations; `@unchecked Sendable`
+        /// because that queue is serial, so the residual is never touched
+        /// concurrently.
+        final class StderrLineBuffer: @unchecked Sendable {
+            private var residual = ""
+            func take(_ chunk: String) -> [Substring] {
+                let combined = residual + chunk
+                var parts = combined.split(separator: "\n", omittingEmptySubsequences: false)
+                residual = combined.hasSuffix("\n") ? "" : String(parts.removeLast())
+                return parts.filter { !$0.isEmpty }
+            }
+            func flush() -> [Substring] {
+                let leftover = residual
+                residual = ""
+                return leftover.isEmpty ? [] : [Substring(leftover)]
+            }
+        }
         nonisolated(unsafe) let weakSelf = self
+        // `availableData` is a raw pipe chunk, not a line. Classifying fragments
+        // sends the tail of a split `[cjk-emphasis]` line to `info` — which is
+        // ring-buffer only, i.e. exactly what promoting it to `notice` exists to
+        // avoid — and would show `handleCLISubprocessExit` half a phrase. Hold
+        // the trailing partial line until its newline arrives, and release it at
+        // EOF so a last line written without one is not lost.
+        let pending = StderrLineBuffer()
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
+            let lines: [Substring]
             if data.isEmpty {
                 handle.readabilityHandler = nil
-                return
+                lines = pending.flush()
+            } else {
+                guard let str = String(data: data, encoding: .utf8), !str.isEmpty else {
+                    // A multi-byte character straddling two reads makes the whole
+                    // chunk undecodable, and Japanese output puts that boundary in
+                    // the common case rather than the rare one.
+                    logger.error("[shim] undecodable stderr chunk, \(data.count) bytes dropped")
+                    return
+                }
+                lines = pending.take(str)
             }
-            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
-                for line in str.split(separator: "\n") {
+            if !lines.isEmpty {
+                for line in lines {
                     // Every `[cjk-emphasis]` line — the armed announcement, the
                     // per-turn tally, the shape dump — is a record someone reads
                     // back later, and `info` lives only in an in-memory ring

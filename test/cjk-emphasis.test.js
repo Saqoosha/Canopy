@@ -145,6 +145,20 @@ test('never moves ASCII punctuation that carries structure', () => {
     assert.strictEqual(repairMarkdown(linkBoth), linkBoth);
 });
 
+test('never rewrites inside a link destination', () => {
+    // A URL is not prose. Repairing inside the parentheses leaves the label
+    // unchanged and silently points it somewhere else.
+    const url = '[参照](https://example.com/**注意。**次)';
+    assert.strictEqual(repairMarkdown(url), url);
+    // The suppression ends at the `)`, so prose after it is still repaired —
+    // and a `](` that is not a link (an index followed by a call) costs only
+    // the few characters up to its own `)`.
+    assert.strictEqual(
+        repairMarkdown('配列は a[i](値)。**注意。**次'),
+        '配列は a[i](値)。**注意**。次',
+    );
+});
+
 // ---------------------------------------------------------------------------
 // Code is the one thing a text rewrite must never reach.
 // ---------------------------------------------------------------------------
@@ -163,6 +177,12 @@ const CODE = [
     // boundary inside that indent must not make the line stop being a line
     // start.
     '  ```js\nconst x = 1;\n\n**注意。**次\n  ```\n',
+    // CommonMark does not let ``` ~ close a backtick fence. A mixed-run pattern
+    // accepted it as a four-character close and rewrote the code that followed.
+    '```\ncode\n```~\n**注意。**次\n```\n',
+    '~~~\ncode\n~~~`\n**注意。**次\n~~~\n',
+    // A link destination, which is not prose either.
+    '[参照](https://example.com/**注意。**次)',
 ];
 
 test('never rewrites inside fenced or inline code', () => {
