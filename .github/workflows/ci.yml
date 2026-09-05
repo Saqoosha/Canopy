@@ -38,7 +38,7 @@ jobs:
     # is not a test at all goes in NON_TEST_FILES. Three visibly different
     # acts rather than one append that could mean any of them.
     env:
-      CI_TEST_FILES: "test/shim-unit.test.js"
+      CI_TEST_FILES: "test/shim-unit.test.js test/cjk-emphasis.test.js test/cjk-emphasis-stream.test.js test/cjk-emphasis-wiring.test.js"
       EXCLUDED_TEST_FILES: "test/shim-integration.test.js"
       # Not a test: a harness, imported only by the integration suite — so
       # nothing this job runs touches it. Node WOULD still discover it (see
@@ -219,7 +219,7 @@ jobs:
       # raising it much further would start eating into what it detects.
       - name: Run shim unit tests
         env:
-          EXPECTED_TESTS: 101
+          EXPECTED_TESTS: 132
           MAX_DURATION_MS: 30000
         run: |
           # `set -f` here for the same reason the assert step has it, and

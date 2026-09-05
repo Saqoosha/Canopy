@@ -7,10 +7,26 @@ const {
   CancellationTokenNone,
 } = require("./types.js");
 const { createNotificationHandler } = require("./notifications.js");
+const { createEmphasisRepairer } = require("./cjk-emphasis-stream.js");
 
 // ---------------------------------------------------------------------------
 // createWindow — full vscode.window shim
 // ---------------------------------------------------------------------------
+
+// Said once per shim process, so "no repair lines in the log" can be read as
+// "nothing needed repairing" rather than "this build never wired it up". The
+// two are otherwise indistinguishable, and the second is the failure that
+// would go unnoticed longest.
+let announcedEmphasisRepair = false;
+function announceEmphasisRepair(enabled) {
+  if (announcedEmphasisRepair) return;
+  announcedEmphasisRepair = true;
+  process.stderr.write(
+    enabled
+      ? "[cjk-emphasis] armed (CANOPY_DISABLE_CJK_EMPHASIS_REPAIR=1 turns it off)\n"
+      : "[cjk-emphasis] disabled by CANOPY_DISABLE_CJK_EMPHASIS_REPAIR\n",
+  );
+}
 
 function createWindow() {
   const notifications = createNotificationHandler();
@@ -23,10 +39,26 @@ function createWindow() {
 
   function createWebviewObject(_extensionUri) {
     const onDidReceiveMessageEmitter = new EventEmitter();
+    // CommonMark cannot close a `**` span whose closer sits between CJK
+    // punctuation and a CJK character, so Japanese replies render their markers
+    // literally. Repairing here covers live streaming and history replay at
+    // once — both reach the webview through this one call. Set
+    // CANOPY_DISABLE_CJK_EMPHASIS_REPAIR=1 to forward frames untouched.
+    const enabled = process.env.CANOPY_DISABLE_CJK_EMPHASIS_REPAIR !== "1";
+    announceEmphasisRepair(enabled);
+    const repairer = enabled ? createEmphasisRepairer() : null;
 
     const webview = {
       postMessage(message) {
-        writeStdout({ type: "webview_message", message });
+        if (!repairer) {
+          writeStdout({ type: "webview_message", message });
+          return Promise.resolve(true);
+        }
+        // One frame in can become two out: a block's held-back tail is released
+        // as a synthetic delta ahead of its content_block_stop.
+        for (const out of repairer.repairOutbound(message)) {
+          writeStdout({ type: "webview_message", message: out });
+        }
         return Promise.resolve(true);
       },
       onDidReceiveMessage: onDidReceiveMessageEmitter.event,

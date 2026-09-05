@@ -1813,7 +1813,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 for line in str.split(separator: "\n") {
-                    logger.info("[shim] \(line, privacy: .public)")
+                    // The CJK emphasis repairer's per-turn tally is a decision
+                    // record someone reads back later, and `info` lives only in
+                    // an in-memory ring buffer — a `--start/--end` query minutes
+                    // afterwards returns nothing. Everything else the shim says
+                    // is stream noise and stays at `info`.
+                    if line.hasPrefix("[cjk-emphasis]") {
+                        logger.notice("[shim] \(line, privacy: .public)")
+                    } else {
+                        logger.info("[shim] \(line, privacy: .public)")
+                    }
                     // Detect CLI subprocess exit from extension error log
                     if line.contains("process exited with code") || line.contains("process terminated by signal") {
                         let lineStr = String(line)
