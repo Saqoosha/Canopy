@@ -31,7 +31,21 @@ enum AskUserQuestionForm {
     static let labelSeparator = ", "
 
     /// What the phone needs to draw the form: one entry per question, each
-    /// with its option labels.
+    /// with its options as `{label, description}`.
+    ///
+    /// **Descriptions are carried, and the first version of this dropped
+    /// them.** The argument for dropping was that they are the bulkiest part
+    /// of the form and nobody taps them — true and irrelevant: they are not
+    /// tapped, they are READ, and on a question whose labels are terse they
+    /// carry the entire difference between the options. That was survivable
+    /// only while the tool's raw input still appeared above the form; once
+    /// that duplicate was removed the phone held no copy of them at all.
+    /// Found in review, on a PR whose own questions put the whole argument in
+    /// the descriptions.
+    ///
+    /// The push budget still degrades safely: `fitPushPayload` drops
+    /// `choices` wholesale when it cannot fit, and the phone then shows the
+    /// body — which has the descriptions in it.
     ///
     /// Returns nil when the input is not an AskUserQuestion form at all, so a
     /// caller can tell "no questions" from "an empty question list" — the
@@ -55,9 +69,17 @@ enum AskUserQuestionForm {
             guard let text = question["question"] as? String, !text.isEmpty,
                   let options = question["options"] as? [[String: Any]]
             else { return nil }
-            let labels = options.compactMap { $0["label"] as? String }.filter { !$0.isEmpty }
-            guard !labels.isEmpty else { return nil }
-            var entry: [String: Any] = ["question": text, "options": labels]
+            var rendered: [[String: Any]] = []
+            for option in options {
+                guard let label = option["label"] as? String, !label.isEmpty else { continue }
+                var entry: [String: Any] = ["label": label]
+                if let description = option["description"] as? String, !description.isEmpty {
+                    entry["description"] = description
+                }
+                rendered.append(entry)
+            }
+            guard !rendered.isEmpty else { return nil }
+            var entry: [String: Any] = ["question": text, "options": rendered]
             if let header = question["header"] as? String, !header.isEmpty {
                 entry["header"] = header
             }
@@ -98,7 +120,11 @@ enum AskUserQuestionForm {
                   let options = question["options"] as? [[String: Any]],
                   let answer = answers[text]
             else { return nil }
-            let offered = Set(options.compactMap { $0["label"] as? String })
+            // Empty labels are filtered here for the same reason
+            // `choices(from:)` filters them: an option with no label is never
+            // drawn on the phone, so accepting "" as an answer would resolve
+            // the question with a choice nobody was offered.
+            let offered = Set(options.compactMap { $0["label"] as? String }.filter { !$0.isEmpty })
             // **An offered label may itself contain the separator.** These
             // are model-authored ("Save, then quit"), and the format cannot
             // represent one unambiguously — the extension joins on ", " and

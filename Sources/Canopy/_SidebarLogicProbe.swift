@@ -7316,11 +7316,30 @@ enum SidebarLogicProbe {
             ]
 
             let drawn = AskUserQuestionForm.choices(from: inputs)
+            let drawnOptions = drawn?.first?["options"] as? [[String: Any]]
             record("ask form: choices carry the question and its option labels",
                    drawn?.count == 1
                        && drawn?.first?["question"] as? String == "Which database?"
-                       && drawn?.first?["options"] as? [String] == ["Postgres", "SQLite"]
+                       && drawnOptions?.compactMap { $0["label"] as? String } == ["Postgres", "SQLite"]
                        && drawn?.first?["header"] as? String == "DB")
+
+            // Descriptions were dropped by the first version of this on the
+            // argument that nobody taps them. They are not tapped, they are
+            // read, and once the raw tool input stopped being shown above the
+            // form the phone held no copy of them anywhere.
+            let described = AskUserQuestionForm.choices(from: [
+                "questions": [
+                    ["question": "Q", "options": [
+                        ["label": "a", "description": "the first one"],
+                        ["label": "b"],
+                    ]],
+                ],
+            ])?.first?["options"] as? [[String: Any]]
+            record("ask form: an option's description is carried to the phone",
+                   described?.first?["description"] as? String == "the first one")
+            record("ask form: an option with no description carries none",
+                   described?.last?["description"] == nil
+                       && described?.last?["label"] as? String == "b")
 
             // nil, not []: the phone must be able to tell "not a form" from "a
             // form with nothing to press", because the second draws a dead
@@ -7417,6 +7436,17 @@ enum SidebarLogicProbe {
             record("ask form: a duplicate question is refused at merge too",
                    AskUserQuestionForm.merged(
                        inputs: duplicate, answers: ["Which?": "a"]) == nil)
+
+            // An option with no label is dropped by `choices`, so the phone
+            // never draws it — and `merged` must not accept it either, or a
+            // question resolves with a choice nobody was offered.
+            let blankLabel: [String: Any] = [
+                "questions": [
+                    ["question": "Q", "options": [["label": ""], ["label": "real"]]],
+                ],
+            ]
+            record("ask form: an empty label is not an answer either side",
+                   AskUserQuestionForm.merged(inputs: blankLabel, answers: ["Q": ""]) == nil)
 
             let two: [String: Any] = [
                 "questions": [
