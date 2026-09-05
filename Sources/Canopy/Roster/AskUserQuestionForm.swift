@@ -42,6 +42,14 @@ enum AskUserQuestionForm {
               let questions = dict["questions"] as? [[String: Any]],
               !questions.isEmpty
         else { return nil }
+        // **A question's text is its KEY, so two questions cannot share one.**
+        // The answer map is keyed by that text — the extension's own form
+        // state is too — so a duplicate silently overwrites, and the phone
+        // would report a form complete while sending one answer for two
+        // questions. The format cannot represent it, so refuse the form and
+        // let the ask fall back to being answered at the Mac.
+        guard Set(questions.compactMap { $0["question"] as? String }).count == questions.count
+        else { return nil }
         var out: [[String: Any]] = []
         for question in questions {
             guard let text = question["question"] as? String, !text.isEmpty,
@@ -78,7 +86,11 @@ enum AskUserQuestionForm {
         guard !answers.isEmpty,
               let dict = inputs as? [String: Any],
               let questions = dict["questions"] as? [[String: Any]],
-              !questions.isEmpty
+              !questions.isEmpty,
+              // See `choices(from:)`: duplicate question text is
+              // unrepresentable in the answer map, and accepting it here
+              // would answer two questions with one selection.
+              Set(questions.compactMap { $0["question"] as? String }).count == questions.count
         else { return nil }
         var accepted: [String: String] = [:]
         for question in questions {

@@ -7401,6 +7401,23 @@ enum SidebarLogicProbe {
                    AskUserQuestionForm.merged(
                        inputs: comma, answers: ["Then?": "Save, then reboot"]) == nil)
 
+            // Two questions sharing one text. The answer map is keyed by
+            // that text, so a duplicate overwrites: the phone reports the
+            // form complete and sends one answer for two questions. The
+            // format cannot represent it, so the form is refused outright
+            // and the ask is answered at the Mac instead.
+            let duplicate: [String: Any] = [
+                "questions": [
+                    ["question": "Which?", "options": [["label": "a"]]],
+                    ["question": "Which?", "options": [["label": "b"]]],
+                ],
+            ]
+            record("ask form: a duplicate question makes the form undrawable",
+                   AskUserQuestionForm.choices(from: duplicate) == nil)
+            record("ask form: a duplicate question is refused at merge too",
+                   AskUserQuestionForm.merged(
+                       inputs: duplicate, answers: ["Which?": "a"]) == nil)
+
             let two: [String: Any] = [
                 "questions": [
                     ["question": "Q1", "options": [["label": "a"]]],
