@@ -12,6 +12,10 @@ struct ReplyEnvelope: Codable {
     let type: String
     let sessionId: String
     let text: String
+    /// Correlates the acknowledgement this Mac sends back. Optional because a
+    /// relay older than the ack protocol sends none; the reply is still
+    /// injected, and only the confirmation is missing.
+    let deliveryId: String?
 }
 
 /// A permission decision made on the phone, arriving down the publisher
@@ -30,6 +34,27 @@ struct DecisionEnvelope: Codable {
     let sessionId: String
     let requestId: String
     let decision: String
+    /// See `ReplyEnvelope.deliveryId`.
+    let deliveryId: String?
+}
+
+/// What this Mac did with a delivery, sent back so the relay can answer the
+/// phone with something true.
+///
+/// **`ok: false` is the case this exists for.** The socket was alive, so the
+/// relay's write succeeded and it used to answer 200 — while the Mac had no
+/// such session, no live shim, or a shim that refused. The phone showed the
+/// message as sent and nothing had happened.
+struct DeliveryOutcome {
+    let ok: Bool
+    /// Shown on the phone. Never conversation content — these are states, not
+    /// text the user wrote.
+    let reason: String?
+
+    static let delivered = DeliveryOutcome(ok: true, reason: nil)
+    static func refused(_ reason: String) -> DeliveryOutcome {
+        DeliveryOutcome(ok: false, reason: reason)
+    }
 }
 
 enum RosterReply {

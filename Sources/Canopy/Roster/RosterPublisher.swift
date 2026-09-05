@@ -92,11 +92,11 @@ final class RosterPublisher {
     /// Called with each reply that arrives down the publisher socket. Set by
     /// `AppDelegate` at start, because the publisher owns the connection but
     /// not the sessions.
-    var onReply: ((ReplyEnvelope) -> Void)?
+    var onReply: ((ReplyEnvelope) -> DeliveryOutcome)?
 
     /// Called with each permission decision that arrives down the publisher
     /// socket. Set alongside `onReply`, same reason.
-    var onDecision: ((DecisionEnvelope) -> Void)?
+    var onDecision: ((DecisionEnvelope) -> DeliveryOutcome)?
 
     /// The live publisher, for callers that cannot reach the `AppDelegate`
     /// instance holding it.
@@ -266,6 +266,28 @@ final class RosterPublisher {
         pingTimer = timer
     }
 
+    /// Tells the relay what happened to a delivery, so its HTTP answer to the
+    /// phone can be true.
+    ///
+    /// Sent on the socket the delivery ARRIVED on, not `self.task`: the two
+    /// differ if a reconnect landed in between, and acking down the new one
+    /// would reach a relay that is not waiting for it while the one that is
+    /// times out. A delivery with no id is from a relay older than this
+    /// protocol — it is still acted on, and there is simply nobody to tell.
+    private func sendAck(deliveryId: String?, outcome: DeliveryOutcome, on task: URLSessionWebSocketTask) {
+        guard let deliveryId else { return }
+        var payload: [String: Any] = ["type": "ack", "deliveryId": deliveryId, "ok": outcome.ok]
+        if let reason = outcome.reason { payload["reason"] = reason }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else { return }
+        task.send(.string(text)) { [weak self] error in
+            guard let error else { return }
+            Task { @MainActor in
+                self?.logger.notice("roster: ack send failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
     private func stopPinging() {
         pingTimer?.cancel()
         pingTimer = nil
@@ -366,11 +388,21 @@ final class RosterPublisher {
                     switch kind.type {
                     case "reply":
                         if let envelope = try? JSONDecoder().decode(ReplyEnvelope.self, from: data) {
-                            Task { @MainActor in self?.onReply?(envelope) }
+                            Task { @MainActor in
+                                guard let self else { return }
+                                let outcome = self.onReply?(envelope)
+                                    ?? .refused("Canopy is not ready for replies yet")
+                                self.sendAck(deliveryId: envelope.deliveryId, outcome: outcome, on: task)
+                            }
                         }
                     case "decision":
                         if let envelope = try? JSONDecoder().decode(DecisionEnvelope.self, from: data) {
-                            Task { @MainActor in self?.onDecision?(envelope) }
+                            Task { @MainActor in
+                                guard let self else { return }
+                                let outcome = self.onDecision?(envelope)
+                                    ?? .refused("Canopy is not ready for decisions yet")
+                                self.sendAck(deliveryId: envelope.deliveryId, outcome: outcome, on: task)
+                            }
                         }
                     default:
                         break
