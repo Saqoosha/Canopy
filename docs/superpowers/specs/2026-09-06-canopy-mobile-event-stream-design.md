@@ -180,6 +180,25 @@ CREATE INDEX IF NOT EXISTS event_by_session ON event (session_id, seq);
 
 ---
 
+## 実測（2026-09-06）
+
+**デプロイ済み relay に対する実配線テストは通った。** 使い捨ての machine id で publisher と watcher の実ソケットを開き、次を確認した（`scratchpad/relay-event-probe.mjs`、worker version `5e7c9705`）。
+
+- publisher が送ったイベントが watcher に届き、relay が `seq` を振っている
+- テキストと `at`（Swift の 2001 年起点の秒、小数込み）が往復で変わらない
+- `events_since 0` がイベントと `oldestSeq` を返す
+- 最新 seq より後を要求すると空が返る
+- **形が壊れたイベントは保存されない** — その後の backfill にも現れない
+
+そのスクリプトには `check(..., true)` と書いた行が 1 つ混ざっており、**あれは何も測っていない**。PASS と表示されるが証拠ではない。
+
+**実機の目視 4 項目は未確認。** Canopy の Debug ビルドと iPhone の新ビルドは動いているが、セッションで 1 turn 走らせる操作が要る。次の 4 つを人が確かめる必要がある。
+
+1. アシスタントの発言が完成時点で電話に現れること
+2. ツール行にコマンドとパスが出ていないこと（`Bash: npm test` は出てよく、`/Users/...` は出てはいけない）
+3. 完了 push と同じ文章が 2 つ並ばないこと
+4. **Mac で打ったプロンプト自身が `user` イベントとして出ること** — これは推論であって実測ではない。出なければ `SessionEvent` の `user` ケースは死にコードであり、拡張が何を送っているかを `[stdout→webview] type=` のログで数えて直す
+
 ## 見つけもの（本体には入れない）
 
 **タイムラインの穴**。1 時間アプリを閉じた後に開くと、1 時間前の疎な `completed` と直近の密なイベントが 1 本に並ぶ。「ここに穴がある」の印は後から足せる。
