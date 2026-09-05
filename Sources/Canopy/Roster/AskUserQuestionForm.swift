@@ -87,9 +87,22 @@ enum AskUserQuestionForm {
                   let answer = answers[text]
             else { return nil }
             let offered = Set(options.compactMap { $0["label"] as? String })
-            let chosen = answer.components(separatedBy: labelSeparator)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
+            // **An offered label may itself contain the separator.** These
+            // are model-authored ("Save, then quit"), and the format cannot
+            // represent one unambiguously — the extension joins on ", " and
+            // splits on ", " too, so the ambiguity is the format's, not this
+            // parser's. Resolve it the only way that cannot be wrong: if the
+            // WHOLE answer is a label that was offered, it is that one label.
+            // Splitting first refused a perfectly valid single-select answer
+            // and left the ask pending on the Mac with nothing to explain it.
+            let chosen: [String]
+            if offered.contains(answer) {
+                chosen = [answer]
+            } else {
+                chosen = answer.components(separatedBy: labelSeparator)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+            }
             guard !chosen.isEmpty, chosen.allSatisfy({ offered.contains($0) }) else { return nil }
             let multiSelect = question["multiSelect"] as? Bool ?? false
             guard multiSelect || chosen.count == 1 else { return nil }

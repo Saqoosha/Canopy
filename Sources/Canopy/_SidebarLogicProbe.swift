@@ -7382,6 +7382,25 @@ enum SidebarLogicProbe {
                        inputs: multi, answers: ["Which features?": "A,  C"])?["answers"]
                        as? [String: String]) == ["Which features?": "A, C"])
 
+            // A label the model wrote with a comma in it. The whole-answer
+            // exact match is what saves this; splitting first yields "Save"
+            // and "then quit", neither offered, so a valid single-select
+            // answer was refused and the ask stayed pending on the Mac.
+            let comma: [String: Any] = [
+                "questions": [
+                    ["question": "Then?", "options": [["label": "Save, then quit"], ["label": "Discard"]]],
+                ],
+            ]
+            record("ask form: an offered label containing the separator is accepted whole",
+                   (AskUserQuestionForm.merged(
+                       inputs: comma, answers: ["Then?": "Save, then quit"])?["answers"]
+                       as? [String: String]) == ["Then?": "Save, then quit"])
+            // The exact match must not become a way past the offered set:
+            // an answer that is not a label still has to split and match.
+            record("ask form: the whole-answer match does not admit an unoffered label",
+                   AskUserQuestionForm.merged(
+                       inputs: comma, answers: ["Then?": "Save, then reboot"]) == nil)
+
             let two: [String: Any] = [
                 "questions": [
                     ["question": "Q1", "options": [["label": "a"]]],
