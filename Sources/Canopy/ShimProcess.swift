@@ -3524,6 +3524,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                     resumeId: session.resumeId,
                                     title: toolName.isEmpty ? "Canopy — needs you" : "Canopy — \(toolName)",
                                     body: requestSummary,
+                                    bodyFull: rendered.isEmpty ? nil : rendered,
                                     requestId: requestId,
                                     allowAlways: hasRules,
                                     answerable: toolName != "AskUserQuestion",
@@ -5423,7 +5424,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 sessionId: session.id.uuidString,
                                 resumeId: session.resumeId,
                                 title: "Canopy",
-                                body: pushBody)
+                                body: pushBody,
+                                // The banner is cut; the conversation should
+                                // not be. See `RosterNotifier.post`.
+                                bodyFull: finalText)
         }
 
         guard !NSApp.isActive else { return }
