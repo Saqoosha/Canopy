@@ -899,16 +899,41 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// value stays `@discardableResult` for the probe and for any future
     /// caller that wants to branch rather than log.
     @discardableResult
-    func applyPermissionDecision(requestId: String, decision: String) -> Bool {
+    /// The form a phone needs to answer an `AskUserQuestion`, or nil when the
+    /// input is not one. A thin seam onto `AskUserQuestionForm` so the call
+    /// site reads in this file's own vocabulary.
+    static func askChoices(from inputs: Any?) -> [[String: Any]]? {
+        AskUserQuestionForm.choices(from: inputs)
+    }
+
+    func applyPermissionDecision(requestId: String, decision: String,
+                                 answers: [String: String]? = nil) -> Bool {
         // An AskUserQuestion's `inputs` is the QUESTION, not an answer, so
-        // echoing it back as `updatedInput` resolves the request with the
-        // prompt itself and the tool never receives what it asked for. Worse,
-        // the `cancel_request` below would then hide the real prompt on the
-        // Mac, leaving nowhere to answer it. Refuse here, and the push does
-        // not offer the buttons in the first place (`answerable` below).
-        guard !pendingAskUserQuestionRequestIds.contains(requestId) else {
-            logger.notice("roster decision refused: requestId \(requestId, privacy: .public) is an AskUserQuestion, which has no allow/deny answer")
-            return false
+        // echoing it back unchanged as `updatedInput` resolves the request
+        // with the prompt itself and the tool never receives what it asked
+        // for. Worse, the `cancel_request` below would then hide the real
+        // prompt on the Mac, leaving nowhere to answer it.
+        //
+        // **So the refusal is about a MISSING answer, not about the tool.**
+        // It used to be unconditional, which is what left the phone rendering
+        // these as raw JSON with nothing to press. A phone that sends the
+        // picked labels supplies exactly what the extension's own form writes
+        // into `answers`, and the request resolves the way it does at the Mac.
+        // `merged` is strict about which labels it will accept — see its doc.
+        var answeredInput: Any?
+        if pendingAskUserQuestionRequestIds.contains(requestId) {
+            guard decision == "allow" else {
+                logger.notice("roster decision refused: requestId \(requestId, privacy: .public) is an AskUserQuestion, which is answered by picking an option, not by \(decision, privacy: .public)")
+                return false
+            }
+            guard let answers, !answers.isEmpty,
+                  let merged = AskUserQuestionForm.merged(
+                      inputs: pendingPermissionRequestInputs[requestId], answers: answers)
+            else {
+                logger.notice("roster decision refused: requestId \(requestId, privacy: .public) is an AskUserQuestion and the answer did not resolve it")
+                return false
+            }
+            answeredInput = merged
         }
         guard pendingPermissionRequestIds.contains(requestId) else {
             logger.notice("roster decision refused: requestId \(requestId, privacy: .public) not outstanding on this shim")
@@ -917,7 +942,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let result: [String: Any]
         switch decision {
         case "allow", "allowAlways":
-            let updatedInput: Any = pendingPermissionRequestInputs[requestId] ?? [String: Any]()
+            let updatedInput: Any = answeredInput
+                ?? pendingPermissionRequestInputs[requestId]
+                ?? [String: Any]()
             // "Always" is not a third behavior — it is `allow` carrying the
             // CLI's proposed rules, which is exactly what the extension's own
             // button sends. An empty proposal degrades to a plain allow and
@@ -3499,7 +3526,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                     body: requestSummary,
                                     requestId: requestId,
                                     allowAlways: hasRules,
-                                    answerable: toolName != "AskUserQuestion")
+                                    answerable: toolName != "AskUserQuestion",
+                                    choices: toolName == "AskUserQuestion"
+                                        ? Self.askChoices(from: request["inputs"])
+                                        : nil)
             }
             refreshAskingState()
             return
