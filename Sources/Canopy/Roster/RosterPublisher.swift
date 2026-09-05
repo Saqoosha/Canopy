@@ -476,6 +476,33 @@ final class RosterPublisher {
     /// Composes the full snapshot. Reading every property here is what arms
     /// the observation above — a field read only inside `publish()` would not
     /// trigger a re-publish when it changed.
+    /// Push one session event down the socket the roster already holds.
+    ///
+    /// **With no socket, the event is dropped in silence.** Buffering on this
+    /// side and replaying after a reconnect is deliberately NOT done: the ring
+    /// buffer lives in the Durable Object, and a second buffer here is two
+    /// guards covering each other — it would also undo the reason the DO-side
+    /// buffer was chosen, which is that the phone can read the recent past
+    /// even when this Mac is gone. Events lost while disconnected are an
+    /// accepted cost, recorded in the design spec.
+    ///
+    /// A send failure does NOT drive a reconnect from here, unlike `publish()`.
+    /// One turn produces tens of events, so a failing network would hammer the
+    /// reconnect path once per event; `publish()` re-establishes the socket on
+    /// the next pane change, which is the right cadence for that.
+    func sendEvent(_ event: SessionEvent) {
+        guard settings.rosterEnabled, let task else { return }
+        guard let data = try? JSONEncoder().encode(event),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+        task.send(.string(text)) { [weak self] error in
+            guard let error else { return }
+            Task { @MainActor in
+                self?.logger.debug("roster: event send failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
     private func snapshot() -> RosterSnapshot? {
         guard let machineId = MachineIdentity.stableId() else { return nil }
         let indexes = RosterSnapshot.paneIndexes(in: store.panes)

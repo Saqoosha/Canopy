@@ -2272,6 +2272,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             extractStatusData(innerMessage)
             extractTitle(innerMessage)
             extractRawUsage(innerMessage)
+            publishSessionEvents(innerMessage)
             if Self.isCanopyOwnedResponse(innerMessage) {
                 return
             }
@@ -5396,6 +5397,37 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ///   model's last message. Passed in rather than accumulated: the frame is
     ///   already in hand at this call site, so there is no stream to buffer and
     ///   no JSONL to re-read, and therefore no race with the CLI's flush.
+    /// The id of the last `assistant` event streamed for this turn. Rides on
+    /// the `completed` push so the phone can draw the two as one thing.
+    private var lastAssistantEventId: String?
+
+    /// Turn one io_message into phone-bound events and send them.
+    ///
+    /// **Called after `consumeRecapTraffic` and `consumeKeepAliveTraffic`,
+    /// which is what keeps Canopy's own synthetic turns off the phone.** A
+    /// recap and a keep-alive are not things the user did, and the keep-alive
+    /// runs hourly on a machine nobody is at — streaming either would fill
+    /// the phone's conversation with turns that never happened.
+    ///
+    /// A bulk history replay does not reach the extractor: it arrives as ONE
+    /// message holding a `response.messages` array (which is why
+    /// `strippingRecapFromReplay` exists at all), and `SessionEvent.events`
+    /// only reads the top-level `type`. Measured on CLI 2.1.258 with Canopy's
+    /// own flags — a `--resume` re-emits no historical `assistant` frames.
+    private func publishSessionEvents(_ message: [String: Any]) {
+        guard let session = boundSession else { return }
+        let events = SessionEvent.events(from: message,
+                                         sessionId: session.id.uuidString,
+                                         resumeId: session.resumeId,
+                                         at: Date(),
+                                         nextId: { UUID().uuidString })
+        guard !events.isEmpty else { return }
+        for event in events {
+            if event.kind == .assistant { lastAssistantEventId = event.eventId }
+            RosterPublisher.current?.sendEvent(event)
+        }
+    }
+
     private func postTaskCompletedNotification(finalText: String?) {
         let body = sessionTitle.isEmpty ? "Task completed" : "\(sessionTitle) — completed"
 
@@ -5427,7 +5459,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 body: pushBody,
                                 // The banner is cut; the conversation should
                                 // not be. See `RosterNotifier.post`.
-                                bodyFull: finalText)
+                                bodyFull: finalText,
+                                eventId: lastAssistantEventId)
         }
 
         guard !NSApp.isActive else { return }
