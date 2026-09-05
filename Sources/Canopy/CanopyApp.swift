@@ -419,19 +419,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // log a notice, so a silent `return` here would be the one gap.
         // The session id is safe to log `.public`; the reply TEXT never is
         // — it is user content and appears in none of these lines.
+        // Every branch returns an outcome now. Each of these used to be a
+        // bare `return` that logged locally and told the phone nothing, so a
+        // reply the Mac could not use still read as sent — the failure this
+        // whole ack path exists to end.
         publisher.onReply = { [weak store] envelope in
-            guard let store else { return }
+            guard let store else { return .refused("Canopy is shutting down") }
             guard let session = RosterReply.target(for: envelope, in: store.openSessions) else {
                 logger.notice("roster reply: no open session matches \(envelope.sessionId, privacy: .public)")
-                return
+                return .refused("That session is not open on this Mac")
             }
             guard let shim = session.shim else {
                 logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) has no live shim")
-                return
+                return .refused("That session is not running — open it on the Mac first")
             }
             if !shim.requestPhoneReply(text: envelope.text) {
-                logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) refused — \(shim.ineligibilityReasonForReply() ?? "unknown", privacy: .public)")
+                let why = shim.ineligibilityReasonForReply() ?? "unknown"
+                logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) refused — \(why, privacy: .public)")
+                return .refused(why)
             }
+            return .delivered
         }
         // Same seam, for a permission decision instead of a typed reply.
         // `RosterReply.decisionTarget` only answers "which session" — the
@@ -442,7 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // silently do nothing, which `applyPermissionDecision`'s own log
         // line covers).
         publisher.onDecision = { [weak store] envelope in
-            guard let store else { return }
+            guard let store else { return .refused("Canopy is shutting down") }
             guard let session = RosterReply.decisionTarget(for: envelope, in: store.openSessions) else {
                 // Say which of the two it was. Reporting an envelope this
                 // router refused as "no open session matches" names the one
@@ -450,16 +457,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // `allowAlways` was added everywhere except that gate.
                 if !RosterReply.acceptedDecisions.contains(envelope.decision) {
                     logger.notice("roster decision: refusing unrecognized decision \(envelope.decision, privacy: .public)")
-                } else {
-                    logger.notice("roster decision: no open session matches \(envelope.sessionId, privacy: .public)")
+                    return .refused("Canopy does not understand that answer")
                 }
-                return
+                logger.notice("roster decision: no open session matches \(envelope.sessionId, privacy: .public)")
+                return .refused("That session is not open on this Mac")
             }
             guard let shim = session.shim else {
                 logger.notice("roster decision: session \(envelope.sessionId, privacy: .public) has no live shim")
-                return
+                return .refused("That session is not running — open it on the Mac first")
             }
-            shim.applyPermissionDecision(requestId: envelope.requestId, decision: envelope.decision)
+            // The one refusal that was ALREADY reported honestly, by
+            // `decisionDelivered` on the phone — but only as "the relay took
+            // it". Now it can say which request went stale.
+            guard shim.applyPermissionDecision(requestId: envelope.requestId, decision: envelope.decision) else {
+                return .refused("That request is no longer waiting for an answer")
+            }
+            return .delivered
         }
     }
 

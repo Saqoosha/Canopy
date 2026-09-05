@@ -1594,19 +1594,19 @@ enum SidebarLogicProbe {
                 status: .live,
                 lastActiveAt: now
             )
-            let good = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "do the thing")
+            let good = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "do the thing", deliveryId: nil)
             record("roster reply: routes to the addressed session",
                    RosterReply.target(for: good, in: [a])?.id == a.id)
 
-            let blank = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "   ")
+            let blank = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "   ", deliveryId: nil)
             record("roster reply: refuses whitespace-only text",
                    RosterReply.target(for: blank, in: [a]) == nil)
 
-            let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x")
+            let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x", deliveryId: nil)
             record("roster reply: refuses a non-reply envelope",
                    RosterReply.target(for: wrongType, in: [a]) == nil)
 
-            let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x")
+            let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x", deliveryId: nil)
             record("roster reply: an id from a previous launch matches nothing",
                    RosterReply.target(for: stale, in: [a]) == nil)
 
@@ -1624,11 +1624,11 @@ enum SidebarLogicProbe {
                 status: .live,
                 lastActiveAt: now
             )
-            let addressesB = ReplyEnvelope(type: "reply", sessionId: b.id.uuidString, text: "for B")
+            let addressesB = ReplyEnvelope(type: "reply", sessionId: b.id.uuidString, text: "for B", deliveryId: nil)
             record("roster reply: with two sessions open, routes to the SECOND when addressed",
                    RosterReply.target(for: addressesB, in: [a, b])?.id == b.id)
 
-            let addressesNeither = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "for neither")
+            let addressesNeither = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "for neither", deliveryId: nil)
             record("roster reply: with two sessions open, an id matching neither finds nothing",
                    RosterReply.target(for: addressesNeither, in: [a, b]) == nil)
         }
@@ -1648,7 +1648,7 @@ enum SidebarLogicProbe {
                 lastActiveAt: now
             )
             let good = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
-                                         requestId: "abc123", decision: "allow")
+                                         requestId: "abc123", decision: "allow", deliveryId: nil)
             record("roster decision: routes to the addressed session",
                    RosterReply.decisionTarget(for: good, in: [a])?.id == a.id)
 
@@ -1659,7 +1659,7 @@ enum SidebarLogicProbe {
             // dropped and reported as "no open session matches".
             for value in RosterReply.acceptedDecisions.sorted() {
                 let env = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
-                                            requestId: "abc123", decision: value)
+                                            requestId: "abc123", decision: value, deliveryId: nil)
                 record("roster decision: \(value) routes to the addressed session",
                        RosterReply.decisionTarget(for: env, in: [a])?.id == a.id)
             }
@@ -1667,17 +1667,17 @@ enum SidebarLogicProbe {
                    RosterReply.acceptedDecisions.contains("allowAlways"))
 
             let badValue = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
-                                             requestId: "abc123", decision: "allow_always")
+                                             requestId: "abc123", decision: "allow_always", deliveryId: nil)
             record("roster decision: refuses an unknown decision value",
                    RosterReply.decisionTarget(for: badValue, in: [a]) == nil)
 
             let blankId = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
-                                            requestId: "", decision: "deny")
+                                            requestId: "", decision: "deny", deliveryId: nil)
             record("roster decision: refuses an envelope whose requestId is empty",
                    RosterReply.decisionTarget(for: blankId, in: [a]) == nil)
 
             let stale = DecisionEnvelope(type: "decision", sessionId: UUID().uuidString,
-                                          requestId: "abc123", decision: "allow")
+                                          requestId: "abc123", decision: "allow", deliveryId: nil)
             record("roster decision: a session id from a previous launch matches nothing",
                    RosterReply.decisionTarget(for: stale, in: [a]) == nil)
 
@@ -1695,12 +1695,12 @@ enum SidebarLogicProbe {
                 lastActiveAt: now
             )
             let addressesB = DecisionEnvelope(type: "decision", sessionId: b.id.uuidString,
-                                               requestId: "def456", decision: "deny")
+                                               requestId: "def456", decision: "deny", deliveryId: nil)
             record("roster decision: with two sessions open, routes to the SECOND when addressed",
                    RosterReply.decisionTarget(for: addressesB, in: [a, b])?.id == b.id)
 
             let addressesNeither = DecisionEnvelope(type: "decision", sessionId: UUID().uuidString,
-                                                      requestId: "ghi789", decision: "allow")
+                                                      requestId: "ghi789", decision: "allow", deliveryId: nil)
             record("roster decision: with two sessions open, an id matching neither finds nothing",
                    RosterReply.decisionTarget(for: addressesNeither, in: [a, b]) == nil)
         }
