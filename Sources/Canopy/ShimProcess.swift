@@ -893,8 +893,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// the same way `userContentController` forwards every webview→host
     /// message it doesn't special-case.
     ///
-    /// Returns whether it was applied, so the caller can log a refusal
-    /// rather than leave the phone believing a decision landed.
+    /// Returns whether it was applied. **Every refusal below already logs its
+    /// own reason**, so the roster caller deliberately discards this and adds
+    /// nothing — unlike the reply path one block above, which checks its
+    /// counterpart because `requestPhoneReply` does NOT log why it declined
+    /// and the caller has to fetch `ineligibilityReasonForReply()` to say.
+    /// The asymmetry is the point; wrapping this call in an `if` would print
+    /// a second, less specific line for a refusal already on the record.
+    /// The value stays for the probe and for any future caller that wants to
+    /// branch rather than log.
     @discardableResult
     func applyPermissionDecision(requestId: String, decision: String) -> Bool {
         // An AskUserQuestion's `inputs` is the QUESTION, not an answer, so
@@ -3550,6 +3557,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func resetActivityState() {
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
+        // Cleared with `…Inputs`, which it is keyed alongside: both are
+        // per-outstanding-request state, and leaving one behind on a shim
+        // exit accumulated entries for the life of the process.
+        pendingPermissionRequestSuggestions.removeAll()
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
