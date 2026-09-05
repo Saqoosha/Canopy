@@ -21,6 +21,7 @@ const streamEvent = (event, parent) => io({
 const start = (index, parent) => streamEvent({ type: 'content_block_start', index, content_block: { type: 'text', text: '' } }, parent);
 const delta = (index, text, parent) => streamEvent({ type: 'content_block_delta', index, delta: { type: 'text_delta', text } }, parent);
 const stop = (index, parent) => streamEvent({ type: 'content_block_stop', index }, parent);
+const result = () => io({ type: 'result', subtype: 'success' });
 
 /** Everything the webview's assembler would append for block `index`. */
 function assembled(outputs, index) {
@@ -76,14 +77,33 @@ test('the assembled text does not depend on the delta boundaries', () => {
     assert.strictEqual(assembled(outputs, 0), expected, 'per-character');
 });
 
+test('two blocks of one message do not share a scanner', () => {
+    // The shape a multi-block reply takes. With one scanner across both, block
+    // 0's held 。 is released into block 1's frame.
+    const r = makeRepairer();
+    const outputs = [];
+    const push = (m) => outputs.push(...r.repairOutbound(m));
+    push(start(0, null));
+    push(start(1, null));
+    push(delta(0, 'ひとつ目の**注意。', null));
+    push(delta(1, 'ふたつ目の文。', null));
+    push(delta(0, '**続き', null));
+    push(stop(1, null));
+    push(stop(0, null));
+    assert.strictEqual(assembled(outputs, 0), 'ひとつ目の**注意**。続き');
+    assert.strictEqual(assembled(outputs, 1), 'ふたつ目の文。');
+});
+
 test('a subagent stream and the main stream do not share a scanner', () => {
+    // NOTE: `parent_tool_use_id` is measured to be hardcoded null on every
+    // `stream_event` the CLI emits, so this fixture drives a shape the wire does
+    // not currently produce. It pins the KEY, not the wire: if a future CLI
+    // starts stamping the field, two interleaved scanners must not merge.
     const r = makeRepairer();
     const outputs = [];
     const push = (m) => outputs.push(...r.repairOutbound(m));
     push(start(0, null));
     push(start(0, 'toolu_sub'));
-    // Interleaved: the main block opens a span, the subagent's text must not
-    // be read as being inside it.
     push(delta(0, '本文の**強調。', null));
     push(delta(0, '子の文。', 'toolu_sub'));
     push(delta(0, '**続き', null));
@@ -96,14 +116,61 @@ test('a subagent stream and the main stream do not share a scanner', () => {
     assert.strictEqual(assembled(sub, 0), '子の文。');
 });
 
-test('message_stop releases a block that never got its own stop', () => {
+test('message_stop releases only its own stream', () => {
     const r = makeRepairer();
     const outputs = [];
     const push = (m) => outputs.push(...r.repairOutbound(m));
     push(start(0, null));
-    push(delta(0, '**注意。', null));
-    push(streamEvent({ type: 'message_stop' }, null));
-    assert.strictEqual(assembled(outputs, 0), '**注意。');
+    push(delta(0, '主**注意。', null));
+    push(start(0, 'toolu_sub'));
+    push(delta(0, '子**注意。', 'toolu_sub'));
+    push(streamEvent({ type: 'message_stop' }, 'toolu_sub'));
+
+    const sub = outputs.filter((o) => o.message.parent_tool_use_id === 'toolu_sub');
+    const main = outputs.filter((o) => o.message.parent_tool_use_id === null);
+    assert.strictEqual(assembled(sub, 0), '子**注意。', 'the ended stream is released');
+    assert.strictEqual(assembled(main, 0), '主**注意', 'the still-running stream keeps its tail');
+});
+
+test('a turn ending at `result` releases every block still open', () => {
+    // An interrupted reply gets no content_block_stop and no message_stop.
+    // Without a drain here the held tail is dropped from the user's transcript.
+    const r = makeRepairer();
+    const outputs = [];
+    const push = (m) => outputs.push(...r.repairOutbound(m));
+    push(start(0, null));
+    push(delta(0, 'これは**注意。', null));
+    push(result());
+    assert.strictEqual(assembled(outputs, 0), 'これは**注意。');
+    assert.ok(r.logs.some((l) => l.includes('WARN')), 'the anomaly is logged');
+});
+
+test('a stale block does not leak into the next turn', () => {
+    const r = makeRepairer();
+    const first = [];
+    const pushFirst = (m) => first.push(...r.repairOutbound(m));
+    pushFirst(start(0, null));
+    pushFirst(delta(0, 'ターン1**注意。', null));
+    pushFirst(result());
+
+    const second = [];
+    const pushSecond = (m) => second.push(...r.repairOutbound(m));
+    pushSecond(delta(0, '新しい話です', null)); // no start: the lazy-create path
+    pushSecond(stop(0, null));
+    assert.strictEqual(assembled(first, 0), 'ターン1**注意。');
+    assert.strictEqual(assembled(second, 0), '新しい話です');
+});
+
+test('a reused block index releases the block it replaces', () => {
+    const r = makeRepairer();
+    const outputs = [];
+    const push = (m) => outputs.push(...r.repairOutbound(m));
+    push(start(0, null));
+    push(delta(0, '前の**注意。', null));
+    push(start(0, null)); // same index again, previous block never stopped
+    push(delta(0, 'あたらしい文', null));
+    push(stop(0, null));
+    assert.strictEqual(assembled(outputs, 0), '前の**注意。あたらしい文');
 });
 
 test('a text block with no content_block_start is still repaired', () => {
@@ -121,15 +188,18 @@ test('a text block with no content_block_start is still repaired', () => {
 
 test('thinking deltas and non-text blocks pass through untouched', () => {
     const r = makeRepairer();
+    // A `text` payload on a foreign delta type: only the type check saves it.
     const thinking = streamEvent({
         type: 'content_block_delta',
         index: 0,
-        delta: { type: 'thinking_delta', thinking: '**考え。**次' },
+        delta: { type: 'thinking_delta', type_is_not_text: true, text: '**考え。**次', thinking: '**考え。**次' },
     }, null);
     assert.deepStrictEqual(r.repairOutbound(thinking), [thinking]);
 
     const toolUse = streamEvent({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use' } }, null);
     assert.deepStrictEqual(r.repairOutbound(toolUse), [toolUse]);
+    // A tool_use block must not have acquired a rewriter from its start event:
+    // a later text_delta on that index would then resume it mid-span.
     const toolDelta = streamEvent({
         type: 'content_block_delta',
         index: 1,
@@ -149,6 +219,23 @@ test('a batch assistant frame is repaired without being mutated', () => {
     assert.strictEqual(out.message.message.content[0].text, '**注意**。次');
     // The extension keeps its own reference to what it posted.
     assert.strictEqual(frame.message.message.content[0].text, '**注意。**次');
+    // Nothing streamed this turn, so the batch frame is what renders and counts.
+    assert.deepStrictEqual(r.stats().live, { closer: 1, opener: 0, blocks: 1 });
+});
+
+test('the batch assistant frame is not counted twice when the same text streamed', () => {
+    // The CLI emits both the deltas and a whole assistant frame for one reply.
+    // Counting both reported one repair as two.
+    const r = makeRepairer();
+    stream(r, ['**注意。**次']);
+    r.repairOutbound(io({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: { id: 'm1', content: [{ type: 'text', text: '**注意。**次' }] },
+    }));
+    r.repairOutbound(result());
+    assert.deepStrictEqual(r.stats().live, { closer: 1, opener: 0, blocks: 1 });
+    assert.match(r.logs.at(-1), /turn: repaired 1 \(1 closer, 0 opener\) in 1 blocks/);
 });
 
 test('history replay is repaired through the response envelope', () => {
@@ -157,15 +244,27 @@ test('history replay is repaired through the response envelope', () => {
         type: 'response',
         response: {
             messages: [
-                { type: 'user', message: { content: '**そのまま。**触らない' } },
+                { type: 'user', message: { content: [{ type: 'text', text: '**そのまま。**触らない' }] } },
                 { type: 'assistant', message: { content: [{ type: 'text', text: '**注意。**次' }] } },
             ],
         },
     };
     const [out] = r.repairOutbound(response);
     assert.strictEqual(out.response.messages[1].message.content[0].text, '**注意**。次');
-    // A user frame is the human's own text and is never rewritten.
-    assert.strictEqual(out.response.messages[0].message.content, '**そのまま。**触らない');
+    // A user frame is the human's own text and is never rewritten — and the
+    // fixture uses the real array-shaped content, so the type check is what
+    // saves it rather than the shape check bailing out first.
+    assert.strictEqual(out.response.messages[0].message.content[0].text, '**そのまま。**触らない');
+});
+
+test('a clean replay still reports, so silence can only mean "never ran"', () => {
+    const r = makeRepairer();
+    r.repairOutbound({
+        type: 'response',
+        response: { messages: [{ type: 'assistant', message: { content: [{ type: 'text', text: '**正しい**：壊れない' }] } }] },
+    });
+    assert.strictEqual(r.logs.length, 1);
+    assert.match(r.logs[0], /turn: no repairs;/);
 });
 
 test('the turn tally logs once per result', () => {
@@ -173,38 +272,40 @@ test('the turn tally logs once per result', () => {
     stream(r, ['**注意。**次と**「引用」**を含む']);
     assert.deepStrictEqual(r.logs, [], 'nothing is logged before the turn ends');
 
-    r.repairOutbound(io({ type: 'result', subtype: 'success' }));
+    r.repairOutbound(result());
     assert.strictEqual(r.logs.length, 1);
-    assert.match(r.logs[0], /^\[cjk-emphasis\] turn: repaired 3 spans \(2 closer, 1 opener\) in 1 blocks;/);
-    assert.match(r.logs[0], /session live 3 spans \/ 1 blocks, replay 0 spans \/ 0 blocks$/);
+    // Repairs, not spans: a span that fails at both ends increments both counters.
+    assert.match(r.logs[0], /^\[cjk-emphasis\] turn: repaired 3 \(2 closer, 1 opener\) in 1 blocks;/);
+    assert.match(r.logs[0], /session live 3 \/ 1 blocks, replay 0 \/ 0 blocks$/);
 });
 
-test('a clean turn still reports, so silence can only mean "never ran"', () => {
+test('a clean turn still reports', () => {
     const r = makeRepairer();
     stream(r, ['**正しい**：壊れない']);
-    r.repairOutbound(io({ type: 'result', subtype: 'success' }));
+    r.repairOutbound(result());
     assert.strictEqual(r.logs.length, 1);
-    assert.match(r.logs[0], /^\[cjk-emphasis\] turn: no repairs; session live 0 spans \/ 0 blocks/);
+    assert.match(r.logs[0], /^\[cjk-emphasis\] turn: no repairs; session live 0 \/ 0 blocks/);
 });
 
 test('the session total accumulates across turns', () => {
     const r = makeRepairer();
     stream(r, ['**注意。**次'], 0);
-    r.repairOutbound(io({ type: 'result', subtype: 'success' }));
+    r.repairOutbound(result());
     stream(r, ['**結論、**そして'], 1);
-    r.repairOutbound(io({ type: 'result', subtype: 'success' }));
+    r.repairOutbound(result());
 
-    assert.match(r.logs[1], /turn: repaired 1 spans \(1 closer, 0 opener\) in 1 blocks/);
-    assert.match(r.logs[1], /session live 2 spans \/ 2 blocks/);
+    assert.match(r.logs[1], /turn: repaired 1 \(1 closer, 0 opener\) in 1 blocks/);
+    assert.match(r.logs[1], /session live 2 \/ 2 blocks/);
     assert.deepStrictEqual(r.stats().live, { closer: 2, opener: 0, blocks: 2 });
 });
 
 // The shapes below are transcribed from a real session's dump
-// (CANOPY_CJK_DEBUG=1): `outer=from-extension inner=io_message deeper=result`
-// and its siblings. Deriving the envelope from the webview's own code instead
-// is one layer short — ShimProcess strips `from-extension` on the way through —
-// and that mistake made the repair a silent no-op on the first build that
-// shipped it, with the arm line still saying everything was fine.
+// (CANOPY_CJK_DEBUG=1): `outer=from-extension inner=io_message frame=result` and
+// its siblings. Deriving the envelope from the webview's own handler instead is
+// one layer short — that handler destructures `from-extension` before its
+// `m.type === 'io_message'` test — and that mistake made the repair a silent
+// no-op on the first build that shipped it, with the arm line still saying
+// everything was fine.
 const fromExtension = (inner) => ({ type: 'from-extension', message: inner });
 
 test('the real from-extension envelope is unwrapped and rewrapped', () => {
@@ -228,9 +329,9 @@ test('a result inside the envelope still ends the turn', () => {
     for (const m of [start(0, null), delta(0, '**注意。**次', null), stop(0, null)]) {
         r.repairOutbound(fromExtension(m));
     }
-    r.repairOutbound(fromExtension(io({ type: 'result', subtype: 'success' })));
+    r.repairOutbound(fromExtension(result()));
     assert.strictEqual(r.logs.length, 1);
-    assert.match(r.logs[0], /turn: repaired 1 spans/);
+    assert.match(r.logs[0], /turn: repaired 1 /);
 });
 
 test('replay inside the envelope is repaired', () => {
@@ -241,6 +342,21 @@ test('replay inside the envelope is repaired', () => {
     }));
     assert.strictEqual(out.type, 'from-extension');
     assert.strictEqual(out.message.response.messages[0].message.content[0].text, '**注意**。次');
+});
+
+test('CANOPY_CJK_DEBUG names the CLI frame, not just the envelope', () => {
+    const previous = process.env.CANOPY_CJK_DEBUG;
+    process.env.CANOPY_CJK_DEBUG = '1';
+    try {
+        const r = makeRepairer();
+        r.repairOutbound(fromExtension(delta(0, 'x', null)));
+        r.repairOutbound(fromExtension(stop(0, null)));
+        assert.match(r.logs[0], /outer=from-extension inner=io_message frame=stream_event event=content_block_delta delta=text_delta/);
+        assert.match(r.logs[1], /event=content_block_stop$/);
+    } finally {
+        if (previous === undefined) delete process.env.CANOPY_CJK_DEBUG;
+        else process.env.CANOPY_CJK_DEBUG = previous;
+    }
 });
 
 test('unrelated messages are forwarded by identity', () => {

@@ -15,91 +15,158 @@
  *
  *     **注意。**次   ->   **注意**。次
  *
- * It fires ONLY when the original would actually break, so text that already
- * renders correctly passes through byte-identical. The opener fails the mirror
- * way — `は**「引用」**を` dies at BOTH ends — and the leading bracket moves out
- * too, landing the pair as `は「**引用**」を`.
+ * The opener fails the mirror way — `は**「引用」**を` dies at BOTH ends — and
+ * the leading bracket moves out too, landing the pair as `は「**引用**」を`.
  *
- * MEASURED against 25,163 Japanese assistant text blocks from ~/.claude
- * transcripts, judged by rendering each block with micromark (the engine behind
- * the webview's renderer) and counting the ** that survive into the HTML
- * outside <code>: 1,664 blocks showed a literal ** and 31 still do, 5,148 stray
- * runs down to 66, 1,641 blocks improved, 0 made worse, and every block came
- * back with the same multiset of characters it went in with.
+ * It fires only where the LOCAL flanking test fails, so text that renders today
+ * comes through byte-identical — with the one exception in KNOWN LIMITS below,
+ * where the local test and CommonMark's paragraph-wide pairing disagree.
  *
- * KNOWN LIMIT, and it is structural rather than a bug to fix: CommonMark pairs
- * delimiters with a stack over the whole paragraph, and a streaming rewriter
- * cannot see the rest of the paragraph. This scanner pairs naively instead, so
- * where the two disagree a repair can fire in the wrong place — that is how the
- * two regressions found at 26,855 blocks arose, one from reading `。` as a span
- * opener and one from an out-of-date punctuation class. Both classes are closed
- * (see OPENING_BRACKET and isPunct) and the measured count is now zero, but zero
- * measured is not zero possible. A DOM pass over the rendered output cannot have
- * this failure mode at all, because it only ever touches the ** a renderer has
- * already refused to consume.
+ * MEASURED against 25,303 Japanese assistant text blocks from ~/.claude
+ * transcripts, judged by rendering each with micromark (the engine behind the
+ * webview's renderer) and counting the ** that survive into the HTML outside
+ * <code>: 1,686 blocks showed a literal ** and 37 still do, 5,227 stray runs
+ * down to 77, 1,657 blocks improved, 0 made worse, and every block came back
+ * with the same multiset of characters it went in with. The harness is not
+ * committed — it reads the user's own transcripts — so these figures cannot be
+ * re-derived from the repo; `test/cjk-emphasis.test.js` pins the multiset and
+ * split-invariance properties over generated text instead.
  *
  * STREAMING CONTRACT: feed() accepts arbitrary chunk splits, and the
  * concatenation of every feed() plus the final end() does not depend on where
  * those splits fell. That is bought by refusing to emit any suffix whose
  * meaning a later character could still change — a `*` run that may still be
  * growing, a punctuation run that may turn out to precede a closer, an
- * unresolved backtick run. Everything else is emitted immediately, so the
- * held-back tail is a few characters and never a whole line.
+ * unresolved backtick run, a fence line whose end has not arrived, half a
+ * surrogate pair. Everything else is emitted immediately, so the held-back tail
+ * is short: bounded by the current line, and in prose by a few characters.
  *
- * Code is never rewritten: fenced blocks and inline code pass through verbatim
- * and suppress all emphasis bookkeeping, so a glob or a Python **kwargs sitting
- * inside them cannot be touched.
+ * WHAT IS NOT TOUCHED: column-0 fenced blocks (``` and ~~~, including indented
+ * up to three spaces) and inline code spans pass through verbatim and suppress
+ * all emphasis bookkeeping. Only NON-ASCII punctuation is ever moved, so ASCII
+ * structure — a link's `)`, an HTML tag's `>`, a `]` — stays where the model
+ * put it even when it sits inside a repaired span.
+ *
+ * KNOWN LIMITS, all measured, none fixed:
+ *  - CommonMark pairs delimiters with a stack over the whole paragraph, and a
+ *    streaming rewriter cannot see the rest of the paragraph. This scanner
+ *    pairs naively instead, so where the two disagree a repair can fire in the
+ *    wrong place. Two such classes were found and closed (see OPENING_BRACKET
+ *    and isPunct); zero measured is not zero possible. A DOM pass over the
+ *    rendered output cannot have this failure mode at all, because it only ever
+ *    touches the ** a renderer has already refused to consume.
+ *  - A fence indented four or more spaces (one inside a list item) is not a
+ *    fence to this scanner, and neither is an indented code block. Their
+ *    contents can be rewritten. Recognising them needs a block parser, which is
+ *    a different piece of software from this one.
+ *  - A repair on an unpaired `**` moves characters without making anything
+ *    render — `章**「補足」だけ` becomes `章「**補足」だけ`, still literal.
  */
 
 'use strict';
 
 // CommonMark "Unicode whitespace" is space, tab, newline, form feed, carriage
-// return plus the Zs category; JavaScript's own `\s` is that set plus U+FEFF,
-// which no assistant text carries. Spelling the class out by hand is a trap:
-// U+2028 and U+2029 are line terminators in JavaScript source, so a literal one
-// inside a regex literal is a syntax error rather than a class member.
+// return plus the Zs category. JavaScript's own `\s` is that set plus U+FEFF,
+// U+000B and the Zl/Zp line separators — none of which appear in assistant
+// text. Spelling the class out by hand is a trap: U+2028 and U+2029 are line
+// terminators in JavaScript source, so a literal one inside a regex literal is
+// a syntax error rather than a class member.
 const WS = /\s/;
-const ASCII_PUNCT = /[!-/:-@[-`{-~]/;
 
-// `undefined` means "past the boundary". CommonMark treats the start and end of
-// the document as whitespace, never as punctuation — which is exactly why
-// `**注意。**` at the end of a paragraph renders fine and needs no repair.
-const isWS = (c) => c === undefined || WS.test(c);
 // CommonMark 0.31 widened "Unicode punctuation" to include the SYMBOL
 // categories, and micromark — the engine behind the webview's renderer —
 // follows it. Testing \p{P} alone is the older definition and it is not a
 // harmless approximation: it makes `＝**.x y**（z）` look like a span that never
 // opened, which then invites the opener repair to fire on the real closer and
-// break a paragraph that rendered perfectly. Measured, once, on a 26,855-block
-// corpus. \p{S} also sweeps in emoji (So), which is what the spec says.
-const isPunct = (c) => c !== undefined && (ASCII_PUNCT.test(c) || /[\p{P}\p{S}]/u.test(c));
-const isPlain = (c) => c !== undefined && !isWS(c) && !isPunct(c);
+// break a paragraph that rendered perfectly. Measured, once, on a 27,003-block
+// corpus. The class subsumes every ASCII punctuation character (measured), so
+// no separate ASCII test is needed.
+const PUNCT = /[\p{P}\p{S}]/u;
 
-// Opening brackets and initial quotes (Ps, Pi): 「『（【〈《〔〖〘〚［｛ and the
-// ASCII ones. The opener repair is restricted to these rather than to
-// punctuation at large, and the restriction is what removes a measured
-// regression: `強調**。続き` is a well-formed CLOSER followed by a full stop,
-// and it is locally indistinguishable from a failed opener. Nothing in real
-// prose starts a bold span with 。 or 、 , so declining them costs nothing and
-// stops the repair firing on a closer whose opener this scanner lost track of.
+// Only NON-ASCII punctuation is ever moved out of a span. Every preceding
+// character measured in the corpus is non-ASCII (。 5129, 、 335, — 222, 」 131,
+// ） 63), and the restriction is what keeps a repair from dragging structure
+// out with it: `**[リンク](https://example.com)。**次` would otherwise become
+// `**[リンク](https://example.com**)。次`, a working link to a 404 — strictly
+// worse than the literal ** it was fixing.
+const ASCII = /[\x00-\x7F]/;
+
+// Opening brackets and initial quotes (Ps, Pi), non-ASCII only: 「『（【〈《〔
+// 〖〘〚［｛ and friends. Two restrictions, each closing a measured failure.
+// Punctuation at large is wrong because `強調**。続き` is a well-formed CLOSER
+// followed by a full stop and is locally indistinguishable from a failed
+// opener; nothing in real prose starts a bold span with 。 or 、 , so declining
+// them costs nothing. ASCII is wrong because `[` is also Ps, and moving it out
+// of `これは**[ドキュメント](./doc.md)**を` breaks the link. What the ASCII half
+// does decline is `**"引用"**` — ASCII quotes are Po, so they were never in this
+// class anyway, but `**(補足)**` mid-sentence now goes unrepaired.
 const OPENING_BRACKET = /[\p{Ps}\p{Pi}]/u;
+
+const isWS = (c) => c === undefined || WS.test(c);
+const isPunct = (c) => c !== undefined && PUNCT.test(c);
+const isPlain = (c) => c !== undefined && !isWS(c) && !isPunct(c);
+const isMovable = (c) => c !== undefined && !ASCII.test(c) && PUNCT.test(c);
+const isOpeningBracket = (c) => c !== undefined && !ASCII.test(c) && OPENING_BRACKET.test(c);
+
+const isHighSurrogate = (code) => code >= 0xd800 && code <= 0xdbff;
+
+/**
+ * The whole code point at `k`, so an astral character (an emoji is category So,
+ * and therefore punctuation under CommonMark 0.31) is classified as itself
+ * rather than as two lone surrogates — which are category Cs and would read as
+ * plain, firing a repair on text that renders correctly.
+ */
+function codePointAt(s, k) {
+    if (k < 0 || k >= s.length) return undefined;
+    if (isHighSurrogate(s.charCodeAt(k)) && k + 1 < s.length) {
+        const next = s.charCodeAt(k + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) return s.slice(k, k + 2);
+    }
+    return s[k];
+}
+
+/** The last whole code point of `s`, for the same reason. */
+function lastCodePoint(s) {
+    if (!s) return undefined;
+    const last = s.charCodeAt(s.length - 1);
+    if (last >= 0xdc00 && last <= 0xdfff && s.length >= 2 && isHighSurrogate(s.charCodeAt(s.length - 2))) {
+        return s.slice(-2);
+    }
+    return s[s.length - 1];
+}
 
 class CJKEmphasisRewriter {
     constructor() {
         this.buf = '';
-        this.lastChar = undefined;  // last character already emitted
-        this.atLineStart = true;
-        this.prevWasNewline = false;
+        // The last code point actually EMITTED — which is the flanking context,
+        // and is not the same thing as the character before the cursor in the
+        // input. A repair reorders characters without going through `take`, so
+        // after one has fired `buf[i - 1]` is a character the reader will never
+        // see in that position. Reading it there let a closer repair fire
+        // straight after an opener repair and collapse `これは**（※）**の扱い`
+        // into `これは（****※）の扱い` — and, because the two disagree only
+        // when a repair has already fired in the same drain, the result depended
+        // on where the chunk boundary fell, which is the one property this file
+        // exists to hold. Found independently by a fuzz over 60,000 texts and by
+        // a hand trace; pinned by `test/cjk-emphasis.test.js`.
+        this.lastChar = undefined;
         this.inFence = false;
         this.fenceChar = '';
         this.fenceLen = 0;
         this.codeTicks = 0;         // backtick-run length while inside inline code
         this.bold = false;
-        this.spanHasPlain = false;  // span content holds a non-punct, non-ws char
-        // One repair === one span that would otherwise have rendered its
-        // markers literally, so these are the "how much did this fix" numbers.
+        // Repairs applied, for the per-turn tally. A span that fails at both
+        // ends increments BOTH, so these are repair counts, not span counts.
         this.repairs = { closer: 0, opener: 0 };
     }
+
+    // Derived from `lastChar` rather than stored, because two fields holding one
+    // fact drift: the punctuation-run and backtick branches used to update
+    // `atLineStart` and leave `prevWasNewline` stale, so `**注意\n、\n続き。**次`
+    // read the second newline as a blank line, closed the span, and lost the
+    // repair that the same text on one line receives.
+    get atLineStart() { return this.lastChar === undefined || this.lastChar === '\n'; }
+    get prevWasNewline() { return this.lastChar === '\n'; }
 
     /** Consume a chunk; returns the text that is safe to forward now. */
     feed(text) {
@@ -115,7 +182,7 @@ class CJKEmphasisRewriter {
     }
 
     _emit(s) {
-        if (s) this.lastChar = s[s.length - 1];
+        if (s) this.lastChar = lastCodePoint(s);
         return s;
     }
 
@@ -123,7 +190,10 @@ class CJKEmphasisRewriter {
         let out = '';
         let i = 0;
         const buf = this.buf;
-        const n = buf.length;
+        // A trailing high surrogate is half a character; scanning it as one
+        // would classify it as plain. Hold it back until its partner arrives.
+        const full = buf.length;
+        const n = (!final && full > 0 && isHighSurrogate(buf.charCodeAt(full - 1))) ? full - 1 : full;
 
         // Stop and wait for more input; everything from `i` onward stays buffered.
         const need = () => { this.buf = buf.slice(i); return out; };
@@ -135,23 +205,26 @@ class CJKEmphasisRewriter {
             // ---- inside a fenced block: verbatim until the closing fence ----
             if (this.inFence) {
                 if (this.atLineStart) {
-                    const close = /^ {0,3}([`~]{3,})[ \t]*(\n|$)/.exec(buf.slice(i));
+                    const close = /^ {0,3}([`~]{3,})[ \t]*(\n|$)/.exec(buf.slice(i, n));
                     if (close && (close[2] === '\n' || final)) {
                         if (close[1][0] === this.fenceChar && close[1].length >= this.fenceLen) {
                             this.inFence = false;
                         }
                         out += take(i + close[0].length);
-                        this.atLineStart = true;
                         continue;
                     }
                     // A line that starts like a fence but whose end has not
                     // arrived: waiting beats guessing, and such lines are short.
-                    if (!final && /^ {0,3}[`~]*$/.test(buf.slice(i))) return need();
+                    // The trailing `[ \t]*` matters — without it a chunk boundary
+                    // inside a closing fence's trailing spaces made the scanner
+                    // miss the fence for the rest of the block and rewrite the
+                    // code inside it, differently depending on where the split
+                    // fell (723 of 20,000 fence-shaped texts).
+                    if (!final && /^ {0,3}[`~]*[ \t]*$/.test(buf.slice(i, n))) return need();
                 }
                 const nl = buf.indexOf('\n', i);
-                if (nl === -1) { out += take(n); this.atLineStart = false; break; }
+                if (nl === -1 || nl >= n) { out += take(n); break; }
                 out += take(nl + 1);
-                this.atLineStart = true;
                 continue;
             }
 
@@ -166,31 +239,27 @@ class CJKEmphasisRewriter {
                     continue;
                 }
                 if (ch === '\n' && this.prevWasNewline) this.codeTicks = 0; // unterminated
-                this.prevWasNewline = ch === '\n';
-                if (this.bold) this.spanHasPlain = true;
-                this.atLineStart = ch === '\n';
                 out += take(i + 1);
                 continue;
             }
 
             // ---- an opening fence ----------------------------------------------
             if (this.atLineStart) {
-                const open = /^ {0,3}([`~]{3,})/.exec(buf.slice(i));
+                const open = /^ {0,3}([`~]{3,})/.exec(buf.slice(i, n));
                 if (open) {
                     if (i + open[0].length >= n && !final) return need(); // run may grow
                     this.inFence = true;
                     this.fenceChar = open[1][0];
                     this.fenceLen = open[1].length;
                     this.bold = false;
-                    this.spanHasPlain = false;
-                    this.atLineStart = false;
                     out += take(i + open[0].length);
                     continue;
                 }
-                // Three backticks may still be arriving one character at a time.
-                if (!final && /[`~]/.test(buf.slice(i)) && /^ {0,3}[`~]*$/.test(buf.slice(i))) {
-                    return need();
-                }
+                // A fence may still be arriving one character at a time, and its
+                // leading indent counts: a buffer of nothing but spaces has to
+                // wait too, or the line stops being a line start and the fence
+                // that follows is never recognised.
+                if (!final && /^ {0,3}[`~]*$/.test(buf.slice(i, n))) return need();
             }
 
             // ---- a backtick run opens inline code --------------------------------
@@ -199,46 +268,43 @@ class CJKEmphasisRewriter {
                 while (j < n && buf[j] === '`') j++;
                 if (j === n && !final) return need();
                 this.codeTicks = j - i;
-                this.atLineStart = false;
                 out += take(j);
                 continue;
             }
 
-            // ---- a punctuation run inside a span: the repair site -----------------
-            if (this.bold && isPunct(ch) && ch !== '*') {
+            // ---- a movable punctuation run inside a span: the repair site ---------
+            if (this.bold && isMovable(codePointAt(buf, i))) {
                 let p = i;
-                while (p < n && isPunct(buf[p]) && buf[p] !== '*' && buf[p] !== '`') p++;
+                for (;;) {
+                    const c = codePointAt(buf, p);
+                    if (p >= n || !isMovable(c)) break;
+                    p += c.length;
+                }
                 if (p === n && !final) return need(); // the run may still grow
                 if (buf[p] === '*') {
                     let j = p;
                     while (j < n && buf[j] === '*') j++;
                     if (j === n && !final) return need(); // the `*` run may still grow
-                    const after = j < n ? buf[j] : undefined;
-                    const beforeRun = i > 0 ? buf[i - 1] : this.lastChar;
-                    // `breaks` is the right-flanking test failing. `safe` keeps
-                    // the rewrite from producing something worse: an all-
-                    // punctuation span would collapse to `****`, and a span
-                    // ending in a space stays unclosable after the move.
+                    const after = j < n ? codePointAt(buf, j) : undefined;
+                    const beforeRun = this.lastChar;
+                    // `breaks` is the right-flanking test failing. After the move
+                    // the closer is followed by the punctuation that used to
+                    // precede it, and `isPunct(after)` alone satisfies
+                    // right-flanking — so `beforeRun` may be punctuation itself
+                    // (a span ending in `code`, say). The one thing it may not be
+                    // is whitespace, which no move can fix, or the opener's own
+                    // `*`, which would collapse an all-punctuation span into a
+                    // four-asterisk run.
                     const breaks = isPlain(after);
-                    // After the move the closer is followed by the punctuation
-                    // that used to precede it, and `isPunct(after)` alone
-                    // satisfies right-flanking — so `beforeRun` may be
-                    // punctuation itself (a span ending in `code`, say). The one
-                    // thing it may not be is whitespace, which no move can fix,
-                    // or the opener's own `*`, which would collapse an
-                    // all-punctuation span into a four-asterisk run.
                     const safe = !isWS(beforeRun) && beforeRun !== '*';
                     if (j - p === 2 && breaks && safe) {
                         out += this._emit('**' + buf.slice(i, p));
                         this.repairs.closer++;
                         this.bold = false;
-                        this.spanHasPlain = false;
-                        this.atLineStart = false;
                         i = j;
                         continue;
                     }
                 }
-                this.atLineStart = false;
                 out += take(p);
                 continue;
             }
@@ -248,33 +314,33 @@ class CJKEmphasisRewriter {
                 let j = i;
                 while (j < n && buf[j] === '*') j++;
                 if (j === n && !final) return need();
-                const after = j < n ? buf[j] : undefined;
-                const before = i > 0 ? buf[i - 1] : this.lastChar;
+                const after = j < n ? codePointAt(buf, j) : undefined;
+                const before = this.lastChar;
                 if (j - i === 2) {
                     if (this.bold) {
                         this.bold = false;
-                        this.spanHasPlain = false;
                     } else if (!isWS(after) && (!isPunct(after) || isWS(before) || isPunct(before))) {
                         this.bold = true; // left-flanking, so it can open
-                        this.spanHasPlain = false;
-                    } else if (OPENING_BRACKET.test(after) && !isWS(before)) {
+                    } else if (isOpeningBracket(after)) {
                         // The mirror defect: an opener dies the same way a
                         // closer does. `は**「引用」**を` fails on BOTH ends —
                         // left-flanking needs the following character not to be
                         // punctuation unless the preceding one is. Moving the
-                        // leading punctuation run outside the span revives it,
-                        // and the closer repair above then handles the other
-                        // end, so the pair lands as `「**引用**」を`.
+                        // leading bracket run outside the span revives it, and
+                        // the closer repair above then handles the other end, so
+                        // the pair lands as `は「**引用**」を`.
                         let q = j;
-                        while (q < n && OPENING_BRACKET.test(buf[q])) q++;
+                        for (;;) {
+                            const c = codePointAt(buf, q);
+                            if (q >= n || !isOpeningBracket(c)) break;
+                            q += c.length;
+                        }
                         if (q === n && !final) return need(); // the run may still grow
-                        const next = q < n ? buf[q] : undefined;
+                        const next = q < n ? codePointAt(buf, q) : undefined;
                         if (!isWS(next)) {
                             out += this._emit(buf.slice(j, q) + '**');
                             this.repairs.opener++;
                             this.bold = true;
-                            this.spanHasPlain = false;
-                            this.atLineStart = false;
                             i = q;
                             continue;
                         }
@@ -283,24 +349,14 @@ class CJKEmphasisRewriter {
                     // `*`, `***`, `****`: emphasis and strong overlap here and the
                     // pairing stops being obvious. Drop out rather than guess.
                     this.bold = false;
-                    this.spanHasPlain = false;
                 }
-                this.atLineStart = false;
                 out += take(j);
                 continue;
             }
 
             // ---- an ordinary character -----------------------------------------------
-            if (ch === '\n') {
-                // A blank line ends the paragraph, and with it any open span.
-                if (this.prevWasNewline) { this.bold = false; this.spanHasPlain = false; }
-                this.prevWasNewline = true;
-                this.atLineStart = true;
-            } else {
-                this.prevWasNewline = false;
-                this.atLineStart = false;
-                if (this.bold && isPlain(ch)) this.spanHasPlain = true;
-            }
+            // A blank line ends the paragraph, and with it any open span.
+            if (ch === '\n' && this.prevWasNewline) this.bold = false;
             out += take(i + 1);
         }
 

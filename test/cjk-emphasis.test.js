@@ -31,10 +31,13 @@ function mulberry32(seed) {
     };
 }
 
+const sortedCodePoints = (s) => [...s].sort().join('');
+
 // ---------------------------------------------------------------------------
-// The five shapes the checker's own corpus reports, in their real proportions:
-// the preceding character was 。 in 5129 cases, then 、 335 / — 222 / 」 131 /
-// ） 63. Every one of these renders as a literal ** today.
+// The shapes the checker's own corpus reports, in their real proportions: the
+// preceding character was 。 in 5129 cases, then 、 335 / — 222 / 」 131 / ） 63,
+// plus a `：` case that is the same defect with a different mark. Every one of
+// these renders as a literal ** today.
 // ---------------------------------------------------------------------------
 const BROKEN = [
     ['**注意。**次の文が続く', '**注意**。次の文が続く'],
@@ -49,6 +52,12 @@ const BROKEN = [
     ['**（補足）**のあとに続く', '**（補足**）のあとに続く'],
     ['**結論：**これは壊れる', '**結論**：これは壊れる'],
 ];
+
+test('repairs the closer CommonMark refuses to accept', () => {
+    for (const [input, expected] of BROKEN) {
+        assert.strictEqual(repairMarkdown(input), expected, `input: ${input}`);
+    }
+});
 
 // The mirror defect. An OPENER dies the same way a closer does: left-flanking
 // needs the following character not to be punctuation unless the preceding one
@@ -69,18 +78,10 @@ test('repairs the opener CommonMark refuses to accept', () => {
 });
 
 test('repairs both ends of a span that fails on each', () => {
-    // Both repairs firing on one span is what puts the brackets where a human
-    // would have typed them.
     assert.strictEqual(
         repairMarkdown('その話は**「引用」**を含む'),
         'その話は「**引用**」を含む',
     );
-});
-
-test('repairs the closer CommonMark refuses to accept', () => {
-    for (const [input, expected] of BROKEN) {
-        assert.strictEqual(repairMarkdown(input), expected, `input: ${input}`);
-    }
 });
 
 // ---------------------------------------------------------------------------
@@ -100,12 +101,48 @@ const UNTOUCHED = [
     '***三重***は避ける',
     '**空**',
     '2 ** 8 は 256',
+    // A well-formed CLOSER followed by a full stop. Locally identical to a
+    // failed opener, which is why the opener repair is restricted to opening
+    // brackets — relax that and this paragraph is destroyed.
+    'これは強調**。続き',
+    '見出し**：本文',
+    '結果**、そして',
+    // An emoji is category So, so CommonMark 0.31 counts it as punctuation and
+    // the closer here is already right-flanking. The scanner walks UTF-16 code
+    // units, so this only holds because it reassembles surrogate pairs before
+    // classifying them.
+    '**注意。**🎉',
+    '**注意。**➕',                          // the same case inside the BMP
 ];
 
 test('leaves already-rendering text byte-identical', () => {
     for (const input of UNTOUCHED) {
         assert.strictEqual(repairMarkdown(input), input, `input: ${input}`);
     }
+});
+
+// ---------------------------------------------------------------------------
+// Only NON-ASCII punctuation is movable, which is what keeps a repair from
+// dragging structure out of the span it is fixing.
+// ---------------------------------------------------------------------------
+test('never moves ASCII punctuation that carries structure', () => {
+    // Moving the `)` would produce a working link to a 404 — strictly worse
+    // than the literal ** it was fixing.
+    assert.strictEqual(
+        repairMarkdown('**[リンク](https://example.com)。**次の文'),
+        '**[リンク](https://example.com)**。次の文',
+    );
+    assert.strictEqual(
+        repairMarkdown('**HTML <b>tag</b>。**次'),
+        '**HTML <b>tag</b>**。次',
+    );
+    // `[` is category Ps, so an opener repair unrestricted by ASCII would pull
+    // it out of the link. Restricted, neither end is repaired and the text is
+    // left alone: the opener cannot open whatever happens to the closer, so a
+    // closer-only move would rearrange the sentence and still render a literal
+    // `**`. Declining is the conservative outcome, not a missed case.
+    const linkBoth = '詳細は**[ドキュメント](./doc.md)、**および';
+    assert.strictEqual(repairMarkdown(linkBoth), linkBoth);
 });
 
 // ---------------------------------------------------------------------------
@@ -118,14 +155,21 @@ const CODE = [
     'まず **説明。**続けて `**kwargs` を渡す',
     '~~~\n**注意。**次\n~~~\n',
     '````\n```\n**注意。**次\n```\n````\n',
+    // A closing fence with trailing whitespace. A chunk boundary landing in
+    // those spaces used to desynchronise `inFence` for the rest of the block.
+    '```\ncode\n``` \n```\n**注意。**次\n```\n',
+    '~~~\ncode\n~~~\t\n~~~\n**注意。**次\n~~~\n',
+    // A fence indented up to three spaces is still a fence, and a chunk
+    // boundary inside that indent must not make the line stop being a line
+    // start.
+    '  ```js\nconst x = 1;\n\n**注意。**次\n  ```\n',
 ];
 
 test('never rewrites inside fenced or inline code', () => {
-    assert.strictEqual(repairMarkdown(CODE[0]), CODE[0]);
-    assert.strictEqual(repairMarkdown(CODE[1]), CODE[1]);
-    assert.strictEqual(repairMarkdown(CODE[2]), CODE[2]);
-    assert.strictEqual(repairMarkdown(CODE[4]), CODE[4]);
-    assert.strictEqual(repairMarkdown(CODE[5]), CODE[5]);
+    for (const input of CODE) {
+        if (input === CODE[3]) continue; // prose outside the span, checked below
+        assert.strictEqual(repairMarkdown(input), input, `input: ${JSON.stringify(input)}`);
+    }
     // Prose outside the span is still repaired, and the backticked text is not.
     assert.strictEqual(
         repairMarkdown(CODE[3]),
@@ -136,7 +180,7 @@ test('never rewrites inside fenced or inline code', () => {
 // ---------------------------------------------------------------------------
 // The streaming contract. This is the property the whole design exists to buy:
 // a delta boundary may fall anywhere, including between the two asterisks of a
-// closer or between a 。 and the ** that follows it.
+// closer, between a 。 and the ** that follows it, or inside a surrogate pair.
 // ---------------------------------------------------------------------------
 const CORPUS = [
     ...BROKEN.map(([input]) => input),
@@ -144,6 +188,13 @@ const CORPUS = [
     'その話は**「引用」**を含む',
     ...UNTOUCHED,
     ...CODE,
+    // Both repairs firing on one span: the opener repair rewrites the stream,
+    // so the closer's flanking context is no longer the input character before
+    // the cursor. Reading it there collapsed this into `これは（****※）の扱い`
+    // — and only when the whole text arrived in one chunk.
+    'これは**（※）**の扱い',
+    '**[リンク](https://example.com)。**次の文',
+    '**注意。**🎉と**続き。**🎉',
     '**手順。**まず `npm test` を実行する。**次に。**ビルドする。\n\n' +
         '```sh\nnpm test  # **kwargs ではない\n```\n\n' +
         '結果は**成功**。**注意：**この行だけ壊れる。',
@@ -184,6 +235,46 @@ test('fuzz: random multi-cut splits agree with the whole-string result', () => {
     }
 });
 
+// The cut-position sweep above only varies WHERE a fixed corpus is split. The
+// invariance break that shipped needed a text nobody had written down — an
+// opener repair immediately followed by a punctuation-only span — so the corpus
+// was the blind spot, not the cut positions. Generating the text as well is what
+// found it.
+test('fuzz: generated texts are split-invariant and preserve every character', () => {
+    const ALPHABET = [
+        'あ', '注', '意', 'x', ' ', '\n',
+        '。', '、', '「', '」', '（', '）', '【', '】', '：', '—', '…', '※', '➕', '🎉',
+        '*', '**', '***', '`', '``', '```', '~~~', '[', ']', '(', ')', '<', '>',
+    ];
+    const rand = mulberry32(0xc0ffee);
+    for (let trial = 0; trial < 4000; trial++) {
+        let text = '';
+        const len = 4 + Math.floor(rand() * 14);
+        for (let k = 0; k < len; k++) text += ALPHABET[Math.floor(rand() * ALPHABET.length)];
+
+        const whole = repairMarkdown(text);
+        assert.strictEqual(
+            sortedCodePoints(whole),
+            sortedCodePoints(text),
+            `characters added or dropped: ${JSON.stringify(text)} -> ${JSON.stringify(whole)}`,
+        );
+        // A `****` run is never an improvement on whatever it replaced.
+        if (!text.includes('****')) {
+            assert.ok(
+                !whole.includes('****'),
+                `produced a four-asterisk run: ${JSON.stringify(text)} -> ${JSON.stringify(whole)}`,
+            );
+        }
+        for (let cut = 1; cut < text.length; cut++) {
+            assert.strictEqual(
+                repairChunked(text, [cut]),
+                whole,
+                `split-dependent: ${JSON.stringify(text)} cut=${cut}`,
+            );
+        }
+    }
+});
+
 // ---------------------------------------------------------------------------
 // Guards against a repair that would be worse than the defect.
 // ---------------------------------------------------------------------------
@@ -192,15 +283,26 @@ test('declines a rewrite that would produce a worse marker', () => {
     assert.strictEqual(repairMarkdown('**。**次'), '**。**次');
     // Moving the run would leave the closer preceded by a space, still unclosable.
     assert.strictEqual(repairMarkdown('**注意 。**次'), '**注意 。**次');
+    // The opener repair fires first here; the closer must then see the `*` it
+    // emitted, not the `（` that precedes the cursor in the input.
+    assert.strictEqual(repairMarkdown('これは**（※）**の扱い'), 'これは（**※）**の扱い');
 });
 
 test('treats Unicode symbols as punctuation, the way CommonMark 0.31 does', () => {
-    // Regression, found by rendering 26,855 real transcript blocks: `＝` is
+    // Regression, found by rendering 27,003 real transcript blocks: `＝` is
     // category Sm. Under the pre-0.31 definition (\p{P} only) the opener here
     // looks like it never opened, and the opener repair then fires on the real
     // closer and destroys a paragraph that rendered perfectly.
     const text = 'その値は＝**.5 の余白**（既定）。';
     assert.strictEqual(repairMarkdown(text), text);
+});
+
+test('a soft line break inside a paragraph does not end the span', () => {
+    // Two fields once held the same fact — `atLineStart` and `prevWasNewline` —
+    // and the punctuation-run branch updated only one, so the second newline
+    // here read as a blank line and closed the span.
+    assert.strictEqual(repairMarkdown('**注意\n、\n続き。**次'), '**注意\n、\n続き**。次');
+    assert.strictEqual(repairMarkdown('**注意\n続き。**次'), '**注意\n続き**。次');
 });
 
 test('a blank line ends the span rather than carrying it into the next paragraph', () => {
@@ -215,4 +317,11 @@ test('holds back only a short tail while streaming', () => {
     assert.strictEqual(emitted, 'これは長い前置きの文章で、**注意');
     assert.strictEqual(rewriter.buf, '。');
     assert.strictEqual(rewriter.feed('**次'), '**。次');
+});
+
+test('holds back half a surrogate pair until its partner arrives', () => {
+    const rewriter = new CJKEmphasisRewriter();
+    const emoji = '🎉';
+    assert.strictEqual(rewriter.feed('**注意。' + emoji[0]), '**注意');
+    assert.strictEqual(rewriter.feed(emoji[1] + 'あと'), '。🎉あと');
 });

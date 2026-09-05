@@ -13,19 +13,31 @@ const { createEmphasisRepairer } = require("./cjk-emphasis-stream.js");
 // createWindow — full vscode.window shim
 // ---------------------------------------------------------------------------
 
-// Said once per shim process, so "no repair lines in the log" can be read as
-// "nothing needed repairing" rather than "this build never wired it up". The
-// two are otherwise indistinguishable, and the second is the failure that
-// would go unnoticed longest.
+// One repairer per shim process, not per webview. `createWebviewPanel` makes a
+// second webview, and a second repairer would keep its own counters and write
+// `session …` totals for a different object into the same log stream, with
+// nothing in the line saying which. "Session" in the tally now means the
+// process, which is what the word was already doing in the log.
+//
+// The line below says only that this build wired the repair up. It cannot say
+// the repair is working — the first version of this feature printed it while
+// every frame passed through untouched. The per-turn tally is what distinguishes
+// those two.
+let emphasisRepairer;
 let announcedEmphasisRepair = false;
-function announceEmphasisRepair(enabled) {
-  if (announcedEmphasisRepair) return;
-  announcedEmphasisRepair = true;
-  process.stderr.write(
-    enabled
-      ? "[cjk-emphasis] armed (CANOPY_DISABLE_CJK_EMPHASIS_REPAIR=1 turns it off)\n"
-      : "[cjk-emphasis] disabled by CANOPY_DISABLE_CJK_EMPHASIS_REPAIR\n",
-  );
+function getEmphasisRepairer() {
+  const enabled = process.env.CANOPY_DISABLE_CJK_EMPHASIS_REPAIR !== "1";
+  if (!announcedEmphasisRepair) {
+    announcedEmphasisRepair = true;
+    process.stderr.write(
+      enabled
+        ? "[cjk-emphasis] armed (CANOPY_DISABLE_CJK_EMPHASIS_REPAIR=1 turns it off)\n"
+        : "[cjk-emphasis] disabled by CANOPY_DISABLE_CJK_EMPHASIS_REPAIR\n",
+    );
+  }
+  if (!enabled) return null;
+  if (!emphasisRepairer) emphasisRepairer = createEmphasisRepairer();
+  return emphasisRepairer;
 }
 
 function createWindow() {
@@ -44,9 +56,7 @@ function createWindow() {
     // literally. Repairing here covers live streaming and history replay at
     // once — both reach the webview through this one call. Set
     // CANOPY_DISABLE_CJK_EMPHASIS_REPAIR=1 to forward frames untouched.
-    const enabled = process.env.CANOPY_DISABLE_CJK_EMPHASIS_REPAIR !== "1";
-    announceEmphasisRepair(enabled);
-    const repairer = enabled ? createEmphasisRepairer() : null;
+    const repairer = getEmphasisRepairer();
 
     const webview = {
       postMessage(message) {

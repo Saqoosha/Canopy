@@ -1813,11 +1813,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 for line in str.split(separator: "\n") {
-                    // The CJK emphasis repairer's per-turn tally is a decision
-                    // record someone reads back later, and `info` lives only in
-                    // an in-memory ring buffer — a `--start/--end` query minutes
-                    // afterwards returns nothing. Everything else the shim says
-                    // is stream noise and stays at `info`.
+                    // Every `[cjk-emphasis]` line — the armed announcement, the
+                    // per-turn tally, the shape dump — is a record someone reads
+                    // back later, and `info` lives only in an in-memory ring
+                    // buffer, so a `--start/--end` query minutes afterwards
+                    // returns nothing. The prefix has to survive on both sides
+                    // of the language boundary for this to work, and nothing can
+                    // test that; the JS side spells it in
+                    // `cjk-emphasis-stream.js` and `window.js`.
                     if line.hasPrefix("[cjk-emphasis]") {
                         logger.notice("[shim] \(line, privacy: .public)")
                     } else {
