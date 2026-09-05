@@ -320,7 +320,7 @@ test('declines a rewrite that would produce a worse marker', () => {
 });
 
 test('treats Unicode symbols as punctuation, the way CommonMark 0.31 does', () => {
-    // Regression, found by rendering 26,983 real transcript blocks: `＝` is
+    // Regression, found by rendering 26,963 real transcript blocks: `＝` is
     // category Sm. Under the pre-0.31 definition (\p{P} only) the opener here
     // looks like it never opened, and the opener repair then fires on the real
     // closer and destroys a paragraph that rendered perfectly.
@@ -397,6 +397,12 @@ test('a whitespace-only line ends the paragraph, not just an empty one', () => {
     assert.strictEqual(repairMarkdown(spaced), spaced);
     const tabbed = '**a\n\t\n注意。**強調**です';
     assert.strictEqual(repairMarkdown(tabbed), tabbed);
+    // An unterminated backtick inside the span reaches the blank line through
+    // the inline-code branch, which has its own reset and has to clear `bold`
+    // too — otherwise the span leaks through the one door the ordinary-character
+    // branch does not cover.
+    const backticked = '**a`未終了\n\n注意。**強調**です';
+    assert.strictEqual(repairMarkdown(backticked), backticked);
 });
 
 test('a blank line ends the span rather than carrying it into the next paragraph', () => {

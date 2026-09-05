@@ -23,11 +23,11 @@
  * local test and CommonMark's paragraph-wide pairing can disagree, and this
  * scanner does not see every construct that ends a paragraph.
  *
- * MEASURED against 25,285 Japanese assistant text blocks from ~/.claude
+ * MEASURED against 25,264 Japanese assistant text blocks from ~/.claude
  * transcripts, judged by rendering each with micromark (the engine behind the
  * webview's renderer) and counting the ** that survive into the HTML outside
- * <code>: 1,696 blocks showed a literal ** and 37 still do, 5,247 stray runs
- * down to 77, 1,667 blocks improved, 0 made worse, and every block came back
+ * <code>: 1,701 blocks showed a literal ** and 37 still do, 5,263 stray runs
+ * down to 77, 1,672 blocks improved, 0 made worse, and every block came back
  * with the same multiset of characters it went in with. The corpus is a live
  * directory that grows between runs, so the totals drift by a few blocks and
  * the harness is not committed — it reads the user's own transcripts — so
@@ -64,7 +64,7 @@
  *    heading, a thematic break, a list marker or a blockquote also end one, and
  *    an open span survives them — so a repair can fire in a following paragraph
  *    that renders correctly. Derived from the code, not observed in the corpus
- *    (0 regressions over 26,983 blocks). Recognising them needs a block parser,
+ *    (0 regressions over 26,963 blocks). Recognising them needs a block parser,
  *    which is a different piece of software from this one.
  *  - A fence indented four or more spaces (one inside a list item) is not a
  *    fence to this scanner, and neither is an indented code block. Their
@@ -91,8 +91,8 @@ const WS = /\s/;
 // harmless approximation: it makes `＝**.x y**（z）` look like a span that never
 // opened, which then invites the opener repair to fire on the real closer and
 // break a paragraph that rendered perfectly. Measured, once, on the same corpus
-// as the MEASURED paragraph above, counted unfiltered by language: 26,983 blocks
-// against its 25,285 Japanese ones. The class subsumes every ASCII punctuation
+// as the MEASURED paragraph above, counted unfiltered by language: 26,963 blocks
+// against its 25,264 Japanese ones. The class subsumes every ASCII punctuation
 // character (measured), so no separate ASCII test is needed.
 const PUNCT = /[\p{P}\p{S}]/u;
 
@@ -269,7 +269,15 @@ class CJKEmphasisRewriter {
                     out += take(j);
                     continue;
                 }
-                if (ch === '\n' && this.lineIsBlank) this.codeTicks = 0; // unterminated
+                // A blank line ends the paragraph, so an unterminated code span
+                // ends here — and so does any span open around it. Clearing only
+                // `codeTicks` left `bold` set, so the span leaked into the next
+                // paragraph through the one door the ordinary-character branch's
+                // identical reset does not cover.
+                if (ch === '\n' && this.lineIsBlank) {
+                    this.codeTicks = 0;
+                    this.bold = false;
+                }
                 out += take(i + codePointAt(buf, i).length);
                 continue;
             }
