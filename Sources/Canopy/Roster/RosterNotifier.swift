@@ -64,8 +64,22 @@ enum RosterNotifier {
     ///   picking one of these. Without it the phone rendered the tool input
     ///   as raw JSON with a plain text field under it — the question legible
     ///   and unanswerable, which is the state the push exists to end.
+    /// - Parameter bodyFull: the untruncated text. `body` is the BANNER —
+    ///   short by necessity, and the phone stores this one for the
+    ///   conversation.
+    ///
+    ///   **Not sending it capped the conversation at the banner's length**,
+    ///   which is measured in BYTES: 2400 of them is about 800 characters of
+    ///   Japanese, so a long message arrived cut to roughly a third with an
+    ///   ellipsis and no way to see the rest (reported from the device
+    ///   2026-09-05). The relay has accepted this field since the push was
+    ///   built; only this side never filled it in.
+    ///
+    ///   It is not unbounded on the other side either — the relay caps it at
+    ///   3000 code points and then shrinks the whole payload to fit APNs's
+    ///   4 KB, which is the real ceiling and cannot be raised from here.
     static func post(kind: Kind, sessionId: String, resumeId: String? = nil,
-                     title: String, body: String,
+                     title: String, body: String, bodyFull: String? = nil,
                      requestId: String? = nil, allowAlways: Bool = false,
                      answerable: Bool = true,
                      choices: [[String: Any]]? = nil) {
@@ -82,6 +96,9 @@ enum RosterNotifier {
             "body": body,
             "kind": kind.rawValue,
         ]
+        if let bodyFull, !bodyFull.isEmpty, bodyFull != body {
+            payload["bodyFull"] = bodyFull
+        }
         if let resumeId, !resumeId.isEmpty {
             payload["resumeId"] = resumeId
         }
