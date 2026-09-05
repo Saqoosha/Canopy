@@ -46,9 +46,15 @@ function createEmphasisRepairer(options) {
     // same reply, and both reach this function. Counting both reported one
     // repaired span as two — a systematic 2x on the only number this feature
     // exists to produce. The batch frame is still repaired (it is what renders
-    // if a reply ever arrives unstreamed); it is only counted when nothing
-    // streamed this turn.
-    let sawStreamedText = false;
+    // if a reply ever arrives unstreamed); it is only counted when that stream
+    // did not already account for it.
+    //
+    // Per stream, not one flag for the process: a subagent's text arrives ONLY
+    // as batch frames, so a single flag set by the main agent's stream left
+    // every subagent repair uncounted while the log said `no repairs` — the tally
+    // contradicting the text it had just rewritten.
+    const streamed = new Set();
+    const streamKey = (frame) => frame.parent_tool_use_id || 'main';
 
     // `parent_tool_use_id` is measured to be hardcoded null on every
     // `stream_event` (ShimProcess.swift records this against CLI 2.1.217), so
@@ -120,7 +126,7 @@ function createEmphasisRepairer(options) {
         turn.closer = 0;
         turn.opener = 0;
         turn.blocks = 0;
-        sawStreamedText = false;
+        streamed.clear();
     }
 
     /** A `content_block_delta` frame carrying `text`, copied off `outer`. */
@@ -180,7 +186,9 @@ function createEmphasisRepairer(options) {
         if (!changed) return frame;
         if (count) {
             noteBlock(target, closer, opener);
-            noteBlock(turn, closer, opener);
+            // The per-turn accumulator belongs to the live path only; a replay
+            // reports its own line and must not resegment a turn in flight.
+            if (target === live) noteBlock(turn, closer, opener);
         }
         return { ...frame, message: { ...msg, content } };
     }
@@ -217,7 +225,7 @@ function createEmphasisRepairer(options) {
                 entry = { rewriter: new CJKEmphasisRewriter(), index, outer, frame };
                 open.set(key, entry);
             }
-            sawStreamedText = true;
+            streamed.add(streamKey(frame));
             const emitted = entry.rewriter.feed(delta.text);
             if (emitted === delta.text) return [outer];
             return [deltaFrame(outer, frame, index, emitted)];
@@ -272,7 +280,7 @@ function createEmphasisRepairer(options) {
             if (!frame || typeof frame !== 'object') return [outer];
             if (frame.type === 'stream_event' && frame.event) return handleStreamEvent(outer, frame);
             if (frame.type === 'assistant') {
-                const repaired = repairAssistantFrame(frame, live, !sawStreamedText);
+                const repaired = repairAssistantFrame(frame, live, !streamed.has(streamKey(frame)));
                 return [repaired === frame ? outer : { ...outer, message: repaired }];
             }
             if (frame.type === 'result') {
@@ -288,18 +296,37 @@ function createEmphasisRepairer(options) {
 
         if (outer.type === 'response' && outer.response && Array.isArray(outer.response.messages)) {
             let changed = false;
-            let sawAssistant = false;
+            let frames = 0;
+            const before = replay.closer + replay.opener;
             const messages = outer.response.messages.map((frame) => {
                 if (!frame || typeof frame !== 'object' || frame.type !== 'assistant') return frame;
-                sawAssistant = true;
+                frames++;
                 const repaired = repairAssistantFrame(frame, replay, true);
                 if (repaired !== frame) changed = true;
                 return repaired;
             });
+            // A replay gets its own line rather than going through reportTurn().
+            // It is not a turn — one `get_session` response can carry a whole
+            // session's history — and it arrives whenever the webview mounts or
+            // reloads, which can be in the middle of a live turn. Sharing
+            // reportTurn() meant a replay landing there zeroed the live turn's
+            // counters and its stream bookkeeping, so the live repairs were
+            // attributed to the replay's line and then counted a second time off
+            // the batch frame: the 2x this file already closed once, back through
+            // a different door.
+            //
             // Reported whether or not anything changed, for the same reason the
             // live path is: a replay that silently stops being repaired would
             // otherwise look exactly like a replay that needed nothing.
-            if (sawAssistant) reportTurn();
+            if (frames > 0) {
+                const repairs = replay.closer + replay.opener - before;
+                write(
+                    `[cjk-emphasis] replay: ${repairs === 0 ? 'no repairs' : `repaired ${repairs}`} ` +
+                    `over ${frames} assistant frames; ` +
+                    `session live ${live.closer + live.opener} / ${live.blocks} blocks, ` +
+                    `replay ${replay.closer + replay.opener} / ${replay.blocks} blocks`,
+                );
+            }
             if (!changed) return [outer];
             return [{ ...outer, response: { ...outer.response, messages } }];
         }

@@ -166,7 +166,10 @@ const CODE = [
     '```python\ndef f(**kwargs):\n    pass\n```\n',
     '```\n**注意。**次\n```\n',
     'インラインの `**注意。**次` はそのまま',
-    'まず **説明。**続けて `**kwargs` を渡す',
+    // The one entry with prose OUTSIDE the code span, so it is not identity —
+    // marked rather than skipped by index, which silently moves if an entry is
+    // inserted above it.
+    { text: 'まず **説明。**続けて `**kwargs` を渡す', repaired: 'まず **説明**。続けて `**kwargs` を渡す' },
     '~~~\n**注意。**次\n~~~\n',
     '````\n```\n**注意。**次\n```\n````\n',
     // A closing fence with trailing whitespace. A chunk boundary landing in
@@ -186,15 +189,11 @@ const CODE = [
 ];
 
 test('never rewrites inside fenced or inline code', () => {
-    for (const input of CODE) {
-        if (input === CODE[3]) continue; // prose outside the span, checked below
-        assert.strictEqual(repairMarkdown(input), input, `input: ${JSON.stringify(input)}`);
+    for (const entry of CODE) {
+        const input = typeof entry === 'string' ? entry : entry.text;
+        const expected = typeof entry === 'string' ? entry : entry.repaired;
+        assert.strictEqual(repairMarkdown(input), expected, `input: ${JSON.stringify(input)}`);
     }
-    // Prose outside the span is still repaired, and the backticked text is not.
-    assert.strictEqual(
-        repairMarkdown(CODE[3]),
-        'まず **説明**。続けて `**kwargs` を渡す',
-    );
 });
 
 // ---------------------------------------------------------------------------
@@ -207,7 +206,7 @@ const CORPUS = [
     ...BROKEN_OPENER.map(([input]) => input),
     'その話は**「引用」**を含む',
     ...UNTOUCHED,
-    ...CODE,
+    ...CODE.map((entry) => (typeof entry === 'string' ? entry : entry.text)),
     // Both repairs firing on one span: the opener repair rewrites the stream,
     // so the closer's flanking context is no longer the input character before
     // the cursor. Reading it there collapsed this into `これは（****※）の扱い`
@@ -261,16 +260,28 @@ test('fuzz: random multi-cut splits agree with the whole-string result', () => {
 // was the blind spot, not the cut positions. Generating the text as well is what
 // found it.
 test('fuzz: generated texts are split-invariant and preserve every character', () => {
-    const ALPHABET = [
-        'あ', '注', '意', 'x', ' ', '\n',
-        '。', '、', '「', '」', '（', '）', '【', '】', '：', '—', '…', '※', '➕', '🎉',
-        '*', '**', '***', '`', '``', '```', '~~~', '[', ']', '(', ')', '<', '>',
+    // Weighted by token CLASS, not a uniform alphabet. A flat 32-symbol
+    // alphabet needs ~20,000 trials to land the one shape that matters —
+    // [plain] ** [bracket] [movable] ** [plain] — so the first version was
+    // decorative for the `****` collapse it was written to catch, and missed the
+    // surrogate defect entirely. `**` and the brackets carry most of the weight
+    // because every interesting branch needs at least one of each.
+    const CLASSES = [
+        [10, ['**']],
+        [6, ['「', '」', '（', '）', '【', '】']],
+        [6, ['。', '、', '：', '—', '…', '※']],
+        [8, ['あ', '注', '意', 'x', '5']],
+        [3, ['🎉', '😀', '➕', '＝']],
+        [3, [' ', '\n']],
+        [2, ['*', '***', '`', '``', '```', '~~~']],
+        [2, ['[', ']', '(', ')', '<', '>']],
     ];
+    const BAG = CLASSES.flatMap(([weight, tokens]) => tokens.flatMap((t) => Array(weight).fill(t)));
     const rand = mulberry32(0xc0ffee);
-    for (let trial = 0; trial < 4000; trial++) {
+    for (let trial = 0; trial < 20000; trial++) {
         let text = '';
         const len = 4 + Math.floor(rand() * 14);
-        for (let k = 0; k < len; k++) text += ALPHABET[Math.floor(rand() * ALPHABET.length)];
+        for (let k = 0; k < len; k++) text += BAG[Math.floor(rand() * BAG.length)];
 
         const whole = repairMarkdown(text);
         assert.strictEqual(
@@ -309,12 +320,64 @@ test('declines a rewrite that would produce a worse marker', () => {
 });
 
 test('treats Unicode symbols as punctuation, the way CommonMark 0.31 does', () => {
-    // Regression, found by rendering 27,003 real transcript blocks: `＝` is
+    // Regression, found by rendering 26,983 real transcript blocks: `＝` is
     // category Sm. Under the pre-0.31 definition (\p{P} only) the opener here
     // looks like it never opened, and the opener repair then fires on the real
     // closer and destroys a paragraph that rendered perfectly.
     const text = 'その値は＝**.5 の余白**（既定）。';
     assert.strictEqual(repairMarkdown(text), text);
+});
+
+test('an astral character is flanking context, not two lone surrogates', () => {
+    // The scanner walks UTF-16 code units. Emitting them one at a time left
+    // `lastChar` holding a lone low surrogate — category Cs, which reads as
+    // plain — so the opener repair fired on text that renders correctly, and
+    // could produce a `****` run. `➕` is the control: same Unicode category
+    // (So), inside the BMP, so only astrality differs.
+    assert.strictEqual(repairMarkdown('あ🎉**「引用」**を'), 'あ🎉**「引用**」を');
+    assert.strictEqual(repairMarkdown('あ➕**「引用」**を'), 'あ➕**「引用**」を');
+    assert.strictEqual(repairMarkdown('🎉**「**x'), '🎉**「**x');
+    const emojiSpan = '😀**.5 の余白**（既定）';
+    assert.strictEqual(repairMarkdown(emojiSpan), emojiSpan);
+});
+
+test('the opener repair declines moves that gain nothing or collapse markers', () => {
+    // `next !== '*'`: mirror of the closer's `safe` guard. Without it the
+    // bracket lands in front of another `**` run and makes `****`.
+    assert.strictEqual(repairMarkdown('注**【**次'), '注**【**次');
+    assert.strictEqual(repairMarkdown('これは**（**続き'), 'これは**（**続き');
+    // `!isWS(next)`: a bracket run with nothing after it, or whitespace after
+    // it, cannot open whatever is done to it.
+    assert.strictEqual(repairMarkdown('注意**「'), '注意**「');
+    assert.strictEqual(repairMarkdown('これは**「 内容'), 'これは**「 内容');
+    assert.strictEqual(repairMarkdown('これは**「\n次'), 'これは**「\n次');
+});
+
+test('an inline code span closes only on a backtick run of its own length', () => {
+    const three = '`code```**注意。**次';
+    assert.strictEqual(repairMarkdown(three), three);
+    const mixed = 'a`x``` **注意。**次';
+    assert.strictEqual(repairMarkdown(mixed), mixed);
+});
+
+test('an unclosed link destination stops suppressing at the end of the line', () => {
+    // Without the newline terminator the suppression runs to the end of the
+    // document and every later repair is silently declined.
+    assert.strictEqual(repairMarkdown('[参照](\n**注意。**次'), '[参照](\n**注意**。次');
+    assert.strictEqual(
+        repairMarkdown('[参照](http://a\n**注意。**次'),
+        '[参照](http://a\n**注意**。次',
+    );
+});
+
+test('an open span is dropped at a fence and at an ambiguous asterisk run', () => {
+    // A fence opening while a span is open clears it; otherwise the span
+    // survives the code block and repairs the prose after it.
+    const acrossFence = '**注意\n```\ncode\n```\n続き。**次';
+    assert.strictEqual(repairMarkdown(acrossFence), acrossFence);
+    // `***` and longer mix strong with emphasis, so the scanner drops out.
+    const tripled = '**~~~*```注```「**注';
+    assert.strictEqual(repairMarkdown(tripled), tripled);
 });
 
 test('a soft line break inside a paragraph does not end the span', () => {
@@ -323,6 +386,17 @@ test('a soft line break inside a paragraph does not end the span', () => {
     // here read as a blank line and closed the span.
     assert.strictEqual(repairMarkdown('**注意\n、\n続き。**次'), '**注意\n、\n続き**。次');
     assert.strictEqual(repairMarkdown('**注意\n続き。**次'), '**注意\n続き**。次');
+});
+
+test('a whitespace-only line ends the paragraph, not just an empty one', () => {
+    // CommonMark ends a paragraph on a line that is empty OR all whitespace.
+    // Testing only for two newlines in a row let the span survive `\n \n` and
+    // fire in the next paragraph, whose `**強調**` renders bold today — so the
+    // repair turned correct output into two literal markers.
+    const spaced = '**a\n \n注意。**強調**です';
+    assert.strictEqual(repairMarkdown(spaced), spaced);
+    const tabbed = '**a\n\t\n注意。**強調**です';
+    assert.strictEqual(repairMarkdown(tabbed), tabbed);
 });
 
 test('a blank line ends the span rather than carrying it into the next paragraph', () => {

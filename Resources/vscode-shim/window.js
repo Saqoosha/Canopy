@@ -24,11 +24,15 @@ const { createEmphasisRepairer } = require("./cjk-emphasis-stream.js");
 // every frame passed through untouched. The per-turn tally is what distinguishes
 // those two.
 let emphasisRepairer;
-let announcedEmphasisRepair = false;
+let announcedEmphasisRepair; // the enablement last announced, not a boolean latch
 function getEmphasisRepairer() {
   const enabled = process.env.CANOPY_DISABLE_CJK_EMPHASIS_REPAIR !== "1";
-  if (!announcedEmphasisRepair) {
-    announcedEmphasisRepair = true;
+  // Announce the value OBSERVED, not the first one. A plain latch let the log
+  // say `armed` while a later call returned null and forwarded frames untouched
+  // — an announcement asserting the opposite of the behaviour, which is the
+  // "reports itself healthy" mode this line exists to rule out.
+  if (announcedEmphasisRepair !== enabled) {
+    announcedEmphasisRepair = enabled;
     process.stderr.write(
       enabled
         ? "[cjk-emphasis] armed (CANOPY_DISABLE_CJK_EMPHASIS_REPAIR=1 turns it off)\n"

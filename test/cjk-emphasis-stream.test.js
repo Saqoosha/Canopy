@@ -198,8 +198,11 @@ test('thinking deltas and non-text blocks pass through untouched', () => {
 
     const toolUse = streamEvent({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use' } }, null);
     assert.deepStrictEqual(r.repairOutbound(toolUse), [toolUse]);
-    // A tool_use block must not have acquired a rewriter from its start event:
-    // a later text_delta on that index would then resume it mid-span.
+    // What this pins is that the frames pass through by identity. It does NOT
+    // pin the `content_block.type === 'text'` guard: a freshly created rewriter
+    // is empty, so a tool_use block acquiring one is indistinguishable from the
+    // lazy creation the delta path already does. Measured — deleting that guard
+    // leaves the whole suite green.
     const toolDelta = streamEvent({
         type: 'content_block_delta',
         index: 1,
@@ -255,6 +258,10 @@ test('history replay is repaired through the response envelope', () => {
     // fixture uses the real array-shaped content, so the type check is what
     // saves it rather than the shape check bailing out first.
     assert.strictEqual(out.response.messages[0].message.content[0].text, '**そのまま。**触らない');
+    // Tallied into `replay`, not `live` — the two are reported separately
+    // because a replay covers a whole history and a turn covers one message.
+    assert.deepStrictEqual(r.stats().replay, { closer: 1, opener: 0, blocks: 1 });
+    assert.deepStrictEqual(r.stats().live, { closer: 0, opener: 0, blocks: 0 });
 });
 
 test('a clean replay still reports, so silence can only mean "never ran"', () => {
@@ -264,7 +271,52 @@ test('a clean replay still reports, so silence can only mean "never ran"', () =>
         response: { messages: [{ type: 'assistant', message: { content: [{ type: 'text', text: '**正しい**：壊れない' }] } }] },
     });
     assert.strictEqual(r.logs.length, 1);
-    assert.match(r.logs[0], /turn: no repairs;/);
+    assert.match(r.logs[0], /^\[cjk-emphasis\] replay: no repairs over 1 assistant frames;/);
+});
+
+test('a replay landing mid-turn does not resegment or double-count the live turn', () => {
+    // `get_session` arrives whenever the webview mounts or reloads, which can be
+    // in the middle of a live turn. Sharing the turn accumulator meant the live
+    // repairs were attributed to the replay's line and then counted a second
+    // time off the batch frame.
+    const r = makeRepairer();
+    const push = (m) => r.repairOutbound(m);
+    push(start(0, null));
+    push(delta(0, '**注意。**次', null));
+    push(fromExtension({
+        type: 'response',
+        response: { messages: [{ type: 'assistant', message: { content: [{ type: 'text', text: '過去の**記録。**あと' }] } }] },
+    }));
+    push(stop(0, null));
+    push(io({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: { id: 'm1', content: [{ type: 'text', text: '**注意。**次' }] },
+    }));
+    push(result());
+
+    assert.deepStrictEqual(r.stats().live, { closer: 1, opener: 0, blocks: 1 }, 'the live span is counted once');
+    assert.deepStrictEqual(r.stats().replay, { closer: 1, opener: 0, blocks: 1 });
+    assert.match(r.logs[0], /^\[cjk-emphasis\] replay: repaired 1 over 1 assistant frames;/);
+    assert.match(r.logs[1], /^\[cjk-emphasis\] turn: repaired 1 \(1 closer, 0 opener\) in 1 blocks;/);
+});
+
+test('a subagent batch frame is counted even while the main stream is running', () => {
+    // Subagent text arrives ONLY as batch frames. A single "did anything stream"
+    // flag for the whole process left every subagent repair uncounted while the
+    // log said `no repairs` — the tally contradicting the text it had rewritten.
+    const r = makeRepairer();
+    r.repairOutbound(start(0, null));
+    r.repairOutbound(delta(0, '本文です', null));
+    r.repairOutbound(io({
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_sub',
+        message: { id: 'm2', content: [{ type: 'text', text: '子の**注意。**次' }] },
+    }));
+    r.repairOutbound(stop(0, null));
+    r.repairOutbound(result());
+    assert.deepStrictEqual(r.stats().live, { closer: 1, opener: 0, blocks: 1 });
+    assert.match(r.logs[0], /turn: repaired 1 /);
 });
 
 test('the turn tally logs once per result', () => {

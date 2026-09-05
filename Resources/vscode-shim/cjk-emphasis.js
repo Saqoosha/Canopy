@@ -19,14 +19,15 @@
  * the leading bracket moves out too, landing the pair as `は「**引用**」を`.
  *
  * It fires only where the LOCAL flanking test fails, so text that renders today
- * comes through byte-identical — with the one exception in KNOWN LIMITS below,
- * where the local test and CommonMark's paragraph-wide pairing disagree.
+ * comes through byte-identical except where KNOWN LIMITS says otherwise — the
+ * local test and CommonMark's paragraph-wide pairing can disagree, and this
+ * scanner does not see every construct that ends a paragraph.
  *
- * MEASURED against 25,307 Japanese assistant text blocks from ~/.claude
+ * MEASURED against 25,285 Japanese assistant text blocks from ~/.claude
  * transcripts, judged by rendering each with micromark (the engine behind the
  * webview's renderer) and counting the ** that survive into the HTML outside
- * <code>: 1,689 blocks showed a literal ** and 37 still do, 5,233 stray runs
- * down to 77, 1,660 blocks improved, 0 made worse, and every block came back
+ * <code>: 1,696 blocks showed a literal ** and 37 still do, 5,247 stray runs
+ * down to 77, 1,667 blocks improved, 0 made worse, and every block came back
  * with the same multiset of characters it went in with. The corpus is a live
  * directory that grows between runs, so the totals drift by a few blocks and
  * the harness is not committed — it reads the user's own transcripts — so
@@ -43,26 +44,35 @@
  * surrogate pair. Everything else is emitted immediately, so the held-back tail
  * is short: bounded by the current line, and in prose by a few characters.
  *
- * WHAT IS NOT TOUCHED: column-0 fenced blocks (``` and ~~~, including indented
- * up to three spaces) and inline code spans pass through verbatim and suppress
- * all emphasis bookkeeping. Only NON-ASCII punctuation is ever moved, so ASCII
- * structure — a link's `)`, an HTML tag's `>`, a `]` — stays where the model
- * put it even when it sits inside a repaired span.
+ * WHAT IS NOT TOUCHED: fenced blocks (``` and ~~~) at the start of a line, up
+ * to three spaces of indent; inline code spans; and link destinations between a
+ * `](` and its `)`. All three pass through verbatim and suppress emphasis
+ * bookkeeping. Only NON-ASCII punctuation is ever moved, so ASCII structure — a
+ * link's `)`, an HTML tag's `>`, a `]` — stays where the model put it even when
+ * it sits inside a repaired span.
  *
- * KNOWN LIMITS, all measured, none fixed:
+ * KNOWN LIMITS, none fixed:
  *  - CommonMark pairs delimiters with a stack over the whole paragraph, and a
  *    streaming rewriter cannot see the rest of the paragraph. This scanner
  *    pairs naively instead, so where the two disagree a repair can fire in the
- *    wrong place. Two such classes were found and closed (see OPENING_BRACKET
- *    and isPunct); zero measured is not zero possible. A DOM pass over the
- *    rendered output cannot have this failure mode at all, because it only ever
- *    touches the ** a renderer has already refused to consume.
+ *    wrong place. Two classes were found and closed — one pairing ambiguity
+ *    (OPENING_BRACKET) and one classification mismatch with micromark (PUNCT);
+ *    zero measured is not zero possible. A DOM pass over the rendered output
+ *    cannot have this failure mode at all, because it only ever touches the **
+ *    a renderer has already refused to consume.
+ *  - The only paragraph boundary this scanner sees is a blank line. An ATX
+ *    heading, a thematic break, a list marker or a blockquote also end one, and
+ *    an open span survives them — so a repair can fire in a following paragraph
+ *    that renders correctly. Derived from the code, not observed in the corpus
+ *    (0 regressions over 26,983 blocks). Recognising them needs a block parser,
+ *    which is a different piece of software from this one.
  *  - A fence indented four or more spaces (one inside a list item) is not a
  *    fence to this scanner, and neither is an indented code block. Their
- *    contents can be rewritten. Recognising them needs a block parser, which is
- *    a different piece of software from this one.
- *  - A repair on an unpaired `**` moves characters without making anything
- *    render — `章**「補足」だけ` becomes `章「**補足」だけ`, still literal.
+ *    contents can be rewritten. Same reason.
+ *  - A repair can fire without making anything render: on an unpaired `**`
+ *    (`章**「補足」だけ` -> `章「**補足」だけ`), or on a paired span whose other
+ *    end the guards then refuse to move (`これは**（※）**の扱い` ->
+ *    `これは（**※）**の扱い`). Characters move, the markers stay literal.
  */
 
 'use strict';
@@ -80,9 +90,10 @@ const WS = /\s/;
 // follows it. Testing \p{P} alone is the older definition and it is not a
 // harmless approximation: it makes `＝**.x y**（z）` look like a span that never
 // opened, which then invites the opener repair to fire on the real closer and
-// break a paragraph that rendered perfectly. Measured, once, on a 27,003-block
-// corpus. The class subsumes every ASCII punctuation character (measured), so
-// no separate ASCII test is needed.
+// break a paragraph that rendered perfectly. Measured, once, on the same corpus
+// as the MEASURED paragraph above, counted unfiltered by language: 26,983 blocks
+// against its 25,285 Japanese ones. The class subsumes every ASCII punctuation
+// character (measured), so no separate ASCII test is needed.
 const PUNCT = /[\p{P}\p{S}]/u;
 
 // Only NON-ASCII punctuation is ever moved out of a span. Every preceding
@@ -152,6 +163,14 @@ class CJKEmphasisRewriter {
         // exists to hold. Found independently by a fuzz over 60,000 texts and by
         // a hand trace; pinned by `test/cjk-emphasis.test.js`.
         this.lastChar = undefined;
+        // Whether the line being emitted has held nothing but whitespace so far.
+        // CommonMark ends a paragraph on a line that is EMPTY OR ALL WHITESPACE,
+        // and testing only for two newlines in a row let an open span survive
+        // `\n \n` and fire a repair in the next paragraph — turning
+        // `**a\n \n注意。**強調**です`, whose second paragraph renders bold today,
+        // into one with two literal markers. Maintained in `_emit` with
+        // `lastChar`, so the two cannot disagree the way two stored flags did.
+        this.lineIsBlank = true;
         this.inFence = false;
         this.fenceChar = '';
         this.fenceLen = 0;
@@ -169,7 +188,6 @@ class CJKEmphasisRewriter {
     // read the second newline as a blank line, closed the span, and lost the
     // repair that the same text on one line receives.
     get atLineStart() { return this.lastChar === undefined || this.lastChar === '\n'; }
-    get prevWasNewline() { return this.lastChar === '\n'; }
 
     /** Consume a chunk; returns the text that is safe to forward now. */
     feed(text) {
@@ -185,7 +203,13 @@ class CJKEmphasisRewriter {
     }
 
     _emit(s) {
-        if (s) this.lastChar = lastCodePoint(s);
+        if (!s) return s;
+        for (let k = 0; k < s.length; k++) {
+            const c = s[k];
+            if (c === '\n') this.lineIsBlank = true;
+            else if (!WS.test(c)) this.lineIsBlank = false;
+        }
+        this.lastChar = lastCodePoint(s);
         return s;
     }
 
@@ -245,8 +269,8 @@ class CJKEmphasisRewriter {
                     out += take(j);
                     continue;
                 }
-                if (ch === '\n' && this.prevWasNewline) this.codeTicks = 0; // unterminated
-                out += take(i + 1);
+                if (ch === '\n' && this.lineIsBlank) this.codeTicks = 0; // unterminated
+                out += take(i + codePointAt(buf, i).length);
                 continue;
             }
 
@@ -365,7 +389,13 @@ class CJKEmphasisRewriter {
                         }
                         if (q === n && !final) return need(); // the run may still grow
                         const next = q < n ? codePointAt(buf, q) : undefined;
-                        if (!isWS(next)) {
+                        // `next !== '*'` is the mirror of the closer's `safe`
+                        // guard, and it was missing: `注**【**次` moved the
+                        // bracket in front of an opener whose own run followed,
+                        // producing `注【****次` — a four-asterisk run out of
+                        // text that had none. `!isWS(next)` alone declines only
+                        // the moves that cannot make anything render.
+                        if (!isWS(next) && next !== '*') {
                             out += this._emit(buf.slice(j, q) + '**');
                             this.repairs.opener++;
                             this.bold = true;
@@ -383,9 +413,16 @@ class CJKEmphasisRewriter {
             }
 
             // ---- an ordinary character -----------------------------------------------
-            // A blank line ends the paragraph, and with it any open span.
-            if (ch === '\n' && this.prevWasNewline) this.bold = false;
-            out += take(i + 1);
+            // A blank line ends the paragraph, and with it any open span. Other
+            // block starts end one too — an ATX heading, a thematic break, a list
+            // marker — and this scanner does not recognise them; see KNOWN LIMITS.
+            if (ch === '\n' && this.lineIsBlank) this.bold = false;
+            // Take the WHOLE code point. Emitting one UTF-16 unit at a time left
+            // `lastChar` holding a lone low surrogate after an astral character —
+            // category Cs, which reads as plain — so `あ🎉**「引用」**を` fired an
+            // opener repair it must not, and `🎉**「**x` produced a `****` run out
+            // of text that had none.
+            out += take(i + codePointAt(buf, i).length);
         }
 
         this.buf = buf.slice(i);
