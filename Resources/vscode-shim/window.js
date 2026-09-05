@@ -7,10 +7,42 @@ const {
   CancellationTokenNone,
 } = require("./types.js");
 const { createNotificationHandler } = require("./notifications.js");
+const { createEmphasisRepairer } = require("./cjk-emphasis-stream.js");
 
 // ---------------------------------------------------------------------------
 // createWindow — full vscode.window shim
 // ---------------------------------------------------------------------------
+
+// One repairer per shim process, not per webview. `createWebviewPanel` makes a
+// second webview, and a second repairer would keep its own counters and write
+// `session …` totals for a different object into the same log stream, with
+// nothing in the line saying which. "Session" in the tally now means the
+// process, which is what the word was already doing in the log.
+//
+// The line below says only that this build wired the repair up. It cannot say
+// the repair is working — the first version of this feature printed it while
+// every frame passed through untouched. The per-turn tally is what distinguishes
+// those two.
+let emphasisRepairer;
+let announcedEmphasisRepair; // the enablement last announced, not a boolean latch
+function getEmphasisRepairer() {
+  const enabled = process.env.CANOPY_DISABLE_CJK_EMPHASIS_REPAIR !== "1";
+  // Announce the value OBSERVED, not the first one. A plain latch let the log
+  // say `armed` while a later call returned null and forwarded frames untouched
+  // — an announcement asserting the opposite of the behaviour, which is the
+  // "reports itself healthy" mode this line exists to rule out.
+  if (announcedEmphasisRepair !== enabled) {
+    announcedEmphasisRepair = enabled;
+    process.stderr.write(
+      enabled
+        ? "[cjk-emphasis] armed (CANOPY_DISABLE_CJK_EMPHASIS_REPAIR=1 turns it off)\n"
+        : "[cjk-emphasis] disabled by CANOPY_DISABLE_CJK_EMPHASIS_REPAIR\n",
+    );
+  }
+  if (!enabled) return null;
+  if (!emphasisRepairer) emphasisRepairer = createEmphasisRepairer();
+  return emphasisRepairer;
+}
 
 function createWindow() {
   const notifications = createNotificationHandler();
@@ -23,10 +55,24 @@ function createWindow() {
 
   function createWebviewObject(_extensionUri) {
     const onDidReceiveMessageEmitter = new EventEmitter();
+    // CommonMark cannot close a `**` span whose closer sits between CJK
+    // punctuation and a CJK character, so Japanese replies render their markers
+    // literally. Repairing here covers live streaming and history replay at
+    // once — both reach the webview through this one call. Set
+    // CANOPY_DISABLE_CJK_EMPHASIS_REPAIR=1 to forward frames untouched.
+    const repairer = getEmphasisRepairer();
 
     const webview = {
       postMessage(message) {
-        writeStdout({ type: "webview_message", message });
+        if (!repairer) {
+          writeStdout({ type: "webview_message", message });
+          return Promise.resolve(true);
+        }
+        // One frame in can become two out: a block's held-back tail is released
+        // as a synthetic delta ahead of its content_block_stop.
+        for (const out of repairer.repairOutbound(message)) {
+          writeStdout({ type: "webview_message", message: out });
+        }
         return Promise.resolve(true);
       },
       onDidReceiveMessage: onDidReceiveMessageEmitter.event,

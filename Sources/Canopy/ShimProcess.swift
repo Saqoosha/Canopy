@@ -1811,15 +1811,46 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 handle.readabilityHandler = nil
                 return
             }
-            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
-                for line in str.split(separator: "\n") {
+            guard let str = String(data: data, encoding: .utf8), !str.isEmpty else {
+                // A multi-byte character straddling two reads makes the WHOLE
+                // chunk undecodable, and Japanese output puts that boundary in
+                // the common case rather than the rare one. Nothing reassembles
+                // it — see the KNOWN GAP below — so the least that can be done
+                // is not to drop it in silence.
+                logger.error("[shim] undecodable stderr chunk, \(data.count) bytes dropped")
+                return
+            }
+            for line in str.split(separator: "\n") {
+                // Every `[cjk-emphasis]` line — the armed announcement, the
+                // per-turn tally, the shape dump — is a record someone reads
+                // back later, and `info` lives only in an in-memory ring
+                // buffer, so a `--start/--end` query minutes afterwards
+                // returns nothing.
+                //
+                // KNOWN GAP: `availableData` is a pipe chunk, not a line, so
+                // a tally split across two reads loses the prefix on its
+                // second half and that half lands at `info` after all. A
+                // line buffer was tried and reverted: holding a residual
+                // across the undecodable-chunk path above glued unrelated
+                // fragments into one line, which then matched this prefix and
+                // the CLI-exit substring below — fabricating records rather
+                // than losing one. Losing a line occasionally beats inventing
+                // one. The same exposure has always applied to the exit
+                // detection two lines down.
+                //
+                // Each side's spelling of the prefix can be pinned but their
+                // agreement cannot: `cjk-emphasis-stream.test.js` pins the JS
+                // side's, and nothing pins this literal or `window.js`'s.
+                if line.hasPrefix("[cjk-emphasis]") {
+                    logger.notice("[shim] \(line, privacy: .public)")
+                } else {
                     logger.info("[shim] \(line, privacy: .public)")
-                    // Detect CLI subprocess exit from extension error log
-                    if line.contains("process exited with code") || line.contains("process terminated by signal") {
-                        let lineStr = String(line)
-                        DispatchQueue.main.async {
-                            weakSelf.handleCLISubprocessExit(lineStr)
-                        }
+                }
+                // Detect CLI subprocess exit from extension error log
+                if line.contains("process exited with code") || line.contains("process terminated by signal") {
+                    let lineStr = String(line)
+                    DispatchQueue.main.async {
+                        weakSelf.handleCLISubprocessExit(lineStr)
                     }
                 }
             }
