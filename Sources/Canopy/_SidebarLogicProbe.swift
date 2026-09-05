@@ -7547,6 +7547,174 @@ enum SidebarLogicProbe {
                    })
         }
 
+        // MARK: - Session event extraction
+        //
+        // The rule most likely to regress is the `tool_result` filter: most
+        // `user` frames on this wire are tool output, and losing the filter
+        // fills the phone's conversation with it. Measured by mutation —
+        // deleting that guard fails two of the assertions below.
+        do {
+            var n = 0
+            let ids = { () -> String in n += 1; return "e\(n)" }
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+            let assistant: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "thinking", "thinking": "secret"],
+                    ["type": "text", "text": "hello"],
+                    ["type": "text", "text": "world"],
+                ]],
+            ]
+            let a = SessionEvent.events(from: assistant, sessionId: "S", resumeId: "R", at: now, nextId: ids)
+            record("event: assistant joins its text blocks",
+                   a.count == 1 && a[0].kind == .assistant && a[0].text == "hello\nworld")
+            record("event: assistant drops thinking blocks", !(a.first?.text.contains("secret") ?? true))
+
+            let bash: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "name": "Bash", "input": ["command": "npm test\nsecond line"]],
+                ]],
+            ]
+            let t = SessionEvent.events(from: bash, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: a tool_use becomes one tool event", t.count == 1 && t.first?.kind == .tool)
+            record("event: Bash carries its first command line", t.first?.text == "Bash: npm test")
+            record("event: Bash carries only the first line", !(t.first?.text.contains("second line") ?? true))
+
+            let edit: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "name": "Edit",
+                     "input": ["file_path": "/Users/hiko/secret/SessionStore.swift"]],
+                ]],
+            ]
+            let e = SessionEvent.events(from: edit, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: Edit carries the file name", e.first?.text == "Edit: SessionStore.swift")
+            record("event: Edit drops the directory", !(e.first?.text.contains("/Users/hiko") ?? true))
+
+            // The default matters more than any listed case: a tool nobody has
+            // thought about must not start shipping its input.
+            let unknown: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "name": "WebFetch",
+                     "input": ["url": "https://internal.example/secret"]],
+                ]],
+            ]
+            let w = SessionEvent.events(from: unknown, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: an unlisted tool is the name alone", w.first?.text == "WebFetch")
+            record("event: an unlisted tool leaks no input",
+                   !(w.first?.text.contains("internal.example") ?? true))
+
+            let longCmd: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "name": "Bash",
+                     "input": ["command": String(repeating: "x", count: 200)]],
+                ]],
+            ]
+            let l = SessionEvent.events(from: longCmd, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: a long tool summary is capped",
+                   (l.first?.text.count ?? 0) <= "Bash: ".count + SessionEvent.maxToolSummaryLength + 1)
+
+            // **This one is vacuous and is kept only to document the shape.**
+            // Measured: deleting the `tool_result` guard leaves it green,
+            // because a pure tool-result frame carries no `text` block, so the
+            // extractor produces nothing either way. The `mixed` fixture below
+            // is the one that actually pins the filter — that is the only
+            // assertion of the two that failed under mutation.
+            let toolResult: [String: Any] = [
+                "type": "user",
+                "message": ["content": [["type": "tool_result", "content": "12345 files"]]],
+            ]
+            record("event: a user frame carrying tool_result is skipped",
+                   SessionEvent.events(from: toolResult, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            let realUser: [String: Any] = [
+                "type": "user",
+                "message": ["content": [["type": "text", "text": "do it"]]],
+            ]
+            let u = SessionEvent.events(from: realUser, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: a genuine user turn is kept",
+                   u.count == 1 && u.first?.kind == .user && u.first?.text == "do it")
+
+            let mixed: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "text", "text": "and also"],
+                    ["type": "tool_result", "content": "output"],
+                ]],
+            ]
+            record("event: a mixed user frame with any tool_result is skipped",
+                   SessionEvent.events(from: mixed, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            record("event: system/init is a turn start",
+                   SessionEvent.events(from: ["type": "system", "subtype": "init"],
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids)
+                       .first?.kind == .turnStart)
+            record("event: a system frame that is not init produces nothing",
+                   SessionEvent.events(from: ["type": "system", "subtype": "status"],
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
+            record("event: result is a turn end",
+                   SessionEvent.events(from: ["type": "result", "subtype": "success"],
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids)
+                       .first?.kind == .turnEnd)
+            record("event: stream_event produces nothing",
+                   SessionEvent.events(from: ["type": "stream_event"],
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
+
+            // A bulk replay arrives as ONE message holding an array. Only the
+            // top-level `type` is read, so it cannot flood the relay.
+            let replay: [String: Any] = [
+                "type": "get_session_response",
+                "response": ["messages": [
+                    ["type": "assistant", "message": ["content": [["type": "text", "text": "old"]]]],
+                ]],
+            ]
+            record("event: a bulk replay envelope produces nothing",
+                   SessionEvent.events(from: replay, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            // 20,000 CJK characters is 60,000 bytes — a character-based cap
+            // would let this through.
+            let huge = String(repeating: "\u{3042}", count: 20_000)
+            let big: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [["type": "text", "text": huge]]],
+            ]
+            let b = SessionEvent.events(from: big, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: text is capped in BYTES, not characters",
+                   (b.first?.text.utf8.count ?? .max) <= SessionEvent.maxTextBytes)
+            record("event: a capped text says so", b.first?.text.hasSuffix("\u{2026}") ?? false)
+
+            var m = 0
+            let seqIds = { () -> String in m += 1; return "id\(m)" }
+            let two: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "text", "text": "x"],
+                    ["type": "tool_use", "name": "Read", "input": [:]],
+                ]],
+            ]
+            let pair = SessionEvent.events(from: two, sessionId: "S", resumeId: nil, at: now, nextId: seqIds)
+            record("event: each event takes its own id from the factory",
+                   pair.count == 2 && pair[0].eventId == "id1" && pair[1].eventId == "id2")
+
+            let empty: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [["type": "text", "text": "   "]]],
+            ]
+            record("event: an empty assistant text produces nothing",
+                   SessionEvent.events(from: empty, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            record("event: the wire tag is always event", a.first?.type == "event")
+            record("event: resumeId rides along", a.first?.resumeId == "R")
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
