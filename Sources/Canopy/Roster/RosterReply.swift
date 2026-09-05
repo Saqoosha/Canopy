@@ -34,6 +34,11 @@ struct DecisionEnvelope: Codable {
     let sessionId: String
     let requestId: String
     let decision: String
+    /// An `AskUserQuestion`'s answer: the question's own text mapped to the
+    /// chosen option labels, joined with `", "` — the extension's own format,
+    /// see `AskUserQuestionForm`. Absent for an ordinary Allow/Deny, and
+    /// required for an AskUserQuestion, which has no allow/deny answer.
+    let answers: [String: String]?
     /// See `ReplyEnvelope.deliveryId`.
     let deliveryId: String?
 }

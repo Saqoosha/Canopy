@@ -1648,7 +1648,7 @@ enum SidebarLogicProbe {
                 lastActiveAt: now
             )
             let good = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
-                                         requestId: "abc123", decision: "allow", deliveryId: nil)
+                                         requestId: "abc123", decision: "allow", answers: nil, deliveryId: nil)
             record("roster decision: routes to the addressed session",
                    RosterReply.decisionTarget(for: good, in: [a])?.id == a.id)
 
@@ -1659,7 +1659,7 @@ enum SidebarLogicProbe {
             // dropped and reported as "no open session matches".
             for value in RosterReply.acceptedDecisions.sorted() {
                 let env = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
-                                            requestId: "abc123", decision: value, deliveryId: nil)
+                                            requestId: "abc123", decision: value, answers: nil, deliveryId: nil)
                 record("roster decision: \(value) routes to the addressed session",
                        RosterReply.decisionTarget(for: env, in: [a])?.id == a.id)
             }
@@ -1667,17 +1667,17 @@ enum SidebarLogicProbe {
                    RosterReply.acceptedDecisions.contains("allowAlways"))
 
             let badValue = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
-                                             requestId: "abc123", decision: "allow_always", deliveryId: nil)
+                                             requestId: "abc123", decision: "allow_always", answers: nil, deliveryId: nil)
             record("roster decision: refuses an unknown decision value",
                    RosterReply.decisionTarget(for: badValue, in: [a]) == nil)
 
             let blankId = DecisionEnvelope(type: "decision", sessionId: a.id.uuidString,
-                                            requestId: "", decision: "deny", deliveryId: nil)
+                                            requestId: "", decision: "deny", answers: nil, deliveryId: nil)
             record("roster decision: refuses an envelope whose requestId is empty",
                    RosterReply.decisionTarget(for: blankId, in: [a]) == nil)
 
             let stale = DecisionEnvelope(type: "decision", sessionId: UUID().uuidString,
-                                          requestId: "abc123", decision: "allow", deliveryId: nil)
+                                          requestId: "abc123", decision: "allow", answers: nil, deliveryId: nil)
             record("roster decision: a session id from a previous launch matches nothing",
                    RosterReply.decisionTarget(for: stale, in: [a]) == nil)
 
@@ -1695,12 +1695,12 @@ enum SidebarLogicProbe {
                 lastActiveAt: now
             )
             let addressesB = DecisionEnvelope(type: "decision", sessionId: b.id.uuidString,
-                                               requestId: "def456", decision: "deny", deliveryId: nil)
+                                               requestId: "def456", decision: "deny", answers: nil, deliveryId: nil)
             record("roster decision: with two sessions open, routes to the SECOND when addressed",
                    RosterReply.decisionTarget(for: addressesB, in: [a, b])?.id == b.id)
 
             let addressesNeither = DecisionEnvelope(type: "decision", sessionId: UUID().uuidString,
-                                                      requestId: "ghi789", decision: "allow", deliveryId: nil)
+                                                      requestId: "ghi789", decision: "allow", answers: nil, deliveryId: nil)
             record("roster decision: with two sessions open, an id matching neither finds nothing",
                    RosterReply.decisionTarget(for: addressesNeither, in: [a, b]) == nil)
         }
@@ -7286,6 +7286,150 @@ enum SidebarLogicProbe {
 
             record("model map: an unknown id passes through untouched",
                    LauncherView.migratingRetiredModel("some-future-model") == "some-future-model")
+        }
+
+        // MARK: - AskUserQuestion form
+        //
+        // The shape asserted here was READ OUT of the extension's webview
+        // bundle, not designed: answers are keyed by the question's own text
+        // and valued by the chosen labels joined with ", ". Measured against
+        // 2.1.260 — the version Canopy loads, from its own managed directory,
+        // not the older copies in `~/.vscode/extensions` — and present
+        // unchanged in 2.1.90, so it has held across 170 releases.
+        //
+        // If a future extension changes it, these keep passing and the Mac
+        // silently stops accepting phone answers. The check that would catch
+        // it is a real ask answered from a real phone, which no assertion can
+        // stand in for.
+        //
+        // What is NOT pinned, and cannot be here: `applyPermissionDecision`
+        // itself. It needs a live shim, so nothing below proves that a valid
+        // form actually reaches `updatedInput` — only that `merged` builds the
+        // right one. Mutating the call site to keep passing the unmodified
+        // input leaves every assertion in this block green.
+        do {
+            let inputs: [String: Any] = [
+                "questions": [
+                    ["question": "Which database?", "header": "DB", "multiSelect": false,
+                     "options": [["label": "Postgres"], ["label": "SQLite"]]],
+                ],
+            ]
+
+            let drawn = AskUserQuestionForm.choices(from: inputs)
+            record("ask form: choices carry the question and its option labels",
+                   drawn?.count == 1
+                       && drawn?.first?["question"] as? String == "Which database?"
+                       && drawn?.first?["options"] as? [String] == ["Postgres", "SQLite"]
+                       && drawn?.first?["header"] as? String == "DB")
+
+            // nil, not []: the phone must be able to tell "not a form" from "a
+            // form with nothing to press", because the second draws a dead
+            // card and that is the bug this whole change removes.
+            record("ask form: a non-form input yields nil, never an empty list",
+                   AskUserQuestionForm.choices(from: ["command": "ls"]) == nil)
+            record("ask form: a question with no options yields nil",
+                   AskUserQuestionForm.choices(from: [
+                       "questions": [["question": "Q", "options": [] as [Any]]],
+                   ]) == nil)
+
+            let answered = AskUserQuestionForm.merged(
+                inputs: inputs, answers: ["Which database?": "Postgres"])
+            record("ask form: a valid answer is written under the question's own text",
+                   (answered?["answers"] as? [String: String]) == ["Which database?": "Postgres"])
+            record("ask form: merging preserves the questions the tool asked",
+                   (answered?["questions"] as? [[String: Any]])?.count == 1)
+
+            // The strictness is the point: the phone draws buttons from
+            // `choices`, so anything else is a stale or foreign client, and
+            // resolving the request with a label the model never listed would
+            // put words in the user's mouth on their own machine.
+            record("ask form: a label that was never offered is refused",
+                   AskUserQuestionForm.merged(
+                       inputs: inputs, answers: ["Which database?": "MySQL"]) == nil)
+            record("ask form: an answer to a question that was not asked is refused",
+                   AskUserQuestionForm.merged(
+                       inputs: inputs, answers: ["Which cache?": "Postgres"]) == nil)
+            record("ask form: an empty answer map is refused",
+                   AskUserQuestionForm.merged(inputs: inputs, answers: [:]) == nil)
+            record("ask form: a single-select question refuses two labels",
+                   AskUserQuestionForm.merged(
+                       inputs: inputs, answers: ["Which database?": "Postgres, SQLite"]) == nil)
+
+            // An extra answer alongside a valid one is refused wholesale: if
+            // the phone is answering a question this form does not have, the
+            // one that DID match is just as likely to belong to the other
+            // form.
+            record("ask form: a valid answer plus a stray one is refused wholesale",
+                   AskUserQuestionForm.merged(inputs: inputs, answers: [
+                       "Which database?": "Postgres", "Which cache?": "Redis",
+                   ]) == nil)
+
+            let multi: [String: Any] = [
+                "questions": [
+                    ["question": "Which features?", "multiSelect": true,
+                     "options": [["label": "A"], ["label": "B"], ["label": "C"]]],
+                ],
+            ]
+            record("ask form: a multi-select question takes several labels",
+                   (AskUserQuestionForm.merged(
+                       inputs: multi, answers: ["Which features?": "A, C"])?["answers"]
+                       as? [String: String]) == ["Which features?": "A, C"])
+            // Re-joined from the parsed labels, so a client's stray spacing
+            // cannot reach the extension's own `split(", ")` and produce a
+            // label with whitespace on it that matches nothing.
+            record("ask form: stray spacing is normalised, not passed through",
+                   (AskUserQuestionForm.merged(
+                       inputs: multi, answers: ["Which features?": "A,  C"])?["answers"]
+                       as? [String: String]) == ["Which features?": "A, C"])
+
+            // A label the model wrote with a comma in it. The whole-answer
+            // exact match is what saves this; splitting first yields "Save"
+            // and "then quit", neither offered, so a valid single-select
+            // answer was refused and the ask stayed pending on the Mac.
+            let comma: [String: Any] = [
+                "questions": [
+                    ["question": "Then?", "options": [["label": "Save, then quit"], ["label": "Discard"]]],
+                ],
+            ]
+            record("ask form: an offered label containing the separator is accepted whole",
+                   (AskUserQuestionForm.merged(
+                       inputs: comma, answers: ["Then?": "Save, then quit"])?["answers"]
+                       as? [String: String]) == ["Then?": "Save, then quit"])
+            // The exact match must not become a way past the offered set:
+            // an answer that is not a label still has to split and match.
+            record("ask form: the whole-answer match does not admit an unoffered label",
+                   AskUserQuestionForm.merged(
+                       inputs: comma, answers: ["Then?": "Save, then reboot"]) == nil)
+
+            // Two questions sharing one text. The answer map is keyed by
+            // that text, so a duplicate overwrites: the phone reports the
+            // form complete and sends one answer for two questions. The
+            // format cannot represent it, so the form is refused outright
+            // and the ask is answered at the Mac instead.
+            let duplicate: [String: Any] = [
+                "questions": [
+                    ["question": "Which?", "options": [["label": "a"]]],
+                    ["question": "Which?", "options": [["label": "b"]]],
+                ],
+            ]
+            record("ask form: a duplicate question makes the form undrawable",
+                   AskUserQuestionForm.choices(from: duplicate) == nil)
+            record("ask form: a duplicate question is refused at merge too",
+                   AskUserQuestionForm.merged(
+                       inputs: duplicate, answers: ["Which?": "a"]) == nil)
+
+            let two: [String: Any] = [
+                "questions": [
+                    ["question": "Q1", "options": [["label": "a"]]],
+                    ["question": "Q2", "options": [["label": "b"]]],
+                ],
+            ]
+            record("ask form: leaving one question unanswered is refused",
+                   AskUserQuestionForm.merged(inputs: two, answers: ["Q1": "a"]) == nil)
+            record("ask form: answering both questions is accepted",
+                   (AskUserQuestionForm.merged(
+                       inputs: two, answers: ["Q1": "a", "Q2": "b"])?["answers"]
+                       as? [String: String]) == ["Q1": "a", "Q2": "b"])
         }
 
         // MARK: - Roster reconnect floor

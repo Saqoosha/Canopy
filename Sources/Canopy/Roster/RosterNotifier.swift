@@ -57,10 +57,18 @@ enum RosterNotifier {
     ///   resolve — an `AskUserQuestion`, whose answer is text the model asked
     ///   for. The phone then shows the ask without buttons rather than
     ///   offering two that cannot work.
+    /// - Parameter choices: an `AskUserQuestion`'s questions and their option
+    ///   labels, from `AskUserQuestionForm.choices(from:)`. Present exactly
+    ///   when `answerable` is false, and for the same reason inverted: the
+    ///   ask cannot be answered with Allow/Deny, but it CAN be answered by
+    ///   picking one of these. Without it the phone rendered the tool input
+    ///   as raw JSON with a plain text field under it — the question legible
+    ///   and unanswerable, which is the state the push exists to end.
     static func post(kind: Kind, sessionId: String, resumeId: String? = nil,
                      title: String, body: String,
                      requestId: String? = nil, allowAlways: Bool = false,
-                     answerable: Bool = true) {
+                     answerable: Bool = true,
+                     choices: [[String: Any]]? = nil) {
         guard let (machineId, url, secret) = resolvedTarget() else { return }
 
         var request = URLRequest(url: url)
@@ -81,6 +89,9 @@ enum RosterNotifier {
             payload["requestId"] = requestId
             payload["allowAlways"] = allowAlways
             payload["answerable"] = answerable
+            if let choices, !choices.isEmpty {
+                payload["choices"] = choices
+            }
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         URLSession.shared.dataTask(with: request) { _, response, error in

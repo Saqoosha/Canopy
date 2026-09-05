@@ -469,7 +469,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The one refusal that was ALREADY reported honestly, by
             // `decisionDelivered` on the phone — but only as "the relay took
             // it". Now it can say which request went stale.
-            guard shim.applyPermissionDecision(requestId: envelope.requestId, decision: envelope.decision) else {
+            guard shim.applyPermissionDecision(requestId: envelope.requestId,
+                                               decision: envelope.decision,
+                                               answers: envelope.answers) else {
                 return .refused("That request is no longer waiting for an answer")
             }
             return .delivered
