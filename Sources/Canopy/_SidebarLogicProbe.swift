@@ -7288,6 +7288,91 @@ enum SidebarLogicProbe {
                    LauncherView.migratingRetiredModel("some-future-model") == "some-future-model")
         }
 
+        // MARK: - Roster reconnect floor
+        //
+        // **These do NOT pin the bug they were written for, and saying so is
+        // the point of this paragraph.** The bug — found in review — was an
+        // early `return` in `RosterPublisher.reconnectAfterLoss` that left no
+        // socket, no ping timer and nothing armed, so an idle Mac reconnected
+        // never. It lived in the CALLER's handling of the decision, and every
+        // assertion below exercises `RosterReconnectFloor.decide` without ever
+        // constructing a publisher. Measured: mutating the caller's
+        // `case .after(let delay): scheduleReconnect(after: delay)` to
+        // `case .after: break` reintroduces the Critical verbatim and all
+        // seven stay green.
+        //
+        // What they do pin is the layer below it — that `decide` always
+        // answers with an attempt, immediately or later, and by how much.
+        // `Decision` having no "do nothing" case is what makes the caller's
+        // mistake unrepresentable at this layer; the enum's exhaustiveness
+        // forces the caller to WRITE a `.after` arm, it cannot force that arm
+        // to do anything. Pinning the caller needs a live publisher, a live
+        // socket and a real network failure — that is a device check, not a
+        // probe assertion, and it has not been built.
+        do {
+            let t0 = Date(timeIntervalSince1970: 1_000_000)
+            let floor: TimeInterval = 30
+
+            record("reconnect floor: a first loss attempts immediately",
+                   RosterReconnectFloor.decide(last: nil, now: t0, floor: floor) == .now)
+
+            // The regression itself: inside the floor, the answer is a
+            // deferral with a real delay — never a skip. Deleting the `.after`
+            // branch cannot leave this green, because there is no third case
+            // for it to fall into.
+            record("reconnect floor: a loss inside the floor defers, and by the remainder",
+                   RosterReconnectFloor.decide(last: t0, now: t0.addingTimeInterval(10), floor: floor)
+                       == .after(20))
+
+            // Both sides of the boundary, so a `<=`/`<` slip is caught.
+            // 29.5, not 29.9: both it and the 0.5 remainder are exact in
+            // binary, so this compares values rather than rounding. Spelled
+            // as a literal rather than as `floor - 29.5`, because an
+            // expectation computed with the implementation's own expression
+            // measures nothing.
+            record("reconnect floor: just before the floor still defers",
+                   RosterReconnectFloor.decide(last: t0, now: t0.addingTimeInterval(29.5), floor: floor)
+                       == .after(0.5))
+            record("reconnect floor: exactly at the floor attempts",
+                   RosterReconnectFloor.decide(last: t0, now: t0.addingTimeInterval(floor), floor: floor) == .now)
+            // No mutation of `decide` kills this one on its own — every way
+            // of making an hour-old attempt defer also fails one of the two
+            // above. Kept as a statement of intent, not counted as coverage.
+            record("reconnect floor: long past the floor attempts",
+                   RosterReconnectFloor.decide(last: t0, now: t0.addingTimeInterval(3600), floor: floor) == .now)
+
+            // A clock stepped backwards must not park the retry for however
+            // far it jumped. Clamped elapsed means the wait is at most one
+            // floor, and it is still a wait rather than a skip.
+            // `.after(30)`, not `.after(floor)`: the second spelling is the
+            // implementation's own expression collapsed for a clamped
+            // elapsed, which is the trap the note four assertions up warns
+            // about. It was not vacuous — dropping the clamp yields
+            // `.after(86430)` — but the rule should not have one exception.
+            record("reconnect floor: a backwards clock waits at most one floor",
+                   RosterReconnectFloor.decide(last: t0, now: t0.addingTimeInterval(-86_400), floor: floor)
+                       == .after(30))
+
+            // **Not test coverage, and it should not be counted as any.** No
+            // mutation of `decide` can fail this while `Decision` has two
+            // cases, and adding a third breaks the exhaustive switch below at
+            // COMPILE time, not here. It is a forcing function written as an
+            // assertion because that is where the next person will look.
+            let everyDecision = [
+                RosterReconnectFloor.decide(last: nil, now: t0, floor: floor),
+                RosterReconnectFloor.decide(last: t0, now: t0, floor: floor),
+                RosterReconnectFloor.decide(last: t0, now: t0.addingTimeInterval(15), floor: floor),
+                RosterReconnectFloor.decide(last: t0, now: t0.addingTimeInterval(-5), floor: floor),
+            ]
+            record("reconnect floor: every decision is an attempt, now or later",
+                   everyDecision.allSatisfy { decision in
+                       switch decision {
+                       case .now: return true
+                       case .after(let delay): return delay > 0
+                       }
+                   })
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

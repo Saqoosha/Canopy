@@ -48,6 +48,47 @@ final class RosterPublisher {
     /// when the network is down.
     private var resendingAfterFailure = false
 
+    /// Liveness ping for the publisher socket.
+    ///
+    /// **A half-open socket produces no error at all** — measured 2026-09-05
+    /// on a Mac Studio: the receive loop had been armed for 47 minutes, the
+    /// socket was gone, and neither `receiveReplies` nor a `send` ever
+    /// failed. The relay's Durable Object still held its end, so `POST
+    /// /reply` answered 200 and the phone reported the message as sent while
+    /// nothing arrived. The user typed into a session that never heard them.
+    ///
+    /// The receive loop's own comment records why there was deliberately no
+    /// timer here: recovery was meant to be the next observed pane change,
+    /// and making the failure visible was thought to be enough. That reasoning
+    /// assumed the socket would report its death. It does not, so nothing was
+    /// visible and an idle Mac — the one with no pane changes to recover on —
+    /// stayed silently unreachable.
+    private var pingTimer: DispatchSourceTimer?
+
+    /// Far below any NAT or load-balancer idle timeout, and cheap: one frame,
+    /// no payload. The cost of a missed detection is a message the user
+    /// believes they sent, so this errs short.
+    private static let pingInterval: TimeInterval = 30
+
+    /// When the last reconnect-after-loss ran, so failures cannot compound
+    /// into a tight loop.
+    private var lastReconnectAt: Date?
+
+    /// The last retry armed because the rate floor was hit. Held so a second
+    /// loss arriving in the meantime replaces it rather than stacking one.
+    ///
+    /// **It is not cleared when it fires**, so a non-nil value means "the
+    /// last one armed", not "one is pending". Nothing reads it as a
+    /// condition — the only uses are `cancel()`, and `cancel()` on a spent
+    /// item is a no-op — so the imprecision costs one retained object and no
+    /// behaviour. Clearing it from inside the item was tried and reverted:
+    /// the identity check it needs (`reconnectWork === work`) makes the
+    /// closure capture the very `let` it initializes, which **crashes
+    /// swiftc 6.3.3** in the SendNonSendable SIL pass rather than diagnosing
+    /// it, and clearing without the check would orphan a newer item armed
+    /// between this one firing and its `Task` running.
+    private var reconnectWork: DispatchWorkItem?
+
     /// Called with each reply that arrives down the publisher socket. Set by
     /// `AppDelegate` at start, because the publisher owns the connection but
     /// not the sessions.
@@ -88,6 +129,8 @@ final class RosterPublisher {
         running = false
         if RosterPublisher.current === self { RosterPublisher.current = nil }
         connectedEndpoint = nil
+        stopPinging()
+        cancelScheduledReconnect()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         stateSince.removeAll()
@@ -104,6 +147,12 @@ final class RosterPublisher {
     /// to wake the closure — in practice, until the next launch.
     func secretChanged() {
         guard running else { return }
+        stopPinging()
+        // Not because the item holds the old secret — it reads the Keychain
+        // at fire time, and `commitRelaySecret` writes it before calling
+        // here, so it would pick up the new one. It is cancelled so a pending
+        // item cannot race the deliberate attempt `publish()` makes below.
+        cancelScheduledReconnect()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         publish()
@@ -154,6 +203,7 @@ final class RosterPublisher {
         let task = URLSession.shared.webSocketTask(with: request)
         task.resume()
         self.task = task
+        startPinging(on: task)
         connectedEndpoint = settings.rosterEndpoint
         logger.notice("roster: connected as \(machineId, privacy: .public)")
         receiveReplies(on: task)
@@ -170,6 +220,134 @@ final class RosterPublisher {
     /// one. A failed receive (the socket closing) ends this loop only; the
     /// next `connectIfConfigured()` call arms a fresh one on the new task,
     /// so there is deliberately no retry here.
+    /// Builds the ping timer.
+    ///
+    /// **`nonisolated`, and that is load-bearing.** `DispatchSourceHandler` is
+    /// a plain `@convention(block) () -> Void` with no `@Sendable`, so a
+    /// closure literal written inside this `@MainActor` type inherits its
+    /// isolation and the compiler emits a main-queue check at the closure's
+    /// entry. The timer fires on its own queue, so the first tick aborts the
+    /// process — measured 2026-09-05: the app died ~30 s after launch, once
+    /// per run, with `BUG IN CLIENT OF LIBDISPATCH: Block was expected to
+    /// execute on queue [com.apple.main-thread]`.
+    ///
+    /// Hopping to the main actor INSIDE the handler does not help, and a
+    /// comment here claimed it did: the entry check runs before the hop.
+    /// `PeerNameStore.makeWatcher` carries the same annotation for the same
+    /// reason. The rule is about the parameter's type, not the body.
+    private nonisolated static func makePingTimer(
+        for task: URLSessionWebSocketTask,
+        interval: TimeInterval,
+        onFailure: @escaping @Sendable (URLSessionWebSocketTask, Error) -> Void
+    ) -> DispatchSourceTimer {
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak task] in
+            guard let task else { return }
+            task.sendPing { error in
+                guard let error else { return }
+                onFailure(task, error)
+            }
+        }
+        return timer
+    }
+
+    /// Starts pinging `task`, replacing any timer armed on an older one.
+    private func startPinging(on task: URLSessionWebSocketTask) {
+        stopPinging()
+        let timer = Self.makePingTimer(for: task, interval: Self.pingInterval) { failed, error in
+            Task { @MainActor in
+                guard let self = RosterPublisher.current, self.task === failed else { return }
+                self.logger.notice("roster: ping failed, reconnecting: \(error.localizedDescription, privacy: .public)")
+                self.reconnectAfterLoss()
+            }
+        }
+        timer.resume()
+        pingTimer = timer
+    }
+
+    private func stopPinging() {
+        pingTimer?.cancel()
+        pingTimer = nil
+    }
+
+    /// Cancels a deferred reconnect. Called wherever the publisher is being
+    /// torn down or deliberately disabled, so a retry cannot fire into a
+    /// state the user just asked for.
+    private func cancelScheduledReconnect() {
+        reconnectWork?.cancel()
+        reconnectWork = nil
+    }
+
+    /// Drops the dead socket and rebuilds one on this publisher's own clock.
+    ///
+    /// **On its own clock, not on the next publish.** The Mac this matters
+    /// for is the idle one: it has no pane changes to trigger a publish, so
+    /// waiting for one means waiting forever, which is the state that was
+    /// measured. The first attempt is immediate; one inside the rate floor is
+    /// deferred by the remainder, never skipped — see `RosterReconnectFloor`.
+    private func reconnectAfterLoss() {
+        stopPinging()
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        connectedEndpoint = nil
+        guard running else { return }
+        // **A floor that DEFERS, never one that skips.** Offline,
+        // `connectIfConfigured()` builds a socket whose receive fails within
+        // seconds, landing straight back here — so without a floor the two
+        // chase each other as fast as the network can refuse, each pass
+        // logging. But an early `return` here was worse than no floor at
+        // all: it left `task` and `pingTimer` both nil with nothing armed to
+        // try again, and the only other callers of `connectIfConfigured()`
+        // are `publish()` (an observed pane change) and `secretChanged()`.
+        // On the idle Mac this whole feature is for, that is never — the
+        // exact state the ping was added to end, reintroduced by its own
+        // rate limit. Caught in review; the comment here had claimed the
+        // opposite.
+        let now = Date()
+        switch RosterReconnectFloor.decide(last: lastReconnectAt, now: now, floor: Self.pingInterval) {
+        case .now:
+            lastReconnectAt = now
+            // `connectIfConfigured()` can itself decline — no Keychain
+            // secret, a non-https endpoint, an unusable URL — and then this
+            // branch arms nothing, which is the Critical's shape reached
+            // through a different door. It self-heals rather than sticking:
+            // `publish()` reads `rosterEndpoint` unconditionally so an
+            // endpoint fix wakes the tracked closure, and a secret fix comes
+            // through `secretChanged()`. Recorded rather than guarded,
+            // because a guard here would need its own retry clock.
+            connectIfConfigured()
+        case .after(let delay):
+            scheduleReconnect(after: delay)
+        }
+    }
+
+    /// Arms a single deferred reconnect. Replacing any pending one keeps a
+    /// burst of losses from stacking attempts.
+    ///
+    /// **`DispatchQueue.main` is a requirement, not a choice.**
+    /// `DispatchWorkItem`'s block parameter is not `@Sendable`, so this
+    /// closure literal — written inside a `@MainActor` type — inherits the
+    /// isolation and the compiler emits a main-queue entry check inside it
+    /// (measured in the IR: `swift_task_reportUnexpectedExecutor` sits in the
+    /// closure's own symbol). The inner `Task { @MainActor }` does not save
+    /// it; that check runs before the hop, which is the whole of what
+    /// `makePingTimer` above records. Move this to `.global(qos:)` and the
+    /// process aborts on the first deferred reconnect — offline, which is the
+    /// only time this code runs.
+    private func scheduleReconnect(after delay: TimeInterval) {
+        reconnectWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self, self.running, self.task == nil else { return }
+                self.lastReconnectAt = Date()
+                self.connectIfConfigured()
+            }
+        }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: work)
+    }
+
     private func receiveReplies(on task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
             switch result {
@@ -203,17 +381,15 @@ final class RosterPublisher {
                     self.receiveReplies(on: task)
                 }
             case .failure(let error):
-                // The socket is dead and this loop ends here — silently, if
-                // we don't log it. Before this, an idle Mac lost its reply
-                // path invisibly (this is the only trigger for reconnecting;
-                // `connectIfConfigured()` only runs from `publish()`, which
-                // only fires on an observed pane/settings change, and an
-                // idle Mac has neither), and the phone went on to report "No
-                // Mac is connected — it may be asleep" about a Mac that was
-                // awake the whole time. Deliberately no ping, no timer, no
-                // reconnect loop here: recovery is still the next observed
-                // state change, same as before this fix — this only makes
-                // that limitation visible instead of silent.
+                // A socket that reports its own death. This used to be the
+                // only recovery trigger, and the comment here used to say
+                // there was deliberately no ping and no timer — recovery
+                // being the next observed pane change. That was measured
+                // wrong twice over: a half-open socket never reports
+                // anything, so this branch does not run, and an idle Mac has
+                // no pane change to recover on either. `pingTimer` is the
+                // trigger that covers both; this one stays because a socket
+                // that DOES fail should not wait up to the ping interval.
                 Task { @MainActor in
                     guard let self else { return }
                     self.logger.notice("roster: receive failed, socket presumed dead: \(error.localizedDescription, privacy: .public)")
@@ -224,8 +400,10 @@ final class RosterPublisher {
                     // working connection instead of the dead one that
                     // actually failed.
                     guard self.task === task else { return }
-                    self.task = nil
-                    self.connectedEndpoint = nil
+                    // A reported failure is the easy case; recovery is the
+                    // same either way, and going through one path means the
+                    // ping and the receive loop cannot disagree about it.
+                    self.reconnectAfterLoss()
                 }
             }
         }
@@ -336,6 +514,18 @@ final class RosterPublisher {
             // else woke this pass). Either way, an open socket now
             // represents a decision the user reversed — close it rather
             // than merely declining to send into it.
+            //
+            // Both timers come down unconditionally, outside the `task`
+            // check. A deferred reconnect is armed only while `task` is nil,
+            // so guarding on a live socket would leave the one state that can
+            // still reconnect after the user switched this off — note that is
+            // one direction only: a pane change can rebuild the socket while
+            // an item is still pending, and the item's own `task == nil`
+            // guard is what makes that harmless. The ping timer is stopped
+            // here to keep a deliberate toggle-off from logging "ping failed,
+            // reconnecting" on its way out.
+            stopPinging()
+            cancelScheduledReconnect()
             if task != nil {
                 task?.cancel(with: .goingAway, reason: nil)
                 task = nil
@@ -356,6 +546,15 @@ final class RosterPublisher {
         if task != nil, endpoint != connectedEndpoint {
             // The user edited the URL under a live socket. Drop it rather
             // than keep publishing to the host they just stopped naming.
+            //
+            // `stopPinging()` because the timer is armed on THIS task and
+            // nothing below is guaranteed to replace it: `connectIfConfigured`
+            // declines a half-typed URL at its https guard, so the timer would
+            // outlive the socket and fire every 30 s forever — its failure
+            // handler declining each time, since `self.task === failed` is
+            // false. Found by review; a comment two screens down had asserted
+            // this could not happen.
+            stopPinging()
             task?.cancel(with: .goingAway, reason: nil)
             task = nil
             connectedEndpoint = nil
@@ -378,6 +577,10 @@ final class RosterPublisher {
                 // Drop the socket so the next change reconnects. A send error
                 // on a hibernated peer is routine, not a fault.
                 self.logger.notice("roster: send failed, will reconnect: \(error.localizedDescription, privacy: .public)")
+                // Same reason as the endpoint-change branch above: the timer
+                // is armed on the task being dropped here, and the resend
+                // below can decline.
+                self.stopPinging()
                 self.task = nil
                 self.connectedEndpoint = nil
                 // Resend ONCE. Without this the dropped snapshot waits for the
@@ -390,10 +593,23 @@ final class RosterPublisher {
                 // `publish()` returns as soon as the send is in flight, so
                 // clearing it on the way out would leave it open by the time
                 // the retry's own failure arrived, and a down network would
-                // loop. Held closed, a second failure simply stops, leaving
-                // the old behaviour — and `publishedAt` staleness already
-                // makes a long gap visible on the phone.
-                guard !self.resendingAfterFailure else { return }
+                // loop.
+                //
+                // **A closed latch must still reconnect.** It used to `return`
+                // bare, which left no socket, no ping timer and a latch that
+                // only a successful send could open — on an idle Mac, nothing
+                // ever calls `publish()` again, so that Mac reconnected never.
+                // That is the same sentence as the Critical this branch's own
+                // commit fixed, reached through a second door: found by the
+                // verification round, in code that predates the ping. The
+                // latch is about not resending the SNAPSHOT twice; it was
+                // never meant to stop the socket coming back, and
+                // `reconnectAfterLoss()` is now the thing that guarantees it
+                // does, on the same rate floor as every other loss.
+                guard !self.resendingAfterFailure else {
+                    self.reconnectAfterLoss()
+                    return
+                }
                 self.resendingAfterFailure = true
                 self.publish()
             }
