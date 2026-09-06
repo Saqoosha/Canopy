@@ -5021,6 +5021,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             detectAskUserQuestion(in: ioMsg)
             detectBackgroundTaskLaunch(in: ioMsg)
             detectTaskStopLaunch(in: ioMsg)
+            // A turn is starting, so the previous turn's streamed-event id is
+            // no longer this turn's. `postTaskCompletedNotification` also
+            // consumes it, and that alone covers every path a completion
+            // actually takes — but it makes the rule depend on the exit
+            // rather than on the boundary, and two reviewers asked for the
+            // boundary. Clearing here is what makes "belongs to the turn in
+            // progress" true by construction. Ordered before
+            // `publishSessionEvents`, which runs later in the same dispatch
+            // and sets the id for THIS turn.
+            if !isWorking { lastAssistantEventId = nil }
             isWorking = true
         case "user":
             processUserToolResults(ioMsg)
