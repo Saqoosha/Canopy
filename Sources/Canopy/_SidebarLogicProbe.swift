@@ -1594,19 +1594,19 @@ enum SidebarLogicProbe {
                 status: .live,
                 lastActiveAt: now
             )
-            let good = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "do the thing", deliveryId: nil)
+            let good = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "do the thing", deliveryId: nil, replyId: nil)
             record("roster reply: routes to the addressed session",
                    RosterReply.target(for: good, in: [a])?.id == a.id)
 
-            let blank = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "   ", deliveryId: nil)
+            let blank = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "   ", deliveryId: nil, replyId: nil)
             record("roster reply: refuses whitespace-only text",
                    RosterReply.target(for: blank, in: [a]) == nil)
 
-            let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x", deliveryId: nil)
+            let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x", deliveryId: nil, replyId: nil)
             record("roster reply: refuses a non-reply envelope",
                    RosterReply.target(for: wrongType, in: [a]) == nil)
 
-            let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x", deliveryId: nil)
+            let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x", deliveryId: nil, replyId: nil)
             record("roster reply: an id from a previous launch matches nothing",
                    RosterReply.target(for: stale, in: [a]) == nil)
 
@@ -1624,11 +1624,11 @@ enum SidebarLogicProbe {
                 status: .live,
                 lastActiveAt: now
             )
-            let addressesB = ReplyEnvelope(type: "reply", sessionId: b.id.uuidString, text: "for B", deliveryId: nil)
+            let addressesB = ReplyEnvelope(type: "reply", sessionId: b.id.uuidString, text: "for B", deliveryId: nil, replyId: nil)
             record("roster reply: with two sessions open, routes to the SECOND when addressed",
                    RosterReply.target(for: addressesB, in: [a, b])?.id == b.id)
 
-            let addressesNeither = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "for neither", deliveryId: nil)
+            let addressesNeither = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "for neither", deliveryId: nil, replyId: nil)
             record("roster reply: with two sessions open, an id matching neither finds nothing",
                    RosterReply.target(for: addressesNeither, in: [a, b]) == nil)
         }
@@ -7750,6 +7750,45 @@ enum SidebarLogicProbe {
                        "type": "from-extension",
                        "message": ["type": "update_state"],
                    ]) == nil)
+
+            // A `user` echo can carry `content` as a plain string. Both echo
+            // matchers in ShimProcess accept that form; the first version
+            // here read only the array and would have dropped it.
+            let stringUser: [String: Any] = [
+                "type": "user",
+                "message": ["content": "typed as a string"],
+            ]
+            let su = SessionEvent.events(fromFrame: stringUser, sessionId: "S", resumeId: nil,
+                                         at: now, nextId: ids)
+            record("event: a string-content user turn is kept",
+                   su.count == 1 && su.first?.kind == .user && su.first?.text == "typed as a string")
+
+            // The phone-reply stamp: a user turn whose text matches carries
+            // the phone's id; any other text takes a fresh one. This is the
+            // whole de-duplication contract for a reply typed on the phone.
+            let stamp: (String) -> String? = { $0 == "from the phone" ? "phone-id" : nil }
+            let echoed: [String: Any] = [
+                "type": "user",
+                "message": ["content": [["type": "text", "text": "from the phone"]]],
+            ]
+            let stamped = SessionEvent.events(fromFrame: echoed, sessionId: "S", resumeId: nil,
+                                              at: now, nextId: ids, stampUser: stamp)
+            record("event: a matching user echo carries the phone's id",
+                   stamped.first?.eventId == "phone-id")
+            let other = SessionEvent.events(fromFrame: realUser, sessionId: "S", resumeId: nil,
+                                            at: now, nextId: ids, stampUser: stamp)
+            record("event: a non-matching user turn takes a fresh id",
+                   other.first.map { $0.eventId != "phone-id" && $0.eventId.hasPrefix("e") } ?? false)
+            // The stamp is for user turns only — an assistant text that
+            // happens to equal the phone's words must not inherit its id.
+            let sameWords: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [["type": "text", "text": "from the phone"]]],
+            ]
+            let notStamped = SessionEvent.events(fromFrame: sameWords, sessionId: "S", resumeId: nil,
+                                                 at: now, nextId: ids, stampUser: stamp)
+            record("event: the stamp never reaches an assistant turn",
+                   notStamped.first?.eventId != "phone-id")
         }
 
         // Summary

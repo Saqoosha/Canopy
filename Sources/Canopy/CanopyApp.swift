@@ -433,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) has no live shim")
                 return .refused("That session is not running — open it on the Mac first")
             }
-            if !shim.requestPhoneReply(text: envelope.text) {
+            if !shim.requestPhoneReply(text: envelope.text, replyId: envelope.replyId) {
                 let why = shim.ineligibilityReasonForReply() ?? "unknown"
                 logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) refused — \(why, privacy: .public)")
                 return .refused(why)

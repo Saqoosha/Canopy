@@ -16,6 +16,13 @@ struct ReplyEnvelope: Codable {
     /// relay older than the ack protocol sends none; the reply is still
     /// injected, and only the confirmation is missing.
     let deliveryId: String?
+    /// The phone's own id for this reply, which it has already stored the
+    /// text under. The streamed `user` event for the CLI's echo is stamped
+    /// with it so the phone draws its local record and the event as one
+    /// thing. Optional: an older phone sends none, and the echo then streams
+    /// under a fresh id and is drawn beside the local record — visible, not
+    /// lost. See `ShimProcess.pendingPhoneReply`.
+    let replyId: String?
 }
 
 /// A permission decision made on the phone, arriving down the publisher

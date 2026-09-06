@@ -81,26 +81,53 @@ struct SessionEvent: Codable, Equatable, Sendable {
 
     /// Convenience over `events(fromFrame:…)` that unwraps first. Callers on
     /// the io_message path hand in the whole envelope.
+    /// - Parameter stampUser: given a `user` turn's text, the id that turn
+    ///   should carry instead of a fresh one, or nil. This is how a reply
+    ///   typed on the PHONE gets the id the phone already stored it under:
+    ///   the phone mints `replyId`, the Mac injects the text and remembers
+    ///   the pair, and the CLI's echo of that text comes back through here
+    ///   carrying the phone's own id — so the phone can tell its local
+    ///   "sent" record and the streamed event are one thing and draw one.
+    ///   Matched on text rather than on the injected frame's `uuid` because
+    ///   whether the echo preserves that field is unmeasured; text is what
+    ///   `isKeepAliveEcho` and `isRecapEcho` already match on.
     static func events(from message: [String: Any],
                        sessionId: String,
                        resumeId: String?,
                        at: Date,
-                       nextId: () -> String) -> [SessionEvent] {
+                       nextId: () -> String,
+                       stampUser: ((String) -> String?)? = nil) -> [SessionEvent] {
         guard let frame = ioFrame(in: message) else { return [] }
         return events(fromFrame: frame, sessionId: sessionId, resumeId: resumeId,
-                      at: at, nextId: nextId)
+                      at: at, nextId: nextId, stampUser: stampUser)
     }
 
     static func events(fromFrame message: [String: Any],
                        sessionId: String,
                        resumeId: String?,
                        at: Date,
-                       nextId: () -> String) -> [SessionEvent] {
-        func make(_ kind: Kind, _ text: String) -> SessionEvent? {
+                       nextId: () -> String,
+                       stampUser: ((String) -> String?)? = nil) -> [SessionEvent] {
+        func make(_ kind: Kind, _ text: String, id: String? = nil) -> SessionEvent? {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
-            return SessionEvent(eventId: nextId(), sessionId: sessionId, resumeId: resumeId,
+            return SessionEvent(eventId: id ?? nextId(), sessionId: sessionId, resumeId: resumeId,
                                 kind: kind, text: capped(trimmed), at: at)
+        }
+
+        /// The text blocks of a `message.content`, whichever of its two wire
+        /// shapes it takes. **A `user` echo can carry `content` as a plain
+        /// string**, not only as an array of blocks — both existing echo
+        /// matchers accept both forms, and the first version here read only
+        /// the array, which would have dropped every string-form turn.
+        func joinedText(of content: Any?) -> String {
+            if let blocks = content as? [[String: Any]] {
+                return blocks
+                    .filter { $0["type"] as? String == "text" }
+                    .compactMap { $0["text"] as? String }
+                    .joined(separator: "\n")
+            }
+            return content as? String ?? ""
         }
 
         switch message["type"] as? String {
@@ -121,13 +148,13 @@ struct SessionEvent: Codable, Equatable, Sendable {
             return out
 
         case "user":
-            let blocks = (message["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
-            guard !blocks.contains(where: { $0["type"] as? String == "tool_result" }) else { return [] }
-            let text = blocks
-                .filter { $0["type"] as? String == "text" }
-                .compactMap { $0["text"] as? String }
-                .joined(separator: "\n")
-            return [make(.user, text)].compactMap { $0 }
+            let content = (message["message"] as? [String: Any])?["content"]
+            if let blocks = content as? [[String: Any]],
+               blocks.contains(where: { $0["type"] as? String == "tool_result" }) {
+                return []
+            }
+            let text = joinedText(of: content).trimmingCharacters(in: .whitespacesAndNewlines)
+            return [make(.user, text, id: stampUser?(text))].compactMap { $0 }
 
         case "system":
             guard message["subtype"] as? String == "init" else { return [] }

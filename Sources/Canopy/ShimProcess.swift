@@ -797,7 +797,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Returns whether it was injected, so the caller can log a refusal
     /// rather than leave the phone believing a message landed.
     @discardableResult
-    func requestPhoneReply(text: String) -> Bool {
+    func requestPhoneReply(text: String, replyId: String? = nil) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         guard !phoneReplyInFlight, !keepAliveInFlight, !recapRequestInFlight, !isWorking,
@@ -811,6 +811,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return false
         }
         phoneReplyInFlight = true
+        // Remembered BEFORE the injection goes out: the echo can arrive on
+        // the very next frame, and a pair recorded afterwards would miss it.
+        pendingPhoneReply = replyId.map { (id: $0, text: trimmed) }
         // The same envelope `requestKeepAlive` sends, with the phone's text.
         // `origin: ["kind": "human"]` is correct and load-bearing here: a
         // reply IS a human's input, arriving by a different route, and the
@@ -851,6 +854,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.phoneReplyTimeoutSeconds, execute: timeout)
         return true
     }
+
+    /// The phone's own id for the reply most recently injected, paired with
+    /// the exact text, so the CLI's echo of that text can be streamed back
+    /// under the id the phone already stored it as. See `SessionEvent.events`'
+    /// `stampUser`. Overwritten by the next reply; cleared once matched, so a
+    /// later identical prompt typed on the Mac is not mistaken for it.
+    private var pendingPhoneReply: (id: String, text: String)?
 
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog behind.
@@ -5416,12 +5426,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// own flags — a `--resume` re-emits no historical `assistant` frames.
     private func publishSessionEvents(_ message: [String: Any]) {
         guard let session = boundSession else { return }
+        let pending = pendingPhoneReply
         let events = SessionEvent.events(from: message,
                                          sessionId: session.id.uuidString,
                                          resumeId: session.resumeId,
                                          at: Date(),
-                                         nextId: { UUID().uuidString })
+                                         nextId: { UUID().uuidString },
+                                         stampUser: { text in
+                                             guard let pending, text == pending.text else { return nil }
+                                             return pending.id
+                                         })
         guard !events.isEmpty else { return }
+        // Consumed on match, so the pair cannot stamp a second, unrelated
+        // turn that happens to carry the same words later.
+        if let pending, events.contains(where: { $0.kind == .user && $0.eventId == pending.id }) {
+            pendingPhoneReply = nil
+        }
         // `debug`, not `notice`: this fires several times per turn and says
         // nothing went wrong. It is here because the one failure this feature
         // can have is total silence — the first version read the outermost
