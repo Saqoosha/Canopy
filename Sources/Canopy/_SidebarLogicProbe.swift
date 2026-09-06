@@ -7714,8 +7714,49 @@ enum SidebarLogicProbe {
                    SessionEvent.events(fromFrame: empty, sessionId: "S", resumeId: nil,
                                        at: now, nextId: ids).isEmpty)
 
-            record("event: the wire tag is always event", a.first?.type == "event")
             record("event: resumeId rides along", a.first?.resumeId == "R")
+
+            // **Asserted on the ENCODED JSON, not on the Swift property.**
+            // The whole discriminator rests on `type` reaching the wire, and
+            // reading `a.first?.type` cannot see it leave: measured by a
+            // reviewer's mutation, turning `type` into a computed property
+            // (which `Codable` then omits) keeps every other assertion here
+            // green while the DO and the phone both start dropping events as
+            // malformed snapshots.
+            if let encoded = try? JSONEncoder().encode(a[0]),
+               let obj = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any] {
+                record("event: the encoded JSON carries type=event", obj["type"] as? String == "event")
+                record("event: the encoded JSON carries the kind's raw value",
+                       obj["kind"] as? String == "assistant")
+                record("event: the encoded JSON carries the text", obj["text"] as? String == "hello\nworld")
+                record("event: the encoded JSON carries a numeric at", obj["at"] is NSNumber)
+            } else {
+                record("event: the encoded JSON carries type=event", false)
+                record("event: the encoded JSON carries the kind's raw value", false)
+                record("event: the encoded JSON carries the text", false)
+                record("event: the encoded JSON carries a numeric at", false)
+            }
+
+            // The listed tools, one each. Three of the seven were unpinned:
+            // dropping the Glob/Grep or Task/Agent case, or narrowing
+            // Read/Edit/Write to Edit alone, all survived mutation.
+            func label(_ name: String, _ input: [String: Any]) -> String? {
+                SessionEvent.events(fromFrame: [
+                    "type": "assistant",
+                    "message": ["content": [["type": "tool_use", "name": name, "input": input]]],
+                ], sessionId: "S", resumeId: nil, at: now, nextId: ids).first?.text
+            }
+            record("event: Read carries the file name", label("Read", ["file_path": "/a/b/R.swift"]) == "Read: R.swift")
+            record("event: Write carries the file name", label("Write", ["file_path": "/a/b/W.swift"]) == "Write: W.swift")
+            record("event: Glob carries the pattern", label("Glob", ["pattern": "**/*.swift"]) == "Glob: **/*.swift")
+            record("event: Grep carries the pattern", label("Grep", ["pattern": "sendEvent"]) == "Grep: sendEvent")
+            record("event: Grep does not carry its path", label("Grep", ["pattern": "x", "path": "/secret/dir"]) == "Grep: x")
+            record("event: Task carries its description", label("Task", ["description": "review the diff"]) == "Task: review the diff")
+            record("event: Agent carries its description", label("Agent", ["description": "go"]) == "Agent: go")
+            // A listed tool whose expected key is missing falls back to the
+            // bare name rather than to some other key's value.
+            record("event: a listed tool with no usable input is the name alone",
+                   label("Bash", ["timeout": 5]) == "Bash")
 
             // **The envelope, measured on device.** The first version read the
             // outermost `type` and produced nothing for an entire session:
