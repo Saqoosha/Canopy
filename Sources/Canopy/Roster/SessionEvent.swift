@@ -48,20 +48,9 @@ struct SessionEvent: Codable, Equatable, Sendable {
         self.at = at
     }
 
-    /// Turn one io_message into zero or more events. Pure.
-    ///
-    /// **Most `user` frames are tool results, not conversation.** A frame
-    /// whose content holds any `tool_result` block is dropped. Losing that
-    /// filter fills the phone's conversation with tool output, which is the
-    /// single most likely regression in this file.
-    ///
-    /// A bulk history replay reaches this function and produces nothing: the
-    /// CLI delivers it as ONE message carrying a `response.messages` array,
-    /// and only the top-level `type` is read here. Measured on CLI 2.1.258
-    /// with Canopy's own flags — a `--resume` does not re-emit historical
-    /// `assistant` frames individually.
     /// Peel the two envelopes off an unsolicited extension message and return
-    /// the CLI frame inside, or nil when this is not one.
+    /// the CLI frame inside, or nil when this is not one — or when it belongs
+    /// to a subagent rather than to this conversation.
     ///
     /// **Measured on device, after the first version read the outermost
     /// `type` and produced nothing for a whole session.** The shape is
@@ -76,6 +65,17 @@ struct SessionEvent: Codable, Equatable, Sendable {
               nested["type"] as? String == "io_message",
               let frame = nested["message"] as? [String: Any]
         else { return nil }
+        // **A subagent's turns are not this conversation.** The CLI re-emits
+        // them as ordinary `assistant` / `user` frames carrying a
+        // `parent_tool_use_id` — the property `ShimProcess`'s own
+        // `isMainConversationMessage` was written against. Without this, one
+        // Agent call streams its dozens of tool lines and its assistant text
+        // into a 200-event ring buffer as if they were the main session, and
+        // the Agent's own prompt arrives drawn as something the human typed.
+        // The turn boundaries were withdrawn for costing a fifth of that
+        // buffer; a subagent costs far more.
+        let parent = frame["parent_tool_use_id"]
+        guard parent == nil || parent is NSNull else { return nil }
         return frame
     }
 
@@ -102,6 +102,18 @@ struct SessionEvent: Codable, Equatable, Sendable {
                       at: at, nextId: nextId, stampUser: stampUser)
     }
 
+    /// Turn one CLI frame into zero or more events. Pure.
+    ///
+    /// **Most `user` frames are tool results, not conversation.** A frame
+    /// whose content holds any `tool_result` block is dropped. Losing that
+    /// filter fills the phone's conversation with tool output, which is the
+    /// single most likely regression in this file.
+    ///
+    /// A bulk history replay never reaches here: the CLI delivers it as ONE
+    /// message carrying a `response.messages` array, and `ioFrame` only reads
+    /// the top-level `type`. Measured on CLI 2.1.258 with Canopy's own flags
+    /// — a `--resume` does not re-emit historical `assistant` frames
+    /// individually.
     static func events(fromFrame message: [String: Any],
                        sessionId: String,
                        resumeId: String?,

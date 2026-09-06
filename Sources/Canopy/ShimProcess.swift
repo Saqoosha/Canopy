@@ -868,6 +868,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         phoneReplyInFlight = false
         phoneReplyTimeout?.cancel()
         phoneReplyTimeout = nil
+        // **The echo cannot arrive after the flight ends**, so a pair still
+        // sitting here is one whose echo never came — the watchdog fired, the
+        // shim died, or the CLI reshaped the frame. Left in place it stamps
+        // the NEXT identical prompt typed on the Mac with the phone's id, and
+        // the phone then drops that genuine turn as a duplicate of its own
+        // old sent record. Found by review; the field's own doc claimed this
+        // was already true.
+        pendingPhoneReply = nil
     }
 
     /// The verbatim text the CC extension's own Deny button sends, captured
@@ -3631,6 +3639,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // watchdog, which would otherwise fire later against a shim that no
         // longer has anything for it to unlatch.
         endPhoneReplyFlight()
+        // The id of an event streamed by the shim that just died. The
+        // reconnected session's first completion would otherwise carry it,
+        // and the phone would drop that push against an event from before
+        // the crash. `endPhoneReplyFlight` above already clears the reply
+        // pair for the same reason.
+        lastAssistantEventId = nil
         refreshAskingState()
         refreshWaitingState()
     }
@@ -5403,12 +5417,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "statusBar.maxOutputTokens.v2.\(directory.path)"
     }
 
-    /// - Parameter finalText: the `result` frame's own `result` field — the
-    ///   model's last message. Passed in rather than accumulated: the frame is
-    ///   already in hand at this call site, so there is no stream to buffer and
-    ///   no JSONL to re-read, and therefore no race with the CLI's flush.
-    /// The id of the last `assistant` event streamed for this turn. Rides on
-    /// the `completed` push so the phone can draw the two as one thing.
+    /// The id of the last `assistant` event streamed for the turn in progress.
+    /// Rides on the `completed` push so the phone can draw the two as one
+    /// thing, and is consumed when that push is composed — see
+    /// `postTaskCompletedNotification`, which clears it whether or not it had
+    /// one, so a text-less turn cannot ship the previous turn's id.
     private var lastAssistantEventId: String?
 
     /// Turn one io_message into phone-bound events and send them.
@@ -5455,6 +5468,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// - Parameter finalText: the `result` frame's own `result` field — the
+    ///   model's last message. Passed in rather than accumulated: the frame is
+    ///   already in hand at this call site, so there is no stream to buffer and
+    ///   no JSONL to re-read, and therefore no race with the CLI's flush.
     private func postTaskCompletedNotification(finalText: String?) {
         let body = sessionTitle.isEmpty ? "Task completed" : "\(sessionTitle) — completed"
 
@@ -5475,6 +5492,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // whatever the relay's raw 3000-character cap happens to do to it. A
         // turn that produced no text keeps the old summary rather than
         // sending an empty push.
+        // **Cleared as this turn's push is composed, whether or not it is
+        // used.** A turn that ends without assistant text — tool_use only, a
+        // Stop, an API error — otherwise ships the PREVIOUS turn's id, and
+        // the phone drops that push as a duplicate of an event it already
+        // drew. The completion most worth seeing is exactly the one that
+        // disappears. Found by four reviewers independently.
+        let eventIdForThisTurn = lastAssistantEventId
+        lastAssistantEventId = nil
         if let session = boundSession {
             let pushBody = finalText?.isEmpty == false
                 ? Self.truncatedNotificationBody(finalText!, maxBytes: 2400)
@@ -5487,7 +5512,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 // The banner is cut; the conversation should
                                 // not be. See `RosterNotifier.post`.
                                 bodyFull: finalText,
-                                eventId: lastAssistantEventId)
+                                eventId: eventIdForThisTurn)
         }
 
         guard !NSApp.isActive else { return }

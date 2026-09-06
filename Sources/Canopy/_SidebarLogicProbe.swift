@@ -7552,7 +7552,10 @@ enum SidebarLogicProbe {
         // The rule most likely to regress is the `tool_result` filter: most
         // `user` frames on this wire are tool output, and losing the filter
         // fills the phone's conversation with it. Measured by mutation —
-        // deleting that guard fails two of the assertions below.
+        // deleting that guard fails ONE assertion below, the `mixed` one.
+        // The pure tool_result fixture is vacuous and says so at its own
+        // record(); an earlier version of this header claimed two, which is
+        // the number the plan predicted before the vacuity was found.
         do {
             var n = 0
             let ids = { () -> String in n += 1; return "e\(n)" }
@@ -7750,6 +7753,38 @@ enum SidebarLogicProbe {
                        "type": "from-extension",
                        "message": ["type": "update_state"],
                    ]) == nil)
+
+            // A subagent's turns carry `parent_tool_use_id` and are not this
+            // conversation. Without this, one Agent call streams its dozens
+            // of tool lines into a 200-event buffer and its prompt is drawn
+            // as something the human typed.
+            func envelope(_ frame: [String: Any]) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "io_message", "message": frame]]
+            }
+            let subagent: [String: Any] = [
+                "type": "assistant",
+                "parent_tool_use_id": "toolu_child",
+                "message": ["content": [["type": "text", "text": "from the child"]]],
+            ]
+            record("event: a subagent frame yields no frame",
+                   SessionEvent.ioFrame(in: envelope(subagent)) == nil)
+            record("event: a subagent frame produces no events",
+                   SessionEvent.events(from: envelope(subagent), sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+            // NSNull is how the CLI spells "no parent" on a main-conversation
+            // frame — `isMainConversationMessage` accepts it for that reason,
+            // and reading it as "has a parent" would silence the main session.
+            let mainWithNull: [String: Any] = [
+                "type": "assistant",
+                "parent_tool_use_id": NSNull(),
+                "message": ["content": [["type": "text", "text": "from the main session"]]],
+            ]
+            record("event: an NSNull parent is the main conversation",
+                   SessionEvent.events(from: envelope(mainWithNull), sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).first?.text == "from the main session")
+            record("event: an absent parent is the main conversation",
+                   SessionEvent.events(from: envelope(assistant), sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).count == 1)
 
             // A `user` echo can carry `content` as a plain string. Both echo
             // matchers in ShimProcess accept that form; the first version

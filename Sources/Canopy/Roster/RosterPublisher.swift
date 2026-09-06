@@ -473,9 +473,6 @@ final class RosterPublisher {
     /// than the socket and so cannot reuse the connection's own header.
     static func sharedSecretForNotifier() -> String? { sharedSecret() }
 
-    /// Composes the full snapshot. Reading every property here is what arms
-    /// the observation above — a field read only inside `publish()` would not
-    /// trigger a re-publish when it changed.
     /// Push one session event down the socket the roster already holds.
     ///
     /// **With no socket, the event is dropped in silence.** Buffering on this
@@ -486,10 +483,14 @@ final class RosterPublisher {
     /// even when this Mac is gone. Events lost while disconnected are an
     /// accepted cost, recorded in the design spec.
     ///
-    /// A send failure does NOT drive a reconnect from here, unlike `publish()`.
-    /// One turn produces tens of events, so a failing network would hammer the
-    /// reconnect path once per event; `publish()` re-establishes the socket on
-    /// the next pane change, which is the right cadence for that.
+    /// A send failure does NOT drive a reconnect from here. **The rationale
+    /// this comment first gave was wrong** — it said `publish()` re-establishes
+    /// the socket "on the next pane change", which is the very state
+    /// `reconnectAfterLoss` was added to fix ("on an idle Mac, nothing ever
+    /// calls `publish()` again, so that Mac reconnected never"). The real
+    /// recovery path is the 30 s ping: it drops the socket and reconnects on
+    /// its own clock, behind `RosterReconnectFloor`. Reconnecting from here
+    /// would only race that, once per event, tens of times a turn.
     func sendEvent(_ event: SessionEvent) {
         guard settings.rosterEnabled, let task else { return }
         guard let data = try? JSONEncoder().encode(event),
