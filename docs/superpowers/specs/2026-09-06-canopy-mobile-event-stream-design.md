@@ -64,7 +64,9 @@ WebSocket はアプリが前面にある間しか生きない。iOS はバック
 | `assistant` | 完成したテキスト 1 通 | `assistant` フレームのテキストブロック |
 | `user` | ユーザーの発言 | `user` フレーム — **tool_result を含むものは除外** |
 | `tool` | ツール名＋一行要約 | `tool_use` ブロック |
-| `turnStart` / `turnEnd` | turn の境界 | `system/init` と `result` |
+| ~~`turnStart` / `turnEnd`~~ | **送らない**（2026-09-06 に撤回） | — |
+
+turn の境界は当初送っていたが撤回した。電話は描かない行を turn ごとに 2 件、200 件のリングバッファに積んでいて、直近履歴の約 2 割がその行で埋まっていた。「まだ動いているか」は roster の状態ドットが答える。enum の case は、relay に残っている古い行を decode できるよう残してある。
 
 **`user` フレームの大半は tool_result である**。除外を落とすと会話がツール結果で埋まる。ここが実装で最も壊れやすい判定で、probe で固定する。
 
@@ -199,6 +201,8 @@ CREATE INDEX IF NOT EXISTS event_by_session ON event (session_id, seq);
 **封筒を読んでいた。** io_message は三重に包まれている（`from-extension` → `io_message` → CLI フレーム）。最初の実装は一番外側の `type` を読んでいたので、`SessionEvent.events` は毎フレーム 0 件を返し、**1 セッションぶん丸ごと何も流れなかった**。関数もフックも publisher も正常で、ログだけが `type=from-extension produced=0` と言っていた。`ioFrame` で剥がし、封筒を固定するアサーションを 4 本足した。
 
 **relay が `eventId` を捨てていた。** `/notify` はこのフィールドを受け取りながら APNs ペイロードに載せていなかった。Canopy は送り、電話は読む用意があり、**間の relay だけが落としていた**。電話には照合する鍵が無く、アシスタントの発言が push とイベントの両方から 2 回描かれた。これは「テストが届かない層」の典型で、`fitPushPayload` が縮小してもこの値を残すことは固定できるが、**そもそもペイロードに入るかどうかはテストから到達できない**（登録済みトークンと実 APNs 呼び出しが要る）。
+
+**測って閉じた疑い：接続前のバックフィル要求。** 会話画面は開いた瞬間に `events_since` を送るが、アプリ復帰直後はソケットの握手が終わっていないかもしれない — `URLSessionWebSocketTask.send` が接続前の送信を捨てるなら、直近が空のまま開く。測った（`scratchpad/ws-send-before-open.swift`、`resume()` 直後に送信）：握手完了 97 ms、送信完了 ok、111 ms で `events` ページ受信。**送信はキューされて届く。** 直すものは無い。
 
 ## 見つけもの（本体には入れない）
 

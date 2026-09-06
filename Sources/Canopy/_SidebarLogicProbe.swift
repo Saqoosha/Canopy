@@ -7651,17 +7651,17 @@ enum SidebarLogicProbe {
                    SessionEvent.events(fromFrame: mixed, sessionId: "S", resumeId: nil,
                                        at: now, nextId: ids).isEmpty)
 
-            record("event: system/init is a turn start",
+            // Turn boundaries are not emitted: two undrawn rows per turn were
+            // eating a fifth of the ring buffer. These pin the removal.
+            record("event: system/init produces nothing",
                    SessionEvent.events(fromFrame: ["type": "system", "subtype": "init"],
-                                       sessionId: "S", resumeId: nil, at: now, nextId: ids)
-                       .first?.kind == .turnStart)
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
             record("event: a system frame that is not init produces nothing",
                    SessionEvent.events(fromFrame: ["type": "system", "subtype": "status"],
                                        sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
-            record("event: result is a turn end",
+            record("event: result produces nothing",
                    SessionEvent.events(fromFrame: ["type": "result", "subtype": "success"],
-                                       sessionId: "S", resumeId: nil, at: now, nextId: ids)
-                       .first?.kind == .turnEnd)
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
             record("event: stream_event produces nothing",
                    SessionEvent.events(fromFrame: ["type": "stream_event"],
                                        sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)

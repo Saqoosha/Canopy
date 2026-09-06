@@ -156,13 +156,13 @@ struct SessionEvent: Codable, Equatable, Sendable {
             let text = joinedText(of: content).trimmingCharacters(in: .whitespacesAndNewlines)
             return [make(.user, text, id: stampUser?(text))].compactMap { $0 }
 
-        case "system":
-            guard message["subtype"] as? String == "init" else { return [] }
-            return [make(.turnStart, "start")].compactMap { $0 }
-
-        case "result":
-            return [make(.turnEnd, "end")].compactMap { $0 }
-
+        // `system/init` and `result` — the turn boundaries — are deliberately
+        // NOT emitted. They were, at first: two events per turn into a
+        // 200-event ring buffer the phone never drew (`SessionEventBlock`
+        // renders them as nothing), so roughly a fifth of a session's recent
+        // history was spent on rows nobody could see. "Is it still working"
+        // is answered by the roster's state dot, not by an event. The enum
+        // cases stay so an older relay's stored rows still decode.
         default:
             return []
         }
