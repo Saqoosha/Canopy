@@ -15,15 +15,25 @@ English | [日本語](README.ja.md)
 ## Features
 
 - **Native macOS window** — Claude Code's full React UI in a WKWebView
-- **Launcher** — directory picker, recent directories, session history, model/effort/permission selectors
+- **Launcher** — directory picker, recent directories, session history, model/effort/permission selectors, GitHub clone, and a "start in a new worktree" toggle
 - **Sidebar shell** — sessions live in a persistent left sidebar; the detail pane swaps the active webview in place
 - **Split view** — up to 6 panes side by side, Cmd+1–9 to focus one, drag the dividers to resize
 - **Session resume** — pick up where you left off with instant history replay
+- **Save and Quit** — the pane layout and every open session come back at the next launch
+- **Named sessions** — titles generated outside the session's own context, renamable from the sidebar row or by double-clicking the pane header
+- **Git aware** — the real branch in the sidebar and pane header, and a session that moves into a worktree is followed there
+- **Peer names** — the name other Claude Code sessions use to message this one, shown on its row
+- **Phone companion** — [Canopy Mobile](https://github.com/Saqoosha/Canopy-Mobile) shows every pane across every Mac and lets you answer a notification — free text or an AskUserQuestion option — as a real user turn
 - **SSH remote** — run Claude CLI on remote machines via SSH
-- **Real-time streaming** — thinking, text, tool use, all streamed live
-- **MacroPad** — optional USB key pad whose LEDs show each pane's activity and whose keys jump to it, so a session waiting on you is visible without looking at the screen (firmware: [Canopy-MacroPad](https://github.com/Saqoosha/Canopy-MacroPad), currently a private repo)
+- **Claude Code on the Web** — teleport a cloud session down into a local one
+- **Custom model providers** — point a session at any Anthropic-compatible endpoint, with per-tier model mapping
+- **Session recap** — come back after being away and a summary of what happened sits above the composer
+- **Warm cache** — an idle session gets one small turn every 55 minutes so its prompt cache doesn't lapse
+- **Usage meters** — 5-hour and weekly rate-limit bars in the sidebar, per-pane context meter in the status bar
+- **Real-time streaming** — thinking, text, and tool use streamed live, with inline image previews for file reads and a live subagent activity list
+- **MacroPad** — optional USB key pad whose LEDs show each pane's activity and whose keys jump to it, so a session waiting on you is visible without looking at the screen. Drives over USB or over TCP from another Mac (firmware and printed case: [Canopy-MacroPad](https://github.com/Saqoosha/Canopy-MacroPad))
 - **Auto-update** — Sparkle with delta updates
-- **Keyboard shortcuts** — Cmd+N (new session), Cmd+O (open folder), Cmd+1–9 (focus pane), Cmd+Opt+←/→ (move focus)
+- **Keyboard shortcuts** — Cmd+N (new session), Cmd+O (open folder), Cmd+1–9 (focus pane), Cmd+Ctrl+1–9 (load the N-th session into the focused pane), Cmd+Shift+[ / ] (cycle the focused pane's session), Cmd+Opt+←/→ (move focus)
 - **Custom styles** — refined typography, code block styling, and syntax highlighting that polish the extension's UI for a native macOS feel
 
 ## Requirements
@@ -56,7 +66,7 @@ For SSH remote, a wrapper script replaces the CLI spawn to run `claude` on the r
 
 ### Requirements
 
-- Xcode 16.0+
+- Xcode 26 (the app does not compile under 16.4)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 
 ### Build from Source
@@ -78,7 +88,13 @@ Sources/Canopy/
   CanopyApp.swift              SwiftUI app entry, panes, menu commands, Sparkle updater
   AppState.swift               Observable state, PermissionMode enum, screen transitions
   SessionActivity.swift        One activity classification shared by the sidebar dot and the MacroPad LED
-  MacroPad/                    USB key pad: wire protocol, serial device, session-state controller
+  MacroPad/                    USB key pad: wire protocol, serial/TCP device, session-state controller
+  Roster/                      Phone companion: pane roster publisher, push notifier, replies
+  SessionStore.swift           Sidebar + pane state, open/close, focus, pane ordering
+  SessionRestoreSnapshot.swift Save-and-Quit snapshot and its restore rules
+  KeepAliveCoordinator.swift   Prompt-cache keep-alive clock and fan-out
+  RecapCoordinator.swift       Buys a session recap after you've been away
+  SessionTitleGenerator.swift  Generates a title outside the session's own context
   ShimProcess.swift            Node.js subprocess manager, NDJSON bridge, auth/permission patching
   NodeDiscovery.swift          Finds Node.js >= 18 (Homebrew, mise, nvm, login shell)
   LauncherView.swift           Launcher: directory picker, recent dirs, session history
