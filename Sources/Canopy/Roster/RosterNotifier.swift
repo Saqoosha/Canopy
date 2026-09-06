@@ -82,7 +82,8 @@ enum RosterNotifier {
                      title: String, body: String, bodyFull: String? = nil,
                      requestId: String? = nil, allowAlways: Bool = false,
                      answerable: Bool = true,
-                     choices: [[String: Any]]? = nil) {
+                     choices: [[String: Any]]? = nil,
+                     eventId: String? = nil) {
         guard let (machineId, url, secret) = resolvedTarget() else { return }
 
         var request = URLRequest(url: url)
@@ -98,6 +99,14 @@ enum RosterNotifier {
         ]
         if let bodyFull, !bodyFull.isEmpty, bodyFull != body {
             payload["bodyFull"] = bodyFull
+        }
+        // The id of the streamed event carrying this same text, so the phone
+        // can tell that this push and that event are one turn and draw it
+        // once. The history item's own id is minted locally by the phone's
+        // notification service extension, so it can never match anything on
+        // this side — this field is the only handle across the two routes.
+        if let eventId, !eventId.isEmpty {
+            payload["eventId"] = eventId
         }
         if let resumeId, !resumeId.isEmpty {
             payload["resumeId"] = resumeId

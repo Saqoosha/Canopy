@@ -132,6 +132,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // `phoneReplyInFlight`'s doc for why the gap before this
                 // point needed its own latch.
                 endPhoneReplyFlight()
+                // The previous turn's streamed-event id is not this turn's.
+                // **This is the only site that sees every start.** It was
+                // first written into `trackWorkingState`'s assistant case,
+                // where it was inert: a Mac-typed prompt sets `isWorking`
+                // from the webview handler long before any CLI frame comes
+                // back, so the `!isWorking` test was already false for every
+                // ordinary turn — and a cancelled turn that never produces a
+                // `result` left the flag true, so the NEXT turn skipped the
+                // clear as well. That residual is what this placement closes.
+                lastAssistantEventId = nil
                 refreshAskingState()
                 // Reconcile pending background tasks against the session
                 // JSONL: only the ids whose `<task-notification>` has
@@ -797,7 +807,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Returns whether it was injected, so the caller can log a refusal
     /// rather than leave the phone believing a message landed.
     @discardableResult
-    func requestPhoneReply(text: String) -> Bool {
+    func requestPhoneReply(text: String, replyId: String? = nil) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         guard !phoneReplyInFlight, !keepAliveInFlight, !recapRequestInFlight, !isWorking,
@@ -811,6 +821,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return false
         }
         phoneReplyInFlight = true
+        // Remembered BEFORE the injection goes out: the echo can arrive on
+        // the very next frame, and a pair recorded afterwards would miss it.
+        pendingPhoneReply = replyId.map { (id: $0, text: trimmed) }
         // The same envelope `requestKeepAlive` sends, with the phone's text.
         // `origin: ["kind": "human"]` is correct and load-bearing here: a
         // reply IS a human's input, arriving by a different route, and the
@@ -852,12 +865,38 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return true
     }
 
+    /// The phone's own id for the reply most recently injected, paired with
+    /// the exact text, so the CLI's echo of that text can be streamed back
+    /// under the id the phone already stored it as. See `SessionEvent.events`'
+    /// `stampUser`. Overwritten by the next reply; cleared once matched, so a
+    /// later identical prompt typed on the Mac is not mistaken for it.
+    private var pendingPhoneReply: (id: String, text: String)?
+
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog behind.
     private func endPhoneReplyFlight() {
         phoneReplyInFlight = false
         phoneReplyTimeout?.cancel()
         phoneReplyTimeout = nil
+        // **An accepted trade, not an oversight.** This function is also
+        // reached from `isWorking`'s false→true edge, and a frame from an
+        // already-running background agent can take that edge before the
+        // CLI's echo arrives — destroying a stamp that was about to match,
+        // so the phone draws its local record AND the event. That is a
+        // visible duplicate. What it replaces is invisible: a pair left
+        // standing silently swallowed a later Mac-typed turn. Trading an
+        // invisible loss for a rare visible duplicate is the right direction,
+        // and splitting the teardown to clear the pair on only some of the
+        // three paths would be two guards covering each other.
+        //
+        // **The echo cannot arrive after the flight ends**, so a pair still
+        // sitting here is one whose echo never came — the watchdog fired, the
+        // shim died, or the CLI reshaped the frame. Left in place it stamps
+        // the NEXT identical prompt typed on the Mac with the phone's id, and
+        // the phone then drops that genuine turn as a duplicate of its own
+        // old sent record. Found by review; the field's own doc claimed this
+        // was already true.
+        pendingPhoneReply = nil
     }
 
     /// The verbatim text the CC extension's own Deny button sends, captured
@@ -2303,6 +2342,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             extractStatusData(innerMessage)
             extractTitle(innerMessage)
             extractRawUsage(innerMessage)
+            publishSessionEvents(innerMessage)
             if Self.isCanopyOwnedResponse(innerMessage) {
                 return
             }
@@ -3651,6 +3691,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // watchdog, which would otherwise fire later against a shim that no
         // longer has anything for it to unlatch.
         endPhoneReplyFlight()
+        // The id of an event streamed by the shim that just died. The
+        // reconnected session's first completion would otherwise carry it,
+        // and the phone would drop that push against an event from before
+        // the crash. `endPhoneReplyFlight` above already clears the reply
+        // pair for the same reason.
+        lastAssistantEventId = nil
         refreshAskingState()
         refreshWaitingState()
     }
@@ -5423,6 +5469,59 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "statusBar.maxOutputTokens.v2.\(directory.path)"
     }
 
+    /// The id of the last `assistant` event streamed for the turn in progress.
+    /// Rides on the `completed` push so the phone can draw the two as one
+    /// thing, and is consumed when that push is composed — see
+    /// `postTaskCompletedNotification`, which clears it whether or not it had
+    /// one, so a text-less turn cannot ship the previous turn's id.
+    private var lastAssistantEventId: String?
+
+    /// Turn one io_message into phone-bound events and send them.
+    ///
+    /// **Called after `consumeRecapTraffic` and `consumeKeepAliveTraffic`,
+    /// which is what keeps Canopy's own synthetic turns off the phone.** A
+    /// recap and a keep-alive are not things the user did, and the keep-alive
+    /// runs hourly on a machine nobody is at — streaming either would fill
+    /// the phone's conversation with turns that never happened.
+    ///
+    /// A bulk history replay does not reach the extractor: it arrives as ONE
+    /// message holding a `response.messages` array (which is why
+    /// `strippingRecapFromReplay` exists at all), and `SessionEvent.events`
+    /// only reads the top-level `type`. Measured on CLI 2.1.258 with Canopy's
+    /// own flags — a `--resume` re-emits no historical `assistant` frames.
+    private func publishSessionEvents(_ message: [String: Any]) {
+        guard let session = boundSession else { return }
+        let pending = pendingPhoneReply
+        let events = SessionEvent.events(from: message,
+                                         sessionId: session.id.uuidString,
+                                         resumeId: session.resumeId,
+                                         at: Date(),
+                                         nextId: { UUID().uuidString },
+                                         stampUser: { text in
+                                             guard let pending, text == pending.text else { return nil }
+                                             return pending.id
+                                         })
+        // **Logged BEFORE the empty guard, and the placement is the point.**
+        // The one failure this feature can have is total silence, and the
+        // first version had it — reading the outermost envelope produced zero
+        // events for a whole session. After the guard this line could never
+        // show that, because `events.count` would be unreachable at 0: it
+        // would credit itself with evidence it cannot produce. `debug`
+        // because it fires several times per turn and says nothing went
+        // wrong; raise it to `notice` while chasing a silence.
+        logger.debug("[event] \(events.count, privacy: .public) event(s) from \((SessionEvent.ioFrame(in: message)?["type"] as? String) ?? "none", privacy: .public)")
+        guard !events.isEmpty else { return }
+        // Consumed on match, so the pair cannot stamp a second, unrelated
+        // turn that happens to carry the same words later.
+        if let pending, events.contains(where: { $0.kind == .user && $0.eventId == pending.id }) {
+            pendingPhoneReply = nil
+        }
+        for event in events {
+            if event.kind == .assistant { lastAssistantEventId = event.eventId }
+            RosterPublisher.current?.sendEvent(event)
+        }
+    }
+
     /// - Parameter finalText: the `result` frame's own `result` field — the
     ///   model's last message. Passed in rather than accumulated: the frame is
     ///   already in hand at this call site, so there is no stream to buffer and
@@ -5447,6 +5546,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // whatever the relay's raw 3000-character cap happens to do to it. A
         // turn that produced no text keeps the old summary rather than
         // sending an empty push.
+        // **Cleared as this turn's push is composed, whether or not it is
+        // used.** A turn that ends without assistant text — tool_use only, a
+        // Stop, an API error — otherwise ships the PREVIOUS turn's id, and
+        // the phone drops that push as a duplicate of an event it already
+        // drew. The completion most worth seeing is exactly the one that
+        // disappears. Found by four reviewers independently.
+        let eventIdForThisTurn = lastAssistantEventId
+        lastAssistantEventId = nil
         if let session = boundSession {
             let pushBody = finalText?.isEmpty == false
                 ? Self.truncatedNotificationBody(finalText!, maxBytes: 2400)
@@ -5458,7 +5565,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 body: pushBody,
                                 // The banner is cut; the conversation should
                                 // not be. See `RosterNotifier.post`.
-                                bodyFull: finalText)
+                                bodyFull: finalText,
+                                eventId: eventIdForThisTurn)
         }
 
         guard !NSApp.isActive else { return }

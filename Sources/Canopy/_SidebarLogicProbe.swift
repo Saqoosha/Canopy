@@ -1594,19 +1594,19 @@ enum SidebarLogicProbe {
                 status: .live,
                 lastActiveAt: now
             )
-            let good = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "do the thing", deliveryId: nil)
+            let good = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "do the thing", deliveryId: nil, replyId: nil)
             record("roster reply: routes to the addressed session",
                    RosterReply.target(for: good, in: [a])?.id == a.id)
 
-            let blank = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "   ", deliveryId: nil)
+            let blank = ReplyEnvelope(type: "reply", sessionId: a.id.uuidString, text: "   ", deliveryId: nil, replyId: nil)
             record("roster reply: refuses whitespace-only text",
                    RosterReply.target(for: blank, in: [a]) == nil)
 
-            let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x", deliveryId: nil)
+            let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x", deliveryId: nil, replyId: nil)
             record("roster reply: refuses a non-reply envelope",
                    RosterReply.target(for: wrongType, in: [a]) == nil)
 
-            let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x", deliveryId: nil)
+            let stale = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "x", deliveryId: nil, replyId: nil)
             record("roster reply: an id from a previous launch matches nothing",
                    RosterReply.target(for: stale, in: [a]) == nil)
 
@@ -1624,11 +1624,11 @@ enum SidebarLogicProbe {
                 status: .live,
                 lastActiveAt: now
             )
-            let addressesB = ReplyEnvelope(type: "reply", sessionId: b.id.uuidString, text: "for B", deliveryId: nil)
+            let addressesB = ReplyEnvelope(type: "reply", sessionId: b.id.uuidString, text: "for B", deliveryId: nil, replyId: nil)
             record("roster reply: with two sessions open, routes to the SECOND when addressed",
                    RosterReply.target(for: addressesB, in: [a, b])?.id == b.id)
 
-            let addressesNeither = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "for neither", deliveryId: nil)
+            let addressesNeither = ReplyEnvelope(type: "reply", sessionId: UUID().uuidString, text: "for neither", deliveryId: nil, replyId: nil)
             record("roster reply: with two sessions open, an id matching neither finds nothing",
                    RosterReply.target(for: addressesNeither, in: [a, b]) == nil)
         }
@@ -7545,6 +7545,330 @@ enum SidebarLogicProbe {
                        case .after(let delay): return delay > 0
                        }
                    })
+        }
+
+        // MARK: - Session event extraction
+        //
+        // The rule most likely to regress is the `tool_result` filter: most
+        // `user` frames on this wire are tool output, and losing the filter
+        // fills the phone's conversation with it. Measured by mutation —
+        // deleting that guard fails ONE assertion below, the `mixed` one.
+        // The pure tool_result fixture is vacuous and says so at its own
+        // record(); an earlier version of this header claimed two, which is
+        // the number the plan predicted before the vacuity was found.
+        do {
+            var n = 0
+            let ids = { () -> String in n += 1; return "e\(n)" }
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+            let assistant: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "thinking", "thinking": "secret"],
+                    ["type": "text", "text": "hello"],
+                    ["type": "text", "text": "world"],
+                ]],
+            ]
+            let a = SessionEvent.events(fromFrame: assistant, sessionId: "S", resumeId: "R", at: now, nextId: ids)
+            record("event: assistant joins its text blocks",
+                   a.count == 1 && a[0].kind == .assistant && a[0].text == "hello\nworld")
+            record("event: assistant drops thinking blocks", !(a.first?.text.contains("secret") ?? true))
+
+            let bash: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "name": "Bash", "input": ["command": "npm test\nsecond line"]],
+                ]],
+            ]
+            let t = SessionEvent.events(fromFrame: bash, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: a tool_use becomes one tool event", t.count == 1 && t.first?.kind == .tool)
+            record("event: Bash carries its first command line", t.first?.text == "Bash: npm test")
+            record("event: Bash carries only the first line", !(t.first?.text.contains("second line") ?? true))
+
+            let edit: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "name": "Edit",
+                     "input": ["file_path": "/Users/hiko/secret/SessionStore.swift"]],
+                ]],
+            ]
+            let e = SessionEvent.events(fromFrame: edit, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: Edit carries the file name", e.first?.text == "Edit: SessionStore.swift")
+            record("event: Edit drops the directory", !(e.first?.text.contains("/Users/hiko") ?? true))
+
+            // The default matters more than any listed case: a tool nobody has
+            // thought about must not start shipping its input.
+            let unknown: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "name": "WebFetch",
+                     "input": ["url": "https://internal.example/secret"]],
+                ]],
+            ]
+            let w = SessionEvent.events(fromFrame: unknown, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: an unlisted tool is the name alone", w.first?.text == "WebFetch")
+            record("event: an unlisted tool leaks no input",
+                   !(w.first?.text.contains("internal.example") ?? true))
+
+            let longCmd: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "name": "Bash",
+                     "input": ["command": String(repeating: "x", count: 200)]],
+                ]],
+            ]
+            let l = SessionEvent.events(fromFrame: longCmd, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            // Fail CLOSED: `?? 0` passed when the tool event stopped being
+            // produced at all, which is the louder failure of the two.
+            record("event: a long tool summary is capped",
+                   l.first.map { $0.text.count <= "Bash: ".count + SessionEvent.maxToolSummaryLength + 1 } ?? false)
+
+            // **This one is vacuous and is kept only to document the shape.**
+            // Measured: deleting the `tool_result` guard leaves it green,
+            // because a pure tool-result frame carries no `text` block, so the
+            // extractor produces nothing either way. The `mixed` fixture below
+            // is the one that actually pins the filter — that is the only
+            // assertion of the two that failed under mutation.
+            let toolResult: [String: Any] = [
+                "type": "user",
+                "message": ["content": [["type": "tool_result", "content": "12345 files"]]],
+            ]
+            record("event: a user frame carrying tool_result is skipped",
+                   SessionEvent.events(fromFrame: toolResult, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            let realUser: [String: Any] = [
+                "type": "user",
+                "message": ["content": [["type": "text", "text": "do it"]]],
+            ]
+            let u = SessionEvent.events(fromFrame: realUser, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: a genuine user turn is kept",
+                   u.count == 1 && u.first?.kind == .user && u.first?.text == "do it")
+
+            let mixed: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "text", "text": "and also"],
+                    ["type": "tool_result", "content": "output"],
+                ]],
+            ]
+            record("event: a mixed user frame with any tool_result is skipped",
+                   SessionEvent.events(fromFrame: mixed, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            // Turn boundaries are not emitted: two undrawn rows per turn were
+            // eating a fifth of the ring buffer. These pin the removal.
+            record("event: system/init produces nothing",
+                   SessionEvent.events(fromFrame: ["type": "system", "subtype": "init"],
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
+            record("event: a system frame that is not init produces nothing",
+                   SessionEvent.events(fromFrame: ["type": "system", "subtype": "status"],
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
+            record("event: result produces nothing",
+                   SessionEvent.events(fromFrame: ["type": "result", "subtype": "success"],
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
+            record("event: stream_event produces nothing",
+                   SessionEvent.events(fromFrame: ["type": "stream_event"],
+                                       sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
+
+            // A bulk replay arrives as ONE message holding an array. Only the
+            // top-level `type` is read, so it cannot flood the relay.
+            let replay: [String: Any] = [
+                "type": "get_session_response",
+                "response": ["messages": [
+                    ["type": "assistant", "message": ["content": [["type": "text", "text": "old"]]]],
+                ]],
+            ]
+            record("event: a bulk replay envelope produces nothing",
+                   SessionEvent.events(fromFrame: replay, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            // 20,000 CJK characters is 60,000 bytes — a character-based cap
+            // would let this through.
+            let huge = String(repeating: "\u{3042}", count: 20_000)
+            let big: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [["type": "text", "text": huge]]],
+            ]
+            let b = SessionEvent.events(fromFrame: big, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            record("event: text is capped in BYTES, not characters",
+                   (b.first?.text.utf8.count ?? .max) <= SessionEvent.maxTextBytes)
+            record("event: a capped text says so", b.first?.text.hasSuffix("\u{2026}") ?? false)
+
+            var m = 0
+            let seqIds = { () -> String in m += 1; return "id\(m)" }
+            let two: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "text", "text": "x"],
+                    ["type": "tool_use", "name": "Read", "input": [:]],
+                ]],
+            ]
+            let pair = SessionEvent.events(fromFrame: two, sessionId: "S", resumeId: nil, at: now, nextId: seqIds)
+            record("event: each event takes its own id from the factory",
+                   pair.count == 2 && pair[0].eventId == "id1" && pair[1].eventId == "id2")
+
+            let empty: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [["type": "text", "text": "   "]]],
+            ]
+            record("event: an empty assistant text produces nothing",
+                   SessionEvent.events(fromFrame: empty, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            record("event: resumeId rides along", a.first?.resumeId == "R")
+
+            // **Asserted on the ENCODED JSON, not on the Swift property.**
+            // The whole discriminator rests on `type` reaching the wire, and
+            // reading `a.first?.type` cannot see it leave: measured by a
+            // reviewer's mutation, turning `type` into a computed property
+            // (which `Codable` then omits) keeps every other assertion here
+            // green while the DO and the phone both start dropping events as
+            // malformed snapshots.
+            if let encoded = try? JSONEncoder().encode(a[0]),
+               let obj = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any] {
+                record("event: the encoded JSON carries type=event", obj["type"] as? String == "event")
+                record("event: the encoded JSON carries the kind's raw value",
+                       obj["kind"] as? String == "assistant")
+                record("event: the encoded JSON carries the text", obj["text"] as? String == "hello\nworld")
+                record("event: the encoded JSON carries a numeric at", obj["at"] is NSNumber)
+            } else {
+                record("event: the encoded JSON carries type=event", false)
+                record("event: the encoded JSON carries the kind's raw value", false)
+                record("event: the encoded JSON carries the text", false)
+                record("event: the encoded JSON carries a numeric at", false)
+            }
+
+            // The listed tools, one each. Three of the seven were unpinned:
+            // dropping the Glob/Grep or Task/Agent case, or narrowing
+            // Read/Edit/Write to Edit alone, all survived mutation.
+            func label(_ name: String, _ input: [String: Any]) -> String? {
+                SessionEvent.events(fromFrame: [
+                    "type": "assistant",
+                    "message": ["content": [["type": "tool_use", "name": name, "input": input]]],
+                ], sessionId: "S", resumeId: nil, at: now, nextId: ids).first?.text
+            }
+            record("event: Read carries the file name", label("Read", ["file_path": "/a/b/R.swift"]) == "Read: R.swift")
+            record("event: Write carries the file name", label("Write", ["file_path": "/a/b/W.swift"]) == "Write: W.swift")
+            record("event: Glob carries the pattern", label("Glob", ["pattern": "**/*.swift"]) == "Glob: **/*.swift")
+            record("event: Grep carries the pattern", label("Grep", ["pattern": "sendEvent"]) == "Grep: sendEvent")
+            record("event: Grep does not carry its path", label("Grep", ["pattern": "x", "path": "/secret/dir"]) == "Grep: x")
+            record("event: Task carries its description", label("Task", ["description": "review the diff"]) == "Task: review the diff")
+            record("event: Agent carries its description", label("Agent", ["description": "go"]) == "Agent: go")
+            // A listed tool whose expected key is missing falls back to the
+            // bare name rather than to some other key's value.
+            record("event: a listed tool with no usable input is the name alone",
+                   label("Bash", ["timeout": 5]) == "Bash")
+
+            // **The envelope, measured on device.** The first version read the
+            // outermost `type` and produced nothing for an entire session:
+            // every frame logged `type=from-extension produced=0`. The real
+            // shape is three deep, and is exactly what `trackWorkingState`
+            // unwraps — these assertions exist so the next edit cannot quietly
+            // go back to reading the envelope.
+            let wrapped: [String: Any] = [
+                "type": "from-extension",
+                "message": [
+                    "type": "io_message",
+                    "message": [
+                        "type": "assistant",
+                        "message": ["content": [["type": "text", "text": "inside"]]],
+                    ],
+                ],
+            ]
+            let unwrapped = SessionEvent.events(from: wrapped, sessionId: "S", resumeId: nil,
+                                                at: now, nextId: ids)
+            record("event: a from-extension envelope is peeled to the CLI frame",
+                   unwrapped.count == 1 && unwrapped.first?.text == "inside")
+
+            // A bare CLI frame handed to the envelope-taking entry point is
+            // NOT an unsolicited extension message and must produce nothing —
+            // otherwise the two entry points would silently accept each
+            // other's input and the bug above could not be told apart.
+            record("event: a bare frame is not mistaken for an envelope",
+                   SessionEvent.events(from: assistant, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            record("event: a response (unwrapped) yields no frame",
+                   SessionEvent.ioFrame(in: ["type": "init_response"]) == nil)
+            record("event: a from-extension carrying something else yields no frame",
+                   SessionEvent.ioFrame(in: [
+                       "type": "from-extension",
+                       "message": ["type": "update_state"],
+                   ]) == nil)
+
+            // A subagent's turns carry `parent_tool_use_id` and are not this
+            // conversation. Without this, one Agent call streams its dozens
+            // of tool lines into a 200-event buffer and its prompt is drawn
+            // as something the human typed.
+            func envelope(_ frame: [String: Any]) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "io_message", "message": frame]]
+            }
+            let subagent: [String: Any] = [
+                "type": "assistant",
+                "parent_tool_use_id": "toolu_child",
+                "message": ["content": [["type": "text", "text": "from the child"]]],
+            ]
+            record("event: a subagent frame yields no frame",
+                   SessionEvent.ioFrame(in: envelope(subagent)) == nil)
+            record("event: a subagent frame produces no events",
+                   SessionEvent.events(from: envelope(subagent), sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+            // NSNull is how the CLI spells "no parent" on a main-conversation
+            // frame — `isMainConversationMessage` accepts it for that reason,
+            // and reading it as "has a parent" would silence the main session.
+            let mainWithNull: [String: Any] = [
+                "type": "assistant",
+                "parent_tool_use_id": NSNull(),
+                "message": ["content": [["type": "text", "text": "from the main session"]]],
+            ]
+            record("event: an NSNull parent is the main conversation",
+                   SessionEvent.events(from: envelope(mainWithNull), sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).first?.text == "from the main session")
+            record("event: an absent parent is the main conversation",
+                   SessionEvent.events(from: envelope(assistant), sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).count == 1)
+
+            // A `user` echo can carry `content` as a plain string. Both echo
+            // matchers in ShimProcess accept that form; the first version
+            // here read only the array and would have dropped it.
+            let stringUser: [String: Any] = [
+                "type": "user",
+                "message": ["content": "typed as a string"],
+            ]
+            let su = SessionEvent.events(fromFrame: stringUser, sessionId: "S", resumeId: nil,
+                                         at: now, nextId: ids)
+            record("event: a string-content user turn is kept",
+                   su.count == 1 && su.first?.kind == .user && su.first?.text == "typed as a string")
+
+            // The phone-reply stamp: a user turn whose text matches carries
+            // the phone's id; any other text takes a fresh one. This is the
+            // whole de-duplication contract for a reply typed on the phone.
+            let stamp: (String) -> String? = { $0 == "from the phone" ? "phone-id" : nil }
+            let echoed: [String: Any] = [
+                "type": "user",
+                "message": ["content": [["type": "text", "text": "from the phone"]]],
+            ]
+            let stamped = SessionEvent.events(fromFrame: echoed, sessionId: "S", resumeId: nil,
+                                              at: now, nextId: ids, stampUser: stamp)
+            record("event: a matching user echo carries the phone's id",
+                   stamped.first?.eventId == "phone-id")
+            let other = SessionEvent.events(fromFrame: realUser, sessionId: "S", resumeId: nil,
+                                            at: now, nextId: ids, stampUser: stamp)
+            record("event: a non-matching user turn takes a fresh id",
+                   other.first.map { $0.eventId != "phone-id" && $0.eventId.hasPrefix("e") } ?? false)
+            // The stamp is for user turns only — an assistant text that
+            // happens to equal the phone's words must not inherit its id.
+            let sameWords: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [["type": "text", "text": "from the phone"]]],
+            ]
+            let notStamped = SessionEvent.events(fromFrame: sameWords, sessionId: "S", resumeId: nil,
+                                                 at: now, nextId: ids, stampUser: stamp)
+            // Fail CLOSED for the same reason: an empty result made
+            // `nil != "phone-id"` true and the assertion vacuous.
+            record("event: the stamp never reaches an assistant turn",
+                   notStamped.first.map { $0.eventId != "phone-id" } ?? false)
         }
 
         // Summary
