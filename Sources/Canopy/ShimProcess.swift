@@ -132,6 +132,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // `phoneReplyInFlight`'s doc for why the gap before this
                 // point needed its own latch.
                 endPhoneReplyFlight()
+                // The previous turn's streamed-event id is not this turn's.
+                // **This is the only site that sees every start.** It was
+                // first written into `trackWorkingState`'s assistant case,
+                // where it was inert: a Mac-typed prompt sets `isWorking`
+                // from the webview handler long before any CLI frame comes
+                // back, so the `!isWorking` test was already false for every
+                // ordinary turn — and a cancelled turn that never produces a
+                // `result` left the flag true, so the NEXT turn skipped the
+                // clear as well. That residual is what this placement closes.
+                lastAssistantEventId = nil
                 refreshAskingState()
                 // Reconcile pending background tasks against the session
                 // JSONL: only the ids whose `<task-notification>` has
@@ -868,6 +878,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         phoneReplyInFlight = false
         phoneReplyTimeout?.cancel()
         phoneReplyTimeout = nil
+        // **An accepted trade, not an oversight.** This function is also
+        // reached from `isWorking`'s false→true edge, and a frame from an
+        // already-running background agent can take that edge before the
+        // CLI's echo arrives — destroying a stamp that was about to match,
+        // so the phone draws its local record AND the event. That is a
+        // visible duplicate. What it replaces is invisible: a pair left
+        // standing silently swallowed a later Mac-typed turn. Trading an
+        // invisible loss for a rare visible duplicate is the right direction,
+        // and splitting the teardown to clear the pair on only some of the
+        // three paths would be two guards covering each other.
+        //
         // **The echo cannot arrive after the flight ends**, so a pair still
         // sitting here is one whose echo never came — the watchdog fired, the
         // shim died, or the CLI reshaped the frame. Left in place it stamps
@@ -5021,16 +5042,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             detectAskUserQuestion(in: ioMsg)
             detectBackgroundTaskLaunch(in: ioMsg)
             detectTaskStopLaunch(in: ioMsg)
-            // A turn is starting, so the previous turn's streamed-event id is
-            // no longer this turn's. `postTaskCompletedNotification` also
-            // consumes it, and that alone covers every path a completion
-            // actually takes — but it makes the rule depend on the exit
-            // rather than on the boundary, and two reviewers asked for the
-            // boundary. Clearing here is what makes "belongs to the turn in
-            // progress" true by construction. Ordered before
-            // `publishSessionEvents`, which runs later in the same dispatch
-            // and sets the id for THIS turn.
-            if !isWorking { lastAssistantEventId = nil }
             isWorking = true
         case "user":
             processUserToolResults(ioMsg)
@@ -5459,19 +5470,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                              guard let pending, text == pending.text else { return nil }
                                              return pending.id
                                          })
+        // **Logged BEFORE the empty guard, and the placement is the point.**
+        // The one failure this feature can have is total silence, and the
+        // first version had it — reading the outermost envelope produced zero
+        // events for a whole session. After the guard this line could never
+        // show that, because `events.count` would be unreachable at 0: it
+        // would credit itself with evidence it cannot produce. `debug`
+        // because it fires several times per turn and says nothing went
+        // wrong; raise it to `notice` while chasing a silence.
+        logger.debug("[event] \(events.count, privacy: .public) event(s) from \((SessionEvent.ioFrame(in: message)?["type"] as? String) ?? "none", privacy: .public)")
         guard !events.isEmpty else { return }
         // Consumed on match, so the pair cannot stamp a second, unrelated
         // turn that happens to carry the same words later.
         if let pending, events.contains(where: { $0.kind == .user && $0.eventId == pending.id }) {
             pendingPhoneReply = nil
         }
-        // `debug`, not `notice`: this fires several times per turn and says
-        // nothing went wrong. It is here because the one failure this feature
-        // can have is total silence — the first version read the outermost
-        // envelope and produced zero events for a whole session, and the line
-        // that found it was this one. Raise it to `notice` while debugging;
-        // an archived line per frame is not worth carrying.
-        logger.debug("[event] \(events.count, privacy: .public) event(s) from \((SessionEvent.ioFrame(in: message)?["type"] as? String) ?? "?", privacy: .public)")
         for event in events {
             if event.kind == .assistant { lastAssistantEventId = event.eventId }
             RosterPublisher.current?.sendEvent(event)

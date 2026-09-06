@@ -504,6 +504,9 @@ final class RosterPublisher {
         }
     }
 
+    /// Composes the full snapshot. Reading every property here is what arms
+    /// the observation above — a field read only inside `publish()` would not
+    /// trigger a re-publish when it changed.
     private func snapshot() -> RosterSnapshot? {
         guard let machineId = MachineIdentity.stableId() else { return nil }
         let indexes = RosterSnapshot.paneIndexes(in: store.panes)

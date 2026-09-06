@@ -7618,8 +7618,10 @@ enum SidebarLogicProbe {
                 ]],
             ]
             let l = SessionEvent.events(fromFrame: longCmd, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            // Fail CLOSED: `?? 0` passed when the tool event stopped being
+            // produced at all, which is the louder failure of the two.
             record("event: a long tool summary is capped",
-                   (l.first?.text.count ?? 0) <= "Bash: ".count + SessionEvent.maxToolSummaryLength + 1)
+                   l.first.map { $0.text.count <= "Bash: ".count + SessionEvent.maxToolSummaryLength + 1 } ?? false)
 
             // **This one is vacuous and is kept only to document the shape.**
             // Measured: deleting the `tool_result` guard leaves it green,
@@ -7863,8 +7865,10 @@ enum SidebarLogicProbe {
             ]
             let notStamped = SessionEvent.events(fromFrame: sameWords, sessionId: "S", resumeId: nil,
                                                  at: now, nextId: ids, stampUser: stamp)
+            // Fail CLOSED for the same reason: an empty result made
+            // `nil != "phone-id"` true and the assertion vacuous.
             record("event: the stamp never reaches an assistant turn",
-                   notStamped.first?.eventId != "phone-id")
+                   notStamped.first.map { $0.eventId != "phone-id" } ?? false)
         }
 
         // Summary
