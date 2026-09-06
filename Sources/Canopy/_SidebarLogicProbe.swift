@@ -7566,7 +7566,7 @@ enum SidebarLogicProbe {
                     ["type": "text", "text": "world"],
                 ]],
             ]
-            let a = SessionEvent.events(from: assistant, sessionId: "S", resumeId: "R", at: now, nextId: ids)
+            let a = SessionEvent.events(fromFrame: assistant, sessionId: "S", resumeId: "R", at: now, nextId: ids)
             record("event: assistant joins its text blocks",
                    a.count == 1 && a[0].kind == .assistant && a[0].text == "hello\nworld")
             record("event: assistant drops thinking blocks", !(a.first?.text.contains("secret") ?? true))
@@ -7577,7 +7577,7 @@ enum SidebarLogicProbe {
                     ["type": "tool_use", "name": "Bash", "input": ["command": "npm test\nsecond line"]],
                 ]],
             ]
-            let t = SessionEvent.events(from: bash, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            let t = SessionEvent.events(fromFrame: bash, sessionId: "S", resumeId: nil, at: now, nextId: ids)
             record("event: a tool_use becomes one tool event", t.count == 1 && t.first?.kind == .tool)
             record("event: Bash carries its first command line", t.first?.text == "Bash: npm test")
             record("event: Bash carries only the first line", !(t.first?.text.contains("second line") ?? true))
@@ -7589,7 +7589,7 @@ enum SidebarLogicProbe {
                      "input": ["file_path": "/Users/hiko/secret/SessionStore.swift"]],
                 ]],
             ]
-            let e = SessionEvent.events(from: edit, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            let e = SessionEvent.events(fromFrame: edit, sessionId: "S", resumeId: nil, at: now, nextId: ids)
             record("event: Edit carries the file name", e.first?.text == "Edit: SessionStore.swift")
             record("event: Edit drops the directory", !(e.first?.text.contains("/Users/hiko") ?? true))
 
@@ -7602,7 +7602,7 @@ enum SidebarLogicProbe {
                      "input": ["url": "https://internal.example/secret"]],
                 ]],
             ]
-            let w = SessionEvent.events(from: unknown, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            let w = SessionEvent.events(fromFrame: unknown, sessionId: "S", resumeId: nil, at: now, nextId: ids)
             record("event: an unlisted tool is the name alone", w.first?.text == "WebFetch")
             record("event: an unlisted tool leaks no input",
                    !(w.first?.text.contains("internal.example") ?? true))
@@ -7614,7 +7614,7 @@ enum SidebarLogicProbe {
                      "input": ["command": String(repeating: "x", count: 200)]],
                 ]],
             ]
-            let l = SessionEvent.events(from: longCmd, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            let l = SessionEvent.events(fromFrame: longCmd, sessionId: "S", resumeId: nil, at: now, nextId: ids)
             record("event: a long tool summary is capped",
                    (l.first?.text.count ?? 0) <= "Bash: ".count + SessionEvent.maxToolSummaryLength + 1)
 
@@ -7629,14 +7629,14 @@ enum SidebarLogicProbe {
                 "message": ["content": [["type": "tool_result", "content": "12345 files"]]],
             ]
             record("event: a user frame carrying tool_result is skipped",
-                   SessionEvent.events(from: toolResult, sessionId: "S", resumeId: nil,
+                   SessionEvent.events(fromFrame: toolResult, sessionId: "S", resumeId: nil,
                                        at: now, nextId: ids).isEmpty)
 
             let realUser: [String: Any] = [
                 "type": "user",
                 "message": ["content": [["type": "text", "text": "do it"]]],
             ]
-            let u = SessionEvent.events(from: realUser, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            let u = SessionEvent.events(fromFrame: realUser, sessionId: "S", resumeId: nil, at: now, nextId: ids)
             record("event: a genuine user turn is kept",
                    u.count == 1 && u.first?.kind == .user && u.first?.text == "do it")
 
@@ -7648,22 +7648,22 @@ enum SidebarLogicProbe {
                 ]],
             ]
             record("event: a mixed user frame with any tool_result is skipped",
-                   SessionEvent.events(from: mixed, sessionId: "S", resumeId: nil,
+                   SessionEvent.events(fromFrame: mixed, sessionId: "S", resumeId: nil,
                                        at: now, nextId: ids).isEmpty)
 
             record("event: system/init is a turn start",
-                   SessionEvent.events(from: ["type": "system", "subtype": "init"],
+                   SessionEvent.events(fromFrame: ["type": "system", "subtype": "init"],
                                        sessionId: "S", resumeId: nil, at: now, nextId: ids)
                        .first?.kind == .turnStart)
             record("event: a system frame that is not init produces nothing",
-                   SessionEvent.events(from: ["type": "system", "subtype": "status"],
+                   SessionEvent.events(fromFrame: ["type": "system", "subtype": "status"],
                                        sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
             record("event: result is a turn end",
-                   SessionEvent.events(from: ["type": "result", "subtype": "success"],
+                   SessionEvent.events(fromFrame: ["type": "result", "subtype": "success"],
                                        sessionId: "S", resumeId: nil, at: now, nextId: ids)
                        .first?.kind == .turnEnd)
             record("event: stream_event produces nothing",
-                   SessionEvent.events(from: ["type": "stream_event"],
+                   SessionEvent.events(fromFrame: ["type": "stream_event"],
                                        sessionId: "S", resumeId: nil, at: now, nextId: ids).isEmpty)
 
             // A bulk replay arrives as ONE message holding an array. Only the
@@ -7675,7 +7675,7 @@ enum SidebarLogicProbe {
                 ]],
             ]
             record("event: a bulk replay envelope produces nothing",
-                   SessionEvent.events(from: replay, sessionId: "S", resumeId: nil,
+                   SessionEvent.events(fromFrame: replay, sessionId: "S", resumeId: nil,
                                        at: now, nextId: ids).isEmpty)
 
             // 20,000 CJK characters is 60,000 bytes — a character-based cap
@@ -7685,7 +7685,7 @@ enum SidebarLogicProbe {
                 "type": "assistant",
                 "message": ["content": [["type": "text", "text": huge]]],
             ]
-            let b = SessionEvent.events(from: big, sessionId: "S", resumeId: nil, at: now, nextId: ids)
+            let b = SessionEvent.events(fromFrame: big, sessionId: "S", resumeId: nil, at: now, nextId: ids)
             record("event: text is capped in BYTES, not characters",
                    (b.first?.text.utf8.count ?? .max) <= SessionEvent.maxTextBytes)
             record("event: a capped text says so", b.first?.text.hasSuffix("\u{2026}") ?? false)
@@ -7699,7 +7699,7 @@ enum SidebarLogicProbe {
                     ["type": "tool_use", "name": "Read", "input": [:]],
                 ]],
             ]
-            let pair = SessionEvent.events(from: two, sessionId: "S", resumeId: nil, at: now, nextId: seqIds)
+            let pair = SessionEvent.events(fromFrame: two, sessionId: "S", resumeId: nil, at: now, nextId: seqIds)
             record("event: each event takes its own id from the factory",
                    pair.count == 2 && pair[0].eventId == "id1" && pair[1].eventId == "id2")
 
@@ -7708,11 +7708,48 @@ enum SidebarLogicProbe {
                 "message": ["content": [["type": "text", "text": "   "]]],
             ]
             record("event: an empty assistant text produces nothing",
-                   SessionEvent.events(from: empty, sessionId: "S", resumeId: nil,
+                   SessionEvent.events(fromFrame: empty, sessionId: "S", resumeId: nil,
                                        at: now, nextId: ids).isEmpty)
 
             record("event: the wire tag is always event", a.first?.type == "event")
             record("event: resumeId rides along", a.first?.resumeId == "R")
+
+            // **The envelope, measured on device.** The first version read the
+            // outermost `type` and produced nothing for an entire session:
+            // every frame logged `type=from-extension produced=0`. The real
+            // shape is three deep, and is exactly what `trackWorkingState`
+            // unwraps — these assertions exist so the next edit cannot quietly
+            // go back to reading the envelope.
+            let wrapped: [String: Any] = [
+                "type": "from-extension",
+                "message": [
+                    "type": "io_message",
+                    "message": [
+                        "type": "assistant",
+                        "message": ["content": [["type": "text", "text": "inside"]]],
+                    ],
+                ],
+            ]
+            let unwrapped = SessionEvent.events(from: wrapped, sessionId: "S", resumeId: nil,
+                                                at: now, nextId: ids)
+            record("event: a from-extension envelope is peeled to the CLI frame",
+                   unwrapped.count == 1 && unwrapped.first?.text == "inside")
+
+            // A bare CLI frame handed to the envelope-taking entry point is
+            // NOT an unsolicited extension message and must produce nothing —
+            // otherwise the two entry points would silently accept each
+            // other's input and the bug above could not be told apart.
+            record("event: a bare frame is not mistaken for an envelope",
+                   SessionEvent.events(from: assistant, sessionId: "S", resumeId: nil,
+                                       at: now, nextId: ids).isEmpty)
+
+            record("event: a response (unwrapped) yields no frame",
+                   SessionEvent.ioFrame(in: ["type": "init_response"]) == nil)
+            record("event: a from-extension carrying something else yields no frame",
+                   SessionEvent.ioFrame(in: [
+                       "type": "from-extension",
+                       "message": ["type": "update_state"],
+                   ]) == nil)
         }
 
         // Summary

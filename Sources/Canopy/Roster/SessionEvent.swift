@@ -60,7 +60,38 @@ struct SessionEvent: Codable, Equatable, Sendable {
     /// and only the top-level `type` is read here. Measured on CLI 2.1.258
     /// with Canopy's own flags — a `--resume` does not re-emit historical
     /// `assistant` frames individually.
+    /// Peel the two envelopes off an unsolicited extension message and return
+    /// the CLI frame inside, or nil when this is not one.
+    ///
+    /// **Measured on device, after the first version read the outermost
+    /// `type` and produced nothing for a whole session.** The shape is
+    /// `{type:"from-extension", message:{type:"io_message", message:<frame>}}`
+    /// — three envelopes deep, which is exactly what `trackWorkingState`
+    /// unwraps. A response (as opposed to an unsolicited message) is NOT
+    /// wrapped, and is not a stream frame either, so it correctly falls out
+    /// here.
+    static func ioFrame(in message: [String: Any]) -> [String: Any]? {
+        guard message["type"] as? String == "from-extension",
+              let nested = message["message"] as? [String: Any],
+              nested["type"] as? String == "io_message",
+              let frame = nested["message"] as? [String: Any]
+        else { return nil }
+        return frame
+    }
+
+    /// Convenience over `events(fromFrame:…)` that unwraps first. Callers on
+    /// the io_message path hand in the whole envelope.
     static func events(from message: [String: Any],
+                       sessionId: String,
+                       resumeId: String?,
+                       at: Date,
+                       nextId: () -> String) -> [SessionEvent] {
+        guard let frame = ioFrame(in: message) else { return [] }
+        return events(fromFrame: frame, sessionId: sessionId, resumeId: resumeId,
+                      at: at, nextId: nextId)
+    }
+
+    static func events(fromFrame message: [String: Any],
                        sessionId: String,
                        resumeId: String?,
                        at: Date,

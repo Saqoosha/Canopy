@@ -5422,6 +5422,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                          at: Date(),
                                          nextId: { UUID().uuidString })
         guard !events.isEmpty else { return }
+        // `debug`, not `notice`: this fires several times per turn and says
+        // nothing went wrong. It is here because the one failure this feature
+        // can have is total silence — the first version read the outermost
+        // envelope and produced zero events for a whole session, and the line
+        // that found it was this one. Raise it to `notice` while debugging;
+        // an archived line per frame is not worth carrying.
+        logger.debug("[event] \(events.count, privacy: .public) event(s) from \((SessionEvent.ioFrame(in: message)?["type"] as? String) ?? "?", privacy: .public)")
         for event in events {
             if event.kind == .assistant { lastAssistantEventId = event.eventId }
             RosterPublisher.current?.sendEvent(event)
