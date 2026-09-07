@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate app icon for CCCanopy by applying squircle mask to source image.
+"""Generate app icon for Canopy by applying squircle mask to source image.
 
 Usage:
   python generate_icon.py
@@ -158,9 +158,9 @@ def create_icon(source_image: NSImage, size: int = 1024) -> NSImage:
     ctx.saveGraphicsState()
     squircle_path.addClip()
 
-    # Draw source image zoomed in to make the symbol larger
+    # Preserve the full approved artwork; cropping clips the canopy edges.
     source_size = source_image.size()
-    crop_ratio = 0.12
+    crop_ratio = 0.0
     crop_px = source_size.width * crop_ratio
     source_image.drawInRect_fromRect_operation_fraction_(
         NSMakeRect(margin, margin, icon_size, icon_size),
@@ -257,8 +257,9 @@ def main():
     # Write Contents.json
     contents = {
         "images": [
-            {"filename": f"appicon_{size}.png", "idiom": "mac", "size": f"{size}x{size}", "scale": "1x"}
-            for size in sizes
+            {"filename": f"appicon_{size * scale}.png", "idiom": "mac", "size": f"{size}x{size}", "scale": f"{scale}x"}
+            for size in [16, 32, 128, 256, 512]
+            for scale in [1, 2]
         ],
         "info": {"author": "xcode", "version": 1},
     }
