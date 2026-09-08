@@ -39,14 +39,31 @@ fi
 cd "$ROOT_DIR"
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT INT TERM
+WORKTREE_DIR=""
+
+# EXIT cleans up; INT/TERM clean up AND exit. A trap that only cleans on a
+# signal returns control to the interrupted line, so a Ctrl+C during the audit
+# would fall through into the commit and push below.
+cleanup() {
+  rm -rf "$WORK"
+  [[ -n "$WORKTREE_DIR" ]] && rm -rf "$WORKTREE_DIR"
+  return 0
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 echo "=== Fetching published appcast from gh-pages ==="
 git fetch origin gh-pages --quiet
 git show origin/gh-pages:appcast.xml > "${WORK}/appcast.xml"
 
-# Every DMG the feed references, in feed order.
-mapfile -t DMGS < <(grep -oE 'url="[^"]*/Canopy-[0-9]+\.[0-9]+\.[0-9]+\.dmg"' "${WORK}/appcast.xml" \
+# Every DMG the feed references, in feed order. Read with a while loop rather
+# than `mapfile`: that builtin arrived in bash 4 and macOS still ships 3.2 at
+# /bin/bash, where it would fail before checking a single entry.
+DMGS=()
+while IFS= read -r _NAME; do
+  [[ -n "$_NAME" ]] && DMGS+=("$_NAME")
+done < <(grep -oE 'url="[^"]*/Canopy-[0-9]+\.[0-9]+\.[0-9]+\.dmg"' "${WORK}/appcast.xml" \
   | sed -E 's|.*/([^/"]*)"$|\1|' | awk '!seen[$0]++')
 
 if (( ${#DMGS[@]} == 0 )); then
@@ -127,7 +144,6 @@ fi
 
 echo "=== Pushing to gh-pages ==="
 WORKTREE_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK" "$WORKTREE_DIR"' EXIT INT TERM
 
 git worktree add "$WORKTREE_DIR" origin/gh-pages --detach --quiet
 (

@@ -34,8 +34,18 @@ codesign_retry() {
     # Output is captured so the transient message can be matched, then relayed
     # verbatim to stderr — codesign's own diagnostics must not be swallowed just
     # because this wrapper wanted to read them.
-    out=$(codesign "$@" 2>&1)
-    rc=$?
+    #
+    # The `if` is load-bearing, not style. Both callers run `set -euo pipefail`,
+    # and a bare `out=$(codesign ...)` is a simple command: errexit kills the
+    # script the instant codesign fails, before `rc=$?` and before any retry
+    # decision. Measured — with the plain assignment, a transient failure
+    # aborted the release on the first attempt and this whole wrapper was inert.
+    # A command substitution inside an `if` condition is exempt from errexit.
+    if out=$(codesign "$@" 2>&1); then
+      rc=0
+    else
+      rc=$?
+    fi
     [[ -n "$out" ]] && printf '%s\n' "$out" >&2
 
     (( rc == 0 )) && return 0
