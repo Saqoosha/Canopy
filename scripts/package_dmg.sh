@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build"
 
+# shellcheck source=./codesign_retry.sh
+source "${ROOT_DIR}/scripts/codesign_retry.sh"
+
 APP_NAME="Canopy"
 VOL_NAME="Canopy"
 
@@ -72,7 +75,11 @@ hdiutil create \
   "${TMP_DMG}"
 
 echo "=== Notarizing DMG ==="
-codesign --force --sign "$DEVELOPER_ID" "${TMP_DMG}"
+# This is the call that failed on the 2.28.1 release, after the ~10 min build
+# and the app's own notarization had already completed. codesign timestamps a
+# Developer ID signature by default, so it reaches Apple's TSA here even with
+# no --timestamp flag.
+codesign_retry --force --sign "$DEVELOPER_ID" "${TMP_DMG}"
 
 xcrun notarytool submit "${TMP_DMG}" \
   --keychain-profile "$KEYCHAIN_PROFILE" \

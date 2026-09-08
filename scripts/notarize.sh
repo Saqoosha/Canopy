@@ -6,6 +6,13 @@ DEVELOPER_ID="Developer ID Application: Tomohiko Koyama (VCFY2GFR89)"
 TEAM_ID="VCFY2GFR89"
 KEYCHAIN_PROFILE="notarytool-profile"
 
+# Retry wrapper for the transient "timestamp service is not available" failure.
+# Sourced before anything signs; see the file itself for why it is scoped to
+# that one message.
+NOTARIZE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./codesign_retry.sh
+source "${NOTARIZE_SCRIPT_DIR}/codesign_retry.sh"
+
 APP_PATH="$1"
 
 if [[ ! -d "$APP_PATH" ]]; then
@@ -39,7 +46,7 @@ echo "=== Signing $APP_NAME.app ==="
 # future helper ever needs e.g. camera/mic, sign it with its own entitlements.
 find "$APP_PATH" -type f \( -perm +111 -o -name "*.dylib" \) ! -path "*/MacOS/${APP_NAME}" | while read -r item; do
   echo "  Signing nested: $(basename "$item") ($(dirname "$item" | sed "s|.*\.app/||"))"
-  codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$item"
+  codesign_retry --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$item"
 done
 
 # Sign the main app bundle last with --entitlements. codesign --force without
@@ -48,7 +55,7 @@ done
 # Result: TCC silently denies access (no permission prompt) for the app and
 # for any subprocess that walks back to it as the responsible process.
 echo "  Signing app bundle: $APP_NAME.app"
-codesign --force --options runtime --timestamp \
+codesign_retry --force --options runtime --timestamp \
   --entitlements "$ENTITLEMENTS" \
   --sign "$DEVELOPER_ID" "$APP_PATH"
 
