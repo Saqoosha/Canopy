@@ -111,6 +111,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     let workingDirectory: URL
     var resumeSessionId: String?
+    /// See `OpenSession.resumeIdIsExistingTranscript`. Read only on the SSH
+    /// remote path, where it gates `CANOPY_REMOTE_RESUME`.
+    ///
+    /// The initializer parameter deliberately has NO default. The first
+    /// revision had one, and `doReconnect` — which builds a shim on a real,
+    /// CLI-reported session id — did not pass the flag, so every SSH reconnect
+    /// fell back to `false` and silently opened a fresh conversation: this
+    /// feature's own bug, on the one path that exists to resume. A `false`
+    /// default makes "forgot" and "placeholder" the same token; there are two
+    /// call sites, so requiring it costs nothing and turns the next miss into
+    /// a compile error.
+    let resumeIdIsExistingTranscript: Bool
     var model: String?
     var effortLevel: String?
     var permissionMode: PermissionMode
@@ -1390,9 +1402,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var cliResolvedModel: String = ""
 
     @MainActor
-    init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil) {
+    init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, resumeIdIsExistingTranscript: Bool) {
         self.workingDirectory = workingDirectory
         self.resumeSessionId = resumeSessionId
+        self.resumeIdIsExistingTranscript = resumeIdIsExistingTranscript
         self.model = model
         self.effortLevel = effortLevel
         self.permissionMode = permissionMode
@@ -1596,6 +1609,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Lifecycle
 
+    /// The id to hand the remote CLI, or nil to let it start fresh.
+    ///
+    /// Lifted out of `start()` because it is the decision the whole SSH resume
+    /// path turns on and `start()` needs a live shim, so nothing could pin it.
+    /// Both directions cost something real: loosen it and every NEW remote
+    /// session dies on `--resume <placeholder>` (CLI exit 1), tighten it and
+    /// resume silently stops happening, which is indistinguishable from this
+    /// feature never having shipped.
+    static func remoteResumeId(existingTranscript: Bool, resumeSessionId: String?) -> String? {
+        guard existingTranscript, let id = resumeSessionId, !id.isEmpty else { return nil }
+        return id
+    }
+
     /// Start the Node.js shim subprocess. Returns false if startup fails.
     @discardableResult
     func start() -> Bool {
@@ -1741,6 +1767,78 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             env["CANOPY_SSH_HOST"] = remote
             env["CANOPY_SSH_CWD"] = workingDirectory.path
+            // At a fresh launch the EXTENSION passes no `--resume` — measured
+            // on 2.1.263 by capturing the wrapper's argv, and by reading a live
+            // LOCAL session's CLI argv, which has none either. On reconnect it
+            // passes one; that is the other half of this claim, not an
+            // amendment to it. CLAUDE.md used to claim a `--resume SESSION_ID`
+            // flag; that line is corrected in the same change as this one.
+            //
+            // Deliberately an observation about this configuration and NOT a
+            // property of the extension. Two drafts of this comment were wrong
+            // in the same direction and the second is worth spelling out,
+            // because the truth is narrower than "Canopy never sets it".
+            //
+            // `extension.js` builds `--resume=${…}` from `options.resume`, and
+            // Canopy DOES populate that: `data-initial-session` becomes the
+            // webview's `sessionId`, which it passes as `launch_claude.resume`.
+            // What clears it is the extension's own local-disk precheck, which
+            // runs only when the webview's `freshStartIfUnresumable()` is true
+            // — `sessionId != nil && !isRemote && !showsAssistantReplies()`.
+            // At a fresh launch that holds, the precheck fails to find a remote
+            // transcript locally, and the flag is dropped: which is exactly
+            // what the argv capture recorded, and all it can record.
+            //
+            // On RECONNECT it does not hold. `doReconnect` reuses the
+            // WKWebView with the conversation on screen, so
+            // `showsAssistantReplies()` is true — strictly, once the session
+            // has had a non-synthetic assistant message, which any reconnect
+            // worth resuming has — the precheck is skipped, and the extension
+            // emits its own `--resume=` beside the one the wrapper appends.
+            //
+            // Grade the two halves apart. That the extension emits one there is
+            // TRACED through `extension.js` and `doReconnect`, not captured on
+            // a reconnect. What is measured is the CLI's response: given
+            // `--resume=A --resume B` — the mixed spelling this pair actually
+            // produces — it accepts both, exits 0, and B wins. The wrapper
+            // appends last, so Canopy's id is the one that takes effect.
+            // Harmless, and only because of an ordering nothing enforces.
+            //
+            // What the extension does at a fresh launch is resolve the session
+            // off THIS machine's disk, which for a remote session finds nothing
+            // and
+            // starts a fresh conversation — announcing it only as a
+            // `system/status` frame carrying `resumeDropped: true` — read out
+            // of `extension.js` 2.1.263, not captured off the wire, which is
+            // the weaker of the two kinds of evidence this repo distinguishes.
+            // Canopy neither reads nor shows it, so the outcome is silent to
+            // the USER rather than on the wire. So the remote CLI has to be
+            // told directly, through the same env-var → wrapper-flag route
+            // `--model` and `--effort` already take.
+            //
+            // Gated on the caller having CLAIMED the id names a real
+            // transcript — see `OpenSession.resumeIdIsExistingTranscript` for
+            // who is entitled to claim it, since most writers assert it from
+            // provenance rather than checking. The CLI exits 1 on an
+            // unresolvable `--resume` (measured), and every brand-new session
+            // carries a placeholder id, so sending it unconditionally would
+            // break new remote sessions to fix continued ones.
+            // Scrubbed before it is conditionally set, because `env` starts
+            // from `ProcessInfo.processInfo.environment` and this decision has
+            // to be Canopy's alone. A Canopy launched from a shell exporting
+            // this — which is how it is developed — would otherwise hand every
+            // remote session an id it never chose: a wrong conversation
+            // resumed, or exit 1 on a new one. The same guard is applied to
+            // `CLAUDE_CODE_SESSION_NAME` thirty lines above, for the same
+            // reason. `CANOPY_REMOTE_MODEL` and `CANOPY_REMOTE_EFFORT` share
+            // the hole and are left alone: pre-existing, and a wrong model is
+            // visible where a wrong conversation is not.
+            env.removeValue(forKey: "CANOPY_REMOTE_RESUME")
+            if let id = Self.remoteResumeId(
+                existingTranscript: resumeIdIsExistingTranscript, resumeSessionId: resumeSessionId
+            ) {
+                env["CANOPY_REMOTE_RESUME"] = id
+            }
             env["CANOPY_SSH_WRAPPER_PATH"] = wrapperPath
             // Ensure wrapper has execute permission (Xcode may strip +x on copy)
             if !FileManager.default.isExecutableFile(atPath: wrapperPath) {
@@ -2167,8 +2265,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// The CLI ignores a `--resume` id that has no JSONL on disk (launcher-born
-    /// sessions pass a freshly generated UUID) and picks its own session id.
+    /// A launcher-born session runs on a freshly generated placeholder UUID and
+    /// the CLI picks its own session id instead. NOT because the CLI ignores an
+    /// id with no JSONL — a sentence that stood here and is deleted rather than
+    /// corrected beside the new one: the id never reaches the CLI, because the
+    /// extension resolves the session off local disk (see `start()`'s
+    /// `CANOPY_REMOTE_RESUME` block). Handed to the CLI directly, as the SSH
+    /// remote path does, an unresolvable `--resume` exits 1.
     /// Called whenever the webview reports a session id (`update_session_state`
     /// or `rename_tab` — both carry `sessionId` through the same handler).
     /// Sync the real id back onto the owning OpenSession so the sidebar's
@@ -2179,6 +2282,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard let session = boundSession, session.resumeId != sid else { return }
         let stale = session.resumeId
         session.resumeId = sid
+        // The id the CLI just reported names a transcript it is writing, so the
+        // flag's documented meaning becomes true here. Written immediately
+        // beside the id it qualifies: leaving it false is how the field starts
+        // describing something other than what it says, and the next shim built
+        // off this session would then decline to resume it. Only for a report
+        // that actually CHANGES the id — one matching the stored id takes the
+        // guard above, where it is either already flagged or is a local
+        // session, which never reads the flag.
+        session.resumeIdIsExistingTranscript = true
         logger.info("backfillResumeId \(stale, privacy: .public) -> \(sid, privacy: .public)")
         // A title generated before this first session-id report was saved
         // under the placeholder id (`activeSessionId ?? resumeSessionId`

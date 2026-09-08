@@ -399,8 +399,12 @@ private struct DetailLauncher: View {
                 // it flips to .session we hand off to the SessionStore, which
                 // creates a fresh OpenSession with the same params.
                 if localAppState.screen == .session {
+                    // Read off the state the launcher stamped at the press.
+                    // Sampling `NSEvent.modifierFlags` here was correct while
+                    // this observer fired in the same instant as the click; the
+                    // remote resume lookup put an SSH round trip in between.
                     let target: SessionStore.PaneTarget =
-                        NSEvent.modifierFlags.contains(.command) ? .newPane : .focused
+                        localAppState.openInNewPane ? .newPane : .focused
                     store.openNew(
                         directory: localAppState.workingDirectory,
                         resumeId: localAppState.resumeSessionId,

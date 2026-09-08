@@ -140,6 +140,26 @@ final class OpenSession: Identifiable, Hashable {
     /// still running. Feeds `SessionActivity.of` as the `background` rung.
     /// Mutually exclusive with `isThinking` — only true between turns.
     var isWaiting: Bool = false
+    /// True when the caller supplied a `resumeId` it believes names a transcript
+    /// that already exists, rather than the placeholder `SessionStore.openNew`
+    /// mints for a brand-new session.
+    ///
+    /// "Believes" is the honest word and the first draft omitted it. Some
+    /// writers CHECK: the remote launcher path verifies the transcript on the
+    /// machine that will run the CLI (`RemoteSessionHistory`), and `openLocal`
+    /// reads a local id off the disk that same CLI will use. The rest assert it
+    /// from provenance — `backfillResumeId` because the CLI just reported the
+    /// id, `openCloudAsync` because the teleport bridge just wrote the
+    /// transcript. Each states its reasoning at its own call site, and
+    /// `applyRestoreSnapshot` deliberately asserts nothing: it carries whatever
+    /// the snapshot recorded. Nothing local needs the distinction — the CC extension resolves
+    /// a session off this machine's disk and silently starts fresh when it
+    /// finds nothing — but an SSH remote session is resumed by handing
+    /// `--resume <id>` to the CLI on the other machine, and the CLI **fails**
+    /// (exit 1) on an id with no transcript. So passing a placeholder there
+    /// would break every NEW remote session in order to fix continued ones.
+    var resumeIdIsExistingTranscript: Bool = false
+
     /// The shim subprocess. Strong reference; nil between init and start, and
     /// for the whole of `.dormant` — a launch-restored session with no pane
     /// has no shim until a pane takes it.
@@ -160,11 +180,13 @@ final class OpenSession: Identifiable, Hashable {
         permissionMode: PermissionMode = .acceptEdits,
         model: String? = nil,
         effortLevel: String? = nil,
-        customApi: ModelProvider? = nil
+        customApi: ModelProvider? = nil,
+        resumeIdIsExistingTranscript: Bool = false
     ) {
         self.id = id
         self.origin = origin
         self.resumeId = resumeId
+        self.resumeIdIsExistingTranscript = resumeIdIsExistingTranscript
         self.title = title
         self.project = project
         self.status = status

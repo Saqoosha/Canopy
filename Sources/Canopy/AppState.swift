@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import os.log
 
@@ -37,6 +38,22 @@ final class AppState {
     var permissionMode: PermissionMode = .acceptEdits
     var model: String?
     var effortLevel: String?
+    /// Whether Cmd was held when the launch was asked for.
+    ///
+    /// `Detail` used to read `NSEvent.modifierFlags` in its `screen` observer,
+    /// which for a synchronous launch was the click instant. The remote branch
+    /// of `LauncherView.launchLocal` awaits an SSH round trip first, so that
+    /// observer can now fire a minute later and would sample whatever is held
+    /// then — a Cmd+click that opens no new pane, or a plain click that opens
+    /// one.
+    ///
+    /// Written only by `launchSession`, from its `openInNewPane` parameter, so
+    /// no route can be added that forgets to stamp it. Stamping at each call
+    /// site was the first revision and a reviewer measured what it missed: two
+    /// of the four routes never stamped, so the session-history row lost its
+    /// Cmd gesture and a stale `true` from an earlier press opened a pane
+    /// nobody asked for.
+    private(set) var openInNewPane = false
     var resumeSessionId: String?
     var resumeSessionTitle: String?
     var remoteHost: String?
@@ -50,7 +67,11 @@ final class AppState {
         debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")
     }
 
-    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil, customApi: ModelProvider? = nil) {
+    /// `openInNewPane`: nil means "sample the modifier now", which is right for
+    /// every caller that runs in the same turn as the click. A caller that
+    /// awaits first must capture the value BEFORE awaiting and pass it.
+    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil, customApi: ModelProvider? = nil, openInNewPane: Bool? = nil) {
+        self.openInNewPane = openInNewPane ?? NSEvent.modifierFlags.contains(.command)
         // Don't add remote paths to local recent directories
         if remoteHost == nil {
             RecentDirectories.add(directory)

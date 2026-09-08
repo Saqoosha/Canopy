@@ -7871,6 +7871,335 @@ enum SidebarLogicProbe {
                    notStamped.first.map { $0.eventId != "phone-id" } ?? false)
         }
 
+        // MARK: - The two gates that decide whether a remote session resumes
+        do {
+            // Loosen this and every NEW remote session dies on
+            // `--resume <placeholder>`; tighten it and resume stops happening,
+            // which looks exactly like the feature never shipping.
+            record("resume gate: a claimed id is sent",
+                   ShimProcess.remoteResumeId(
+                       existingTranscript: true, resumeSessionId: "rid") == "rid")
+            record("resume gate: a placeholder id is not",
+                   ShimProcess.remoteResumeId(
+                       existingTranscript: false, resumeSessionId: "rid") == nil)
+            record("resume gate: an absent id is not",
+                   ShimProcess.remoteResumeId(
+                       existingTranscript: true, resumeSessionId: nil) == nil)
+            // An empty string would reach the wrapper as `--resume ''`.
+            record("resume gate: an empty id is not",
+                   ShimProcess.remoteResumeId(
+                       existingTranscript: true, resumeSessionId: "") == nil)
+
+            // The escalated pass skips candidates the first pass already
+            // classified: an `sdk-*` verdict cannot change by reading further
+            // into the same file, and re-fetching them costs 16x each.
+            let first = RemoteSessionHistory.remoteScript(
+                path: "/a/b", encodedFolders: ["-a-b"],
+                window: ClaudeSessionHistory.metadataHeadSize)
+            record("escalation: the first pass skips nothing",
+                   first.contains("| tail -n +1 |"))
+            // The WHOLE pipeline segment, not just the `tail` stage: matching
+            // a substring let `tail | head` pass as readily as `head | tail`,
+            // and reversing them makes `maxCandidates` count from the skip
+            // instead of from the top. Measured green before this was widened.
+            record("escalation: a skip reaches the remote listing",
+                   RemoteSessionHistory.remoteScript(
+                       path: "/a/b", encodedFolders: ["-a-b"],
+                       window: ClaudeSessionHistory.metadataMaxScanSize,
+                       skipping: 6
+                   ).contains("| head -\(RemoteSessionHistory.maxCandidates) | tail -n +7 |"))
+
+            // The arithmetic `run` feeds that parameter — and ONLY the
+            // arithmetic. `run` needs a live ssh, so hardcoding its call site
+            // to `skipping: 0` still leaves every assertion here green; a
+            // reviewer measured that after an earlier comment claimed these
+            // closed it. Kept because the arithmetic is worth pinning, named
+            // honestly because the wire is not.
+            record("escalation: the skip starts AT the ambiguous candidate",
+                   RemoteSessionHistory.escalationSkip(stoppedAt: 7) == 6)
+            record("escalation: stopping on the first candidate skips none",
+                   RemoteSessionHistory.escalationSkip(stoppedAt: 1) == 0)
+            // A pass that read no line at all must not skip backwards.
+            record("escalation: an empty pass skips none",
+                   RemoteSessionHistory.escalationSkip(stoppedAt: 0) == 0)
+            // A later pass reports its stop in the FULL listing, or the next
+            // skip would be relative to a listing that no longer starts at 1.
+            record("escalation: a skipped pass reports an absolute position",
+                   RemoteSessionHistory.absoluteStop(skipping: 6, stoppedAt: 2) == 8)
+        }
+
+        // MARK: - Restore carries the resume kind (issue found in review)
+        //
+        // Asserting `true` on restore was this branch's own regression: a
+        // snapshot taken before the CLI reported its session id holds the
+        // placeholder `openNew` minted, and `--resume <placeholder>` exits 1
+        // on the remote. These pin the round trip that replaced the assertion.
+        do {
+            let dir = URL(fileURLWithPath: "/Users/hiko/repos/Work/Thing")
+
+            func restored(_ flag: Bool?) -> OpenSession? {
+                var snap = SessionRestoreSnapshot(
+                    sessions: [.init(
+                        resumeId: "rid-1", title: "T", project: "P",
+                        origin: .remote(host: "studio", path: dir.path),
+                        permissionMode: .acceptEdits, model: nil, effortLevel: nil,
+                        providerId: nil, lastActiveAt: Date(),
+                        resumeIdIsExistingTranscript: flag
+                    )],
+                    panes: [.init(content: .session(resumeId: "rid-1"), width: 800)],
+                    focusedPaneIndex: 0
+                )
+                snap = snap.sanitized(paneCap: SessionStore.paneAbsoluteCap) { _ in true }
+                let store = SessionStore()
+                store.applyRestoreSnapshot(snap)
+                return store.openSessions.first
+            }
+
+            record("restore: a captured true survives the round trip",
+                   restored(true)?.resumeIdIsExistingTranscript == true)
+            // The placeholder case. Asserting `true` here is what turned a
+            // pane that came up fresh into one that fails to start.
+            record("restore: a captured false is not upgraded",
+                   restored(false)?.resumeIdIsExistingTranscript == false)
+            // A snapshot written before the field existed. nil reads as false,
+            // which is that build's own behaviour — never as "assume true".
+            record("restore: a snapshot predating the field reads as false",
+                   restored(nil)?.resumeIdIsExistingTranscript == false)
+
+            // The capture half, so the two cannot drift: what `openNew`
+            // derived is what a snapshot carries.
+            let store = SessionStore()
+            let live = store.openNew(
+                directory: dir, resumeId: "rid-2", remoteHost: "studio")
+            record("restore: openNew records a supplied id as existing",
+                   live.resumeIdIsExistingTranscript)
+            record("restore: a placeholder id is not recorded as existing",
+                   !SessionStore().openNew(directory: dir, remoteHost: "studio")
+                       .resumeIdIsExistingTranscript)
+            // The FALSE direction, measured missing: with only the assertion
+            // below, hardcoding the capture to `true` stayed green — and that
+            // mutation is exactly the placeholder-resumed-on-restore bug this
+            // branch already had once.
+            let fresh = SessionStore()
+            fresh.openNew(directory: dir, remoteHost: "studio")
+            record("restore: capture does not claim a placeholder is real",
+                   fresh.captureRestoreSnapshot().sessions
+                       .first?.resumeIdIsExistingTranscript == false)
+
+            record("restore: capture carries the flag off the session",
+                   store.captureRestoreSnapshot().sessions
+                       .first { $0.resumeId == "rid-2" }?
+                       .resumeIdIsExistingTranscript == true)
+        }
+
+        // MARK: - Remote session lookup (SSH "Continue session")
+        //
+        // Every assertion here pins a way a remote session is silently NOT
+        // resumed — the failure this whole path exists to fix, and one that
+        // reports nothing: the launcher just opens a fresh conversation.
+        do {
+            let dir = URL(fileURLWithPath: "/Users/hiko/repos/Work/Thing")
+
+            func line(_ id: String, _ mtime: String, _ records: [String]) -> Data {
+                let header = records.joined(separator: "\n") + "\n"
+                let b64 = Data(header.utf8).base64EncodedString()
+                return Data("\(id) \(mtime) \(b64)".utf8)
+            }
+            func resumable(_ line: Data) -> SessionEntry? {
+                if case .resumable(let e) = RemoteSessionHistory.classify(line: line, directory: dir) {
+                    return e
+                }
+                return nil
+            }
+
+            let realId = "11111111-2222-3333-4444-555555555555"
+            let userRecord = #"{"type":"user","entrypoint":"claude-vscode","cwd":"/Users/hiko/repos/Work/Thing","message":{"role":"user","content":"fix the parser"}}"#
+
+            record("remote: a claude-vscode session is resumable",
+                   resumable(line(realId, "1788851176", [userRecord]))?.id == realId)
+
+            record("remote: its title comes from the first user message",
+                   resumable(line(realId, "1788851176", [userRecord]))?.title == "fix the parser")
+
+            record("remote: the mtime is the session timestamp",
+                   resumable(line(realId, "1788851176", [userRecord]))?.timestamp == Date(timeIntervalSince1970: 1788851176))
+
+            // Resuming an automated run instead of the user's session is the
+            // failure the filter exists to prevent, and on the host this was
+            // built against it was the majority of a real project folder. The
+            // figures live once, on `ssh-claude-wrapper.sh`'s
+            // CLAUDE_CODE_ENTRYPOINT block — restating a slice of them here is
+            // how three copies of one measurement start disagreeing.
+            record("remote: an sdk-py run is not resumable",
+                   RemoteSessionHistory.classify(line: line(realId, "1788851176", [
+                           #"{"type":"user","entrypoint":"sdk-py","message":{"role":"user","content":"Review this change for security vulnerabilities."}}"#,
+                       ]), directory: dir) == .filtered)
+
+            record("remote: an sdk-cli run is not resumable",
+                   RemoteSessionHistory.classify(line: line(realId, "1788851176", [
+                           #"{"type":"user","entrypoint":"sdk-cli","message":{"role":"user","content":"hi"}}"#,
+                       ]), directory: dir) == .filtered)
+
+            record("remote: a scheduled task is not resumable",
+                   RemoteSessionHistory.classify(line: line(realId, "1788851176", [
+                           #"{"type":"queue-operation","operation":"enqueue","content":"<scheduled-task id=\"x\">go</scheduled-task>"}"#,
+                           userRecord,
+                       ]), directory: dir) == .filtered)
+
+            // The scan must reach the LAST newline-terminated record, not stop
+            // one short: `head -c` truncation means the marker that disqualifies
+            // a transcript can be the final complete line in the window. (A
+            // trailing FRAGMENT needs no assertion of its own — cutting an
+            // object mid-way never yields valid JSON, so `consume` rejects it
+            // for the same reason the local scanner does. That is why this
+            // pins the complete-last-line case instead: it is the one a loop
+            // bound can actually get wrong.)
+            record("remote: the last complete record still decides the filter",
+                   RemoteSessionHistory.classify(line: line(realId, "1", [
+                           #"{"type":"user","cwd":"/Users/hiko/repos/Work/Thing","message":{"role":"user","content":"go"}}"#,
+                           #"{"type":"user","entrypoint":"sdk-py","message":{"role":"user","content":"Review"}}"#,
+                       ]), directory: dir) == .filtered)
+
+            record("remote: a non-UUID id is rejected",
+                   resumable(line("not-a-uuid", "1", [userRecord])) == nil)
+
+            record("remote: a line missing its header field is rejected",
+                   resumable(Data("\(realId) 1788851176".utf8)) == nil)
+
+            record("remote: undecodable base64 is rejected",
+                   resumable(Data("\(realId) 1788851176 !!!not-base64!!!".utf8)) == nil)
+
+            // A missing mtime must not become "now". Selection is by ORDER —
+            // `scan` takes the first surviving line and `ls -1t` decided the
+            // order, so a fabricated date would not change which session wins;
+            // what it would corrupt is the timestamp the row displays and the
+            // `.max` the LOCAL launcher path applies to the same type.
+            // `date -r` failing on the remote emits 0 by design.
+            record("remote: a zero mtime degrades to distantPast",
+                   resumable(line(realId, "0", [userRecord]))?.timestamp == .distantPast)
+
+            // One `ls -1t` over BOTH encodings, because `ls` sorts all of its
+            // arguments together — per-folder listing would let an older
+            // strict-encoded session beat a newer legacy-encoded one.
+            let script = RemoteSessionHistory.remoteScript(
+                path: "/a/b", encodedFolders: ["-a-b", "-a-b.c"],
+                window: ClaudeSessionHistory.metadataHeadSize)
+            record("remote script: one ls covers every encoding candidate",
+                   script.components(separatedBy: "ls -1t").count == 2
+                       && script.contains("/-a-b\"/*.jsonl")
+                       && script.contains("/-a-b.c\"/*.jsonl"))
+
+            record("remote script: agent- sidechains are skipped remotely",
+                   script.contains("case \"$id\" in agent-*) continue ;; esac"))
+
+            // The FIRST window matches the local scanner's first chunk. That is
+            // necessary and, on its own, not sufficient — the first revision of
+            // this comment claimed it was, and a reviewer measured the gap: a
+            // `/security-review` record starting ~90KB in runs past the chunk,
+            // so parity of the constant does not give parity of the scan. What
+            // closes it is the escalation asserted just below.
+            record("remote script: the first window matches the local scan",
+                   RemoteSessionHistory.remoteScript(
+                       path: "/a/b", encodedFolders: ["-a-b"],
+                       window: ClaudeSessionHistory.metadataHeadSize
+                   ).contains("head -c \(ClaudeSessionHistory.metadataHeadSize) "))
+
+            record("remote script: the escalated window is the local ceiling",
+                   RemoteSessionHistory.remoteScript(
+                       path: "/a/b", encodedFolders: ["-a-b"],
+                       window: ClaudeSessionHistory.metadataMaxScanSize
+                   ).contains("head -c \(ClaudeSessionHistory.metadataMaxScanSize) "))
+
+            // The whole point of the classification: a header the window did
+            // not reach must not read as "not automated". Two records that
+            // never yield a `type: "user"` — the shape a truncated
+            // `/security-review` opener produces — and the line is ambiguous,
+            // not resumable.
+            let noUserRecord = line(realId, "1", [
+                #"{"type":"queue-operation","operation":"enqueue","content":"diff…"}"#,
+                #"{"type":"attachment","hookName":"SessionStart:startup"}"#,
+            ])
+            record("remote: a header with no user record is not resumable",
+                   resumable(noUserRecord) == nil)
+            record("remote: it is reported as exhausted, not filtered",
+                   RemoteSessionHistory.classify(line: noUserRecord, directory: dir)
+                       == .headerExhausted(SessionEntry(
+                           id: realId, title: "Untitled",
+                           timestamp: Date(timeIntervalSince1970: 1),
+                           projectDirectory: dir)))
+
+            // An automated run disqualified by an `attachment` record — the
+            // minority case, per the measurement on `extractMetadata`'s
+            // `isAutomated` paragraph, not the common one — is
+            // filtered outright and never escalates. Worth a fixture precisely
+            // because it is the uncommon path.
+            record("remote: an attachment-borne entrypoint filters without escalating",
+                   RemoteSessionHistory.classify(
+                       line: line(realId, "1", [
+                           #"{"type":"attachment","entrypoint":"sdk-py"}"#,
+                       ]), directory: dir) == .filtered)
+
+            // Non-empty bytes that parse as NOTHING — the `sawAnyRecord`
+            // guard's own case, and distinct from the empty-field fixture
+            // below, which a different guard reaches first. Without this one
+            // `sawAnyRecord` is unpinned, as a mutation run proved before it
+            // was added.
+            record("remote: bytes that are not a transcript are rejected",
+                   RemoteSessionHistory.classify(
+                       line: Data("\(realId) 1788851176 \(Data("not jsonl at all\n".utf8).base64EncodedString())".utf8),
+                       directory: dir) == .malformed)
+
+            // `Data(base64Encoded: "")` is a non-nil EMPTY Data and the split
+            // yields three fields, so this line reaches the empty-header guard
+            // rather than being rejected by the decode. It pins that near-guard
+            // only — `sawAnyRecord` would reject it too; see `classify`.
+            record("remote: an empty header field is rejected",
+                   RemoteSessionHistory.classify(
+                       line: Data("\(realId) 1788851176 ".utf8), directory: dir) == .malformed)
+
+            // The resolved path must be asked for before anything can depend on
+            // the listing succeeding: a symlinked directory (`/tmp` →
+            // `/private/tmp` on the host this was built against) files its
+            // transcripts under an encoding the requested path never names, and
+            // the retry has nothing to retry with if this line is missing.
+            record("remote script: the resolved path leads the output",
+                   script.hasPrefix("printf 'P %s\\n' \"`cd '/a/b' 2>/dev/null && pwd -P`\""))
+
+            record("remote script: a quote in the path cannot break out",
+                   RemoteSessionHistory.remoteScript(
+                       path: "/a/it's", encodedFolders: ["-a-it-s"],
+                       window: ClaudeSessionHistory.metadataHeadSize)
+                       .contains(##"cd '/a/it'\''s' 2>/dev/null"##))
+
+            record("remote: the resolved-path line is recognised",
+                   RemoteSessionHistory.resolvedPath(fromLine: Data("P /private/tmp".utf8)) == "/private/tmp")
+
+            // Empty is "the directory is not there", which the caller must not
+            // retry as a path; nil is "this was a session line". Collapsing the
+            // two would send an `ls` at the encoding of the empty string.
+            record("remote: an unresolvable directory reports empty, not nil",
+                   RemoteSessionHistory.resolvedPath(fromLine: Data("P ".utf8)) == "")
+
+            // `ssh` reads a leading `-` as an option, and the host is a
+            // free-text field — `-oProxyCommand=…` runs a command of the
+            // author's choosing. Nothing here passes through a shell, so this
+            // is the whole exposure.
+            record("remote host: a leading dash is refused",
+                   !RemoteSessionHistory.isSpawnableHost("-oProxyCommand=touch /tmp/x"))
+            record("remote host: an empty host is refused",
+                   !RemoteSessionHistory.isSpawnableHost(""))
+            // Not a hostname validator: config aliases, `user@host` and IPv6
+            // literals are all legal destinations and must survive.
+            record("remote host: ordinary destinations are allowed",
+                   RemoteSessionHistory.isSpawnableHost("studio")
+                       && RemoteSessionHistory.isSpawnableHost("hiko@10.0.0.2")
+                       && RemoteSessionHistory.isSpawnableHost("[fe80::1]"))
+
+            record("remote: a session line is not read as a resolved path",
+                   RemoteSessionHistory.resolvedPath(
+                       fromLine: line(realId, "1", [userRecord])) == nil)
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
