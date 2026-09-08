@@ -771,6 +771,12 @@ enum ClaudeSessionHistory {
     /// each escalation chunk after it — a smaller file reads less. Sized so
     /// large base64 image attachments don't push `ai-title` past the window.
     /// Non-private for the same reason as `metadataMaxScanSize`.
+    /// Also the SSH remote scan's window, interpolated into the script
+    /// `RemoteSessionHistory.remoteScript` builds — which is the second reason
+    /// this is non-private. There it is the FIRST window rather than the only
+    /// one: that path escalates to `metadataMaxScanSize` on the same signal
+    /// this one does, so tuning this down costs a round trip there rather than
+    /// widening a filter gap.
     static let metadataHeadSize = 131_072
 
     /// Ceiling on the escalated scan (see `extractMetadata`) — sixteen head
@@ -810,8 +816,26 @@ enum ClaudeSessionHistory {
     ///
     /// `isAutomated` flags non-interactive `claude -p` / SDK-driven runs
     /// (memory observers, sub-agents from `/ship-it`, plugin background
-    /// reviews, etc.), detected via the `entrypoint: "sdk-*"` marker the
-    /// CLI/SDKs write on their user lines (`sdk-cli`, `sdk-py`, `sdk-ts`).
+    /// reviews, etc.), detected via the `entrypoint: "sdk-*"` marker
+    /// (`sdk-cli`, `sdk-py`, `sdk-ts`). It rides the session's HEADER records
+    /// generally — `user`, `attachment`, `system` and `progress` all carry it,
+    /// not only the user line as this said before — which is why
+    /// `HeaderScanner.consume` reads it above the `guard let type`.
+    ///
+    /// It does NOT usually arrive early enough to spare the SSH remote path an
+    /// escalation. Measured 2026-09-08 over the AUTOMATED transcripts the
+    /// loaders can open (`entrypoint: "sdk-*"`, n≈890), the first
+    /// entrypoint-bearing record is a `user` record 857 times against 24
+    /// `attachment` and 7 `progress`. Automated is the population that matters
+    /// here, and naming it is the point: over ALL openable transcripts
+    /// `attachment` leads 29.5% of the time, so the same question answered on
+    /// the wrong set flips the conclusion. An earlier version of this called
+    /// it "often" and did not say which set it counted; 2.7% is not often, and
+    /// the escalation carries the weight.
+    ///
+    /// The per-line classification itself lives in `HeaderScanner`, shared
+    /// verbatim with `RemoteSessionHistory`, which runs it over header bytes
+    /// fetched from another machine.
     ///
     /// **Scanning is by whole line, never by byte prefix, and the byte budget
     /// is a floor rather than a hard stop.** A JSONL record is only usable
@@ -866,27 +890,210 @@ enum ClaudeSessionHistory {
         }
         defer { try? handle.close() }
 
-        var aiTitle: String?
-        var firstUserMessage: String?
-        var firstCwd: String?
-        var lastRelocatedCwd: String?
-        var isBackgroundScheduled = false
-        var entrypoint: String?
-        var sawUserRecord = false
-        var stopScan = false
+        var scanner = HeaderScanner()
 
-        // Whole lines only, so JSON is parsed straight from the line's bytes.
-        // The old lossy String decode existed to survive a window boundary
-        // landing inside a multibyte sequence; complete lines can't have one.
-        // It also repaired bytes that were invalid *on disk*, which this does
-        // not — such a line is now rejected outright. That is the better
-        // failure (a mangled title is worse than none) but it is a real
-        // behaviour change, and on a header line it costs the title and the
-        // `sdk-*` filter together, the same pair this function exists to fix.
-        func consume(_ lineData: Data) {
+        var carry = Data()
+        var scannedBytes = 0
+        var atEOF = false
+
+        while !scanner.stopScan, !atEOF, scannedBytes < metadataMaxScanSize {
+            // Past the head chunk, keep going only while the header is still
+            // out of reach — except that a non-empty `carry` may be a
+            // COMPLETE final record rather than a fragment. Which one it is
+            // depends solely on whether the file ends here, so ask, with a
+            // single byte, instead of guessing. Without this a file whose
+            // size is an exact multiple of the chunk loses its last record.
+            if scannedBytes >= metadataHeadSize, scanner.sawUserRecord {
+                if !carry.isEmpty { atEOF = handle.readData(ofLength: 1).isEmpty }
+                break
+            }
+
+            let want = min(metadataHeadSize, metadataMaxScanSize - scannedBytes)
+            let chunk = handle.readData(ofLength: want)
+            scannedBytes += chunk.count
+            // Only a zero-length read proves EOF. A short read implies it on a
+            // local regular file and not necessarily anywhere else, so reading
+            // one more time costs a syscall and removes an assumption.
+            if chunk.isEmpty {
+                atEOF = true
+                break
+            }
+            carry.append(chunk)
+
+            var searchStart = carry.startIndex
+            while let newline = carry[searchStart...].firstIndex(of: 0x0A) {
+                scanner.consume(Data(carry[searchStart..<newline]))
+                searchStart = newline + 1
+                if scanner.stopScan { break }
+            }
+            // Keep only the unterminated tail; the copy re-bases the indices.
+            carry = Data(carry[searchStart...])
+        }
+
+        // A final record with no trailing newline is complete only at EOF.
+        // Hitting the ceiling instead leaves a fragment, which is exactly what
+        // must not be parsed.
+        // `consume` silently rejects a line it cannot parse, so `carry` is NOT
+        // cleared here even on success. These files are appended to by running
+        // sessions, so "EOF" can mean "the CLI has not finished this record
+        // yet" — clearing would fold an unparsed fragment into `consumedBytes`
+        // below and hand the tail scan a mid-record start, which is the exact
+        // hole that bound exists to close. Leaving it costs the tail scan one
+        // re-read: for a record `consume` accepted that is exactly idempotent,
+        // and relocation is last-wins. For one it REJECTED it is not — the
+        // tail decodes lossily, so a `relocated` carrying a byte that is
+        // invalid on disk can be accepted there after being refused here.
+        // Measured, and left as is: `resolveProjectPath` checks the directory
+        // exists before using it.
+        if !scanner.stopScan, atEOF, !carry.isEmpty {
+            scanner.consume(carry)
+        }
+
+        // Bytes consumed as WHOLE LINES — which is not the same as bytes read,
+        // and the tail window below has to be bounded by this one. The line
+        // scan almost always stops mid-record, and that record's leading bytes
+        // are inside the read region while its tail is not; bounding the tail
+        // at `scannedBytes` would start it mid-record, the boundary probe would
+        // correctly call the remainder a fragment, and neither half would ever
+        // look at it. A `relocated` event landing there would be lost — and it
+        // is the tail scan's whole job not to lose one. Bounding here instead
+        // starts the tail exactly on a line boundary. That also recovers a
+        // record straddling the head chunk — but only while the file ends
+        // within 32KB of it; past that `fileSize - tailSize` dominates and the
+        // straddling record falls in the gap neither half reads, exactly as it
+        // did before. The probe pins the naive bytes-read alternative, not the
+        // pre-PR constant, which this fixture's size happens to survive.
+        let consumedBytes = UInt64(scannedBytes - carry.count)
+
+        // Sessions can be `relocated` many MB into the JSONL (e.g. a long
+        // LSE-Core session that later cd into `.claude/worktrees/…`). The
+        // head chunk misses that; the CLI still stores the JSONL under the
+        // current encoded cwd, so returning the stale launch cwd here would
+        // make `--resume` spawn the CLI in the wrong dir → CLI can't find
+        // the JSONL → empty session with a fresh id (see `backfillResumeId`
+        // in logs). Scan the tail for the latest relocation event.
+        // On I/O failure we keep head-only data; `loadAllSessions`'s
+        // encoded-folder verification still protects against a stale cwd.
+        if !scanner.isBackgroundScheduled {
+            var stage = "seekToEnd"
+            do {
+                let fileSize = try handle.seekToEnd()
+                if fileSize > consumedBytes {
+                    let tailSize: UInt64 = 32_768
+                    let tailStart = max(consumedBytes, fileSize - min(tailSize, fileSize))
+                    // Only drop the first tail line when `tailStart` lands
+                    // mid-line. If the previous byte is `\n`, the first line
+                    // is complete — dropping it would lose a `relocated`
+                    // event that begins exactly at the window boundary.
+                    // Offset 0 is a line start by definition and has no
+                    // previous byte to probe. Reached whenever the scan
+                    // consumed no whole line — any file with no newline in the
+                    // region it read — and the file fits in one tail window.
+                    // The probe's own `arrayContentJSONL` is that shape, so
+                    // this runs on every CI build. Three reviewers have now
+                    // reasoned about this branch and the first two deleted it
+                    // in their heads; measure before believing either.
+                    var startsAtLineBoundary = tailStart == 0
+                    if tailStart > 0 {
+                        stage = "seek to tailStart-1"
+                        try handle.seek(toOffset: tailStart - 1)
+                        stage = "read boundary byte"
+                        if let probe = try handle.read(upToCount: 1), probe == Data([0x0A]) {
+                            startsAtLineBoundary = true
+                        }
+                    }
+                    stage = "seek to tailStart"
+                    try handle.seek(toOffset: tailStart)
+                    stage = "readToEnd"
+                    let tailData = try handle.readToEnd() ?? Data()
+                    let tailText = String(decoding: tailData, as: UTF8.self)
+                    let tailLines = tailText.split(separator: "\n", omittingEmptySubsequences: true)
+                    let start = startsAtLineBoundary ? 0 : 1
+                    if start < tailLines.count {
+                        // Reversed: the last relocated in the tail wins on first hit.
+                        for line in tailLines[start...].reversed() {
+                            guard line.contains("relocated"),
+                                  let lineData = line.data(using: .utf8),
+                                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                                  json["type"] as? String == "relocated",
+                                  let value = json["relocatedCwd"] as? String, !value.isEmpty
+                            else { continue }
+                            scanner.noteRelocated(value)
+                            break
+                        }
+                    }
+                }
+            } catch {
+                logger.error("extractMetadata: tail scan I/O failed at \(stage, privacy: .public) for \(path, privacy: .private): \(String(describing: error), privacy: .public)")
+            }
+        }
+
+        return scanner.result
+    }
+}
+
+extension ClaudeSessionHistory {
+    /// The per-line half of `extractMetadata`, lifted out of it so the SSH
+    /// remote path can apply the SAME filters to header bytes fetched off
+    /// another machine.
+    ///
+    /// The alternative was reimplementing the `entrypoint: "sdk-*"` and
+    /// `<scheduled-task` tests in the remote shell, which puts two copies of
+    /// the filter one network hop apart where nothing can notice them
+    /// drifting — and the drift is silent: a stale copy resumes an automated
+    /// run instead of the user's session. Measured on the remote host this
+    /// was built against, the third-newest JSONL in a real project folder was
+    /// exactly such a run (a `/security-review`, `entrypoint: "sdk-py"`).
+    ///
+    /// Line-oriented only: `extractMetadata` keeps the escalation loop and the
+    /// tail relocation scan, both of which need a seekable handle.
+    ///
+    /// The two are NOT alike in whether the remote path can do without them,
+    /// and the first revision of this comment said it could do without both.
+    /// The relocation scan it genuinely does not need — the user picked the
+    /// directory, so there is no relocated cwd to resolve. Escalation it does:
+    /// `isAutomated == false` means "no `sdk-*` entrypoint was SEEN", which is
+    /// only "not automated" once the header was actually reached, and
+    /// `sawUserRecord` is this type's own evidence for that. A reviewer sampled
+    /// the newest 50 files on this machine and found one automated transcript
+    /// yielding no entrypoint inside a single head chunk, so
+    /// `RemoteSessionHistory` escalates its window on that signal rather than
+    /// reading one fixed chunk. That sample is its own and was taken days
+    /// after `maxSessionsToKeep`'s; the automated share of a "newest 50" drifts
+    /// as the machine is used, so the two are not reconcilable and neither is
+    /// restated as the other's.
+    struct HeaderScanner {
+        private var aiTitle: String?
+        private var firstUserMessage: String?
+        private var firstCwd: String?
+        private var lastRelocatedCwd: String?
+        private var entrypoint: String?
+        private(set) var isBackgroundScheduled = false
+        private(set) var sawUserRecord = false
+        /// True once ANY line parsed as JSON. Separates "the window ended
+        /// before the header" from "these bytes are not a transcript" — one is
+        /// worth reading further for, the other is worth rejecting, and the
+        /// SSH remote path accepted both as a session until a reviewer split
+        /// them. Local callers do not read it: `extractMetadata` returns
+        /// whatever it parsed either way.
+        private(set) var sawAnyRecord = false
+        /// Set by the one record whose CONTENT ends the scan - see `consume`.
+        private(set) var stopScan = false
+
+        /// Whole lines only, so JSON is parsed straight from the line's bytes.
+        /// The old lossy String decode existed to survive a window boundary
+        /// landing inside a multibyte sequence; complete lines can't have one.
+        /// It also repaired bytes that were invalid *on disk*, which this does
+        /// not — such a line is now rejected outright. That is the better
+        /// failure (a mangled title is worse than none) but it is a real
+        /// behaviour change, and on a header line it costs the title and the
+        /// `sdk-*` filter together — the pair `extractMetadata`'s escalation
+        /// exists to recover ("two symptoms, one cause" on its own doc).
+        mutating func consume(_ lineData: Data) {
             guard !lineData.isEmpty,
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
             else { return }
+            sawAnyRecord = true
 
             if firstCwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
                 firstCwd = value
@@ -945,144 +1152,16 @@ enum ClaudeSessionHistory {
             }
         }
 
-        var carry = Data()
-        var scannedBytes = 0
-        var atEOF = false
+        /// Record a relocation the line scan never reached. Only
+        /// `extractMetadata`'s tail scan calls this; last write wins, which is
+        /// the line scan's own rule.
+        mutating func noteRelocated(_ cwd: String) { lastRelocatedCwd = cwd }
 
-        while !stopScan, !atEOF, scannedBytes < metadataMaxScanSize {
-            // Past the head chunk, keep going only while the header is still
-            // out of reach — except that a non-empty `carry` may be a
-            // COMPLETE final record rather than a fragment. Which one it is
-            // depends solely on whether the file ends here, so ask, with a
-            // single byte, instead of guessing. Without this a file whose
-            // size is an exact multiple of the chunk loses its last record.
-            if scannedBytes >= metadataHeadSize, sawUserRecord {
-                if !carry.isEmpty { atEOF = handle.readData(ofLength: 1).isEmpty }
-                break
-            }
-
-            let want = min(metadataHeadSize, metadataMaxScanSize - scannedBytes)
-            let chunk = handle.readData(ofLength: want)
-            scannedBytes += chunk.count
-            // Only a zero-length read proves EOF. A short read implies it on a
-            // local regular file and not necessarily anywhere else, so reading
-            // one more time costs a syscall and removes an assumption.
-            if chunk.isEmpty {
-                atEOF = true
-                break
-            }
-            carry.append(chunk)
-
-            var searchStart = carry.startIndex
-            while let newline = carry[searchStart...].firstIndex(of: 0x0A) {
-                consume(Data(carry[searchStart..<newline]))
-                searchStart = newline + 1
-                if stopScan { break }
-            }
-            // Keep only the unterminated tail; the copy re-bases the indices.
-            carry = Data(carry[searchStart...])
+        var result: (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
+            (aiTitle ?? firstUserMessage ?? "Untitled",
+             lastRelocatedCwd ?? firstCwd,
+             isBackgroundScheduled,
+             entrypoint?.hasPrefix("sdk-") == true)
         }
-
-        // A final record with no trailing newline is complete only at EOF.
-        // Hitting the ceiling instead leaves a fragment, which is exactly what
-        // must not be parsed.
-        // `consume` silently rejects a line it cannot parse, so `carry` is NOT
-        // cleared here even on success. These files are appended to by running
-        // sessions, so "EOF" can mean "the CLI has not finished this record
-        // yet" — clearing would fold an unparsed fragment into `consumedBytes`
-        // below and hand the tail scan a mid-record start, which is the exact
-        // hole that bound exists to close. Leaving it costs the tail scan one
-        // re-read: for a record `consume` accepted that is exactly idempotent,
-        // and relocation is last-wins. For one it REJECTED it is not — the
-        // tail decodes lossily, so a `relocated` carrying a byte that is
-        // invalid on disk can be accepted there after being refused here.
-        // Measured, and left as is: `resolveProjectPath` checks the directory
-        // exists before using it.
-        if !stopScan, atEOF, !carry.isEmpty {
-            consume(carry)
-        }
-
-        // Bytes consumed as WHOLE LINES — which is not the same as bytes read,
-        // and the tail window below has to be bounded by this one. The line
-        // scan almost always stops mid-record, and that record's leading bytes
-        // are inside the read region while its tail is not; bounding the tail
-        // at `scannedBytes` would start it mid-record, the boundary probe would
-        // correctly call the remainder a fragment, and neither half would ever
-        // look at it. A `relocated` event landing there would be lost — and it
-        // is the tail scan's whole job not to lose one. Bounding here instead
-        // starts the tail exactly on a line boundary. That also recovers a
-        // record straddling the head chunk — but only while the file ends
-        // within 32KB of it; past that `fileSize - tailSize` dominates and the
-        // straddling record falls in the gap neither half reads, exactly as it
-        // did before. The probe pins the naive bytes-read alternative, not the
-        // pre-PR constant, which this fixture's size happens to survive.
-        let consumedBytes = UInt64(scannedBytes - carry.count)
-
-        // Sessions can be `relocated` many MB into the JSONL (e.g. a long
-        // LSE-Core session that later cd into `.claude/worktrees/…`). The
-        // head chunk misses that; the CLI still stores the JSONL under the
-        // current encoded cwd, so returning the stale launch cwd here would
-        // make `--resume` spawn the CLI in the wrong dir → CLI can't find
-        // the JSONL → empty session with a fresh id (see `backfillResumeId`
-        // in logs). Scan the tail for the latest relocation event.
-        // On I/O failure we keep head-only data; `loadAllSessions`'s
-        // encoded-folder verification still protects against a stale cwd.
-        if !isBackgroundScheduled {
-            var stage = "seekToEnd"
-            do {
-                let fileSize = try handle.seekToEnd()
-                if fileSize > consumedBytes {
-                    let tailSize: UInt64 = 32_768
-                    let tailStart = max(consumedBytes, fileSize - min(tailSize, fileSize))
-                    // Only drop the first tail line when `tailStart` lands
-                    // mid-line. If the previous byte is `\n`, the first line
-                    // is complete — dropping it would lose a `relocated`
-                    // event that begins exactly at the window boundary.
-                    // Offset 0 is a line start by definition and has no
-                    // previous byte to probe. Reached whenever the scan
-                    // consumed no whole line — any file with no newline in the
-                    // region it read — and the file fits in one tail window.
-                    // The probe's own `arrayContentJSONL` is that shape, so
-                    // this runs on every CI build. Three reviewers have now
-                    // reasoned about this branch and the first two deleted it
-                    // in their heads; measure before believing either.
-                    var startsAtLineBoundary = tailStart == 0
-                    if tailStart > 0 {
-                        stage = "seek to tailStart-1"
-                        try handle.seek(toOffset: tailStart - 1)
-                        stage = "read boundary byte"
-                        if let probe = try handle.read(upToCount: 1), probe == Data([0x0A]) {
-                            startsAtLineBoundary = true
-                        }
-                    }
-                    stage = "seek to tailStart"
-                    try handle.seek(toOffset: tailStart)
-                    stage = "readToEnd"
-                    let tailData = try handle.readToEnd() ?? Data()
-                    let tailText = String(decoding: tailData, as: UTF8.self)
-                    let tailLines = tailText.split(separator: "\n", omittingEmptySubsequences: true)
-                    let start = startsAtLineBoundary ? 0 : 1
-                    if start < tailLines.count {
-                        // Reversed: the last relocated in the tail wins on first hit.
-                        for line in tailLines[start...].reversed() {
-                            guard line.contains("relocated"),
-                                  let lineData = line.data(using: .utf8),
-                                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                                  json["type"] as? String == "relocated",
-                                  let value = json["relocatedCwd"] as? String, !value.isEmpty
-                            else { continue }
-                            lastRelocatedCwd = value
-                            break
-                        }
-                    }
-                }
-            } catch {
-                logger.error("extractMetadata: tail scan I/O failed at \(stage, privacy: .public) for \(path, privacy: .private): \(String(describing: error), privacy: .public)")
-            }
-        }
-
-        let cwd = lastRelocatedCwd ?? firstCwd
-        let title = aiTitle ?? firstUserMessage ?? "Untitled"
-        return (title, cwd, isBackgroundScheduled, entrypoint?.hasPrefix("sdk-") == true)
     }
 }

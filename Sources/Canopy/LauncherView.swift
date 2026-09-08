@@ -16,6 +16,10 @@ struct LauncherView: View {
     @State private var remoteHost: String = ""
     @State private var savedHosts: [String] = []
     @State private var isRemoteMode = false
+    /// True while the SSH round trip that resolves "Continue session" for a
+    /// remote host is in flight. Its own flag rather than reusing
+    /// `isCreatingWorktree` so the button can say which one it is waiting on.
+    @State private var isResolvingRemoteSession = false
     @State private var remoteDirectory: String = "~"
     @State private var showRemoteBrowser = false
     @State private var showCloneSheet = false
@@ -474,19 +478,24 @@ struct LauncherView: View {
 
     // MARK: - Start Button
 
+    private var startButtonTitle: String {
+        if isCreatingWorktree { return "Creating Worktree…" }
+        if isResolvingRemoteSession { return "Finding Session…" }
+        return "Start Session"
+    }
+
     private var startButton: some View {
         Button {
             startSession()
         } label: {
-            Label(isCreatingWorktree ? "Creating Worktree…" : "Start Session",
-                  systemImage: "play.fill")
+            Label(startButtonTitle, systemImage: "play.fill")
                 .font(.headline)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(isCreatingWorktree || (isRemoteMode
+        .disabled(isCreatingWorktree || isResolvingRemoteSession || (isRemoteMode
             ? (remoteHost.isEmpty || remoteDirectory.isEmpty)
             : selectedDirectory == nil))
         .keyboardShortcut(.return, modifiers: [])
@@ -942,10 +951,21 @@ struct LauncherView: View {
     }
 
     private func latestSession(for directory: URL) -> SessionEntry? {
-        // Query disk directly so remote-only paths (SSH workspace folders that
-        // don't exist locally) still surface a session. The in-memory `sessions`
-        // list is populated by loadAllSessions, which excludes entries whose
-        // cwd is missing locally — fine for UI listing, wrong for continue.
+        // Query disk directly rather than filtering the in-memory `sessions`
+        // list: that one comes from `loadAllSessions`, which drops entries whose
+        // cwd is missing locally — fine for UI listing, wrong for continue,
+        // because a directory can be gone (an unmounted volume, a deleted
+        // worktree) while its transcripts are still resumable.
+        //
+        // Selection is by ORDER on the remote path, which never reaches this
+        // `.max` — see `RemoteSessionHistory`.
+        //
+        // LOCAL sessions only. This reads this machine's `~/.claude/projects`,
+        // and a remote session's transcripts are on the remote host — an older
+        // version of this comment claimed the disk read covered SSH workspace
+        // folders, which is exactly backwards and is why remote "Continue
+        // session" silently started from scratch. `RemoteSessionHistory` is
+        // that case; `launchLocal` routes to it.
         ClaudeSessionHistory.loadSessions(for: directory)
             .max { $0.timestamp < $1.timestamp }
     }
@@ -965,6 +985,13 @@ struct LauncherView: View {
     }
 
     private func startSession() {
+        // The Start button is `.disabled` while a remote lookup is in flight;
+        // the SSH Host and Remote Directory fields' `onSubmit` are not, so
+        // Enter reaches here regardless. Before the remote branch went async
+        // there was no window to re-enter — now each press spawns its own
+        // lookup Task, and each Task that finishes calls `launchSession`, so
+        // holding Enter opens a pane per press against one resume id.
+        guard !isResolvingRemoteSession else { return }
         let selectedModel = model.isEmpty ? nil : model
         let selectedEffort = effortLevel.isEmpty ? nil : effortLevel
         let selectedPermission = resolvedPermission
@@ -1023,6 +1050,33 @@ struct LauncherView: View {
     }
 
     private func launchLocal(_ dir: URL, remoteHost: String?, model: String?, effort: String?, permission: PermissionMode) {
+        // A remote session's transcripts live on the OTHER machine, so
+        // `latestSession(for:)` — which reads this machine's
+        // `~/.claude/projects` — can only ever miss, or worse, hand the remote
+        // CLI a local id for a conversation it has never seen. Resolve it over
+        // SSH instead. See `RemoteSessionHistory`.
+        //
+        // Only when the user asked to continue: a fresh remote session must
+        // not pay a network round trip to learn something it will not use.
+        if let remoteHost, continueSession {
+            // Captured BEFORE the await. `launchSession` samples the modifier
+            // itself for every synchronous caller; this is the one route where
+            // "now" is a round trip too late.
+            let cmdHeld = NSEvent.modifierFlags.contains(.command)
+            isResolvingRemoteSession = true
+            Task {
+                let latest = await RemoteSessionHistory.latestSession(host: remoteHost, directory: dir)
+                isResolvingRemoteSession = false
+                // A miss is not an error worth a dialog: an unreachable host
+                // fails again, visibly, one step later when the shim starts,
+                // and a directory with no resumable session is the ordinary
+                // first-run case. Both land on a fresh session, which is what
+                // this path did before the lookup existed.
+                appState.launchSession(directory: dir, resumeSessionId: latest?.id, sessionTitle: latest?.title, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: cmdHeld)
+            }
+            return
+        }
+
         var resumeId: String?
         var resumeTitle: String?
         if continueSession, let latest = latestSession(for: dir) {

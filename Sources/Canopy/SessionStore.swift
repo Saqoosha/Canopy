@@ -512,11 +512,24 @@ final class SessionStore {
         let title = sessionTitle ?? "Untitled"
         let project = remoteHost.map { "\($0):\(directory.lastPathComponent)" }
             ?? GitWorktree.projectDisplayName(for: directory)
-        // The CLI ignores a --resume id that has no JSONL on disk, so for a
-        // brand-new session this UUID is only a placeholder; ShimProcess's
+        // For a brand-new session this UUID is only a placeholder; ShimProcess's
         // backfillResumeId swaps in the CLI's real session id once the
         // webview reports it via update_session_state (or rename_tab —
         // both carry sessionId through the same handler).
+        //
+        // What makes the placeholder harmless LOCALLY is not that the CLI
+        // ignores it — a sentence that stood here and is now deleted rather
+        // than corrected in place, because it is the discarded model that hid
+        // this feature's bug for three rounds. The id never reaches the CLI at
+        // all: the extension resolves a session off this machine's disk and
+        // starts fresh when it finds nothing. A REMOTE session is the opposite
+        // case, which is why the kind has to be recorded — `--resume` is handed
+        // to the CLI on the other machine, and an unresolvable one exits 1.
+        //
+        // This is where the distinction is MINTED. The other routes that hold
+        // the same information state it at their own call sites —
+        // `openCloudAsync`, `backfillResumeId`, and `applyRestoreSnapshot`,
+        // which carries the recorded value rather than asserting one.
         let session = OpenSession(
             origin: origin,
             resumeId: resumeId ?? UUID().uuidString,
@@ -526,7 +539,8 @@ final class SessionStore {
             permissionMode: permissionMode,
             model: model,
             effortLevel: effortLevel,
-            customApi: customApi
+            customApi: customApi,
+            resumeIdIsExistingTranscript: resumeId != nil
         )
         // Don't persist remote-host paths in recents (matches existing behaviour).
         if remoteHost == nil {
@@ -734,7 +748,13 @@ final class SessionStore {
             title: title,
             project: project,
             status: .spawning,
-            permissionMode: permissionMode
+            permissionMode: permissionMode,
+            // The teleport bridge just wrote that transcript, so the flag is
+            // factually true. Inert — a teleported session is local, and the
+            // flag is only read on the SSH remote path — but left false it was
+            // also UNCORRECTABLE: `backfillResumeId` returns early when the id
+            // already matches, which for this site it always does.
+            resumeIdIsExistingTranscript: true
         )
         // Append (don't insert at top): match openNew's browser-tab
         // convention so cloud reopens don't push existing Open rows
@@ -1768,7 +1788,8 @@ final class SessionStore {
                 model: open.model,
                 effortLevel: open.effortLevel,
                 providerId: open.customApi?.id,
-                lastActiveAt: open.lastActiveAt
+                lastActiveAt: open.lastActiveAt,
+                resumeIdIsExistingTranscript: open.resumeIdIsExistingTranscript
             ))
         }
 
@@ -1853,7 +1874,26 @@ final class SessionStore {
                 permissionMode: Self.clampedPermissionMode(s.permissionMode),
                 model: s.model,
                 effortLevel: s.effortLevel,
-                customApi: provider
+                customApi: provider,
+                // Carried from the snapshot, NOT asserted here. Asserting
+                // `true` was this fix's own first revision and a reviewer
+                // found what it broke: a snapshot does not only hold ids the
+                // CLI reported. Quit inside the window between the shim
+                // starting — which is what arms the quit prompt — and the
+                // CLI's first session-id report, and the captured id is still
+                // `openNew`'s placeholder. Restoring THAT with `--resume`
+                // makes the remote CLI exit 1, so a pane that used to come up
+                // fresh (correct, for a session with no transcript) instead
+                // fails to start.
+                //
+                // The state this is still wrong in, named because it stays
+                // reachable: a remote transcript deleted between quit and
+                // restore. `--resume` is then unresolvable and the pane fails
+                // visibly rather than coming up empty — a rare loud failure
+                // traded for a common silent one, and the reason
+                // `resumableOnDisk` accepting remote sessions unchecked does
+                // not settle the question by itself.
+                resumeIdIsExistingTranscript: s.resumeIdIsExistingTranscript ?? false
             )
             byResumeId[s.resumeId] = open
             restored.append(open)

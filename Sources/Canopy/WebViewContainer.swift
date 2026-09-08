@@ -176,7 +176,6 @@ struct WebViewContainer: NSViewRepresentable {
             ucc.removeScriptMessageHandler(forName: "vscodeHost")
             shimProcess = nil
 
-            // Create new ShimProcess with --resume
             let newShim = ShimProcess(
                 workingDirectory: workingDirectory,
                 resumeSessionId: sessionId,
@@ -186,7 +185,17 @@ struct WebViewContainer: NSViewRepresentable {
                 sessionTitle: nil,
                 statusBarData: statusBarData,
                 remoteHost: remoteHost,
-                customApi: customApi
+                customApi: customApi,
+                // `sessionId` came from the CLI itself (`activeSessionId`, via
+                // the disconnect delegate) for a session that was mid-turn when
+                // the link dropped, so it names a real remote transcript by
+                // construction — this is the strongest case in the codebase for
+                // the flag being true.
+                //
+                // Getting it wrong here is invisible: the overlay resolves to
+                // "connected" and the conversation is gone. That is why the
+                // parameter no longer has a default — see `ShimProcess`.
+                resumeIdIsExistingTranscript: true
             )
             newShim.delegate = self
             newShim.webView = webView
@@ -392,7 +401,11 @@ struct WebViewContainer: NSViewRepresentable {
                 sessionTitle: sessionTitle,
                 statusBarData: statusBarData,
                 remoteHost: remoteHost,
-                customApi: customApi
+                customApi: customApi,
+                // Read off the session rather than threaded through this
+                // view's own properties: the flag only ever accompanies
+                // `resumeSessionId`, and `boundSession` is already here.
+                resumeIdIsExistingTranscript: boundSession?.resumeIdIsExistingTranscript ?? false
             )
             isFreshShim = true
             // Bind the shim to the OpenSession IMMEDIATELY, before the

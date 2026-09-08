@@ -91,6 +91,22 @@ struct SessionRestoreSnapshot: Codable, Equatable {
         var effortLevel: String?
         var providerId: String?
         var lastActiveAt: Date
+        /// `OpenSession.resumeIdIsExistingTranscript` as it stood at capture.
+        ///
+        /// Recorded rather than asserted on restore, and the first revision did
+        /// assert it — `applyRestoreSnapshot` hardcoded `true` on the reasoning
+        /// that a snapshot only holds ids the CLI reported. It does not: a
+        /// session quit before its first `update_session_state` still carries
+        /// the placeholder `openNew` minted, and the quit prompt is gated on
+        /// `ShimProcess.hasActiveSession`, which goes true when the shim
+        /// starts rather than when the CLI answers. On a REMOTE session that
+        /// turned a restore into `--resume <placeholder>` and a CLI exit 1 —
+        /// a pane that fails to start, in place of one that used to come up
+        /// fresh, which is correct for a session that never had a transcript.
+        ///
+        /// Optional so a snapshot written before this field existed still
+        /// decodes; nil is read as false, which is that build's own behaviour.
+        var resumeIdIsExistingTranscript: Bool?
     }
 
     enum PaneContent: Codable, Equatable {
