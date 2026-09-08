@@ -115,6 +115,24 @@ detach_mount() {
 # Strip code-signed xattrs from shell scripts in local DMG copies before delta generation.
 # codesign adds com.apple.cs.* xattrs to resource files; Sparkle can't diff files with
 # these xattrs. File contents (hashed in CodeResources) are unaffected, so this is safe.
+#
+# REBUILDING A DMG CHANGES ITS BYTES, and generate_appcast signs whatever is in
+# $APPCAST_DIR while release.sh publishes build/Canopy-X.dmg — so a rebuild here
+# makes the appcast's EdDSA signature and length describe a file nobody can
+# download. Sparkle then fails the check and SILENTLY drops that item, offering
+# the previous version as "latest" (issue #188). Two guards follow from that:
+# the predicate below matches ONLY the xattrs this function exists to remove,
+# and the current version's DMG is never passed here at all.
+#
+# The predicate is deliberately `com.apple.cs.` and not "has any xattr". The
+# published 2.28.0 DMG carries exactly one .sh xattr — com.apple.provenance,
+# which the kernel applies and `xattr -c` does not remove — so "any xattr"
+# matched on every release since at least 2.26.1 and rebuilt every DMG every
+# run, which is why the mismatch was structural rather than a one-off.
+sh_has_cs_xattrs() {
+  find "$1" -name "*.sh" -exec xattr {} \; 2>/dev/null | grep -q '^com\.apple\.cs\.'
+}
+
 strip_sh_xattrs() {
   local DMG="$1"
   local MOUNT TMP_CONTENT REBUILD=0
@@ -124,8 +142,7 @@ strip_sh_xattrs() {
     rm -rf "$MOUNT" "$TMP_CONTENT"
     return 0
   fi
-  # Only rebuild if any .sh has xattrs
-  if find "$MOUNT" -name "*.sh" -exec xattr {} \; 2>/dev/null | grep -q .; then
+  if sh_has_cs_xattrs "$MOUNT"; then
     REBUILD=1
     cp -Rp "$MOUNT"/* "$TMP_CONTENT/" 2>/dev/null || true
   fi
@@ -151,10 +168,33 @@ strip_sh_xattrs() {
   rm -rf "$TMP_CONTENT"
 }
 
+# The current version's DMG is the one release.sh already published, so it must
+# reach generate_appcast byte-for-byte. It is skipped rather than checked-and-
+# skipped-if-clean: a conditional here would put the appcast's correctness back
+# on a predicate, which is the shape that broke. package_dmg.sh already runs
+# `xattr -c` over the .sh files before creating it, so a cs xattr surviving into
+# it is a regression there — reported as a warning, because it only degrades
+# delta generation while rebuilding would break the update itself.
 echo "Stripping shell script xattrs from local DMG copies..."
 for _DMG in "$APPCAST_DIR"/*.dmg; do
+  if [[ "$(basename "$_DMG")" == "$DMG_NAME" ]]; then
+    echo "  Skipping $DMG_NAME (published artifact — must stay byte-identical)"
+    continue
+  fi
   strip_sh_xattrs "$_DMG"
 done
+
+_CUR_MOUNT=$(mktemp -d)
+if hdiutil attach "${APPCAST_DIR}/${DMG_NAME}" -mountpoint "$_CUR_MOUNT" -nobrowse -quiet -readonly 2>/dev/null; then
+  if sh_has_cs_xattrs "$_CUR_MOUNT"; then
+    echo "  warn: ${DMG_NAME} still carries com.apple.cs.* xattrs on a .sh file." >&2
+    echo "        package_dmg.sh's strip regressed; deltas from this release will" >&2
+    echo "        be degraded, but the update itself is unaffected." >&2
+  fi
+  detach_mount "$_CUR_MOUNT" && rm -rf "$_CUR_MOUNT"
+else
+  rm -rf "$_CUR_MOUNT"
+fi
 
 # If an existing appcast.xml exists on gh-pages, fetch it so generate_appcast
 # can append to it (preserving older versions in the feed).
@@ -210,6 +250,75 @@ if new_content != content:
         f.write(new_content)
     print("  Normalized channel metadata")
 PYEOF
+
+# The failure this guards against is silent by construction: Sparkle downloads
+# the published DMG, checks it against the appcast's EdDSA signature, and on a
+# mismatch DISCARDS the item without a log line or an error, then offers the
+# next-oldest item as "latest". Nothing on the release side looks wrong — the
+# appcast parses, GitHub has the asset, the tag exists (issue #188). So assert
+# the one property that actually has to hold, against the file users will
+# really download, before any of it reaches gh-pages.
+echo "=== Verifying appcast matches the published DMG ==="
+PUBLISHED_SIZE=$(gh release view "v${VERSION}" --json assets \
+  --jq ".assets[] | select(.name == \"${DMG_NAME}\") | .size" 2>/dev/null || echo "")
+if [[ -z "$PUBLISHED_SIZE" ]]; then
+  echo "Error: ${DMG_NAME} is not attached to release v${VERSION}." >&2
+  echo "Not pushing an appcast that points at a file nobody can download." >&2
+  exit 1
+fi
+
+# Length alone is a proxy, and this guard exists precisely because a proxy
+# already failed once. Two same-size DMGs sign differently, and the local copy
+# can diverge from the published one without changing size — a re-run against a
+# stale or replaced build/Canopy-X.dmg, say. So fetch the bytes users will
+# actually download and compare them against the exact file generate_appcast
+# signed. One ~3.5 MB download at the end of a release that has already built,
+# notarized and uploaded is not a cost worth optimising away.
+VERIFY_DIR=$(mktemp -d)
+if ! gh release download "v${VERSION}" --pattern "${DMG_NAME}" --dir "$VERIFY_DIR" --clobber >/dev/null 2>&1; then
+  rm -rf "$VERIFY_DIR"
+  echo "Error: could not download ${DMG_NAME} from release v${VERSION} to verify it." >&2
+  exit 1
+fi
+if ! cmp -s "${VERIFY_DIR}/${DMG_NAME}" "${APPCAST_DIR}/${DMG_NAME}"; then
+  echo "Error: the DMG the appcast signed is not the DMG that was published." >&2
+  echo "  signed:    ${APPCAST_DIR}/${DMG_NAME} ($(stat -f%z "${APPCAST_DIR}/${DMG_NAME}") bytes)" >&2
+  echo "  published: ${DMG_NAME} on v${VERSION} (${PUBLISHED_SIZE} bytes)" >&2
+  echo "Sparkle would fail the signature check and silently skip this update." >&2
+  echo "Nothing was pushed to gh-pages." >&2
+  rm -rf "$VERIFY_DIR"
+  exit 1
+fi
+rm -rf "$VERIFY_DIR"
+echo "  ${DMG_NAME}: byte-identical to the published asset"
+
+# Not subsumed by the byte comparison above: that one proves the right file was
+# available to be signed, this one proves the appcast's item actually describes
+# it. The feed is generated on top of the one fetched from gh-pages, so a
+# generate_appcast that preserves a stale entry for this version instead of
+# re-signing leaves a correct DMG beside a wrong enclosure.
+APPCAST_SIZE=$(python3 - "${APPCAST_DIR}/appcast.xml" "$DMG_NAME" <<'PYEOF'
+import re, sys
+xml = open(sys.argv[1]).read()
+name = sys.argv[2]
+for tag in re.findall(r'<enclosure\b[^>]*>', xml):
+    url = re.search(r'url="([^"]*)"', tag)
+    if url and url.group(1).endswith('/' + name):
+        length = re.search(r'length="(\d+)"', tag)
+        print(length.group(1) if length else '')
+        break
+PYEOF
+)
+
+if [[ "$APPCAST_SIZE" != "$PUBLISHED_SIZE" ]]; then
+  echo "Error: appcast describes a different file than the one published." >&2
+  echo "  appcast length:   ${APPCAST_SIZE:-<no enclosure for ${DMG_NAME}>}" >&2
+  echo "  published asset:  ${PUBLISHED_SIZE}" >&2
+  echo "Sparkle would fail the signature check and silently skip this update." >&2
+  echo "Nothing was pushed to gh-pages." >&2
+  exit 1
+fi
+echo "  ${DMG_NAME}: ${APPCAST_SIZE} bytes, matches the published asset"
 
 echo "Generated appcast.xml:"
 cat "${APPCAST_DIR}/appcast.xml"
