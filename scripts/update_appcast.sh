@@ -267,6 +267,36 @@ if [[ -z "$PUBLISHED_SIZE" ]]; then
   exit 1
 fi
 
+# Length alone is a proxy, and this guard exists precisely because a proxy
+# already failed once. Two same-size DMGs sign differently, and the local copy
+# can diverge from the published one without changing size — a re-run against a
+# stale or replaced build/Canopy-X.dmg, say. So fetch the bytes users will
+# actually download and compare them against the exact file generate_appcast
+# signed. One ~3.5 MB download at the end of a release that has already built,
+# notarized and uploaded is not a cost worth optimising away.
+VERIFY_DIR=$(mktemp -d)
+if ! gh release download "v${VERSION}" --pattern "${DMG_NAME}" --dir "$VERIFY_DIR" --clobber >/dev/null 2>&1; then
+  rm -rf "$VERIFY_DIR"
+  echo "Error: could not download ${DMG_NAME} from release v${VERSION} to verify it." >&2
+  exit 1
+fi
+if ! cmp -s "${VERIFY_DIR}/${DMG_NAME}" "${APPCAST_DIR}/${DMG_NAME}"; then
+  echo "Error: the DMG the appcast signed is not the DMG that was published." >&2
+  echo "  signed:    ${APPCAST_DIR}/${DMG_NAME} ($(stat -f%z "${APPCAST_DIR}/${DMG_NAME}") bytes)" >&2
+  echo "  published: ${DMG_NAME} on v${VERSION} (${PUBLISHED_SIZE} bytes)" >&2
+  echo "Sparkle would fail the signature check and silently skip this update." >&2
+  echo "Nothing was pushed to gh-pages." >&2
+  rm -rf "$VERIFY_DIR"
+  exit 1
+fi
+rm -rf "$VERIFY_DIR"
+echo "  ${DMG_NAME}: byte-identical to the published asset"
+
+# Not subsumed by the byte comparison above: that one proves the right file was
+# available to be signed, this one proves the appcast's item actually describes
+# it. The feed is generated on top of the one fetched from gh-pages, so a
+# generate_appcast that preserves a stale entry for this version instead of
+# re-signing leaves a correct DMG beside a wrong enclosure.
 APPCAST_SIZE=$(python3 - "${APPCAST_DIR}/appcast.xml" "$DMG_NAME" <<'PYEOF'
 import re, sys
 xml = open(sys.argv[1]).read()
