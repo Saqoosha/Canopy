@@ -119,7 +119,7 @@ struct Detail: View {
                             )
                             store.closeSession(session.id)
                         }
-                        .id(session.id)
+                        .id(session.mountIdentity)
                     }
                 } else {
                     // Session was closed under us; pane should have been auto-removed

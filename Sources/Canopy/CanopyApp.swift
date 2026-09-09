@@ -501,6 +501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// keyDown here keeps the title bar still.
     private var cmdWMonitor: Any?
     private var paneFocusClickMonitor: Any?
+    private var paneHeaderContextMenuMonitor: Any?
     private var keyTypingMonitor: Any?
 
     // NOTE: there is deliberately NO app-wide didResizeNotification observer
@@ -530,6 +531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         installCmdWMonitor()
         installPaneFocusClickMonitor()
+        installPaneHeaderContextMenuMonitor()
         installKeyTypingMonitor()
         RecapCoordinator.shared.start()
         KeepAliveCoordinator.shared.start()
@@ -561,6 +563,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             handleCloseShortcut()
             return nil // consume — no flash
         }
+    }
+
+    /// Which pane a mouse event landed in, and where inside that pane.
+    ///
+    /// Shared by the two monitors that hit-test the detail column — left
+    /// mouse-down (pane focus, the close X, header rename) and right
+    /// mouse-down (the pane header's context menu). They cannot be allowed to
+    /// disagree about where a pane starts, and the only way to guarantee that
+    /// is one call to `PaneLayoutMetrics.paneWidths`: the same function
+    /// `WeightedPaneLayout` places the panes with.
+    private struct PaneHit {
+        let index: Int
+        let paneWidth: CGFloat
+        /// Origin top-left, y growing DOWN — the space
+        /// `PaneHeaderStrip.closeButtonHitRect(paneWidth:)` is written in.
+        ///
+        /// `x` is pane-local. `y` is content-view-local, and equals pane-local
+        /// only because `Detail.swift` puts every pane flush to the window top
+        /// — the first of `closeButtonHitRect`'s unenforced preconditions, and
+        /// the one that silently moves this whole rect if it is ever broken.
+        let local: CGPoint
+        /// Kept only so the close-X log line can report what the sidebar
+        /// measured as; nothing branches on it.
+        let sidebarWidth: CGFloat
+    }
+
+    /// Resolve `event` to a pane, or nil when it is not a Canopy window, no
+    /// pane exists, or the click landed in the sidebar.
+    private static func paneHit(for event: NSEvent) -> (store: SessionStore, hit: PaneHit)? {
+        guard let window = event.window, isCanopyWindow(window),
+              let store = SessionStore.shared,
+              !store.panes.isEmpty else { return nil }
+
+        // Click location in window coordinates (bottom-left origin).
+        let loc = event.locationInWindow
+        let contentHeight = window.contentView?.bounds.height ?? window.frame.height
+        let clickX = loc.x
+        let clickYFromTop = contentHeight - loc.y
+
+        // Only route clicks inside the detail column area.
+        let sidebar = PaneWindowSizer.measuredSidebarWidthTrustingCollapse(in: window)
+        guard clickX > sidebar else { return nil }
+
+        // preferredWidth is a weight. Use the same layout algorithm
+        // (WeightedPaneLayout via PaneLayoutMetrics) as Detail.swift
+        // so click hit-testing exactly matches the visual layout.
+        let contentWidth = window.contentView?.bounds.width ?? window.frame.width
+        let detailW = max(0, contentWidth - sidebar)
+        let widths = PaneLayoutMetrics.paneWidths(
+            detailWidth: detailW,
+            weights: store.panes.map(\.preferredWidth),
+            dividerWidth: SessionStore.paneDividerWidth,
+            minimumWidth: SessionStore.paneMinDragWidth
+        )
+        var xCursor = sidebar
+        for index in store.panes.indices {
+            let paneW = index < widths.count ? widths[index] : 0
+            let paneEnd = xCursor + paneW
+            if clickX >= xCursor && clickX < paneEnd {
+                return (store, PaneHit(
+                    index: index,
+                    paneWidth: paneW,
+                    local: CGPoint(x: clickX - xCursor, y: clickYFromTop),
+                    sidebarWidth: sidebar
+                ))
+            }
+            xCursor = paneEnd + SessionStore.paneDividerWidth
+        }
+        return nil
     }
 
     /// Route left-mouse-down clicks inside the detail column to pane focus.
@@ -596,138 +667,110 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // no-op.) The cost the widening did carry: the sidebar
             // measurement and the full `PaneLayoutMetrics` computation run on
             // every left mouse-down in the single-pane case, the common one.
-            guard let window = event.window, isCanopyWindow(window),
-                  let store = SessionStore.shared,
-                  !store.panes.isEmpty else { return event }
+            guard let (store, hit) = Self.paneHit(for: event) else { return event }
+            let index = hit.index
+            let paneW = hit.paneWidth
+            let localPoint = hit.local
+            let clickYFromTop = localPoint.y
 
-            // Click location in window coordinates (bottom-left origin).
-            let loc = event.locationInWindow
-            let contentHeight = window.contentView?.bounds.height ?? window.frame.height
-            let clickX = loc.x
-            let clickYFromTop = contentHeight - loc.y
-
-            // Only route clicks inside the detail column area.
-            let sidebar = PaneWindowSizer.measuredSidebarWidthTrustingCollapse(in: window)
-            guard clickX > sidebar else { return event }
-
-            // preferredWidth is a weight. Use the same layout algorithm
-            // (WeightedPaneLayout via PaneLayoutMetrics) as Detail.swift
-            // so click hit-testing exactly matches the visual layout.
-            let contentWidth = window.contentView?.bounds.width ?? window.frame.width
-            let detailW = max(0, contentWidth - sidebar)
-            let widths = PaneLayoutMetrics.paneWidths(
-                detailWidth: detailW,
-                weights: store.panes.map(\.preferredWidth),
-                dividerWidth: SessionStore.paneDividerWidth,
-                minimumWidth: SessionStore.paneMinDragWidth
-            )
-            var xCursor = sidebar
-            for index in store.panes.indices {
-                let paneW = index < widths.count ? widths[index] : 0
-                let paneEnd = xCursor + paneW
-                if clickX >= xCursor && clickX < paneEnd {
-                    // Close X first: it lives in the pane header, which macOS 26
-                    // covers with the detail column's scroll-edge BackdropView
-                    // (see PaneHeaderStrip's doc for what that band was and was
-                    // not measured to do). Hit-test it here instead and consume
-                    // the event so the click can't also start a window drag on
-                    // the way out.
-                    //
-                    // Two limitations OF THAT KIND, accepted rather than
-                    // guarded. This is not the whole inventory: the rect's
-                    // geometric preconditions are listed on
-                    // `closeButtonHitRect`, and where one breaks, a consumed
-                    // click can land on blank header space or on the window's
-                    // own traffic lights. A round of review asked for a bare-modifier
-                    // test and an app-active test; the modifier test read
-                    // `deviceIndependentFlagsMask`, which contains `.capsLock`
-                    // — so an engaged Caps Lock killed the button outright,
-                    // the reported bug back in a narrower form. Its sibling
-                    // could not be shown to do anything: by the time a local
-                    // monitor sees the mouse-down, `NSApp.isActive` is already
-                    // true, so it cannot tell an activating click from any
-                    // other. What remains, unguarded and deliberately so:
-                    //   - ctrl-click and Cmd+click close the pane rather than
-                    //     meaning secondary-click / "new pane".
-                    //   - the click that brings a background window forward
-                    //     closes a pane instead of only activating, which a
-                    //     real control's default `acceptsFirstMouse == false`
-                    //     would have swallowed. `closePane` keeps the session,
-                    //     so the cost is re-opening a pane, not losing work.
-                    // Fixing either needs a measurement first, not a guess:
-                    // the guesses cost a round and shipped a worse bug. The
-                    // measurement for the second one is cheap — `isKeyWindow`
-                    // is set inside `NSWindow.sendEvent`, which this monitor
-                    // precedes, so logging it here for a click that raises a
-                    // background window would say whether it discriminates.
-                    let localPoint = CGPoint(x: clickX - xCursor, y: clickYFromTop)
-                    // `panes.count > 1` mirrors `PaneHeaderStrip`'s
-                    // `showCloseButton`: hit-testing an X that is not drawn
-                    // would close the only pane from blank header space.
-                    if store.panes.count > 1,
-                       PaneHeaderStrip.closeButtonHitRect(paneWidth: paneW).contains(localPoint) {
-                        // notice, not debug: this is the only record that the
-                        // geometry-derived branch removed a pane, and debug
-                        // does not survive to a log capture. Same rule the
-                        // background-reconcile subsystem follows.
-                        logger.notice("""
-                            [pane] close X hit: index=\(index, privacy: .public) \
-                            paneW=\(paneW, privacy: .public) \
-                            sidebar=\(sidebar, privacy: .public) \
-                            local=(\(localPoint.x, privacy: .public),\
-                            \(localPoint.y, privacy: .public))
-                            """)
-                        store.closePane(at: index)
-                        return nil
-                    }
-                    // Double-click the header to rename, for the same
-                    // reason the close X is hit-tested here rather than by
-                    // SwiftUI: no mouse event reaches what that strip draws.
-                    // Consumed ONLY when a sheet actually opened, so the
-                    // click can still zoom the window otherwise — a launcher
-                    // pane has no session to name, and consuming there would
-                    // both fail to rename and swallow the zoom, leaving a
-                    // gesture that does nothing at all.
-                    // Ordered after the close X so the X keeps the smaller,
-                    // more specific target.
-                    if event.clickCount == 2, clickYFromTop < PaneHeaderStrip.height,
-                       store.beginRenameForPane(at: index) {
-                        return nil
-                    }
-                    // Skip the title bar so window-drag clicks don't move
-                    // focus. Since the stamp below moved inside this branch,
-                    // the band now also gates ACKNOWLEDGEMENT: a click in a
-                    // pane's top 28pt acknowledges nothing. Hoisting the stamp
-                    // above the test would fix that and would also make
-                    // dragging the window by a pane's header clear that pane's
-                    // mark, which is not an act on the pane — left as it is
-                    // deliberately, not by omission.
-                    // Deliberately applied AFTER the close-X test and
-                    // not as an early return: the X's target spans y 8…40 and
-                    // this band is y <= 28, so an early return would kill the
-                    // top 20 of its 32pt — an intermittent failure that only
-                    // works when clicked low, which is worse to diagnose than
-                    // a dead button.
-                    let titleBarHeight: CGFloat = 28
-                    if clickYFromTop > titleBarHeight {
-                        // Focus only moves when it isn't already here, but the
-                        // MacroPad stamp is unconditional — and the difference
-                        // is the whole point. Clearing an unread mark needs a
-                        // deliberate act on that pane AFTER its turn finished
-                        // (see `MacroPadUnreadTracker.markSeq`), and clicking
-                        // the pane you are already in is exactly that act. Tying
-                        // the stamp to the focus CHANGE would mean the one pane
-                        // most likely to be lit — the one you left focused when
-                        // you walked away — is the one clicking cannot
-                        // acknowledge, which is how this was found.
-                        if index != store.focusedPaneIndex {
-                            store.setFocusedPaneIndex(index)
-                        }
-                        self?.macroPad?.noteInteraction(paneIndex: index)
-                    }
-                    break
+            // Close X first: it lives in the pane header, which macOS 26
+            // covers with the detail column's scroll-edge BackdropView
+            // (see PaneHeaderStrip's doc for what that band was and was
+            // not measured to do). Hit-test it here instead and consume
+            // the event so the click can't also start a window drag on
+            // the way out.
+            //
+            // Two limitations OF THAT KIND, accepted rather than
+            // guarded. This is not the whole inventory: the rect's
+            // geometric preconditions are listed on
+            // `closeButtonHitRect`, and where one breaks, a consumed
+            // click can land on blank header space or on the window's
+            // own traffic lights. A round of review asked for a bare-modifier
+            // test and an app-active test; the modifier test read
+            // `deviceIndependentFlagsMask`, which contains `.capsLock`
+            // — so an engaged Caps Lock killed the button outright,
+            // the reported bug back in a narrower form. Its sibling
+            // could not be shown to do anything: by the time a local
+            // monitor sees the mouse-down, `NSApp.isActive` is already
+            // true, so it cannot tell an activating click from any
+            // other. What remains, unguarded and deliberately so:
+            //   - ctrl-click and Cmd+click close the pane rather than
+            //     meaning secondary-click / "new pane".
+            //   - the click that brings a background window forward
+            //     closes a pane instead of only activating, which a
+            //     real control's default `acceptsFirstMouse == false`
+            //     would have swallowed. `closePane` keeps the session,
+            //     so the cost is re-opening a pane, not losing work.
+            // Fixing either needs a measurement first, not a guess:
+            // the guesses cost a round and shipped a worse bug. The
+            // measurement for the second one is cheap — `isKeyWindow`
+            // is set inside `NSWindow.sendEvent`, which this monitor
+            // precedes, so logging it here for a click that raises a
+            // background window would say whether it discriminates.
+            //
+            // `panes.count > 1` mirrors `PaneHeaderStrip`'s
+            // `showCloseButton`: hit-testing an X that is not drawn
+            // would close the only pane from blank header space.
+            if store.panes.count > 1,
+               PaneHeaderStrip.closeButtonHitRect(paneWidth: paneW).contains(localPoint) {
+                // notice, not debug: this is the only record that the
+                // geometry-derived branch removed a pane, and debug
+                // does not survive to a log capture. Same rule the
+                // background-reconcile subsystem follows.
+                logger.notice("""
+                    [pane] close X hit: index=\(index, privacy: .public) \
+                    paneW=\(paneW, privacy: .public) \
+                    sidebar=\(hit.sidebarWidth, privacy: .public) \
+                    local=(\(localPoint.x, privacy: .public),\
+                    \(localPoint.y, privacy: .public))
+                    """)
+                store.closePane(at: index)
+                return nil
+            }
+            // Double-click the header to rename, for the same
+            // reason the close X is hit-tested here rather than by
+            // SwiftUI: no mouse event reaches what that strip draws.
+            // Consumed ONLY when a sheet actually opened, so the
+            // click can still zoom the window otherwise — a launcher
+            // pane has no session to name, and consuming there would
+            // both fail to rename and swallow the zoom, leaving a
+            // gesture that does nothing at all.
+            // Ordered after the close X so the X keeps the smaller,
+            // more specific target.
+            if event.clickCount == 2, clickYFromTop < PaneHeaderStrip.height,
+               store.beginRenameForPane(at: index) {
+                return nil
+            }
+            // Skip the title bar so window-drag clicks don't move
+            // focus. Since the stamp below moved inside this branch,
+            // the band now also gates ACKNOWLEDGEMENT: a click in a
+            // pane's top 28pt acknowledges nothing. Hoisting the stamp
+            // above the test would fix that and would also make
+            // dragging the window by a pane's header clear that pane's
+            // mark, which is not an act on the pane — left as it is
+            // deliberately, not by omission.
+            // Deliberately applied AFTER the close-X test and
+            // not as an early return: the X's target spans y 8…40 and
+            // this band is y <= 28, so an early return would kill the
+            // top 20 of its 32pt — an intermittent failure that only
+            // works when clicked low, which is worse to diagnose than
+            // a dead button.
+            let titleBarHeight: CGFloat = 28
+            if clickYFromTop > titleBarHeight {
+                // Focus only moves when it isn't already here, but the
+                // MacroPad stamp is unconditional — and the difference
+                // is the whole point. Clearing an unread mark needs a
+                // deliberate act on that pane AFTER its turn finished
+                // (see `MacroPadUnreadTracker.markSeq`), and clicking
+                // the pane you are already in is exactly that act. Tying
+                // the stamp to the focus CHANGE would mean the one pane
+                // most likely to be lit — the one you left focused when
+                // you walked away — is the one clicking cannot
+                // acknowledge, which is how this was found.
+                if index != store.focusedPaneIndex {
+                    store.setFocusedPaneIndex(index)
                 }
-                xCursor = paneEnd + SessionStore.paneDividerWidth
+                self?.macroPad?.noteInteraction(paneIndex: index)
             }
             return event
         }
@@ -746,6 +789,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // reaches the controller through SwiftUI rather than this monitor.
         if paneFocusClickMonitor == nil {
             logger.warning("installPaneFocusClickMonitor: addLocalMonitorForEvents returned nil — pane focus by click, the close X, header rename, and acknowledging a MacroPad unread mark by clicking its pane are all dead (typing, the pad key, and clicking its sidebar row still acknowledge)")
+        }
+    }
+
+    /// Route a right-click on a pane header to `PaneHeaderMenu`.
+    ///
+    /// A separate monitor rather than a branch in the left-click one because
+    /// the two match different event masks; everything they share — which pane
+    /// the point is in, and where inside it — is `paneHit(for:)`.
+    ///
+    /// It exists at all for the reason the close X is hit-tested by a monitor:
+    /// macOS 26 covers the header band with the detail column's scroll-edge
+    /// `BackdropView`, so a SwiftUI `.contextMenu` on `PaneHeaderStrip` would
+    /// never open. See that type's doc for what was and was not measured.
+    ///
+    /// The event is consumed only when a menu actually opened, mirroring the
+    /// double-click-to-rename rule: a right-click that showed nothing should
+    /// still reach whatever would otherwise have handled it.
+    private func installPaneHeaderContextMenuMonitor() {
+        guard paneHeaderContextMenuMonitor == nil else { return }
+        paneHeaderContextMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { event in
+            guard let (store, hit) = Self.paneHit(for: event) else { return event }
+            guard hit.local.y < PaneHeaderStrip.height else { return event }
+            // Screen coordinates: `PaneHeaderMenu.show` pops with a nil view,
+            // and the window is the only thing that can do the conversion.
+            guard let window = event.window else { return event }
+            let screenPoint = window.convertPoint(toScreen: event.locationInWindow)
+            // Right-clicking a pane is an act on that pane, exactly as
+            // left-clicking one is — move focus before the menu opens so the
+            // verbs act on the pane the user is looking at, and so `Rename…`
+            // and the sidebar highlight agree with it.
+            if hit.index != store.focusedPaneIndex {
+                store.setFocusedPaneIndex(hit.index)
+            }
+            guard PaneHeaderMenu.show(store: store, paneIndex: hit.index, at: screenPoint) else {
+                return event
+            }
+            return nil
+        }
+        if paneHeaderContextMenuMonitor == nil {
+            logger.warning("installPaneHeaderContextMenuMonitor: addLocalMonitorForEvents returned nil — right-clicking a pane header opens nothing (the session's sidebar row still carries the same menu)")
         }
     }
 
@@ -866,6 +949,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let paneFocusClickMonitor {
             NSEvent.removeMonitor(paneFocusClickMonitor)
             self.paneFocusClickMonitor = nil
+        }
+        if let paneHeaderContextMenuMonitor {
+            NSEvent.removeMonitor(paneHeaderContextMenuMonitor)
+            self.paneHeaderContextMenuMonitor = nil
         }
         if let keyTypingMonitor {
             NSEvent.removeMonitor(keyTypingMonitor)

@@ -4450,6 +4450,66 @@ enum SidebarLogicProbe {
 
         }
 
+        // MARK: - Restart session
+        //
+        // `restartSession` is the only route that throws a session's shim and
+        // webview away and keeps its row and its pane. What is pinned here is
+        // the part a screenshot cannot show: that the identity SwiftUI mounts
+        // on actually moves (nothing re-mounts otherwise, and the restart is a
+        // silent no-op), and that the paned and unpaned cases land in
+        // different statuses. The teardown itself needs a live shim and is not
+        // reachable from here.
+        do {
+            let liveA = OpenSession(
+                origin: .local(cwd),
+                resumeId: "restart-a",
+                title: "Paned",
+                project: "ProjectA",
+                status: .live
+            )
+            let liveB = OpenSession(
+                origin: .local(cwd),
+                resumeId: "restart-b",
+                title: "Unpaned",
+                project: "ProjectB",
+                status: .live
+            )
+            let store = SessionStore()
+            store._probeSeedOpenSessions([liveA, liveB])
+            store.openInFocusedPane(liveA.id)
+
+            let identityBefore = liveA.mountIdentity
+            record("restart: a session's mount identity starts equal to itself",
+                   identityBefore == liveA.mountIdentity)
+
+            store.restartSession(liveA.id)
+            record("restart: the mount identity changes, so SwiftUI re-mounts",
+                   liveA.mountIdentity != identityBefore,
+                   "gen=\(liveA.restartGeneration)")
+            record("restart: the id it is addressed by does NOT change",
+                   liveA.mountIdentity.id == identityBefore.id)
+            record("restart: a paned session goes to .spawning",
+                   liveA.status == .spawning, "status=\(liveA.status)")
+            record("restart: the row and its pane stay exactly where they were",
+                   store.openSessions.map(\.id) == [liveA.id, liveB.id]
+                   && store.panes.map(\.content) == [.session(liveA.id)])
+            record("restart: the activity flags are cleared with the shim",
+                   !liveA.isThinking && !liveA.isAsking && !liveA.isWaiting
+                   && liveA.lastFatalError == nil)
+
+            store.restartSession(liveB.id)
+            record("restart: an UNPANED session goes to .dormant, not .spawning",
+                   liveB.status == .dormant, "status=\(liveB.status)")
+            record("restart: an unpaned restart still bumps the generation",
+                   liveB.restartGeneration == 1)
+
+            let unknown = UUID()
+            store.restartSession(unknown)
+            record("restart: an unknown id changes nothing",
+                   liveA.restartGeneration == 1 && liveB.restartGeneration == 1
+                   && store.panes.count == 1)
+        }
+
         // MARK: - Recap (see RecapGate / ShimProcess recap filters)
         //
         // These pin the two failure modes review found in the recap filters:

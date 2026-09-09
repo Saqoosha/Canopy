@@ -276,19 +276,21 @@ struct Sidebar: View {
             // stretches its content to fill the cell and eats any inset
             // modifier — a rounded rect handed to it renders as a full-bleed
             // square. The pane highlight sits under the hover fill so hovering
-            // a paned row deepens it instead of replacing it, and the shared
-            // padding is what separates adjacent paned rows into distinct
-            // chips rather than one continuous block.
+            // a paned row deepens it instead of replacing it.
+            //
+            // Drawn flush to the cell, with NO padding of its own: both
+            // insets are taken by `.listRowInsets` below, so the chip IS the
+            // cell. That is what puts the chip under the system ring a
+            // right-click leaves behind — see `RowChip` for why the ring is
+            // the thing that cannot move.
             ZStack {
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: RowChip.cornerRadius)
                     .fill(paneHighlightFill(for: row))
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: RowChip.cornerRadius)
                     .strokeBorder(paneHighlightStroke(for: row), lineWidth: 1)
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: RowChip.cornerRadius)
                     .fill(rowBackgroundFill(for: row))
             }
-            .padding(.horizontal, 3)
-            .padding(.vertical, 1)
         )
         .id(row.id)
         .onHover { h in hoveredRowId = h ? row.id : nil }
@@ -306,7 +308,12 @@ struct Sidebar: View {
         // `.background` above, where insets survive.
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+        .listRowInsets(EdgeInsets(
+            top: 1 + RowChip.verticalInset,
+            leading: RowChip.horizontalInset,
+            bottom: 1 + RowChip.verticalInset,
+            trailing: RowChip.horizontalInset
+        ))
     }
 
     @ViewBuilder
@@ -321,10 +328,20 @@ struct Sidebar: View {
             EmptyView()
         }
         if case .open(let s) = row {
+            Button("Restart session") { store.restartSession(s.id) }
             Button("Close session") { store.closeSession(s.id) }
         }
         if case .launcher = row {
             Button("Close pane") { handleClose(row) }
+        }
+        // Only where a local folder exists to open: a remote session's
+        // directory is on the other machine, a cloud row has none until it is
+        // teleported, and a launcher has no session. Absent rather than
+        // disabled — a greyed row reads as "not right now", and for these it
+        // is never.
+        if let directory = finderDirectory(for: row) {
+            Divider()
+            Button("Open in Finder") { store.revealInFinder(directory) }
         }
         Button("Hide from sidebar") {
             store.hideClosedSession(rowId: row.id)
@@ -332,6 +349,21 @@ struct Sidebar: View {
         // Open rows and launcher rows both stand for something live; hiding
         // one would take a pane off the map without closing it.
         .disabled(row.isOpen)
+    }
+
+    /// The local folder a row's "Open in Finder" should open, or nil when the
+    /// row has none. Open rows use the session's SPAWN directory, which is
+    /// what `SessionStore.revealInFinder` documents and what the pane header's
+    /// copy of this menu passes too.
+    private func finderDirectory(for row: SidebarRow) -> URL? {
+        switch row {
+        case .open(let s):
+            return s.origin.remoteHost == nil ? s.origin.workingDirectory : nil
+        case .closedLocal(let entry):
+            return entry.projectDirectory
+        case .closedCloud, .launcher:
+            return nil
+        }
     }
 
     /// Hover fill only — the top layer of the inline `.background` ZStack.
@@ -485,6 +517,49 @@ struct Sidebar: View {
     }
 }
 
+/// Geometry of the rounded chip a sidebar row draws itself as.
+///
+/// The two insets are `.listRowInsets` values, and the chip is drawn flush to
+/// the cell they produce. That indirection is the whole point: the system ring
+/// a right-click leaves on a row traces the **table row**, which no SwiftUI
+/// modifier moves and which `contentShape(.contextMenuPreview, …)` cannot
+/// reshape either (iOS-only). So the only way to make the two agree is to put
+/// the chip where the ring already is — and the ring is where AppKit puts a
+/// sidebar row's highlight, which is the native look anyway.
+///
+/// **All three values are measurements of the ring, not design choices.** They
+/// come from an ASCII pixel map of one corner of a right-clicked row on macOS
+/// 26, classifying each device pixel as background / ring / chip stroke / chip
+/// fill. Re-measure that way if a macOS release moves them, and measure the
+/// corner from its TANGENT rows — a 45° diagonal through the corner is the one
+/// place where two different radii still read as touching, so it makes any
+/// radius look correct.
+///
+/// - `horizontalInset` is **negative**: the ring's inner edge sits 12pt from
+///   the window's left edge while a List row's default content area starts at
+///   16, so a zero inset still leaves a 4pt band of background inside the
+///   ring. Vertically the two already agree, which is why only this one is.
+/// - `cornerRadius` is the radius of the ring's INNER rect, read off a pixel
+///   map of one corner. **Do not derive it as "outer radius minus stroke
+///   width" — the ring is not a stroked path.** Measured: the outer arc spans
+///   13 device px and the inner arc 12.5, a difference of 0.5px against a band
+///   4px thick, so the two contours are near-identical curves 2pt apart rather
+///   than concentric arcs. Deriving it gave 5.5 and then 4.5, both visibly too
+///   square; the chip's border pulled away from the blue around the corner
+///   while the straight edges stayed flush. The chip is drawn UNDER the ring,
+///   so too small only shows as that pull-away, while too large (it was 9)
+///   opens a real background gap at each corner — the two failures look
+///   different, and only the second one has a name.
+///
+/// `SidebarRowView`'s content padding subtracts both insets, so the text and
+/// icons stay exactly where they were when the inset lived inside the
+/// background.
+private enum RowChip {
+    static let cornerRadius: CGFloat = 6.25
+    static let horizontalInset: CGFloat = -4
+    static let verticalInset: CGFloat = 1
+}
+
 // MARK: - Filter popover
 
 private struct FilterPopover: View {
@@ -628,10 +703,15 @@ private struct SidebarRowView: View {
                 .help(closeHelp)
             }
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 6)
-        .padding(.vertical, 4)
-        .frame(minHeight: 36)
+        // Padding INSIDE the chip, stated as the ORIGINAL distance from the
+        // List cell minus whatever `RowChip` now takes outside this view. So
+        // the text and icons land where they always did, whatever the insets
+        // are set to — including the negative horizontal one, where this
+        // padding grows to keep the content still while the chip widens.
+        .padding(.leading, 10 - RowChip.horizontalInset)
+        .padding(.trailing, 6 - RowChip.horizontalInset)
+        .padding(.vertical, 4 - RowChip.verticalInset)
+        .frame(minHeight: 36 - 2 * RowChip.verticalInset)
         .contentShape(Rectangle())
     }
 

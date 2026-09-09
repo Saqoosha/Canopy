@@ -918,6 +918,84 @@ final class SessionStore {
         Task { await refreshRecents() }
     }
 
+    /// Tear down a session's shim and webview and build both again, resuming
+    /// the same conversation, without touching the row or the pane it sits in.
+    ///
+    /// The row stays where it is and the pane keeps its width, which is the
+    /// whole difference from close-then-reopen: that path removes the session,
+    /// re-derives selection, and appends a new row at the bottom of the Open
+    /// block. It is also the only way to pick up a NEW CC extension build, or
+    /// to recover a session whose CLI is wedged, short of losing its place.
+    ///
+    /// Resume is inherited rather than arranged here. `resumeId` already names
+    /// the CLI's own transcript once a turn has landed (`backfillResumeId`
+    /// writes it, and sets `resumeIdIsExistingTranscript` beside it), so the
+    /// fresh shim resumes for the same reason reopening a closed row does. A
+    /// session that has never taken a turn still holds `openNew`'s placeholder
+    /// and correctly starts fresh — there is nothing yet to resume.
+    ///
+    /// An UNPANED open session lands in `.dormant`, not `.spawning`: nothing
+    /// mounts a `SessionContainer` for it, so no shim would be built, and
+    /// `.spawning` renders as the breathing "working" dot on a session that is
+    /// running nothing. `startIfDormant(_:)` picks it up when a pane takes it.
+    /// Open a directory in Finder, reporting whether Finder took it.
+    ///
+    /// The caller passes the session's SPAWN directory — "where this session
+    /// started", which is also what `ShimProcess.openTerminal` opens. A
+    /// session that has since relocated into a worktree therefore lands on its
+    /// original folder; the two routes into a session's directory agreeing
+    /// matters more than either one tracking the relocation, and changing both
+    /// is its own piece of work (see the relocation learnings in CLAUDE.md).
+    ///
+    /// A remote session has no directory this machine can open, and callers
+    /// are expected not to offer the action at all there rather than to let it
+    /// fail here. What this DOES catch is a directory deleted out from under a
+    /// still-open session, where `NSWorkspace.open` returns false.
+    @discardableResult
+    func revealInFinder(_ directory: URL) -> Bool {
+        let opened = NSWorkspace.shared.open(directory)
+        if !opened {
+            logger.warning("revealInFinder failed: \(directory.path, privacy: .public)")
+        }
+        return opened
+    }
+
+    func restartSession(_ id: UUID) {
+        guard let session = openSessions.first(where: { $0.id == id }) else { return }
+        let isPaned = panes.contains { pane in
+            if case .session(let sid) = pane.content { return sid == id }
+            return false
+        }
+        logger.notice("""
+            restartSession id=\(id.uuidString, privacy: .public) \
+            resume=\(session.resumeId, privacy: .public) paned=\(isPaned)
+            """)
+
+        // Unbind before dropping the reference. The old `WebViewContainer`
+        // coordinator's `dismantleNSView` runs after the replacement mount has
+        // already installed a new shim on this session, and it stops whatever
+        // shim it holds only when that shim's `boundSession` is nil — so
+        // clearing the link here is what turns that teardown into a backstop
+        // for the stop below instead of a no-op. It also stops any late
+        // callback on the dying shim from writing to a session that has moved
+        // on.
+        let old = session.shim
+        old?.boundSession = nil
+        old?.stop()
+        session.shim = nil
+        session.webView = nil
+
+        session.statusBar.resetAll()
+        session.statusBar.remoteHost = session.origin.remoteHost
+        session.connection.status = .connected
+        session.isThinking = false
+        session.isAsking = false
+        session.isWaiting = false
+        session.lastFatalError = nil
+        session.status = isPaned ? .spawning : .dormant
+        session.restartGeneration += 1
+    }
+
     // MARK: - Refresh
 
     /// Reload the local JSONL list. Cheap (parses headers only). The
