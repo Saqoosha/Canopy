@@ -256,8 +256,18 @@ async function main() {
     const ext = require(extensionJsPath);
     await ext.activate(context);
   } catch (err) {
+    // The stack goes out on BOTH channels on purpose. The stderr echo is the
+    // readable one but lands at `.info` in `ShimProcess`, i.e. an in-memory ring
+    // buffer measured at anywhere from 37 s to ~5 minutes — reliably gone by the
+    // time a user notices sessions will not open and starts looking. The NDJSON
+    // copy is logged at `.error`, which is archived, and `ShimProcess`'s `error`
+    // handler has always read a `stack` field that nothing ever sent.
     process.stderr.write(`[vscode-shim] Activation error: ${err.stack}\n`);
-    writeStdout({ type: "error", message: `Extension activation failed: ${err.message}` });
+    writeStdout({
+      type: "error",
+      message: `Extension activation failed: ${err.message}`,
+      stack: err.stack,
+    });
     process.exit(1);
   } finally {
     process.chdir(savedCwd);
@@ -271,6 +281,8 @@ async function main() {
 }
 
 main().catch((err) => {
-  writeStdout({ type: "error", message: `Fatal: ${err.message}` });
+  // Nothing is written to stderr on this path at all, so the `stack` field is
+  // the only record of where a fatal came from.
+  writeStdout({ type: "error", message: `Fatal: ${err.message}`, stack: err.stack });
   process.exit(1);
 });

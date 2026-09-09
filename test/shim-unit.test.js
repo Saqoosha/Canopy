@@ -424,6 +424,16 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+/** Redirect process.stderr.write for the duration of a block. */
+function captureStderr(sink) {
+  const original = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => {
+    sink(String(chunk));
+    return true;
+  };
+  return () => { process.stderr.write = original; };
+}
+
 describe("ExtensionContext", () => {
   let ctx, tmpDir;
   beforeEach(() => {
@@ -491,6 +501,60 @@ describe("ExtensionContext", () => {
   it("subscriptions is an array", () => {
     assert.ok(Array.isArray(ctx.subscriptions));
     assert.equal(ctx.subscriptions.length, 0);
+  });
+
+  // The Proxy does not stop the crash — the read still yields undefined and the
+  // caller still throws — it names the member on the way past. Without it the
+  // only evidence is the thrown message, which names the property read on
+  // undefined (`reading 'get'`) and never the member that was missing.
+  it("names an unknown ExtensionContext member instead of answering silently", () => {
+    const warned = [];
+    const restore = captureStderr((chunk) => warned.push(chunk));
+    try {
+      assert.equal(ctx.someFutureApi, undefined);
+    } finally {
+      restore();
+    }
+    assert.ok(
+      warned.some((w) => w.includes("Unknown ExtensionContext member: someFutureApi")),
+      warned.join(""),
+    );
+  });
+
+  it("passes known members through without warning", () => {
+    const warned = [];
+    const restore = captureStderr((chunk) => warned.push(chunk));
+    try {
+      assert.equal(ctx.extensionPath, "/fake/ext");
+      assert.equal(typeof ctx.globalState.get, "function");
+      assert.equal(typeof ctx.workspaceState.get, "function");
+    } finally {
+      restore();
+    }
+    assert.deepEqual(warned, []);
+  });
+
+  // `util.inspect`, `JSON.stringify` and the promise machinery probe these on any
+  // object handed to them. Warning there would bury the real signal under the
+  // runtime's own bookkeeping.
+  it("stays silent for symbol and `then` probes", () => {
+    const warned = [];
+    const restore = captureStderr((chunk) => warned.push(chunk));
+    try {
+      assert.equal(ctx[Symbol.toPrimitive], undefined);
+      assert.equal(ctx[Symbol.iterator], undefined);
+      assert.equal(ctx.then, undefined);
+    } finally {
+      restore();
+    }
+    assert.deepEqual(warned, []);
+  });
+
+  // A real VSCode API the shim never implemented. Nothing syncs here, so a
+  // no-op is correct — but an absent method throws mid-activate.
+  it("accepts globalState.setKeysForSync", () => {
+    assert.doesNotThrow(() => ctx.globalState.setKeysForSync(["a", "b"]));
+    assert.doesNotThrow(() => ctx.globalState.setKeysForSync([]));
   });
 
   it("logUri points to logs directory", () => {

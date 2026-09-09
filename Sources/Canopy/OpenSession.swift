@@ -140,6 +140,13 @@ final class OpenSession: Identifiable, Hashable {
     /// still running. Feeds `SessionActivity.of` as the `background` rung.
     /// Mutually exclusive with `isThinking` — only true between turns.
     var isWaiting: Bool = false
+
+    /// The last fatal the shim reported over `{type:"error"}`, if any.
+    ///
+    /// The crash callback carries only an exit status, and 1 says nothing about
+    /// why. This is where the message that DOES say why is parked, so the
+    /// launcher can show it after the pane is gone — see `SessionStore.SessionFailure`.
+    var lastFatalError: String?
     /// True when the caller supplied a `resumeId` it believes names a transcript
     /// that already exists, rather than the placeholder `SessionStore.openNew`
     /// mints for a brand-new session.
