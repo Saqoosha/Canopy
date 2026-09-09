@@ -4454,11 +4454,22 @@ enum SidebarLogicProbe {
         //
         // `restartSession` is the only route that throws a session's shim and
         // webview away and keeps its row and its pane. What is pinned here is
-        // the part a screenshot cannot show: that the identity SwiftUI mounts
-        // on actually moves (nothing re-mounts otherwise, and the restart is a
-        // silent no-op), and that the paned and unpaned cases land in
-        // different statuses. The teardown itself needs a live shim and is not
-        // reachable from here.
+        // that the identity SwiftUI mounts on actually moves, that the paned
+        // and unpaned cases land in different statuses, and that a re-mount
+        // only takes the keyboard when its pane is the focused one.
+        //
+        // Two things these assertions do NOT reach, recorded rather than
+        // implied. `Detail.swift`'s `.id(session.mountIdentity)` is the line
+        // that turns a moved identity into an actual re-mount: revert it to
+        // `.id(session.id)` and the whole feature is a silent no-op — the shim
+        // is torn down and nothing rebuilds it — while every assertion below
+        // stays green, because they only pin that the identity moves, never
+        // that anything reads it. And the teardown itself needs a live shim,
+        // so `stop()` ordering is on-device only. The focus assertions have
+        // the same shape: they pin `isFocusedPaneSession`, not
+        // `WebViewContainer.focusIfThisPaneIsFocused`'s call to it — delete
+        // that guard and the keyboard-stealing regression returns with the
+        // suite green.
         do {
             let liveA = OpenSession(
                 origin: .local(cwd),
@@ -4479,8 +4490,8 @@ enum SidebarLogicProbe {
             store.openInFocusedPane(liveA.id)
 
             let identityBefore = liveA.mountIdentity
-            record("restart: a session's mount identity starts equal to itself",
-                   identityBefore == liveA.mountIdentity)
+            record("restart: the focused pane's session is the one that may take the keyboard",
+                   store.isFocusedPaneSession(liveA.id) && !store.isFocusedPaneSession(liveB.id))
 
             store.restartSession(liveA.id)
             record("restart: the mount identity changes, so SwiftUI re-mounts",
@@ -4508,6 +4519,25 @@ enum SidebarLogicProbe {
             record("restart: an unknown id changes nothing",
                    liveA.restartGeneration == 1 && liveB.restartGeneration == 1
                    && store.panes.count == 1)
+
+            // The predicate `WebViewContainer` gates its mount-time
+            // `makeFirstResponder` on. Restarting a NON-focused pane's session
+            // is exactly the case that used to steal the keyboard: the sidebar
+            // menu acts on a row, so nothing moves focus, and the re-mount
+            // took it anyway. Both directions are asserted, since a predicate
+            // that answered `true` for everything would pass one of them.
+            _ = store.openInNewPane(liveB.id)
+            record("restart: a second pane takes focus, so the first is no longer eligible",
+                   store.isFocusedPaneSession(liveB.id) && !store.isFocusedPaneSession(liveA.id))
+            store.restartSession(liveA.id)
+            record("restart: restarting a non-focused pane does not make it eligible",
+                   !store.isFocusedPaneSession(liveA.id)
+                   && store.focusedPaneIndex == 1,
+                   "focused=\(store.focusedPaneIndex)")
+
+            store.openLauncherInFocusedPane()
+            record("restart: a launcher pane makes no session eligible",
+                   !store.isFocusedPaneSession(liveA.id) && !store.isFocusedPaneSession(liveB.id))
         }
 
         // MARK: - Recap (see RecapGate / ShimProcess recap filters)

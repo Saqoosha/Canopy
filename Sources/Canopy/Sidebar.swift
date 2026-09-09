@@ -104,9 +104,13 @@ struct Sidebar: View {
             .animation(.easeInOut(duration: 0.2), value: openRowIdentity)
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
-            // Compensate for `.listStyle(.sidebar)`'s built-in side
-            // padding. The pill bg has its own 6px inset already so
-            // rows still don't touch the wall, just the wider gutter.
+            // Compensate for `.listStyle(.sidebar)`'s built-in side padding.
+            // Rows still don't touch the wall: what keeps them off it is the
+            // sidebar's own edge plus `RowChip.horizontalInset`, which is
+            // NEGATIVE — the chip deliberately extends past the List's content
+            // area to sit under the system's row ring. (An older note here
+            // credited a 6px inset on the chip itself; there has never been
+            // one, and there is now less than none.)
             .padding(.horizontal, -8)
             // Auto-scroll-to-top when a new session is opened, via an
             // AppKit hook below. SwiftUI's `ScrollViewProxy.scrollTo` on
@@ -341,7 +345,7 @@ struct Sidebar: View {
         // is never.
         if let directory = finderDirectory(for: row) {
             Divider()
-            Button("Open in Finder") { store.revealInFinder(directory) }
+            Button("Open in Finder") { store.openInFinder(directory) }
         }
         Button("Hide from sidebar") {
             store.hideClosedSession(rowId: row.id)
@@ -353,7 +357,7 @@ struct Sidebar: View {
 
     /// The local folder a row's "Open in Finder" should open, or nil when the
     /// row has none. Open rows use the session's SPAWN directory, which is
-    /// what `SessionStore.revealInFinder` documents and what the pane header's
+    /// what `SessionStore.openInFinder` documents and what the pane header's
     /// copy of this menu passes too.
     private func finderDirectory(for row: SidebarRow) -> URL? {
         switch row {
@@ -530,7 +534,8 @@ struct Sidebar: View {
 /// **All three values are measurements of the ring, not design choices.** They
 /// come from an ASCII pixel map of one corner of a right-clicked row on macOS
 /// 26, classifying each device pixel as background / ring / chip stroke / chip
-/// fill. Re-measure that way if a macOS release moves them, and measure the
+/// fill, **on a 2x display** — the device-pixel counts below are halved to
+/// points on that assumption and were never checked at another backing scale. Re-measure that way if a macOS release moves them, and measure the
 /// corner from its TANGENT rows — a 45° diagonal through the corner is the one
 /// place where two different radii still read as touching, so it makes any
 /// radius look correct.

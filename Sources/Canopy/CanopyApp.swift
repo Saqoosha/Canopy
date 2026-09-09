@@ -654,19 +654,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installPaneFocusClickMonitor() {
         guard paneFocusClickMonitor == nil else { return }
         paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            // `!isEmpty`, not `count > 1`: a double-click on a pane header
-            // renames its session, and a single pane is the common case for
-            // that. That guard is now LOAD-BEARING rather than merely
-            // harmless — the branch below also acknowledges an unread mark,
-            // which matters most with one pane. (It used to be argued here
-            // that the branch was inert at one pane, because
-            // `focusedPaneIndex` is clamped to 0 wherever the strip shrinks;
-            // that was true only while the branch did nothing but move focus.
-            // The clamp is still an invariant held in `SessionStore` rather
-            // than a check here, and is still what makes the focus CALL a
-            // no-op.) The cost the widening did carry: the sidebar
-            // measurement and the full `PaneLayoutMetrics` computation run on
-            // every left mouse-down in the single-pane case, the common one.
+            // The `!isEmpty` guard this paragraph is about now lives in
+            // `paneHit(for:)`, shared with the right-click monitor. It is
+            // `!isEmpty` and not `count > 1` because a double-click on a pane
+            // header renames its session, and a single pane is the common case
+            // for that. That is LOAD-BEARING rather than merely harmless — the
+            // branch below also acknowledges an unread mark, which matters
+            // most with one pane. (It used to be argued that the branch was
+            // inert at one pane, because `focusedPaneIndex` is clamped to 0
+            // wherever the strip shrinks; that was true only while the branch
+            // did nothing but move focus. The clamp is still an invariant held
+            // in `SessionStore` rather than a check here, and is still what
+            // makes the focus CALL a no-op.) The cost the widening carried:
+            // the sidebar measurement and the full `PaneLayoutMetrics`
+            // computation run on every left mouse-down in the single-pane
+            // case, the common one — and, since the extraction, on every right
+            // mouse-down anywhere in the detail column too.
             guard let (store, hit) = Self.paneHit(for: event) else { return event }
             let index = hit.index
             let paneW = hit.paneWidth
@@ -810,6 +813,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard paneHeaderContextMenuMonitor == nil else { return }
         paneHeaderContextMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { event in
             guard let (store, hit) = Self.paneHit(for: event) else { return event }
+            // The whole 48pt strip, including the top 28pt the left monitor
+            // skips. That band is skipped there so a click that starts a
+            // window drag does not also move focus; a right-click starts no
+            // drag, so the exclusion has nothing to protect here.
             guard hit.local.y < PaneHeaderStrip.height else { return event }
             // Screen coordinates: `PaneHeaderMenu.show` pops with a nil view,
             // and the window is the only thing that can do the conversion.

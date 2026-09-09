@@ -253,20 +253,19 @@ struct WebViewContainer: NSViewRepresentable {
         // is nil at this point (SwiftUI hasn't placed the host yet), so
         // defer until the next runloop pass when the window is wired.
         let target = context.coordinator.currentWebView
+        let sessionId = boundSession?.id
         DispatchQueue.main.async {
-            if let target, let window = target.window {
-                window.makeFirstResponder(target)
-            }
+            Self.focusIfThisPaneIsFocused(target, sessionId: sessionId)
         }
         return host
     }
 
     func updateNSView(_ host: SessionWebViewHost, context: Context) {
         // Swap the inner WKWebView when the session bound to this view
-        // changes. With `.id(session.id)` on the SessionContainer this
-        // guard rarely fires (SwiftUI re-mounts on session change), but
-        // we keep it for the SwiftUI double-pass case where makeNSView
-        // is followed by an immediate updateNSView with the same id.
+        // changes. With `.id(session.mountIdentity)` on the SessionContainer
+        // this guard rarely fires (SwiftUI re-mounts on session change, and on
+        // restart), but we keep it for the SwiftUI double-pass case where
+        // makeNSView is followed by an immediate updateNSView with the same id.
         let newId = boundSession?.id
         guard newId != context.coordinator.lastBoundSessionId else {
             // Same session, nothing to swap — but a sibling host built by
@@ -297,11 +296,33 @@ struct WebViewContainer: NSViewRepresentable {
         // (often the window itself), so the user gets a beep until they
         // click into the input field. Hand focus back to the webview.
         let target = context.coordinator.currentWebView
+        let sessionId = newId
         DispatchQueue.main.async {
-            if let target, let window = target.window {
-                window.makeFirstResponder(target)
-            }
+            Self.focusIfThisPaneIsFocused(target, sessionId: sessionId)
         }
+    }
+
+    /// Hand the keyboard to `target`, but only when the session it belongs to
+    /// is the one the FOCUSED pane is showing.
+    ///
+    /// Both call sites used to do this unconditionally, which was correct only
+    /// because every route that mounted a pane's content focused that pane
+    /// first. `SessionStore.restartSession(_:)` is the first that does not: it
+    /// acts on a sidebar row, so re-mounting a non-focused pane took the
+    /// keyboard while the highlight stayed elsewhere and the next keystroke
+    /// landed in a session the user was not looking at. The predicate lives on
+    /// the store (`isFocusedPaneSession`) so the probe can reach it.
+    ///
+    /// A nil session id is a launcher pane, which has no webview to focus.
+    /// Declining when the store is missing is the safe direction: nothing gets
+    /// the keyboard, rather than the wrong thing getting it.
+    @MainActor
+    private static func focusIfThisPaneIsFocused(_ target: WKWebView?, sessionId: OpenSession.ID?) {
+        guard let target, let window = target.window,
+              let sessionId,
+              SessionStore.shared?.isFocusedPaneSession(sessionId) == true
+        else { return }
+        window.makeFirstResponder(target)
     }
 
     /// Build (or fetch cached) WKWebView for `boundSession` and add it
