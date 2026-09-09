@@ -887,6 +887,32 @@ struct LauncherView: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .lineLimit(3 ... 12)
+                // Shift+Return inserts a newline. Measured on a standalone
+                // SwiftUI harness (macOS 26.6): in a `TextField(axis:
+                // .vertical)` the field editor binds a newline to
+                // OPTION+Return only — plain Return submits, and Shift+Return
+                // and Cmd+Return are both dead keys. So the prompt box was
+                // single-line to anyone typing the chat-composer convention,
+                // and the send button's `.keyboardShortcut(.return,
+                // modifiers: [])` was NOT the cause: Shift+Return does not
+                // match it either, which is why the press produced nothing at
+                // all rather than a launch.
+                //
+                // The handler re-issues the binding that already works rather
+                // than appending "\n" to `initialPrompt` — the caret can be
+                // mid-text, and only the field editor knows where it is.
+                // Undo, selection replacement and scroll-to-caret come along
+                // for free. Everything else returns `.ignored`, which is what
+                // keeps plain Return reaching the send button's shortcut and
+                // Option+Return reaching the field editor unchanged (both
+                // re-measured with the handler installed).
+                .onKeyPress(.return, phases: .down) { press in
+                    guard press.modifiers.contains(.shift),
+                          let editor = NSApp.keyWindow?.firstResponder as? NSTextView
+                    else { return .ignored }
+                    editor.insertNewlineIgnoringFieldEditor(nil)
+                    return .handled
+                }
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
                 .padding(.bottom, 6)
