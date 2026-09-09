@@ -1759,6 +1759,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // settings file). Writing to the settings file caused cross-window
         // interference and broke /resume when the wrapper was eagerly cleared
         // after the first CLI spawn.
+        // Scrubbed before it is conditionally set, for the reason spelled out on
+        // `CANOPY_REMOTE_RESUME` below. What an inherited value costs HERE:
+        // `vscode-shim/index.js` installs its fs/spawn patches on this variable
+        // alone, so every LOCAL session would get SSH mode and a remote-keyed
+        // `workspaceState` file.
+        //
+        // Its two siblings are left alone for different reasons, and only one of
+        // them is safe. `CANOPY_SSH_CWD` is read solely by `ssh-claude-wrapper.sh`,
+        // which refuses to run without `CANOPY_SSH_HOST`, so an inherited value is
+        // inert. `CANOPY_SSH_WRAPPER_PATH` is a REAL remaining hole: `workspace.js`'s
+        // `createConfiguration` reads it for every shim with no SSH gate, so an
+        // exported value hands every local session a `claudeProcessWrapper` it
+        // cannot use and the wrapper exits 1. Out of scope here, and it fails
+        // loudly rather than silently selecting SSH mode.
+        env.removeValue(forKey: "CANOPY_SSH_HOST")
         if let remote = remoteHost {
             guard let wrapperPath = Self.findWrapperPath() else {
                 logger.error("SSH remote: wrapper script not found in bundle")
