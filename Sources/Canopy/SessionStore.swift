@@ -1007,40 +1007,43 @@ final class SessionStore {
             resume=\(session.resumeId, privacy: .public) paned=\(isPaned)
             """)
 
-        // The dying shim keeps its `boundSession`, deliberately. Clearing it
-        // was the first version, on the reasoning that `dismantleNSView`'s
-        // `if shimProcess?.boundSession == nil { stop() }` would then act as a
-        // backstop for the stop below. It would — and that is the defect:
-        // `stop()` has no idempotence beyond `guard proc.isRunning`, and
-        // `isRunning` stays true until the child has actually exited, which is
-        // milliseconds away when SwiftUI processes the re-mount. So the second
-        // call re-runs the whole body, including `closeFile()` on the same
-        // already-closed stdin handle — an `NSFileHandleOperationException`
-        // Swift cannot catch. There was nothing for a backstop to cover
-        // anyway: this function stops the shim itself, synchronously.
+        // The dying shim keeps its `boundSession`, deliberately — but the
+        // reason is smaller than two earlier revisions of this comment
+        // claimed, and the difference is recorded because both of them read
+        // like verification. Clearing it arms `dismantleNSView`'s
+        // `if shimProcess?.boundSession == nil { stop() }` backstop, and
+        // `stop()`'s only idempotence is `guard proc.isRunning`, which is
+        // still true milliseconds later when SwiftUI processes the re-mount.
+        // So the second call re-runs the whole body. The claim was that this
+        // crashes — `closeFile()` on an already-closed stdin handle raising an
+        // `NSFileHandleOperationException` Swift cannot catch. **Measured on
+        // this machine, it does not**: a doubled `closeFile()` is a no-op, in
+        // isolation and in `stop()`'s exact shape (a live child ignoring
+        // SIGTERM, the whole body run twice). Foundation invalidates the
+        // descriptor and returns.
         //
-        // What the link costs while it dangles: `handleProcessExit` arrives
+        // What the second pass actually costs is a `pgrep` tree walk and a
+        // `PeerNameStore.captureNow()` disk read, per restart, for nothing.
+        // That is reason enough not to arm it — this function stops the shim
+        // itself, synchronously, so a backstop has nothing to cover — but it
+        // is not a crash, and nothing here should be read as guarding one.
+        //
+        // Note what follows for the quit-time sweep, since a previous revision
+        // called it a hole: `stopOrphanedSessions` tests ownership only
+        // (`session == nil || session?.shim !== shim`), and the retired shim
+        // matches the second clause. It will call `stop()` on it again at
+        // quit. That is the sweep working — the shim genuinely is owned by no
+        // `OpenSession` — and it is why the sweep is left alone.
+        //
+        // The link's real cost while it dangles: `handleProcessExit` arrives
         // async and calls `resetActivityState()` ahead of its own
         // `isIntentionalStop` guard, so it can write into the live session and
         // the `StatusBarData` the new shim was handed — the same cleared flags
-        // this function has already written, plus an emptied subagent list,
-        // for as long as the child takes to die. `stop()` SIGKILLs only the
-        // descendants, never the Node parent, so on the wedged CLI this
-        // feature exists to recover from that is longer than the usual few
-        // hundred ms.
-        //
-        // Two paths that could do worse are gated on `isIntentionalStop`,
-        // which `stop()` sets first: the crash route and `hasActiveSession`.
-        // **The quit-time orphan sweep is NOT** — `stopOrphanedSessions` tests
-        // ownership only (`session == nil || session?.shim !== shim`), and the
-        // second clause is exactly the state left here. So a Cmd+Q landing
-        // inside that window re-enters `stop()` on the retired shim and
-        // re-closes its stdin handle: the same uncatchable
-        // `NSFileHandleOperationException` this function stopped arming
-        // `dismantleNSView` for. It is pre-existing rather than opened here —
-        // `closeSession` reaches the sweep's FIRST clause the moment its
-        // `OpenSession` deallocates — and closing it means teaching the sweep
-        // about `isIntentionalStop`, which is not this change's to make.
+        // this function has already written, plus an emptied subagent list.
+        // Bounded by the child's lifetime, and possibly never: the old shim is
+        // held only by the outgoing coordinator, `terminationHandler` captures
+        // it weakly, and `dismantleNSView` drops it — so it may deallocate
+        // before the child dies and never run that path at all.
         session.shim?.stop()
         session.shim = nil
         session.webView = nil

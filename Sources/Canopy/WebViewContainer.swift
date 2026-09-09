@@ -324,8 +324,11 @@ struct WebViewContainer: NSViewRepresentable {
     /// rather than the wrong thing getting it. Neither is reachable today:
     /// `Detail` renders `DetailLauncher` for a launcher pane rather than a
     /// `SessionContainer`, so `sessionId` is never nil here, and
-    /// `SessionStore.shared` is assigned in the store's own `init`. They are
-    /// defensive, not descriptive of a state anyone has seen.
+    /// `SessionStore.shared` is held for the app's lifetime by `CanopyApp`.
+    /// (That holder, not the assignment in `SessionStore.init`, is what makes
+    /// it non-nil — `shared` is `weak`, and the probe builds stores that
+    /// overwrite it and then go away.) They are defensive, not descriptive of
+    /// a state anyone has seen.
     @MainActor
     private static func focusIfThisPaneIsFocused(_ target: WKWebView?, sessionId: OpenSession.ID?) {
         guard let target, let window = target.window,
