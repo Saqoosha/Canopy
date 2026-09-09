@@ -827,6 +827,46 @@ final class SessionStore {
         SessionStorePersistence.saveHiddenIds(hiddenIds)
     }
 
+    /// A session that died on its own, kept only long enough for the launcher to
+    /// say so.
+    ///
+    /// It exists because the shim's `{type:"error"}` channel was write-only: the
+    /// message was logged and the pane closed, so a user saw a flash and a
+    /// launcher and nothing else (issue #194 — that is the hour issue #193 cost).
+    ///
+    /// `count` collapses a burst rather than showing the newest and hiding the
+    /// rest, because the failure that motivated this killed EVERY pane at once —
+    /// one cause, N panes. Bursts are collapsed by identical `message`, so two
+    /// genuinely different failures stay two banners' worth of information rather
+    /// than being averaged into one wrong number.
+    struct SessionFailure: Equatable {
+        var title: String
+        var message: String
+        var count: Int = 1
+    }
+
+    /// The most recent `SessionFailure`, or nil once dismissed or superseded by a
+    /// session that started successfully. Read by `DetailLauncher`.
+    var lastSessionFailure: SessionFailure?
+
+    /// Records a session that died, for the launcher banner.
+    ///
+    /// `message` is nil when the shim never sent one — a bare non-zero exit, or a
+    /// webview process that vanished — and the exit status is all there is. Saying
+    /// "exited N" is worse than nothing only if it displaces something better, and
+    /// here there is nothing better.
+    func noteSessionFailure(title: String, message: String?, status: Int32) {
+        let text = message ?? "The session process exited (status \(status))."
+        let label = title.isEmpty ? "Untitled" : title
+        if var existing = lastSessionFailure, existing.message == text {
+            existing.count += 1
+            lastSessionFailure = existing
+        } else {
+            lastSessionFailure = SessionFailure(title: label, message: text)
+        }
+        logger.error("session failure surfaced: \(text, privacy: .public)")
+    }
+
     func closeSession(_ id: UUID) {
         guard let idx = openSessions.firstIndex(where: { $0.id == id }) else { return }
         let session = openSessions[idx]

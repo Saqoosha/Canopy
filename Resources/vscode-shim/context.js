@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { Uri, Disposable } = require("./types.js");
+const { writeStdout } = require("./protocol.js");
 
 // ---------------------------------------------------------------------------
 // Memento (backs both globalState and workspaceState)
@@ -52,6 +53,17 @@ class Memento {
 
   keys() {
     return Object.keys(this._data);
+  }
+
+  // Real VSCode API, declared on `globalState` only. Nothing here syncs, so
+  // recording the keys and doing nothing IS the correct implementation — but it
+  // has to EXIST, or an extension that calls it dies with `not a function` in
+  // the middle of `activate`, which is the shape this whole file's Proxy below
+  // is meant to make legible. Kept on the class rather than the globalState
+  // instance: one method beats a per-instance graft, and workspaceState having
+  // an inert extra is cheaper than the asymmetry.
+  setKeysForSync(keys) {
+    this._syncKeys = Array.isArray(keys) ? [...keys] : [];
   }
 }
 
@@ -154,7 +166,7 @@ function createExtensionContext({ extensionPath, storagePath, workspacePath, rem
 
   const secretsOnDidChange = new (require("./types.js").EventEmitter)();
 
-  return {
+  const context = {
     subscriptions: [],
     extensionPath,
     extensionUri,
@@ -203,6 +215,40 @@ function createExtensionContext({ extensionPath, storagePath, workspacePath, rem
       onDidChange: secretsOnDidChange.event,
     },
   };
+
+  // `ExtensionContext` is a hand-written subset, so an extension update can
+  // reach for a member that was never implemented. That is not hypothetical:
+  // 2.1.266's `getPanelSessionIds()` read `workspaceState`, got `undefined`,
+  // and `undefined.get` threw during `activate` — the shim exited 1 and every
+  // session bounced back to the launcher.
+  //
+  // The Proxy does NOT prevent that; the read still yields `undefined` and the
+  // caller still throws. What it buys is the member's NAME at the moment of
+  // access. The thrown message names the property read on `undefined`
+  // (`reading 'get'`), never `workspaceState`, and the extension's file:line
+  // arrives on a separate record — so recovering the member meant reading the
+  // minified `extension.js` at that column. One `Unknown ExtensionContext
+  // member:` line replaces that whole detour.
+  //
+  // Same shape as `stubs.js`'s Proxy over the `vscode` namespace, including its
+  // symbol carve-out: `util.inspect`, `JSON.stringify` and friends probe well
+  // known symbols on any object handed to them, and warning on those would bury
+  // the real signal.
+  return new Proxy(context, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (typeof prop === "symbol") return undefined;
+      // `then` is probed by the language itself whenever an object reaches a
+      // promise position — awaiting one, or resolving a promise with it. A
+      // warning there would report the runtime's own bookkeeping as an
+      // extension bug.
+      if (prop === "then") return undefined;
+      const msg = `Unknown ExtensionContext member: ${String(prop)}`;
+      process.stderr.write(`[vscode-shim] WARN: ${msg}\n`);
+      writeStdout({ type: "log", level: "warn", msg });
+      return undefined;
+    },
+  });
 }
 
 module.exports = { createExtensionContext, Memento, workspaceStateFile, MAX_LABEL_LENGTH };

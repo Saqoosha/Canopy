@@ -108,7 +108,15 @@ struct Detail: View {
                             leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,
                             onClose: { store.closePane(at: index) }
                         )
-                        SessionContainer(session: session) { _ in
+                        SessionContainer(session: session) { status in
+                            // The pane still closes — that behaviour is unchanged.
+                            // What is new is that the reason survives it, so the
+                            // launcher can say why instead of just appearing.
+                            store.noteSessionFailure(
+                                title: session.title,
+                                message: session.lastFatalError,
+                                status: status
+                            )
                             store.closeSession(session.id)
                         }
                         .id(session.id)
@@ -388,11 +396,74 @@ private struct TeleportOverlay: View {
 /// Embeds the existing LauncherView. The Launcher still owns the new-session
 /// flow; on Start it calls back into the store via a closure binding (set up
 /// in PR 2 inside LauncherView). For PR 1/2 we feed it a temporary AppState.
+/// Why the last session died, shown above the launcher.
+///
+/// Deliberately a banner over the launcher rather than a surviving crashed pane:
+/// the pane-closing behaviour is long-established and this is meant to add the
+/// missing information, not to renegotiate the layout. The known cost is that a
+/// burst collapses into one row — `SessionFailure.count` reports how many.
+private struct SessionFailureBanner: View {
+    let failure: SessionStore.SessionFailure
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.system(size: 12))
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(headline)
+                    .font(.system(size: 12, weight: .medium))
+                Text(failure.message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    // The interesting part of an activation failure is the tail
+                    // (which member, which file), so let it wrap rather than
+                    // truncating into "Cannot read properties of…".
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 8)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.orange.opacity(0.10))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.orange.opacity(0.25)).frame(height: 1)
+        }
+    }
+
+    private var headline: String {
+        failure.count > 1
+            ? "\(failure.count) sessions failed to start"
+            : "\(failure.title) failed to start"
+    }
+}
+
 private struct DetailLauncher: View {
     @Bindable var store: SessionStore
     @State private var localAppState = AppState()
 
     var body: some View {
+        VStack(spacing: 0) {
+            if let failure = store.lastSessionFailure {
+                SessionFailureBanner(failure: failure) {
+                    store.lastSessionFailure = nil
+                }
+            }
+            launcher
+        }
+    }
+
+    private var launcher: some View {
         LauncherView(appState: localAppState, compactMode: true)
             .onChange(of: localAppState.screen) {
                 // The Launcher uses an AppState-based screen transition. When
@@ -416,6 +487,8 @@ private struct DetailLauncher: View {
                         customApi: localAppState.customApi,
                         target: target
                     )
+                    // A session started, so the previous failure is answered.
+                    store.lastSessionFailure = nil
                     // Reset the local appState so the next Start works again
                     localAppState.backToLauncher()
                 }
