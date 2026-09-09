@@ -253,20 +253,19 @@ struct WebViewContainer: NSViewRepresentable {
         // is nil at this point (SwiftUI hasn't placed the host yet), so
         // defer until the next runloop pass when the window is wired.
         let target = context.coordinator.currentWebView
+        let sessionId = boundSession?.id
         DispatchQueue.main.async {
-            if let target, let window = target.window {
-                window.makeFirstResponder(target)
-            }
+            Self.focusIfThisPaneIsFocused(target, sessionId: sessionId)
         }
         return host
     }
 
     func updateNSView(_ host: SessionWebViewHost, context: Context) {
         // Swap the inner WKWebView when the session bound to this view
-        // changes. With `.id(session.id)` on the SessionContainer this
-        // guard rarely fires (SwiftUI re-mounts on session change), but
-        // we keep it for the SwiftUI double-pass case where makeNSView
-        // is followed by an immediate updateNSView with the same id.
+        // changes. With `.id(session.mountIdentity)` on the SessionContainer
+        // this guard rarely fires (SwiftUI re-mounts on session change, and on
+        // restart), but we keep it for the SwiftUI double-pass case where
+        // makeNSView is followed by an immediate updateNSView with the same id.
         let newId = boundSession?.id
         guard newId != context.coordinator.lastBoundSessionId else {
             // Same session, nothing to swap — but a sibling host built by
@@ -297,11 +296,46 @@ struct WebViewContainer: NSViewRepresentable {
         // (often the window itself), so the user gets a beep until they
         // click into the input field. Hand focus back to the webview.
         let target = context.coordinator.currentWebView
+        let sessionId = newId
         DispatchQueue.main.async {
-            if let target, let window = target.window {
-                window.makeFirstResponder(target)
-            }
+            Self.focusIfThisPaneIsFocused(target, sessionId: sessionId)
         }
+    }
+
+    /// Hand the keyboard to `target`, but only when the session it belongs to
+    /// is the one the FOCUSED pane is showing.
+    ///
+    /// Both call sites used to do this unconditionally, and
+    /// `SessionStore.restartSession(_:)` is what made that visibly wrong: it
+    /// acts on a sidebar row rather than on a pane, so re-mounting a
+    /// NON-focused pane took the keyboard while the highlight stayed elsewhere
+    /// and the next keystroke landed in a session the user was not looking at.
+    /// The predicate lives on the store (`isFocusedPaneSession`) so the probe
+    /// can reach it.
+    ///
+    /// It was not, however, the first route that could mount unfocused
+    /// content: multi-pane launch restore builds N panes in one pass, and
+    /// before this every one of them called `makeFirstResponder`, so whichever
+    /// deferred block ran last won the keyboard regardless of the snapshot's
+    /// `focusedPaneIndex`. That is closed here too, incidentally rather than by
+    /// design.
+    ///
+    /// Both guards decline in the safe direction — nothing gets the keyboard,
+    /// rather than the wrong thing getting it. Neither is reachable today:
+    /// `Detail` renders `DetailLauncher` for a launcher pane rather than a
+    /// `SessionContainer`, so `sessionId` is never nil here, and
+    /// `SessionStore.shared` is held for the app's lifetime by `CanopyApp`.
+    /// (That holder, not the assignment in `SessionStore.init`, is what makes
+    /// it non-nil — `shared` is `weak`, and the probe builds stores that
+    /// overwrite it and then go away.) They are defensive, not descriptive of
+    /// a state anyone has seen.
+    @MainActor
+    private static func focusIfThisPaneIsFocused(_ target: WKWebView?, sessionId: OpenSession.ID?) {
+        guard let target, let window = target.window,
+              let sessionId,
+              SessionStore.shared?.isFocusedPaneSession(sessionId) == true
+        else { return }
+        window.makeFirstResponder(target)
     }
 
     /// Build (or fetch cached) WKWebView for `boundSession` and add it

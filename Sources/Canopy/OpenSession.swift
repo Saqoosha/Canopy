@@ -184,6 +184,31 @@ final class OpenSession: Identifiable, Hashable {
     /// whole of `.dormant` — which never reaches a SessionContainer.
     var webView: WKWebView?
 
+    /// Bumped by `SessionStore.restartSession(_:)`, and read only through
+    /// `mountIdentity`.
+    ///
+    /// A restart has to throw away the shim AND the WKWebView and build both
+    /// again, and the only code that builds either is `WebViewContainer`'s
+    /// `makeNSView` — reached by re-mounting `SessionContainer`, which
+    /// `Detail.swift` keys on this session's identity. `id` cannot carry that
+    /// signal: it is what the panes, the sidebar rows, the entry file and the
+    /// restore snapshot all address this session by, so minting a new one to
+    /// force a re-mount would detach every one of them.
+    var restartGeneration: Int = 0
+
+    /// The identity `Detail.swift` mounts this session's `SessionContainer`
+    /// under. Distinct from `id` in exactly one way: it also changes on a
+    /// restart, which is what makes SwiftUI tear the old pane content down and
+    /// build a fresh shim and webview against the same session.
+    struct MountIdentity: Hashable {
+        let id: UUID
+        let restartGeneration: Int
+    }
+
+    var mountIdentity: MountIdentity {
+        MountIdentity(id: id, restartGeneration: restartGeneration)
+    }
+
     init(
         id: UUID = UUID(),
         origin: Origin,

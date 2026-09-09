@@ -471,6 +471,24 @@ final class SessionStore {
         window.makeFirstResponder(webView)
     }
 
+    /// Whether `id` is the session the FOCUSED pane is showing.
+    ///
+    /// Exists for `WebViewContainer`, whose mount-time
+    /// `window.makeFirstResponder(target)` was unconditional. That was
+    /// harmless while every mount belonged to the focused pane — which was
+    /// true of every route that existed before `restartSession(_:)`, since a
+    /// pane only ever gained content by being focused first. Restart broke the
+    /// assumption: the sidebar's "Restart session" acts on a row, not on a
+    /// pane, so re-mounting a NON-focused pane handed it the keyboard while
+    /// `focusedPaneIndex` and the sidebar highlight stayed where they were,
+    /// and the next keystroke went to a session the user was not looking at.
+    /// (The pane header's copy of that menu is safe by accident of ordering —
+    /// its monitor focuses the pane before the menu opens.)
+    func isFocusedPaneSession(_ id: OpenSession.ID) -> Bool {
+        guard let pane = focusedPane, case .session(let sid) = pane.content else { return false }
+        return sid == id
+    }
+
     /// Update selection + lastActiveResumeId from the currently focused pane's content.
     /// Called from setFocusedPaneIndex, moveFocus, openInFocusedPane,
     /// openLauncherInFocusedPane, and closePane so tap-to-focus, Cmd+Opt+arrow,
@@ -916,6 +934,129 @@ final class SessionStore {
         // sidebar appear and post-teleport). Reload so the now-closed
         // session shows up in the Recents block immediately.
         Task { await refreshRecents() }
+    }
+
+    /// Open a directory in Finder, reporting whether Finder took it.
+    ///
+    /// The caller passes the session's SPAWN directory — "where this session
+    /// started", which is also what `ShimProcess.openTerminal` opens. A
+    /// session that has since relocated into a worktree therefore lands on its
+    /// original folder; the two routes into a session's directory agreeing
+    /// matters more than either one tracking the relocation, and changing both
+    /// is its own piece of work (see the relocation learnings in CLAUDE.md).
+    ///
+    /// A remote session has no directory this machine can open, and callers
+    /// are expected not to offer the action at all there rather than to let it
+    /// fail here. A directory deleted out from under a still-open session is a
+    /// different matter: `NSWorkspace.open` returns false and this logs it,
+    /// and that log line is the WHOLE of the handling — both menu items
+    /// discard the result, so to the user the row does nothing at all. Saying
+    /// so is deliberate; a visible error here would be new behaviour, decided
+    /// separately from the feature that added the row.
+    ///
+    /// Named `open`, not `reveal`, because that is what it does: revealing is
+    /// `NSWorkspace.activateFileViewerSelecting(_:)`, which would select the
+    /// folder in its PARENT window instead of opening it.
+    @discardableResult
+    func openInFinder(_ directory: URL) -> Bool {
+        let opened = NSWorkspace.shared.open(directory)
+        if !opened {
+            logger.warning("openInFinder failed: \(directory.path, privacy: .public)")
+        }
+        return opened
+    }
+
+    /// Tear down a session's shim and webview and build both again, resuming
+    /// the same conversation, without touching the row or the pane it sits in.
+    ///
+    /// The row stays where it is and the pane keeps its width, which is the
+    /// whole difference from close-then-reopen: that path removes the session,
+    /// re-derives selection, and appends a new row at the bottom of the Open
+    /// block. It is also the only way to pick up a NEW CC extension build, or
+    /// to recover a session whose CLI is wedged, short of losing its place.
+    ///
+    /// Resume is inherited rather than arranged here. `resumeId` already names
+    /// the CLI's own transcript once a turn has landed (`backfillResumeId`
+    /// writes it, and sets `resumeIdIsExistingTranscript` beside it), so the
+    /// fresh shim resumes for the same reason reopening a closed row does. A
+    /// session that has never taken a turn still holds `openNew`'s placeholder
+    /// and correctly starts fresh — there is nothing yet to resume.
+    ///
+    /// **What "resuming" does not promise.** The fresh shim is handed this
+    /// session's SPAWN `workingDirectory`, so a session that has since
+    /// relocated into a worktree hits the same hole close-then-reopen already
+    /// has: its transcript now lives under the WORKTREE's encoded project
+    /// folder, the extension's local-disk precheck misses it, and the CLI
+    /// starts a fresh conversation — announced only as a `system/status` frame
+    /// carrying `resumeDropped: true`, which Canopy neither reads nor shows.
+    /// Pre-existing, and not widened here except in that this makes it one
+    /// click. See the relocation learnings in CLAUDE.md.
+    ///
+    /// An UNPANED open session lands in `.dormant`, not `.spawning`: nothing
+    /// mounts a `SessionContainer` for it, so no shim would be built, and
+    /// `.spawning` renders as the breathing "working" dot on a session that is
+    /// running nothing. `startIfDormant(_:)` picks it up when a pane takes it.
+    func restartSession(_ id: UUID) {
+        guard let session = openSessions.first(where: { $0.id == id }) else { return }
+        let isPaned = panes.contains { pane in
+            if case .session(let sid) = pane.content { return sid == id }
+            return false
+        }
+        logger.notice("""
+            restartSession id=\(id.uuidString, privacy: .public) \
+            resume=\(session.resumeId, privacy: .public) paned=\(isPaned)
+            """)
+
+        // The dying shim keeps its `boundSession`, deliberately — but the
+        // reason is smaller than two earlier revisions of this comment
+        // claimed, and the difference is recorded because both of them read
+        // like verification. Clearing it arms `dismantleNSView`'s
+        // `if shimProcess?.boundSession == nil { stop() }` backstop, and
+        // `stop()`'s only idempotence is `guard proc.isRunning`, which is
+        // still true milliseconds later when SwiftUI processes the re-mount.
+        // So the second call re-runs the whole body. The claim was that this
+        // crashes — `closeFile()` on an already-closed stdin handle raising an
+        // `NSFileHandleOperationException` Swift cannot catch. **Measured on
+        // this machine, it does not**: a doubled `closeFile()` is a no-op, in
+        // isolation and in `stop()`'s exact shape (a live child ignoring
+        // SIGTERM, the whole body run twice). Foundation invalidates the
+        // descriptor and returns.
+        //
+        // What the second pass actually costs is a `pgrep` tree walk and a
+        // `PeerNameStore.captureNow()` disk read, per restart, for nothing.
+        // That is reason enough not to arm it — this function stops the shim
+        // itself, synchronously, so a backstop has nothing to cover — but it
+        // is not a crash, and nothing here should be read as guarding one.
+        //
+        // Note what follows for the quit-time sweep, since a previous revision
+        // called it a hole: `stopOrphanedSessions` tests ownership only
+        // (`session == nil || session?.shim !== shim`), and the retired shim
+        // matches the second clause. It will call `stop()` on it again at
+        // quit. That is the sweep working — the shim genuinely is owned by no
+        // `OpenSession` — and it is why the sweep is left alone.
+        //
+        // The link's real cost while it dangles: `handleProcessExit` arrives
+        // async and calls `resetActivityState()` ahead of its own
+        // `isIntentionalStop` guard, so it can write into the live session and
+        // the `StatusBarData` the new shim was handed — the same cleared flags
+        // this function has already written, plus an emptied subagent list.
+        // Bounded by the child's lifetime, and possibly never: the old shim is
+        // held only by the outgoing coordinator, `terminationHandler` captures
+        // it weakly, and `dismantleNSView` drops it — so it may deallocate
+        // before the child dies and never run that path at all.
+        session.shim?.stop()
+        session.shim = nil
+        session.webView = nil
+
+        session.statusBar.resetAll()
+        session.statusBar.remoteHost = session.origin.remoteHost
+        session.connection.status = .connected
+        session.isThinking = false
+        session.isAsking = false
+        session.isWaiting = false
+        session.lastFatalError = nil
+        session.status = isPaned ? .spawning : .dormant
+        session.restartGeneration += 1
     }
 
     // MARK: - Refresh
