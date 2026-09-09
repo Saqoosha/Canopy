@@ -18,6 +18,58 @@ protocol ShimProcessDelegate: AnyObject {
 /// (serialized by the system). All other mutable state (`isReady`, `pendingMessages`, etc.)
 /// is only accessed from the main thread. Stdin writes are serialized via `writeQueue`.
 final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
+
+    /// Every env key Canopy assigns to a shim itself.
+    ///
+    /// A shim's environment starts from `ProcessInfo.processInfo.environment`, and
+    /// each of these is assigned CONDITIONALLY — so on the branch that does not
+    /// assign it, whatever the launching shell exported survives into the child.
+    /// That is always wrong: these encode a decision Canopy just made, and Canopy
+    /// is developed by launching it from a shell.
+    ///
+    /// What an inherited value costs, per key, because the answers differ:
+    /// `CANOPY_SSH_HOST` alone gates `vscode-shim/index.js`'s fs/spawn patches, so
+    /// it puts a LOCAL session into SSH mode and keys its `workspaceState` file as
+    /// remote. `CANOPY_SSH_WRAPPER_PATH` is read by `workspace.js`'s
+    /// `createConfiguration` with no SSH gate at all, so it hands every local
+    /// session a `claudeProcessWrapper` that then exits 1 at
+    /// `ssh-claude-wrapper.sh`'s own `CANOPY_SSH_HOST` guard. `CANOPY_SSH_CWD` is
+    /// read only past that guard and is inert on its own — listed anyway, so the
+    /// rule is "everything Canopy assigns" rather than a judgement call per key.
+    /// `CANOPY_REMOTE_RESUME` resumes a conversation the user did not pick.
+    /// `CANOPY_REMOTE_MODEL` / `CANOPY_REMOTE_EFFORT` pick a model they did not.
+    /// `CANOPY_PANE` misattributes notifications — and a Canopy launched from a
+    /// terminal inside another Canopy session inherits a real one.
+    ///
+    /// Deliberately NOT a `CANOPY_*` prefix sweep. The shim also reads dev
+    /// overrides Canopy never assigns — `CANOPY_CJK_DEBUG`,
+    /// `CANOPY_DISABLE_CJK_EMPHASIS_REPAIR` — which are exported on purpose, and a
+    /// prefix rule would eat exactly those. The membership test is "Canopy writes
+    /// this key", so adding a new one here is part of adding the assignment.
+    ///
+    /// `CLAUDE_CODE_SESSION_NAME` is scrubbed on its own branch below instead: it
+    /// is not Canopy's namespace, and its reasoning is specific to peer names.
+    /// `ANTHROPIC_BASE_URL` and friends are deliberately absent — an inherited
+    /// custom endpoint is a supported way to launch Canopy, and
+    /// `sessionUsesCustomEndpoint` reads the environment for exactly that reason.
+    static let canopyAssignedEnvKeys = [
+        "CANOPY_SSH_HOST",
+        "CANOPY_SSH_CWD",
+        "CANOPY_SSH_WRAPPER_PATH",
+        "CANOPY_REMOTE_RESUME",
+        "CANOPY_REMOTE_MODEL",
+        "CANOPY_REMOTE_EFFORT",
+        "CANOPY_PANE",
+    ]
+
+    /// Drops `canopyAssignedEnvKeys` from an inherited environment. Both shim
+    /// spawners call this — `ShimProcess` and `RemoteSessionsBridge` — because a
+    /// per-site `removeValue` is a list that only one of them ever has all of.
+    static func scrubbingCanopyAssignedKeys(_ environment: [String: String]) -> [String: String] {
+        var scrubbed = environment
+        for key in canopyAssignedEnvKeys { scrubbed.removeValue(forKey: key) }
+        return scrubbed
+    }
     weak var webView: WKWebView?
 
     private var process: Process?
@@ -1725,7 +1777,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         args.append(contentsOf: ["--settings-path", CanopySettings.shared.filePath.path])
         proc.arguments = args
 
-        var env = ProcessInfo.processInfo.environment
+        var env = Self.scrubbingCanopyAssignedKeys(ProcessInfo.processInfo.environment)
         env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
 
         // Ensure PATH includes directories where tools like rg (ripgrep) live.
@@ -1877,17 +1929,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // unresolvable `--resume` (measured), and every brand-new session
             // carries a placeholder id, so sending it unconditionally would
             // break new remote sessions to fix continued ones.
-            // Scrubbed before it is conditionally set, because `env` starts
-            // from `ProcessInfo.processInfo.environment` and this decision has
-            // to be Canopy's alone. A Canopy launched from a shell exporting
-            // this — which is how it is developed — would otherwise hand every
-            // remote session an id it never chose: a wrong conversation
-            // resumed, or exit 1 on a new one. The same guard is applied to
-            // `CLAUDE_CODE_SESSION_NAME` thirty lines above, for the same
-            // reason. `CANOPY_REMOTE_MODEL` and `CANOPY_REMOTE_EFFORT` share
-            // the hole and are left alone: pre-existing, and a wrong model is
-            // visible where a wrong conversation is not.
-            env.removeValue(forKey: "CANOPY_REMOTE_RESUME")
+            // Scrubbed with the rest of Canopy's own keys where `env` is built;
+            // what an inherited value costs HERE is a wrong conversation resumed,
+            // or exit 1 on a new one.
             if let id = Self.remoteResumeId(
                 existingTranscript: resumeIdIsExistingTranscript, resumeSessionId: resumeSessionId
             ) {
@@ -2541,6 +2585,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             let stack = msg["stack"] as? String
             logger.error("Shim error: \(message, privacy: .public)")
             if let stack { logger.error("Stack: \(stack, privacy: .public)") }
+            // Park it on the session so the launcher can say why after the pane
+            // is gone. Logging alone is what made issue #193 invisible: the shim
+            // reported this accurately and nothing on screen ever read it.
+            boundSession?.lastFatalError = message
 
         default:
             logger.info("Unknown shim message: \(type, privacy: .public)")

@@ -8299,6 +8299,93 @@ enum SidebarLogicProbe {
                        fromLine: line(realId, "1", [userRecord])) == nil)
         }
 
+        // MARK: - Inherited-environment scrub (issue #197)
+        //
+        // The membership rule is what these pin, not the list's contents: every
+        // key Canopy ASSIGNS is dropped, and every key it merely READS survives.
+        // Deriving the removals from `canopyAssignedEnvKeys` rather than naming
+        // them keeps the first half true when a key is added; the survivors are
+        // spelled out because each is a separate decision that a prefix sweep
+        // would silently reverse.
+        do {
+            var env = ["PATH": "/usr/bin", "HOME": "/Users/probe"]
+            for key in ShimProcess.canopyAssignedEnvKeys { env[key] = "inherited" }
+            let scrubbed = ShimProcess.scrubbingCanopyAssignedKeys(env)
+
+            record("env scrub: drops every key Canopy assigns",
+                   ShimProcess.canopyAssignedEnvKeys.allSatisfy { scrubbed[$0] == nil })
+            record("env scrub: leaves everything else alone",
+                   scrubbed["PATH"] == "/usr/bin" && scrubbed["HOME"] == "/Users/probe")
+
+            // The reason this is a list and not a `CANOPY_*` prefix sweep: the
+            // shim reads these two, Canopy never writes them, and a developer
+            // exports them on purpose.
+            let overrides = ShimProcess.scrubbingCanopyAssignedKeys([
+                "CANOPY_CJK_DEBUG": "1",
+                "CANOPY_DISABLE_CJK_EMPHASIS_REPAIR": "1",
+            ])
+            record("env scrub: keeps the dev overrides a prefix sweep would eat",
+                   overrides["CANOPY_CJK_DEBUG"] == "1"
+                       && overrides["CANOPY_DISABLE_CJK_EMPHASIS_REPAIR"] == "1")
+
+            // An inherited custom endpoint is a supported way to launch Canopy,
+            // and `sessionUsesCustomEndpoint` reads the environment for it.
+            let api = ShimProcess.scrubbingCanopyAssignedKeys(["ANTHROPIC_BASE_URL": "https://x"])
+            record("env scrub: keeps an inherited custom endpoint",
+                   api["ANTHROPIC_BASE_URL"] == "https://x")
+
+            record("env scrub: the keys that motivated it are in the list",
+                   ShimProcess.canopyAssignedEnvKeys.contains("CANOPY_SSH_HOST")
+                       && ShimProcess.canopyAssignedEnvKeys.contains("CANOPY_SSH_WRAPPER_PATH"))
+
+            record("env scrub: an already-clean environment is unchanged",
+                   ShimProcess.scrubbingCanopyAssignedKeys(["PATH": "/usr/bin"]) == ["PATH": "/usr/bin"])
+        }
+
+        // MARK: - Session failure surfaced to the launcher (issue #194)
+        do {
+            let store = SessionStore()
+
+            record("failure: nothing to report before anything dies",
+                   store.lastSessionFailure == nil)
+
+            store.noteSessionFailure(title: "Canopy", message: "Extension activation failed: boom", status: 1)
+            record("failure: the shim's own message wins over the exit status",
+                   store.lastSessionFailure?.message == "Extension activation failed: boom"
+                       && store.lastSessionFailure?.title == "Canopy"
+                       && store.lastSessionFailure?.count == 1)
+
+            // One cause, N panes — the shape issue #193 actually had. Showing the
+            // newest and hiding the rest would under-report it as a single
+            // session's problem.
+            store.noteSessionFailure(title: "Other", message: "Extension activation failed: boom", status: 1)
+            store.noteSessionFailure(title: "Third", message: "Extension activation failed: boom", status: 1)
+            record("failure: a burst with one cause collapses to a count",
+                   store.lastSessionFailure?.count == 3)
+
+            // A genuinely different failure is not the same event, so it replaces
+            // rather than incrementing — otherwise the count describes nothing.
+            store.noteSessionFailure(title: "Canopy", message: "Something else entirely", status: 1)
+            record("failure: a different message starts a new report",
+                   store.lastSessionFailure?.message == "Something else entirely"
+                       && store.lastSessionFailure?.count == 1)
+
+            // No message at all is the bare-exit case: the crash callback carries
+            // a status and nothing else.
+            store.lastSessionFailure = nil
+            store.noteSessionFailure(title: "Canopy", message: nil, status: 9)
+            record("failure: a bare exit still says something",
+                   store.lastSessionFailure?.message.contains("status 9") == true)
+
+            store.lastSessionFailure = nil
+            store.noteSessionFailure(title: "", message: "boom", status: 1)
+            record("failure: an untitled session is labelled, not blank",
+                   store.lastSessionFailure?.title == "Untitled")
+
+            record("failure: dismissing clears it",
+                   { store.lastSessionFailure = nil; return store.lastSessionFailure == nil }())
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

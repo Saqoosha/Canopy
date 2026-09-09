@@ -83,7 +83,10 @@ final class RemoteSessionsBridge: @unchecked Sendable {
 
     init(cwd: URL, extraEnv: [String: String] = [:]) {
         self.cwd = cwd
-        var e = ProcessInfo.processInfo.environment
+        // Same scrub as the pane shim: this spawns the same `index.js` and reaches
+        // the same `createExtensionContext`, so an inherited `CANOPY_SSH_HOST` puts
+        // the bridge in SSH mode too. See `ShimProcess.canopyAssignedEnvKeys`.
+        var e = ShimProcess.scrubbingCanopyAssignedKeys(ProcessInfo.processInfo.environment)
         e["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
         for (k, v) in extraEnv { e[k] = v }
         self.env = e
