@@ -902,10 +902,17 @@ struct LauncherView: View {
                 // than appending "\n" to `initialPrompt` — the caret can be
                 // mid-text, and only the field editor knows where it is.
                 // Undo, selection replacement and scroll-to-caret come along
-                // for free. Everything else returns `.ignored`, which is what
-                // keeps plain Return reaching the send button's shortcut and
-                // Option+Return reaching the field editor unchanged (both
-                // re-measured with the handler installed).
+                // for free.
+                //
+                // The shift test is `contains`, not an exact match, so
+                // Shift+Option+Return and Shift+Cmd+Return insert a newline
+                // too. Deliberate: an exact match would only turn those combos
+                // back into the dead keys this is fixing. Every other Return
+                // returns `.ignored`, which is what keeps plain Return
+                // reaching the send button's shortcut and Option+Return
+                // reaching the field editor unchanged — re-measured on the
+                // harness with the handler installed, and the real launcher
+                // checked on a Debug build.
                 .onKeyPress(.return, phases: .down) { press in
                     guard press.modifiers.contains(.shift),
                           let editor = NSApp.keyWindow?.firstResponder as? NSTextView
