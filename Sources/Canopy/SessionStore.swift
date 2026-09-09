@@ -1019,14 +1019,28 @@ final class SessionStore {
         // Swift cannot catch. There was nothing for a backstop to cover
         // anyway: this function stops the shim itself, synchronously.
         //
-        // What the link costs while it dangles is bounded. `handleProcessExit`
-        // arrives async and calls `resetActivityState()` ahead of its own
-        // `isIntentionalStop` guard, so it can write into the live session —
-        // but only the same cleared flags this function has already written,
-        // and only for the few hundred ms before the child is reaped. Every
-        // path that could do worse is gated on `isIntentionalStop`, which
-        // `stop()` sets first: the crash route, `hasActiveSession`, and the
-        // quit-time orphan sweep all skip it.
+        // What the link costs while it dangles: `handleProcessExit` arrives
+        // async and calls `resetActivityState()` ahead of its own
+        // `isIntentionalStop` guard, so it can write into the live session and
+        // the `StatusBarData` the new shim was handed — the same cleared flags
+        // this function has already written, plus an emptied subagent list,
+        // for as long as the child takes to die. `stop()` SIGKILLs only the
+        // descendants, never the Node parent, so on the wedged CLI this
+        // feature exists to recover from that is longer than the usual few
+        // hundred ms.
+        //
+        // Two paths that could do worse are gated on `isIntentionalStop`,
+        // which `stop()` sets first: the crash route and `hasActiveSession`.
+        // **The quit-time orphan sweep is NOT** — `stopOrphanedSessions` tests
+        // ownership only (`session == nil || session?.shim !== shim`), and the
+        // second clause is exactly the state left here. So a Cmd+Q landing
+        // inside that window re-enters `stop()` on the retired shim and
+        // re-closes its stdin handle: the same uncatchable
+        // `NSFileHandleOperationException` this function stopped arming
+        // `dismantleNSView` for. It is pre-existing rather than opened here —
+        // `closeSession` reaches the sweep's FIRST clause the moment its
+        // `OpenSession` deallocates — and closing it means teaching the sweep
+        // about `isIntentionalStop`, which is not this change's to make.
         session.shim?.stop()
         session.shim = nil
         session.webView = nil

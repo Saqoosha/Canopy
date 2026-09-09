@@ -105,12 +105,14 @@ struct Sidebar: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             // Compensate for `.listStyle(.sidebar)`'s built-in side padding.
-            // Rows still don't touch the wall: what keeps them off it is the
-            // sidebar's own edge plus `RowChip.horizontalInset`, which is
-            // NEGATIVE — the chip deliberately extends past the List's content
-            // area to sit under the system's row ring. (An older note here
-            // credited a 6px inset on the chip itself; there has never been
-            // one, and there is now less than none.)
+            // Rows still don't touch the wall, but not for the reason an older
+            // note here gave: it credited the chip with a "6px inset" of its
+            // own, which was a fair reading of the 3pt-per-side padding the
+            // background used to take. That padding is gone, and
+            // `RowChip.horizontalInset` is NEGATIVE — the chip deliberately
+            // extends 4pt PAST the List's content area to sit under the
+            // system's row ring. The sidebar's own edge is what keeps it off
+            // the wall now.
             .padding(.horizontal, -8)
             // Auto-scroll-to-top when a new session is opened, via an
             // AppKit hook below. SwiftUI's `ScrollViewProxy.scrollTo` on
@@ -531,19 +533,29 @@ struct Sidebar: View {
 /// the chip where the ring already is — and the ring is where AppKit puts a
 /// sidebar row's highlight, which is the native look anyway.
 ///
-/// **All three values are measurements of the ring, not design choices.** They
-/// come from an ASCII pixel map of one corner of a right-clicked row on macOS
-/// 26, classifying each device pixel as background / ring / chip stroke / chip
-/// fill, **on a 2x display** — the device-pixel counts below are halved to
-/// points on that assumption and were never checked at another backing scale. Re-measure that way if a macOS release moves them, and measure the
-/// corner from its TANGENT rows — a 45° diagonal through the corner is the one
-/// place where two different radii still read as touching, so it makes any
-/// radius look correct.
+/// **`horizontalInset` and `cornerRadius` are measurements of the ring, not
+/// design choices.** They come from an ASCII pixel map of the TOP-LEFT corner
+/// of a right-clicked row on macOS 26, classifying each device pixel as
+/// background / ring / chip stroke / chip fill, **on a 2x display** — the
+/// device-pixel counts below are halved to points on that assumption and were
+/// never checked at another backing scale. Re-measure the same way if a macOS
+/// release moves them, and measure a corner from its TANGENT rows: a 45°
+/// diagonal through the corner is the one place where two different radii
+/// still read as touching, so it makes any radius look correct.
+///
+/// `verticalInset` is **not** a measurement of anything. It is the 1pt the
+/// background's own `.padding(.vertical, 1)` used to take, relocated out to
+/// `listRowInsets` and subtracted back out of `SidebarRowView`. The chip's top
+/// edge and height come out identical either way; vertically the chip and the
+/// ring already agreed, which is why only the horizontal inset had to move.
 ///
 /// - `horizontalInset` is **negative**: the ring's inner edge sits 12pt from
 ///   the window's left edge while a List row's default content area starts at
 ///   16, so a zero inset still leaves a 4pt band of background inside the
-///   ring. Vertically the two already agree, which is why only this one is.
+///   ring. Only the LEADING edge was measured; the trailing −4 assumes the
+///   ring is symmetric about the List's content area, which one corner cannot
+///   show. If the right edge ever looks wrong, that assumption is where to
+///   look first.
 /// - `cornerRadius` is the radius of the ring's INNER rect, read off a pixel
 ///   map of one corner. **Do not derive it as "outer radius minus stroke
 ///   width" — the ring is not a stroked path.** Measured: the outer arc spans
