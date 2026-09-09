@@ -441,8 +441,6 @@ enum GitWorktree {
         return full.hasPrefix("origin/") ? String(full.dropFirst("origin/".count)) : full
     }
 
-    /// `baseRef` nil keeps git's own default, which is the repository's HEAD —
-    /// see `defaultBaseRef` for why callers should almost never want that.
     /// Whether a ref of this name already exists in `repo`.
     ///
     /// `git worktree add -b` creates a branch and fails outright if the name is
@@ -474,6 +472,8 @@ enum GitWorktree {
         return branch
     }
 
+    /// `baseRef` nil keeps git's own default, which is the repository's HEAD —
+    /// see `defaultBaseRef` for why callers should almost never want that.
     static func createWorktree(
         repo: URL,
         branch: String,

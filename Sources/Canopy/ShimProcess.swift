@@ -717,30 +717,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         keepAliveGate.noteActivity(at: Date())
     }
 
-    /// Inject one refresh turn.
-    ///
-    /// The payload is the same shape `requestRecap` uses, for the same
-    /// reason: it was captured field-for-field from a genuine webview→host
-    /// prompt, and the extension is stricter than the documented
-    /// `{type, message}` core suggests. `origin.kind` stays "human" because
-    /// that is the only value the path is known to accept.
-    ///
-    /// Unlike the recap this is NOT a fork — it is an ordinary turn in the
-    /// main conversation, and that is deliberate. A fork would leave the
-    /// transcript untouched, but only a turn on the main conversation is
-    /// guaranteed to hit the exact cached prefix the next real turn will
-    /// use, which is the entire point. Whether the recap fork's own request
-    /// also refreshes that prefix is unmeasured; if it does, this could
-    /// have been free of transcript cost, and that is worth measuring
-    /// before extending this feature rather than assuming either way.
-    ///
-    /// The price of using the main conversation is that the turn is
-    /// permanent: it is in the JSONL and in the model's context from here
-    /// on. Roughly forty tokens each, so an overnight run adds a few
-    /// hundred — negligible against the 200K it is protecting, but real,
-    /// and the reason `KeepAliveGate.promptText` explains itself to a
-    /// reader.
-
     /// Submit the prompt the user typed on the launch screen, if there is one.
     ///
     /// Unlike the recap and the keep-alive — the other two turns Canopy
@@ -800,6 +776,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // never eligible for a recap until the user types), and `promptHistory`
         // stays empty (so the title generator is seeded with nothing — on the
         // one prompt this whole feature is about).
+        //
+        // `isWorking` for the same reason: a real turn is now in flight, and
+        // `requestKeepAlive`/`requestRecap` both guard on `!isWorking` while
+        // the sidebar dot and the MacroPad LED read it. `phoneReplyInFlight`'s
+        // doc already warns that `sendToShim` "writes straight to the shim's
+        // stdin and never touches that path" — this is that call site.
+        isWorking = true
         recapGate.noteUserTurn()
         // Same reason: `KeepAliveGate` declines with "no API activity yet —
         // nothing cached to keep" while `lastActivityAt` is nil, and nothing
@@ -819,6 +802,29 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         logger.notice("initial prompt: queued \(prompt.count, privacy: .public) chars")
     }
 
+    /// Inject one refresh turn.
+    ///
+    /// The payload is the same shape `requestRecap` uses, for the same
+    /// reason: it was captured field-for-field from a genuine webview→host
+    /// prompt, and the extension is stricter than the documented
+    /// `{type, message}` core suggests. `origin.kind` stays "human" because
+    /// that is the only value the path is known to accept.
+    ///
+    /// Unlike the recap this is NOT a fork — it is an ordinary turn in the
+    /// main conversation, and that is deliberate. A fork would leave the
+    /// transcript untouched, but only a turn on the main conversation is
+    /// guaranteed to hit the exact cached prefix the next real turn will
+    /// use, which is the entire point. Whether the recap fork's own request
+    /// also refreshes that prefix is unmeasured; if it does, this could
+    /// have been free of transcript cost, and that is worth measuring
+    /// before extending this feature rather than assuming either way.
+    ///
+    /// The price of using the main conversation is that the turn is
+    /// permanent: it is in the JSONL and in the model's context from here
+    /// on. Roughly forty tokens each, so an overnight run adds a few
+    /// hundred — negligible against the 200K it is protecting, but real,
+    /// and the reason `KeepAliveGate.promptText` explains itself to a
+    /// reader.
     func requestKeepAlive(at now: Date) {
         // The coordinator checks the full gate one line before calling, so
         // this is not a live race — it is the same self-guard `requestRecap`

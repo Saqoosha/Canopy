@@ -46,8 +46,17 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "TitleGen")
 /// which is worse, so the local call stands as a deliberate choice rather than
 /// an oversight.
 enum SessionTitleGenerator {
-    /// Wall-clock ceiling for one generation. Past this the process is killed
-    /// and the caller keeps whatever title it had.
+    /// Ceiling for ONE leg. There are two, so the worst case is ~68 s.
+    ///
+    /// `generate` spends this on the direct call and, on any failure, again on
+    /// the CLI — plus `CLIOneShot.killGrace` (3) and `finishSlack` (5). Only
+    /// the second leg has a process to kill; the first is bounded by
+    /// `URLRequest.timeoutInterval`. Off the critical path, so unlike
+    /// `WorktreeBranchNamer.timeout` the total costs nobody a spinner.
+    ///
+    /// The caller does not keep its old title on failure — `ShimProcess` shows
+    /// a fallback, which is what `sanitize`'s doc says and this one used to
+    /// contradict.
     static let timeout: TimeInterval = 30
 
     /// Model alias for the generation. Cheapest tier that can write a title;
@@ -223,7 +232,8 @@ enum SessionTitleGenerator {
         return meaningful.joined().count >= minimumSignalLength
     }
 
-    /// Reduce raw CLI output to a usable title, or nil if it isn't one.
+    /// Reduce a raw model answer — from either route — to a usable title, or
+    /// nil if it isn't one.
     ///
     /// Returning nil is a real outcome, not a failure to handle. It means "this
     /// produced no title"; what the caller does about that is the caller's

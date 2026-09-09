@@ -7,10 +7,10 @@ import os
 /// `WorktreeBranchNamer` needed the same thing. What is shared is the process
 /// mechanics, and every one of them is a hazard that was found the hard way:
 /// an unbounded drain that must not deadlock, a watchdog that must escalate to
-/// SIGKILL, a completion that must fire exactly once even when the child never
-/// releases its output, and a stdin that must be written and closed or the CLI
-/// waits on it. Duplicating that per caller means duplicating five ways to
-/// hang a worker with no log.
+/// SIGKILL, a scheduled answer that fires even when neither of those helps, a
+/// completion that must run exactly once, and a stdin that must be written and
+/// closed or the CLI waits on it. Duplicating that per caller means
+/// duplicating five ways to hang a worker with no log.
 ///
 /// What is deliberately NOT shared is anything about *meaning*: the system
 /// prompt, how the payload is framed, and what counts as a usable answer stay

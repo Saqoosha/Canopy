@@ -105,18 +105,19 @@ enum AnthropicDirect {
 
     /// Log a failure at the level its cause deserves.
     ///
-    /// `noCredential` is `debug`, and the reason is narrower than it looks:
-    /// it fires at most once per naming or titling attempt, and the CLI
-    /// fallback that follows reports a missing login properly. (An earlier
-    /// version of this justified the level by a per-keystroke prefetch — that
-    /// mechanism was deleted in the same change, so do not restore the level
-    /// on that argument.) Everything else is
-    /// `notice`, because it means the fast path is silently off and the only
-    /// symptom is that things got slow again.
+    /// Everything here is `notice`, including `noCredential`.
+    ///
+    /// `noCredential` was `debug` on the argument that it would otherwise fire
+    /// per keystroke — from a prefetch deleted in the same change — and that
+    /// level is not merely quiet: this project measured that `log show` cannot
+    /// read `debug` AT ALL, because macOS does not persist it. So the one
+    /// state that turns the fast path off for the life of the process left no
+    /// readable trace of why everything got slow. It fires at most once per
+    /// naming or titling attempt; `notice` costs nothing.
     static func log(_ error: Error, label: String) {
         switch error {
         case Failure.noCredential:
-            logger.debug("[direct] \(label, privacy: .public): no Claude Code credential")
+            logger.notice("[direct] \(label, privacy: .public): no Claude Code credential")
         case let Failure.http(status, body):
             logger.notice("[direct] \(label, privacy: .public): HTTP \(status, privacy: .public): \(body, privacy: .private)")
         default:

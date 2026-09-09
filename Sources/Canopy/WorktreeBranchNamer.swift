@@ -40,9 +40,11 @@ enum WorktreeBranchNamer {
     /// CLI leg exists precisely because it can authenticate where the direct
     /// one cannot, so cutting it short defeats it, and threading a deadline
     /// through `CLIOneShot` adds a failure path to the file whose whole design
-    /// is "answer exactly once". The common failure is also the cheap one —
-    /// `noCredential` throws immediately, so a machine with no login pays ~20 s,
-    /// not 48. Known limitation, recorded rather than patched.
+    /// is "answer exactly once". The common failure is also the cheaper one —
+    /// `noCredential` throws immediately, so a machine with no login pays only
+    /// the CLI leg: ~28 s on the same wedged-child assumption the 48 uses, and
+    /// in practice whatever the CLI actually takes. Known limitation, recorded
+    /// rather than patched.
     static let timeout: TimeInterval = 20
 
     /// Cheapest tier that can do this; a custom provider maps the alias through
@@ -115,7 +117,8 @@ enum WorktreeBranchNamer {
         """
     }
 
-    /// Reduce raw CLI output to a branch name, or nil if it isn't one.
+    /// Reduce a raw model answer — from either route — to a branch name, or
+    /// nil if it isn't one.
     ///
     /// Slugifies rather than trusting the model to have obeyed the format: a
     /// name that reaches `git worktree add` and is rejected there surfaces as a

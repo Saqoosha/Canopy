@@ -207,9 +207,6 @@ struct LauncherView: View {
     @State private var pickedBaseRef: GitWorktree.BaseCandidate?
     /// Branches offered by the picker, refreshed with the folder.
     @State private var baseCandidates: [GitWorktree.BaseCandidate] = []
-    /// True while the base-ref reads for the selected folder are in flight.
-    /// Gates Start (see `canStart`) so a fast Return cannot outrun them.
-    @State private var isResolvingBaseRef = false
     /// Presents the SSH host / remote path fields.
     ///
     /// Collapsing the old form's two SSH cards into the location chip left the
@@ -395,16 +392,21 @@ struct LauncherView: View {
             baseRef = nil
             baseRefLabel = nil
             baseCandidates = []
-            isResolvingBaseRef = false
+            pickedBaseRef = nil
             return
         }
         // Cleared synchronously, so the window between picking a folder and its
-        // reads finishing cannot serve the PREVIOUS folder's base.
+        // reads finishing cannot serve the PREVIOUS folder's data. That has to
+        // include `currentBranchName`: it is written last, after a third
+        // detached read, and the branch chip reads it directly — so leaving it
+        // out meant the chip confidently named folder A's branch while folder
+        // B was selected, which is the exact bug this clear exists to stop,
+        // one field short.
+        currentBranchName = nil
         baseRef = nil
         baseRefLabel = nil
         baseCandidates = []
         pickedBaseRef = nil
-        isResolvingBaseRef = true
         Task {
             let base = await Task.detached(priority: .userInitiated) { () -> (String, String)? in
                 guard let ref = GitWorktree.defaultBaseRef(for: dir) else { return nil }
@@ -417,7 +419,6 @@ struct LauncherView: View {
                 baseRef = base?.0
                 baseRefLabel = base?.1
                 baseCandidates = candidates
-                isResolvingBaseRef = false
             }
             let name = await Task.detached(priority: .userInitiated) {
                 // The same reader the status bar uses, so the launcher cannot
@@ -501,7 +502,7 @@ struct LauncherView: View {
             return willContinueSession ? "Where were we?" : "What should we build?"
         }
         if willContinueSession { return "Where were we in \(place)?" }
-        if startInWorktree { return "What should we build in a new \(place) worktree?" }
+        if willCreateWorktree { return "What should we build in a new \(place) worktree?" }
         return "What should we build in \(place)?"
     }
 
@@ -857,9 +858,16 @@ struct LauncherView: View {
     /// SSH or picking a non-Git folder, where the chip disappears and
     /// `startSession` bypasses worktree creation entirely — but the Continue
     /// conflict kept firing, so a persisted Continue silently launched a fresh
-    /// session on a path that was never going to make a worktree. Every reader
-    /// of "is a worktree happening" goes through this, so the launch path and
-    /// the UI cannot disagree about it again.
+    /// session on a path that was never going to make a worktree.
+    ///
+    /// Every reader that MAKES A CLAIM about a worktree goes through this: the
+    /// Continue conflict, the headline, and the composer's placeholder. The
+    /// first version of this comment said "every reader" flatly, and the
+    /// headline and placeholder were still on the raw toggle — so the same
+    /// switch-to-SSH gesture left the screen promising "a new mbp worktree"
+    /// while nothing was going to cut one. The chip's own text stays on the
+    /// raw toggle deliberately: it renders only inside the gate, so the two
+    /// are equivalent there and reading the toggle is what the chip is FOR.
     private var willCreateWorktree: Bool {
         startInWorktree && !isRemoteMode && selectedDirectoryIsGitRepo
     }
@@ -869,7 +877,7 @@ struct LauncherView: View {
         // the three outcomes genuinely differ: a fresh turn, a turn appended to
         // an existing conversation, or a turn that also names a branch.
         if willContinueSession { return "Pick up where you left off" }
-        if startInWorktree { return "Describe a task — it names the branch too" }
+        if willCreateWorktree { return "Describe a task — it names the branch too" }
         return "Describe a task or ask a question"
     }
 
@@ -1027,15 +1035,22 @@ struct LauncherView: View {
 
     private var canStart: Bool {
         if isCreatingWorktree || isResolvingRemoteSession { return false }
-        // A worktree cannot start before its base is known. `refreshBranchName`
-        // fills `baseRef` from detached git reads, so a user who picks a folder
-        // and hits Return inside that window would reach `createWorktree` with
-        // `baseRef == nil` — which is git's "branch from HEAD", the exact
-        // silent wrong-base bug `defaultBaseRef` was added to close, reached
-        // through a race instead of a missing call. `isResolvingBaseRef` is
-        // cleared even when nothing resolved, so a repo with no origin/main
-        // still starts (from HEAD, deliberately, with the log line saying so).
-        if willCreateWorktree, isResolvingBaseRef { return false }
+        // **Deliberately NOT gated on base-ref resolution.** A gate here was
+        // written and reverted in review: it cleared only from the completion
+        // of three `Task.detached` reads that funnel into
+        // `GitWorktree.runCommand`, which sends SIGTERM and then drains an
+        // unbounded pipe — no SIGKILL escalation and no answer-anyway
+        // deadline, both of which `CLIOneShot` has and argues for. A git hook
+        // that ignores SIGTERM, or a grandchild holding the write end, wedges
+        // that read forever, so the flag never cleared and Start went grey for
+        // the life of the pane with no spinner and no log. Bricking a healthy
+        // launcher is worse than the race it closed.
+        //
+        // The race that remains: pick a folder and press Return before the
+        // reads answer, and the worktree branches from HEAD. Narrow (the reads
+        // are fast on a warm repo), announced in the log by `createWorktree`'s
+        // `from HEAD`, and it needs `runCommand` brought up to `CLIOneShot`'s
+        // standard before a gate can be safe. Known limitation, recorded.
         return isRemoteMode
             ? !(remoteHost.trimmingCharacters(in: .whitespaces).isEmpty || remoteDirectory.isEmpty)
             : selectedDirectory != nil
@@ -1457,6 +1472,11 @@ struct LauncherView: View {
         }
 
         if isRemoteMode {
+            // Trimmed here as well as in the sheet: Cancel leaves an edited
+            // host in place when the trimmed value is non-empty, so " newhost "
+            // could still reach `ssh` — and `SSHHostStore.add` would persist
+            // the untrimmed form into the saved list forever.
+            remoteHost = remoteHost.trimmingCharacters(in: .whitespaces)
             guard !remoteHost.isEmpty, !remoteDirectory.isEmpty else { return }
             SSHHostStore.add(remoteHost)
             savedHosts = SSHHostStore.hosts()
