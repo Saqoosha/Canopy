@@ -518,14 +518,16 @@ final class SessionStore {
                 // from the user's chair it is indistinguishable from the pad
                 // being disconnected. `info` would be ring-buffer only.
                 //
-                // The benign not-yet-mounted case (a `.spawning` pane, the
-                // auth screen) lands here too and will write this line saying
+                // Benign causes land here too and will write this line saying
                 // nothing happened, which cuts against the background-reconcile
-                // rule that such lines stay `debug`. Splitting the two apart is
-                // possible — the caller holds the `OpenSession` and could gate
-                // on `.spawning` — and is not done because the volume is one
-                // line per pad press and a status check carries its own
-                // staleness. A cost call, not an impossibility.
+                // rule that such lines stay `debug`. See `Outcome.noInput` for
+                // the full set; the routine one is a pending permission request
+                // with an empty composer, which the extension hides outright.
+                // Nothing on this side can separate them: a `.spawning` gate
+                // would not cover that case, and the JS cannot report a cause
+                // it would have to recognise the extension's own DOM to name.
+                // Accepted at one line per pad press, because the alternative
+                // is losing the regression signal entirely.
                 logger.notice("focusFocusedPaneComposer: no chat input matched the shape heuristic")
             }
         }

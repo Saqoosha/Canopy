@@ -33,11 +33,21 @@ enum ComposerFocusScript {
         /// returned `focused`, so this branch is unmeasured rather than ruled
         /// out.
         case alreadyFocused = "already-focused"
-        /// Nothing matched. Either the page has not mounted a composer yet
-        /// (auth screen, first paint), or the composer lost the
-        /// `role="textbox"` + `contenteditable` pair `findInputEl` asks for —
-        /// an attribute-level drift, which is the specific failure that
-        /// selector choice buys.
+        /// Nothing matched. Three known causes, and the routine one is last:
+        /// the page has not mounted a composer yet (auth screen, first
+        /// paint); the composer lost the `role="textbox"` + `contenteditable`
+        /// pair `findInputEl` asks for, an attribute-level drift and the
+        /// specific failure that selector choice buys; or **a permission
+        /// request is pending and the composer is empty**, in which case the
+        /// extension sets the whole prompt-input container to `display:none`
+        /// (measured on 2.1.263: `permissionRequests.length > 0 &&
+        /// !promptInputActive`), the rect collapses and the width gate drops
+        /// it. That third case is the `asking` state — the raised-hand LED,
+        /// the press this feature most exists to serve — so it is neither
+        /// rare nor a fault, and it is what stops a pad press from stealing
+        /// keyboard focus from the permission dialog. It stops being true the
+        /// moment the composer holds a draft, which is the one window where a
+        /// press could still take focus off that dialog.
         case noInput = "no-input"
     }
 
@@ -59,8 +69,11 @@ enum ComposerFocusScript {
         //     real <textarea> that does `setAttribute("role","textbox")` and
         //     `setAttribute("aria-multiline","true")`, so neither attribute
         //     discriminates. It is mounted by Canopy's own ContentViewer and
-        //     by the extension's diff editor, and it is a positioned,
-        //     non-zero-sized element, so the viewport gate does not drop it.
+        //     by the extension's diff editor. It is 1x1 rather than hidden,
+        //     and it renders wherever the caret is — top-left when there is no
+        //     visible cursor — so the viewport gate below sometimes drops it
+        //     and sometimes does not. Position-dependent is the same as
+        //     unreliable here; the gate is not what excludes it.
         //   - `[contenteditable]` also matches a Bash permission request's
         //     editable command box, AskUserQuestion's "Other" field, the
         //     permission dialog's reject box, and the sidebar's
