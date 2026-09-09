@@ -328,6 +328,84 @@ replay される」状態に当たる可能性がある。スパイクがこの�
 
 auth（3）はこの表から降りた。上の実測で、案 B が何も変えないことが分かったため。
 
+## 出荷形の設計
+
+スパイクは「動く」ことだけを示した。ここから先は、スパイクが**逃げた**ところを
+どう本気で解くか。7 点あり、1 番が設計の中心で、残りは作業に近い。
+
+### 1. auth —— 注入をやめ、remote の CLI に聞く
+
+**スパイクは嘘をついている。** `update_state` に **ローカルの** Keychain から
+authStatus を注入するので、webview は「ローカルのアカウントで認証済み」と表示する
+一方、実際の API 呼び出しは remote の `~/.claude/.credentials.json` を使う。
+2 台が別アカウントなら、UI は動いていない方のアカウントを表示する。
+`/login` が死ぬのは既知だと書いたが、より悪いのはこちらで、静かに間違う。
+
+**remote の CLI は自分の認証状態を知っていて、SSH 越しに答えられる。** 実測（studio、
+keychain がロックされた SSH セッション、`exit=0`）:
+
+```
+claude auth status --json
+{ "loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty",
+  "email": "…", "orgId": "…", "orgName": "…", "subscriptionType": "max" }
+```
+
+webview が期待する形は `KeychainAuth.readAuthStatus()` が組み立てている
+`{ authMethod, email, subscriptionType }` の 3 つだけなので、対応はほぼ 1 対 1。
+正規化が要るのは `authMethod` の綴りひとつ（CLI は `claude.ai`、webview は
+`claudeai`）。**そして `email` は Keychain 経路に無く、Canopy は今 `NSNull()` を
+渡している** —— remote 経路の方が情報が多い、という珍しい向き。
+
+だから出荷形は「注入をうまくやる」ではなく **注入をやめる**。remote セッションの
+authStatus は remote の CLI から作る。これで 3 つ同時に片付く: 表示が事実になる、
+`/login` を殺す理由が消える、そして「remote でログインし直す」が
+**表現できる操作**になる（いまは概念ごと存在しない）。
+
+未解決: `loggedIn: false` の remote をどう見せるか。ローカルにフォールバックしては
+いけない —— それがまさにスパイクの嘘。remote 固有のログイン導線が要る。
+
+### 2. パス解決 —— 非同期にし、auth と 1 往復にまとめる
+
+`spikeRemotePaths` は main actor を同期 SSH でブロックする。上の auth 問い合わせも
+SSH なので、**1 回の `ssh bash -s` でパスと auth を一緒に返す**のが素直。
+セッション spawn の前に非同期で走らせ、結果をホストごとにキャッシュする。
+キャッシュの無効化条件は「shim の spawn に失敗したとき」——
+remote の Canopy 入れ替えを検出する手段はそれしかない。
+
+### 3. 純粋関数を probe で pin する
+
+`spikeHostIsWellFormed`、`spikeSSHArguments`、そして上の authStatus マッピング。
+いまは `--` を消しても host 検証を消しても suite が緑のまま。
+この repo の floor はアサーションを数えるだけで、それが何かを守っている証明には
+ならない —— 変異させて赤くなることを確認する。
+
+### 4. model / effort —— 未解決、選択肢は 2 つ
+
+wrapper が消えると `CANOPY_REMOTE_MODEL` → `--model` の経路も消える。
+(a) remote の `~/.claude/settings.json` を書く（**共有ファイルを触る**ので、
+ローカル側が同じ理由で避けた手）。(b) remote 側にも `claudeProcessWrapper` を置き、
+model/effort だけを足す最小の wrapper にする（`workspace.js` の `envOverrides` が
+そのまま使える）。b の方が既存の仕組みに乗るが、**wrapper を消す話と矛盾する**ので、
+決めるには「wrapper が何のために残るのか」を先に決める必要がある。
+
+### 5. Canopy 未導入の remote —— v1 では対象外
+
+明示的なエラーで止める。herdr はここを「approval-based setup」で解いており、
+それが最終形。node と extension と shim の 3 つを配る話になるので、別の仕事。
+
+### 6. バージョン skew —— 検出するが強制しない
+
+webview は**ローカルの** extension、shim は remote の extension を実行する。
+2.1.263 対 2.1.266 では動いた。壊れる幅は未測定なので、まずは**両方のバージョンを
+ログと status bar に出す**。食い違いで拒否するのは、壊れ方を 1 つでも観測してから。
+
+### 7. 2 経路 —— 同時には消さない
+
+`ssh-claude-wrapper.sh`、`CANOPY_REMOTE_*`、`RemoteSessionHistory`、
+`index.js` の fs/spawn パッチは、この設計が完成すると**全部不要**になる。
+ただし同じ変更で消さない: 設定で新旧を切り替えられる状態を一度作り、
+新経路が実地で持つことを確認してから消す。**削除は別 PR。**
+
 ## 保留（findings、この設計の外）
 
 - **`system/init` はターンのときにしか来ない**（`canopy-21` の実測、commit 10134af）。
