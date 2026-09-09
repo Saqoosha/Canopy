@@ -27,13 +27,22 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "BranchNamer
 /// is why no retry exists: the user is watching a spinner, and a second attempt
 /// buys a marginally better name for another `timeout` seconds of waiting.
 enum WorktreeBranchNamer {
-    /// Wall-clock ceiling for one naming call.
+    /// Wall-clock ceiling for ONE leg. There are two, so the worst case is
+    /// roughly 48 s, not 20.
     ///
-    /// Deliberately shorter than `SessionTitleGenerator.timeout`. A title is
-    /// generated behind the user's back and can afford 30s; this one is on the
-    /// critical path between pressing Start and the session opening, and the
-    /// fallback is good enough that waiting longer for a better name is a bad
-    /// trade.
+    /// `generate` spends this on the direct call and, on any failure, spends it
+    /// again on the CLI — plus `CLIOneShot.killGrace` (3) and `finishSlack`
+    /// (5). An earlier version of this doc claimed the value was "deliberately
+    /// shorter than `SessionTitleGenerator.timeout`" and stopped there, which
+    /// calibrated the reader against a number the code does not honour.
+    ///
+    /// Left as two full legs rather than budgeted against one deadline: the
+    /// CLI leg exists precisely because it can authenticate where the direct
+    /// one cannot, so cutting it short defeats it, and threading a deadline
+    /// through `CLIOneShot` adds a failure path to the file whose whole design
+    /// is "answer exactly once". The common failure is also the cheap one —
+    /// `noCredential` throws immediately, so a machine with no login pays ~20 s,
+    /// not 48. Known limitation, recorded rather than patched.
     static let timeout: TimeInterval = 20
 
     /// Cheapest tier that can do this; a custom provider maps the alias through

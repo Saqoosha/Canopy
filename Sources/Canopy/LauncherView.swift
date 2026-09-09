@@ -814,7 +814,7 @@ struct LauncherView: View {
                 continueSession = true
             } label: {
                 Label(
-                    startInWorktree
+                    willCreateWorktree
                         ? "Continue — not with a new worktree"
                         : "Continue the latest session",
                     systemImage: willContinueSession ? "checkmark" : ""
@@ -822,7 +822,7 @@ struct LauncherView: View {
             }
             // Disabled rather than hidden: a row that vanishes reads as a bug,
             // and the point is to say WHY the two cannot combine.
-            .disabled(startInWorktree)
+            .disabled(willCreateWorktree)
         } label: {
             ChipLabel(
                 icon: willContinueSession ? "arrow.uturn.backward" : "plus.bubble",
@@ -848,7 +848,20 @@ struct LauncherView: View {
     /// a persisted preference, and flipping it here would silently lose the
     /// user's setting the moment they turned the worktree off again.
     private var willContinueSession: Bool {
-        continueSession && !startInWorktree
+        continueSession && !willCreateWorktree
+    }
+
+    /// Whether this launch will actually cut a worktree.
+    ///
+    /// `startInWorktree` alone is not that: the toggle survives switching to
+    /// SSH or picking a non-Git folder, where the chip disappears and
+    /// `startSession` bypasses worktree creation entirely — but the Continue
+    /// conflict kept firing, so a persisted Continue silently launched a fresh
+    /// session on a path that was never going to make a worktree. Every reader
+    /// of "is a worktree happening" goes through this, so the launch path and
+    /// the UI cannot disagree about it again.
+    private var willCreateWorktree: Bool {
+        startInWorktree && !isRemoteMode && selectedDirectoryIsGitRepo
     }
 
     private var composerPlaceholder: String {
@@ -1022,7 +1035,7 @@ struct LauncherView: View {
         // through a race instead of a missing call. `isResolvingBaseRef` is
         // cleared even when nothing resolved, so a repo with no origin/main
         // still starts (from HEAD, deliberately, with the log line saying so).
-        if startInWorktree, !isRemoteMode, isResolvingBaseRef { return false }
+        if willCreateWorktree, isResolvingBaseRef { return false }
         return isRemoteMode
             ? !(remoteHost.trimmingCharacters(in: .whitespaces).isEmpty || remoteDirectory.isEmpty)
             : selectedDirectory != nil
