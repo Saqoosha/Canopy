@@ -26,7 +26,7 @@ local で走り、それが読みたいファイルは remote にある*。
 |---|---|---|
 | transcript が描画されない | extension | 直る |
 | `@`-mention のファイル一覧が空 | extension（`workspace.fs` / `findFiles`） | 直る |
-| Continue session が効かなかった | extension | 直る（既に別途対処済み） |
+| Continue session が効かなかった | extension（precheck）+ `LauncherView`（どれを継ぐか） | precheck の側は直る |
 | `open_file` が読めない | **`ShimProcess`**（`handleOpenFile`） | **直らない** |
 | 背景タスクの hourglass が残る | **`ShimProcess`**（`jsonlPath`） | **直らない** |
 
@@ -46,7 +46,7 @@ peer messaging はマシンローカルで、CLAUDE.md が
 before reopening this."* と明記している。限界ではなく正しい挙動で、
 実際 studio の実測でも chip は出ていない。
 
-4 行目は既に塞いである。`RemoteSessionHistory` が SSH 越しに header を streaming で
+Continue session の行は既に塞いである。`RemoteSessionHistory` が SSH 越しに header を streaming で
 読む。**つまり「穴を 1 個ずつ SSH RPC で塞ぐ」やり方の実装コストは既知**で、
 あのファイル 1 本ぶん。
 
@@ -148,6 +148,10 @@ remote に headless Canopy を常駐させ、local は client に徹する。
 
 ## 実測結果（2026-09-09、mbp）
 
+> この節の `mbp` も**このマシン自身**（下の「オンデバイス実測」冒頭を見よ）。
+> SSH セッションに依存する主張は生きるが、別マシンに依存する主張は無効 ——
+> とくに「scratch `HOME` が効いている」は、ネットワーク越しでの意味を持たない。
+
 判断を分ける問いは 1 つだった —— *`ssh host node <shim>` が NDJSON を素通しできるか*。
 **通った。** GUI もビルドも scp も要らず、mbp に既にあるものだけで走った。
 
@@ -184,7 +188,7 @@ remote に headless Canopy を常駐させ、local は client に徹する。
 最初の実験で `No authentication found` を見た。次に SSH セッションの keychain
 到達性を測り、こう出た:
 
-| | local (Mac Studio) | remote (mbp / SSH) |
+| | local（GUI セッション） | 同じマシンへの SSH セッション |
 |---|---|---|
 | `security find …`（metadata） | exit 0 | exit 0 |
 | `security find … -w`（値） | **exit 0** | **exit 36** |
@@ -207,7 +211,7 @@ SSH の keychain 制約は実在するが、**観測した症状の原因では�
 
 結論の向きが逆になる。Canopy の auth は最初から
 `patchAuthIfNeeded` の `init_response` 分岐にある注入 1 本で立っており、それは Swift 側・パイプの
-local 側で起きる。**案 B は auth を何も変えない。** ぼくの実験が未認証だったのは
+local 側で起きる。案 B は auth を何も変えない —— **この段落の結論はこの下の「オンデバイス実測」で覆る**。ぼくの実験が未認証だったのは
 remote だからではなく、`ShimProcess` を通さず生の shim を叩いたからで、
 注入する主体が居なかっただけ。
 
@@ -386,12 +390,13 @@ authStatus は remote の CLI から作る。これで 3 つ同時に片付く: 
 `spikeRemotePaths` は main actor を同期 SSH でブロックする。上の auth 問い合わせも
 SSH なので、**1 回の `ssh bash -s` でパスと auth を一緒に返す**のが素直。
 セッション spawn の前に非同期で走らせ、結果をホストごとにキャッシュする。
-キャッシュの無効化条件は「shim の spawn に失敗したとき」——
+キャッシュの無効化条件は「spike の shim が ready に到達せず終了したとき」——
+（executable は ssh なので spawn 自体はほぼ必ず成功する）
 remote の Canopy 入れ替えを検出する手段はそれしかない。
 
 ### 3. 純粋関数の probe による pin
 
-`spikeHostIsWellFormed`、`spikeSSHArguments`、そして上の authStatus マッピング。
+`spikeSSHArguments`、`start()` の host guard、そして上の authStatus マッピング。
 いまは `--` を消しても host 検証を消しても suite が緑のまま。
 この repo の floor はアサーションを数えるだけで、それが何かを守っている証明には
 ならない —— 変異させて赤くなることを確認する。
@@ -423,7 +428,7 @@ webview は**ローカルの** extension、shim は remote の extension を実�
 ただし同じ変更で消さない: 設定で新旧を切り替えられる状態を一度作り、
 新経路が実地で持つことを確認してから消す。**削除は別 PR。**
 
-## レビューで出た未修正（挙動を足す変更なので提案に留めた）
+## レビューで出た未修正（挙動を足す変更なので提案どまり）
 
 8 本のレビュアーを回した。コメントと doc の**偽の主張は全部消した**し、既存 helper に
 寄せられるものは寄せた。以下は**実行時の挙動を足す**修正で、スパイクの段階で
@@ -469,6 +474,49 @@ webview は**ローカルの** extension、shim は remote の extension を実�
    local の ssh の子で、remote の node と CLI には届かない。通常は stdin close で
    remote の shim が自ら終わるが、蓋を閉じた half-open のような切れ方では
    remote が生き残りうる。ローカルからは観測できない
+
+## レビュー 2 巡目 —— 訂正が新しい嘘を生んだ
+
+1 巡目で偽の主張を 7 本消した。**2 巡目は、その訂正のうち 8 本が新しい偽の主張だと
+指摘した。** 同じ 8 人のレビュアーで、対象は「ぼくが直した行」だけ。
+
+| 1 巡目でぼくが書いた訂正 | 2 巡目の実測 |
+|---|---|
+| `try?` にして SIGPIPE も塞いだ | 塞いでいない。SIGPIPE はシグナルなので何も throw されない |
+| split は decode 失敗の誤ログを直す | `String(decoding:)` は失敗しないので**論拠が自壊**、しかも**拒否まで消していた** |
+| fish の問題は未マッチ glob | **逆**。単独代入が parse error で script ごと死ぬ（exit 127）。glob は結果を変えない |
+| `ExtensionUpdater` が無人で更新する | check は自動、**install は人がボタンを押す** |
+| probe assertion 4 本 | **3 本** |
+| settings は存在確認している | **一切していない** |
+| EXT は「本当に解決している」 | 3 つの中で**最弱の検査**（`-n` だけ） |
+| 落ちるものの列挙 | `CLAUDE_CODE_DISABLE_1M_CONTEXT` と remote settings が抜けていた |
+
+メモ側も、削除した関数を pin しろと書き、表を並べ替えて行参照を壊し、
+`local (Mac Studio)` が自分の訂正と矛盾し、太字の偽結論が訂正より前に立っていた。
+**ぼくが追加した「誰が読むか」の列で、Continue-session 行を自分の規則で誤分類**もした。
+
+**やり方を変えた。3 巡目はパッチせず、削った。** コードのコメントは自分で測った事実だけ
+に落とし、論証はこのメモに寄せた。根拠は memory の
+`comment-analyzer is the rationale-comment lens` の一行 ——
+*shrinking the comment converges where patching it doesn't*。
+
+### 決着した論争 1 件
+
+**`F_SETNOSIGPIPE` は macOS の pipe fd に効く。** レビュアーが割れた ——
+2 人が「pipe の write 端に `fcntl` を張れ」、1 人が「socket 専用、pipe には効かない、
+唯一の手はプロセス全体の `SIG_IGN`」と Apple のガイダンス付きで断言した。
+
+測った（fork した子で pipe を作り、read 端を閉じてから write）:
+
+| | 結果 |
+|---|---|
+| 素の write、既定 disposition | **signal 13 で死ぬ** |
+| `F_SETNOSIGPIPE` を write 端に | `fcntl` が 0 を返し、write が **EPIPE**、生存 |
+| グローバル `SIG_IGN` | 同上 |
+
+**効く。** 一般則を自信たっぷりに述べた側が外していた。
+一致ではなく**不一致が出た時点で測った**のが正解で、どちらかを信じて実装していたら
+2 度目の偽の修正を書いていた。
 
 ## 保留（findings、この設計の外）
 
