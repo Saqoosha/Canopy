@@ -450,6 +450,12 @@ final class SessionStore {
     /// webview firstResponder naturally via AppKit; keyboard-driven focus
     /// changes don't, so we do it manually.
     ///
+    /// This delivers nothing when the target ALREADY holds first responder —
+    /// AppKit returns early without sending become/resign — so re-focusing the
+    /// pane that is already focused reaches here and moves no caret. Every
+    /// route through `setFocusedPaneIndex` / `moveFocus` has that hole; only
+    /// the MacroPad closes it, via `focusFocusedPaneComposer()` below.
+    ///
     /// Callers where this actually matters (target WKWebView is already
     /// mounted): `setFocusedPaneIndex` (Cmd+1..9, tap-to-focus),
     /// `moveFocus` (Cmd+Opt+←/→), `closePane`'s survivor, and
@@ -497,18 +503,28 @@ final class SessionStore {
                 logger.error("focusFocusedPaneComposer JS error: \(error.localizedDescription, privacy: .public)")
                 return
             }
-            let outcome = (result as? String).flatMap(ComposerFocusScript.Outcome.init(rawValue:))
+            guard let outcome = (result as? String).flatMap(ComposerFocusScript.Outcome.init(rawValue:)) else {
+                logger.notice("focusFocusedPaneComposer: unexpected result \(String(describing: result), privacy: .public)")
+                return
+            }
             switch outcome {
             case .focused, .alreadyFocused:
-                logger.debug("focusFocusedPaneComposer: \(outcome?.rawValue ?? "?", privacy: .public)")
+                logger.debug("focusFocusedPaneComposer: \(outcome.rawValue, privacy: .public)")
             case .noInput:
                 // `notice`, not `debug`: the input failing the shape heuristic
                 // is how a CC extension DOM change would surface here, and
                 // from the user's chair it is indistinguishable from the pad
                 // being disconnected. `info` would be ring-buffer only.
+                //
+                // The benign not-yet-mounted case (a `.spawning` pane, the
+                // auth screen) lands here too and will write this line saying
+                // nothing happened, which cuts against the background-reconcile
+                // rule that such lines stay `debug`. Accepted deliberately: the
+                // volume is one line per pad press, and splitting the two apart
+                // would need the JS to distinguish "no document yet" from "a
+                // document with no input", which is the regression signal
+                // itself.
                 logger.notice("focusFocusedPaneComposer: no chat input matched the shape heuristic")
-            case nil:
-                logger.notice("focusFocusedPaneComposer: unexpected result \(String(describing: result), privacy: .public)")
             }
         }
     }

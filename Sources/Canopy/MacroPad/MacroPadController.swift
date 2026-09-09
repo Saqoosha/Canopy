@@ -1584,8 +1584,9 @@ final class MacroPadController {
         guard pressed else { return }
         // Both presses of the chord focus their panes on the way in, and
         // `focusPane` is not a quiet reassignment: it calls
-        // `NSApp.activate(ignoringOtherApps:)`, orders the window front, and
-        // clears that pane's unread marker. Issue #147 accepted the focus
+        // `NSApp.activate(ignoringOtherApps:)`, orders the window front,
+        // clears that pane's unread marker, and puts the caret in that pane's
+        // composer. Issue #147 accepted the focus
         // change; what it understated is that the app comes forward, and that
         // "nobody is in front of it" is the one thing this gesture cannot
         // assume — it is performed by a person at the desk.
