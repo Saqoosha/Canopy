@@ -687,7 +687,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Anthropic with the 1h window intact, and this declines it anyway.
     /// Declining wrongly costs one cache miss; permitting wrongly bills
     /// every hour, forever, on a machine nobody is watching.
-    static func sessionUsesCustomEndpoint(_ customApi: ModelProvider?) -> Bool {
+    /// `nonisolated` so the out-of-session generators can ask it. They run
+    /// off the main actor and `ShimProcess` is main-actor-isolated only by
+    /// inference from `WKScriptMessageHandler`; this reads `ProcessInfo` and a
+    /// value type and touches no instance state.
+    nonisolated static func sessionUsesCustomEndpoint(_ customApi: ModelProvider?) -> Bool {
         if customApi?.isEnabled == true { return true }
         let inherited = ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
         return !(inherited ?? "").isEmpty
@@ -736,6 +740,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// hundred — negligible against the 200K it is protecting, but real,
     /// and the reason `KeepAliveGate.promptText` explains itself to a
     /// reader.
+
     /// Submit the prompt the user typed on the launch screen, if there is one.
     ///
     /// Unlike the recap and the keep-alive — the other two turns Canopy
@@ -757,9 +762,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
         guard let channelId else {
-            // Not an error worth clearing the prompt over: `launch_claude` sets
-            // the channel and the backstop recovers it from the next
-            // channel-scoped message, so a later `init` gets another chance.
+            // Deferred, not dropped — and the retry is a real call site, not a
+            // hope. An earlier version of this comment claimed the channelId
+            // backstop "recovers it from the next channel-scoped message, so a
+            // later `init` gets another chance": the backstop assigned the id
+            // and never re-invoked this, and `init` only re-fires on a turn the
+            // user types. So the prompt they typed *to avoid* typing one was
+            // lost silently. The backstop now calls this directly.
             logger.notice("initial prompt: deferred, no channelId yet")
             return
         }
@@ -784,10 +793,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 ] as [String: Any],
             ] as [String: Any],
         ])
+        // This bypasses `userContentController`, which is where every OTHER
+        // user turn is booked in — so the same bookkeeping has to happen here
+        // or the turn does not exist as far as the rest of Canopy is concerned.
+        // Without it: `RecapGate` counts zero user turns (so the session is
+        // never eligible for a recap until the user types), and `promptHistory`
+        // stays empty (so the title generator is seeded with nothing — on the
+        // one prompt this whole feature is about).
+        recapGate.noteUserTurn()
+        // Same reason: `KeepAliveGate` declines with "no API activity yet —
+        // nothing cached to keep" while `lastActivityAt` is nil, and nothing
+        // else would ever set it for a session whose only turn came from here.
+        noteApiActivity()
+        promptHistory.append(prompt)
+        promptHistory = Self.trimmedPromptHistory(promptHistory)
+        lastUserMessageText = prompt
+        maybeGenerateTitle()
+
         // `.private` on the text: it is verbatim user content, and these lines
         // reach disk. The length is public because "did it send" and "did it
         // send everything" are the two questions this line has to answer.
-        logger.notice("initial prompt: submitted \(prompt.count, privacy: .public) chars")
+        // "queued", not "submitted": `sendToShim` hands off to a write queue and
+        // can also buffer into `pendingMessages` before the shim is ready, so a
+        // failure surfaces later, from `writeToStdin`, at `.error`.
+        logger.notice("initial prompt: queued \(prompt.count, privacy: .public) chars")
     }
 
     func requestKeepAlive(at now: Date) {
@@ -2203,6 +2232,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 "channelId recovered via backstop from \(msgType, privacy: .public) message"
             )
             self.channelId = cid
+            // The channel is what `sendPendingInitialPrompt` was missing if it
+            // ran before this; retry now rather than waiting for a turn the
+            // user would have to type.
+            sendPendingInitialPrompt()
         }
 
         // A Bool, not the text: `maybeGenerateTitle` takes no argument and

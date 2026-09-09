@@ -13,10 +13,6 @@ private struct ChipLabel: View {
     let icon: String
     let text: String
     var muted: Bool = false
-    /// Unused for a `Menu`, which draws its own indicator (see `chipStyle`).
-    /// It exists for the branch chip, the one pill that is not a menu and so
-    /// must not look like one.
-    var showsChevron: Bool = true
     /// Ceiling for the label, so one long name cannot push the row off screen.
     /// Middle truncation rather than tail: the ends of a branch name carry more
     /// than its middle ("fix-…-counts" beats "fix-issue-one-hundred-…").
@@ -120,7 +116,7 @@ private extension View {
     /// Applied to the `Menu`, never to its label — see `ChipLabel`. Kept as
     /// one modifier so the row cannot drift a point out of alignment between
     /// chips, which is exactly what happened when each carried its own padding.
-    func chipStyle(hasIndicator: Bool = true) -> some View {
+    func chipStyle() -> some View {
         // All three numbers are optical, and the asymmetry is the point: an SF
         // Symbol's ink sits inset inside its layout box, so the same metric
         // padding reads as MORE space on the icon side than beside text, and
@@ -130,7 +126,7 @@ private extension View {
         // A pill with no menu keeps the wider trailing value, because there
         // its right edge is text — tight ink, and 5 would crowd it.
         padding(.leading, 8)
-            .padding(.trailing, hasIndicator ? 5 : 10)
+            .padding(.trailing, 5)
             .padding(.vertical, 5)
             .background(Color.primary.opacity(0.06), in: Capsule())
             .overlay(Capsule().stroke(Color.primary.opacity(0.10), lineWidth: 1))
@@ -140,20 +136,16 @@ private extension View {
 
 struct LauncherView: View {
     @Bindable var appState: AppState
-    /// When true, hide the bottom Recents/Sessions/Web lists — the sidebar
-    /// shell already shows them and duplication just adds noise.
-    var compactMode: Bool = false
-
     @State private var selectedDirectory: URL?
     @State private var recentDirectories: [URL] = []
-    @State private var sessions: [SessionEntry] = []
     @State private var isDropTargeted = false
     @State private var remoteHost: String = ""
     @State private var savedHosts: [String] = []
     @State private var isRemoteMode = false
     /// True while the SSH round trip that resolves "Continue session" for a
     /// remote host is in flight. Its own flag rather than reusing
-    /// `isCreatingWorktree` so the button can say which one it is waiting on.
+    /// `isCreatingWorktree` so `preparingHeadline` can say which one it is
+    /// waiting on.
     @State private var isResolvingRemoteSession = false
     @State private var remoteDirectory: String = "~"
     @State private var showRemoteBrowser = false
@@ -184,15 +176,17 @@ struct LauncherView: View {
     @State private var isCreatingWorktree = false
     /// The prompt typed on the launch screen. Optional by design: leaving it
     /// empty is how the user says "open the directory, I will decide there",
-    /// which is roughly half of how sessions actually start (measured: of 40
-    /// sessions that relocated into a worktree, 19 did it only after several
-    /// turns of discussion). A launcher that demanded a task up front would
-    /// delete that half.
+    /// which is how roughly half of WORKTREE-BOUND sessions began — of 40 that
+    /// relocated into a worktree, 19 did so only after several turns of
+    /// discussion. (That is the population measured; it says nothing about
+    /// sessions that never relocate.) A launcher that demanded a task up front
+    /// would delete that half.
     @State private var initialPrompt = ""
-    /// Which step of the worktree hand-off is running, for the Start button's
-    /// label. Three of them can take seconds and they fail for unrelated
-    /// reasons, so "Creating Worktree…" over all three named the wrong one
-    /// two times out of three.
+    /// Which step of the worktree hand-off is running, for `preparingHeadline`
+    /// — which the launcher renders on `SpawningOverlay`, not on the button.
+    /// Three of them can take seconds and they fail for unrelated reasons, so
+    /// "Creating Worktree…" over all three named the wrong one two times out
+    /// of three.
     @State private var worktreeStage: String?
     /// Branch of `selectedDirectory`, refreshed when it changes rather than
     /// read per render — the read shells out, and a chip is drawn constantly.
@@ -213,6 +207,9 @@ struct LauncherView: View {
     @State private var pickedBaseRef: GitWorktree.BaseCandidate?
     /// Branches offered by the picker, refreshed with the folder.
     @State private var baseCandidates: [GitWorktree.BaseCandidate] = []
+    /// True while the base-ref reads for the selected folder are in flight.
+    /// Gates Start (see `canStart`) so a fast Return cannot outrun them.
+    @State private var isResolvingBaseRef = false
     /// Presents the SSH host / remote path fields.
     ///
     /// Collapsing the old form's two SSH cards into the location chip left the
@@ -384,8 +381,10 @@ struct LauncherView: View {
         where FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory)
             && isDirectory.boolValue
         {
+            // No explicit `refreshBranchName()`: assigning `selectedDirectory`
+            // fires `.onChange`, and calling both ran the whole git/VCS
+            // subprocess chain twice on every launcher mount.
             selectedDirectory = dir
-            refreshBranchName()
             return
         }
     }
@@ -393,8 +392,19 @@ struct LauncherView: View {
     private func refreshBranchName() {
         guard let dir = selectedDirectory, GitWorktree.isGitRepo(dir) else {
             currentBranchName = nil
+            baseRef = nil
+            baseRefLabel = nil
+            baseCandidates = []
+            isResolvingBaseRef = false
             return
         }
+        // Cleared synchronously, so the window between picking a folder and its
+        // reads finishing cannot serve the PREVIOUS folder's base.
+        baseRef = nil
+        baseRefLabel = nil
+        baseCandidates = []
+        pickedBaseRef = nil
+        isResolvingBaseRef = true
         Task {
             let base = await Task.detached(priority: .userInitiated) { () -> (String, String)? in
                 guard let ref = GitWorktree.defaultBaseRef(for: dir) else { return nil }
@@ -407,8 +417,7 @@ struct LauncherView: View {
                 baseRef = base?.0
                 baseRefLabel = base?.1
                 baseCandidates = candidates
-                // A hand-picked base belongs to the folder it was picked in.
-                pickedBaseRef = nil
+                isResolvingBaseRef = false
             }
             let name = await Task.detached(priority: .userInitiated) {
                 // The same reader the status bar uses, so the launcher cannot
@@ -439,9 +448,9 @@ struct LauncherView: View {
     }
 
     // MARK: - Composer
-
-    /// The launch screen is one composer, not a form.
-    ///
+    //
+    // The launch screen is one composer, not a form.
+    //
     /// It replaced a vertical stack of labelled `GridRow`s — Provider, Model,
     /// Effort, Permission, Worktree, a Working Directory card, a Continue
     /// checkbox and an SSH toggle — where every session started by reading
@@ -461,6 +470,7 @@ struct LauncherView: View {
     /// already lists every session and recent project, so the launcher was
     /// rendering a second copy of it directly beside the first. What survives
     /// moved into the menu of the chip it belongs to.
+
     /// Icon and a line that names what is about to happen.
     ///
     /// The old header was the app icon over "Canopy" over "Start a new
@@ -622,8 +632,7 @@ struct LauncherView: View {
                 icon: "arrow.triangle.branch",
                 text: branchChipText,
                 muted: true,
-                showsChevron: false
-            )
+                )
             // Keeps the pills' vertical metric so the row still aligns, and
             // enough horizontal room not to crowd them — everything except the
             // fill and the border, which are what said "press me".
@@ -763,10 +772,16 @@ struct LauncherView: View {
                     showRemoteSetup = false
                     // Leaving remote mode on with no host is the dead end this
                     // sheet exists to close, so cancelling restores local.
-                    if remoteHost.isEmpty { isRemoteMode = false }
+                    if remoteHost.trimmingCharacters(in: .whitespaces).isEmpty {
+                        isRemoteMode = false
+                    }
                 }
                 .keyboardShortcut(.cancelAction)
                 Button("Use This Host") {
+                    // Trimmed before it is stored OR launched: `SSHHostStore`
+                    // does not normalise, and " myhost " reaches ssh as a
+                    // destination containing spaces.
+                    remoteHost = remoteHost.trimmingCharacters(in: .whitespaces)
                     SSHHostStore.add(remoteHost)
                     savedHosts = SSHHostStore.hosts()
                     isRemoteMode = true
@@ -999,8 +1014,17 @@ struct LauncherView: View {
 
     private var canStart: Bool {
         if isCreatingWorktree || isResolvingRemoteSession { return false }
+        // A worktree cannot start before its base is known. `refreshBranchName`
+        // fills `baseRef` from detached git reads, so a user who picks a folder
+        // and hits Return inside that window would reach `createWorktree` with
+        // `baseRef == nil` — which is git's "branch from HEAD", the exact
+        // silent wrong-base bug `defaultBaseRef` was added to close, reached
+        // through a race instead of a missing call. `isResolvingBaseRef` is
+        // cleared even when nothing resolved, so a repo with no origin/main
+        // still starts (from HEAD, deliberately, with the log line saying so).
+        if startInWorktree, !isRemoteMode, isResolvingBaseRef { return false }
         return isRemoteMode
-            ? !(remoteHost.isEmpty || remoteDirectory.isEmpty)
+            ? !(remoteHost.trimmingCharacters(in: .whitespaces).isEmpty || remoteDirectory.isEmpty)
             : selectedDirectory != nil
     }
 
@@ -1089,7 +1113,7 @@ struct LauncherView: View {
         // achieves that — merely dropping `maxWidth: .infinity` did not,
         // measured: the card still spanned the full column. Vertically fixed
         // too, so a long message grows the card rather than being clipped;
-        // `messageWidthCap` is what keeps that from growing sideways instead.
+        // `bannerMaxWidth` is what keeps that from growing sideways instead.
         .frame(maxWidth: Self.bannerMaxWidth)
         .fixedSize(horizontal: true, vertical: true)
         // Matched to the composer's own corner and hairline rather than left
@@ -1436,8 +1460,15 @@ struct LauncherView: View {
         }
 
         // Worktree checkout can take seconds on big repos — keep it off the
-        // main thread and disable the Start button while it runs.
+        // main thread. The composer is not merely disabled while it runs: it
+        // is replaced by `SpawningOverlay` (see `body`).
         let prompt = initialPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Sampled at the press, not after the await. `AppState.launchSession`
+        // reads `NSEvent.modifierFlags` when it is called, and everything below
+        // — naming, checkout, seeding — happens first, so by then the modifier
+        // is long released and Cmd+click quietly lost its new pane. Same hazard
+        // the SSH-continue branch documents; same fix.
+        let cmdHeld = NSEvent.modifierFlags.contains(.command)
         isCreatingWorktree = true
         let repo = local
         let api = buildCustomApiConfig()
@@ -1450,7 +1481,13 @@ struct LauncherView: View {
             // offered one was removed as unused, and the three-rung fallback
             // below already covers every case it did.
             worktreeStage = "Naming Branch…"
-            let branchName = await resolveBranchName(prompt: prompt, customApi: api)
+            let named = await resolveBranchName(prompt: prompt, customApi: api)
+            // Two worktrees started from the same prompt get the same slug, and
+            // `worktree add -b` fails outright on a taken name — with no field
+            // left for the user to resolve it in.
+            let branchName = await Task.detached(priority: .userInitiated) {
+                GitWorktree.uniqueBranchName(named, in: repo)
+            }.value
             do {
                 worktreeStage = "Creating Worktree…"
                 let base = resolvedBaseRef
@@ -1472,7 +1509,8 @@ struct LauncherView: View {
                     }.value
                 }
                 launchLocal(worktree, remoteHost: nil,
-                            model: selectedModel, effort: selectedEffort, permission: selectedPermission)
+                            model: selectedModel, effort: selectedEffort,
+                            permission: selectedPermission, openInNewPane: cmdHeld)
             } catch {
                 // NSAlert instead of a SwiftUI .alert: the user can navigate
                 // away mid-creation, destroying this view's @State — a
@@ -1512,7 +1550,14 @@ struct LauncherView: View {
         return GitWorktree.suggestedBranchName()
     }
 
-    private func launchLocal(_ dir: URL, remoteHost: String?, model: String?, effort: String?, permission: PermissionMode) {
+    /// `openInNewPane` is nil for every synchronous caller, which lets
+    /// `AppState.launchSession` sample the modifier itself. Only a caller that
+    /// crosses an `await` before reaching here has to pass one — see the
+    /// worktree path and the SSH-continue branch below.
+    private func launchLocal(
+        _ dir: URL, remoteHost: String?, model: String?, effort: String?,
+        permission: PermissionMode, openInNewPane: Bool? = nil
+    ) {
         // A remote session's transcripts live on the OTHER machine, so
         // `latestSession(for:)` — which reads this machine's
         // `~/.claude/projects` — can only ever miss, or worse, hand the remote
@@ -1547,7 +1592,7 @@ struct LauncherView: View {
             resumeId = latest.id
             resumeTitle = latest.title
         }
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), initialPrompt: pendingPromptForLaunch)
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: openInNewPane, initialPrompt: pendingPromptForLaunch)
         clearPendingPrompt()
     }
 
@@ -1556,10 +1601,12 @@ struct LauncherView: View {
         providers = ModelProviderStore.load()
         recentDirectories = RecentDirectories.load()
         savedHosts = SSHHostStore.hosts()
-        Task {
-            let all = await Task.detached { ClaudeSessionHistory.loadAllSessions() }.value
-            sessions = all
-        }
+        // No `loadAllSessions()` here any more. Its only consumer was the
+        // session-history list this screen no longer has, and the scan walks
+        // every JSONL under `~/.claude/projects` parsing metadata — ~21,000
+        // sessions on this machine — once per launcher pane mount. Deleting a
+        // view has to delete what fed it; `latestSession(for:)` does its own
+        // per-directory read and deliberately never used this.
     }
 
     // MARK: - Web Sessions / Teleport

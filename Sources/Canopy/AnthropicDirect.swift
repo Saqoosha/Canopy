@@ -6,8 +6,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "AnthropicDi
 /// One non-streaming `/v1/messages` call, using the Claude Code credential
 /// Canopy already reads from the Keychain.
 ///
-/// **This exists because the CLI is two orders of magnitude of latency away
-/// from the API.** Measured three times each on the same prompt and model:
+/// **This exists because the CLI costs 7-8x the latency of the API for the
+/// same answer.** Measured three times each on the same prompt and model:
 /// `claude -p` took 6.93 / 7.15 / 8.50 s, this path took **0.97 s**. None of
 /// that gap is process spawn — `claude --version` returns in 0.04 s — so it is
 /// the CLI's own initialisation plus its round trip, and nothing on this side
@@ -55,7 +55,9 @@ enum AnthropicDirect {
         maxTokens: Int = 64,
         timeout: TimeInterval = 20
     ) async throws -> String {
-        guard let auth = KeychainAuth.readAccessTokenAndOrg() else {
+        // Token only: this request never names an organization, so requiring
+        // one would disable the fast path on any blob that lacks the field.
+        guard let token = KeychainAuth.readAccessToken() else {
             throw Failure.noCredential
         }
 
@@ -64,7 +66,7 @@ enum AnthropicDirect {
         request.timeoutInterval = timeout
         // Never logged, never surfaced: the token is written into the request
         // and nowhere else.
-        request.setValue("Bearer \(auth.token)", forHTTPHeaderField: "authorization")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -78,9 +80,12 @@ enum AnthropicDirect {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw Failure.malformedResponse }
         guard (200 ..< 300).contains(http.statusCode) else {
-            // Bounded, and public: an API error body carries a reason
-            // ("credit balance too low", an unknown model, a 429) and no user
-            // content — the request that produced it is not echoed back.
+            // Bounded, and `.private` at the log site. The first version of
+            // this comment claimed the body "carries no user content — the
+            // request that produced it is not echoed back", which was asserted
+            // rather than measured: a validation error can name the offending
+            // field, and the `user` field here IS the user's verbatim prompt.
+            // Over-redacting a diagnostic is the safe direction.
             let body = String(decoding: data.prefix(400), as: UTF8.self)
             throw Failure.http(status: http.statusCode, body: body)
         }
@@ -100,9 +105,12 @@ enum AnthropicDirect {
 
     /// Log a failure at the level its cause deserves.
     ///
-    /// `noCredential` is `debug`: on a machine that has never logged in it
-    /// would otherwise fire on every launcher keystroke burst, and the CLI
-    /// fallback reports the same condition properly. Everything else is
+    /// `noCredential` is `debug`, and the reason is narrower than it looks:
+    /// it fires at most once per naming or titling attempt, and the CLI
+    /// fallback that follows reports a missing login properly. (An earlier
+    /// version of this justified the level by a per-keystroke prefetch — that
+    /// mechanism was deleted in the same change, so do not restore the level
+    /// on that argument.) Everything else is
     /// `notice`, because it means the fast path is silently off and the only
     /// symptom is that things got slow again.
     static func log(_ error: Error, label: String) {
@@ -110,7 +118,7 @@ enum AnthropicDirect {
         case Failure.noCredential:
             logger.debug("[direct] \(label, privacy: .public): no Claude Code credential")
         case let Failure.http(status, body):
-            logger.notice("[direct] \(label, privacy: .public): HTTP \(status, privacy: .public): \(body, privacy: .public)")
+            logger.notice("[direct] \(label, privacy: .public): HTTP \(status, privacy: .public): \(body, privacy: .private)")
         default:
             logger.notice("[direct] \(label, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }

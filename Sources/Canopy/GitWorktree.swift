@@ -245,8 +245,8 @@ enum GitWorktree {
     /// in sequence deadlocks the moment the one NOT being read fills its 64KB
     /// buffer: the child blocks writing to it, so the stream being read never
     /// reaches EOF. A caller that needs only a status takes the single-stream
-    /// path, which cannot deadlock; the one caller that needs stdout pays for
-    /// a concurrent drain (same reason `CloneRepoSheet` uses a group).
+    /// path, which cannot deadlock; callers that need stdout pay for a
+    /// concurrent drain (same reason `CloneRepoSheet` uses a group).
     private static func runCommand(
         _ executable: String,
         _ arguments: [String],
@@ -287,7 +287,12 @@ enum GitWorktree {
         watchdog.cancel()
 
         if timedOut.value {
-            let message = "\(executable) timed out after \(Int(timeout))s — check git hooks or LFS credential prompts"
+            // The hint is per-executable: this function also runs `/bin/cp`
+            // for seeding, where "check git hooks" is actively misleading.
+            let hint = executable.hasSuffix("git")
+                ? " — check git hooks or LFS credential prompts"
+                : ""
+            let message = "\(executable) timed out after \(Int(timeout))s\(hint)"
             logger.error("\(message, privacy: .public)")
             throw NSError(domain: "GitWorktree", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
         }
@@ -304,9 +309,11 @@ enum GitWorktree {
     ///
     /// Pure so the order can be pinned: it is the whole of the policy, and the
     /// order is the part that would rot silently. `origin/HEAD` first because
-    /// it is the only entry that asks the REMOTE what its default branch is
-    /// rather than guessing a name; the rest are the two conventional names,
-    /// remote before local, because a local `main` can be behind.
+    /// it is the only entry that records what the remote SAID its default
+    /// branch was, rather than guessing a name — it is a local cache written
+    /// at clone time, so it can be absent or stale, which is why the two
+    /// conventional names follow it. Remote before local, because a local
+    /// `main` can be behind.
     static let baseRefCandidates = ["origin/HEAD", "origin/main", "origin/master", "main", "master"]
 
     /// What a new worktree should branch from, or nil when nothing resolves.
@@ -357,8 +364,12 @@ enum GitWorktree {
     /// added alongside — the work looks fine and only conflicts at merge. The
     /// user still thinks in "branch off main", so the name shown is `main`.
     ///
-    /// Order is preserved from the caller, which sorts by commit date, so the
-    /// branches someone is actually working on come first.
+    /// Order within each source is the caller's commit-date sort. The two are
+    /// CONCATENATED, remote first, so every remote entry outranks every
+    /// local-only one whatever its date — a branch that exists only locally
+    /// sorts below a remote one last touched a year ago. Accepted: the entry
+    /// worth defaulting to is almost always a remote one, and the list is
+    /// capped at `limit` rather than scanned.
     ///
     /// **The remote's own symbolic HEAD is dropped, and it does NOT look the
     /// way you would guess.** `refs/remotes/origin/HEAD` renders under
@@ -432,6 +443,37 @@ enum GitWorktree {
 
     /// `baseRef` nil keeps git's own default, which is the repository's HEAD —
     /// see `defaultBaseRef` for why callers should almost never want that.
+    /// Whether a ref of this name already exists in `repo`.
+    ///
+    /// `git worktree add -b` creates a branch and fails outright if the name is
+    /// taken. Since the hand-typed name field was removed there is no way for
+    /// the user to resolve that collision, and it is reachable in the ordinary
+    /// way: start two worktrees from the same prompt and the namer returns the
+    /// same slug twice.
+    static func refExists(_ name: String, in repo: URL, timeout: TimeInterval = 15) -> Bool {
+        guard let result = try? runCommand(
+            "/usr/bin/git",
+            ["-C", repo.path, "rev-parse", "--verify", "--quiet", "refs/heads/\(name)"],
+            timeout: timeout,
+            wantsStdout: true
+        ) else { return false }
+        return result.status == 0
+    }
+
+    /// `branch` with a numeric suffix appended if needed to make it free.
+    ///
+    /// Bounded rather than looping forever: past `limit` the repo has that many
+    /// branches on one slug and the caller is better off failing visibly than
+    /// silently creating `foo-97`.
+    static func uniqueBranchName(_ branch: String, in repo: URL, limit: Int = 20) -> String {
+        guard refExists(branch, in: repo) else { return branch }
+        for suffix in 2 ... limit {
+            let candidate = "\(branch)-\(suffix)"
+            if !refExists(candidate, in: repo) { return candidate }
+        }
+        return branch
+    }
+
     static func createWorktree(
         repo: URL,
         branch: String,
@@ -502,7 +544,7 @@ enum GitWorktree {
     /// xcodegen (`Canopy.xcodeproj` is gitignored here), `node_modules`, and
     /// Unity's `Library`, whose cold reimport costs tens of minutes.
     ///
-    /// The fix is APFS `clonefile(2)` via `cp -c`: copy-on-write, so the copy
+    /// The fix is APFS `clonefile(2)` via `cp -Rc`: copy-on-write, so the copy
     /// is near-instant and costs only metadata until the two sides diverge.
     /// Measured on a 3.4 GB / 55,971-file Unity `Library`: **10.9 s and 46 MB
     /// of real disk**, 1.3% of the source. That is what makes seeding cheap
@@ -525,7 +567,10 @@ enum GitWorktree {
         case clone
         /// Symlink to the original instead of recreating it.
         case link
-        /// Nothing sensible to do.
+        /// Unreachable from `plan(for:)` today — every `FileAttributeType`
+        /// maps to `.clone` or `.link`. Entries are skipped by `shouldSeed`
+        /// and by the two guards in `seedIgnoredFiles`, not here, so a reader
+        /// debugging a skipped entry should look there.
         case skip
     }
 
@@ -634,7 +679,10 @@ enum GitWorktree {
             wantsStdout: true
         )
         guard result.status == 0 else {
-            logger.notice("ls-files failed (status \(result.status)): \(result.stderr, privacy: .public)")
+            // `.private` for the same reason the clone-failure line below is:
+            // git's stderr here names the repository path and can name
+            // individual ignored paths, and these lines reach disk.
+            logger.notice("ls-files failed (status \(result.status)): \(result.stderr, privacy: .private)")
             return []
         }
         return String(decoding: result.stdout, as: UTF8.self)
@@ -672,7 +720,7 @@ enum GitWorktree {
                 continue
             }
             let source = repo.appendingPathComponent(relative).standardizedFileURL
-            // The second of the two guards named on `seedDenyList`: refuse an
+            // The second of the two guards named on `seedDenyPrefixes`: refuse an
             // entry that IS the destination or contains it. Without this a
             // repo whose worktrees live under some other ignored directory
             // would copy the worktree into itself while writing into it.
@@ -689,8 +737,17 @@ enum GitWorktree {
                 continue
             }
 
-            let attrs = try? fm.attributesOfItem(atPath: source.path)
-            let type = (attrs?[.type] as? FileAttributeType) ?? .typeUnknown
+            // A failed stat must NOT fall through to `.typeUnknown`: that case
+            // is deliberately mapped to `.link` because it is how a FIFO
+            // arrives, so an unreadable regular file would be reproduced as a
+            // symlink INTO the source repo — edits in the worktree would then
+            // write back into the root checkout, silently, counted as `linked`.
+            guard let attrs = try? fm.attributesOfItem(atPath: source.path) else {
+                report.failed += 1
+                logger.notice("seed: cannot stat \(relative, privacy: .private)")
+                continue
+            }
+            let type = (attrs[.type] as? FileAttributeType) ?? .typeUnknown
             do {
                 try fm.createDirectory(
                     at: dest.deletingLastPathComponent(),

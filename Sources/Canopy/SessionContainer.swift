@@ -83,7 +83,6 @@ struct SessionContainer: View {
     }
 }
 
-/// Lightweight placeholder shown over the WebView while the shim spawns.
 /// The pane's "something is starting" screen: spinner, one headline, one
 /// detail line.
 ///

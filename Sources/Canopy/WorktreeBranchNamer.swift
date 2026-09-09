@@ -154,7 +154,16 @@ enum WorktreeBranchNamer {
             return
         }
 
-        if customApi?.isEnabled != true {
+        // NOT `customApi?.isEnabled != true`. A custom endpoint is a property
+        // of the ENVIRONMENT, not of the UI setting: a Canopy launched from a
+        // shell that exports `ANTHROPIC_BASE_URL` hands it to the CLI while
+        // `customApi` stays nil, and launching from a terminal is exactly how
+        // this is developed. Gating on the UI alone sent verbatim conversation
+        // text to api.anthropic.com on those machines — a different provider
+        // AND a different privacy boundary than the CLI route it replaced.
+        // `ShimProcess.sessionUsesCustomEndpoint` reads both sources and is
+        // already probe-tested for this.
+        if !ShimProcess.sessionUsesCustomEndpoint(customApi) {
             Task {
                 do {
                     let raw = try await AnthropicDirect.message(
