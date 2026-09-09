@@ -1523,9 +1523,24 @@ struct LauncherView: View {
             }.value
             do {
                 worktreeStage = "Creating Worktree…"
-                let base = resolvedBaseRef
+                // `resolvedBaseRef` is nil until the probe started by
+                // `refreshBaseRef` lands, and Start is reachable before then —
+                // so reading it alone silently reproduces the bug the base-ref
+                // ladder exists to fix: a worktree branched from whatever HEAD
+                // happens to be, invisible until somebody else's unmerged work
+                // shows up in the diff. The user's own pick always wins; the
+                // fallback resolves only when nothing has resolved yet.
+                //
+                // Deterministic where a UI gate was not. An earlier revision
+                // disabled Start until the probe landed, which could latch
+                // forever on a wedged probe and leave the button grey with no
+                // way out. This costs one `git` call on a path already running
+                // several, and cannot latch.
+                let picked = resolvedBaseRef
                 let worktree = try await Task.detached(priority: .userInitiated) {
-                    try GitWorktree.createWorktree(repo: repo, branch: branchName, baseRef: base)
+                    let base = picked ?? GitWorktree.defaultBaseRef(for: repo)
+                    return try GitWorktree.createWorktree(
+                        repo: repo, branch: branchName, baseRef: base)
                 }.value
                 // A fresh worktree holds only tracked files, so for most
                 // projects it cannot build until this runs. Deliberately AFTER

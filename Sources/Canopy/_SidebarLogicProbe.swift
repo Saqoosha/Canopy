@@ -2098,6 +2098,46 @@ enum SidebarLogicProbe {
         record("isGitRepo: .git file (gitlink) → true",
                GitWorktree.isGitRepo(gitFileDir))
 
+        // The ONLY assertion in this file that executes `GitWorktree.runCommand`
+        // — every other git helper above is a pure string or filesystem check,
+        // so a green suite says nothing about the subprocess round trip. That
+        // gap was real: the drain was rewritten to run off the calling thread
+        // behind a `DispatchSemaphore` bound, and the whole suite stayed green
+        // because nothing had ever spawned anything.
+        //
+        // A real repo rather than a fixture, because the round trip IS the
+        // thing under test: spawn, stdout drain to EOF, reap, signal, read. A
+        // mock would only re-assert the `-z` parser that already has coverage.
+        //
+        // What this does NOT pin, and cannot cheaply: the wedge path. Reaching
+        // it needs a child that outlives SIGKILL or a grandchild holding the
+        // write end, and the failure mode of getting that wrong in a test is a
+        // hung CI job rather than a red one. The bound is reasoned from
+        // `CLIOneShot`, which documents the same residue.
+        let spawnRepo = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ProbeSpawn-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: spawnRepo) }
+        try? FileManager.default.createDirectory(at: spawnRepo, withIntermediateDirectories: true)
+        let gitInit = Process()
+        gitInit.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        gitInit.arguments = ["-C", spawnRepo.path, "init", "-q"]
+        gitInit.standardOutput = FileHandle.nullDevice
+        gitInit.standardError = FileHandle.nullDevice
+        try? gitInit.run()
+        gitInit.waitUntilExit()
+        try? "build/\n".write(to: spawnRepo.appendingPathComponent(".gitignore"),
+                              atomically: true, encoding: .utf8)
+        try? FileManager.default.createDirectory(
+            at: spawnRepo.appendingPathComponent("build", isDirectory: true),
+            withIntermediateDirectories: true)
+        try? "x".write(to: spawnRepo.appendingPathComponent("build/artifact.o"),
+                       atomically: true, encoding: .utf8)
+        // `--directory` collapses the wholly-ignored directory to one entry, so
+        // this is also the assertion that the flag is still being passed.
+        let spawnIgnored = (try? GitWorktree.ignoredEntries(repo: spawnRepo)) ?? []
+        record("ignoredEntries: subprocess round trip completes and drains stdout",
+               spawnIgnored.contains("build/"))
+
         record("projectDisplayName: managed worktree → repo · branch",
                GitWorktree.projectDisplayName(
                    for: GitWorktree.worktreesRoot

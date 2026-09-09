@@ -247,6 +247,21 @@ enum GitWorktree {
     /// reaches EOF. A caller that needs only a status takes the single-stream
     /// path, which cannot deadlock; callers that need stdout pay for a
     /// concurrent drain (same reason `CloneRepoSheet` uses a group).
+    /// The two drains' output, written off the calling thread.
+    ///
+    /// Plain `var`s captured by those closures compile with "mutation of
+    /// captured var in concurrently-executing code", and a warning left
+    /// standing next to correct code reads as a defect to the next person.
+    /// The synchronisation is real and is what `@unchecked` asserts: the two
+    /// writers touch different fields and never race each other, `group.wait()`
+    /// orders both before the `signal()`, and the caller reads only after its
+    /// `wait()` returns. On the wedge path the caller throws without reading,
+    /// so a writer still parked in `readDataToEndOfFile` has nothing to race.
+    private final class OutputBox: @unchecked Sendable {
+        var out = Data()
+        var err = Data()
+    }
+
     private static func runCommand(
         _ executable: String,
         _ arguments: [String],
@@ -261,30 +276,78 @@ enum GitWorktree {
         proc.standardOutput = stdoutPipe ?? FileHandle.nullDevice
         let stderrPipe = Pipe()
         proc.standardError = stderrPipe
+        // Inherited stdin is what makes the LFS half of the hint below
+        // reachable at all: a git credential prompt reads from it, and
+        // inheriting Canopy's parks that read on a terminal nobody is watching
+        // until the watchdog fires. `/dev/null` turns the hang into an
+        // immediate failure carrying git's own message on stderr. Nothing run
+        // through here reads stdin.
+        proc.standardInput = FileHandle.nullDevice
 
         let timedOut = TimeoutFlag()
+        let reaped = TimeoutFlag()
+        let queue = DispatchQueue.global(qos: .utility)
         let watchdog = DispatchWorkItem { [weak proc] in
+            guard let proc, !reaped.value, proc.isRunning else { return }
             timedOut.set()
-            proc?.terminate()
+            proc.terminate()
         }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        // Escalation, not decoration, and `reaped` NARROWS the check-then-act
+        // window rather than closing it. Both points are argued once, on
+        // `CLIOneShot.killGrace`, whose constant this reuses rather than
+        // re-types — a number copied here is one that can drift from the
+        // reasoning that justifies it.
+        let killer = DispatchWorkItem { [weak proc] in
+            guard let proc, !reaped.value, proc.isRunning else { return }
+            kill(proc.processIdentifier, SIGKILL)
+        }
+        queue.asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        queue.asyncAfter(deadline: .now() + timeout + CLIOneShot.killGrace, execute: killer)
 
         try proc.run()
 
-        var outData = Data()
-        var errData = Data()
-        if let stdoutPipe {
+        // The drain and the reap run OFF this thread so the CALLER can be
+        // bounded. Both are unbounded in themselves: the reads return at EOF
+        // and `waitUntilExit()` only after the reap, and a grandchild that
+        // inherited a write end defers EOF indefinitely — no signal to the
+        // direct child closes that. `CLIOneShot.finishSlack` documents exactly
+        // that residue and is reused for it. What the bound buys here:
+        // `startSession` holds `isCreatingWorktree` true and shows
+        // `SpawningOverlay` across this whole call, so one wedged `git` used to
+        // strand the launcher with no route back and nothing logged.
+        let output = OutputBox()
+        let done = DispatchSemaphore(value: 0)
+        queue.async {
             let group = DispatchGroup()
-            let queue = DispatchQueue.global(qos: .utility)
-            queue.async(group: group) { outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile() }
-            queue.async(group: group) { errData = stderrPipe.fileHandleForReading.readDataToEndOfFile() }
+            if let stdoutPipe {
+                queue.async(group: group) {
+                    output.out = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                }
+            }
+            queue.async(group: group) {
+                output.err = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            }
             group.wait()
-        } else {
-            errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            reaped.set()
+            done.signal()
         }
 
-        proc.waitUntilExit()
+        let slack = CLIOneShot.killGrace + CLIOneShot.finishSlack
+        if done.wait(timeout: .now() + timeout + slack) == .timedOut {
+            // Deliberately does NOT cancel the killer: the escalation is still
+            // this call's only chance of freeing the parked threads. When it
+            // cannot, the leak — both drains, the worker, the `Process` and its
+            // descriptors — is the one `CLIOneShot.finishSlack` accepts, and it
+            // is bounded here the same way it is there: worktree creation runs
+            // a handful of commands the user asks for one at a time.
+            let message = "\(executable) did not release its output within \(Int(timeout + slack))s"
+            logger.error("\(message, privacy: .public)")
+            throw NSError(domain: "GitWorktree", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: message])
+        }
         watchdog.cancel()
+        killer.cancel()
 
         if timedOut.value {
             // The hint is per-executable: this function also runs `/bin/cp`
@@ -300,9 +363,9 @@ enum GitWorktree {
         // Never `String(data:encoding:)`: a read that cuts a multi-byte
         // sequence makes the WHOLE buffer decode to nil, blanking a
         // diagnostic that is already the only clue about what failed.
-        let stderr = String(decoding: errData, as: UTF8.self)
+        let stderr = String(decoding: output.err, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return CommandResult(status: proc.terminationStatus, stdout: outData, stderr: stderr)
+        return CommandResult(status: proc.terminationStatus, stdout: output.out, stderr: stderr)
     }
 
     /// Refs to try, in order, when deciding what a new worktree branches FROM.
