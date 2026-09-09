@@ -1,24 +1,151 @@
 import SwiftUI
 
+/// One pill in the launcher's context row.
+///
+/// A single definition rather than a modifier chain repeated per chip: the row
+/// only reads as a row while every pill shares its metrics, and the first draft
+/// of this screen had two of them a point taller than the rest.
+///
+/// `muted` means "this is the default, not a choice the user made" — it is what
+/// keeps a row of five chips from reading as five settings that all need
+/// attention.
+private struct ChipLabel: View {
+    let icon: String
+    let text: String
+    var muted: Bool = false
+    /// Ceiling for the label, so one long name cannot push the row off screen.
+    /// Middle truncation rather than tail: the ends of a branch name carry more
+    /// than its middle ("fix-…-counts" beats "fix-issue-one-hundred-…").
+    var maxTextWidth: CGFloat = 150
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .medium))
+            Text(text)
+                .font(.system(size: 12))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: maxTextWidth, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // ---------------------------------------------------------------- 5.
+        // Pinned, because SF Symbols do not share an intrinsic height: the
+        // Continue chip swaps `plus.bubble` for `arrow.uturn.backward` and the
+        // row grew a point, which moved the composer under the user's cursor.
+        // A reported 1px jitter is the visible half of a layout that resizes
+        // on every state change.
+        .frame(height: 16)
+        .foregroundStyle(muted ? Color.secondary : Color.primary)
+    }
+}
+
+/// Left-aligned chips that wrap onto as many lines as they need.
+///
+/// SwiftUI ships no flow layout, and the two built-ins both fail here for the
+/// reason `WeightedPaneLayout` documents one level up: `HStack` is single-pass
+/// and never redistributes, so it overflows silently rather than wrapping.
+/// This is the same `Layout` escape hatch, at a much smaller scale.
+///
+/// `sizeThatFits` reports the height the rows actually need for the proposed
+/// width, and takes the proposal's width verbatim when it has one — returning
+/// the natural content width instead is what makes a custom layout inflate its
+/// parent, which is the runaway-growth bug the pane layout was built around.
+private struct ChipFlowLayout: Layout {
+    var spacing: CGFloat = 6
+    var lineSpacing: CGFloat = 6
+
+    private func rows(_ sizes: [CGSize], maxWidth: CGFloat) -> [[Int]] {
+        var rows: [[Int]] = [[]]
+        var x: CGFloat = 0
+        for (index, size) in sizes.enumerated() {
+            let advance = rows[rows.count - 1].isEmpty ? size.width : size.width + spacing
+            // A chip wider than the whole line still gets its own row rather
+            // than being dropped: `x > 0` keeps the first item on any row.
+            if x + advance > maxWidth, x > 0 {
+                rows.append([index])
+                x = size.width
+            } else {
+                rows[rows.count - 1].append(index)
+                x += advance
+            }
+        }
+        return rows
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        guard !sizes.isEmpty else { return .zero }
+        let maxWidth = proposal.width ?? sizes.map(\.width).reduce(0, +)
+        let laidOut = rows(sizes, maxWidth: maxWidth)
+        let height = laidOut.reduce(CGFloat.zero) { total, row in
+            total + (row.map { sizes[$0].height }.max() ?? 0)
+        } + CGFloat(max(0, laidOut.count - 1)) * lineSpacing
+        return CGSize(width: maxWidth, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        guard !sizes.isEmpty else { return }
+        var y = bounds.minY
+        for row in rows(sizes, maxWidth: bounds.width) {
+            var x = bounds.minX
+            let rowHeight = row.map { sizes[$0].height }.max() ?? 0
+            for index in row {
+                subviews[index].place(
+                    // Centred within the row so a chip and a text field of
+                    // different heights sit on one baseline.
+                    at: CGPoint(x: x, y: y + (rowHeight - sizes[index].height) / 2),
+                    proposal: ProposedViewSize(sizes[index])
+                )
+                x += sizes[index].width + spacing
+            }
+            y += rowHeight + lineSpacing
+        }
+    }
+}
+
+private extension View {
+    /// The pill every context chip and composer control wears.
+    ///
+    /// Applied to the `Menu`, never to its label — see `ChipLabel`. Kept as
+    /// one modifier so the row cannot drift a point out of alignment between
+    /// chips, which is exactly what happened when each carried its own padding.
+    func chipStyle() -> some View {
+        // All three numbers are optical, and the asymmetry is the point: an SF
+        // Symbol's ink sits inset inside its layout box, so the same metric
+        // padding reads as MORE space on the icon side than beside text, and
+        // macOS reserves its own trailing room for the menu indicator on top of
+        // whatever is set here. So the leading side comes in from 10, and the
+        // trailing side comes in further still when an indicator is present.
+        // A pill with no menu keeps the wider trailing value, because there
+        // its right edge is text — tight ink, and 5 would crowd it.
+        padding(.leading, 8)
+            .padding(.trailing, 5)
+            .padding(.vertical, 5)
+            .background(Color.primary.opacity(0.06), in: Capsule())
+            .overlay(Capsule().stroke(Color.primary.opacity(0.10), lineWidth: 1))
+            .contentShape(Capsule())
+    }
+}
+
 struct LauncherView: View {
     @Bindable var appState: AppState
-    /// When true, hide the bottom Recents/Sessions/Web lists — the sidebar
-    /// shell already shows them and duplication just adds noise.
-    var compactMode: Bool = false
-
     @State private var selectedDirectory: URL?
     @State private var recentDirectories: [URL] = []
-    @State private var sessions: [SessionEntry] = []
-    @State private var searchText = ""
-    @State private var hoveredDirectoryPath: String?
-    @State private var hoveredSessionId: String?
     @State private var isDropTargeted = false
     @State private var remoteHost: String = ""
     @State private var savedHosts: [String] = []
     @State private var isRemoteMode = false
     /// True while the SSH round trip that resolves "Continue session" for a
     /// remote host is in flight. Its own flag rather than reusing
-    /// `isCreatingWorktree` so the button can say which one it is waiting on.
+    /// `isCreatingWorktree` so `preparingHeadline` can say which one it is
+    /// waiting on.
     @State private var isResolvingRemoteSession = false
     @State private var remoteDirectory: String = "~"
     @State private var showRemoteBrowser = false
@@ -46,12 +173,48 @@ struct LauncherView: View {
     @AppStorage("launcher.continueSession") private var continueSession = false
 
     @State private var startInWorktree = false
-    @State private var worktreeBranch = ""
     @State private var isCreatingWorktree = false
-    /// Computed once per launcher so the placeholder and the empty-field
-    /// fallback produce the same branch name (a per-render call would drift
-    /// by its seconds-precision timestamp).
-    @State private var suggestedWorktreeBranch = GitWorktree.suggestedBranchName()
+    /// The prompt typed on the launch screen. Optional by design: leaving it
+    /// empty is how the user says "open the directory, I will decide there",
+    /// which is how roughly half of WORKTREE-BOUND sessions began — of 40 that
+    /// relocated into a worktree, 19 did so only after several turns of
+    /// discussion. (That is the population measured; it says nothing about
+    /// sessions that never relocate.) A launcher that demanded a task up front
+    /// would delete that half.
+    @State private var initialPrompt = ""
+    /// Which step of the worktree hand-off is running, for `preparingHeadline`
+    /// — which the launcher renders on `SpawningOverlay`, not on the button.
+    /// Three of them can take seconds and they fail for unrelated reasons, so
+    /// "Creating Worktree…" over all three named the wrong one two times out
+    /// of three.
+    @State private var worktreeStage: String?
+    /// Branch of `selectedDirectory`, refreshed when it changes rather than
+    /// read per render — the read shells out, and a chip is drawn constantly.
+    @State private var currentBranchName: String?
+    /// What a new worktree will branch FROM, resolved from the selected repo,
+    /// and how to say it on screen. Nil until resolved, or when nothing
+    /// matched — in which case the base is the folder's own HEAD.
+    @State private var baseRef: String?
+    @State private var baseRefLabel: String?
+    /// A base the user picked by hand, or nil to use `baseRef` — the repo's
+    /// default branch, which is the right answer for almost every worktree
+    /// (the new branch is going to be merged back into it, so starting
+    /// anywhere else drags unmerged work into the diff).
+    ///
+    /// Nil by default on purpose: branching off whatever the root happened to
+    /// be on is the trap this whole base-ref resolution exists to close, and a
+    /// picker that opens with no recommendation just moves the trap.
+    @State private var pickedBaseRef: GitWorktree.BaseCandidate?
+    /// Branches offered by the picker, refreshed with the folder.
+    @State private var baseCandidates: [GitWorktree.BaseCandidate] = []
+    /// Presents the SSH host / remote path fields.
+    ///
+    /// Collapsing the old form's two SSH cards into the location chip left the
+    /// menu able to CHOOSE a saved host and unable to add one — "Connect to
+    /// host…" turned remote mode on with an empty host, which disables Start
+    /// with nothing on screen to type into. A chip can only offer values that
+    /// already exist, so anything that creates one needs somewhere to live.
+    @State private var showRemoteSetup = false
 
     // Bare family aliases, so a row tracks the latest model in its family with no
     // release-day edit here. Measured 2026-09-02 on CLI 2.1.239: "fable" resolves to
@@ -113,46 +276,64 @@ struct LauncherView: View {
     private static let rowHeight: CGFloat = 34
     private static let listRowCount = 10
 
-    var body: some View {
+    private var launchComposer: some View {
         ScrollView {
-            VStack(spacing: 28) {
-                header
+            VStack(spacing: 12) {
                 #if DEBUG
                 if ProcessInfo.processInfo.environment["CANOPY_PROBE"] == "1" {
                     ProbeRetentionView()
                 }
                 #endif
+                launchHeader
                 extensionUpdateBanner
-
-                Toggle("SSH Remote", isOn: $isRemoteMode)
-                    .toggleStyle(.switch)
-                    .padding(.horizontal)
-
-                sessionOptions
-
-                if isRemoteMode {
-                    sshHostCard
-                    remoteDirectoryCard
-                } else {
-                    directoryCard
-                }
-
-                startButton
-
-                if !isRemoteMode && !compactMode {
-                    searchField
-                    listsSection
-                    webSessionsSection
-                }
+                contextChipRow
+                composerBox
             }
-            .padding(.horizontal, 36)
-            .padding(.vertical, 36)
-            .frame(maxWidth: 560)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 32)
+            .frame(maxWidth: 720)
             .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .scrollBounceBehavior(.basedOnSize)
         .defaultScrollAnchor(.center)
+    }
+
+    /// Which wait, if any, is running — nil means the composer is live.
+    ///
+    /// Both of these happen BEFORE a session exists, which is why neither can
+    /// be reported by a session's own overlay: the worktree's path is not
+    /// known until the branch is named, and the remote lookup is the round
+    /// trip that decides which session to open at all. They are the same KIND
+    /// of wait though, so they get the same screen — `SpawningOverlay`, the
+    /// one `SessionContainer` shows a moment later. What the user sees is one
+    /// continuous spinner: Naming Branch… → Creating Worktree… → Copying
+    /// Build Files… → Starting <session>…
+    private var preparingHeadline: String? {
+        if let worktreeStage { return worktreeStage }
+        // Reached only if a stage is somehow unset while the work runs; the
+        // flag is what actually gates the composer, so it answers too.
+        if isCreatingWorktree { return "Preparing Worktree…" }
+        if isResolvingRemoteSession { return "Finding Session…" }
+        return nil
+    }
+
+    var body: some View {
+        Group {
+            if let preparingHeadline {
+                // The composer is REPLACED rather than covered: every control
+                // in it is disabled for the duration anyway, and leaving it
+                // visible behind a spinner invites a click that does nothing.
+                SpawningOverlay(
+                    headline: preparingHeadline,
+                    detail: isRemoteMode
+                        ? remoteHost
+                        : (selectedDirectory?.lastPathComponent ?? "")
+                )
+            } else {
+                launchComposer
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .onAppear {
             // Move a selection made in an older build onto an id this Picker still
@@ -160,6 +341,7 @@ struct LauncherView: View {
             let migrated = Self.migratingRetiredModel(model)
             if migrated != model { model = migrated }
             loadData()
+            preselectMostRecentDirectory()
             Task { await updater.checkForUpdate() }
         }
         .onChange(of: selectedProviderId) {
@@ -170,8 +352,91 @@ struct LauncherView: View {
                 effortLevel = ""
             }
         }
+        .onChange(of: selectedDirectory) { refreshBranchName() }
+        .sheet(isPresented: $showWebSessions) {
+            webSessionsSection
+                .padding(20)
+                .frame(minWidth: 560, minHeight: 420)
+        }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
+        }
+    }
+
+    /// Open on the most recently used folder when nothing is chosen yet.
+    ///
+    /// Only when nothing is chosen: this runs on every `onAppear`, and a pane
+    /// that is re-shown must not throw away a folder the user picked by hand.
+    /// A recent entry can name a folder that has since been deleted or is on
+    /// an unmounted volume, so the list is walked rather than blindly taking
+    /// its head — otherwise the screen would come up pointed at nothing and
+    /// Start would fail at the shim.
+    private func preselectMostRecentDirectory() {
+        guard selectedDirectory == nil else { return }
+        var isDirectory: ObjCBool = false
+        for dir in recentDirectories
+        where FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+        {
+            // No explicit `refreshBranchName()`: assigning `selectedDirectory`
+            // fires `.onChange`, and calling both ran the whole git/VCS
+            // subprocess chain twice on every launcher mount.
+            selectedDirectory = dir
+            return
+        }
+    }
+
+    private func refreshBranchName() {
+        guard let dir = selectedDirectory, GitWorktree.isGitRepo(dir) else {
+            currentBranchName = nil
+            baseRef = nil
+            baseRefLabel = nil
+            baseCandidates = []
+            pickedBaseRef = nil
+            return
+        }
+        // Cleared synchronously, so the window between picking a folder and its
+        // reads finishing cannot serve the PREVIOUS folder's data. That has to
+        // include `currentBranchName`: it is written last, after a third
+        // detached read, and the branch chip reads it directly — so leaving it
+        // out meant the chip confidently named folder A's branch while folder
+        // B was selected, which is the exact bug this clear exists to stop,
+        // one field short.
+        currentBranchName = nil
+        baseRef = nil
+        baseRefLabel = nil
+        baseCandidates = []
+        pickedBaseRef = nil
+        Task {
+            let base = await Task.detached(priority: .userInitiated) { () -> (String, String)? in
+                guard let ref = GitWorktree.defaultBaseRef(for: dir) else { return nil }
+                return (ref, GitWorktree.displayBaseRef(ref, for: dir))
+            }.value
+            let candidates = await Task.detached(priority: .userInitiated) {
+                GitWorktree.baseCandidates(for: dir)
+            }.value
+            if selectedDirectory == dir {
+                baseRef = base?.0
+                baseRefLabel = base?.1
+                baseCandidates = candidates
+            }
+            let name = await Task.detached(priority: .userInitiated) {
+                // The same reader the status bar uses, so the launcher cannot
+                // disagree with the pane it is about to open. It matters here
+                // rather than being tidiness: these repos are jj-colocated, so
+                // git HEAD is permanently detached and a git-only read renders
+                // "detached" on every one of them — accurate and useless.
+                //
+                // `branchNameOnly` strips the working-copy status this returns
+                // ("main (modified)"), which belongs on a status pill and reads
+                // as part of the name anywhere else.
+                let raw = ShimProcess.detectVCSInfo(at: dir)?.branch ?? ""
+                let cleaned = GitWorktree.branchNameOnly(raw)
+                return cleaned.isEmpty ? GitWorktree.currentBranch(for: dir) : cleaned
+            }.value
+            // Discard a read that finished after the user moved on, or the
+            // chip would name the previous folder's branch.
+            if selectedDirectory == dir { currentBranchName = name }
         }
     }
 
@@ -183,21 +448,612 @@ struct LauncherView: View {
         }
     }
 
-    // MARK: - Header
+    // MARK: - Composer
+    //
+    // The launch screen is one composer, not a form.
+    //
+    /// It replaced a vertical stack of labelled `GridRow`s — Provider, Model,
+    /// Effort, Permission, Worktree, a Working Directory card, a Continue
+    /// checkbox and an SSH toggle — where every session started by reading
+    /// eight controls the answer to which is almost always the same as last
+    /// time. The shape here is Cursor's and Codex's: **context above the box,
+    /// how-to-run inside it, and nothing else on screen.**
+    ///
+    /// The split is not cosmetic. The chips answer *where the work happens*
+    /// (folder, branch, worktree, machine, fresh-or-resume) and are the things
+    /// that change between one session and the next; the controls inside the
+    /// box answer *how the model runs* and mostly do not. Putting the second
+    /// group inside the box is what lets the first group be a single scannable
+    /// line instead of a column of labels.
+    ///
+    /// The lists that used to sit below (recent folders, session history, web
+    /// sessions) are gone from the body rather than restyled: the sidebar
+    /// already lists every session and recent project, so the launcher was
+    /// rendering a second copy of it directly beside the first. What survives
+    /// moved into the menu of the chip it belongs to.
 
-    private var header: some View {
-        VStack(spacing: 6) {
+    /// Icon and a line that names what is about to happen.
+    ///
+    /// The old header was the app icon over "Canopy" over "Start a new
+    /// session" — three lines that between them said nothing the title bar and
+    /// the sidebar did not. This one is folder-aware and mode-aware, so it is
+    /// the only place on screen that states the whole intent in one sentence,
+    /// and it changes when the Continue chip does — which is also the answer to
+    /// "what happens if I type something with Continue on", asked before the
+    /// screen said it anywhere.
+    private var launchHeader: some View {
+        VStack(spacing: 10) {
             Image(nsImage: NSApp.applicationIconImage)
                 .resizable()
                 .frame(width: 64, height: 64)
-            Text("Canopy")
-                .font(.title.bold())
-            Text("Start a new session")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            Text(headlineText)
+                .font(.system(size: 21, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.primary)
         }
-        .frame(maxWidth: .infinity)
         .padding(.bottom, 4)
+    }
+
+    private var headlineText: String {
+        let place = isRemoteMode
+            ? (remoteHost.isEmpty ? nil : remoteHost)
+            : selectedDirectory?.lastPathComponent
+        guard let place else {
+            return willContinueSession ? "Where were we?" : "What should we build?"
+        }
+        if willContinueSession { return "Where were we in \(place)?" }
+        if willCreateWorktree { return "What should we build in a new \(place) worktree?" }
+        return "What should we build in \(place)?"
+    }
+
+    private var contextChipRow: some View {
+        // Widest scope first, narrowing left to right: which machine, which
+        // folder on it, whether a worktree is cut from that folder, and what
+        // that worktree branches from.
+        //
+        // The branch chip sits immediately after the worktree chip because it
+        // is no longer independent of it: with a worktree it reads "from main",
+        // which is a property of the worktree being made, not of the folder.
+        // It was second in the row before, next to the folder, and that
+        // adjacency is what made "New worktree" look like it branched off
+        // whatever the folder was on.
+        ChipFlowLayout(spacing: 6, lineSpacing: 6) {
+            locationChip
+            directoryChip
+            if !isRemoteMode, selectedDirectoryIsGitRepo {
+                worktreeChip
+                branchChip
+            }
+            continueChip
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var directoryLabel: String {
+        if isRemoteMode {
+            return remoteDirectory.isEmpty ? "Choose folder" : (remoteDirectory as NSString).lastPathComponent
+        }
+        return selectedDirectory?.lastPathComponent ?? "Choose folder"
+    }
+
+    private var directoryChip: some View {
+        Menu {
+            if isRemoteMode {
+                // Routed through the setup sheet rather than presenting a
+                // second copy of the browser: two presenters for one
+                // `showRemoteBrowser` is a state both would fight over.
+                Button("Browse remote…") { showRemoteSetup = true }
+            } else {
+                if !recentDirectories.isEmpty {
+                    Section("Recent") {
+                        ForEach(recentDirectories.prefix(15), id: \.path) { dir in
+                            Button(dir.lastPathComponent) { selectedDirectory = dir }
+                        }
+                    }
+                    Divider()
+                }
+                Button("Open folder…") { chooseFolder() }
+                Button("Clone from GitHub…") { showCloneSheet = true }
+            }
+        } label: {
+            ChipLabel(
+                icon: "folder",
+                text: directoryLabel,
+                muted: isRemoteMode ? remoteDirectory.isEmpty : selectedDirectory == nil
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+        .help(isRemoteMode ? remoteDirectory : (selectedDirectory?.abbreviatingWithTilde ?? "No folder chosen"))
+        .sheet(isPresented: $showCloneSheet) {
+            CloneRepoSheet { cloned in
+                selectedDirectory = cloned
+                RecentDirectories.add(cloned)
+                recentDirectories = RecentDirectories.load()
+            }
+        }
+    }
+
+    /// A label, not a control — and now drawn as one.
+    ///
+    /// It wore the same pill as its neighbours at first and was reported as
+    /// "the branch pill doesn't do anything", which was the right reading of a
+    /// wrong signal: a pill among pills invites a click. With no fill and no
+    /// border the row reads as four controls and one fact.
+    ///
+    /// **Switching is deliberately absent, not missing.** Cursor and Codex
+    /// both make their equivalent a switcher, and copying that here would be
+    /// actively harmful: these repos are jj-colocated, where the git branch is
+    /// not what moves the working copy (`jj edit` / `jj new` are), so a
+    /// `git switch` would leave git and jj disagreeing about where the repo
+    /// is. Doing it safely means detecting the VCS, refusing on a dirty tree,
+    /// and speaking jj's vocabulary — a feature, not a menu.
+    ///
+    /// It still earns its space: this is the line that says which branch the
+    /// prompt is about to run against, which is the confusion the whole
+    /// branch-display fix was about.
+    @ViewBuilder
+    private var branchChip: some View {
+        if startInWorktree, !baseCandidates.isEmpty {
+            // With a worktree this chip is a control, because there is a real
+            // choice behind it: which branch the new one starts from.
+            Menu {
+                // Most recently committed first, with the recommended one
+                // marked — the picker offers the choice without asking a
+                // question it can answer itself.
+                ForEach(baseCandidates) { candidate in
+                    Button {
+                        // Choosing the recommended entry clears the override
+                        // rather than pinning it, so a later folder change
+                        // still moves the default with it.
+                        pickedBaseRef = (candidate.name == baseRefLabel) ? nil : candidate
+                    } label: {
+                        // No "(recommended)" marker: the default IS the
+                        // recommendation, and it opens already checked, so the
+                        // word only annotated the row the checkmark was on.
+                        Label(
+                            candidate.name,
+                            systemImage: isSelectedBase(candidate) ? "checkmark" : ""
+                        )
+                    }
+                }
+            } label: {
+                ChipLabel(icon: "arrow.triangle.branch", text: branchChipText)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .chipStyle()
+            .help(branchChipHelp)
+        } else {
+            // Without one it is a fact, not a control: Canopy does not switch
+            // the branch a folder is on (see the type doc), so a pill here
+            // would invite a click that cannot be honoured.
+            ChipLabel(
+                icon: "arrow.triangle.branch",
+                text: branchChipText,
+                muted: true,
+                )
+            // Keeps the pills' vertical metric so the row still aligns, and
+            // enough horizontal room not to crowd them — everything except the
+            // fill and the border, which are what said "press me".
+            .padding(.horizontal, 4)
+            .padding(.vertical, 5)
+            .help(branchChipHelp)
+        }
+    }
+
+    /// With no worktree, the branch the prompt runs ON. With one, the branch
+    /// the new worktree starts FROM.
+    ///
+    /// Those are different questions and the chip used to answer only the
+    /// first, while sitting beside a "New worktree" chip — which read as "the
+    /// new worktree comes off this", and was reported as exactly that
+    /// confusion. It was also TRUE at the time, which is what made it worth
+    /// fixing in the code rather than only in the label.
+    private var branchChipText: String {
+        guard startInWorktree else { return currentBranchName ?? "detached" }
+        if let pickedBaseRef { return "from \(pickedBaseRef.name)" }
+        return "from \(baseRefLabel ?? currentBranchName ?? "HEAD")"
+    }
+
+    private var branchChipHelp: String {
+        startInWorktree
+            ? "Which branch the new worktree starts from"
+            : "Branch of the selected folder. Canopy does not switch branches."
+    }
+
+    private func isSelectedBase(_ candidate: GitWorktree.BaseCandidate) -> Bool {
+        if let pickedBaseRef { return pickedBaseRef.ref == candidate.ref }
+        return candidate.name == baseRefLabel
+    }
+
+    /// The base handed to `git worktree add`, honouring a hand-picked one.
+    ///
+    /// Nil reaches git as "no start-point", i.e. the folder's own HEAD. That is
+    /// only correct when nothing resolved at all — see `defaultBaseRef`.
+    private var resolvedBaseRef: String? {
+        pickedBaseRef?.ref ?? baseRef
+    }
+
+    private var worktreeChip: some View {
+        Menu {
+            Button {
+                startInWorktree = false
+            } label: {
+                Label("Work in this folder", systemImage: startInWorktree ? "" : "checkmark")
+            }
+            Button {
+                startInWorktree = true
+            } label: {
+                // Just "New worktree": naming from the prompt is the only
+                // way it happens now that the hand-typed field is gone, so
+                // saying so described the mechanism rather than the choice.
+                Label("New worktree", systemImage: startInWorktree ? "checkmark" : "")
+            }
+            // The base list used to hang off this menu, which split the
+            // question in two: the chip that SHOWED the branch could not change
+            // it, and the chip that changed it did not show it. It lives on the
+            // branch chip now.
+        } label: {
+            ChipLabel(
+                icon: startInWorktree ? "square.on.square.dashed" : "square",
+                text: startInWorktree ? "New worktree" : "No worktree",
+                muted: !startInWorktree
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+    }
+
+    private var locationChip: some View {
+        Menu {
+            Button {
+                isRemoteMode = false
+            } label: {
+                Label("This Mac", systemImage: isRemoteMode ? "" : "checkmark")
+            }
+            if !savedHosts.isEmpty {
+                Section("SSH") {
+                    ForEach(savedHosts, id: \.self) { host in
+                        Button {
+                            remoteHost = host
+                            isRemoteMode = true
+                        } label: {
+                            Label(host, systemImage: isRemoteMode && remoteHost == host ? "checkmark" : "")
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Connect to host…") { showRemoteSetup = true }
+        } label: {
+            ChipLabel(
+                icon: isRemoteMode ? "network" : "desktopcomputer",
+                text: isRemoteMode ? (remoteHost.isEmpty ? "SSH host…" : remoteHost) : "This Mac",
+                muted: isRemoteMode && remoteHost.isEmpty
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+        .sheet(isPresented: $showRemoteSetup) { remoteSetupSheet }
+    }
+
+    /// Host and path for an SSH session.
+    ///
+    /// Purpose-built rather than the old vertical form's two cards restored:
+    /// those were sized for a 560pt column and carried their own headings,
+    /// which is the shape this screen just stopped being.
+    private var remoteSetupSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Connect over SSH")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Host").font(.caption).foregroundStyle(.secondary)
+                TextField("user@host or an ssh_config name", text: $remoteHost)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Directory").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    TextField("~", text: $remoteDirectory)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…") { showRemoteBrowser = true }
+                        .disabled(remoteHost.isEmpty)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showRemoteSetup = false
+                    // Leaving remote mode on with no host is the dead end this
+                    // sheet exists to close, so cancelling restores local.
+                    if remoteHost.trimmingCharacters(in: .whitespaces).isEmpty {
+                        isRemoteMode = false
+                    }
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("Use This Host") {
+                    // Trimmed before it is stored OR launched: `SSHHostStore`
+                    // does not normalise, and " myhost " reaches ssh as a
+                    // destination containing spaces.
+                    remoteHost = remoteHost.trimmingCharacters(in: .whitespaces)
+                    SSHHostStore.add(remoteHost)
+                    savedHosts = SSHHostStore.hosts()
+                    isRemoteMode = true
+                    showRemoteSetup = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(remoteHost.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 420)
+        // Mounted on the sheet that owns the Browse button. The presenter used
+        // to live on the deleted `remoteDirectoryCard`, and removing that view
+        // took the browser with it — the button stayed, and did nothing.
+        .sheet(isPresented: $showRemoteBrowser) {
+            RemoteDirectoryBrowser(sshHost: remoteHost) { path in
+                remoteDirectory = path
+            }
+        }
+    }
+
+    private var continueChip: some View {
+        Menu {
+            Button {
+                continueSession = false
+            } label: {
+                Label("New session", systemImage: willContinueSession ? "" : "checkmark")
+            }
+            Button {
+                continueSession = true
+            } label: {
+                Label(
+                    willCreateWorktree
+                        ? "Continue — not with a new worktree"
+                        : "Continue the latest session",
+                    systemImage: willContinueSession ? "checkmark" : ""
+                )
+            }
+            // Disabled rather than hidden: a row that vanishes reads as a bug,
+            // and the point is to say WHY the two cannot combine.
+            .disabled(willCreateWorktree)
+        } label: {
+            ChipLabel(
+                icon: willContinueSession ? "arrow.uturn.backward" : "plus.bubble",
+                text: willContinueSession ? "Continue" : "New session",
+                muted: !willContinueSession
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+    }
+
+    /// Whether this launch will actually resume something.
+    ///
+    /// **"Continue" and "New worktree" cannot both be honoured.** A worktree
+    /// created a second ago has no session history, so `latestSession` finds
+    /// nothing and the launch silently falls through to a fresh session — while
+    /// the headline said "Where were we in Canopy?" and the composer said "Pick
+    /// up where you left off". Three surfaces lying in agreement.
+    ///
+    /// The worktree wins because it is the thing the user just built a name and
+    /// a checkout for. `continueSession` is deliberately NOT written to: it is
+    /// a persisted preference, and flipping it here would silently lose the
+    /// user's setting the moment they turned the worktree off again.
+    private var willContinueSession: Bool {
+        continueSession && !willCreateWorktree
+    }
+
+    /// Whether this launch will actually cut a worktree.
+    ///
+    /// `startInWorktree` alone is not that: the toggle survives switching to
+    /// SSH or picking a non-Git folder, where the chip disappears and
+    /// `startSession` bypasses worktree creation entirely — but the Continue
+    /// conflict kept firing, so a persisted Continue silently launched a fresh
+    /// session on a path that was never going to make a worktree.
+    ///
+    /// Every reader that MAKES A CLAIM about a worktree goes through this: the
+    /// Continue conflict, the headline, and the composer's placeholder. The
+    /// first version of this comment said "every reader" flatly, and the
+    /// headline and placeholder were still on the raw toggle — so the same
+    /// switch-to-SSH gesture left the screen promising "a new mbp worktree"
+    /// while nothing was going to cut one. The chip's own text stays on the
+    /// raw toggle deliberately: it renders only inside the gate, so the two
+    /// are equivalent there and reading the toggle is what the chip is FOR.
+    private var willCreateWorktree: Bool {
+        startInWorktree && !isRemoteMode && selectedDirectoryIsGitRepo
+    }
+
+    private var composerPlaceholder: String {
+        // Each mode says what this box will actually do with the text, because
+        // the three outcomes genuinely differ: a fresh turn, a turn appended to
+        // an existing conversation, or a turn that also names a branch.
+        if willContinueSession { return "Pick up where you left off" }
+        if willCreateWorktree { return "Describe a task — it names the branch too" }
+        return "Describe a task or ask a question"
+    }
+
+    private var composerBox: some View {
+        VStack(spacing: 0) {
+            TextField("", text: $initialPrompt, prompt: Text(composerPlaceholder), axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .lineLimit(3 ... 12)
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 6)
+                .disabled(isCreatingWorktree || isResolvingRemoteSession)
+
+            HStack(spacing: 5) {
+                moreMenu
+                modelChip
+                if isAnthropicProvider { effortChip }
+                permissionChip
+                Spacer(minLength: 8)
+                sendButton
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 9)
+        }
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(isDropTargeted ? Color.accentColor : Color.primary.opacity(0.12),
+                        lineWidth: isDropTargeted ? 2 : 1)
+        )
+    }
+
+    /// Everything that is neither context nor a model setting.
+    ///
+    /// Mirrors the `+` both reference apps put in the same corner: the drawer
+    /// for actions that would each otherwise want a chip of their own and are
+    /// reached once a week rather than once a session.
+    private var moreMenu: some View {
+        Menu {
+            if !providers.isEmpty {
+                Section("Provider") {
+                    Button {
+                        selectedProviderId = ""
+                    } label: {
+                        Label("Anthropic (default)",
+                              systemImage: selectedProviderId.isEmpty ? "checkmark" : "")
+                    }
+                    ForEach(providers) { provider in
+                        Button {
+                            selectedProviderId = provider.id
+                        } label: {
+                            Label(provider.name,
+                                  systemImage: selectedProviderId == provider.id ? "checkmark" : "")
+                        }
+                    }
+                }
+                Divider()
+            }
+            Button("Claude Code on the Web…") { Task { await toggleWebSessions() } }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var modelChip: some View {
+        Menu {
+            Button { model = "" } label: {
+                Label("Auto", systemImage: model.isEmpty ? "checkmark" : "")
+            }
+            ForEach(Self.modelOptions.dropFirst(), id: \.self) { alias in
+                Button { model = alias } label: {
+                    Label(Self.modelDisplayName(alias), systemImage: model == alias ? "checkmark" : "")
+                }
+            }
+        } label: {
+            ChipLabel(icon: "sparkle",
+                      text: model.isEmpty ? "Auto" : Self.modelDisplayName(model),
+                      muted: model.isEmpty)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+    }
+
+    private var effortChip: some View {
+        Menu {
+            Button { effortLevel = "" } label: {
+                Label("Auto", systemImage: effortLevel.isEmpty ? "checkmark" : "")
+            }
+            ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
+                Button { effortLevel = level } label: {
+                    Label(Self.effortDisplayName(level), systemImage: effortLevel == level ? "checkmark" : "")
+                }
+            }
+        } label: {
+            ChipLabel(icon: "gauge.with.dots.needle.33percent",
+                      text: effortLevel.isEmpty ? "Auto" : Self.effortDisplayName(effortLevel),
+                      muted: effortLevel.isEmpty)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+    }
+
+    private var permissionChip: some View {
+        Menu {
+            ForEach(visiblePermissionModes, id: \.rawValue) { mode in
+                Button { permissionModeRaw = mode.rawValue } label: {
+                    Label(mode.displayName, systemImage: permissionModeRaw == mode.rawValue ? "checkmark" : "")
+                }
+            }
+            if CanopySettings.shared.allowDangerouslySkipPermissions {
+                Button { permissionModeRaw = PermissionMode.bypassPermissions.rawValue } label: {
+                    Label(PermissionMode.bypassPermissions.displayName,
+                          systemImage: permissionModeRaw == PermissionMode.bypassPermissions.rawValue ? "checkmark" : "")
+                }
+            }
+        } label: {
+            ChipLabel(icon: "lock.shield", text: resolvedPermission.displayName)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+    }
+
+    /// The one control that is a button rather than a menu.
+    ///
+    /// Deliberately just the arrow: the three steps behind a worktree launch
+    /// — naming, checkout, copying ignored files — used to be reported in this
+    /// label, which put a changing sentence inside a 20pt control and reflowed
+    /// the row under the cursor. They belong on `SpawningOverlay`, which has
+    /// replaced this whole screen by the time there is a stage to report.
+    private var sendButton: some View {
+        Button {
+            startSession()
+        } label: {
+            Image(systemName: "arrow.up.circle.fill")
+                .font(.system(size: 20))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(canStart ? Color.accentColor : Color.secondary.opacity(0.5))
+        .disabled(!canStart)
+        .keyboardShortcut(.return, modifiers: [])
+        .help("Start Session")
+    }
+
+    private var canStart: Bool {
+        if isCreatingWorktree || isResolvingRemoteSession { return false }
+        // **Deliberately NOT gated on base-ref resolution.** A gate here was
+        // written and reverted in review: it cleared only from the completion
+        // of three `Task.detached` reads that funnel into
+        // `GitWorktree.runCommand`, which sends SIGTERM and then drains an
+        // unbounded pipe — no SIGKILL escalation and no answer-anyway
+        // deadline, both of which `CLIOneShot` has and argues for. A git hook
+        // that ignores SIGTERM, or a grandchild holding the write end, wedges
+        // that read forever, so the flag never cleared and Start went grey for
+        // the life of the pane with no spinner and no log. Bricking a healthy
+        // launcher is worse than the race it closed.
+        //
+        // The race that remains: pick a folder and press Return before the
+        // reads answer, and the worktree branches from HEAD. Narrow (the reads
+        // are fast on a warm repo), announced in the log by `createWorktree`'s
+        // `from HEAD`, and it needs `runCommand` brought up to `CLIOneShot`'s
+        // standard before a gate can be safe. Known limitation, recorded.
+        return isRemoteMode
+            ? !(remoteHost.trimmingCharacters(in: .whitespaces).isEmpty || remoteDirectory.isEmpty)
+            : selectedDirectory != nil
     }
 
     // MARK: - Extension Update Banner
@@ -209,7 +1065,7 @@ struct LauncherView: View {
             updateBannerCard(icon: "arrow.down.circle", iconColor: .blue, tint: .blue) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Extension update available")
-                        .font(.subheadline.bold())
+                        .font(.system(size: 12, weight: .semibold))
                     HStack(spacing: 6) {
                         if let currentVersion {
                             Text("v\(currentVersion) → v\(latestVersion)")
@@ -220,10 +1076,9 @@ struct LauncherView: View {
                         Link("Changelog", destination: ExtensionUpdater.changelogURL)
                             .foregroundStyle(Color.accentColor)
                     }
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 }
-                Spacer()
                 Button("Update") {
                     Task { await updater.triggerInstall() }
                 }
@@ -235,14 +1090,13 @@ struct LauncherView: View {
             let text = updater.state == .downloading ? "Downloading extension…" : "Installing extension…"
             updateBannerCard(tint: .secondary) {
                 ProgressView().controlSize(.small)
-                Text(text).font(.subheadline).foregroundStyle(.secondary)
+                Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
             }
 
         case .done(let version):
             updateBannerCard(icon: "checkmark.circle.fill", iconColor: .green, tint: .green) {
                 Text("Extension v\(version) installed. Restart Canopy to apply.")
-                    .font(.subheadline)
-                Spacer()
+                    .font(.system(size: 12))
                 Button("Restart Now") {
                     AppDelegate.relaunch()
                 }
@@ -253,9 +1107,8 @@ struct LauncherView: View {
         case .failed(let message):
             updateBannerCard(icon: "exclamationmark.triangle.fill", iconColor: .orange, tint: .orange) {
                 Text("Update failed: \(message)")
-                    .font(.subheadline)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                Spacer()
                 Button("Retry") {
                     Task { await updater.checkForUpdate() }
                 }
@@ -267,92 +1120,44 @@ struct LauncherView: View {
         }
     }
 
+    /// Ceiling for the update card, so a long failure message wraps instead of
+    /// stretching the card past the composer it sits above.
+    private static let bannerMaxWidth: CGFloat = 480
+
     private func updateBannerCard<C: View>(
         icon: String? = nil, iconColor: Color = .primary, tint: Color,
         @ViewBuilder content: () -> C
     ) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             if let icon {
                 Image(systemName: icon).foregroundStyle(iconColor)
             }
             content()
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    // MARK: - Directory Card
-
-    private var directoryCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Working Directory")
-                .font(.headline)
-
-            HStack(spacing: 10) {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(selectedDirectory != nil ? Color.blue : Color.secondary)
-                    .font(.title3)
-
-                Text(selectedDirectory?.abbreviatingWithTilde ?? "Select a folder...")
-                    .foregroundStyle(selectedDirectory != nil ? Color.primary : Color.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Spacer()
-
-                if !recentDirectories.isEmpty {
-                    Menu {
-                        Section("Recent") {
-                            ForEach(recentDirectories.prefix(15), id: \.path) { dir in
-                                Button(dir.lastPathComponent) {
-                                    selectedDirectory = dir
-                                }
-                            }
-                        }
-                        Divider()
-                        Button("Open folder…") { chooseFolder() }
-                    } label: {
-                        Image(systemName: "chevron.down")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .frame(width: 22)
-                    .help("Recent folders")
-                }
-
-                Button("Browse...") { chooseFolder() }
-            }
-            .padding(12)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(
-                        isDropTargeted ? Color.blue : (selectedDirectory != nil ? Color.blue.opacity(0.3) : Color.clear),
-                        lineWidth: isDropTargeted ? 2 : 1
-                    )
-            )
-
-            HStack {
-                Spacer()
-                Button {
-                    showCloneSheet = true
-                } label: {
-                    Label("Clone from GitHub…", systemImage: "arrow.down.circle")
-                }
-                .help("Clone a GitHub repository into a folder you choose")
-            }
-        }
-        .sheet(isPresented: $showCloneSheet) {
-            CloneRepoSheet { cloned in
-                selectedDirectory = cloned
-                RecentDirectories.add(cloned)
-                recentDirectories = RecentDirectories.load()
-            }
-        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        // Sized by what is in it. `fixedSize` horizontally is what actually
+        // achieves that — merely dropping `maxWidth: .infinity` did not,
+        // measured: the card still spanned the full column. Vertically fixed
+        // too, so a long message grows the card rather than being clipped;
+        // `bannerMaxWidth` is what keeps that from growing sideways instead.
+        .frame(maxWidth: Self.bannerMaxWidth)
+        .fixedSize(horizontal: true, vertical: true)
+        // Matched to the composer's own corner and hairline rather than left
+        // as a filled 8pt card: at full saturation it was the loudest thing on
+        // a screen whose whole point is that the prompt box is.
+        .background(tint.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(tint.opacity(0.16), lineWidth: 1)
+        )
+        // Inside the card, so the idle state — which renders `EmptyView` —
+        // cannot contribute a gap for a banner that is not there. It stacks on
+        // the enclosing VStack's own 12, so the visible gap is ~30: this card
+        // is an interruption between the headline and the composer, and at a
+        // tighter spacing it read as a third element of the same group.
+        .padding(.vertical, 18)
     }
 
     // MARK: - Session Options
@@ -364,98 +1169,6 @@ struct LauncherView: View {
             Self.permissionModes
         } else {
             Self.permissionModes.filter { $0 != .auto }
-        }
-    }
-
-    private var sessionOptions: some View {
-        VStack(spacing: 12) {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                if !providers.isEmpty {
-                    GridRow {
-                        Text("Provider:")
-                            .foregroundStyle(.secondary)
-                            .gridColumnAlignment(.trailing)
-                        Picker("", selection: $selectedProviderId) {
-                            Text("Anthropic (default)").tag("")
-                            ForEach(providers) { provider in
-                                Text(provider.name).tag(provider.id)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                }
-
-                GridRow {
-                    Text("Model:")
-                        .foregroundStyle(.secondary)
-                        .gridColumnAlignment(.trailing)
-                    Picker("", selection: $model) {
-                        Text("Auto").tag("")
-                        ForEach(Self.modelOptions.dropFirst(), id: \.self) { alias in
-                            Text(Self.modelDisplayName(alias)).tag(alias)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-
-                if isAnthropicProvider {
-                    GridRow {
-                        Text("Effort:")
-                            .foregroundStyle(.secondary)
-                            .gridColumnAlignment(.trailing)
-                        Picker("", selection: $effortLevel) {
-                            Text("Auto").tag("")
-                            ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
-                                Text(Self.effortDisplayName(level)).tag(level)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                }
-
-                GridRow {
-                    Text("Permission:")
-                        .foregroundStyle(.secondary)
-                        .gridColumnAlignment(.trailing)
-                    Picker("", selection: $permissionModeRaw) {
-                        ForEach(visiblePermissionModes, id: \.rawValue) { mode in
-                            Text(mode.displayName).tag(mode.rawValue)
-                        }
-                        if CanopySettings.shared.allowDangerouslySkipPermissions {
-                            Text(PermissionMode.bypassPermissions.displayName)
-                                .tag(PermissionMode.bypassPermissions.rawValue)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-
-                if !isRemoteMode && selectedDirectoryIsGitRepo {
-                    GridRow {
-                        Text("Worktree:")
-                            .foregroundStyle(.secondary)
-                            .gridColumnAlignment(.trailing)
-                        HStack {
-                            Toggle("Start in new worktree", isOn: $startInWorktree)
-                                .toggleStyle(.checkbox)
-                            if startInWorktree {
-                                TextField("", text: $worktreeBranch, prompt: Text(suggestedWorktreeBranch))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 180)
-                            }
-                        }
-                    }
-                }
-            }
-
-            HStack(spacing: 16) {
-                Toggle("Continue session", isOn: $continueSession)
-            }
-            .toggleStyle(.checkbox)
-            .frame(maxWidth: .infinity)
         }
     }
 
@@ -476,100 +1189,29 @@ struct LauncherView: View {
         }
     }
 
-    // MARK: - Start Button
-
-    private var startButtonTitle: String {
-        if isCreatingWorktree { return "Creating Worktree…" }
-        if isResolvingRemoteSession { return "Finding Session…" }
-        return "Start Session"
+    /// The typed prompt, or nil when the field is empty.
+    ///
+    /// Read by EVERY launch route this view owns, not just the Start button:
+    /// clicking a recent directory, a session-history row, or a teleported web
+    /// session all submit it too. One rule — whatever is in the field is sent
+    /// to whatever session you open — because the alternative is a field that
+    /// silently does nothing depending on which control was clicked, and
+    /// nothing on screen would say which those are.
+    private var pendingPromptForLaunch: String? {
+        let trimmed = initialPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
-    private var startButton: some View {
-        Button {
-            startSession()
-        } label: {
-            Label(startButtonTitle, systemImage: "play.fill")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .disabled(isCreatingWorktree || isResolvingRemoteSession || (isRemoteMode
-            ? (remoteHost.isEmpty || remoteDirectory.isEmpty)
-            : selectedDirectory == nil))
-        .keyboardShortcut(.return, modifiers: [])
-    }
-
-    // MARK: - Search
-
-    private var searchField: some View {
-        HStack {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-            TextField("Filter...", text: $searchText)
-                .textFieldStyle(.plain)
-            if !searchText.isEmpty {
-                Button { searchText = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(8)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    // MARK: - Lists (side by side)
-
-    private var listsSection: some View {
-        HStack(alignment: .top, spacing: 20) {
-            // Recent directories (left)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Recents")
-                    .font(.headline)
-
-                ScrollView {
-                    VStack(spacing: 0) {
-                        let dirs = filteredDirectories
-                        ForEach(Array(dirs.enumerated()), id: \.element.path) { index, dir in
-                            directoryRow(dir)
-                            if index < dirs.count - 1 {
-                                Divider().padding(.leading, 34)
-                            }
-                        }
-                    }
-                }
-                .frame(height: Self.rowHeight * CGFloat(Self.listRowCount))
-                .background(.regularMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-            .frame(maxWidth: .infinity)
-
-            // Sessions (right)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Sessions")
-                    .font(.headline)
-
-                ScrollView {
-                    VStack(spacing: 0) {
-                        let items = filteredSessions
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, session in
-                            sessionRow(session)
-                            if index < items.count - 1 {
-                                Divider().padding(.leading, 34)
-                            }
-                        }
-                    }
-                }
-                .frame(height: Self.rowHeight * CGFloat(Self.listRowCount))
-                .background(.regularMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-            .frame(maxWidth: .infinity)
-        }
+    /// Empty the prompt field after it has been handed to a session.
+    ///
+    /// Usually invisible, because starting a session unmounts this view and
+    /// takes its `@State` with it. The case that survives is Cmd+click, which
+    /// puts the session in a NEW pane and leaves the launcher pane standing —
+    /// with the prompt still in the box, and the next Start would submit it a
+    /// second time. Clearing is also what makes the field agree with what will
+    /// happen: text sitting in it means text that is about to be sent.
+    private func clearPendingPrompt() {
+        initialPrompt = ""
     }
 
     // MARK: - Web Sessions Section
@@ -754,55 +1396,6 @@ struct LauncherView: View {
         .onHover { h in hoveredWebSessionId = h ? session.id : nil }
     }
 
-    // MARK: - Recent Row
-
-    private func directoryRow(_ dir: URL) -> some View {
-        let isSelected = selectedDirectory == dir
-        let isHovered = hoveredDirectoryPath == dir.path
-        return Button {
-            selectedDirectory = dir
-            launchFromDirectory(dir)
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
-                    .frame(width: 16)
-                Text(dir.lastPathComponent)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                if isHovered {
-                    Button {
-                        RecentDirectories.remove(dir)
-                        recentDirectories.removeAll { $0 == dir }
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Text(dir.deletingLastPathComponent().abbreviatingWithTilde)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                isSelected
-                    ? Color.accentColor.opacity(0.15)
-                    : isHovered ? Color.primary.opacity(0.04) : Color.clear
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { h in hoveredDirectoryPath = h ? dir.path : nil }
-    }
-
     // MARK: - Session Row
 
     private static let sessionDateFormatter: DateFormatter = {
@@ -812,128 +1405,6 @@ struct LauncherView: View {
         f.timeStyle = .short
         return f
     }()
-
-    private func sessionRow(_ session: SessionEntry) -> some View {
-        let isHovered = hoveredSessionId == session.id
-        return Button {
-            selectedDirectory = session.projectDirectory
-            appState.launchSession(directory: session.projectDirectory, resumeSessionId: session.id, sessionTitle: session.title, model: model.isEmpty ? nil : model, effortLevel: effortLevel.isEmpty ? nil : effortLevel, permissionMode: resolvedPermission, customApi: buildCustomApiConfig())
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "text.bubble")
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
-                    .frame(width: 16)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(session.title)
-                        .font(.callout.weight(.medium))
-                        .lineLimit(1)
-                    HStack(spacing: 6) {
-                        Text(session.projectName)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text("\u{00B7}")
-                            .font(.caption2)
-                            .foregroundStyle(.quaternary)
-                        Text(Self.sessionDateFormatter.string(from: session.timestamp))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isHovered ? Color.primary.opacity(0.04) : Color.clear)
-        }
-        .buttonStyle(.plain)
-        .onHover { h in hoveredSessionId = h ? session.id : nil }
-    }
-
-    // MARK: - Filtering
-
-    private var filteredDirectories: [URL] {
-        guard !searchText.isEmpty else { return recentDirectories }
-        let q = searchText.lowercased()
-        return recentDirectories.filter {
-            $0.lastPathComponent.lowercased().contains(q) || $0.path.lowercased().contains(q)
-        }
-    }
-
-    private var filteredSessions: [SessionEntry] {
-        guard !searchText.isEmpty else { return Array(sessions.prefix(50)) }
-        let q = searchText.lowercased()
-        return Array(sessions.filter {
-            $0.title.lowercased().contains(q) || $0.projectName.lowercased().contains(q)
-        }.prefix(50))
-    }
-
-    // MARK: - SSH Host Card
-
-    private var sshHostCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("SSH Host")
-                .font(.headline)
-
-            HStack(spacing: 10) {
-                Image(systemName: "network")
-                    .foregroundStyle(!remoteHost.isEmpty ? Color.blue : Color.secondary)
-                    .font(.title3)
-
-                TextField("hostname or user@host", text: $remoteHost)
-                    .textFieldStyle(.plain)
-                    .onSubmit { startSession() }
-
-                if !savedHosts.isEmpty {
-                    Menu {
-                        ForEach(savedHosts, id: \.self) { host in
-                            Button(host) { remoteHost = host }
-                        }
-                    } label: {
-                        Image(systemName: "clock.arrow.circlepath")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 30)
-                }
-            }
-            .padding(12)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
-    // MARK: - Remote Directory Card
-
-    private var remoteDirectoryCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Working Directory")
-                .font(.headline)
-
-            HStack(spacing: 10) {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(!remoteDirectory.isEmpty ? Color.blue : Color.secondary)
-                    .font(.title3)
-
-                TextField("Remote path (e.g. ~/projects/myapp)", text: $remoteDirectory)
-                    .textFieldStyle(.plain)
-                    .onSubmit { startSession() }
-
-                Button("Browse...") {
-                    showRemoteBrowser = true
-                }
-                .disabled(remoteHost.isEmpty)
-            }
-            .padding(12)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-        .sheet(isPresented: $showRemoteBrowser) {
-            RemoteDirectoryBrowser(sshHost: remoteHost) { path in
-                remoteDirectory = path
-            }
-        }
-    }
 
     // MARK: - Actions
 
@@ -977,11 +1448,12 @@ struct LauncherView: View {
 
         var resumeId: String?
         var resumeTitle: String?
-        if continueSession, let latest = latestSession(for: dir) {
+        if willContinueSession, let latest = latestSession(for: dir) {
             resumeId = latest.id
             resumeTitle = latest.title
         }
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: resolvedPermission, customApi: buildCustomApiConfig())
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: resolvedPermission, customApi: buildCustomApiConfig(), initialPrompt: pendingPromptForLaunch)
+        clearPendingPrompt()
     }
 
     private func startSession() {
@@ -1000,6 +1472,11 @@ struct LauncherView: View {
         }
 
         if isRemoteMode {
+            // Trimmed here as well as in the sheet: Cancel leaves an edited
+            // host in place when the trimmed value is non-empty, so " newhost "
+            // could still reach `ssh` — and `SSHHostStore.add` would persist
+            // the untrimmed form into the saved list forever.
+            remoteHost = remoteHost.trimmingCharacters(in: .whitespaces)
             guard !remoteHost.isEmpty, !remoteDirectory.isEmpty else { return }
             SSHHostStore.add(remoteHost)
             savedHosts = SSHHostStore.hosts()
@@ -1016,25 +1493,72 @@ struct LauncherView: View {
         }
 
         // Worktree checkout can take seconds on big repos — keep it off the
-        // main thread and disable the Start button while it runs.
-        var branch = GitWorktree.sanitizeBranchName(worktreeBranch)
-        if branch.isEmpty {
-            branch = suggestedWorktreeBranch
-        }
-        // Reflect what will actually be used, so a sanitized or auto-generated
-        // name is never a silent surprise.
-        worktreeBranch = branch
+        // main thread. The composer is not merely disabled while it runs: it
+        // is replaced by `SpawningOverlay` (see `body`).
+        let prompt = initialPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Sampled at the press, not after the await. `AppState.launchSession`
+        // reads `NSEvent.modifierFlags` when it is called, and everything below
+        // — naming, checkout, seeding — happens first, so by then the modifier
+        // is long released and Cmd+click quietly lost its new pane. Same hazard
+        // the SSH-continue branch documents; same fix.
+        let cmdHeld = NSEvent.modifierFlags.contains(.command)
         isCreatingWorktree = true
         let repo = local
-        let branchName = branch
+        let api = buildCustomApiConfig()
         Task {
-            defer { isCreatingWorktree = false }
+            defer {
+                isCreatingWorktree = false
+                worktreeStage = nil
+            }
+            // There is no hand-typed name to prefer any more: the field that
+            // offered one was removed as unused, and the three-rung fallback
+            // below already covers every case it did.
+            worktreeStage = "Naming Branch…"
+            let named = await resolveBranchName(prompt: prompt, customApi: api)
+            // Two worktrees started from the same prompt get the same slug, and
+            // `worktree add -b` fails outright on a taken name — with no field
+            // left for the user to resolve it in.
+            let branchName = await Task.detached(priority: .userInitiated) {
+                GitWorktree.uniqueBranchName(named, in: repo)
+            }.value
             do {
+                worktreeStage = "Creating Worktree…"
+                // `resolvedBaseRef` is nil until the probe started by
+                // `refreshBaseRef` lands, and Start is reachable before then —
+                // so reading it alone silently reproduces the bug the base-ref
+                // ladder exists to fix: a worktree branched from whatever HEAD
+                // happens to be, invisible until somebody else's unmerged work
+                // shows up in the diff. The user's own pick always wins; the
+                // fallback resolves only when nothing has resolved yet.
+                //
+                // Deterministic where a UI gate was not. An earlier revision
+                // disabled Start until the probe landed, which could latch
+                // forever on a wedged probe and leave the button grey with no
+                // way out. This costs one `git` call on a path already running
+                // several, and cannot latch.
+                let picked = resolvedBaseRef
                 let worktree = try await Task.detached(priority: .userInitiated) {
-                    try GitWorktree.createWorktree(repo: repo, branch: branchName)
+                    let base = picked ?? GitWorktree.defaultBaseRef(for: repo)
+                    return try GitWorktree.createWorktree(
+                        repo: repo, branch: branchName, baseRef: base)
                 }.value
+                // A fresh worktree holds only tracked files, so for most
+                // projects it cannot build until this runs. Deliberately AFTER
+                // the checkout and BEFORE the session opens: seeding into a
+                // half-created worktree is meaningless, and a session that
+                // opens first would have its first turn racing the copy.
+                if CanopySettings.shared.seedWorktreeArtifacts {
+                    worktreeStage = "Copying Build Files…"
+                    await Task.detached(priority: .userInitiated) {
+                        // Discarded on purpose: the report is for the log, and
+                        // a partial seed is not a reason to withhold a worktree
+                        // the user asked for.
+                        _ = GitWorktree.seedIgnoredFiles(repo: repo, worktree: worktree)
+                    }.value
+                }
                 launchLocal(worktree, remoteHost: nil,
-                            model: selectedModel, effort: selectedEffort, permission: selectedPermission)
+                            model: selectedModel, effort: selectedEffort,
+                            permission: selectedPermission, openInNewPane: cmdHeld)
             } catch {
                 // NSAlert instead of a SwiftUI .alert: the user can navigate
                 // away mid-creation, destroying this view's @State — a
@@ -1049,7 +1573,39 @@ struct LauncherView: View {
         }
     }
 
-    private func launchLocal(_ dir: URL, remoteHost: String?, model: String?, effort: String?, permission: PermissionMode) {
+    /// Branch name for a worktree the user did not name themselves.
+    ///
+    /// Three rungs, each strictly worse than the one above and each measured
+    /// against the same 21,265-session sample (see `WorktreeBranchNamer`):
+    /// a model reading the prompt, then the same prompt slugified locally with
+    /// no model call, then a timestamp. The timestamp is last because it is
+    /// the one that is known NOT to work — the only two worktrees Canopy's
+    /// launcher has ever created were named that way and neither was reopened.
+    ///
+    /// The middle rung is what keeps a CLI outage, an expired login or a
+    /// 20-second timeout from dropping straight to that.
+    private func resolveBranchName(prompt: String, customApi: ModelProvider?) async -> String {
+        if !prompt.isEmpty {
+            let generated = await withCheckedContinuation { continuation in
+                WorktreeBranchNamer.generate(prompt: prompt, customApi: customApi) { name in
+                    continuation.resume(returning: name)
+                }
+            }
+            if let generated, !generated.isEmpty { return generated }
+            let local = GitWorktree.slugFromPrompt(prompt)
+            if !local.isEmpty { return local }
+        }
+        return GitWorktree.suggestedBranchName()
+    }
+
+    /// `openInNewPane` is nil for every synchronous caller, which lets
+    /// `AppState.launchSession` sample the modifier itself. Only a caller that
+    /// crosses an `await` before reaching here has to pass one — see the
+    /// worktree path and the SSH-continue branch below.
+    private func launchLocal(
+        _ dir: URL, remoteHost: String?, model: String?, effort: String?,
+        permission: PermissionMode, openInNewPane: Bool? = nil
+    ) {
         // A remote session's transcripts live on the OTHER machine, so
         // `latestSession(for:)` — which reads this machine's
         // `~/.claude/projects` — can only ever miss, or worse, hand the remote
@@ -1058,7 +1614,7 @@ struct LauncherView: View {
         //
         // Only when the user asked to continue: a fresh remote session must
         // not pay a network round trip to learn something it will not use.
-        if let remoteHost, continueSession {
+        if let remoteHost, willContinueSession {
             // Captured BEFORE the await. `launchSession` samples the modifier
             // itself for every synchronous caller; this is the one route where
             // "now" is a round trip too late.
@@ -1072,18 +1628,20 @@ struct LauncherView: View {
                 // and a directory with no resumable session is the ordinary
                 // first-run case. Both land on a fresh session, which is what
                 // this path did before the lookup existed.
-                appState.launchSession(directory: dir, resumeSessionId: latest?.id, sessionTitle: latest?.title, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: cmdHeld)
+                appState.launchSession(directory: dir, resumeSessionId: latest?.id, sessionTitle: latest?.title, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: cmdHeld, initialPrompt: pendingPromptForLaunch)
+                clearPendingPrompt()
             }
             return
         }
 
         var resumeId: String?
         var resumeTitle: String?
-        if continueSession, let latest = latestSession(for: dir) {
+        if willContinueSession, let latest = latestSession(for: dir) {
             resumeId = latest.id
             resumeTitle = latest.title
         }
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig())
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: openInNewPane, initialPrompt: pendingPromptForLaunch)
+        clearPendingPrompt()
     }
 
     private func loadData() {
@@ -1091,10 +1649,12 @@ struct LauncherView: View {
         providers = ModelProviderStore.load()
         recentDirectories = RecentDirectories.load()
         savedHosts = SSHHostStore.hosts()
-        Task {
-            let all = await Task.detached { ClaudeSessionHistory.loadAllSessions() }.value
-            sessions = all
-        }
+        // No `loadAllSessions()` here any more. Its only consumer was the
+        // session-history list this screen no longer has, and the scan walks
+        // every JSONL under `~/.claude/projects` parsing metadata — ~21,000
+        // sessions on this machine — once per launcher pane mount. Deleting a
+        // view has to delete what fed it; `latestSession(for:)` does its own
+        // per-directory read and deliberately never used this.
     }
 
     // MARK: - Web Sessions / Teleport
@@ -1217,8 +1777,10 @@ struct LauncherView: View {
             model: model.isEmpty ? nil : model,
             effortLevel: effortLevel.isEmpty ? nil : effortLevel,
             permissionMode: resolvedPermission,
-            customApi: buildCustomApiConfig()
+            customApi: buildCustomApiConfig(),
+            initialPrompt: pendingPromptForLaunch
         )
+        clearPendingPrompt()
     }
 
     private func resolveTeleportCwd(for session: RemoteSession) -> URL? {

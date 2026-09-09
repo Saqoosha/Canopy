@@ -46,6 +46,19 @@ final class CanopySettings {
     var keepAliveEnabled: Bool = true {
         didSet { save() }
     }
+
+    /// Copy the repo's gitignored build artifacts into a newly created
+    /// worktree (see `GitWorktree.seedIgnoredFiles`).
+    ///
+    /// Default on, because without it a fresh worktree usually cannot build at
+    /// all, and the copy is APFS copy-on-write — measured at 10.9 s and 46 MB
+    /// of real disk for a 3.4 GB Unity `Library`. The toggle exists for the
+    /// case the measurement does not cover: a repo whose ignored tree is
+    /// enormous in FILE COUNT rather than bytes, where the cost is inode
+    /// creation (~5,100 files/s) and no amount of copy-on-write helps.
+    var seedWorktreeArtifacts: Bool = true {
+        didSet { save() }
+    }
     /// Which pad this Canopy drives: none, the local USB one, or a bridge on
     /// another Mac. Replaces the old `macroPadEnabled` boolean, which is read
     /// once at load for migration and then never written again.
@@ -174,6 +187,9 @@ final class CanopySettings {
         if let keepAlive = dict["canopy.keepAliveEnabled"] as? Bool {
             keepAliveEnabled = keepAlive
         }
+        if let seed = dict["canopy.seedWorktreeArtifacts"] as? Bool {
+            seedWorktreeArtifacts = seed
+        }
         let storedSourceRaw = dict["canopy.macroPadSource"] as? String
         macroPadRemoteHost = (dict["canopy.macroPadRemoteHost"] as? String) ?? ""
         macroPadSource = MacroPadSource.migrated(
@@ -244,6 +260,7 @@ final class CanopySettings {
         dict["claudeCode.respectGitIgnore"] = respectGitIgnore
         dict["canopy.recapEnabled"] = recapEnabled
         dict["canopy.keepAliveEnabled"] = keepAliveEnabled
+        dict["canopy.seedWorktreeArtifacts"] = seedWorktreeArtifacts
         dict["canopy.macroPadSource"] = macroPadSource.rawValue
         dict["canopy.macroPadRemoteHost"] = macroPadRemoteHost
         // Retire the pre-source key on the first save after migration.

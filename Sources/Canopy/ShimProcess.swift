@@ -687,7 +687,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Anthropic with the 1h window intact, and this declines it anyway.
     /// Declining wrongly costs one cache miss; permitting wrongly bills
     /// every hour, forever, on a machine nobody is watching.
-    static func sessionUsesCustomEndpoint(_ customApi: ModelProvider?) -> Bool {
+    /// `nonisolated` so the out-of-session generators can ask it. They run
+    /// off the main actor and `ShimProcess` is main-actor-isolated only by
+    /// inference from `WKScriptMessageHandler`; this reads `ProcessInfo` and a
+    /// value type and touches no instance state.
+    nonisolated static func sessionUsesCustomEndpoint(_ customApi: ModelProvider?) -> Bool {
         if customApi?.isEnabled == true { return true }
         let inherited = ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
         return !(inherited ?? "").isEmpty
@@ -711,6 +715,106 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// to prevent.
     private func noteApiActivity() {
         keepAliveGate.noteActivity(at: Date())
+    }
+
+    /// Submit the prompt the user typed on the launch screen, if there is one.
+    ///
+    /// Unlike the recap and the keep-alive — the other two turns Canopy
+    /// injects — this one is **not** synthetic and nothing downstream swallows
+    /// it. The user typed it and expects to see it; it is their first turn,
+    /// merely submitted from a different text field. So no echo tracking, no
+    /// replay filter, and no interlock against the other two: those exist to
+    /// hide a turn, and hiding this one would be the bug.
+    ///
+    /// Clearing `pendingInitialPrompt` on the session is the whole idempotence
+    /// guarantee, and it has to live there rather than in a flag on `self`:
+    /// `init` is re-emitted by every ordinary turn and by a `/model` switch
+    /// (measured — see the swallow branches), and a reconnect builds a new
+    /// `ShimProcess` against the same `OpenSession`, so a per-process flag
+    /// would resubmit the prompt after an SSH drop.
+    func sendPendingInitialPrompt() {
+        // Split rather than one `guard`, because a single silent return cannot
+        // tell "this session has no prompt" (the ordinary case, every session
+        // not started from the launcher) from "the prompt is there and we are
+        // dropping it" (a bug). A reviewer named this and it was deferred; the
+        // first end-to-end GUI test then hit exactly the second case with no
+        // log line to say which guard had fired.
+        guard let session = boundSession else {
+            logger.notice("initial prompt: no bound session at init — a prompt, if any, is unreachable")
+            return
+        }
+        guard let prompt = session.pendingInitialPrompt,
+              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        guard let channelId else {
+            // Deferred, not dropped — and the retry is a real call site, not a
+            // hope. An earlier version of this comment claimed the channelId
+            // backstop "recovers it from the next channel-scoped message, so a
+            // later `init` gets another chance": the backstop assigned the id
+            // and never re-invoked this, and `init` only re-fires on a turn the
+            // user types. So the prompt they typed *to avoid* typing one was
+            // lost silently. The backstop now calls this directly.
+            logger.notice("initial prompt: deferred, no channelId yet")
+            return
+        }
+        session.pendingInitialPrompt = nil
+
+        sendToShim([
+            "type": "webview_message",
+            "message": [
+                "type": "io_message",
+                "channelId": channelId,
+                "done": false,
+                "message": [
+                    "type": "user",
+                    "session_id": "",
+                    "origin": ["kind": "human"] as [String: Any],
+                    "parent_tool_use_id": NSNull(),
+                    "uuid": UUID().uuidString.lowercased(),
+                    "message": [
+                        "role": "user",
+                        "content": [["type": "text", "text": prompt]],
+                    ] as [String: Any],
+                ] as [String: Any],
+            ] as [String: Any],
+        ])
+        // This bypasses `userContentController`, which is where every OTHER
+        // user turn is booked in — so the same bookkeeping has to happen here
+        // or the turn does not exist as far as the rest of Canopy is concerned.
+        // Without it: `RecapGate` counts zero user turns (so the session is
+        // never eligible for a recap until the user types), and `promptHistory`
+        // stays empty (so the title generator is seeded with nothing — on the
+        // one prompt this whole feature is about).
+        //
+        // `isWorking` for the same reason: a real turn is now in flight, and
+        // `requestKeepAlive`/`requestRecap` both guard on `!isWorking` while
+        // the sidebar dot and the MacroPad LED read it. `phoneReplyInFlight`'s
+        // doc already warns that `sendToShim` "writes straight to the shim's
+        // stdin and never touches that path" — this is that call site.
+        // The three silent `return`s above and this line are what make the
+        // path observable at all. Its absence — with no "deferred" and no "no
+        // bound session" either — is what says the function was never called,
+        // which is the shape the init deadlock had. Length only, never the
+        // text.
+        logger.notice("initial prompt: submitted, \(prompt.count, privacy: .public) chars")
+        isWorking = true
+        recapGate.noteUserTurn()
+        // Same reason: `KeepAliveGate` declines with "no API activity yet —
+        // nothing cached to keep" while `lastActivityAt` is nil, and nothing
+        // else would ever set it for a session whose only turn came from here.
+        noteApiActivity()
+        promptHistory.append(prompt)
+        promptHistory = Self.trimmedPromptHistory(promptHistory)
+        lastUserMessageText = prompt
+        maybeGenerateTitle()
+
+        // `.private` on the text: it is verbatim user content, and these lines
+        // reach disk. The length is public because "did it send" and "did it
+        // send everything" are the two questions this line has to answer.
+        // "queued", not "submitted": `sendToShim` hands off to a write queue and
+        // can also buffer into `pendingMessages` before the shim is ready, so a
+        // failure surfaces later, from `writeToStdin`, at `.error`.
+        logger.notice("initial prompt: queued \(prompt.count, privacy: .public) chars")
     }
 
     /// Inject one refresh turn.
@@ -2149,6 +2253,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 "channelId recovered via backstop from \(msgType, privacy: .public) message"
             )
             self.channelId = cid
+            // The channel is what `sendPendingInitialPrompt` was missing if it
+            // ran before this; retry now rather than waiting for a turn the
+            // user would have to type.
+            sendPendingInitialPrompt()
         }
 
         // A Bool, not the text: `maybeGenerateTitle` takes no argument and
@@ -2304,6 +2412,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         sendToShim(["type": "webview_message", "message": dict])
+
+        // The launcher's prompt is submitted here, immediately after the spawn
+        // request it belongs to, so the CLI sees the turn behind the process.
+        //
+        // It used to wait for the CLI's own `system/init`, on the reasoning
+        // that init is the CLI announcing it will accept a turn. That is a
+        // deadlock: `init` arrives in RESPONSE to a turn, so waiting for it
+        // before sending one can never fire — the prompt is never sent, the
+        // chat opens empty, and no log line says why. Measured against the CLI
+        // directly, no Canopy in the path, on a fresh session: stdin held open
+        // and silent for 12 s yields `system/hook_started`, `hook_response`
+        // and `hook_progress` and nothing else; one turn written at t=12.0
+        // yields `init` at t=12.21, then `status`, then the stream.
+        // Corroborated from this side by dumping every distinct wire shape
+        // reaching `extractStatusData` on extension 2.1.263 — `request`,
+        // `response`, `system/status` (Canopy's own synthetic one, injected
+        // above), the three `hook_*`, `auth_status`, no `init`. Three GUI runs
+        // were spent reading the injection code before the shape was dumped at
+        // the hook point, which is the rule CLAUDE.md already states for
+        // exactly this.
+        //
+        // The `channelId` backstop above was the other call site and is dead
+        // for a second, independent reason: `launch_claude` has just assigned
+        // `channelId`, so that branch's `== nil` guard can never hold after
+        // it. Neither site could fire, which is why the failure had no
+        // partial mode — the prompt was lost every time.
+        if dict["type"] as? String == "launch_claude" {
+            sendPendingInitialPrompt()
+        }
         if sawUserPromptThisMessage {
             maybeGenerateTitle()
         }
@@ -5807,7 +5944,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Detect VCS type and current branch/bookmark for status bar display.
     /// Checks for jj first (`.jj/` directory), falls back to git.
-    private static func detectVCSInfo(at directory: URL) -> (type: StatusBarData.VCSType, branch: String)? {
+    nonisolated static func detectVCSInfo(at directory: URL) -> (type: StatusBarData.VCSType, branch: String)? {
         let fm = FileManager.default
 
         // Check for jj repo
@@ -5863,7 +6000,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Find an executable by name, checking common locations that GUI apps miss from PATH.
-    private static func findExecutable(_ name: String) -> String? {
+    nonisolated private static func findExecutable(_ name: String) -> String? {
         let searchPaths = [
             "/opt/homebrew/bin",
             "/usr/local/bin",
@@ -5880,7 +6017,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Run a command and return stdout as String, or nil on failure.
-    private static func runCommand(_ executable: String, args: [String], at directory: URL) -> String? {
+    nonisolated private static func runCommand(_ executable: String, args: [String], at directory: URL) -> String? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executable)
         proc.arguments = args

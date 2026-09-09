@@ -67,6 +67,33 @@ enum KeychainAuth {
         return (token, org)
     }
 
+    /// The access token alone, for callers that do not need the organization.
+    ///
+    /// `readAccessTokenAndOrg` requires a non-empty `organizationUuid` because
+    /// its callers send one. `AnthropicDirect` does not — it puts the token in
+    /// an `authorization` header and never mentions the org — so gating it on
+    /// that field turned "this blob has no organizationUuid" into "the fast
+    /// path is permanently off", paying the CLI's 7-8 s on every call with
+    /// nothing in the log to say why.
+    ///
+    /// Each failure logs, because this one bypasses `readOAuthFromKeychain`
+    /// where the equivalent warnings live — and a nil here means the fast path
+    /// is off for the life of the process, paying the CLI's 7-8 s on every
+    /// call. A silent nil would make that undiagnosable, which is the thing
+    /// this reader was added to prevent rather than relocate.
+    static func readAccessToken() -> String? {
+        guard let blob = readKeychainBlob() else { return nil }
+        guard let oauth = blob["claudeAiOauth"] as? [String: Any] else {
+            logger.warning("Keychain JSON missing 'claudeAiOauth' key")
+            return nil
+        }
+        guard let token = oauth["accessToken"] as? String, !token.isEmpty else {
+            logger.warning("Keychain OAuth blob has no usable accessToken")
+            return nil
+        }
+        return token
+    }
+
     /// Single source of truth: spawns `security find-generic-password` and
     /// returns the parsed JSON blob. All other readers go through this.
     private static func readKeychainBlob() -> [String: Any]? {

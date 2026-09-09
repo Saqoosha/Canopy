@@ -464,7 +464,7 @@ private struct DetailLauncher: View {
     }
 
     private var launcher: some View {
-        LauncherView(appState: localAppState, compactMode: true)
+        LauncherView(appState: localAppState)
             .onChange(of: localAppState.screen) {
                 // The Launcher uses an AppState-based screen transition. When
                 // it flips to .session we hand off to the SessionStore, which
@@ -485,7 +485,8 @@ private struct DetailLauncher: View {
                         permissionMode: localAppState.permissionMode,
                         remoteHost: localAppState.remoteHost,
                         customApi: localAppState.customApi,
-                        target: target
+                        target: target,
+                        initialPrompt: localAppState.initialPrompt
                     )
                     // A session started, so the previous failure is answered.
                     store.lastSessionFailure = nil
