@@ -203,7 +203,14 @@ async function main() {
   require.cache.vscode = { id: "vscode", filename: "vscode", loaded: true, exports: vscodeModule };
 
   // Create ExtensionContext
-  const context = createExtensionContext({ extensionPath, storagePath });
+  // remoteHost keys the workspaceState file apart from a local session at the
+  // same path — see `workspaceStateFile` for why.
+  const context = createExtensionContext({
+    extensionPath,
+    storagePath,
+    workspacePath: args.cwd,
+    remoteHost: process.env.CANOPY_SSH_HOST,
+  });
 
   // Start stdin reader. When stdin closes (Canopy exits/crashes), exit gracefully.
   let webviewReady = false;

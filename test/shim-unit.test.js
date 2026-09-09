@@ -1,6 +1,6 @@
 "use strict";
 
-const { describe, it, beforeEach } = require("node:test");
+const { describe, it, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 const { Readable } = require("node:stream");
 
@@ -415,7 +415,11 @@ describe("RelativePattern", () => {
 // ===========================================================================
 // context.js tests
 // ===========================================================================
-const { createExtensionContext } = require("../Resources/vscode-shim/context.js");
+const {
+  createExtensionContext,
+  workspaceStateFile,
+  MAX_LABEL_LENGTH,
+} = require("../Resources/vscode-shim/context.js");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -424,7 +428,14 @@ describe("ExtensionContext", () => {
   let ctx, tmpDir;
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-test-"));
-    ctx = createExtensionContext({ extensionPath: "/fake/ext", storagePath: tmpDir });
+    ctx = createExtensionContext({
+      extensionPath: "/fake/ext",
+      storagePath: tmpDir,
+      workspacePath: "/fake/workspace",
+    });
+  });
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("has extensionPath and extensionUri", () => {
@@ -469,7 +480,11 @@ describe("ExtensionContext", () => {
     assert.equal(data.persist, "yes");
 
     // New Memento instance reads from same file
-    const ctx2 = createExtensionContext({ extensionPath: "/fake/ext", storagePath: tmpDir });
+    const ctx2 = createExtensionContext({
+      extensionPath: "/fake/ext",
+      storagePath: tmpDir,
+      workspacePath: "/fake/workspace",
+    });
     assert.equal(ctx2.globalState.get("persist"), "yes");
   });
 
@@ -482,6 +497,141 @@ describe("ExtensionContext", () => {
     assert.equal(ctx.logUri.scheme, "file");
     assert.ok(ctx.logUri.fsPath.endsWith("/logs"));
     assert.ok(ctx.logPath.endsWith("/logs"));
+  });
+
+  // Extension 2.1.266's getPanelSessionIds() reads context.workspaceState during
+  // activation. With no such property the read threw and the shim exited 1.
+  // `get(key, default)` is the call shape read off that stack frame at the time,
+  // so a workspaceState that exists but is the wrong shape is caught too.
+  it("exposes a Memento-shaped workspaceState", () => {
+    assert.equal(typeof ctx.workspaceState.get, "function");
+    assert.equal(typeof ctx.workspaceState.update, "function");
+    assert.equal(typeof ctx.workspaceState.keys, "function");
+    assert.equal(ctx.workspaceState.get("panelSessionIds"), undefined);
+    assert.deepEqual(ctx.workspaceState.get("panelSessionIds", []), []);
+  });
+
+  it("workspaceState.update and get round-trips", () => {
+    ctx.workspaceState.update("panelSessionIds", ["a", "b"]);
+    assert.deepEqual(ctx.workspaceState.get("panelSessionIds"), ["a", "b"]);
+
+    ctx.workspaceState.update("panelSessionIds", undefined);
+    assert.equal(ctx.workspaceState.get("panelSessionIds"), undefined);
+  });
+
+  // Establishes a different document from globalState's. The location is
+  // deliberately NOT pinned — the expected path is derived from
+  // `workspaceStateFile`, so renaming the directory is free.
+  it("workspaceState persists to its own file, separate from globalState", () => {
+    ctx.workspaceState.update("panelSessionIds", ["one"]);
+    ctx.globalState.update("panelSessionIds", ["global"]);
+
+    const wsFile = workspaceStateFile(tmpDir, "/fake/workspace");
+    assert.deepEqual(JSON.parse(fs.readFileSync(wsFile, "utf-8")).panelSessionIds, ["one"]);
+
+    const globalFile = path.join(tmpDir, "globalState.json");
+    assert.deepEqual(JSON.parse(fs.readFileSync(globalFile, "utf-8")).panelSessionIds, ["global"]);
+
+    const reopened = createExtensionContext({
+      extensionPath: "/fake/ext",
+      storagePath: tmpDir,
+      workspacePath: "/fake/workspace",
+    });
+    assert.deepEqual(reopened.workspaceState.get("panelSessionIds"), ["one"]);
+  });
+
+  // Pins the scoping rule stated on workspaceStateFile.
+  it("workspaceState is scoped per workspace", () => {
+    ctx.workspaceState.update("panelSessionIds", ["from-a"]);
+
+    const other = createExtensionContext({
+      extensionPath: "/fake/ext",
+      storagePath: tmpDir,
+      workspacePath: "/fake/other-workspace",
+    });
+    assert.equal(other.workspaceState.get("panelSessionIds"), undefined);
+  });
+
+  it("workspaceState file names disambiguate same-basename workspaces", () => {
+    const a = path.basename(workspaceStateFile(tmpDir, "/one/Canopy"));
+    const b = path.basename(workspaceStateFile(tmpDir, "/two/Canopy"));
+    assert.notEqual(a, b);
+    // label-first, digest-suffixed — the readability contract. The separator
+    // between them is the implementation's to choose and is not pinned.
+    assert.ok(a.startsWith("Canopy") && a.endsWith(".json"), a);
+    assert.ok(b.startsWith("Canopy") && b.endsWith(".json"), b);
+  });
+
+  // Without the host in the key a remote session shares a file with a local one
+  // at the same path — see `workspaceStateFile` for why.
+  it("workspaceState file names separate SSH remote hosts from local", () => {
+    const local = workspaceStateFile(tmpDir, "/Users/hiko/repo");
+    const studio = workspaceStateFile(tmpDir, "/Users/hiko/repo", "studio");
+    const mbp = workspaceStateFile(tmpDir, "/Users/hiko/repo", "mbp");
+    assert.notEqual(local, studio);
+    assert.notEqual(local, mbp);
+    assert.notEqual(studio, mbp);
+    // The host changes the digest, never the readable label.
+    for (const f of [local, studio, mbp]) {
+      assert.ok(path.basename(f).startsWith("repo"), f);
+    }
+  });
+
+  // The key is a JSON array, not a joined string, so no (host, path) pair can
+  // spell another pair's key. Joining them would make both of these "a/b/c".
+  it("workspaceState file names key host and path unambiguously", () => {
+    const a = workspaceStateFile(tmpDir, "/b/c", "a");
+    const b = workspaceStateFile(tmpDir, "/c", "a/b");
+    assert.notEqual(a, b);
+  });
+
+  // basename() has already removed every separator before the regex runs, so a
+  // "/" assertion here would pass for any character class. These are characters
+  // that reach the regex.
+  it("workspaceState file name sanitizes characters illegal in a filename", () => {
+    const name = path.basename(workspaceStateFile(tmpDir, "/some/a:b*c d"));
+    assert.ok(name.startsWith("a_b_c_d"), name);
+  });
+
+  // Why the cap exists is on MAX_LABEL_LENGTH. Asserted without reference to the
+  // label/digest separator, which the sibling test above declares the
+  // implementation's to choose.
+  it("workspaceState file name caps the label length", () => {
+    const long = "/some/" + "a".repeat(MAX_LABEL_LENGTH * 4);
+    const name = path.basename(workspaceStateFile(tmpDir, long));
+    assert.ok(Buffer.byteLength(name) < 255, `${Buffer.byteLength(name)} bytes`);
+    assert.ok(name.startsWith("a".repeat(MAX_LABEL_LENGTH)), name);
+    assert.ok(!name.startsWith("a".repeat(MAX_LABEL_LENGTH + 1)), name);
+  });
+
+  it("workspaceState file name falls back when the basename is empty", () => {
+    const name = path.basename(workspaceStateFile(tmpDir, "/"));
+    assert.ok(name.startsWith("workspace"), name);
+  });
+
+  it("requires a workspacePath rather than silently sharing one file", () => {
+    assert.throws(
+      () => createExtensionContext({ extensionPath: "/fake/ext", storagePath: tmpDir }),
+      /workspacePath is required/,
+    );
+    assert.throws(
+      () => createExtensionContext({
+        extensionPath: "/fake/ext",
+        storagePath: tmpDir,
+        workspacePath: "",
+      }),
+      /workspacePath is required/,
+    );
+  });
+
+  // Both directions, because only the negative half pins the scoping — see
+  // Memento.update for why the gate is globalState's alone.
+  it("forces the CC auth gate on globalState only", () => {
+    ctx.globalState.update("experimentGates", { some_gate: false });
+    assert.equal(ctx.globalState.get("experimentGates").tengu_vscode_cc_auth, true);
+
+    ctx.workspaceState.update("experimentGates", { some_gate: false });
+    assert.deepEqual(ctx.workspaceState.get("experimentGates"), { some_gate: false });
   });
 });
 
