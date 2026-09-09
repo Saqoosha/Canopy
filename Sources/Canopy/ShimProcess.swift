@@ -733,8 +733,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `ShimProcess` against the same `OpenSession`, so a per-process flag
     /// would resubmit the prompt after an SSH drop.
     func sendPendingInitialPrompt() {
-        guard let session = boundSession,
-              let prompt = session.pendingInitialPrompt,
+        // Split rather than one `guard`, because a single silent return cannot
+        // tell "this session has no prompt" (the ordinary case, every session
+        // not started from the launcher) from "the prompt is there and we are
+        // dropping it" (a bug). A reviewer named this and it was deferred; the
+        // first end-to-end GUI test then hit exactly the second case with no
+        // log line to say which guard had fired.
+        guard let session = boundSession else {
+            logger.notice("initial prompt: no bound session at init — a prompt, if any, is unreachable")
+            return
+        }
+        guard let prompt = session.pendingInitialPrompt,
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
         guard let channelId else {
@@ -782,6 +791,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // the sidebar dot and the MacroPad LED read it. `phoneReplyInFlight`'s
         // doc already warns that `sendToShim` "writes straight to the shim's
         // stdin and never touches that path" — this is that call site.
+        // The three silent `return`s above and this line are what make the
+        // path observable at all. Its absence — with no "deferred" and no "no
+        // bound session" either — is what says the function was never called,
+        // which is the shape the init deadlock had. Length only, never the
+        // text.
+        logger.notice("initial prompt: submitted, \(prompt.count, privacy: .public) chars")
         isWorking = true
         recapGate.noteUserTurn()
         // Same reason: `KeepAliveGate` declines with "no API activity yet —
@@ -2397,6 +2412,32 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         sendToShim(["type": "webview_message", "message": dict])
+
+        // The launcher's prompt is submitted here, immediately after the spawn
+        // request it belongs to, so the CLI sees the turn behind the process.
+        //
+        // It used to wait for the CLI's own `system/init`, on the reasoning
+        // that init is the CLI announcing it will accept a turn. Measured on
+        // extension 2.1.263 by dumping every distinct wire shape reaching
+        // `extractStatusData`: `init` never arrives during startup at all. The
+        // wire carries `request`, `response`, `system/status` (Canopy's own
+        // synthetic one, injected above), `system/hook_started`,
+        // `system/hook_response`, `system/hook_progress` and `auth_status`,
+        // and nothing else. Under `--input-format stream-json` the CLI emits
+        // `init` in response to a turn, so waiting for init before sending one
+        // is a deadlock — the prompt is never sent, the chat opens empty, and
+        // no log line says why. Three GUI runs were spent reading the
+        // injection code before the shape was dumped at the hook point, which
+        // is the rule CLAUDE.md already states for exactly this.
+        //
+        // The `channelId` backstop above was the other call site and is dead
+        // for a second, independent reason: `launch_claude` has just assigned
+        // `channelId`, so that branch's `== nil` guard can never hold after
+        // it. Neither site could fire, which is why the failure had no
+        // partial mode — the prompt was lost every time.
+        if dict["type"] as? String == "launch_claude" {
+            sendPendingInitialPrompt()
+        }
         if sawUserPromptThisMessage {
             maybeGenerateTitle()
         }
@@ -5408,16 +5449,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                let model = ioMsg["model"] as? String, !model.isEmpty
             {
                 cliResolvedModel = model
-            }
-            // `init` is the CLI saying it is up and will accept a turn, which
-            // is the earliest safe moment to submit the launcher's prompt —
-            // `launch_claude` is too early (the process is only being spawned)
-            // and waiting for anything later means the user watches an empty
-            // pane for no reason. Gated on `subtype` alone rather than sharing
-            // the guard above, because that one additionally requires a
-            // non-empty `model` and this has no business depending on it.
-            if ioMsg["subtype"] as? String == "init" {
-                sendPendingInitialPrompt()
             }
 
         case "stream_event":
