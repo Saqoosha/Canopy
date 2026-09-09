@@ -2417,18 +2417,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // request it belongs to, so the CLI sees the turn behind the process.
         //
         // It used to wait for the CLI's own `system/init`, on the reasoning
-        // that init is the CLI announcing it will accept a turn. Measured on
-        // extension 2.1.263 by dumping every distinct wire shape reaching
-        // `extractStatusData`: `init` never arrives during startup at all. The
-        // wire carries `request`, `response`, `system/status` (Canopy's own
-        // synthetic one, injected above), `system/hook_started`,
-        // `system/hook_response`, `system/hook_progress` and `auth_status`,
-        // and nothing else. Under `--input-format stream-json` the CLI emits
-        // `init` in response to a turn, so waiting for init before sending one
-        // is a deadlock — the prompt is never sent, the chat opens empty, and
-        // no log line says why. Three GUI runs were spent reading the
-        // injection code before the shape was dumped at the hook point, which
-        // is the rule CLAUDE.md already states for exactly this.
+        // that init is the CLI announcing it will accept a turn. That is a
+        // deadlock: `init` arrives in RESPONSE to a turn, so waiting for it
+        // before sending one can never fire — the prompt is never sent, the
+        // chat opens empty, and no log line says why. Measured against the CLI
+        // directly, no Canopy in the path, on a fresh session: stdin held open
+        // and silent for 12 s yields `system/hook_started`, `hook_response`
+        // and `hook_progress` and nothing else; one turn written at t=12.0
+        // yields `init` at t=12.21, then `status`, then the stream.
+        // Corroborated from this side by dumping every distinct wire shape
+        // reaching `extractStatusData` on extension 2.1.263 — `request`,
+        // `response`, `system/status` (Canopy's own synthetic one, injected
+        // above), the three `hook_*`, `auth_status`, no `init`. Three GUI runs
+        // were spent reading the injection code before the shape was dumped at
+        // the hook point, which is the rule CLAUDE.md already states for
+        // exactly this.
         //
         // The `channelId` backstop above was the other call site and is dead
         // for a second, independent reason: `launch_claude` has just assigned
