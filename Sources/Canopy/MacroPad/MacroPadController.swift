@@ -1830,5 +1830,19 @@ final class MacroPadController {
             window.makeKeyAndOrderFront(nil)
         }
         store.setFocusedPaneIndex(index)
+        // Focus the composer itself, not just the pane. `setFocusedPaneIndex`
+        // hands first-responder to the pane's WKWebView, and that is what
+        // lands the caret in the input — but ONLY when the responder actually
+        // changes: AppKit returns early from `makeFirstResponder` for a view
+        // that already holds it, so pressing the key of the ALREADY-focused
+        // pane sent WebKit nothing at all and the caret never moved. That is
+        // the gesture the pad exists for (come back to the session you were
+        // in), so it is the one that has to work. See `ComposerFocusScript`.
+        //
+        // Unconditional rather than gated on `index != focusedPaneIndex`: one
+        // instruction for both cases is what stops them diverging again, and
+        // the script itself declines to move a caret that is already in the
+        // input.
+        store.focusFocusedPaneComposer()
     }
 }

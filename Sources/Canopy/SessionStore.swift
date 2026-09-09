@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Observation
 import SwiftUI
+import WebKit
 import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SessionStore")
@@ -469,6 +470,47 @@ final class SessionStore {
               let window = webView.window
         else { return }
         window.makeFirstResponder(webView)
+    }
+
+    /// Put the caret in the focused pane's chat composer, at the DOM level.
+    ///
+    /// `makeFocusedPaneKeyResponder()` above cannot do this on its own: AppKit
+    /// returns early from `makeFirstResponder` when the target is already the
+    /// first responder, so on a re-focus of the pane that already has focus
+    /// nothing is sent to WebKit and the caret stays wherever it was. See
+    /// `ComposerFocusScript` for the measurement.
+    ///
+    /// Called only from `MacroPadController.focusPane`, deliberately. A pad
+    /// press is "put me in that session now" and carries no other meaning;
+    /// Cmd+1..9 and tap-to-focus are pane navigation, and moving the caret for
+    /// them would be a behaviour change nobody asked for.
+    ///
+    /// A launcher pane is skipped: its prompt box is a native SwiftUI field
+    /// with no webview to evaluate anything in.
+    func focusFocusedPaneComposer() {
+        guard let pane = focusedPane,
+              case .session(let id) = pane.content,
+              let webView = openSessions.first(where: { $0.id == id })?.webView
+        else { return }
+        webView.evaluateJavaScript(ComposerFocusScript.expression) { result, error in
+            if let error {
+                logger.error("focusFocusedPaneComposer JS error: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            let outcome = (result as? String).flatMap(ComposerFocusScript.Outcome.init(rawValue:))
+            switch outcome {
+            case .focused, .alreadyFocused:
+                logger.debug("focusFocusedPaneComposer: \(outcome?.rawValue ?? "?", privacy: .public)")
+            case .noInput:
+                // `notice`, not `debug`: the input failing the shape heuristic
+                // is how a CC extension DOM change would surface here, and
+                // from the user's chair it is indistinguishable from the pad
+                // being disconnected. `info` would be ring-buffer only.
+                logger.notice("focusFocusedPaneComposer: no chat input matched the shape heuristic")
+            case nil:
+                logger.notice("focusFocusedPaneComposer: unexpected result \(String(describing: result), privacy: .public)")
+            }
+        }
     }
 
     /// Update selection + lastActiveResumeId from the currently focused pane's content.
