@@ -22,18 +22,23 @@ remote に出ているのは **CLI の spawn だけ**。WKWebView も shim も e
 **境界が CLI spawn にあること**の帰結で、原因は 1 行で言える —— *extension.js が
 local で走り、それが読みたいファイルは remote にある*。
 
-| 症状 | 読むのは誰か | 読みたいものの所在 |
+| 症状 | 読むのは誰か | 案 B で直るか |
 |---|---|---|
-| transcript が描画されない | extension | remote |
-| `@`-mention のファイル一覧が空 | extension（`workspace.fs` / `findFiles`） | remote |
-| `open_file` が読めない | extension | remote |
-| Continue session が効かなかった | extension | remote |
-| 背景タスクの hourglass が残る | **`ShimProcess`**（`jsonlPath`） | remote |
+| transcript が描画されない | extension | 直る |
+| `@`-mention のファイル一覧が空 | extension（`workspace.fs` / `findFiles`） | 直る |
+| Continue session が効かなかった | extension | 直る（既に別途対処済み） |
+| `open_file` が読めない | **`ShimProcess`**（`handleOpenFile`） | **直らない** |
+| 背景タスクの hourglass が残る | **`ShimProcess`**（`jsonlPath`） | **直らない** |
 
-**「読むのは誰か」の列が、この表の要。** 上 4 行は extension が読むので、
-extension ごと remote に移せば全部 local になる。**最下行だけは違う** ——
-背景タスクの reconcile を走らせるのは `ShimProcess` で、それは Swift 側・
-local に残る。境界を上げても**この 1 行は直らない**。
+**「読むのは誰か」の列が、この表の要**で、症状の見た目では分類できない。
+extension が読むものは extension ごと remote へ移るので local になる。
+`ShimProcess` が読むものは移らない —— **`ShimProcess` は Swift 側で local に残る**
+のがこの設計の前提だから。`handleOpenFile` は local の `workingDirectory` と
+`FileManager` でパスを解決し、背景タスクの reconcile も `jsonlPath` を local で
+stat する。どちらも remote のファイルには届かない。
+
+初稿はこの列を持たず、5 行とも「remote にある」とだけ書いて全部直ることにしていた。
+**下 2 行は直らない。** 境界を上げて得られるのは 3 行であって 5 行ではない。
 
 peer name の chip が出ない件を、初稿ではここに 6 行目として書いていた。**削除した。**
 peer messaging はマシンローカルで、CLAUDE.md が
@@ -68,6 +73,9 @@ SSH RPC に差し替える。
 - 効く: `@`-mention、`open_file`
 - 効かない: transcript 描画。あれは extension.js が local disk を前提にする層が
   もっと深く、RPC 1 本では届かない
+- **`open_file` は案 A だけが直せる、という非対称がある。** 読むのが `ShimProcess`
+  なので、案 A はそこを RPC に差し替えればよく、案 B は `ShimProcess` を local に
+  残すぶん届かない。案 B に寄せても、この 1 個は案 A 側の手当てが要る
 - コスト: 穴の数だけ。1 個の相場は `RemoteSessionHistory` 1 本ぶん
 - リスク: 低い。既存の経路を壊さない
 
@@ -80,10 +88,10 @@ proc.arguments = [host, "node", remoteShimPath, "--extension-path", …]
 ```
 
 **NDJSON パイプがそのまま SSH channel になる。** ShimProcess から下が丸ごと
-remote に移るので、**上の表の「extension が読む」4 行が同時に消える**。
+remote に移るので、**上の表の「extension が読む」3 行が同時に消える**。
 `~/.claude/projects` も CLI spawn も `workspace.fs` も、全部 remote 側で local として
-解決する。**hourglass の 1 行は消えない** —— あれを読むのは `ShimProcess` で、
-それは local に残る。
+解決する。**下 2 行は消えない** —— `open_file` と hourglass を読むのは `ShimProcess`
+で、それは local に残る。
 
 消えるものが多い。`ssh-claude-wrapper.sh` とその env 転送・`--resume` 追記・
 `--model`/`--effort` フラグ化、`vscode-shim/index.js` の `fs.realpathSync` パッチと

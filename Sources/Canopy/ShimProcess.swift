@@ -2187,9 +2187,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Scope, because an earlier draft of this comment overclaimed it and
         // contradicted the same PR's own measurement: what moves is what the
         // EXTENSION reads. What `ShimProcess` reads does not move, because
-        // `ShimProcess` stays here — so the peer-name record and the
-        // background-task JSONL scan are still resolved locally. The peer chip
-        // in particular is not a defect to fix: peer messaging is machine-local
+        // `ShimProcess` stays here. So `handleOpenFile` (which resolves against
+        // the local `workingDirectory` with the local `FileManager`) and the
+        // background-task JSONL scan are BOTH still local, and neither is fixed
+        // by this branch — `open_file` in particular is fixed by the per-hole
+        // RPC approach this one replaces, and not by this one. The peer chip is
+        // a third case and not a defect at all: peer messaging is machine-local
         // and CLAUDE.md records that a remote session correctly shows no name.
         //
         // Deliberately additive. With the flag absent, nothing below runs and
