@@ -3,8 +3,14 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "TitleGen")
 
-/// Generates a session title by running the Claude CLI **outside the session's
-/// own context**, instead of asking the extension to generate one in-session.
+/// Generates a session title **outside the session's own context**, instead of
+/// asking the extension to generate one in-session.
+///
+/// The transport is `AnthropicDirect` with the CLI (`CLIOneShot`) behind it —
+/// see `generate`. "Outside the session's own context" is the part that
+/// matters and it holds on both routes; everything below about configuration
+/// leaking into titles describes the CLI route, and the direct one loads no
+/// configuration at all.
 ///
 /// The in-session route could not be fixed by prompt wording. The CLI's title
 /// generator ran with the user's own configuration loaded, so an output-style
@@ -321,6 +327,59 @@ enum SessionTitleGenerator {
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(nil) } }
             return
         }
+        // Fast path first — see `AnthropicDirect` for the 1 s vs 7-8 s
+        // measurement. Titling is not on any critical path, so the win here is
+        // not felt; it is taken because a title should not cost a CLI boot.
+        //
+        // There is a second, non-obvious gain. Everything `arguments()` does
+        // with `--setting-sources ''` exists to stop the user's own output
+        // style leaking into titles — a whole measured saga. The direct call
+        // loads NO configuration at all, so on this route that class of leak
+        // is structurally impossible rather than suppressed by a flag.
+        if customApi?.isEnabled != true {
+            Task {
+                do {
+                    let raw = try await AnthropicDirect.message(
+                        system: systemPrompt,
+                        user: userPrompt(prompts: prompts),
+                        maxTokens: 64,
+                        timeout: timeout
+                    )
+                    if let title = sanitize(raw) {
+                        logger.notice("[title] \(sessionLabel, privacy: .public): generated \(title, privacy: .private) (direct)")
+                        await MainActor.run { completion(title) }
+                        return
+                    }
+                    // Same evidence rule as the CLI branch below: the rejected
+                    // text is what a successful injection looks like.
+                    logger.notice("[title] \(sessionLabel, privacy: .public): direct call gave no usable title from \(String(raw.prefix(200)), privacy: .private)")
+                } catch {
+                    AnthropicDirect.log(error, label: sessionLabel)
+                }
+                generateViaCLI(
+                    prompts: prompts, customApi: customApi,
+                    sessionLabel: sessionLabel, completion: completion
+                )
+            }
+            return
+        }
+        generateViaCLI(
+            prompts: prompts, customApi: customApi,
+            sessionLabel: sessionLabel, completion: completion
+        )
+    }
+
+    /// The fallback route: same prompts, same sanitiser, through the CLI.
+    ///
+    /// Kept because it authenticates in ways the direct call cannot see — a
+    /// custom provider's endpoint and token, or a login the Keychain read
+    /// misses. A machine where the direct call fails still gets titles.
+    private static func generateViaCLI(
+        prompts: [String],
+        customApi: ModelProvider?,
+        sessionLabel: String,
+        completion: @escaping @MainActor (String?) -> Void
+    ) {
         guard let cli = CCExtension.cliBinaryPath() else {
             logger.notice("[title] \(sessionLabel, privacy: .public): skipped, no CLI binary found")
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(nil) } }
@@ -351,7 +410,7 @@ enum SessionTitleGenerator {
             }
             // Titles summarise the user's prompts, so they are session content
             // and are logged `.private` — the same rule the `[bg]` paths follow.
-            logger.notice("[title] \(sessionLabel, privacy: .public): generated \(title, privacy: .private)")
+            logger.notice("[title] \(sessionLabel, privacy: .public): generated \(title, privacy: .private) (cli)")
             completion(title)
         }
     }

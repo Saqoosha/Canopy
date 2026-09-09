@@ -1857,6 +1857,70 @@ enum SidebarLogicProbe {
                [FileAttributeType.typeRegular, .typeDirectory, .typeSymbolicLink]
                    .allSatisfy { GitWorktree.plan(for: $0) == .clone })
 
+        // MARK: What a new worktree branches FROM
+        //
+        // The order IS the policy, and it is the half that rots silently: a
+        // worktree created off the wrong base looks completely normal and only
+        // shows up as somebody else's commits in the diff.
+        record("base ref: asks the remote before guessing a name",
+               GitWorktree.baseRefCandidates.first == "origin/HEAD")
+        record("base ref: a remote name outranks the same local name",
+               GitWorktree.baseRefCandidates.firstIndex(of: "origin/main")!
+                   < GitWorktree.baseRefCandidates.firstIndex(of: "main")!
+                   && GitWorktree.baseRefCandidates.firstIndex(of: "origin/master")!
+                   < GitWorktree.baseRefCandidates.firstIndex(of: "master")!)
+        record("base ref: main is tried before master",
+               GitWorktree.baseRefCandidates.firstIndex(of: "origin/main")!
+                   < GitWorktree.baseRefCandidates.firstIndex(of: "origin/master")!)
+        // Nothing here may resolve to the checked-out branch: falling back to
+        // HEAD is what the whole resolution exists to stop being the default.
+        record("base ref: HEAD is not a candidate",
+               !GitWorktree.baseRefCandidates.contains("HEAD"))
+
+        // MARK: The base-branch picker (GitWorktree.mergeBaseCandidates)
+        //
+        // Both rules below are easy to get backwards, and getting either one
+        // backwards is invisible: the worktree is created, the work looks
+        // normal, and it surfaces only as conflicts or as somebody else's
+        // commits in the diff.
+        do {
+            // The remote list is spelled the way `for-each-ref
+            // --format=%(refname:short) refs/remotes/origin` actually spells
+            // it, which is the whole point of this fixture: the symbolic HEAD
+            // comes out as the bare string "origin", NOT as "origin/HEAD".
+            // The first version of this block guessed the long form, so it
+            // agreed with the code's identical wrong guess and a branch called
+            // "origin" shipped into the picker.
+            let merged = GitWorktree.mergeBaseCandidates(
+                local: ["main", "feature-a"],
+                remote: ["origin", "origin/main", "origin/feature-b"]
+            )
+            // A local `main` can be days behind `origin/main`, so the remote
+            // copy is what gets checked out — while the name shown stays the
+            // bare one, because that is how the user thinks about it.
+            record("base picker: remote wins a tie, local name is displayed",
+                   merged.first == GitWorktree.BaseCandidate(name: "main", ref: "origin/main"),
+                   "\(String(describing: merged.first))")
+            record("base picker: the remote's own symbolic HEAD is not offered",
+                   !merged.contains { $0.name == "origin" || $0.name == "HEAD" },
+                   "\(merged.map(\.name))")
+            record("base picker: a local-only branch survives",
+                   merged.contains { $0.name == "feature-a" && $0.ref == "feature-a" })
+            record("base picker: a remote-only branch survives",
+                   merged.contains { $0.name == "feature-b" && $0.ref == "origin/feature-b" })
+            // The caller sorts by commit date, so preserving the order is what
+            // puts the branches someone is actually on at the top.
+            record("base picker: input order is preserved",
+                   merged.map(\.name) == ["main", "feature-b", "feature-a"],
+                   "\(merged.map(\.name))")
+            record("base picker: no duplicate names",
+                   Set(merged.map(\.name)).count == merged.count)
+            let capped = GitWorktree.mergeBaseCandidates(
+                local: (0 ..< 30).map { "b\($0)" }, remote: [], limit: 12
+            )
+            record("base picker: the limit holds", capped.count == 12)
+        }
+
         // MARK: Branch naming without a model (GitWorktree.slugFromPrompt)
         record("slug: drops filler, keeps the substance",
                GitWorktree.slugFromPrompt("Please can you fix the CI assert counts")

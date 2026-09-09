@@ -63,7 +63,7 @@ struct SessionContainer: View {
             // the user sees a blank pane for 1–3 s and wonders if the click
             // landed.
             if case .spawning = session.status {
-                SpawningOverlay(title: session.title, project: session.project)
+                SpawningOverlay(headline: "Starting \(session.title)…", detail: session.project)
                     .transition(.opacity)
             }
         }
@@ -84,9 +84,19 @@ struct SessionContainer: View {
 }
 
 /// Lightweight placeholder shown over the WebView while the shim spawns.
-private struct SpawningOverlay: View {
-    let title: String
-    let project: String
+/// The pane's "something is starting" screen: spinner, one headline, one
+/// detail line.
+///
+/// Not private, and takes its text rather than composing it, because the
+/// launcher shows the SAME screen while it prepares a worktree — naming the
+/// branch, checking it out, cloning the ignored files. Those steps happen
+/// BEFORE a session can exist (the worktree path is not known until the branch
+/// is named), so they cannot be reported by a session's own overlay; but they
+/// are the same kind of wait, in the same place on screen, and a second
+/// spinner built beside this one would drift from it.
+struct SpawningOverlay: View {
+    let headline: String
+    let detail: String
 
     var body: some View {
         ZStack {
@@ -94,9 +104,9 @@ private struct SpawningOverlay: View {
             VStack(spacing: 12) {
                 ProgressView()
                     .controlSize(.large)
-                Text("Starting \(title)…")
+                Text(headline)
                     .font(.headline)
-                Text(project)
+                Text(detail)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 // Keep the same line count as TeleportOverlay so the

@@ -300,7 +300,144 @@ enum GitWorktree {
         return CommandResult(status: proc.terminationStatus, stdout: outData, stderr: stderr)
     }
 
-    static func createWorktree(repo: URL, branch: String, timeout: TimeInterval = 120) throws -> URL {
+    /// Refs to try, in order, when deciding what a new worktree branches FROM.
+    ///
+    /// Pure so the order can be pinned: it is the whole of the policy, and the
+    /// order is the part that would rot silently. `origin/HEAD` first because
+    /// it is the only entry that asks the REMOTE what its default branch is
+    /// rather than guessing a name; the rest are the two conventional names,
+    /// remote before local, because a local `main` can be behind.
+    static let baseRefCandidates = ["origin/HEAD", "origin/main", "origin/master", "main", "master"]
+
+    /// What a new worktree should branch from, or nil when nothing resolves.
+    ///
+    /// **A nil result means "use HEAD", and that is the behaviour this function
+    /// exists to stop being the default.** `git worktree add -b X <path>` with
+    /// no start-point branches from the repository's HEAD — so a root that had
+    /// drifted onto a feature branch silently grew every new worktree on top of
+    /// that feature's work. Reported as "does it mean the new worktree will be
+    /// created based on that branch…?", which is exactly what it meant.
+    ///
+    /// Matches `EnterWorktree`'s own `worktree.baseRef: fresh` default, so the
+    /// two ways of making a worktree in this project agree about where work
+    /// starts.
+    static func defaultBaseRef(for repo: URL, timeout: TimeInterval = 15) -> String? {
+        for candidate in baseRefCandidates {
+            guard let result = try? runCommand(
+                "/usr/bin/git",
+                ["-C", repo.path, "rev-parse", "--verify", "--quiet", candidate],
+                timeout: timeout,
+                wantsStdout: true
+            ), result.status == 0 else { continue }
+            let resolved = String(decoding: result.stdout, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !resolved.isEmpty else { continue }
+            return candidate
+        }
+        return nil
+    }
+
+    /// One branch a new worktree could start from.
+    struct BaseCandidate: Equatable, Identifiable {
+        /// What the user is shown — always the bare branch name.
+        let name: String
+        /// What is handed to `git worktree add`, which may be the remote copy.
+        let ref: String
+        var id: String { ref }
+    }
+
+    /// Merge local and remote branch names into one ordered, deduplicated list.
+    ///
+    /// Pure, because the two rules here are the whole of the policy and both
+    /// are easy to get backwards.
+    ///
+    /// **The remote copy wins a tie, while the LOCAL name is displayed.** A
+    /// local `main` can be behind `origin/main` by days, and starting a branch
+    /// from a stale base is the quieter version of the bug this picker was
+    /// added alongside — the work looks fine and only conflicts at merge. The
+    /// user still thinks in "branch off main", so the name shown is `main`.
+    ///
+    /// Order is preserved from the caller, which sorts by commit date, so the
+    /// branches someone is actually working on come first.
+    ///
+    /// **The remote's own symbolic HEAD is dropped, and it does NOT look the
+    /// way you would guess.** `refs/remotes/origin/HEAD` renders under
+    /// `%(refname:short)` as the bare string `origin` — not `origin/HEAD` — so
+    /// a filter written against the long form silently passes it through and
+    /// the picker offers a branch called "origin" that duplicates whatever the
+    /// default branch is. Shipped exactly that way, caught in a screenshot,
+    /// and the probe had missed it because the FIXTURE used the guessed
+    /// spelling too: a test written from the same wrong idea as the code
+    /// agrees with it.
+    static func mergeBaseCandidates(
+        local: [String],
+        remote: [String],
+        limit: Int = 12
+    ) -> [BaseCandidate] {
+        var seen = Set<String>()
+        var result: [BaseCandidate] = []
+        for full in remote + local {
+            let isRemote = full.hasPrefix("origin/")
+            let name = isRemote ? String(full.dropFirst("origin/".count)) : full
+            guard name != "HEAD", name != "origin", !name.isEmpty, !seen.contains(name)
+            else { continue }
+            seen.insert(name)
+            result.append(BaseCandidate(name: name, ref: full))
+            if result.count == limit { break }
+        }
+        return result
+    }
+
+    /// Branches a new worktree could start from, most recently committed first.
+    static func baseCandidates(for repo: URL, limit: Int = 12, timeout: TimeInterval = 15) -> [BaseCandidate] {
+        func names(_ refspace: String) -> [String] {
+            guard let result = try? runCommand(
+                "/usr/bin/git",
+                ["-C", repo.path, "for-each-ref", "--sort=-committerdate",
+                 "--format=%(refname:short)", refspace],
+                timeout: timeout,
+                wantsStdout: true
+            ), result.status == 0 else { return [] }
+            return String(decoding: result.stdout, as: UTF8.self)
+                .split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
+        return mergeBaseCandidates(
+            local: names("refs/heads"),
+            remote: names("refs/remotes/origin"),
+            limit: limit
+        )
+    }
+
+    /// Human-readable form of a base ref, for the chip that reports it.
+    ///
+    /// `origin/HEAD` names a symbolic ref, not a branch anyone thinks in, so it
+    /// is resolved to what it points at before being shown.
+    static func displayBaseRef(_ ref: String, for repo: URL, timeout: TimeInterval = 15) -> String {
+        guard ref == "origin/HEAD" else {
+            return ref.hasPrefix("origin/") ? String(ref.dropFirst("origin/".count)) : ref
+        }
+        guard let result = try? runCommand(
+            "/usr/bin/git",
+            ["-C", repo.path, "symbolic-ref", "--short", "--quiet", "refs/remotes/origin/HEAD"],
+            timeout: timeout,
+            wantsStdout: true
+        ), result.status == 0 else { return "default" }
+        let full = String(decoding: result.stdout, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !full.isEmpty else { return "default" }
+        return full.hasPrefix("origin/") ? String(full.dropFirst("origin/".count)) : full
+    }
+
+    /// `baseRef` nil keeps git's own default, which is the repository's HEAD —
+    /// see `defaultBaseRef` for why callers should almost never want that.
+    static func createWorktree(
+        repo: URL,
+        branch: String,
+        baseRef: String? = nil,
+        timeout: TimeInterval = 120
+    ) throws -> URL {
         let repoName = repo.lastPathComponent
         let branchComponent = branch.replacingOccurrences(of: "/", with: "-")
         let worktreesParent = worktreesRoot.appendingPathComponent(repoName, isDirectory: true)
@@ -310,7 +447,8 @@ enum GitWorktree {
 
         let result = try runCommand(
             "/usr/bin/git",
-            ["-C", repo.path, "worktree", "add", "-b", branch, worktreeURL.path],
+            ["-C", repo.path, "worktree", "add", "-b", branch, worktreeURL.path]
+                + (baseRef.map { [$0] } ?? []),
             timeout: timeout
         )
         if result.status != 0 {
@@ -324,7 +462,9 @@ enum GitWorktree {
                 userInfo: [NSLocalizedDescriptionKey: message]
             )
         }
-        logger.info("Created worktree at \(worktreeURL.path, privacy: .public) on branch \(branch, privacy: .public)")
+        logger.notice(
+            "Created worktree at \(worktreeURL.path, privacy: .private) on branch \(branch, privacy: .public) from \(baseRef ?? "HEAD", privacy: .public)"
+        )
         return worktreeURL
     }
 

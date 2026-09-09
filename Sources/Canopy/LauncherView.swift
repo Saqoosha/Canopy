@@ -181,7 +181,6 @@ struct LauncherView: View {
     @AppStorage("launcher.continueSession") private var continueSession = false
 
     @State private var startInWorktree = false
-    @State private var worktreeBranch = ""
     @State private var isCreatingWorktree = false
     /// The prompt typed on the launch screen. Optional by design: leaving it
     /// empty is how the user says "open the directory, I will decide there",
@@ -195,13 +194,25 @@ struct LauncherView: View {
     /// reasons, so "Creating Worktree…" over all three named the wrong one
     /// two times out of three.
     @State private var worktreeStage: String?
-    /// True once the user has asked to name the worktree branch themselves,
-    /// which is what reveals the name field. Off by default because the whole
-    /// point of the naming work is that the field does not need filling in.
-    @State private var namingWorktreeManually = false
     /// Branch of `selectedDirectory`, refreshed when it changes rather than
     /// read per render — the read shells out, and a chip is drawn constantly.
     @State private var currentBranchName: String?
+    /// What a new worktree will branch FROM, resolved from the selected repo,
+    /// and how to say it on screen. Nil until resolved, or when nothing
+    /// matched — in which case the base is the folder's own HEAD.
+    @State private var baseRef: String?
+    @State private var baseRefLabel: String?
+    /// A base the user picked by hand, or nil to use `baseRef` — the repo's
+    /// default branch, which is the right answer for almost every worktree
+    /// (the new branch is going to be merged back into it, so starting
+    /// anywhere else drags unmerged work into the diff).
+    ///
+    /// Nil by default on purpose: branching off whatever the root happened to
+    /// be on is the trap this whole base-ref resolution exists to close, and a
+    /// picker that opens with no recommendation just moves the trap.
+    @State private var pickedBaseRef: GitWorktree.BaseCandidate?
+    /// Branches offered by the picker, refreshed with the folder.
+    @State private var baseCandidates: [GitWorktree.BaseCandidate] = []
     /// Presents the SSH host / remote path fields.
     ///
     /// Collapsing the old form's two SSH cards into the location chip left the
@@ -210,10 +221,6 @@ struct LauncherView: View {
     /// with nothing on screen to type into. A chip can only offer values that
     /// already exist, so anything that creates one needs somewhere to live.
     @State private var showRemoteSetup = false
-    /// Computed once per launcher so the placeholder and the empty-field
-    /// fallback produce the same branch name (a per-render call would drift
-    /// by its seconds-precision timestamp).
-    @State private var suggestedWorktreeBranch = GitWorktree.suggestedBranchName()
 
     // Bare family aliases, so a row tracks the latest model in its family with no
     // release-day edit here. Measured 2026-09-02 on CLI 2.1.239: "fable" resolves to
@@ -275,7 +282,7 @@ struct LauncherView: View {
     private static let rowHeight: CGFloat = 34
     private static let listRowCount = 10
 
-    var body: some View {
+    private var launchComposer: some View {
         ScrollView {
             VStack(spacing: 12) {
                 #if DEBUG
@@ -293,9 +300,46 @@ struct LauncherView: View {
             .frame(maxWidth: 720)
             .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .scrollBounceBehavior(.basedOnSize)
         .defaultScrollAnchor(.center)
+    }
+
+    /// Which wait, if any, is running — nil means the composer is live.
+    ///
+    /// Both of these happen BEFORE a session exists, which is why neither can
+    /// be reported by a session's own overlay: the worktree's path is not
+    /// known until the branch is named, and the remote lookup is the round
+    /// trip that decides which session to open at all. They are the same KIND
+    /// of wait though, so they get the same screen — `SpawningOverlay`, the
+    /// one `SessionContainer` shows a moment later. What the user sees is one
+    /// continuous spinner: Naming Branch… → Creating Worktree… → Copying
+    /// Build Files… → Starting <session>…
+    private var preparingHeadline: String? {
+        if let worktreeStage { return worktreeStage }
+        // Reached only if a stage is somehow unset while the work runs; the
+        // flag is what actually gates the composer, so it answers too.
+        if isCreatingWorktree { return "Preparing Worktree…" }
+        if isResolvingRemoteSession { return "Finding Session…" }
+        return nil
+    }
+
+    var body: some View {
+        Group {
+            if let preparingHeadline {
+                // The composer is REPLACED rather than covered: every control
+                // in it is disabled for the duration anyway, and leaving it
+                // visible behind a spinner invites a click that does nothing.
+                SpawningOverlay(
+                    headline: preparingHeadline,
+                    detail: isRemoteMode
+                        ? remoteHost
+                        : (selectedDirectory?.lastPathComponent ?? "")
+                )
+            } else {
+                launchComposer
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .onAppear {
             // Move a selection made in an older build onto an id this Picker still
@@ -352,6 +396,20 @@ struct LauncherView: View {
             return
         }
         Task {
+            let base = await Task.detached(priority: .userInitiated) { () -> (String, String)? in
+                guard let ref = GitWorktree.defaultBaseRef(for: dir) else { return nil }
+                return (ref, GitWorktree.displayBaseRef(ref, for: dir))
+            }.value
+            let candidates = await Task.detached(priority: .userInitiated) {
+                GitWorktree.baseCandidates(for: dir)
+            }.value
+            if selectedDirectory == dir {
+                baseRef = base?.0
+                baseRefLabel = base?.1
+                baseCandidates = candidates
+                // A hand-picked base belongs to the folder it was picked in.
+                pickedBaseRef = nil
+            }
             let name = await Task.detached(priority: .userInitiated) {
                 // The same reader the status bar uses, so the launcher cannot
                 // disagree with the pane it is about to open. It matters here
@@ -430,24 +488,31 @@ struct LauncherView: View {
             ? (remoteHost.isEmpty ? nil : remoteHost)
             : selectedDirectory?.lastPathComponent
         guard let place else {
-            return continueSession ? "Where were we?" : "What should we build?"
+            return willContinueSession ? "Where were we?" : "What should we build?"
         }
-        if continueSession { return "Where were we in \(place)?" }
+        if willContinueSession { return "Where were we in \(place)?" }
         if startInWorktree { return "What should we build in a new \(place) worktree?" }
         return "What should we build in \(place)?"
     }
 
     private var contextChipRow: some View {
+        // Widest scope first, narrowing left to right: which machine, which
+        // folder on it, whether a worktree is cut from that folder, and what
+        // that worktree branches from.
+        //
+        // The branch chip sits immediately after the worktree chip because it
+        // is no longer independent of it: with a worktree it reads "from main",
+        // which is a property of the worktree being made, not of the folder.
+        // It was second in the row before, next to the folder, and that
+        // adjacency is what made "New worktree" look like it branched off
+        // whatever the folder was on.
         ChipFlowLayout(spacing: 6, lineSpacing: 6) {
+            locationChip
             directoryChip
             if !isRemoteMode, selectedDirectoryIsGitRepo {
-                branchChip
                 worktreeChip
-                if startInWorktree, namingWorktreeManually {
-                    worktreeNameField
-                }
+                branchChip
             }
-            locationChip
             continueChip
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -499,53 +564,127 @@ struct LauncherView: View {
         }
     }
 
-    /// Read-only, unlike Cursor's and Codex's equivalent chip.
+    /// A label, not a control — and now drawn as one.
     ///
-    /// Canopy cannot switch branches — nothing in the app runs `git switch` —
-    /// so a menu here would offer either nothing or an action that does not
-    /// exist. It is still worth the space: this is the line that says which
-    /// branch the prompt is about to run against, and getting that wrong is
-    /// the confusion the branch-display work was about.
+    /// It wore the same pill as its neighbours at first and was reported as
+    /// "the branch pill doesn't do anything", which was the right reading of a
+    /// wrong signal: a pill among pills invites a click. With no fill and no
+    /// border the row reads as four controls and one fact.
+    ///
+    /// **Switching is deliberately absent, not missing.** Cursor and Codex
+    /// both make their equivalent a switcher, and copying that here would be
+    /// actively harmful: these repos are jj-colocated, where the git branch is
+    /// not what moves the working copy (`jj edit` / `jj new` are), so a
+    /// `git switch` would leave git and jj disagreeing about where the repo
+    /// is. Doing it safely means detecting the VCS, refusing on a dirty tree,
+    /// and speaking jj's vocabulary — a feature, not a menu.
+    ///
+    /// It still earns its space: this is the line that says which branch the
+    /// prompt is about to run against, which is the confusion the whole
+    /// branch-display fix was about.
+    @ViewBuilder
     private var branchChip: some View {
-        ChipLabel(
-            icon: "arrow.triangle.branch",
-            text: currentBranchName ?? "detached",
-            muted: currentBranchName == nil,
-            showsChevron: false
-        )
-        // The one pill with no menu behind it, so nothing reserves trailing
-        // space and it takes the symmetric padding.
-        .chipStyle(hasIndicator: false)
-        .help("Current branch of the selected folder")
+        if startInWorktree, !baseCandidates.isEmpty {
+            // With a worktree this chip is a control, because there is a real
+            // choice behind it: which branch the new one starts from.
+            Menu {
+                // Most recently committed first, with the recommended one
+                // marked — the picker offers the choice without asking a
+                // question it can answer itself.
+                ForEach(baseCandidates) { candidate in
+                    Button {
+                        // Choosing the recommended entry clears the override
+                        // rather than pinning it, so a later folder change
+                        // still moves the default with it.
+                        pickedBaseRef = (candidate.name == baseRefLabel) ? nil : candidate
+                    } label: {
+                        // No "(recommended)" marker: the default IS the
+                        // recommendation, and it opens already checked, so the
+                        // word only annotated the row the checkmark was on.
+                        Label(
+                            candidate.name,
+                            systemImage: isSelectedBase(candidate) ? "checkmark" : ""
+                        )
+                    }
+                }
+            } label: {
+                ChipLabel(icon: "arrow.triangle.branch", text: branchChipText)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .chipStyle()
+            .help(branchChipHelp)
+        } else {
+            // Without one it is a fact, not a control: Canopy does not switch
+            // the branch a folder is on (see the type doc), so a pill here
+            // would invite a click that cannot be honoured.
+            ChipLabel(
+                icon: "arrow.triangle.branch",
+                text: branchChipText,
+                muted: true,
+                showsChevron: false
+            )
+            // Keeps the pills' vertical metric so the row still aligns, and
+            // enough horizontal room not to crowd them — everything except the
+            // fill and the border, which are what said "press me".
+            .padding(.horizontal, 4)
+            .padding(.vertical, 5)
+            .help(branchChipHelp)
+        }
+    }
+
+    /// With no worktree, the branch the prompt runs ON. With one, the branch
+    /// the new worktree starts FROM.
+    ///
+    /// Those are different questions and the chip used to answer only the
+    /// first, while sitting beside a "New worktree" chip — which read as "the
+    /// new worktree comes off this", and was reported as exactly that
+    /// confusion. It was also TRUE at the time, which is what made it worth
+    /// fixing in the code rather than only in the label.
+    private var branchChipText: String {
+        guard startInWorktree else { return currentBranchName ?? "detached" }
+        if let pickedBaseRef { return "from \(pickedBaseRef.name)" }
+        return "from \(baseRefLabel ?? currentBranchName ?? "HEAD")"
+    }
+
+    private var branchChipHelp: String {
+        startInWorktree
+            ? "Which branch the new worktree starts from"
+            : "Branch of the selected folder. Canopy does not switch branches."
+    }
+
+    private func isSelectedBase(_ candidate: GitWorktree.BaseCandidate) -> Bool {
+        if let pickedBaseRef { return pickedBaseRef.ref == candidate.ref }
+        return candidate.name == baseRefLabel
+    }
+
+    /// The base handed to `git worktree add`, honouring a hand-picked one.
+    ///
+    /// Nil reaches git as "no start-point", i.e. the folder's own HEAD. That is
+    /// only correct when nothing resolved at all — see `defaultBaseRef`.
+    private var resolvedBaseRef: String? {
+        pickedBaseRef?.ref ?? baseRef
     }
 
     private var worktreeChip: some View {
         Menu {
             Button {
                 startInWorktree = false
-                namingWorktreeManually = false
             } label: {
                 Label("Work in this folder", systemImage: startInWorktree ? "" : "checkmark")
             }
             Button {
                 startInWorktree = true
-                namingWorktreeManually = false
-                worktreeBranch = ""
             } label: {
-                Label(
-                    "New worktree, named from the prompt",
-                    systemImage: startInWorktree && !namingWorktreeManually ? "checkmark" : ""
-                )
+                // Just "New worktree": naming from the prompt is the only
+                // way it happens now that the hand-typed field is gone, so
+                // saying so described the mechanism rather than the choice.
+                Label("New worktree", systemImage: startInWorktree ? "checkmark" : "")
             }
-            Button {
-                startInWorktree = true
-                namingWorktreeManually = true
-            } label: {
-                Label(
-                    "New worktree, name it myself…",
-                    systemImage: startInWorktree && namingWorktreeManually ? "checkmark" : ""
-                )
-            }
+            // The base list used to hang off this menu, which split the
+            // question in two: the chip that SHOWED the branch could not change
+            // it, and the chip that changed it did not show it. It lives on the
+            // branch chip now.
         } label: {
             ChipLabel(
                 icon: startInWorktree ? "square.on.square.dashed" : "square",
@@ -556,13 +695,6 @@ struct LauncherView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .chipStyle()
-    }
-
-    private var worktreeNameField: some View {
-        TextField("", text: $worktreeBranch, prompt: Text(suggestedWorktreeBranch))
-            .textFieldStyle(.roundedBorder)
-            .font(.system(size: 12))
-            .frame(width: 170)
     }
 
     private var locationChip: some View {
@@ -661,18 +793,26 @@ struct LauncherView: View {
             Button {
                 continueSession = false
             } label: {
-                Label("New session", systemImage: continueSession ? "" : "checkmark")
+                Label("New session", systemImage: willContinueSession ? "" : "checkmark")
             }
             Button {
                 continueSession = true
             } label: {
-                Label("Continue the latest session", systemImage: continueSession ? "checkmark" : "")
+                Label(
+                    startInWorktree
+                        ? "Continue — not with a new worktree"
+                        : "Continue the latest session",
+                    systemImage: willContinueSession ? "checkmark" : ""
+                )
             }
+            // Disabled rather than hidden: a row that vanishes reads as a bug,
+            // and the point is to say WHY the two cannot combine.
+            .disabled(startInWorktree)
         } label: {
             ChipLabel(
-                icon: continueSession ? "arrow.uturn.backward" : "plus.bubble",
-                text: continueSession ? "Continue" : "New session",
-                muted: !continueSession
+                icon: willContinueSession ? "arrow.uturn.backward" : "plus.bubble",
+                text: willContinueSession ? "Continue" : "New session",
+                muted: !willContinueSession
             )
         }
         .menuStyle(.borderlessButton)
@@ -680,11 +820,27 @@ struct LauncherView: View {
         .chipStyle()
     }
 
+    /// Whether this launch will actually resume something.
+    ///
+    /// **"Continue" and "New worktree" cannot both be honoured.** A worktree
+    /// created a second ago has no session history, so `latestSession` finds
+    /// nothing and the launch silently falls through to a fresh session — while
+    /// the headline said "Where were we in Canopy?" and the composer said "Pick
+    /// up where you left off". Three surfaces lying in agreement.
+    ///
+    /// The worktree wins because it is the thing the user just built a name and
+    /// a checkout for. `continueSession` is deliberately NOT written to: it is
+    /// a persisted preference, and flipping it here would silently lose the
+    /// user's setting the moment they turned the worktree off again.
+    private var willContinueSession: Bool {
+        continueSession && !startInWorktree
+    }
+
     private var composerPlaceholder: String {
         // Each mode says what this box will actually do with the text, because
         // the three outcomes genuinely differ: a fresh turn, a turn appended to
         // an existing conversation, or a turn that also names a branch.
-        if continueSession { return "Pick up where you left off" }
+        if willContinueSession { return "Pick up where you left off" }
         if startInWorktree { return "Describe a task — it names the branch too" }
         return "Describe a task or ask a question"
     }
@@ -821,22 +977,18 @@ struct LauncherView: View {
 
     /// The one control that is a button rather than a menu.
     ///
-    /// It carries `worktreeStage` as its label because the three steps behind
-    /// a worktree launch — naming, checkout, copying ignored files — can each
-    /// take seconds and fail for unrelated reasons, and this is the only thing
-    /// on screen positioned to say which one is running.
+    /// Deliberately just the arrow: the three steps behind a worktree launch
+    /// — naming, checkout, copying ignored files — used to be reported in this
+    /// label, which put a changing sentence inside a 20pt control and reflowed
+    /// the row under the cursor. They belong on `SpawningOverlay`, which has
+    /// replaced this whole screen by the time there is a stage to report.
     private var sendButton: some View {
         Button {
             startSession()
         } label: {
-            HStack(spacing: 6) {
-                if let worktreeStage {
-                    Text(worktreeStage).font(.system(size: 12))
-                }
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 20))
-            }
-            .contentShape(Rectangle())
+            Image(systemName: "arrow.up.circle.fill")
+                .font(.system(size: 20))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(canStart ? Color.accentColor : Color.secondary.opacity(0.5))
@@ -1244,7 +1396,7 @@ struct LauncherView: View {
 
         var resumeId: String?
         var resumeTitle: String?
-        if continueSession, let latest = latestSession(for: dir) {
+        if willContinueSession, let latest = latestSession(for: dir) {
             resumeId = latest.id
             resumeTitle = latest.title
         }
@@ -1285,7 +1437,6 @@ struct LauncherView: View {
 
         // Worktree checkout can take seconds on big repos — keep it off the
         // main thread and disable the Start button while it runs.
-        let typedBranch = GitWorktree.sanitizeBranchName(worktreeBranch)
         let prompt = initialPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         isCreatingWorktree = true
         let repo = local
@@ -1295,23 +1446,16 @@ struct LauncherView: View {
                 isCreatingWorktree = false
                 worktreeStage = nil
             }
-            // A name the user typed always wins — the generator is what fills
-            // the field they left blank, not a second opinion on the one they
-            // filled in.
-            let branchName: String
-            if !typedBranch.isEmpty {
-                branchName = typedBranch
-            } else {
-                worktreeStage = "Naming Branch…"
-                branchName = await resolveBranchName(prompt: prompt, customApi: api)
-            }
-            // Reflect what will actually be used, so a sanitized or generated
-            // name is never a silent surprise.
-            worktreeBranch = branchName
+            // There is no hand-typed name to prefer any more: the field that
+            // offered one was removed as unused, and the three-rung fallback
+            // below already covers every case it did.
+            worktreeStage = "Naming Branch…"
+            let branchName = await resolveBranchName(prompt: prompt, customApi: api)
             do {
                 worktreeStage = "Creating Worktree…"
+                let base = resolvedBaseRef
                 let worktree = try await Task.detached(priority: .userInitiated) {
-                    try GitWorktree.createWorktree(repo: repo, branch: branchName)
+                    try GitWorktree.createWorktree(repo: repo, branch: branchName, baseRef: base)
                 }.value
                 // A fresh worktree holds only tracked files, so for most
                 // projects it cannot build until this runs. Deliberately AFTER
@@ -1377,7 +1521,7 @@ struct LauncherView: View {
         //
         // Only when the user asked to continue: a fresh remote session must
         // not pay a network round trip to learn something it will not use.
-        if let remoteHost, continueSession {
+        if let remoteHost, willContinueSession {
             // Captured BEFORE the await. `launchSession` samples the modifier
             // itself for every synchronous caller; this is the one route where
             // "now" is a round trip too late.
@@ -1399,7 +1543,7 @@ struct LauncherView: View {
 
         var resumeId: String?
         var resumeTitle: String?
-        if continueSession, let latest = latestSession(for: dir) {
+        if willContinueSession, let latest = latestSession(for: dir) {
             resumeId = latest.id
             resumeTitle = latest.title
         }

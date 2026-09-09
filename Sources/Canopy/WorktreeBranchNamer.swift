@@ -3,8 +3,11 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "BranchNamer")
 
-/// Names a worktree's branch from the user's first prompt, by running the CLI
-/// outside any session (`CLIOneShot`).
+/// Names a worktree's branch from the user's first prompt.
+///
+/// Goes straight to the API (`AnthropicDirect`, ~1 s) and keeps the CLI
+/// (`CLIOneShot`, 7-8 s) as the fallback — see `generate` for which route runs
+/// when, and `AnthropicDirect` for the measurements.
 ///
 /// **What this replaces is measured, not assumed.** Across 21,265 session logs
 /// on two Macs, worktree branch names fall into three families: 33 named by an
@@ -127,6 +130,19 @@ enum WorktreeBranchNamer {
 
     /// Name a branch. `completion` is called exactly once on the main actor,
     /// with nil when nothing usable came back — the caller owns the fallback.
+    ///
+    /// Two routes, and the fast one is the default. `AnthropicDirect` answers
+    /// in ~1 s against the CLI's 7-8 s (both measured, figures on that type),
+    /// which for a call the user waits through is the difference between a
+    /// flicker and a stall. The CLI remains the fallback because it can
+    /// authenticate in ways this cannot see — a custom provider's endpoint and
+    /// token, or a login the Keychain read misses — so a machine where the
+    /// direct call cannot work still gets a name, just slowly.
+    ///
+    /// A custom provider skips the direct path entirely rather than guessing
+    /// at its auth header: its `baseURL` and `authToken` already flow to the
+    /// CLI through the environment, and inventing a second way to speak to an
+    /// endpoint nobody here has tested is how you get a silent 401.
     static func generate(
         prompt: String,
         customApi: ModelProvider?,
@@ -137,6 +153,39 @@ enum WorktreeBranchNamer {
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(nil) } }
             return
         }
+
+        if customApi?.isEnabled != true {
+            Task {
+                do {
+                    let raw = try await AnthropicDirect.message(
+                        system: systemPrompt,
+                        user: userPrompt(trimmed),
+                        maxTokens: 64,
+                        timeout: timeout
+                    )
+                    if let name = sanitize(raw) {
+                        logger.notice("[branch] generated \(name, privacy: .public) (direct)")
+                        await MainActor.run { completion(name) }
+                        return
+                    }
+                    logger.notice("[branch] direct call returned no usable name")
+                } catch {
+                    AnthropicDirect.log(error, label: "branch")
+                }
+                // Anything that did not produce a name falls through to the
+                // CLI, which is slower but authenticates differently.
+                generateViaCLI(prompt: trimmed, customApi: customApi, completion: completion)
+            }
+            return
+        }
+        generateViaCLI(prompt: trimmed, customApi: customApi, completion: completion)
+    }
+
+    private static func generateViaCLI(
+        prompt trimmed: String,
+        customApi: ModelProvider?,
+        completion: @escaping @MainActor (String?) -> Void
+    ) {
         guard let cli = CCExtension.cliBinaryPath() else {
             logger.notice("[branch] skipped, no CLI binary found")
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(nil) } }
@@ -163,7 +212,7 @@ enum WorktreeBranchNamer {
             // ref, and a sidebar subtitle. It is not private by the time
             // anyone reads this line, and a redacted one would make the log
             // useless for the question it exists to answer.
-            logger.notice("[branch] generated \(name, privacy: .public)")
+            logger.notice("[branch] generated \(name, privacy: .public) (cli)")
             completion(name)
         }
     }
