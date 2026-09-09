@@ -56,6 +56,11 @@ final class AppState {
     private(set) var openInNewPane = false
     var resumeSessionId: String?
     var resumeSessionTitle: String?
+
+    /// The prompt typed on the launch screen, to be submitted as the session's
+    /// first turn once its CLI is up. Nil for every route that has no launch
+    /// screen behind it (a sidebar click, a restore, Cmd+O).
+    var initialPrompt: String?
     var remoteHost: String?
     var customApi: ModelProvider?
     var debugAutoLaunchDir: String?
@@ -70,7 +75,7 @@ final class AppState {
     /// `openInNewPane`: nil means "sample the modifier now", which is right for
     /// every caller that runs in the same turn as the click. A caller that
     /// awaits first must capture the value BEFORE awaiting and pass it.
-    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil, customApi: ModelProvider? = nil, openInNewPane: Bool? = nil) {
+    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil, customApi: ModelProvider? = nil, openInNewPane: Bool? = nil, initialPrompt: String? = nil) {
         self.openInNewPane = openInNewPane ?? NSEvent.modifierFlags.contains(.command)
         // Don't add remote paths to local recent directories
         if remoteHost == nil {
@@ -79,6 +84,7 @@ final class AppState {
         workingDirectory = directory
         self.resumeSessionId = resumeSessionId
         self.resumeSessionTitle = sessionTitle
+        self.initialPrompt = initialPrompt
         self.model = model
         self.effortLevel = effortLevel
         self.permissionMode = permissionMode
@@ -91,6 +97,9 @@ final class AppState {
 
     func backToLauncher() {
         resumeSessionId = nil
+        // Cleared with the rest of the hand-off state, or the NEXT session
+        // started from this launcher would submit the previous one's prompt.
+        initialPrompt = nil
         remoteHost = nil
         screen = .launcher
     }

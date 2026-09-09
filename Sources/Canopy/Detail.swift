@@ -414,7 +414,8 @@ private struct DetailLauncher: View {
                         permissionMode: localAppState.permissionMode,
                         remoteHost: localAppState.remoteHost,
                         customApi: localAppState.customApi,
-                        target: target
+                        target: target,
+                        initialPrompt: localAppState.initialPrompt
                     )
                     // Reset the local appState so the next Start works again
                     localAppState.backToLauncher()

@@ -140,6 +140,15 @@ final class OpenSession: Identifiable, Hashable {
     /// still running. Feeds `SessionActivity.of` as the `background` rung.
     /// Mutually exclusive with `isThinking` — only true between turns.
     var isWaiting: Bool = false
+    /// Prompt typed on the launch screen, waiting for this session's CLI to
+    /// come up so it can be submitted as the first turn.
+    ///
+    /// It lives here rather than on `ShimProcess` because the shim does not
+    /// exist when the launcher hands it over — `SessionContainer` spawns one
+    /// lazily when the pane mounts, and a launch-restored session may have no
+    /// shim for as long as it has no pane. `ShimProcess` reads it once the CLI
+    /// announces itself and clears it, so a reconnect cannot resubmit it.
+    var pendingInitialPrompt: String?
     /// True when the caller supplied a `resumeId` it believes names a transcript
     /// that already exists, rather than the placeholder `SessionStore.openNew`
     /// mints for a brand-new session.

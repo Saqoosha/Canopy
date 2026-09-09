@@ -505,7 +505,8 @@ final class SessionStore {
         permissionMode: PermissionMode = .acceptEdits,
         remoteHost: String? = nil,
         customApi: ModelProvider? = nil,
-        target: PaneTarget = .focused
+        target: PaneTarget = .focused,
+        initialPrompt: String? = nil
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -542,6 +543,11 @@ final class SessionStore {
             customApi: customApi,
             resumeIdIsExistingTranscript: resumeId != nil
         )
+        // Parked on the session rather than passed to `ShimProcess`, because
+        // the shim does not exist yet — `SessionContainer` spawns it lazily
+        // when the pane mounts. `ShimProcess` reads and clears it once the CLI
+        // announces itself.
+        session.pendingInitialPrompt = initialPrompt
         // Don't persist remote-host paths in recents (matches existing behaviour).
         if remoteHost == nil {
             RecentDirectories.add(directory)

@@ -684,6 +684,60 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// hundred — negligible against the 200K it is protecting, but real,
     /// and the reason `KeepAliveGate.promptText` explains itself to a
     /// reader.
+    /// Submit the prompt the user typed on the launch screen, if there is one.
+    ///
+    /// Unlike the recap and the keep-alive — the other two turns Canopy
+    /// injects — this one is **not** synthetic and nothing downstream swallows
+    /// it. The user typed it and expects to see it; it is their first turn,
+    /// merely submitted from a different text field. So no echo tracking, no
+    /// replay filter, and no interlock against the other two: those exist to
+    /// hide a turn, and hiding this one would be the bug.
+    ///
+    /// Clearing `pendingInitialPrompt` on the session is the whole idempotence
+    /// guarantee, and it has to live there rather than in a flag on `self`:
+    /// `init` is re-emitted by every ordinary turn and by a `/model` switch
+    /// (measured — see the swallow branches), and a reconnect builds a new
+    /// `ShimProcess` against the same `OpenSession`, so a per-process flag
+    /// would resubmit the prompt after an SSH drop.
+    func sendPendingInitialPrompt() {
+        guard let session = boundSession,
+              let prompt = session.pendingInitialPrompt,
+              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        guard let channelId else {
+            // Not an error worth clearing the prompt over: `launch_claude` sets
+            // the channel and the backstop recovers it from the next
+            // channel-scoped message, so a later `init` gets another chance.
+            logger.notice("initial prompt: deferred, no channelId yet")
+            return
+        }
+        session.pendingInitialPrompt = nil
+
+        sendToShim([
+            "type": "webview_message",
+            "message": [
+                "type": "io_message",
+                "channelId": channelId,
+                "done": false,
+                "message": [
+                    "type": "user",
+                    "session_id": "",
+                    "origin": ["kind": "human"] as [String: Any],
+                    "parent_tool_use_id": NSNull(),
+                    "uuid": UUID().uuidString.lowercased(),
+                    "message": [
+                        "role": "user",
+                        "content": [["type": "text", "text": prompt]],
+                    ] as [String: Any],
+                ] as [String: Any],
+            ] as [String: Any],
+        ])
+        // `.private` on the text: it is verbatim user content, and these lines
+        // reach disk. The length is public because "did it send" and "did it
+        // send everything" are the two questions this line has to answer.
+        logger.notice("initial prompt: submitted \(prompt.count, privacy: .public) chars")
+    }
+
     func requestKeepAlive(at now: Date) {
         // The coordinator checks the full gate one line before calling, so
         // this is not a live race — it is the same self-guard `requestRecap`
@@ -5268,6 +5322,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             {
                 cliResolvedModel = model
             }
+            // `init` is the CLI saying it is up and will accept a turn, which
+            // is the earliest safe moment to submit the launcher's prompt —
+            // `launch_claude` is too early (the process is only being spawned)
+            // and waiting for anything later means the user watches an empty
+            // pane for no reason. Gated on `subtype` alone rather than sharing
+            // the guard above, because that one additionally requires a
+            // non-empty `model` and this has no business depending on it.
+            if ioMsg["subtype"] as? String == "init" {
+                sendPendingInitialPrompt()
+            }
 
         case "stream_event":
             guard let event = ioMsg["event"] as? [String: Any],
@@ -5759,7 +5823,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Detect VCS type and current branch/bookmark for status bar display.
     /// Checks for jj first (`.jj/` directory), falls back to git.
-    private static func detectVCSInfo(at directory: URL) -> (type: StatusBarData.VCSType, branch: String)? {
+    nonisolated static func detectVCSInfo(at directory: URL) -> (type: StatusBarData.VCSType, branch: String)? {
         let fm = FileManager.default
 
         // Check for jj repo
@@ -5815,7 +5879,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Find an executable by name, checking common locations that GUI apps miss from PATH.
-    private static func findExecutable(_ name: String) -> String? {
+    nonisolated private static func findExecutable(_ name: String) -> String? {
         let searchPaths = [
             "/opt/homebrew/bin",
             "/usr/local/bin",
@@ -5832,7 +5896,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Run a command and return stdout as String, or nil on failure.
-    private static func runCommand(_ executable: String, args: [String], at directory: URL) -> String? {
+    nonisolated private static func runCommand(_ executable: String, args: [String], at directory: URL) -> String? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executable)
         proc.arguments = args

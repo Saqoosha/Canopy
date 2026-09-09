@@ -1808,6 +1808,105 @@ enum SidebarLogicProbe {
             record("title prompts: chunked read with promptless head → tail only", false, "write failed")
         }
 
+        // MARK: Worktree seeding (GitWorktree.shouldSeed / .plan)
+        //
+        // Every constant below is derived from the type it protects, never
+        // re-typed: `paneAbsoluteCap` moved once and two fixtures that had
+        // spelled `5` inline failed as if the cap were broken. Same trap.
+        record("shouldSeed: ordinary artifact",
+               GitWorktree.shouldSeed("node_modules/"))
+        record("shouldSeed: generated Xcode project",
+               GitWorktree.shouldSeed("Canopy.xcodeproj/"))
+        // The whole point of denying by first component rather than by exact
+        // match: git emits the collapsed `.jj/` when the directory is wholly
+        // ignored and individual paths under it when it is not, and an exact
+        // comparison catches only one of those two shapes.
+        record("shouldSeed: denies a collapsed deny-list dir",
+               !GitWorktree.shouldSeed(".jj/"))
+        record("shouldSeed: denies a path UNDER a deny-list dir",
+               !GitWorktree.shouldSeed(".jj/repo/store/blob"))
+        record("shouldSeed: denies every first-component entry",
+               GitWorktree.seedDenyList.allSatisfy { !GitWorktree.shouldSeed($0 + "/x") })
+        // `.claude` as a whole must stay seedable — this is the case that
+        // makes the prefix list a prefix list instead of a fourth entry in
+        // `seedDenyList`, and deleting the distinction leaves it green
+        // everywhere else.
+        record("shouldSeed: allows .claude/settings.local.json",
+               GitWorktree.shouldSeed(".claude/settings.local.json"))
+        record("shouldSeed: denies every worktree-holding prefix",
+               GitWorktree.seedDenyPrefixes.allSatisfy {
+                   !GitWorktree.shouldSeed($0) && !GitWorktree.shouldSeed($0 + "/branch-x")
+               })
+        // A prefix must not match a mere string prefix of a NAME: `.worktrees`
+        // denies `.worktrees/x`, and `.worktreesomething` is a different
+        // directory that has nothing to do with it.
+        record("shouldSeed: prefix does not swallow a longer sibling name",
+               GitWorktree.shouldSeed(".worktreesomething/file"))
+        record("shouldSeed: empty and whitespace",
+               !GitWorktree.shouldSeed("") && !GitWorktree.shouldSeed("   "))
+
+        // The FIFO rule, and the reason `plan`'s default is `.link` rather
+        // than `.skip`: `FileAttributeType` has no FIFO case, so 1Password's
+        // mounted `.env` arrives as `.typeUnknown`. Cloning one produces a
+        // NEW empty pipe and the first read in the worktree blocks forever.
+        record("plan: unknown type (a FIFO) links rather than clones",
+               GitWorktree.plan(for: .typeUnknown) == .link)
+        record("plan: socket links",
+               GitWorktree.plan(for: .typeSocket) == .link)
+        record("plan: regular / directory / symlink all clone",
+               [FileAttributeType.typeRegular, .typeDirectory, .typeSymbolicLink]
+                   .allSatisfy { GitWorktree.plan(for: $0) == .clone })
+
+        // MARK: Branch naming without a model (GitWorktree.slugFromPrompt)
+        record("slug: drops filler, keeps the substance",
+               GitWorktree.slugFromPrompt("Please can you fix the CI assert counts")
+                   == "fix-ci-assert-counts")
+        record("slug: never exceeds the display cap",
+               GitWorktree.slugFromPrompt(String(repeating: "alpha beta ", count: 40))
+                   .count <= GitWorktree.maxBranchNameLength)
+        record("slug: cuts on a word boundary, not mid-word",
+               !GitWorktree.slugFromPrompt(String(repeating: "alpha beta ", count: 40))
+                   .hasSuffix("-"))
+        // A prompt with no ASCII word characters yields "" so the caller falls
+        // through to the timestamp — a name built from nothing is worse.
+        record("slug: all-Japanese prompt yields empty",
+               GitWorktree.slugFromPrompt("ワークツリーの命名を直す") == "")
+        // One word longer than the whole budget must still produce a name;
+        // the assembly loop alone would return "" here.
+        record("slug: single over-long word is truncated, not dropped",
+               GitWorktree.slugFromPrompt(String(repeating: "x", count: 200)).count
+                   == GitWorktree.maxBranchNameLength)
+        // Filler-only input must not reduce to nothing: the filter falls back
+        // to the unfiltered words rather than emptying the name.
+        record("slug: filler-only prompt keeps the words",
+               !GitWorktree.slugFromPrompt("please can you").isEmpty)
+
+        // MARK: Branch naming with a model (WorktreeBranchNamer)
+        record("branch namer: kebab output survives unchanged",
+               WorktreeBranchNamer.sanitize("ci-assert-counts") == "ci-assert-counts")
+        record("branch namer: takes the first non-empty line",
+               WorktreeBranchNamer.sanitize("\n\n  fix-login-race  \n") == "fix-login-race")
+        record("branch namer: forces a legal shape on a disobedient answer",
+               WorktreeBranchNamer.sanitize("\"Fix Login Race!\"") == "fix-login-race")
+        // Prose means the model answered instead of naming. Rejected rather
+        // than slugified, because a truncated paragraph looks deliberate and
+        // describes nothing, and the local slug behind it is better.
+        record("branch namer: prose is rejected, not truncated",
+               WorktreeBranchNamer.sanitize(
+                   String(repeating: "word ", count: WorktreeBranchNamer.maxRawLength)) == nil)
+        record("branch namer: empty output is nil",
+               WorktreeBranchNamer.sanitize("   \n  ") == nil)
+        // The one spelling the CLI rejects outright: a bare `{}` fails with
+        // "mcpServers: Invalid input: expected record, received undefined".
+        record("branch namer: empty MCP map keeps the spelling the CLI accepts",
+               WorktreeBranchNamer.arguments().contains(#"{"mcpServers":{}}"#))
+        record("branch namer: persona fix is present",
+               WorktreeBranchNamer.arguments().contains("--setting-sources"))
+        // Waiting on this one is on the critical path between Start and the
+        // session opening, unlike titling, which runs behind the user's back.
+        record("branch namer: times out sooner than titling",
+               WorktreeBranchNamer.timeout < SessionTitleGenerator.timeout)
+
         record("sanitizeBranchName: spaces → hyphens",
                GitWorktree.sanitizeBranchName("feature my branch") == "feature-my-branch")
         record("sanitizeBranchName: keeps inner slash, strips invalid",
