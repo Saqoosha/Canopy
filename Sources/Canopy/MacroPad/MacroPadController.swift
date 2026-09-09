@@ -1584,8 +1584,9 @@ final class MacroPadController {
         guard pressed else { return }
         // Both presses of the chord focus their panes on the way in, and
         // `focusPane` is not a quiet reassignment: it calls
-        // `NSApp.activate(ignoringOtherApps:)`, orders the window front, and
-        // clears that pane's unread marker. Issue #147 accepted the focus
+        // `NSApp.activate(ignoringOtherApps:)`, orders the window front,
+        // clears that pane's unread marker, and puts the caret in that pane's
+        // composer. Issue #147 accepted the focus
         // change; what it understated is that the app comes forward, and that
         // "nobody is in front of it" is the one thing this gesture cannot
         // assume — it is performed by a person at the desk.
@@ -1830,5 +1831,19 @@ final class MacroPadController {
             window.makeKeyAndOrderFront(nil)
         }
         store.setFocusedPaneIndex(index)
+        // Focus the composer itself, not just the pane. `setFocusedPaneIndex`
+        // hands first-responder to the pane's WKWebView, and that is what
+        // lands the caret in the input — but ONLY when the responder actually
+        // changes: AppKit returns early from `makeFirstResponder` for a view
+        // that already holds it, so pressing the key of the ALREADY-focused
+        // pane sent WebKit nothing at all and the caret never moved. That is
+        // the gesture the pad exists for (come back to the session you were
+        // in), so it is the one that has to work. See `ComposerFocusScript`.
+        //
+        // Unconditional rather than gated on `index != focusedPaneIndex`: one
+        // instruction for both cases is what stops them diverging again, and
+        // the script itself declines to move a caret that is already in the
+        // input.
+        store.focusFocusedPaneComposer()
     }
 }

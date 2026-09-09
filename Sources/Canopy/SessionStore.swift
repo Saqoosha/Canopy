@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Observation
 import SwiftUI
+import WebKit
 import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SessionStore")
@@ -449,6 +450,12 @@ final class SessionStore {
     /// webview firstResponder naturally via AppKit; keyboard-driven focus
     /// changes don't, so we do it manually.
     ///
+    /// This delivers nothing when the target ALREADY holds first responder —
+    /// AppKit returns early without sending become/resign — so re-focusing the
+    /// pane that is already focused reaches here and moves no caret. Every
+    /// route through `setFocusedPaneIndex` / `moveFocus` has that hole; only
+    /// the MacroPad closes it, via `focusFocusedPaneComposer()` below.
+    ///
     /// Callers where this actually matters (target WKWebView is already
     /// mounted): `setFocusedPaneIndex` (Cmd+1..9, tap-to-focus),
     /// `moveFocus` (Cmd+Opt+←/→), `closePane`'s survivor, and
@@ -469,6 +476,61 @@ final class SessionStore {
               let window = webView.window
         else { return }
         window.makeFirstResponder(webView)
+    }
+
+    /// Put the caret in the focused pane's chat composer, at the DOM level.
+    ///
+    /// `makeFocusedPaneKeyResponder()` above cannot do this on its own: AppKit
+    /// returns early from `makeFirstResponder` when the target is already the
+    /// first responder, so on a re-focus of the pane that already has focus
+    /// nothing is sent to WebKit and the caret stays wherever it was. See
+    /// `ComposerFocusScript` for the measurement.
+    ///
+    /// Called only from `MacroPadController.focusPane`, deliberately. A pad
+    /// press is "put me in that session now" and carries no other meaning;
+    /// every other route through `setFocusedPaneIndex` / `moveFocus` is pane
+    /// navigation, and moving the caret for those would be a behaviour change
+    /// nobody asked for. That single-caller rule is unenforced by design —
+    /// this cannot be `private` because the only caller lives in another file.
+    ///
+    /// A launcher pane is skipped: its prompt box is a native SwiftUI field
+    /// with no webview to evaluate anything in.
+    func focusFocusedPaneComposer() {
+        guard let pane = focusedPane,
+              case .session(let id) = pane.content,
+              let webView = openSessions.first(where: { $0.id == id })?.webView
+        else { return }
+        webView.evaluateJavaScript(ComposerFocusScript.expression) { result, error in
+            if let error {
+                logger.error("focusFocusedPaneComposer JS error: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard let outcome = (result as? String).flatMap(ComposerFocusScript.Outcome.init(rawValue:)) else {
+                logger.notice("focusFocusedPaneComposer: unexpected result \(String(describing: result), privacy: .public)")
+                return
+            }
+            switch outcome {
+            case .focused, .alreadyFocused:
+                logger.debug("focusFocusedPaneComposer: \(outcome.rawValue, privacy: .public)")
+            case .noInput:
+                // `notice`, not `debug`: the input failing the shape heuristic
+                // is how a CC extension DOM change would surface here, and
+                // from the user's chair it is indistinguishable from the pad
+                // being disconnected. `info` would be ring-buffer only.
+                //
+                // Benign causes land here too and will write this line saying
+                // nothing happened, which cuts against the background-reconcile
+                // rule that such lines stay `debug`. See `Outcome.noInput` for
+                // the full set; the routine one is a pending permission request
+                // with an empty composer, which the extension hides outright.
+                // Nothing on this side can separate them: a `.spawning` gate
+                // would not cover that case, and the JS cannot report a cause
+                // it would have to recognise the extension's own DOM to name.
+                // Accepted at one line per pad press, because the alternative
+                // is losing the regression signal entirely.
+                logger.notice("focusFocusedPaneComposer: no chat input matched the shape heuristic")
+            }
+        }
     }
 
     /// Whether `id` is the session the FOCUSED pane is showing.
