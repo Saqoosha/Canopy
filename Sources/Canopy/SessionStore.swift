@@ -488,8 +488,10 @@ final class SessionStore {
     ///
     /// Called only from `MacroPadController.focusPane`, deliberately. A pad
     /// press is "put me in that session now" and carries no other meaning;
-    /// Cmd+1..9 and tap-to-focus are pane navigation, and moving the caret for
-    /// them would be a behaviour change nobody asked for.
+    /// every other route through `setFocusedPaneIndex` / `moveFocus` is pane
+    /// navigation, and moving the caret for those would be a behaviour change
+    /// nobody asked for. That single-caller rule is unenforced by design —
+    /// this cannot be `private` because the only caller lives in another file.
     ///
     /// A launcher pane is skipped: its prompt box is a native SwiftUI field
     /// with no webview to evaluate anything in.
@@ -519,11 +521,11 @@ final class SessionStore {
                 // The benign not-yet-mounted case (a `.spawning` pane, the
                 // auth screen) lands here too and will write this line saying
                 // nothing happened, which cuts against the background-reconcile
-                // rule that such lines stay `debug`. Accepted deliberately: the
-                // volume is one line per pad press, and splitting the two apart
-                // would need the JS to distinguish "no document yet" from "a
-                // document with no input", which is the regression signal
-                // itself.
+                // rule that such lines stay `debug`. Splitting the two apart is
+                // possible — the caller holds the `OpenSession` and could gate
+                // on `.spawning` — and is not done because the volume is one
+                // line per pad press and a status check carries its own
+                // staleness. A cost call, not an impossibility.
                 logger.notice("focusFocusedPaneComposer: no chat input matched the shape heuristic")
             }
         }

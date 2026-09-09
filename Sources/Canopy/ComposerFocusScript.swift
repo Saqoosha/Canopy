@@ -2,32 +2,21 @@ import Foundation
 
 /// Puts the caret in a session's chat composer from Swift, at the DOM level.
 ///
-/// Every other focus path in Canopy runs through the AppKit responder chain
-/// (`SessionStore.makeFocusedPaneKeyResponder`, plus `WebViewContainer`'s two
-/// post-mount handoffs), and that chain cannot express "focus it again".
-/// **`NSWindow.makeFirstResponder(_:)` on a view that is ALREADY the first
-/// responder returns `true` without sending `resignFirstResponder` or
-/// `becomeFirstResponder`** — measured with a two-view AppKit probe. So a
-/// MacroPad press on the pane that already holds focus reached that handoff
-/// and sent WebKit nothing. Note the scope: the REST of `focusPane` still ran
-/// — it activates the app, orders the window front and clears that pane's
-/// unread mark — so the press was never inert, it just never moved the caret.
-/// Coming back to the session you were already in is the gesture the pad
-/// exists for, and it was the one gesture that did not finish.
+/// The MacroPad needs this because the AppKit responder chain cannot express
+/// "focus it again". **`NSWindow.makeFirstResponder(_:)` on a view that is
+/// ALREADY the first responder returns `true` without sending
+/// `resignFirstResponder` or `becomeFirstResponder`** — measured with a
+/// two-view probe. So a press on the pane that already held focus reached
+/// `SessionStore.makeFocusedPaneKeyResponder` and sent WebKit nothing. Only
+/// that handoff was inert: the rest of `focusPane` still activated the app,
+/// ordered the window front and cleared the unread mark, so the press moved
+/// everything except the caret.
 ///
-/// Focusing at the DOM level closes that without depending on the responder
-/// changing: it is the same instruction whether or not the pane changed, so
-/// the two cases cannot diverge again. It is NOT independent of WebKit's own
+/// Focusing at the DOM level does not depend on the responder changing, so
+/// the same-pane and cross-pane presses run one instruction and cannot
+/// diverge again. It is NOT ordered against WebKit's own
 /// restore-on-becoming-first-responder — on a cross-pane press both are in
-/// flight and their order has never been isolated (see the MacroPad
-/// learnings, which record what the hardware run does and does not settle).
-///
-/// The input is located by SHAPE, never by the extension's hashed class names
-/// — same reason as `InputWidthProbe` and `RecapScript` (`inputContainer_cKsPxg`
-/// churns every extension release). It is NOT the same shape as theirs, and
-/// `findInputEl` below carries the measurement for why: their selector is
-/// right for taking a measurement and wrong for taking an action, because two
-/// of its three clauses match only elements this must never focus.
+/// flight, and which lands last has never been isolated.
 enum ComposerFocusScript {
     /// Result strings the expression can evaluate to. Swift-side callers log
     /// them; they are also what makes a selector regression visible, since
@@ -39,16 +28,16 @@ enum ComposerFocusScript {
         /// The composer already WAS `document.activeElement`, so nothing was
         /// done and — deliberately — no caret was moved (see `expression`).
         /// Read that property for what it is: the document's last-focused
-        /// element, which survives the window losing key status. It is not
-        /// "currently holds keyboard focus", and the looser meaning is the one
-        /// wanted here — an element that is still the document's focused one
-        /// gets the caret back from WebKit on activation without any help.
-        /// Both observed hardware presses returned `focused`, so this branch
-        /// is unmeasured rather than ruled out.
+        /// element, which survives the window losing key status, not
+        /// "currently holds keyboard focus". Both observed hardware presses
+        /// returned `focused`, so this branch is unmeasured rather than ruled
+        /// out.
         case alreadyFocused = "already-focused"
-        /// No input matched the shape heuristic. Either the page has not
-        /// mounted one yet (auth screen, first paint) or the extension's DOM
-        /// moved out from under the heuristic.
+        /// Nothing matched. Either the page has not mounted a composer yet
+        /// (auth screen, first paint), or the composer lost the
+        /// `role="textbox"` + `contenteditable` pair `findInputEl` asks for —
+        /// an attribute-level drift, which is the specific failure that
+        /// selector choice buys.
         case noInput = "no-input"
     }
 
@@ -62,45 +51,44 @@ enum ComposerFocusScript {
     static let expression = """
     (function () {
       function findInputEl() {
-        // NOT the same selector as InputWidthProbe.findInputEl, and the
-        // difference is measured rather than stylistic. Against the bundled
-        // extension 2.1.263:
+        // The composer is the one element that is BOTH `contenteditable` and
+        // `role="textbox"`. Measured against the bundled extension 2.1.263,
+        // where each half ALONE matches something this must never focus:
         //
-        //   - the composer is `contentEditable:"plaintext-only"` with
-        //     `role:"textbox"` and `aria-label:"Message input"`. Attribute
-        //     selectors match on the exact value, so the probe's
-        //     `[contenteditable="true"]` clause never matches it — the
-        //     `[role="textbox"]` clause is the one carrying it, and it is the
-        //     bundle's only `role:"textbox"`.
-        //   - `[contenteditable="true"]` matches exactly three things, all of
-        //     them elements we must NOT focus: a Bash permission request's
-        //     editable command box (`permissionRequestInput bashCommand`) and
-        //     the sidebar's session/group rename-in-place spans.
-        //   - `[contenteditable="plaintext-only"]` additionally matches
-        //     AskUserQuestion's "Other" field and the permission dialog's
-        //     "Tell Claude what to do instead" box.
+        //   - `[role="textbox"]` also matches Monaco's hidden `inputarea` — a
+        //     real <textarea> that does `setAttribute("role","textbox")` and
+        //     `setAttribute("aria-multiline","true")`, so neither attribute
+        //     discriminates. It is mounted by Canopy's own ContentViewer and
+        //     by the extension's diff editor, and it is a positioned,
+        //     non-zero-sized element, so the viewport gate does not drop it.
+        //   - `[contenteditable]` also matches a Bash permission request's
+        //     editable command box, AskUserQuestion's "Other" field, the
+        //     permission dialog's reject box, and the sidebar's
+        //     rename-in-place spans. The first three render inside the
+        //     composer overlay AHEAD of the input, so a first-match scan
+        //     reaches them first — and they appear in the `asking` state,
+        //     which is the raised-hand LED, i.e. the press this feature most
+        //     exists to serve. Landing there would put the user's next
+        //     keystroke into a command box.
         //
-        // Those wrong elements cluster in the `asking` state — the raised-hand
-        // LED, i.e. the single press this feature exists to serve — and they
-        // sit near the bottom of the viewport, so a first-match-wins scan over
-        // the generic shapes redirects the user's next keystroke into a
-        // command box. Ask for the composer's own signature instead.
+        // Note the spelling trap in the second bullet: the composer is
+        // `contenteditable="plaintext-only"`, and attribute selectors match on
+        // the exact value, so `InputWidthProbe`'s `[contenteditable="true"]`
+        // never matches it at all. Presence, not value, is what is wanted.
         var vh = window.innerHeight || document.documentElement.clientHeight;
-        var candidates = document.querySelectorAll('[role="textbox"]');
+        var candidates = document.querySelectorAll('[role="textbox"][contenteditable]');
         for (var i = 0; i < candidates.length; i++) {
-          // Bottom half of the viewport, so a future second textbox mounted
-          // above the fold can't win ahead of the composer.
+          // Bottom half of the viewport, so a future second composer-shaped
+          // element above the fold can't win ahead of the real one.
           var rect = candidates[i].getBoundingClientRect();
           if (rect.bottom > vh * 0.5 && rect.width > 0) return candidates[i];
         }
-        // No fallback, and that is the other deliberate divergence. The two
-        // sibling copies fall through to `candidates[0]` when nothing passes
-        // the gate, because a width measured off the wrong element is a
-        // cosmetic misalignment. Here the consequence is an action, and the
-        // fallback would also report `focused`, swallowing the `no-input`
-        // signal that is the only way a DOM change surfaces here. If the
-        // extension ever drops `role="textbox"`, this returns null and says
-        // so — loudly not working beats quietly focusing the wrong thing.
+        // No `candidates[0]` fallback, unlike the sibling copies of this
+        // scan. Theirs report a measurement, where a mispick is a cosmetic
+        // misalignment; this one takes an action, and a mispick would also
+        // return `focused` and swallow the `no-input` signal that is the only
+        // way a DOM change surfaces here. Loudly not working beats quietly
+        // focusing the wrong thing.
         return null;
       }
 
