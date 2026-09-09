@@ -22,18 +22,28 @@ remote に出ているのは **CLI の spawn だけ**。WKWebView も shim も e
 **境界が CLI spawn にあること**の帰結で、原因は 1 行で言える —— *extension.js が
 local で走り、それが読みたいファイルは remote にある*。
 
-| 症状 | 読みたいもの | 実際の所在 |
+| 症状 | 読むのは誰か | 読みたいものの所在 |
 |---|---|---|
-| transcript が描画されない | セッション JSONL | remote |
-| `@`-mention のファイル一覧が空 | `workspace.fs` / `findFiles` | local を見る |
-| `open_file` が読めない | 対象ファイル | remote |
-| peer name の chip が出ない | `~/.claude/sessions/<pid>.json` | remote（かつ socket も remote） |
-| 背景タスクの hourglass が残る | 完了マーカーの JSONL scan | remote |
-| Continue session が効かなかった | 直近セッションの header | remote |
+| transcript が描画されない | extension | remote |
+| `@`-mention のファイル一覧が空 | extension（`workspace.fs` / `findFiles`） | remote |
+| `open_file` が読めない | extension | remote |
+| Continue session が効かなかった | extension | remote |
+| 背景タスクの hourglass が残る | **`ShimProcess`**（`jsonlPath`） | remote |
 
-最後の 1 行だけは既に塞いである。`RemoteSessionHistory` が SSH 越しに header を
-streaming で読む。**つまり「穴を 1 個ずつ SSH RPC で塞ぐ」やり方の実装コストは
-既知**で、あのファイル 1 本ぶん。残りは 5 個。
+**「読むのは誰か」の列が、この表の要。** 上 4 行は extension が読むので、
+extension ごと remote に移せば全部 local になる。**最下行だけは違う** ——
+背景タスクの reconcile を走らせるのは `ShimProcess` で、それは Swift 側・
+local に残る。境界を上げても**この 1 行は直らない**。
+
+peer name の chip が出ない件を、初稿ではここに 6 行目として書いていた。**削除した。**
+peer messaging はマシンローカルで、CLAUDE.md が
+*"a remote session is not a peer and correctly shows no name … Check a record
+before reopening this."* と明記している。限界ではなく正しい挙動で、
+実際 studio の実測でも chip は出ていない。
+
+4 行目は既に塞いである。`RemoteSessionHistory` が SSH 越しに header を streaming で
+読む。**つまり「穴を 1 個ずつ SSH RPC で塞ぐ」やり方の実装コストは既知**で、
+あのファイル 1 本ぶん。
 
 ## herdr の置き方
 
@@ -46,22 +56,22 @@ client だけだから。
 再接続もマシンごとに独立で、切れている間はキャッシュを dim 表示にする。
 「同じに扱える」の正体は魔法ではなく、**ランタイムを各マシンに複製したこと**。
 
-## Canopy に写すと境界候補は 3 つ
+## Canopy への写像 —— 境界候補 3 つ
 
 現在の境界（CLI spawn）を含めて、上から順に。
 
-### 案 A — 境界は据え置き、穴を個別 RPC で塞ぐ
+### 案 A —— 境界据え置き、穴の個別 RPC 化
 
 Next Steps の Phase 2 がこれ。`workspace.fs` / `findFiles` / `open_file` を
 SSH RPC に差し替える。
 
 - 効く: `@`-mention、`open_file`
 - 効かない: transcript 描画。あれは extension.js が local disk を前提にする層が
-  もっと深く、RPC 1 本では届かない。peer name も届かない（socket が remote）
+  もっと深く、RPC 1 本では届かない
 - コスト: 穴の数だけ。1 個の相場は `RemoteSessionHistory` 1 本ぶん
 - リスク: 低い。既存の経路を壊さない
 
-### 案 B — shim を remote に置く
+### 案 B —— shim の remote 配置
 
 ```swift
 proc.executableURL = URL(fileURLWithPath: nodeInfo.path)   // 今
@@ -70,8 +80,10 @@ proc.arguments = [host, "node", remoteShimPath, "--extension-path", …]
 ```
 
 **NDJSON パイプがそのまま SSH channel になる。** ShimProcess から下が丸ごと
-remote に移るので、上の表の 6 行が同時に消える。`~/.claude/projects` も
-CLI spawn も `workspace.fs` も peer socket も、全部 remote 側で local として解決する。
+remote に移るので、**上の表の「extension が読む」4 行が同時に消える**。
+`~/.claude/projects` も CLI spawn も `workspace.fs` も、全部 remote 側で local として
+解決する。**hourglass の 1 行は消えない** —— あれを読むのは `ShimProcess` で、
+それは local に残る。
 
 消えるものが多い。`ssh-claude-wrapper.sh` とその env 転送・`--resume` 追記・
 `--model`/`--effort` フラグ化、`vscode-shim/index.js` の `fs.realpathSync` パッチと
@@ -85,28 +97,24 @@ CLI spawn も `workspace.fs` も peer socket も、全部 remote 側で local �
    `file://` で読み込まれる（`WebViewContainer` の entry HTML）。WKWebView は remote の
    `file://` を読めないので、これは動かせない。shim は remote の extension.js を実行する。
    結果、**extension のコピーが 2 つになり、そのバージョン整合が新しい制約**になる。
-   `ExtensionUpdater` は local の 1 本しか知らない。今日この 2 台は偶然そろっている
-   （両方 Canopy 2.28.1 / extension 2.1.263）が、**そろえているものは何も無い**。
-   片方だけ更新されたときに何が起きるかは未測定
-2. **remote に CC extension と node ≥ 18 が要る（実測: mbp では既に揃っている）。**
+   `ExtensionUpdater` は local の 1 本しか知らない。**現に食い違っている** ——
+   local が extension 2.1.263、studio が 2.1.266。実測ではこの組み合わせで動いたが、
+   **そろえているものは何も無い**し、どこまで離れると壊れるかは未測定
+2. **remote に CC extension と node ≥ 18 が要る（studio で充足を確認）。**
    herdr が remote に herdr を入れるのと同型で、herdr はそこを
    「approval-based setup」で処理している。ただし *Canopy が入っている* マシンでは
-   前提が最初から満たされる —— mbp は Canopy.app 2.28.1・Canopy 管理の extension
-   2.1.263・node v24.11.1 を持っており、shim もアプリバンドルの
-   `Contents/Resources/vscode-shim/` に 12 モジュール揃っている。**配布が要るのは
-   Canopy を入れていない remote だけ**で、これは当初の見積もりより狭い
-3. **auth の経路は変わらない（実測で棄却）。** ここは当初「remote に macOS Keychain が
-   無いから刺さる」と書き、次に「SSH セッションが login keychain を解錠できないから
-   刺さる」と書いた。**どちらも違う。** local で同じ probe を走らせたら、
-   `Keychain read failed, trying file fallback` → `No authentication found` が
-   **一字一句同じに出た**。`init_response` と `update_state` の `state` から
-   `authStatus` キーが欠けているのも local と remote で同一。
-   つまり拡張の AuthManager は **local でも認証を持っていない**。Canopy が動くのは
-   `ShimProcess.swift:2753` の注入が *唯一の* auth 経路だからで、その注入は
-   Swift 側・パイプの local 側で起きる。案 B でも ShimProcess は local に残るので、
-   **この経路は丸ごと無傷**。remote の CLI は自分の `~/.claude/.credentials.json`
-   （mbp に実在、mode 0600）を読むので、CLI 側も無傷。
-   詳細と、この項が 2 回間違った理由は「実測結果」節に書いた
+   前提が最初から満たされる —— studio は Canopy.app・CLI 2.1.266・Canopy 管理の
+   extension 2.1.266 を持ち、shim もアプリバンドルに揃っている。**配布が要るのは
+   Canopy を入れていない remote だけ**で、これは当初の見積もりより狭い。
+   ただし probe は `/Applications/Canopy.app` を決め打ちするので、
+   `~/Applications` に置いた Canopy は「入っていない」と報告される
+3. **auth は刺さる。** ここは当初「remote に macOS Keychain が無いから」と書き、
+   次に「SSH セッションが keychain を解錠できないから」と書き、次に
+   「経路は変わらない」と棄却した。**最後の棄却が誤り**で、実機がそれを覆した。
+   刺さるのは事実で、機序は SSH セッションが login keychain を解錠できないこと。
+   詳細と、この項が結論を 3 回変えた経緯は「オンデバイス実測」節に書いた。
+   出荷形での解き方は「出荷形の設計 §1」——
+   注入をやめ、remote の CLI に `claude auth status --json` で聞く
 4. **`--settings-path` は local のパス。** `CanopySettings.shared.filePath` を渡している。
    remote 側で何を読ませるかは未決。remote の `~/.claude/settings.json` を
    直接書く形にすると、共有ファイルを触ることになる
@@ -190,7 +198,7 @@ remote に headless Canopy を常駐させ、local は client に徹する。
 SSH の keychain 制約は実在するが、**観測した症状の原因ではない**。
 
 結論の向きが逆になる。Canopy の auth は最初から
-`ShimProcess.swift:2753` の注入 1 本で立っており、それは Swift 側・パイプの
+`patchAuthIfNeeded` の `init_response` 分岐にある注入 1 本で立っており、それは Swift 側・パイプの
 local 側で起きる。**案 B は auth を何も変えない。** ぼくの実験が未認証だったのは
 remote だからではなく、`ShimProcess` を通さず生の shim を叩いたからで、
 注入する主体が居なかっただけ。
@@ -326,14 +334,15 @@ replay される」状態に当たる可能性がある。スパイクがこの�
    今日はそろっているので、壊し方を作らないと測れない
 4. **レイテンシとフレーム数**（7）。案 B の採否は変えないが、体感を決める
 
-auth（3）はこの表から降りた。上の実測で、案 B が何も変えないことが分かったため。
+auth（3）はこの表から降りた —— 解決したからではなく、**設計の中心に昇格した**ため。
+「出荷形の設計 §1」を見よ。
 
 ## 出荷形の設計
 
 スパイクは「動く」ことだけを示した。ここから先は、スパイクが**逃げた**ところを
 どう本気で解くか。7 点あり、1 番が設計の中心で、残りは作業に近い。
 
-### 1. auth —— 注入をやめ、remote の CLI に聞く
+### 1. auth —— 注入の廃止と remote CLI への問い合わせ
 
 **スパイクは嘘をついている。** `update_state` に **ローカルの** Keychain から
 authStatus を注入するので、webview は「ローカルのアカウントで認証済み」と表示する
@@ -364,7 +373,7 @@ authStatus は remote の CLI から作る。これで 3 つ同時に片付く: 
 未解決: `loggedIn: false` の remote をどう見せるか。ローカルにフォールバックしては
 いけない —— それがまさにスパイクの嘘。remote 固有のログイン導線が要る。
 
-### 2. パス解決 —— 非同期にし、auth と 1 往復にまとめる
+### 2. パス解決 —— 非同期化と auth との 1 往復統合
 
 `spikeRemotePaths` は main actor を同期 SSH でブロックする。上の auth 問い合わせも
 SSH なので、**1 回の `ssh bash -s` でパスと auth を一緒に返す**のが素直。
@@ -372,14 +381,14 @@ SSH なので、**1 回の `ssh bash -s` でパスと auth を一緒に返す**�
 キャッシュの無効化条件は「shim の spawn に失敗したとき」——
 remote の Canopy 入れ替えを検出する手段はそれしかない。
 
-### 3. 純粋関数を probe で pin する
+### 3. 純粋関数の probe による pin
 
 `spikeHostIsWellFormed`、`spikeSSHArguments`、そして上の authStatus マッピング。
 いまは `--` を消しても host 検証を消しても suite が緑のまま。
 この repo の floor はアサーションを数えるだけで、それが何かを守っている証明には
 ならない —— 変異させて赤くなることを確認する。
 
-### 4. model / effort —— 未解決、選択肢は 2 つ
+### 4. model / effort —— 未解決、選択肢 2 つ
 
 wrapper が消えると `CANOPY_REMOTE_MODEL` → `--model` の経路も消える。
 (a) remote の `~/.claude/settings.json` を書く（**共有ファイルを触る**ので、
@@ -393,18 +402,65 @@ model/effort だけを足す最小の wrapper にする（`workspace.js` の `en
 明示的なエラーで止める。herdr はここを「approval-based setup」で解いており、
 それが最終形。node と extension と shim の 3 つを配る話になるので、別の仕事。
 
-### 6. バージョン skew —— 検出するが強制しない
+### 6. バージョン skew —— 検出のみ、強制なし
 
 webview は**ローカルの** extension、shim は remote の extension を実行する。
 2.1.263 対 2.1.266 では動いた。壊れる幅は未測定なので、まずは**両方のバージョンを
 ログと status bar に出す**。食い違いで拒否するのは、壊れ方を 1 つでも観測してから。
 
-### 7. 2 経路 —— 同時には消さない
+### 7. 2 経路 —— 同時削除の回避
 
 `ssh-claude-wrapper.sh`、`CANOPY_REMOTE_*`、`RemoteSessionHistory`、
 `index.js` の fs/spawn パッチは、この設計が完成すると**全部不要**になる。
 ただし同じ変更で消さない: 設定で新旧を切り替えられる状態を一度作り、
 新経路が実地で持つことを確認してから消す。**削除は別 PR。**
+
+## レビューで出た未修正（挙動を足す変更なので提案に留めた）
+
+8 本のレビュアーを回した。コメントと doc の**偽の主張は全部消した**し、既存 helper に
+寄せられるものは寄せた。以下は**実行時の挙動を足す**修正で、スパイクの段階で
+入れると「守りの分岐が増えて、壊れていないときに発火する」側に倒れるので、
+提案として残す。重い順。
+
+1. **ssh が spawn 後に死ぬと、ペインが無言で消える。** `start()` は ssh が起動できた
+   時点で `true` を返す。存在しない host も、鍵拒否も、未登録 host key も、起動自体は
+   成功して 255 で即死する。`activeSessionId` はまだ nil なので `handleProcessExit` は
+   crash 側に落ち、ペインが閉じる —— issue #193 の症状そのもので、**#194 の
+   `lastFatalError` が繋がっていない**。ssh の stderr は `info` なので数分で消える。
+   最小の直しは「spike の失敗を全部 `boundSession?.lastFatalError` に載せる」1 点で、
+   これだけで下の 2・3・4 が同時に可視化される
+2. **再接続が終わらない。** `shimProcessDidDisconnect` が毎回 `reconnectAttempt` を 0 に
+   戻し、`doReconnect` は `start()` が true を返した時点で `.connected` を宣言する。
+   スパイクではそれは「ssh が実行可能だった」以上の意味を持たないので、
+   ssh 起動 → 10 秒で死ぬ → カウンタ 0 → 3 秒待つ、が無限に続く。
+   **この経路は今まで死にコードだった**（Phase 3.1 の既知欠陥どおり node が生き残るので
+   `terminationHandler` が発火しなかった）。**スパイクがそれを主経路に昇格させた**ので、
+   潜在バグが一緒に出荷される
+3. **カスタム API の送信先が remote に届かない。** `ANTHROPIC_BASE_URL` /
+   `ANTHROPIC_AUTH_TOKEN` は local の ssh プロセスに設定され、ssh は環境を転送しない。
+   wrapper 経路は明示的に転送している。結果、**ユーザが選んでいない endpoint に会話が
+   送られる**。ログも UI 差分も無い。「動いているときにも見えない」ので、
+   この一覧でいちばん質が悪い。直すなら転送ではなく**起動前に拒否**すべき ——
+   local の proxy を指す `ANTHROPIC_BASE_URL` を remote に転送すると、
+   remote の localhost を指してしまう
+4. **probe が ssh の stderr を捨て、全部の失敗が 1 つの誤ったメッセージになる。**
+   `Host key verification failed`、`Permission denied (publickey)`、名前解決失敗、
+   到達不能 —— 全部が "Is Canopy installed there?" になる。probe 自身は
+   exit 3 / 4 で「extension が無い」「shim が無い」を区別して**いる**のに、
+   Swift 側が捨てている
+5. **probe に hard deadline が無く、失敗をキャッシュしない。** `ConnectTimeout` は TCP
+   connect しか覆わないので、banner / 鍵交換で止まる host や、詰まる `ProxyCommand` は
+   素通り。しかも成功しかキャッシュしないため、**壊れた host は spawn ごとに毎回
+   ブロックを払う** —— 3 ペインの復元なら 3 回連続でアプリ全体が固まる
+6. **キャッシュに無効化が無い。** `extensionPath` は extension 更新のたびに動くので、
+   remote が自動更新した瞬間からそのプロセスの以後のセッションが全部落ちる
+7. **spike なのに local の node / shim / extension / wrapper が必須。** どれも spike では
+   使わないのに、無いと `start()` が false を返す。しかも文言が誤診を招く
+   （"Install it in VSCode first." / "wrapper script not found."）
+8. **remote のプロセス回収が効かない。** `stop()` の `collectDescendants` が見るのは
+   local の ssh の子で、remote の node と CLI には届かない。通常は stdin close で
+   remote の shim が自ら終わるが、蓋を閉じた half-open のような切れ方では
+   remote が生き残りうる。ローカルからは観測できない
 
 ## 保留（findings、この設計の外）
 
@@ -440,12 +496,18 @@ webview は**ローカルの** extension、shim は remote の extension を実�
 
 - **既存の ssh 呼び出しに `--` が無い。** `ssh` は先頭が `-` の引数をフラグとして
   読むので、host 文字列が `-oProxyCommand=…` だと接続前に任意コマンドが走る。
-  スパイクが足した 2 箇所は `--` と `spikeHostIsWellFormed` で塞いだが、
-  `RemoteSessionHistory.swift:343`、`RemoteDirectoryBrowser.swift:216`、
-  `ssh-claude-wrapper.sh` の 2 行は同じ形のまま。host はランチャーの入力欄・
-  `SSHHostStore`・restore snapshot から来るので権限境界は越えない（書ける相手は
-  すでにこのユーザとして任意コマンドを実行できる）。実害より footgun の話で、
-  直すなら 1 箇所ずつではなく入口で 1 回検証する形にすべき
+  スパイクが足した 2 箇所は `--` で塞ぎ、検証は
+  **既存の `RemoteSessionHistory.isSpawnableHost` を呼ぶ**形にした（初稿は独自の
+  文字集合検証を書いていたが、それは `isSpawnableHost` の doc が
+  「厳しくすると正当な host を弾く」と明示的に退けている手で、実際
+  `fe80::1%en0` を弾いた。削除した）。
+  **残る露出は初稿の記述より狭い** —— `RemoteSessionHistory` は `--` こそ無いが
+  `latestSession` が `isSpawnableHost` で弾いており、無防備なのは
+  `RemoteDirectoryBrowser.swift:216` と `ssh-claude-wrapper.sh` の 2 行。
+  host はランチャーの入力欄・`SSHHostStore`・restore snapshot から来るので権限境界は
+  越えない（書ける相手はすでにこのユーザとして任意コマンドを実行できる）。
+  実害より footgun の話。直すなら入口で 1 回検証する形にすべきで、
+  その入口は既に `isSpawnableHost` として存在する
 
 - 永続化（案 C）。要求が出ていない
 - 複数 remote の集約 sidebar。herdr の machine list 相当。Canopy の sidebar は
