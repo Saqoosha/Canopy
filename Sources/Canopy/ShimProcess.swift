@@ -1713,8 +1713,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The probe is fed over stdin (`bash -s`) because `ssh host cmd args…`
     /// hands its joined arguments to the remote LOGIN shell, which is fish on
     /// the hosts this was built against — and a standalone `VAR=value` is a
-    /// parse error there, so the script would die on its first line. Measured
-    /// on fish 4.9.3.
+    /// parse error there. fish rejects the whole buffer before running
+    /// anything, so the probe would produce nothing at all and exit 127.
+    /// Measured on fish 4.9.3.
     static func spikeRemotePaths(host: String) -> SpikeRemotePaths? {
         if let cached = spikeRemotePathCache[host] { return cached }
 
@@ -1748,18 +1749,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.error("SPIKE: ssh probe failed to launch: \(error.localizedDescription, privacy: .public)")
             return nil
         }
-        // `F_SETNOSIGPIPE` is required, not belt and braces. ssh exits within
-        // milliseconds on an unresolvable host or a refused key, so a write
-        // into a pipe with no reader left is the ordinary case here — and the
-        // default disposition KILLS the process. Canopy sets no
-        // `signal(SIGPIPE, SIG_IGN)` anywhere. Measured on this machine, pipe
-        // fd, writing after closing the read end: default → killed by signal
-        // 13; with this fcntl → `fcntl` returns 0 and the write returns EPIPE.
-        // (Guidance that `F_SETNOSIGPIPE` is socket-only is wrong for pipes on
-        // macOS; that was measured because two reviewers disagreed about it.)
-        // Switching to the throwing overload alone does NOT close this — the
-        // signal arrives at `write(2)`, so nothing is ever thrown.
-        fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        // `F_SETNOSIGPIPE` is required, not belt and braces. Canopy sets no
+        // `signal(SIGPIPE, SIG_IGN)` anywhere, so the default disposition KILLS
+        // the process on a write into a pipe with no reader left — and ssh
+        // exits within milliseconds on an unresolvable host or a refused key.
+        // `man 2 fcntl` documents this flag for "a write fails on a pipe or
+        // socket", so the guidance that it is socket-only is wrong; measured
+        // too, because two reviewers disagreed: default → signal 13, with the
+        // flag → EPIPE.
+        //
+        // Switching to the throwing overload alone does NOT close this. The
+        // signal arrives inside `write(2)`, so nothing is ever thrown and the
+        // catch never runs. **That applies to every other `FileHandle` write to
+        // a subprocess in this codebase** — `sendToShim`,
+        // `RemoteSessionsBridge` and `SessionTitleGenerator` all use the
+        // throwing form and none of them sets this flag. Those are pre-existing
+        // and out of this branch's scope, but the throwing form must not be
+        // read as protection there either.
+        //
+        // Checked rather than discarded, matching `MacroPadDevice`'s
+        // `SO_NOSIGPIPE` guard: a silent failure here is not survivable later —
+        // it restores exactly the kill this call exists to prevent, at a write
+        // that would otherwise look fine.
+        guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            logger.error(
+                "SPIKE: fcntl(F_SETNOSIGPIPE) failed: \(String(cString: strerror(errno)), privacy: .public)"
+            )
+            proc.terminate()
+            return nil
+        }
         do {
             try inPipe.fileHandleForWriting.write(contentsOf: Data(probe.utf8))
         } catch {
@@ -1775,6 +1793,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // reported as `exit 0`. The failable initializer is deliberate:
         // `String(decoding:as:)` substitutes U+FFFD instead of failing, which
         // would let a mangled path through into the cache and on to `node`.
+        // The whole-buffer-nil hazard this file records elsewhere does not
+        // apply — that is about a multi-byte sequence split across two chunked
+        // reads, and `readDataToEndOfFile()` returns a complete buffer.
         guard proc.terminationStatus == 0 else {
             logger.error("SPIKE: ssh probe exit \(proc.terminationStatus, privacy: .public)")
             return nil
@@ -1806,6 +1827,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// constraint `ssh-claude-wrapper.sh` documents. `exec` is used so the
     /// remote shell is replaced by node and there is no extra process between
     /// the SSH channel and the NDJSON.
+    ///
+    /// The `bash -s` trick the probe uses is NOT available here: stdin is the
+    /// NDJSON channel, so this hands a command string to that same fish login
+    /// shell. `q()`'s POSIX `'\''` idiom was verified to survive fish — but
+    /// only the apostrophe was; fish also treats `\` as an escape inside single
+    /// quotes, so a `cwd` containing one arrives mangled and a trailing one
+    /// aborts the command. Recorded in the memo, not fixed here.
     ///
     /// **`--resume` and `--permission-mode` are inert.** `vscode-shim/index.js`
     /// parses both into `args` and reads neither again; they mirror the local

@@ -38,7 +38,8 @@ extension が読むものは extension ごと remote へ移るので local に�
 stat する。どちらも remote のファイルには届かない。
 
 初稿はこの列を持たず、5 行とも「remote にある」とだけ書いて全部直ることにしていた。
-**下 2 行は直らない。** 境界を上げて得られるのは 3 行であって 5 行ではない。
+**下 2 行は直らない**し、Continue session は precheck の側だけ。境界を上げて得られるのは
+**2 行と半分**であって 5 行ではない。
 
 peer name の chip が出ない件を、初稿ではここに 6 行目として書いていた。**削除した。**
 peer messaging はマシンローカルで、CLAUDE.md が
@@ -88,7 +89,8 @@ proc.arguments = [host, "node", remoteShimPath, "--extension-path", …]
 ```
 
 **NDJSON パイプがそのまま SSH channel になる。** ShimProcess から下が丸ごと
-remote に移るので、**上の表の「extension が読む」3 行が同時に消える**。
+remote に移るので、**上の表の「extension が読む」2 行と、Continue session の precheck
+の側が同時に消える**。
 `~/.claude/projects` も CLI spawn も `workspace.fs` も、全部 remote 側で local として
 解決する。**下 2 行は消えない** —— `open_file` と hourglass を読むのは `ShimProcess`
 で、それは local に残る。
@@ -188,7 +190,7 @@ remote に headless Canopy を常駐させ、local は client に徹する。
 最初の実験で `No authentication found` を見た。次に SSH セッションの keychain
 到達性を測り、こう出た:
 
-| | local（GUI セッション） | 同じマシンへの SSH セッション |
+| | local（Aqua ログインセッション） | 同じマシンへの SSH セッション |
 |---|---|---|
 | `security find …`（metadata） | exit 0 | exit 0 |
 | `security find … -w`（値） | **exit 0** | **exit 36** |
@@ -382,6 +384,11 @@ authStatus は remote の CLI から作る。これで 3 つ同時に片付く: 
 `/login` を殺す理由が消える、そして「remote でログインし直す」が
 **表現できる操作**になる（いまは概念ごと存在しない）。
 
+スパイクの注入がもう一つ抱えている問題も、これで消える —— `KeychainAuth.readAuthStatus()`
+は**プロセス寿命でメモ化する**（`KeychainAuth.swift` の static `cached`）ので、ローカルで
+ログアウトしてもアカウントを切り替えても、注入される値は古いまま。2 台が別アカウントの
+ときの表示ずれとは別の障害で、1 台の中だけで起きる。
+
 未解決: `loggedIn: false` の remote をどう見せるか。ローカルにフォールバックしては
 いけない —— それがまさにスパイクの嘘。remote 固有のログイン導線が要る。
 
@@ -430,8 +437,8 @@ webview は**ローカルの** extension、shim は remote の extension を実�
 
 ## レビューで出た未修正（挙動を足す変更なので提案どまり）
 
-8 本のレビュアーを回した。コメントと doc の**偽の主張は全部消した**し、既存 helper に
-寄せられるものは寄せた。以下は**実行時の挙動を足す**修正で、スパイクの段階で
+8 本のレビュアーを回した。コメントと doc の偽の主張を消し、既存 helper に寄せられるものは
+寄せた —— **この「全部消した」は 2 巡目に否定される**（下の「レビュー 2 巡目」節）。以下は**実行時の挙動を足す**修正で、スパイクの段階で
 入れると「守りの分岐が増えて、壊れていないときに発火する」側に倒れるので、
 提案として残す。重い順。
 
@@ -466,7 +473,8 @@ webview は**ローカルの** extension、shim は remote の extension を実�
    素通り。しかも成功しかキャッシュしないため、**壊れた host は spawn ごとに毎回
    ブロックを払う** —— 3 ペインの復元なら 3 回連続でアプリ全体が固まる
 6. **キャッシュに無効化が無い。** `extensionPath` は extension 更新のたびに動くので、
-   remote が自動更新した瞬間からそのプロセスの以後のセッションが全部落ちる
+   remote の extension が更新された瞬間から、そのプロセスの以後のセッションが全部落ちる
+   （更新自体は人がボタンを押す。無人ではないが、こちら側からは観測できない）
 7. **spike なのに local の node / shim / extension / wrapper が必須。** どれも spike では
    使わないのに、無いと `start()` が false を返す。しかも文言が誤診を招く
    （"Install it in VSCode first." / "wrapper script not found."）
@@ -489,7 +497,8 @@ webview は**ローカルの** extension、shim は remote の extension を実�
 | probe assertion 4 本 | **3 本** |
 | settings は存在確認している | **一切していない** |
 | EXT は「本当に解決している」 | 3 つの中で**最弱の検査**（`-n` だけ） |
-| 落ちるものの列挙 | `CLAUDE_CODE_DISABLE_1M_CONTEXT` と remote settings が抜けていた |
+| 落ちるものの列挙 | `CLAUDE_CODE_DISABLE_1M_CONTEXT` が抜けていた（remote settings の件は
+下の findings に置いた） |
 
 メモ側も、削除した関数を pin しろと書き、表を並べ替えて行参照を壊し、
 `local (Mac Studio)` が自分の訂正と矛盾し、太字の偽結論が訂正より前に立っていた。
