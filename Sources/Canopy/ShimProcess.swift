@@ -1778,6 +1778,210 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return id
     }
 
+    // MARK: - SPIKE: whole shim on the remote
+
+    /// Where the remote's own Canopy install keeps the three things the shim
+    /// needs.
+    ///
+    /// What the probe below actually does, since only one of the three is
+    /// resolved: `extensionPath` is globbed on the remote (its directory name
+    /// carries a version, so this side must not pin it) and tested only for
+    /// being non-empty; `shim` is a hardcoded path tested with `-f`; `settings`
+    /// is composed and never tested at all.
+    struct SpikeRemotePaths {
+        let shim: String
+        let extensionPath: String
+        let settings: String
+    }
+
+    /// Read once, at first access. An env var cannot change while the process
+    /// runs, so a computed property would re-read it on every spawn — the same
+    /// hot-path mistake `CANOPY_KEEPALIVE_MINUTES` already paid for.
+    static let spikeRemoteShimEnabled: Bool =
+        ProcessInfo.processInfo.environment["CANOPY_SPIKE_REMOTE_SHIM"] == "1"
+
+    // No host validator here on purpose: the call site uses
+    // `RemoteSessionHistory.isSpawnableHost`. A stricter one was written here
+    // and deleted — it rejected forms ssh accepts (`fe80::1%en0`), which that
+    // function's own doc predicts of any tighter pattern.
+
+    private static var spikeRemotePathCache: [String: SpikeRemotePaths] = [:]
+
+    /// Ask the remote where its Canopy lives. Cached per host.
+    ///
+    /// SPIKE-grade in three ways the design memo argues at length and this does
+    /// not repeat: it blocks the main actor for a round trip with no hard
+    /// deadline, only successes are cached (so a bad host pays that block on
+    /// every spawn), and nothing ever invalidates an entry.
+    ///
+    /// The probe is fed over stdin (`bash -s`) because `ssh host cmd args…`
+    /// hands its joined arguments to the remote LOGIN shell, which is fish on
+    /// the hosts this was built against — and a standalone `VAR=value` is a
+    /// parse error there. fish rejects the whole buffer before running
+    /// anything, so the probe would produce nothing at all and exit 127.
+    /// Measured on fish 4.9.3.
+    static func spikeRemotePaths(host: String) -> SpikeRemotePaths? {
+        if let cached = spikeRemotePathCache[host] { return cached }
+
+        let probe = """
+        set -u
+        SUPPORT="$HOME/Library/Application Support/Canopy"
+        EXT=$(ls -d "$SUPPORT/extensions/anthropic.claude-code-"* 2>/dev/null | sort -V | tail -1)
+        SHIM=/Applications/Canopy.app/Contents/Resources/vscode-shim/index.js
+        [ -n "$EXT" ] || exit 3
+        [ -f "$SHIM" ] || exit 4
+        echo "SHIM=$SHIM"
+        echo "EXT=$EXT"
+        echo "SETTINGS=$SUPPORT/settings.json"
+        """
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        proc.arguments = [
+            "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
+            "--", host, "bash", "-s",
+        ]
+        let inPipe = Pipe(), outPipe = Pipe()
+        proc.standardInput = inPipe
+        proc.standardOutput = outPipe
+        proc.standardError = FileHandle.nullDevice
+
+        do {
+            try proc.run()
+        } catch {
+            logger.error("SPIKE: ssh probe failed to launch: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        // `F_SETNOSIGPIPE` is required, not belt and braces. Canopy sets no
+        // `signal(SIGPIPE, SIG_IGN)` anywhere, so the default disposition KILLS
+        // the process on a write into a pipe with no reader left — and ssh
+        // exits within milliseconds on an unresolvable host or a refused key.
+        // `man 2 fcntl` documents this flag for "a write fails on a pipe or
+        // socket", so the guidance that it is socket-only is wrong; measured
+        // too, because two reviewers disagreed: default → signal 13, with the
+        // flag → EPIPE.
+        //
+        // Switching to the throwing overload alone does NOT close this. The
+        // signal arrives inside `write(2)`, so nothing is ever thrown and the
+        // catch never runs. **That applies to every other `FileHandle` write to
+        // a subprocess in this codebase** — `sendToShim`,
+        // `RemoteSessionsBridge` and `SessionTitleGenerator` all use the
+        // throwing form and none of them sets this flag. Those are pre-existing
+        // and out of this branch's scope, but the throwing form must not be
+        // read as protection there either.
+        //
+        // Checked rather than discarded, matching `MacroPadDevice`'s
+        // `SO_NOSIGPIPE` guard: a silent failure here is not survivable later —
+        // it restores exactly the kill this call exists to prevent, at a write
+        // that would otherwise look fine.
+        guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            logger.error(
+                "SPIKE: fcntl(F_SETNOSIGPIPE) failed: \(String(cString: strerror(errno)), privacy: .public)"
+            )
+            proc.terminate()
+            return nil
+        }
+        do {
+            try inPipe.fileHandleForWriting.write(contentsOf: Data(probe.utf8))
+        } catch {
+            logger.error("SPIKE: ssh probe stdin write failed: \(error.localizedDescription, privacy: .public)")
+            proc.terminate()
+            return nil
+        }
+        try? inPipe.fileHandleForWriting.close()
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+
+        // Status and decode are separate guards so a decode failure cannot be
+        // reported as `exit 0`. The failable initializer is deliberate:
+        // `String(decoding:as:)` substitutes U+FFFD instead of failing, which
+        // would let a mangled path through into the cache and on to `node`.
+        // The whole-buffer-nil hazard this file records elsewhere does not
+        // apply — that is about a multi-byte sequence split across two chunked
+        // reads, and `readDataToEndOfFile()` returns a complete buffer.
+        guard proc.terminationStatus == 0 else {
+            logger.error("SPIKE: ssh probe exit \(proc.terminationStatus, privacy: .public)")
+            return nil
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            logger.error("SPIKE: ssh probe output was not valid UTF-8")
+            return nil
+        }
+
+        var found: [String: String] = [:]
+        for line in text.split(separator: "\n") {
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            found[String(line[line.startIndex..<eq])] = String(line[line.index(after: eq)...])
+        }
+        guard let shim = found["SHIM"], let ext = found["EXT"], let settings = found["SETTINGS"] else {
+            logger.error("SPIKE: ssh probe returned no usable paths")
+            return nil
+        }
+        let paths = SpikeRemotePaths(shim: shim, extensionPath: ext, settings: settings)
+        spikeRemotePathCache[host] = paths
+        logger.notice("SPIKE: resolved remote Canopy on \(host, privacy: .public)")
+        return paths
+    }
+
+    /// Build the ssh argv that runs the remote shim.
+    ///
+    /// Every dynamic value is single-quoted, because ssh flattens its remote
+    /// arguments into one string for the remote login shell — the same
+    /// constraint `ssh-claude-wrapper.sh` documents. `exec` is used so the
+    /// remote shell is replaced by node and there is no extra process between
+    /// the SSH channel and the NDJSON.
+    ///
+    /// The `bash -s` trick the probe uses is NOT available here: stdin is the
+    /// NDJSON channel, so this hands a command string to that same fish login
+    /// shell. `q()`'s POSIX `'\''` idiom was verified to survive fish — but
+    /// only the apostrophe was; fish also treats `\` as an escape inside single
+    /// quotes, so a `cwd` containing one arrives mangled and a trailing one
+    /// aborts the command. Recorded in the memo, not fixed here.
+    ///
+    /// **`--resume` and `--permission-mode` are inert.** `vscode-shim/index.js`
+    /// parses both into `args` and reads neither again; they mirror the local
+    /// spawn's argv. What resumes a remote session is `data-initial-session` →
+    /// the extension's own precheck, which finds the transcript because on the
+    /// remote it is local.
+    ///
+    /// **Nothing in the local environment reaches the remote CLI**, because ssh
+    /// forwards none of it and the wrapper that used to serialize it is not in
+    /// play. Model and effort are dropped silently; so is
+    /// `CLAUDE_CODE_DISABLE_1M_CONTEXT`, so a non-1M Opus selection runs at 1M
+    /// over there; so is a configured custom API provider, which is the one that
+    /// matters — the conversation goes to an endpoint the user did not choose,
+    /// with no log line and nothing visible. This branch does not yet refuse
+    /// that combination.
+    static func spikeSSHArguments(
+        host: String,
+        paths: SpikeRemotePaths,
+        cwd: String,
+        resumeSessionId: String?,
+        permissionMode: PermissionMode
+    ) -> [String] {
+        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+        var remote = "exec node \(q(paths.shim))"
+            + " --extension-path \(q(paths.extensionPath))"
+            + " --cwd \(q(cwd))"
+            + " --settings-path \(q(paths.settings))"
+            + " --permission-mode \(q(permissionMode.rawValue))"
+        if let id = resumeSessionId, !id.isEmpty {
+            remote += " --resume \(q(id))"
+        }
+
+        return [
+            "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+            "--", host, remote,
+        ]
+    }
+
+    // MARK: - Lifecycle (continued)
+    //
+    // Without it the SPIKE mark above swallows `start()` in Xcode's jump bar.
+
     /// Start the Node.js shim subprocess. Returns false if startup fails.
     @discardableResult
     func start() -> Bool {
@@ -2058,6 +2262,81 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 .map(String.init) ?? "-"
         }
 
+        // SPIKE — remote-shim boundary. Opt in with `CANOPY_SPIKE_REMOTE_SHIM=1`.
+        //
+        // Today's SSH remote moves ONLY the CLI spawn to the other machine, so
+        // extension.js runs here and the local-disk assumptions it holds are
+        // wrong: the transcript it replays, `workspace.fs` and `findFiles` all
+        // resolve against this Mac.
+        //
+        // This branch moves the boundary up: the NDJSON pipe becomes the SSH
+        // channel and the whole shim runs on the remote, where those are simply
+        // local. Measured against studio by resuming a session whose project
+        // directory does not exist here — the full transcript rendered.
+        //
+        // What moves is what the EXTENSION reads. `ShimProcess` stays here, so
+        // what IT reads stays local — `handleOpenFile` and the background-task
+        // JSONL scan are not fixed by this branch.
+        //
+        // With the flag absent nothing below runs, so the two routes A/B
+        // against one build. Everything else — the deferred behavioural gaps,
+        // the measurements, the wrong turns — is in
+        // docs/superpowers/specs/2026-09-09-ssh-remote-boundary.md.
+        if let remote = remoteHost, Self.spikeRemoteShimEnabled {
+            // Both argv builders also pass `--`, which is the actual mechanism;
+            // this check exists to produce a legible error instead of an ssh
+            // usage message. Neither depends on the other being present.
+            //
+            // The guard is at the call site rather than inside the two spike
+            // helpers, so a future second caller gets no protection from it —
+            // stated because an earlier comment here claimed the two "cannot
+            // disagree about what they accepted", which is a property of there
+            // being one caller today, not of the code.
+            guard RemoteSessionHistory.isSpawnableHost(remote) else {
+                logger.error("SPIKE: refusing host that ssh would read as an option: \(remote, privacy: .public)")
+                showErrorInWebView(
+                    "SPIKE remote shim: refusing to use \"\(remote)\" as an SSH host — "
+                        + "it could be read as an ssh option."
+                )
+                return false
+            }
+            guard let paths = Self.spikeRemotePaths(host: remote) else {
+                logger.error("SPIKE: cannot resolve remote shim paths on \(remote, privacy: .public)")
+                showErrorInWebView(
+                    "SPIKE remote shim: could not resolve Canopy paths on \(remote). "
+                        + "Is Canopy installed there?"
+                )
+                return false
+            }
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            proc.arguments = Self.spikeSSHArguments(
+                host: remote,
+                paths: paths,
+                cwd: workingDirectory.path,
+                resumeSessionId: resumeSessionId,
+                permissionMode: permissionMode
+            )
+            // The wrapper must NOT be in play here. In spike mode the CLI is
+            // spawned by the REMOTE extension as an ordinary local child; a
+            // surviving `CANOPY_SSH_HOST` would arm `vscode-shim/index.js`'s
+            // fs/spawn patches and make the remote shim ssh back to itself.
+            // SSH does not forward environment anyway, so this is belt and
+            // braces — but the belt is what stops a future reader assuming
+            // these reach the far side.
+            //
+            // This clears ALL of `canopyAssignedEnvKeys`, not just the SSH
+            // trio: `CANOPY_REMOTE_MODEL`/`_EFFORT` (the launcher's model
+            // selection, which therefore reaches nothing — known gap 4) and
+            // `CANOPY_PANE` (Pager's stand-down marker) go with them.
+            //
+            // Uses the shared helper rather than an inline loop, because
+            // `scrubbingCanopyAssignedKeys`'s own doc says a per-site
+            // `removeValue` is "a list that only one of them ever has all of" —
+            // and the first draft here was a third such site.
+            env = Self.scrubbingCanopyAssignedKeys(env)
+            logger.notice("SPIKE: running shim on \(remote, privacy: .public)")
+        }
+
         proc.environment = env
 
         let stdin = Pipe()
@@ -2158,11 +2437,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         do {
             try proc.run()
-            logger.info("Shim started: PID \(proc.processIdentifier), node=\(nodeInfo.path, privacy: .public)")
+            // In spike mode the process is ssh and `nodeInfo.path` names a local
+            // binary that was never executed — reporting it there contradicted
+            // the `SPIKE: running shim on <host>` notice three lines earlier.
+            let launched = (remoteHost != nil && Self.spikeRemoteShimEnabled)
+                ? "ssh (remote node)" : nodeInfo.path
+            logger.info("Shim started: PID \(proc.processIdentifier), node=\(launched, privacy: .public)")
             return true
         } catch {
             logger.error("Failed to start shim: \(error.localizedDescription, privacy: .public)")
-            showErrorInWebView("Failed to start Node.js: \(error.localizedDescription)")
+            // Names what was actually spawned; in spike mode that is ssh, and
+            // the thrown error is about ssh rather than about node.
+            let what = (remoteHost != nil && Self.spikeRemoteShimEnabled) ? "ssh" : "Node.js"
+            showErrorInWebView("Failed to start \(what): \(error.localizedDescription)")
             self.process = nil
             self.stdinPipe = nil
             self.stdoutPipe = nil
@@ -2861,9 +3148,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               var nested = message["message"] as? [String: Any]
         else { return message }
 
-        // Patch update_state: override permission/experiment settings but do NOT inject authStatus.
-        // The extension controls authStatus in update_state — injecting keychain auth here
-        // would prevent /login and "Switch Account" from showing the login screen.
+        // Patch update_state: override permission/experiment settings. authStatus
+        // is the extension's to control here, and injecting keychain auth
+        // prevents /login and "Switch Account" from reaching the login screen —
+        // so the shipping path never does. The spike branch below is the one
+        // exception and pays exactly that price; the rule above it still stands,
+        // which is why it is scoped rather than lifted.
         if var request = nested["request"] as? [String: Any],
            request["type"] as? String == "update_state",
            var state = request["state"] as? [String: Any]
@@ -2874,6 +3164,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             var gates = (state["experimentGates"] as? [String: Any]) ?? [:]
             gates["tengu_vscode_cc_auth"] = true
             state["experimentGates"] = gates
+
+            // SPIKE ONLY. A remote shim cannot read a keychain over SSH, so the
+            // extension omits authStatus from every update_state and the
+            // webview's `state.authStatus ?? null` wipes the init_response
+            // bootstrap — the pane falls to the login screen. The Keychain read
+            // here happens locally, in Canopy's GUI process, which is the one
+            // context that can do it.
+            //
+            // Two costs, both real inside spike mode rather than deferred by the
+            // scoping. `/login` cannot reach the login screen, because the login
+            // flow's own signal is an update_state with authStatus absent —
+            // exactly this trigger. And this shows the LOCAL account while the
+            // remote CLI authenticates as its own, so two machines on different
+            // accounts display the wrong one; a remote logout is overwritten
+            // here too, since on this wire it is indistinguishable from "could
+            // not read a keychain". The shipping design replaces this with
+            // `claude auth status --json` on the remote.
+            if Self.spikeRemoteShimEnabled, remoteHost != nil,
+               state["authStatus"] == nil || state["authStatus"] is NSNull,
+               let keychainAuth = KeychainAuth.readAuthStatus()
+            {
+                state["authStatus"] = keychainAuth
+            }
+
             request["state"] = state
             nested["request"] = request
             var patchedMessage = message

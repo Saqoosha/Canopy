@@ -504,6 +504,7 @@ SSH death kills the CLI subprocess but Node.js shim stays alive → `termination
 - `docs/superpowers/plans/2026-03-31-ssh-connection-management.md` — Phase 3 implementation plan
 - `docs/superpowers/specs/2026-04-29-single-window-sidebar.md` — Single-window sidebar shell design spec
 - `docs/superpowers/plans/2026-04-29-single-window-sidebar.md` — Single-window sidebar implementation plan
+- `docs/superpowers/specs/2026-09-09-ssh-remote-boundary.md` — Where to put the SSH-remote boundary. Argues that the "Remaining Limitations" above are one boundary in the wrong place rather than separate defects, and records a working spike (`CANOPY_SPIKE_REMOTE_SHIM=1`) that runs the whole vscode-shim on the remote. **Read it before touching SSH remote**, for two reasons beyond the design: the host `mbp` resolves through Tailscale to THIS machine, so every "remote" test against it is localhost with a shared `~/.claude` (use `studio`, and verify with `IOPlatformUUID`); and the memo records three wrong turns in full, including two where a measurement was read as proving something it could not
 
 ## Running Tests
 ```bash
