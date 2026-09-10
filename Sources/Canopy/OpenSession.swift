@@ -149,7 +149,11 @@ final class OpenSession: Identifiable, Hashable {
     /// shim for as long as it has no pane. `ShimProcess` reads it once the CLI
     /// announces itself and clears it, so a reconnect cannot resubmit it.
     var pendingInitialPrompt: String?
-    /// The last fatal the shim reported over `{type:"error"}`, if any.
+    /// The last fatal reported for this session, if any.
+    ///
+    /// Two writers, and the second is why this is not "what the shim said": a
+    /// fatal the shim reported over `{type:"error"}`, and a `ShimProcess.start()`
+    /// failure, which happens before any shim exists.
     ///
     /// The crash callback carries only an exit status, and 1 says nothing about
     /// why. This is where the message that DOES say why is parked, so the
