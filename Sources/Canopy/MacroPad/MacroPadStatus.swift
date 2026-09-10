@@ -42,8 +42,9 @@ final class MacroPadStatus {
         case disabled
         /// Enabled, and nothing has answered a probe. Unplugged, mid-probe
         /// and mid-retry collapse here because the device layer emits no
-        /// `Output` that separates them — and none of the three is something
-        /// the user can act on, which is what lets them share a case.
+        /// `Output` that separates them. Not because the remedies agree —
+        /// plugging a pad in is about as actionable as it gets — but because
+        /// Canopy cannot tell which one it is looking at.
         ///
         /// The one cause in that group that IS actionable has moved out to
         /// `portBusy`. Anything the open call could not attribute stays here,
@@ -54,18 +55,24 @@ final class MacroPadStatus {
         /// is what a person needs to go find the holder.
         ///
         /// Split out of `searching` because the remedy is the opposite of an
-        /// empty desk's — quit the holder, or switch THIS machine's source to
-        /// `.off` if it is the bridge serving the pad to another Canopy. It
-        /// is the state that cost the most to diagnose without it: measured
-        /// on 2026-09-10, a bridge held this pad for 45 minutes while the
-        /// indicator said `searching` and the pad simply did nothing.
+        /// empty desk's: go find the holder and quit it. It is the state that
+        /// cost the most to diagnose without it — measured on 2026-09-10,
+        /// something held this pad for 45.3 minutes while the indicator said
+        /// `searching` and the pad simply did nothing.
+        ///
+        /// Who that something was is NOT recorded, deliberately: the log
+        /// names four Canopy processes being refused and cannot name the one
+        /// holding it. `MacroPadDevice.Output.searchFailed` carries what is
+        /// known about the mechanism, including which suspect a first draft
+        /// named wrongly; the path in the payload is here so a person can
+        /// answer the question with `lsof` instead of guessing.
         case portBusy(path: String)
         /// A port answered a probe. See `Keys` for what the payload can mean.
         case connected(Keys)
     }
 
     /// What the device has said about its key count, as three states rather
-    /// than an `Int?` with a loaded zero. `MacroPadController.publishStatus`
+    /// than an `Int?` with a loaded zero. `MacroPadController.link(source:isConnected:keyCount:portBusyPath:)`
     /// builds these from device state; `demoCycle` below builds them literally.
     ///
     /// What the enum buys is exhaustiveness at the *render* site. As an `Int?`
@@ -323,9 +330,9 @@ struct MacroPadIndicator: View {
     /// moved its WIDTH. Both are false and the second is worse, because the
     /// figures it cited refute it in the same sentence: `square.slash` is
     /// 11x13 and `square.grid.2x2` is 11x11, so they differ in height and
-    /// share a width. Measured across all three symbols and all four
-    /// framed/unframed combinations, the footer comes out identical per
-    /// symbol — the popup's own minimum metrics absorb the variation
+    /// share a width. Measured across the three symbols that existed at the
+    /// time and all four framed/unframed combinations, the footer comes out
+    /// identical per symbol — the popup's own minimum metrics absorb the variation
     /// entirely, so symbol bounds move neither axis. There was also nothing
     /// to normalise before this PR: only two symbols existed and both were
     /// 11x11.
@@ -382,7 +389,7 @@ struct MacroPadIndicator: View {
             // `square.slash`, not `square.grid.2x2.slash` — the latter is not
             // a real SF Symbol and renders as a broken-image glyph. Caught by
             // eye; the probe now resolves every symbol reachable through
-            // `MacroPadStatus.demoCycle`, which today covers all five states,
+            // `MacroPadStatus.demoCycle`, which today covers all six states,
             // so the next typo fails a test instead. See the probe for what
             // that does and does not buy.
             return Appearance(symbol: "square.slash",
@@ -403,8 +410,10 @@ struct MacroPadIndicator: View {
             // worth pulling the eye. The SYMBOL is what separates them —
             // a lock rather than a grid, because nothing here is wrong with
             // the pad. `lock.square` resolves on this system; the probe
-            // checks it along with every other symbol the cycle reaches,
-            // which is how `square.grid.2x2.slash` was caught.
+            // checks it along with every other symbol the cycle reaches, so
+            // the next typo fails a test instead of shipping the way
+            // `square.grid.2x2.slash` did — that one was caught by eye, and
+            // the `.disabled` case above says so.
             //
             // The path is in the help rather than the glyph because it is
             // what makes the state actionable — `lsof <path>` names the
@@ -412,7 +421,7 @@ struct MacroPadIndicator: View {
             // device node.
             return Appearance(symbol: "lock.square",
                               tint: AnyShapeStyle(Color.orange.opacity(0.8)),
-                              help: "MacroPad port is held by another process (\(path)) — quit it, or set this Mac's source to Off if it is serving the pad over the bridge. Click to change source",
+                              help: "MacroPad port is held by another process (\(path)) — `lsof` it to find out which; another Canopy build on this Mac is the one confirmed cause. Click to change source",
                               demoLabel: "port busy")
         case .connected(.unreachable):
             return Appearance(symbol: "square.grid.2x2",
