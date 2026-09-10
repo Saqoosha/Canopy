@@ -625,7 +625,12 @@ enum GitWorktree {
             let message = result.stderr.isEmpty
                 ? "git worktree add failed (exit \(result.status))"
                 : result.stderr
-            logger.error("worktree add failed (status \(result.status)): \(message, privacy: .public)")
+            // `.private`: git's stderr can name the worktree path, which the
+            // success line at the end of this function already redacts. The
+            // thrown copy stays public — it goes to the user's alert, not to
+            // disk — so the cost here is that the reason is no longer readable
+            // in the log without private-data logging on.
+            logger.error("worktree add failed (status \(result.status)): \(message, privacy: .private)")
             throw NSError(
                 domain: "GitWorktree",
                 code: Int(result.status),
@@ -785,16 +790,15 @@ enum GitWorktree {
         var linked = 0
         var skipped = 0
         var failed = 0
-        /// The entries behind `failed`, in the order they were attempted.
-        ///
-        /// Carried so the alert can name them: "3 entries failed" is not
-        /// actionable. An earlier draft justified this by saying the log
-        /// redacts these paths, and that is false — the interpolated path is
-        /// `.private` at every `seed:` site, but two of them re-emit it inside
-        /// a `.public` `cp` stderr or `localizedDescription` (measured). The
-        /// real reason is simply that Console is the wrong place to send
-        /// someone standing in front of the app.
+        /// The entries behind `failed`, so the alert can name them: "3
+        /// entries failed" is not actionable, and Console is the wrong place
+        /// to send someone standing in front of the app.
         var failedEntries: [String] = []
+
+        /// Set when the listing failed, so nothing was even attempted. A
+        /// flag rather than a `failed` count because there is no entry to
+        /// count — the loop never ran.
+        var couldNotList = false
 
         var summary: String {
             "cloned \(cloned), linked \(linked), skipped \(skipped), failed \(failed)"
@@ -820,12 +824,17 @@ enum GitWorktree {
         /// "added" rather than "copied" because the `.link` plan is in here
         /// too, and a FIFO is symlinked rather than copied.
         ///
-        /// Known hole, deliberately left: a listing that fails outright
-        /// returns an all-zero report, so `failed` is 0 and this says nothing
-        /// while NOTHING was seeded. Closing it means giving `ignoredEntries`
-        /// an error contract it does not have — its non-zero-status branch
-        /// returns `[]` on purpose — which is a wider change than this one.
+        /// A failed listing is reported too, through `couldNotList`.
         var failureNotice: String? {
+            if couldNotList {
+                // Hedged: the listing is what would have said whether this
+                // repo ignores anything, so "nothing was added" is certain and
+                // "you are missing files" is not knowable from here.
+                return "Canopy could not list this repository's ignored files, "
+                    + "so nothing was added to the new worktree. If the "
+                    + "repository has build artifacts it does not track, a "
+                    + "build here may fail until they are restored."
+            }
             guard failed > 0 else { return nil }
             let attempted = cloned + linked + failed
             // Agrees with the SET, not the numerator: "1 of 5 entries", never
@@ -869,7 +878,17 @@ enum GitWorktree {
             // git's stderr here names the repository path and can name
             // individual ignored paths, and these lines reach disk.
             logger.notice("ls-files failed (status \(result.status)): \(result.stderr, privacy: .private)")
-            return []
+            // Throws rather than returning `[]`, which is what a repo that
+            // ignores nothing returns — so a failed listing used to reach
+            // `seedIgnoredFiles` as an all-zero report and say nothing while
+            // NOTHING was seeded. The message carries the status only; git's
+            // stderr stays in the line above, because the catch site logs this
+            // description at `.public`.
+            throw NSError(
+                domain: "GitWorktree", code: Int(result.status),
+                userInfo: [NSLocalizedDescriptionKey:
+                            "git ls-files failed (exit \(result.status))"]
+            )
         }
         return String(decoding: result.stdout, as: UTF8.self)
             .split(separator: "\0", omittingEmptySubsequences: true)
@@ -893,6 +912,7 @@ enum GitWorktree {
         do {
             entries = try ignoredEntries(repo: repo)
         } catch {
+            report.couldNotList = true
             logger.notice("seed: could not list ignored entries: \(error.localizedDescription, privacy: .public)")
             return report
         }
@@ -963,19 +983,21 @@ enum GitWorktree {
                     } else {
                         report.failed += 1
                         report.failedEntries.append(relative)
-                        // `.private` on the path: an ignored entry's name can
-                        // carry a client or product name, and these lines
-                        // reach disk.
+                        // Both `.private`. `cp` echoes the path it was given
+                        // in its error, so redacting only `relative` left the
+                        // same path in the clear one field along.
                         logger.notice(
-                            "seed: clone failed for \(relative, privacy: .private): \(result.stderr, privacy: .public)"
+                            "seed: clone failed for \(relative, privacy: .private): \(result.stderr, privacy: .private)"
                         )
                     }
                 }
             } catch {
                 report.failed += 1
                 report.failedEntries.append(relative)
+                // `.private` for the same reason: a Foundation file error
+                // names the file and the folder it is in.
                 logger.notice(
-                    "seed: \(relative, privacy: .private) failed: \(error.localizedDescription, privacy: .public)"
+                    "seed: \(relative, privacy: .private) failed: \(error.localizedDescription, privacy: .private)"
                 )
             }
         }

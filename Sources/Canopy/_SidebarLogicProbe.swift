@@ -2194,7 +2194,8 @@ enum SidebarLogicProbe {
         //
         // That it covers that branch rather than something upstream of it is
         // measured, and the obvious mutation does NOT show it: forcing every
-        // `runCommand` to report failure empties `ignoredEntries`, so the loop
+        // `runCommand` to report failure makes `ignoredEntries` throw, so the
+        // loop
         // body never runs and `/bin/cp` is never spawned — this assertion then
         // reddens for a reason it was not added for. Scoping the forced
         // failure to `/bin/cp` is the discriminating one; it leaves the
@@ -2275,6 +2276,43 @@ enum SidebarLogicProbe {
                    failed.failed == 1 && failed.failedEntries == ["blocked"])
             record("seedIgnoredFiles: the notice reaches the user with that name in it",
                    failed.failureNotice?.contains("• blocked") == true)
+        }
+
+        // A failed listing is not a repo with nothing to ignore, and until
+        // now both were the same all-zero report. A directory OUTSIDE any git
+        // repository reaches it with no permissions games — git discovery
+        // ascends, so a plain directory inside one would not; `temporaryDirectory`
+        // is `/var/folders/…` here and on `macos-26`.
+        do {
+            let notARepo = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeNotARepo-\(UUID().uuidString)")
+            let notARepoDest = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeNotARepoDest-\(UUID().uuidString)")
+            defer {
+                try? FileManager.default.removeItem(at: notARepo)
+                try? FileManager.default.removeItem(at: notARepoDest)
+            }
+            for dir in [notARepo, notARepoDest] {
+                try? FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true)
+            }
+            let unlisted = GitWorktree.seedIgnoredFiles(
+                repo: notARepo, worktree: notARepoDest, perEntryTimeout: 10)
+            record("seedIgnoredFiles: a failed listing is flagged, not read as an empty repo",
+                   unlisted.couldNotList && unlisted.failed == 0 && unlisted.cloned == 0)
+            record("failureNotice: a failed listing speaks even with no failed count",
+                   unlisted.failureNotice?.contains("could not list") == true)
+            // The thrown message carries the status only, because the catch
+            // site logs its description at `.public`. Measured to be worth an
+            // assertion: putting the repo path back into that message leaves
+            // the two records above green.
+            do {
+                _ = try GitWorktree.ignoredEntries(repo: notARepo)
+                record("ignoredEntries: a failed listing throws", false)
+            } catch {
+                record("ignoredEntries: the thrown message carries the status, not the path",
+                       !error.localizedDescription.contains(notARepo.path))
+            }
         }
 
         record("projectDisplayName: managed worktree → repo · branch",
