@@ -8978,6 +8978,37 @@ enum SidebarLogicProbe {
                ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: false, awaitingAnswer: true)
                    == "That session is waiting for an answer to its own question")
 
+        // MARK: - Phone reply disposition (what the phone is actually told)
+        //
+        // The third and last lift in this feature, for the reason the first
+        // two were made: these three strings are what the user reads, and
+        // nothing could reach them while the mapping sat inline. Measured on
+        // the revision that shipped the queue — rewording any of them, or
+        // mapping `.empty` to `.queued` (a blank turn in the transcript,
+        // under a 200), passed every assertion in the suite.
+        record("reply disposition: blank text is refused, and says so",
+               ShimProcess.phoneReplyDisposition(for: .empty, gateReason: nil)
+                   == .refused("The message was empty"))
+        record("reply disposition: blank text is refused whatever the gate says",
+               ShimProcess.phoneReplyDisposition(for: .empty, gateReason: "session busy")
+                   == .refused("The message was empty"))
+        record("reply disposition: a full queue refuses, naming the number it holds",
+               ShimProcess.phoneReplyDisposition(for: .full(capacity: PhoneReplyQueue.capacity), gateReason: nil)
+                   == .refused("Already \(PhoneReplyQueue.capacity) messages waiting — let the session catch up"))
+        record("reply disposition: a queued prompt carries the gate's own words",
+               ShimProcess.phoneReplyDisposition(for: .queued(depth: 1), gateReason: "session busy")
+                   == .queued(reason: "session busy"))
+        // The `nil` gate is the case the whole queue exists for: nothing is
+        // blocking, and the prompt waits only because older ones are ahead.
+        // It is also the branch a live shim can barely be made to hit, which
+        // is why it went unwritten about until a reviewer went looking.
+        record("reply disposition: an open gate says the wait is other prompts",
+               ShimProcess.phoneReplyDisposition(for: .queued(depth: 3), gateReason: nil)
+                   == .queued(reason: "an earlier message is still waiting"))
+        record("reply disposition: depth does not change what is said",
+               ShimProcess.phoneReplyDisposition(for: .queued(depth: 1), gateReason: nil)
+                   == ShimProcess.phoneReplyDisposition(for: .queued(depth: 9), gateReason: nil))
+
         // MARK: - Phone reply routing (which of the two doors a prompt takes)
         //
         // `submitPhoneReply`'s decision, lifted out of the shim so it can be

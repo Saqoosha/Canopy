@@ -1071,6 +1071,39 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         queueIsEmpty && gateReason == nil
     }
 
+    /// What the phone is told, given what the queue did with the prompt and
+    /// what the gate says right now.
+    ///
+    /// **Pure because the three strings below are the ones the user reads**,
+    /// and until this was lifted nothing could reach them. Measured on the
+    /// revision that shipped the queue: swapping `.empty` to a `.queued` —
+    /// which would put a blank turn in the transcript under a 200 — passed
+    /// every assertion in the suite, as did rewording any of the three. The
+    /// same lift had already been made twice in this feature for the same
+    /// reason (`phoneReplyMayInjectNow`, `phoneReplyBlockingReason`); this is
+    /// the third and last place it applies.
+    ///
+    /// `gateReason` is `ineligibilityReasonForReply()`'s answer. Its `nil`
+    /// case is the one the whole queue exists for: the gate is open and the
+    /// prompt is waiting anyway, because older ones are ahead of it.
+    nonisolated static func phoneReplyDisposition(for result: PhoneReplyQueue.AppendResult,
+                                                  gateReason: String?) -> PhoneReplyDisposition {
+        switch result {
+        case .empty:
+            return .refused("The message was empty")
+        case .full(let capacity):
+            return .refused("Already \(capacity) messages waiting — let the session catch up")
+        case .queued:
+            // Reported as it stands NOW, and it can be stale by the time the
+            // phone renders it — the turn may end a second later. That is the
+            // honest shape anyway: it says why the prompt is waiting, not how
+            // long it will wait. The reasons where saying "waiting" would be
+            // a lie the user acts on never reach here at all;
+            // `blockingReasonForReply()` refuses those before the queue.
+            return .queued(reason: gateReason ?? "an earlier message is still waiting")
+        }
+    }
+
     /// The phone's entry point for a typed prompt: injects it if the shim
     /// can take one right now, and otherwise queues it.
     ///
@@ -1108,24 +1141,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            requestPhoneReply(text: text, replyId: replyId) {
             return .injected
         }
-        switch queuedPhoneReplies.append(text: text, replyId: replyId) {
-        case .empty:
-            return .refused("The message was empty")
-        case .full(let capacity):
+        let appended = queuedPhoneReplies.append(text: text, replyId: replyId)
+        let disposition = Self.phoneReplyDisposition(
+            for: appended,
+            gateReason: ineligibilityReasonForReply()
+        )
+        switch (appended, disposition) {
+        case (.full(let capacity), _):
             logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): queue full at \(capacity, privacy: .public)")
-            return .refused("Already \(capacity) messages waiting — let the session catch up")
-        case .queued(let depth):
-            // The reason is reported as it stands NOW, and it can be stale by
-            // the time the phone renders it — the turn may end a second
-            // later. That is the honest shape anyway: it says why the prompt
-            // is waiting, not how long it will wait. The reasons where saying
-            // "waiting" would be a lie the user acts on never reach this
-            // branch at all: `blockingReasonForReply()` refuses them above.
-            let why = ineligibilityReasonForReply() ?? "an earlier message is still waiting"
+        case (.queued(let depth), .queued(let why)):
             logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): queued at depth \(depth, privacy: .public) — \(why, privacy: .public)")
             scheduleQueuedPhoneReplyDrain()
-            return .queued(reason: why)
+        default:
+            break
         }
+        return disposition
     }
 
     /// Injects a reply typed on the phone as a real user turn.
@@ -1253,7 +1283,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// What became of a prompt the phone submitted. Returned rather than a
     /// `Bool` because `queued` is a success the phone must be able to tell
     /// from `injected` — same 200, different thing to say about it.
-    enum PhoneReplyDisposition {
+    enum PhoneReplyDisposition: Equatable {
         case injected
         /// Held. `reason` is the gate that was closed — or, when the gate is
         /// open and the queue merely is not empty, that there are older
@@ -1339,6 +1369,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
         }
         scheduleQueuedPhoneReplyDrain()
+    }
+
+    /// Drops every waiting prompt on every live shim.
+    ///
+    /// **For quit, which reaches no shim's own teardown.**
+    /// `applicationWillTerminate` does not call `stop()` on a live owned shim
+    /// — its own comment says so, and `stopOrphanedSessions()` skips owned
+    /// shims by construction — so before this the queue died at quit with no
+    /// line at all, which is the one thing the whole design leans on. A
+    /// `deinit` cannot stand in: deinits do not run at process exit.
+    ///
+    /// Nothing is recoverable here and nothing is meant to be. The app is
+    /// going away; what this buys is the count in the log, so "I sent that
+    /// and it never arrived" has an answer tomorrow.
+    @MainActor static func discardAllQueuedPhoneReplies() {
+        for shim in instances.allObjects {
+            shim.discardQueuedPhoneReplies()
+        }
     }
 
     /// Drops every waiting prompt. Reached from `resetActivityState` — the
