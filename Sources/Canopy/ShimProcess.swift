@@ -6582,10 +6582,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ///
     /// **新しい側を落とさない。** 直前に始まった Read こそ画面に出る番なので、
     /// そこを捨てると「最近の絵だけ出ない」という一番気づきにくい形になる。
+    ///
+    /// **落とした分も返す。** 呼び出し側はそれぞれに画像なしの行を出す —— でな
+    /// いと、後から来る `tool_result` がもう相手を見つけられず、その Read が
+    /// あったことごと沈黙する。長いセッションでは結果の来ない Read（セッション
+    /// が死んだ、CLI が落ちた）が 1 件ずつ積み上がり、結果がまだ来る予定の
+    /// 隣人を巻き込んで押し出す経路がある — レビューで指摘された。
     static func prunedImageReads(_ reads: [(id: String, file: String)],
-                                 cap: Int) -> [(id: String, file: String)] {
-        guard reads.count > cap else { return reads }
-        return Array(reads.suffix(cap))
+                                 cap: Int) -> (kept: [(id: String, file: String)],
+                                               dropped: [(id: String, file: String)]) {
+        guard reads.count > cap else { return (reads, []) }
+        let overflow = reads.count - cap
+        return (Array(reads.suffix(cap)), Array(reads.prefix(overflow)))
     }
 
     /// Turn one io_message into phone-bound events and send them.
@@ -6616,12 +6624,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                          onImageRead: { [weak self] toolUseId, fileName in
                                              guard let self else { return }
                                              self.pendingImageReads.append((id: toolUseId, file: fileName))
-                                             self.pendingImageReads = Self.prunedImageReads(
+                                             let (kept, dropped) = Self.prunedImageReads(
                                                  self.pendingImageReads, cap: Self.maxPendingImageReads)
+                                             self.pendingImageReads = kept
+                                             guard !dropped.isEmpty else { return }
+                                             // 上限で押し出された Read も、画像なしの素の行だけは出す
+                                             // —— 出さないと、これから来る `tool_result` はもう相手が
+                                             // いないので、その Read があったことごと沈黙してしまう。
+                                             // ファイル名ではなく件数だけを記録する: ファイル名は会話の
+                                             // 内容に近いが、件数はこの経路が発火したこと自体を示す。
+                                             logger.notice("roster image pending cap dropped \(dropped.count, privacy: .public) read(s)")
+                                             for entry in dropped {
+                                                 RosterPublisher.current?.sendEvent(
+                                                     SessionEvent(eventId: UUID().uuidString,
+                                                                  sessionId: session.id.uuidString,
+                                                                  resumeId: session.resumeId,
+                                                                  kind: .tool,
+                                                                  text: "Read: \(entry.file)",
+                                                                  at: Date()))
+                                             }
                                          })
+        let frame = SessionEvent.ioFrame(in: message)
         // 画像の結果は `events` が空を返すフレーム（tool_result を含む user
         // フレーム）に来るので、**空の guard より先に見る。**
-        if let frame = SessionEvent.ioFrame(in: message) {
+        if let frame {
             publishImageResultIfAny(frame, session: session)
         }
         // **Logged BEFORE the empty guard, and the placement is the point.**
@@ -6632,7 +6658,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // would credit itself with evidence it cannot produce. `debug`
         // because it fires several times per turn and says nothing went
         // wrong; raise it to `notice` while chasing a silence.
-        logger.debug("[event] \(events.count, privacy: .public) event(s) from \((SessionEvent.ioFrame(in: message)?["type"] as? String) ?? "none", privacy: .public)")
+        logger.debug("[event] \(events.count, privacy: .public) event(s) from \(frame?["type"] as? String ?? "none", privacy: .public)")
         guard !events.isEmpty else { return }
         // Consumed on match, so the pair cannot stamp a second, unrelated
         // turn that happens to carry the same words later.

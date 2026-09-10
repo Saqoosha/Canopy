@@ -8713,11 +8713,18 @@ enum SidebarLogicProbe {
             for i in 0..<40 { pending.append((id: "t\(i)", file: "f\(i).png")) }
             let pruned = ShimProcess.prunedImageReads(pending, cap: ShimProcess.maxPendingImageReads)
             record("image: pending reads are capped",
-                   pruned.count == ShimProcess.maxPendingImageReads)
+                   pruned.kept.count == ShimProcess.maxPendingImageReads)
             record("image: pruning drops the oldest, not the newest",
-                   pruned.first?.id == "t8" && pruned.last?.id == "t39")
+                   pruned.kept.first?.id == "t8" && pruned.kept.last?.id == "t39")
+            // 落ちた分も呼び出し側に返る —— でないと、そのぶんに画像なしの行を
+            // 出す手立てが無い。落ちるのは古い方から、この場合は t0〜t7。
+            record("image: dropped entries come back, oldest first",
+                   pruned.dropped.count == 8
+                       && pruned.dropped.first?.id == "t0" && pruned.dropped.last?.id == "t7")
+            let untouched = ShimProcess.prunedImageReads([(id: "a", file: "a.png")], cap: 32)
             record("image: a list under the cap is untouched",
-                   ShimProcess.prunedImageReads([(id: "a", file: "a.png")], cap: 32).count == 1)
+                   untouched.kept.count == 1 && untouched.kept[0].id == "a"
+                       && untouched.kept[0].file == "a.png" && untouched.dropped.isEmpty)
         }
 
         // MARK: - The two gates that decide whether a remote session resumes
