@@ -5905,12 +5905,20 @@ enum SidebarLogicProbe {
             // broken on 15. All three current symbols predate 15 by years.
             var unresolved: [String] = []
             var blankHelp: [String] = []
+            var pathlessBusyHelp: [String] = []
             for link in MacroPadStatus.demoCycle {
                 let appearance = MacroPadIndicator.appearance(for: link)
                 if NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: nil) == nil {
                     unresolved.append(appearance.symbol)
                 }
                 if appearance.help.isEmpty { blankHelp.append(appearance.symbol) }
+                // `.portBusy`'s whole remedy is the path — `lsof` it and you
+                // have the holder — so an empty-help check does not cover it.
+                // Deleting `(\(path))` from the help string was measured to
+                // leave every other assertion green.
+                if case .portBusy(let path) = link, !appearance.help.contains(path) {
+                    pathlessBusyHelp.append(appearance.help)
+                }
             }
             record("indicator: every link state resolves to a real SF Symbol",
                    unresolved.isEmpty,
@@ -5918,12 +5926,101 @@ enum SidebarLogicProbe {
             record("indicator: every link state carries help text",
                    blankHelp.isEmpty,
                    "blank=\(blankHelp)")
+            record("indicator: the port-busy help names the path it is about",
+                   pathlessBusyHelp.isEmpty,
+                   "help=\(pathlessBusyHelp)")
             // Without this the two assertions above are vacuously green on an
             // empty cycle — `isEmpty` over nothing is true. Pinning the count
             // also makes removing a state cost an edit here.
-            record("indicator: the demo cycle still covers five states",
-                   MacroPadStatus.demoCycle.count == 5,
+            record("indicator: the demo cycle still covers six states",
+                   MacroPadStatus.demoCycle.count == 6,
                    "count=\(MacroPadStatus.demoCycle.count)")
+
+            // --- which link state the indicator is asked to draw. The four
+            // inputs are independent and the precedence between them is the
+            // whole decision, so both directions of it are pinned rather than
+            // just the new case.
+            //
+            // What this does NOT pin, and the reason is the same one the
+            // extraction's own doc gives: that `publishStatus` passes the
+            // right four values, and that every path which changes one of
+            // them republishes. Both live at call sites no assertion here
+            // reaches.
+            let busy = "/dev/cu.usbmodem20103"
+            record("link: a held port reads as portBusy and carries the path",
+                   MacroPadController.link(source: .local, isConnected: false,
+                                           keyCount: nil, portBusyPath: busy)
+                   == .portBusy(path: busy),
+                   "\(MacroPadController.link(source: .local, isConnected: false, keyCount: nil, portBusyPath: busy))")
+            record("link: no attribution is still plain searching",
+                   MacroPadController.link(source: .local, isConnected: false,
+                                           keyCount: nil, portBusyPath: nil)
+                   == .searching,
+                   "\(MacroPadController.link(source: .local, isConnected: false, keyCount: nil, portBusyPath: nil))")
+            // A machine deliberately serving its pad over the bridge must be
+            // `.off` for socat to hold the port — so `.off` outranking a held
+            // port is what stops the intended configuration reading as a
+            // fault.
+            record("link: source off outranks a held port",
+                   MacroPadController.link(source: .off, isConnected: false,
+                                           keyCount: nil, portBusyPath: busy)
+                   == .disabled,
+                   "\(MacroPadController.link(source: .off, isConnected: false, keyCount: nil, portBusyPath: busy))")
+            // The other direction: a path left over from an earlier pass says
+            // nothing about a link that is now up.
+            record("link: a live connection outranks a stale busy path",
+                   MacroPadController.link(source: .local, isConnected: true,
+                                           keyCount: 6, portBusyPath: busy)
+                   == .connected(.available(6)),
+                   "\(MacroPadController.link(source: .local, isConnected: true, keyCount: 6, portBusyPath: busy))")
+            // The `keyCount → Keys` mapping moved INTO `link` with the
+            // extraction, so it became probe-reachable for the first time
+            // here. Both of these mutations were measured to survive the
+            // whole suite before these two lines existed, and the zero case
+            // is a line CLAUDE.md records as having actually been broken
+            // once — a `count > 0` guard that degraded 0 to "unknown" and
+            // then addressed four keys that did not exist.
+            record("link: a zero key count is the NeoKey-unreachable state, not a real count",
+                   MacroPadController.link(source: .local, isConnected: true,
+                                           keyCount: 0, portBusyPath: nil)
+                   == .connected(.unreachable),
+                   "\(MacroPadController.link(source: .local, isConnected: true, keyCount: 0, portBusyPath: nil))")
+            record("link: no key count yet is counting, not unreachable",
+                   MacroPadController.link(source: .local, isConnected: true,
+                                           keyCount: nil, portBusyPath: nil)
+                   == .connected(.counting),
+                   "\(MacroPadController.link(source: .local, isConnected: true, keyCount: nil, portBusyPath: nil))")
+            // `.off` outranks a LIVE link too, not just a held port. Reachable
+            // in the window after a source switch where `isConnected` has not
+            // dropped yet; widening the guard to `!source.isOff || isConnected`
+            // passed everything before this line.
+            record("link: source off outranks a live connection",
+                   MacroPadController.link(source: .off, isConnected: true,
+                                           keyCount: 6, portBusyPath: nil)
+                   == .disabled,
+                   "\(MacroPadController.link(source: .off, isConnected: true, keyCount: 6, portBusyPath: nil))")
+            // `link` asks only `source.isOff`, so remote and local are the
+            // same to it. That is a decision — the device layer opens no
+            // serial port under `.remote` — and this records it as one.
+            record("link: a remote source is treated exactly like a local one",
+                   MacroPadController.link(source: .remote(MacroPadRemoteEndpoint(host: "studio", port: 8765)),
+                                           isConnected: false, keyCount: nil, portBusyPath: busy)
+                   == .portBusy(path: busy),
+                   "\(MacroPadController.link(source: .remote(MacroPadRemoteEndpoint(host: "studio", port: 8765)), isConnected: false, keyCount: nil, portBusyPath: busy))")
+
+            // --- the device's EBUSY classifier: the only thing that can put
+            // a value in `searchFailed`'s payload. Deleting its body was
+            // measured to leave the whole suite green.
+            record("busyPath: EBUSY on a fresh pass names that path",
+                   MacroPadDevice.busyPath(existing: nil, errno: EBUSY, path: "/dev/cu.a") == "/dev/cu.a",
+                   "\(String(describing: MacroPadDevice.busyPath(existing: nil, errno: EBUSY, path: "/dev/cu.a")))")
+            record("busyPath: any other errno is not an attribution",
+                   MacroPadDevice.busyPath(existing: nil, errno: ENOENT, path: "/dev/cu.a") == nil
+                   && MacroPadDevice.busyPath(existing: nil, errno: EACCES, path: "/dev/cu.a") == nil,
+                   "enoent=\(String(describing: MacroPadDevice.busyPath(existing: nil, errno: ENOENT, path: "/dev/cu.a")))")
+            record("busyPath: the first busy port wins, later ones do not overwrite",
+                   MacroPadDevice.busyPath(existing: "/dev/cu.data", errno: EBUSY, path: "/dev/cu.console") == "/dev/cu.data",
+                   "\(String(describing: MacroPadDevice.busyPath(existing: "/dev/cu.data", errno: EBUSY, path: "/dev/cu.console")))")
 
             // --- the refresh-skip predicate. The dangerous direction is
             // TIGHTENING it: a skipped refresh on the acknowledging act leaves

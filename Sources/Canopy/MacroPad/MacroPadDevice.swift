@@ -29,6 +29,30 @@ final class MacroPadDevice: @unchecked Sendable {
         /// Port closed — unplug, crash, or a failed write. The controller
         /// drops its diff cache on this so the next connect re-pushes.
         case disconnected
+        /// One discovery pass finished without adopting anything, and says
+        /// WHY as far as `open(2)` can tell: `busyPath` names a callout
+        /// device that matched the pad and answered `EBUSY`, meaning another
+        /// process holds it with `TIOCEXCL`. Nil covers every other way a
+        /// pass can come up empty (nothing enumerated, opened but silent, a
+        /// TCP bridge that would not connect), which are all the same to the
+        /// user.
+        ///
+        /// Deliberately does NOT name the holder, because the one measurement
+        /// there is says only which processes were LOCKED OUT. A first draft
+        /// blamed the bridge's `socat`, which is refuted: measured with a
+        /// pty, `socat` opened the bridge's way (`FILE:…,raw,nonblock`, no
+        /// `lock`) leaves the node openable by anyone else, matching
+        /// CLAUDE.md's own record. What reliably produces `EBUSY` is a holder
+        /// that sets `TIOCEXCL` — which `adopt` below does, so a second
+        /// Canopy on this Mac is the one confirmed producer (measured
+        /// 2026-09-11: a Debug build hit `EBUSY` against the released build's
+        /// held port). `lsof <path>` is what names any other.
+        ///
+        /// Emitted on EVERY failed pass rather than only on the first, so the
+        /// state is self-clearing: the controller stores the latest and a
+        /// holder going away is reported by the next retry rather than
+        /// needing its own signal.
+        case searchFailed(busyPath: String?)
         case event(MacroPadEvent)
     }
 
@@ -52,6 +76,22 @@ final class MacroPadDevice: @unchecked Sendable {
     /// `boot.py` sets this via `supervisor.set_usb_identification`. Matching on
     /// it rather than on a `/dev/cu.usbmodemNNNN` path is the whole point: the
     /// numeric suffix changes with the port and across reboots.
+    /// Which callout path a pass reports as held, given the one it already
+    /// had and one more `open(2)` failure.
+    ///
+    /// Split out of `openAndProbe` because it is the ONLY thing that can put
+    /// a value in `Output.searchFailed`'s payload, and deleting its body
+    /// leaves the whole feature dead with every assertion still green —
+    /// measured by a reviewer running exactly that mutation. Two rules, both
+    /// load-bearing and neither obvious from the call site: only `EBUSY` is
+    /// attributed (every other failure is a pass that came up empty, which
+    /// `.searching` already covers), and the FIRST such path wins, because
+    /// `rankedEndpoints` puts the likely data port ahead of the console one.
+    static func busyPath(existing: String?, errno code: Int32, path: String) -> String? {
+        guard code == EBUSY, existing == nil else { return existing }
+        return path
+    }
+
     static let expectedProductName = "Canopy MacroPad"
     /// CircuitPython's USB vendor id.
     ///
@@ -368,17 +408,35 @@ final class MacroPadDevice: @unchecked Sendable {
             // failed, this is the only thread back, and returning here would
             // end discovery for the lifetime of the process while the log
             // claimed a fallback existed.
+            emit(.searchFailed(busyPath: nil))
             if !hasHotplug { scheduleRetry() }
             return
         }
 
+        // Collected across the whole pass rather than per candidate, because
+        // the busy port is not always the first one tried. Measured over the
+        // 2026-09-10 incident (283 refusals from one Canopy across 45.3
+        // minutes): 275 named the data port and 8 the console port, so ONE
+        // `EBUSY` per pass is the rule and two is the exception — the console
+        // port normally opens and then sits out `probeTimeout` in silence,
+        // which is also why the observed cadence is ~10s rather than the 8s
+        // the back-off caps at. First wins, so on the rare pass where both
+        // refuse, the data port's path is the one reported; `rankedEndpoints`
+        // already puts it first.
+        //
+        // The consequence worth knowing: on a pass where only the CONSOLE
+        // port is held and the data port is merely silent (a pad still
+        // booting), this names the console port, and the indicator sends the
+        // user after a holder that is blocking nothing. 8 of 283 above.
+        var busyPath: String?
         // Not `for … where`: `openAndProbe` opens a port, writes to it, and
         // can block for `probeTimeout`. That does not belong in a filter.
         for endpoint in endpoints {
-            if openAndProbe(endpoint) { return }
+            if openAndProbe(endpoint, busyPath: &busyPath) { return }
         }
         // Every candidate stayed silent. Common during bring-up (wrong port,
         // firmware not running) and after a reset that is still booting.
+        emit(.searchFailed(busyPath: busyPath))
         scheduleRetry()
     }
 
@@ -392,7 +450,7 @@ final class MacroPadDevice: @unchecked Sendable {
     /// Opens the port, asks it to identify itself, and adopts it only if it
     /// answers. Probing rather than trusting the ranking is what makes the
     /// console-vs-data ordering a preference rather than a dependency.
-    private func openAndProbe(_ endpoint: Endpoint) -> Bool {
+    private func openAndProbe(_ endpoint: Endpoint, busyPath: inout String?) -> Bool {
         let handle: Int32
         switch endpoint {
         case .serial(let path, _):
@@ -402,9 +460,28 @@ final class MacroPadDevice: @unchecked Sendable {
                 // `screen` session, a CircuitPython IDE, or (with the remote
                 // transport) the bridge on this same machine holding the port
                 // — and it is unactionable unless it is said out loud.
+                //
+                // Saying it in the log is not enough on its own: measured on
+                // 2026-09-10, something held this pad for 45.3 minutes while
+                // Canopy retried, and the only trace was this line — 283 of
+                // them, a median 10.0s apart (`scheduleRetry`'s back-off caps
+                // at 8s; the rest is the other port's probe timeout). Nothing
+                // on screen changed in those 45 minutes. `busyPath` is what
+                // carries it to the sidebar indicator, which had no way to
+                // tell a held port from an empty desk.
+                //
+                // `errno` is bound to a local because the message now reads
+                // it TWICE — once for the comparison, once for `strerror` —
+                // and `strerror` is a call that may set it. The pre-diff line
+                // read it exactly once, inside the interpolation, so this is
+                // a new requirement rather than a fix to an old double read.
+                // The comparison is deliberately narrow: only `EBUSY` gets an
+                // attribution, because it is the only one the user can act on.
+                let failure = errno
+                busyPath = Self.busyPath(existing: busyPath, errno: failure, path: path)
                 logger.notice("""
                     MacroPad: open(\(path, privacy: .public)) failed: \
-                    \(String(cString: strerror(errno)), privacy: .public)
+                    \(String(cString: strerror(failure)), privacy: .public)
                     """)
                 return false
             }
