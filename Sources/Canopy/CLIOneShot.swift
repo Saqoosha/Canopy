@@ -182,8 +182,10 @@ enum CLIOneShot {
             // `.error` where this file otherwise uses `.notice` throughout: the
             // neighbouring lines report that one call came up empty, and this
             // one reports that the guard against killing the app did not take.
-            // `errno` is read before the message is built, since composing an
-            // `OSLogMessage` may itself make calls that overwrite it.
+            // `errno` is read before the message is built, because the two
+            // interpolations ahead of it are evaluated first and composing an
+            // `OSLogMessage` may itself overwrite it. The sibling sites read it
+            // inline, where it is the only interpolation.
             if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == -1 {
                 let reason = String(cString: strerror(errno))
                 logger.error("\(logPrefix, privacy: .public) \(label, privacy: .public): fcntl(F_SETNOSIGPIPE) failed: \(reason, privacy: .public)")

@@ -131,13 +131,14 @@ final class RemoteSessionsBridge: @unchecked Sendable {
 
         // `send`'s `catch` cannot see a dead reader — SIGPIPE arrives inside
         // `write(2)` and kills Canopy before anything is thrown. What reaches
-        // it is the shim exiting on its OWN (an activation failure, say):
-        // nothing in `terminationHandler` clears `stdinPipe`, so `sendRequest`'s
-        // `isRunning` check can pass and the write still land on a dead reader.
-        // An orderly `shutdown()` is the protected case, not the exposed one —
-        // it nils `stdinPipe` on main and `send` guards on that. See
-        // `ShimProcess.start()` for the measurement and the log-not-refuse
-        // reasoning.
+        // it is a write already on `writeQueue`, which captured this pipe
+        // strongly: `shutdown()` nils `stdinPipe` and `send` guards on that, so
+        // the guard only turns away sends not yet enqueued. Nothing in
+        // `terminationHandler` clears the pipe either, so a shim that exits on
+        // its own leaves it live while `sendRequest`'s `isRunning` check races
+        // the exit — and `start()`'s own `webview_ready` send skips that check
+        // altogether. See `ShimProcess.start()` for the measurement and the
+        // log-not-refuse reasoning.
         if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == -1 {
             logger.error("fcntl(F_SETNOSIGPIPE) failed on bridge stdin: \(String(cString: strerror(errno)), privacy: .public)")
         }

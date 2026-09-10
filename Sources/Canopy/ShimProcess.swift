@@ -1502,8 +1502,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Optional OpenSession that owns this shim. Set by WebViewContainer
-    /// after spawn so isWorking transitions reach the sidebar's icon.
+    /// Optional OpenSession that owns this shim. Set by `WebViewContainer`
+    /// so `isWorking` transitions reach the sidebar's icon — **before**
+    /// `start()`, not after it, for the re-entrancy reason argued at that bind.
+    /// `showErrorInWebView` depends on that ordering to report a launch
+    /// failure, and nothing in the suite would catch the bind moving.
     ///
     /// didSet re-syncs the session's asking flag against this shim's current
     /// internal state. On SSH reconnect a fresh shim inherits an existing
@@ -1859,10 +1862,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // reasoning and the measurement live at `start()`, for all four of the
         // sites that set this flag.
         //
-        // Refused rather than logged, unlike the other three: that write IS
+        // Refused as well as logged, unlike the other three: that write IS
         // this probe, so there is nothing left for it to do if the guard did
         // not take.
-        guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+        guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
             logger.error(
                 "SPIKE: fcntl(F_SETNOSIGPIPE) failed: \(String(cString: strerror(errno)), privacy: .public)"
             )
@@ -2339,14 +2342,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // NOT cover it: the signal is delivered inside `write(2)`, so nothing
         // is ever thrown and the catch never runs.
         //
-        // The standing exposure is an SSH session whose reconnects have all
-        // failed. That path routes through `shimProcessDidDisconnect` rather
-        // than the crash path, so nothing calls `closeSession`, `session.shim`
-        // keeps pointing at the dead shim with its stdin still open, and the
-        // keep-alive writes into it every interval for the life of the app. A
-        // LOCAL crash closes itself and is deliberately not the example here —
-        // `closeSession` reaches `stop()`, which closes the write end, so a
-        // later write throws instead of signalling.
+        // Reachable because a dead shim can stay reachable. Several
+        // background fan-outs write through `session.shim` — the keep-alive,
+        // the recap, the Pager roster paths — and what clears that reference is
+        // `SessionStore.closeSession`, which not every way of losing a shim
+        // goes through. `stop()` closing the write end is NOT what protects the
+        // ones that do: it returns at its own `proc.isRunning` guard whenever
+        // the process has already exited, which is exactly the crash case.
         //
         // The flag works on pipes, not only sockets: `man 2 fcntl` documents it
         // for "a write fails on a pipe or socket", and it was measured on a
@@ -2354,9 +2356,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // write throws `EPIPE` and the process lives.
         //
         // A process-wide `signal(SIGPIPE, SIG_IGN)` would cover every fd at
-        // once, including any added later, and is NOT used because `SIG_IGN`
-        // survives `exec`: it would silently change the disposition inside the
-        // Node shim, the Claude CLI and `ssh` as well.
+        // once, including any added later. It is not used because `SIG_IGN`
+        // survives `exec` into every child, and Canopy cannot know what a
+        // future one expects of it.
         //
         // Logged rather than refused, unlike the probe above. A failing `fcntl`
         // on a fresh pipe fd would almost certainly be systemic rather than
@@ -6264,23 +6266,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     private func showErrorInWebView(_ message: String) {
         // Park it on the session as well, because on the path this function
-        // exists for the webview cannot render it: every call site is a
-        // `start()` failure, and `buildWebView` calls `start()` before
-        // `loadCCWebview`, so there is no document for the injected script to
-        // prepend to and `completionHandler: nil` discards the throw that
-        // follows. The pane then closes. A reconnect failure is the one call
-        // site where the injection DOES render — that webview already has a
-        // document — and equally the one where the line below is a no-op, since
+        // exists for the injection cannot survive: every call site is a
+        // `start()` failure, and `buildWebView` calls `start()` one statement
+        // before `loadCCWebview`, so the load replaces whatever the script
+        // landed in — and `completionHandler: nil` discards any throw besides.
+        // The pane then closes. A reconnect failure is the one route into here
+        // where the injection DOES survive, since that webview is already
+        // loaded and stays, and equally the one where the line below is a
+        // no-op, because
         // `doReconnect` binds the session only after `start()` succeeds. That
         // is correct there: it retries rather than reporting.
         //
         // The rest of the path already exists (issue #194): `Detail`'s crash
         // closure hands `lastFatalError` to `SessionStore.noteSessionFailure`,
-        // which `DetailLauncher` renders. The shim's own `error` frames were
-        // wired to it; a launch that never got as far as a shim was not. This
-        // inherits that path's limit rather than fixing it — only
-        // `DetailLauncher` reads the failure, so with other panes still open
-        // the message waits until a launcher pane exists.
+        // and `DetailLauncher` renders `lastSessionFailure`. The shim's own
+        // `error` frames were wired to it; a launch that never got as far as a
+        // shim was not. This inherits that path's limit rather than fixing it —
+        // `DetailLauncher` is the only reader, so with other panes still open
+        // the message waits for a launcher pane.
         boundSession?.lastFatalError = message
 
         // Escape backslash FIRST, then single quotes
