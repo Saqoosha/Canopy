@@ -2126,9 +2126,9 @@ enum SidebarLogicProbe {
         // leaves both GREEN (measured, on a rebuilt Debug binary). So nothing
         // here distinguishes the new reap from the old one, and nothing here
         // could: the defect was never reproduced, and `GitWorktree.runCommand`
-        // records what is and is not known about why. Note the handler-deletion mutation goes
-        // red only after the full bound elapses, so it presents as a stalled
-        // probe first and a red one second.
+        // records what is and is not known about why. Note the handler-deletion
+        // mutation goes red only after the full bound elapses, so it presents
+        // as a stalled probe first and a red one second.
         let spawnRepo = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProbeSpawn-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: spawnRepo) }

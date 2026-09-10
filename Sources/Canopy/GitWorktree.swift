@@ -363,8 +363,7 @@ enum GitWorktree {
         // bounded. Both are unbounded in themselves: the reads return at EOF
         // and `exited.wait()` returns only once the child has been reaped, and
         // a grandchild that inherited a write end defers EOF indefinitely — no
-        // signal to the
-        // direct child closes that. `CLIOneShot.finishSlack` documents exactly
+        // signal to the direct child closes that. `CLIOneShot.finishSlack` documents exactly
         // that residue and is reused for it. What the bound buys here:
         // `startSession` holds `isCreatingWorktree` true and shows
         // `SpawningOverlay` across this whole call, so one wedged `git` used to
@@ -395,19 +394,18 @@ enum GitWorktree {
         if done.wait(timeout: .now() + timeout + slack) == .timedOut {
             // Deliberately does NOT cancel the killer: the escalation is still
             // this call's only chance of freeing the parked threads. When it
-            // cannot, what leaks is whatever is still parked: the worker
-            // always, and the drains only when it is a pipe that wedged rather
-            // than the reap — on a reap stall they have already returned at
-            // EOF — plus the pipes those parked drains hold. Not the
-            // `Process`: the worker no longer captures it, and Foundation's
-            // self-retain has let go of a child that exited, which leaves one
-            // that survives SIGKILL as the only case it stays.
-            // `CLIOneShot.finishSlack` bounds the same residue the same way, so
-            // the reasoning is reused; its own list ("a `Process`, three
-            // `Pipe`s") differs because its worker holds the process across
-            // `waitUntilExit()` and it always pipes stdin and stdout. Bounded
-            // here as it is there: worktree creation runs a handful of commands
-            // the user asks for one at a time.
+            // cannot, the leak — both drains, the worker, the `Process` and its
+            // descriptors — is the one `CLIOneShot.finishSlack` accepts, and it
+            // is bounded here the same way it is there: worktree creation runs
+            // a handful of commands the user asks for one at a time.
+            //
+            // Deliberately left unscoped. Two attempts to say WHICH of those
+            // leaks on WHICH wedge each replaced a vague-but-true list with a
+            // narrower false one — the second claimed the parked drains hold
+            // the pipes, when on a reap stall no drain is parked at all and the
+            // worker's own closure holds them. Every item above does leak on
+            // some path; pinning them per path needs measuring each wedge, and
+            // nobody has.
             let message = "\(executable) did not release its output within \(Int(timeout + slack))s"
             logger.error("\(message, privacy: .public)")
             throw NSError(domain: "GitWorktree", code: -2,
