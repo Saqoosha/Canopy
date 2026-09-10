@@ -2277,6 +2277,33 @@ enum SidebarLogicProbe {
                    failed.failureNotice?.contains("• blocked") == true)
         }
 
+        // A listing that fails is not a repo with nothing to ignore, and for
+        // as long as `ignoredEntries` returned `[]` on a non-zero `git`
+        // status the two were the same all-zero report — so a worktree that
+        // seeded NOTHING opened saying nothing. No permissions games needed
+        // to reach it: a directory that is not a repo makes `git ls-files`
+        // exit non-zero every time.
+        do {
+            let notARepo = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeNotARepo-\(UUID().uuidString)")
+            let notARepoDest = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeNotARepoDest-\(UUID().uuidString)")
+            defer {
+                try? FileManager.default.removeItem(at: notARepo)
+                try? FileManager.default.removeItem(at: notARepoDest)
+            }
+            for dir in [notARepo, notARepoDest] {
+                try? FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true)
+            }
+            let unlisted = GitWorktree.seedIgnoredFiles(
+                repo: notARepo, worktree: notARepoDest, perEntryTimeout: 10)
+            record("seedIgnoredFiles: a failed listing is flagged, not read as an empty repo",
+                   unlisted.couldNotList && unlisted.failed == 0 && unlisted.cloned == 0)
+            record("failureNotice: a failed listing speaks even with no failed count",
+                   unlisted.failureNotice?.contains("could not list") == true)
+        }
+
         record("projectDisplayName: managed worktree → repo · branch",
                GitWorktree.projectDisplayName(
                    for: GitWorktree.worktreesRoot
