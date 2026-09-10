@@ -8523,6 +8523,117 @@ enum SidebarLogicProbe {
             // `nil != "phone-id"` true and the assertion vacuous.
             record("event: the stamp never reaches an assistant turn",
                    notStamped.first.map { $0.eventId != "phone-id" } ?? false)
+
+            // 画像 Read。行は tool_use ではなく tool_result の時点で出る。
+            let imageRead: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "id": "toolu_1", "name": "Read",
+                     "input": ["file_path": "/Users/hiko/shot.PNG"]],
+                ]],
+            ]
+            record("event: an image Read is recognised by extension, case-insensitively",
+                   SessionEvent.imageReadFileName(name: "Read",
+                                                  input: ["file_path": "/x/shot.PNG"]) == "shot.PNG")
+            record("event: a non-image Read is not an image Read",
+                   SessionEvent.imageReadFileName(name: "Read",
+                                                  input: ["file_path": "/x/main.swift"]) == nil)
+            // allowlist の外は、拡張子が画像でも画像 Read ではない。
+            // これが緩むと、上流が足したどのツールの出力も R2 に上がりうる。
+            record("event: an unlisted tool is never an image read",
+                   SessionEvent.imageReadFileName(name: "Bash",
+                                                  input: ["file_path": "/x/shot.png"]) == nil)
+            record("event: a Read with no file_path is not an image read",
+                   SessionEvent.imageReadFileName(name: "Read", input: nil) == nil)
+
+            // 既定では今と同じ。クロージャを渡さない呼び出し側は行を失わない。
+            let plain = SessionEvent.events(fromFrame: imageRead, sessionId: "S", resumeId: nil,
+                                            at: now, nextId: ids)
+            record("event: with no image handler an image Read still emits its row",
+                   plain.count == 1 && plain.first?.text == "Read: shot.PNG")
+
+            // クロージャを渡すと、行は出ずに tool_use_id が報告される。
+            var noted: [(String, String)] = []
+            let suppressed = SessionEvent.events(fromFrame: imageRead, sessionId: "S", resumeId: nil,
+                                                 at: now, nextId: ids,
+                                                 onImageRead: { noted.append(($0, $1)) })
+            record("event: an image Read emits no row at tool_use time", suppressed.isEmpty)
+            record("event: an image Read reports its tool_use id and file name",
+                   noted.count == 1 && noted[0].0 == "toolu_1" && noted[0].1 == "shot.PNG")
+
+            // 同じ assistant フレームに画像 Read と別のツールが並んでいても、
+            // 抑止されるのは画像 Read の行だけ。
+            let mixedTools: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "id": "toolu_a", "name": "Read",
+                     "input": ["file_path": "/x/shot.png"]],
+                    ["type": "tool_use", "id": "toolu_b", "name": "Bash",
+                     "input": ["command": "ls"]],
+                ]],
+            ]
+            let onlyBash = SessionEvent.events(fromFrame: mixedTools, sessionId: "S", resumeId: nil,
+                                               at: now, nextId: ids, onImageRead: { _, _ in })
+            record("event: suppression is per block, not per frame",
+                   onlyBash.count == 1 && onlyBash.first?.text == "Bash: ls")
+
+            // tool_result 側。ImagePreviewScript が実測した形。
+            let resultFrame: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_1", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/png",
+                            "data": Data([0x89, 0x50, 0x4e, 0x47]).base64EncodedString(),
+                        ]],
+                    ]],
+                ]],
+            ]
+            let found = SessionEvent.firstImageResult(inFrame: resultFrame)
+            record("event: a tool_result's base64 image is decoded",
+                   found?.toolUseId == "toolu_1" && found?.mediaType == "image/png"
+                       && found?.data == Data([0x89, 0x50, 0x4e, 0x47]))
+
+            // 失敗した Read は content が文字列。ImagePreviewScript と同じ扱い。
+            let errorResult: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_1", "content": "File not found"],
+                ]],
+            ]
+            record("event: a string-content tool_result yields no image",
+                   SessionEvent.firstImageResult(inFrame: errorResult) == nil)
+
+            record("event: undecodable base64 yields no image",
+                   SessionEvent.firstImageResult(inFrame: [
+                       "type": "user",
+                       "message": ["content": [
+                           ["type": "tool_result", "tool_use_id": "toolu_1", "content": [
+                               ["type": "image", "source": [
+                                   "type": "base64", "media_type": "image/png",
+                                   "data": "!!!not base64!!!",
+                               ]],
+                           ]],
+                       ]],
+                   ]) == nil)
+
+            // 画像フィールドを持つイベントが JSON に往復すること。
+            // ここが壊れると relay には届くが電話が読めない、という形になる。
+            let withImage = SessionEvent(eventId: "e1", sessionId: "S", resumeId: nil,
+                                         kind: .tool, text: "Read: shot.png", at: now,
+                                         image: SessionEvent.ImageInfo(width: 1440, height: 900,
+                                                                       bytes: 434_831))
+            let roundTripped = (try? JSONEncoder().encode(withImage))
+                .flatMap { try? JSONDecoder().decode(SessionEvent.self, from: $0) }
+            record("event: an image event round-trips through JSON",
+                   roundTripped?.image == withImage.image)
+            // 画像の無いイベントは image キーを出さない。古い relay と
+            // 古い電話のデコードを変えないため。
+            let bare = SessionEvent(eventId: "e2", sessionId: "S", resumeId: nil,
+                                    kind: .tool, text: "Bash: ls", at: now)
+            record("event: an image-less event writes no image key",
+                   !(String(data: (try? JSONEncoder().encode(bare)) ?? Data(),
+                            encoding: .utf8)?.contains("image") ?? true))
         }
 
         // MARK: - The two gates that decide whether a remote session resumes

@@ -20,6 +20,13 @@ struct SessionEvent: Codable, Equatable, Sendable {
     let kind: Kind
     let text: String
     let at: Date
+    /// 画像 Read の行だけが持つ。**`kind` は `tool` のまま。**
+    ///
+    /// 新しい `kind` にしないのは互換のため —— 古い電話は知らない `kind` を
+    /// `.other` に落として「image: Read: shot.png」という意味不明の行を描く。
+    /// 未知のフィールドは Codable が黙って無視するので、古い電話はいつもの
+    /// レンチ行のままになる。
+    let image: ImageInfo?
 
     enum Kind: String, Codable, Sendable {
         case assistant
@@ -27,6 +34,79 @@ struct SessionEvent: Codable, Equatable, Sendable {
         case tool
         case turnStart
         case turnEnd
+    }
+
+    /// 画像を運んでよいツールの名前。
+    ///
+    /// **`toolLabel` の switch と同じ向きの判断で、同じ理由で狭い。** あちらは
+    /// 80 文字の要約について「デフォルトは名前だけ、列挙したものだけが中身を
+    /// 出す」と決めている。こちらが運ぶのは数百 KB の画像なので、同じ慎重さが
+    /// 要る。**削除は常に安全、追加だけが判断を要する。**
+    ///
+    /// 広げる先は chrome-devtools の `take_screenshot` などだが、**電話側には
+    /// この判定が無い** —— 届いたものを描くだけなので、広げるのは Mac の変更
+    /// だけで済み、App Store のリリースを待たない。もう 1 箇所は
+    /// `ImagePreviewScript` の `IMG_EXT`。
+    static let imageToolAllowlist: Set<String> = ["Read"]
+
+    /// 画像として扱う拡張子。`ImagePreviewScript` の `IMG_EXT` と同じ集合。
+    /// 片方だけ広げると、Mac の webview には出るのに電話には出ない（あるいは
+    /// その逆）という、どちらもエラーを出さない形のずれになる。
+    static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif"]
+
+    /// 画像 Read なら最後のパス要素、そうでなければ nil。
+    ///
+    /// `toolLabel` が `Read` に対して出すのと同じ最後のパス要素を返す ——
+    /// ディレクトリは機械の説明であって、作業対象の名前ではない。
+    static func imageReadFileName(name: String, input: [String: Any]?) -> String? {
+        guard imageToolAllowlist.contains(name),
+              let path = input?["file_path"] as? String
+        else { return nil }
+        let url = URL(fileURLWithPath: path)
+        guard imageExtensions.contains(url.pathExtension.lowercased()) else { return nil }
+        let component = url.lastPathComponent
+        return component.isEmpty ? nil : component
+    }
+
+    /// 1 つの `tool_result` フレームから最初の base64 画像を取り出す。
+    ///
+    /// **最初の 1 枚だけ。** 1 回の Read が複数枚返すことはあり（`ImagePreviewScript`
+    /// は配列で持っている）、そのときは 1 行 1 枚という前提を守って残りを捨てる。
+    ///
+    /// 失敗した Read は `content` が配列ではなく文字列で来る —— これも
+    /// `ImagePreviewScript` の実測。
+    static func firstImageResult(inFrame message: [String: Any])
+        -> (toolUseId: String, mediaType: String, data: Data)? {
+        guard message["type"] as? String == "user",
+              let blocks = (message["message"] as? [String: Any])?["content"] as? [[String: Any]]
+        else { return nil }
+        for block in blocks where block["type"] as? String == "tool_result" {
+            guard let toolUseId = block["tool_use_id"] as? String,
+                  let items = block["content"] as? [[String: Any]]
+            else { continue }
+            for item in items where item["type"] as? String == "image" {
+                guard let source = item["source"] as? [String: Any],
+                      source["type"] as? String == "base64",
+                      let mediaType = source["media_type"] as? String,
+                      let encoded = source["data"] as? String,
+                      let data = Data(base64Encoded: encoded)
+                else { continue }
+                return (toolUseId, mediaType, data)
+            }
+        }
+        return nil
+    }
+
+    /// 1 枚の画像について電話が知る必要のあること。**バイトは含まない** ——
+    /// R2 にあり、`GET /image` で取る。この値の存在が「この行には画像がある」。
+    ///
+    /// `width` / `height` は原寸のピクセル数で、行が絵を読み込む前に正しい
+    /// 縦横比の場所を確保するためにある。`bytes` は原寸のバイト数で、タップ
+    /// する前に大きさを見せるため。
+    struct ImageInfo: Codable, Equatable, Sendable {
+        let width: Int
+        let height: Int
+        let bytes: Int
     }
 
     /// Upper bound on one event's text, in BYTES. Keeps a single row in the
@@ -38,7 +118,8 @@ struct SessionEvent: Codable, Equatable, Sendable {
     /// 4000-character command line is not more informative than its first 80.
     static let maxToolSummaryLength = 80
 
-    init(eventId: String, sessionId: String, resumeId: String?, kind: Kind, text: String, at: Date) {
+    init(eventId: String, sessionId: String, resumeId: String?, kind: Kind, text: String,
+         at: Date, image: ImageInfo? = nil) {
         self.type = "event"
         self.eventId = eventId
         self.sessionId = sessionId
@@ -46,6 +127,7 @@ struct SessionEvent: Codable, Equatable, Sendable {
         self.kind = kind
         self.text = text
         self.at = at
+        self.image = image
     }
 
     /// Peel the two envelopes off an unsolicited extension message and return
@@ -96,10 +178,11 @@ struct SessionEvent: Codable, Equatable, Sendable {
                        resumeId: String?,
                        at: Date,
                        nextId: () -> String,
-                       stampUser: ((String) -> String?)? = nil) -> [SessionEvent] {
+                       stampUser: ((String) -> String?)? = nil,
+                       onImageRead: ((_ toolUseId: String, _ fileName: String) -> Void)? = nil) -> [SessionEvent] {
         guard let frame = ioFrame(in: message) else { return [] }
         return events(fromFrame: frame, sessionId: sessionId, resumeId: resumeId,
-                      at: at, nextId: nextId, stampUser: stampUser)
+                      at: at, nextId: nextId, stampUser: stampUser, onImageRead: onImageRead)
     }
 
     /// Turn one CLI frame into zero or more events. Pure.
@@ -119,7 +202,8 @@ struct SessionEvent: Codable, Equatable, Sendable {
                        resumeId: String?,
                        at: Date,
                        nextId: () -> String,
-                       stampUser: ((String) -> String?)? = nil) -> [SessionEvent] {
+                       stampUser: ((String) -> String?)? = nil,
+                       onImageRead: ((_ toolUseId: String, _ fileName: String) -> Void)? = nil) -> [SessionEvent] {
         func make(_ kind: Kind, _ text: String, id: String? = nil) -> SessionEvent? {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
@@ -152,8 +236,18 @@ struct SessionEvent: Codable, Equatable, Sendable {
                 .joined(separator: "\n")
             if let event = make(.assistant, text) { out.append(event) }
             for block in blocks where block["type"] as? String == "tool_use" {
-                guard let name = block["name"] as? String,
-                      let event = make(.tool, toolLabel(name: name, input: block["input"] as? [String: Any]))
+                guard let name = block["name"] as? String else { continue }
+                // 画像 Read は、結果が来るまで行を出さない。画像はこのフレーム
+                // ではなく次の `tool_result` に来るので、行と絵を 1 行にする
+                // には結果まで待つしかない。**`onImageRead` が nil のときは
+                // 今と同じ挙動** —— 画像を扱わない呼び出し側が行を失わない。
+                if let onImageRead,
+                   let fileName = imageReadFileName(name: name, input: block["input"] as? [String: Any]),
+                   let toolUseId = block["id"] as? String {
+                    onImageRead(toolUseId, fileName)
+                    continue
+                }
+                guard let event = make(.tool, toolLabel(name: name, input: block["input"] as? [String: Any]))
                 else { continue }
                 out.append(event)
             }
