@@ -2346,6 +2346,37 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         proc.standardOutput = stdout
         proc.standardError = stderr
 
+        // A write into a pipe whose reader is gone raises SIGPIPE, and the
+        // default disposition KILLS the process — Canopy installs no
+        // `signal(SIGPIPE, SIG_IGN)` anywhere. `writeToStdin`'s `do/catch`
+        // does NOT cover this: the signal is delivered inside `write(2)`, so
+        // nothing is ever thrown and the catch never runs.
+        //
+        // Reachable with no user action. `isReady` is set once and never
+        // cleared, and `handleProcessExit` drops the readability handlers but
+        // leaves `stdinPipe` in place — so after a shim dies, the usage poll
+        // scheduled two seconds after launch, or the hourly keep-alive
+        // injection, writes into a dead pipe and takes the whole app down.
+        // Every pane, not just the one whose shim died.
+        //
+        // `F_SETNOSIGPIPE` makes that write return `EPIPE` instead, which the
+        // existing catch already logs. It works on pipes, not only sockets:
+        // `man 2 fcntl` documents it for "a write fails on a pipe or socket",
+        // and it was measured on a pipe fd here (default → killed by signal 13;
+        // with the flag → `fcntl` returns 0 and the write returns `EPIPE`).
+        //
+        // Checked rather than discarded, matching `MacroPadDevice`'s
+        // `SO_NOSIGPIPE` guard: a silent failure restores exactly the kill this
+        // exists to prevent, at a write that would otherwise look fine. Unlike
+        // that one, a failure here does not refuse the session — the shim is
+        // still usable and refusing would trade a rare crash for a certain
+        // one — so it is logged at `.error` and left to the existing catch.
+        if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != 0 {
+            logger.error(
+                "fcntl(F_SETNOSIGPIPE) failed on shim stdin: \(String(cString: strerror(errno)), privacy: .public)"
+            )
+        }
+
         self.stdinPipe = stdin
         self.stdoutPipe = stdout
         self.stderrPipe = stderr
@@ -6239,6 +6270,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     private func showErrorInWebView(_ message: String) {
+        // Park it on the session as well, because in the case this function
+        // exists for the webview cannot render it. Every call site is a
+        // `start()` failure, and at that point `buildWebView` has not called
+        // `loadCCWebview` yet — there is no document for the injected script to
+        // prepend to, `completionHandler: nil` discards the resulting throw, the
+        // load then replaces whatever was there, and `onCrash(-1)` closes the
+        // pane. Four ways for the message to vanish, none of which logs.
+        //
+        // The rest of the path already exists (issue #194): `Detail`'s crash
+        // closure hands `lastFatalError` to `SessionStore.noteSessionFailure`,
+        // which the launcher renders as a banner after the pane is gone. The
+        // shim's own `error` frames were wired to it; a launch that never got
+        // as far as a shim was not.
+        //
+        // `boundSession` is set before `start()` runs (`buildWebView`'s early
+        // bind), so this lands. The reconnect path spawns a shim with no bound
+        // session and does not go through the banner at all — the assignment is
+        // a no-op there, which is correct: it retries rather than reporting.
+        boundSession?.lastFatalError = message
+
         // Escape backslash FIRST, then single quotes
         let escaped = message
             .replacingOccurrences(of: "\\", with: "\\\\")

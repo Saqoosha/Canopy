@@ -170,6 +170,18 @@ enum CLIOneShot {
             process.standardOutput = stdout
             process.standardError = stderr
 
+            // The `catch` around the stdin write below cannot see a dead
+            // reader: SIGPIPE is delivered inside `write(2)` and its default
+            // disposition kills Canopy, so nothing is thrown. That is reachable
+            // here without any fault of ours — a CLI that rejects one of its
+            // flags exits before draining stdin, and the payload is written
+            // unconditionally after `run()`. `F_SETNOSIGPIPE` turns it into the
+            // `EPIPE` that catch already logs. See `ShimProcess.start()` for
+            // the measurement.
+            if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != 0 {
+                logger.notice("\(logPrefix, privacy: .public) \(label, privacy: .public): fcntl(F_SETNOSIGPIPE) failed: \(String(cString: strerror(errno)), privacy: .public)")
+            }
+
             do {
                 try process.run()
             } catch {

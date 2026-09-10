@@ -129,6 +129,16 @@ final class RemoteSessionsBridge: @unchecked Sendable {
         proc.standardOutput = stdout
         proc.standardError = stderr
 
+        // `send`'s `catch` cannot see a dead reader — SIGPIPE arrives inside
+        // `write(2)` and kills Canopy before anything is thrown. The bridge is
+        // short-lived and torn down by SIGTERM then SIGKILL, so a send racing
+        // that teardown is the ordinary case rather than an edge one.
+        // `F_SETNOSIGPIPE` turns it into the `EPIPE` that catch already logs;
+        // see `ShimProcess.start()` for the measurement.
+        if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != 0 {
+            logger.error("fcntl(F_SETNOSIGPIPE) failed on bridge stdin: \(String(cString: strerror(errno)), privacy: .public)")
+        }
+
         self.stdinPipe = stdin
         self.stdoutPipe = stdout
         self.stderrPipe = stderr
