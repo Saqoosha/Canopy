@@ -956,6 +956,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the headline case, and it was open until this line existed.
         PeerNameStore.shared.captureNow()
 
+        // Same shape as the line above, and the same reason it is here rather
+        // than in `stop()`: quit does not route a live owned shim through
+        // that path, so a prompt the phone was told `ok` about would vanish
+        // with no trace at all. Nothing can be delivered at this point — what
+        // this leaves behind is the count in the log.
+        ShimProcess.discardAllQueuedPhoneReplies()
+
         // Saving the layout and normalizing the saved frame to one pane's
         // width are mutually exclusive — but the deciding question is
         // "will the next launch rebuild the pane strip?", NOT "did the user
