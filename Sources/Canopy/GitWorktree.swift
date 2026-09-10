@@ -296,7 +296,8 @@ enum GitWorktree {
         // window rather than closing it. Both points are argued once, on
         // `CLIOneShot.killGrace`, whose constant this reuses rather than
         // re-types — a number copied here is one that can drift from the
-        // reasoning that justifies it.
+        // reasoning that justifies it. That doc still names `waitUntilExit()`;
+        // the reasoning transfers to `exited`, the primitive does not.
         let killer = DispatchWorkItem { [weak proc] in
             guard let proc, !reaped.value, proc.isRunning else { return }
             kill(proc.processIdentifier, SIGKILL)
@@ -304,28 +305,45 @@ enum GitWorktree {
         queue.asyncAfter(deadline: .now() + timeout, execute: watchdog)
         queue.asyncAfter(deadline: .now() + timeout + CLIOneShot.killGrace, execute: killer)
 
-        // The child's exit is observed HERE, through `terminationHandler`, and
-        // never through `waitUntilExit()`.
+        // The child's exit is observed through `terminationHandler` rather
+        // than `waitUntilExit()`. Scope that to THIS function's reap, not to a
+        // house rule: `CLIOneShot.run`, whose constants this borrows, still
+        // uses `waitUntilExit()` in the same off-main shape and is left alone
+        // deliberately — its `abandon` work item answers the caller either
+        // way, and the other ~11 call sites are their own audit.
         //
-        // `waitUntilExit()` parks the calling thread on that thread's own
-        // CFRunLoop and depends on a wakeup arriving there. The reap below
-        // runs on a `DispatchQueue.global` worker, which owns no runloop
-        // anybody drives, and that wakeup is intermittently lost. Measured
-        // 2026-09-10 on a worktree seed of `Canopy-Mobile`: the FIRST `/bin/cp`
-        // — an 11-file, 48 KB `.xcodeproj` — had exited and been reaped (no
-        // zombie under the app, both pipes at EOF, every file already present
-        // in the destination) while the drain thread sat in `mach_msg` inside
-        // `waitUntilExit()` for the entire 308 s bound. So a clone that had
-        // COPIED EVERYTHING was reported `failed`, and the launcher showed
-        // "Copying Build Files…" for five minutes over finished work.
+        // MEASURED 2026-09-10, seeding a worktree of `Canopy-Mobile`: the
+        // first `/bin/cp` — an 11-file, 48 KB `.xcodeproj` — had exited, had
+        // been reaped (no zombie under the app) and had copied every one of
+        // its files, both pipes were at EOF, and the drain thread was STILL
+        // parked in `mach_msg` inside `waitUntilExit()` when the caller's
+        // bound expired 308 s later (300 plus the two slacks in force then).
+        // A clone that had copied everything was reported `failed`, and the
+        // launcher span "Copying Build Files…" over it for five minutes.
         //
-        // It is a race, not a rule: 1,600 runs of this function's exact shape
-        // in a standalone binary never reproduced it, and the eight later
-        // clones in that same seed all returned normally. That is why the fix
-        // is to drop the dependency rather than to shorten the bound.
-        // `terminationHandler` is delivered by Foundation on its own queue
-        // with no runloop in the path. Assigned BEFORE `run()`, so a child
-        // that exits immediately cannot beat the handler into place.
+        // The reap is what makes this swap a fix rather than a relocation: a
+        // reaped child means Foundation's own exit monitor had already run to
+        // completion, and that monitor is what invokes `terminationHandler`.
+        //
+        // The MECHANISM is not established, and the obvious phrasing for it is
+        // wrong — `waitUntilExit()` is documented as polling the CALLING
+        // thread's runloop, so a runloop was being driven, and "no runloop was
+        // running" cannot be the explanation. What is suspected is the
+        // topology: `run()` on one thread and the wait on a `DispatchQueue`
+        // worker, which Foundation nowhere promises to wake. Whether the
+        // wakeup was never posted or posted where nobody was waiting was not
+        // isolated, and 1,600 runs of a STANDALONE reproduction never
+        // reproduced it — which may mean the race is rare, or may mean the
+        // harness lacked whatever the app supplies. Hence dropping the
+        // dependency rather than shortening the bound.
+        //
+        // `terminationHandler`'s execution context is undefined per `NSTask.h`
+        // (measured once on a shared global root queue), and that is fine:
+        // signalling a semaphore is valid from any context, which is the real
+        // reason this works. Assigning before `run()` is hygiene rather than a
+        // guarantee being relied on — a handler installed after the child has
+        // already exited still fires (measured 100/100) — and an exit landing
+        // before `exited.wait()` is covered by the semaphore's own count.
         let exited = DispatchSemaphore(value: 0)
         proc.terminationHandler = { _ in exited.signal() }
 
@@ -333,7 +351,7 @@ enum GitWorktree {
 
         // The drain and the reap run OFF this thread so the CALLER can be
         // bounded. Both are unbounded in themselves: the reads return at EOF
-        // and `exited` only once the child is gone, and a grandchild that
+        // and `exited.wait()` only after the reap, and a grandchild that
         // inherited a write end defers EOF indefinitely — no signal to the
         // direct child closes that. `CLIOneShot.finishSlack` documents exactly
         // that residue and is reused for it. What the bound buys here:
@@ -364,8 +382,8 @@ enum GitWorktree {
         if done.wait(timeout: .now() + timeout + slack) == .timedOut {
             // Deliberately does NOT cancel the killer: the escalation is still
             // this call's only chance of freeing the parked threads. When it
-            // cannot, the leak — both drains, the worker, the `Process` and its
-            // descriptors — is the one `CLIOneShot.finishSlack` accepts, and it
+            // cannot, the leak — both drains, the worker and its descriptors —
+            // is the one `CLIOneShot.finishSlack` accepts, and it
             // is bounded here the same way it is there: worktree creation runs
             // a handful of commands the user asks for one at a time.
             let message = "\(executable) did not release its output within \(Int(timeout + slack))s"

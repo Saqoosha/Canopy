@@ -2114,6 +2114,19 @@ enum SidebarLogicProbe {
         // write end, and the failure mode of getting that wrong in a test is a
         // hung CI job rather than a red one. The bound is reasoned from
         // `CLIOneShot`, which documents the same residue.
+        //
+        // These two are also the only assertions reaching the REAP inside
+        // `runCommand`, and what that is worth needs stating exactly, because
+        // the obvious reading is too generous. Deleting the
+        // `terminationHandler` while leaving `exited.wait()` in place does
+        // fail them — but that is a self-deadlock, not the code the handler
+        // replaced. Swapping `exited.wait()` back to `proc.waitUntilExit()` —
+        // the actual revert — leaves both GREEN, so nothing here distinguishes
+        // the new reap from the old one, and nothing here could: the defect
+        // was a race (see `GitWorktree.runCommand` for why it was not
+        // reproducible). Note also that the handler-deletion mutation goes red
+        // only after the full bound elapses, so it presents as a stalled probe
+        // first and a red one second.
         let spawnRepo = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProbeSpawn-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: spawnRepo) }
@@ -2134,18 +2147,31 @@ enum SidebarLogicProbe {
                        atomically: true, encoding: .utf8)
         // `--directory` collapses the wholly-ignored directory to one entry, so
         // this is also the assertion that the flag is still being passed.
-        //
-        // And it is the ONLY assertion that reaches `runCommand`'s reap, which
-        // is worth knowing before deleting it as a shallow smoke test: removing
-        // the `terminationHandler` that signals `exited` fails exactly here
-        // (measured, by doing it). What it cannot cover is the defect that put
-        // the handler there — a lost CFRunLoop wakeup inside `waitUntilExit()`,
-        // a race that 1,600 runs of that function's shape in a standalone
-        // binary never reproduced. Repeating this call would not change that,
-        // so it deliberately runs once.
         let spawnIgnored = (try? GitWorktree.ignoredEntries(repo: spawnRepo)) ?? []
         record("ignoredEntries: subprocess round trip completes and drains stdout",
                spawnIgnored.contains("build/"))
+
+        // The defect that motivated the reap rewrite happened on `/bin/cp`,
+        // which runs with `wantsStdout: false` — one drain in the group, not
+        // two — so the assertion above reaches the reap by the OTHER branch
+        // and never touched this one. It asserts `cloned`/`failed` rather than
+        // just the file, because the reported symptom was precisely a copy
+        // that had placed every file and was still counted `failed`.
+        //
+        // `perEntryTimeout` is cut to 10 s so a reap that stops returning goes
+        // red in about eighteen rather than stalling the probe for five
+        // minutes on the shipped default.
+        let seedDest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ProbeSeed-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: seedDest) }
+        try? FileManager.default.createDirectory(
+            at: seedDest, withIntermediateDirectories: true)
+        let seeded = GitWorktree.seedIgnoredFiles(
+            repo: spawnRepo, worktree: seedDest, perEntryTimeout: 10)
+        record("seedIgnoredFiles: a completed /bin/cp is reported cloned, not failed",
+               seeded.cloned == 1 && seeded.failed == 0
+                   && FileManager.default.fileExists(
+                       atPath: seedDest.appendingPathComponent("build/artifact.o").path))
 
         record("projectDisplayName: managed worktree → repo · branch",
                GitWorktree.projectDisplayName(
