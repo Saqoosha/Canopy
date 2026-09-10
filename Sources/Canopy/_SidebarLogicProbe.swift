@@ -8683,7 +8683,13 @@ enum SidebarLogicProbe {
             record("image: a thumbnail keeps the aspect ratio",
                    RosterImageUploader.pixelSize(of: thumb ?? Data())
                        .map { $0.width == 320 && $0.height == 200 } ?? false)
-            // 縮小の目的そのもの。ここが逆転していたら R2 に置く意味が無い。
+            // **これは実質 vacuous で、形を残すためだけに置いてある。**
+            // 実測: 単色フィクスチャは JPEG の DCT が縮小の有無に関わらず
+            // 潰す（1,831 バイト対、元 PNG の 19,137 バイト）ので、
+            // `thumbnail()` がリサイズを丸ごと飛ばしても、この比較には勝つ。
+            // 縮小そのものをピクセル寸法で pin しているのは上の 2 つ ——
+            // `a thumbnail's long edge is the cap` と
+            // `a thumbnail keeps the aspect ratio`。
             record("image: a thumbnail is smaller than the original",
                    (thumb?.count ?? .max) < wide.count)
             record("image: thumbnail refuses non-image bytes",
@@ -8699,6 +8705,19 @@ enum SidebarLogicProbe {
                 record("image: small fixture PNG could be built", false, "makePNG returned nil")
             }
             }  // if let wide
+
+            // pending の上限。結果が来ないまま溜まる Read があるので、
+            // 無限には持たない。**古いものから落とす** —— 新しいものを
+            // 落とすと、直前に始まった Read の絵が永久に出ない。
+            var pending = [(id: String, file: String)]()
+            for i in 0..<40 { pending.append((id: "t\(i)", file: "f\(i).png")) }
+            let pruned = ShimProcess.prunedImageReads(pending, cap: ShimProcess.maxPendingImageReads)
+            record("image: pending reads are capped",
+                   pruned.count == ShimProcess.maxPendingImageReads)
+            record("image: pruning drops the oldest, not the newest",
+                   pruned.first?.id == "t8" && pruned.last?.id == "t39")
+            record("image: a list under the cap is untouched",
+                   ShimProcess.prunedImageReads([(id: "a", file: "a.png")], cap: 32).count == 1)
         }
 
         // MARK: - The two gates that decide whether a remote session resumes

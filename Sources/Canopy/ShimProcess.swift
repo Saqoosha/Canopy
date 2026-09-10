@@ -6568,6 +6568,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// one, so a text-less turn cannot ship the previous turn's id.
     private var lastAssistantEventId: String?
 
+    /// 結果を待っている画像 Read。`tool_use` で入り、`tool_result` で出る。
+    ///
+    /// **フレームを跨ぐ状態がここに要るのは、画像が行と別のフレームに来る
+    /// から。** `pendingPhoneReply` と `lastAssistantEventId` が同じ形。
+    private var pendingImageReads: [(id: String, file: String)] = []
+
+    /// pending の上限。結果が来ない Read（セッションが死んだ、CLI が落ちた）
+    /// があるので、無限には持たない。
+    static let maxPendingImageReads = 32
+
+    /// 上限を超えたぶんを古い側から落とす。
+    ///
+    /// **新しい側を落とさない。** 直前に始まった Read こそ画面に出る番なので、
+    /// そこを捨てると「最近の絵だけ出ない」という一番気づきにくい形になる。
+    static func prunedImageReads(_ reads: [(id: String, file: String)],
+                                 cap: Int) -> [(id: String, file: String)] {
+        guard reads.count > cap else { return reads }
+        return Array(reads.suffix(cap))
+    }
+
     /// Turn one io_message into phone-bound events and send them.
     ///
     /// **Called after `consumeRecapTraffic` and `consumeKeepAliveTraffic`,
@@ -6592,7 +6612,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                          stampUser: { text in
                                              guard let pending, text == pending.text else { return nil }
                                              return pending.id
+                                         },
+                                         onImageRead: { [weak self] toolUseId, fileName in
+                                             guard let self else { return }
+                                             self.pendingImageReads.append((id: toolUseId, file: fileName))
+                                             self.pendingImageReads = Self.prunedImageReads(
+                                                 self.pendingImageReads, cap: Self.maxPendingImageReads)
                                          })
+        // 画像の結果は `events` が空を返すフレーム（tool_result を含む user
+        // フレーム）に来るので、**空の guard より先に見る。**
+        if let frame = SessionEvent.ioFrame(in: message) {
+            publishImageResultIfAny(frame, session: session)
+        }
         // **Logged BEFORE the empty guard, and the placement is the point.**
         // The one failure this feature can have is total silence, and the
         // first version had it — reading the outermost envelope produced zero
@@ -6611,6 +6642,48 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         for event in events {
             if event.kind == .assistant { lastAssistantEventId = event.eventId }
             RosterPublisher.current?.sendEvent(event)
+        }
+    }
+
+    /// 待っていた画像 Read の結果が来たら、2 枚アップロードして 1 行出す。
+    ///
+    /// **アップロードの成功を待ってから行を出す。** 行が出た = バイトは在る、
+    /// という関係が、壊れたサムネイルの出ない唯一の根拠。失敗したら画像なしの
+    /// 素のレンチ行を出す —— 行そのものを落とすと、Read があったことすら
+    /// 伝わらない。
+    private func publishImageResultIfAny(_ frame: [String: Any], session: OpenSession) {
+        guard let result = SessionEvent.firstImageResult(inFrame: frame),
+              let index = pendingImageReads.firstIndex(where: { $0.id == result.toolUseId })
+        else { return }
+        let file = pendingImageReads[index].file
+        pendingImageReads.remove(at: index)
+
+        let eventId = UUID().uuidString
+        let sessionId = session.id.uuidString
+        let resumeId = session.resumeId
+        let text = "Read: \(file)"
+        let at = Date()
+
+        func emit(_ image: SessionEvent.ImageInfo?) {
+            RosterPublisher.current?.sendEvent(
+                SessionEvent(eventId: eventId, sessionId: sessionId, resumeId: resumeId,
+                             kind: .tool, text: text, at: at, image: image))
+        }
+
+        guard result.data.count <= RosterImageUploader.maxFullBytes,
+              let size = RosterImageUploader.pixelSize(of: result.data),
+              let thumb = RosterImageUploader.thumbnail(from: result.data)
+        else {
+            emit(nil)
+            return
+        }
+        let info = SessionEvent.ImageInfo(width: size.width, height: size.height,
+                                          bytes: result.data.count)
+        Task { @MainActor in
+            let ok = await RosterImageUploader.upload(
+                sessionId: sessionId, eventId: eventId,
+                full: result.data, thumb: thumb, mediaType: result.mediaType)
+            emit(ok ? info : nil)
         }
     }
 

@@ -61,4 +61,71 @@ enum RosterImageUploader {
         guard CGImageDestinationFinalize(dest), out.length > 0 else { return nil }
         return out as Data
     }
+
+    /// full と thumb を PUT する。両方成功したときだけ true。
+    ///
+    /// **片方だけ成功した状態を成功と呼ばない。** thumb だけ在れば行に絵は
+    /// 出るがタップが 404 になり、full だけ在れば行に穴が空く。どちらも
+    /// 「行が出た = バイトは在る」を破る。
+    static func upload(sessionId: String, eventId: String,
+                       full: Data, thumb: Data, mediaType: String) async -> Bool {
+        guard let target = await resolvedTarget() else { return false }
+        async let a = put(target: target, sessionId: sessionId, eventId: eventId,
+                          variant: "full", body: full, mediaType: mediaType)
+        async let b = put(target: target, sessionId: sessionId, eventId: eventId,
+                          variant: "thumb", body: thumb, mediaType: "image/jpeg")
+        // Not `await a && b` — `&&`'s second operand is `@autoclosure`, and an
+        // `async let` cannot be captured inside one (compile error). Awaiting
+        // both to plain `Bool`s first sidesteps it without changing that both
+        // uploads run concurrently above.
+        let (fullOK, thumbOK) = await (a, b)
+        return fullOK && thumbOK
+    }
+
+    /// `RosterNotifier.resolvedTarget` と同じ 3 つ組を同じ順で確かめる。
+    /// https の拒否も同じ理由（CWE-319）—— ここも Bearer secret を運ぶ。
+    @MainActor
+    private static func resolvedTarget() -> (machineId: String, base: URLComponents, secret: String)? {
+        let settings = CanopySettings.shared
+        guard settings.rosterEnabled,
+              let machineId = MachineIdentity.stableId(),
+              var components = URLComponents(string: settings.rosterEndpoint)
+        else { return nil }
+        components.path = "/image"
+        guard components.scheme == "https" else {
+            logger.error("roster endpoint must be https; refusing to send the secret over \(components.scheme ?? "no scheme", privacy: .public)")
+            return nil
+        }
+        guard let secret = RosterPublisher.sharedSecretForNotifier() else { return nil }
+        return (machineId, components, secret)
+    }
+
+    private static func put(target: (machineId: String, base: URLComponents, secret: String),
+                            sessionId: String, eventId: String, variant: String,
+                            body: Data, mediaType: String) async -> Bool {
+        var components = target.base
+        components.queryItems = [
+            URLQueryItem(name: "machine", value: target.machineId),
+            URLQueryItem(name: "session", value: sessionId),
+            URLQueryItem(name: "event", value: eventId),
+            URLQueryItem(name: "variant", value: variant),
+        ]
+        guard let url = components.url else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(target.secret)", forHTTPHeaderField: "Authorization")
+        request.setValue(mediaType, forHTTPHeaderField: "Content-Type")
+        do {
+            let (_, response) = try await URLSession.shared.upload(for: request, from: body)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if code != 200 {
+                logger.notice("roster image \(variant, privacy: .public) returned \(code, privacy: .public)")
+                return false
+            }
+            return true
+        } catch {
+            logger.notice("roster image \(variant, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
 }
