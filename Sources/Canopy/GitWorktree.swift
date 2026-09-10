@@ -296,7 +296,8 @@ enum GitWorktree {
         // window rather than closing it. Both points are argued once, on
         // `CLIOneShot.killGrace`, whose constant this reuses rather than
         // re-types — a number copied here is one that can drift from the
-        // reasoning that justifies it.
+        // reasoning that justifies it. That doc still names `waitUntilExit()`;
+        // the reasoning transfers to `exited`, the primitive does not.
         let killer = DispatchWorkItem { [weak proc] in
             guard let proc, !reaped.value, proc.isRunning else { return }
             kill(proc.processIdentifier, SIGKILL)
@@ -304,13 +305,65 @@ enum GitWorktree {
         queue.asyncAfter(deadline: .now() + timeout, execute: watchdog)
         queue.asyncAfter(deadline: .now() + timeout + CLIOneShot.killGrace, execute: killer)
 
+        // The child's exit is observed through `terminationHandler` rather
+        // than `waitUntilExit()`. Scope that to THIS function: it was the only
+        // call site that ran `run()` on one thread and waited on another. Every
+        // other `waitUntilExit()` in `Sources/` — thirteen of them, `CLIOneShot`
+        // and the probe's own `git init` included, and read rather than assumed
+        // — does both on one and the same thread, so none of them has that
+        // split, and they are left alone rather than swept.
+        //
+        // MEASURED 2026-09-10, seeding a worktree of `Canopy-Mobile`: the first
+        // `/bin/cp` — an 11-file, 48 KB `.xcodeproj` — had exited, had been
+        // reaped (no zombie under the app) and had copied every one of its
+        // files, its single pipe was at EOF (`wantsStdout: false`, so there is
+        // only stderr), and the worker was still parked in `mach_msg` inside
+        // `waitUntilExit()` when the caller's bound expired 308 s later (300
+        // plus the two slacks in force then). A clone that had copied
+        // everything was reported `failed`, and the launcher showed "Copying
+        // Build Files…" over it for five minutes.
+        //
+        // "Reaped" is the load-bearing word, and the step after it is inference
+        // rather than observation: a reaped child means Foundation's exit
+        // monitor had already run, and on Darwin that monitor is what invokes
+        // `terminationHandler` — so the handler would have fired for this exact
+        // failure. Nobody watched it fire; no handler was installed at the time.
+        //
+        // The MECHANISM is not established, and two measurements bracket it
+        // rather than settle it. A healthy `waitUntilExit()` polls the CALLING
+        // thread's runloop — documented in `NSTask.h`, and measured at ~15 Hz
+        // even on a `DispatchQueue.global` worker, so one dropped wakeup would
+        // heal itself in milliseconds — yet the failing thread was parked in
+        // `mach_msg` for essentially every sample of a 3 s `sample(1)` run.
+        // Whatever this was, it was not a single missed wakeup on an otherwise
+        // spinning poll, and "no runloop was running" does not describe it
+        // either. 1,600 runs of a STANDALONE reproduction never reproduced it,
+        // which may mean the race is rare or may mean the harness lacked
+        // whatever the app supplies. Dropping the dependency is what that state
+        // of knowledge supports; shortening the bound is not.
+        //
+        // What the swap gives up, since nothing else records it: that poll
+        // re-checks `isRunning`, so it can recover on its own, where a
+        // `terminationHandler` is one-shot and a lost delivery parks the worker
+        // for good. The caller is bounded either way by `done.wait(timeout:)`.
+        //
+        // `terminationHandler`'s execution context is undefined per `NSTask.h`
+        // (measured once on a shared global root queue), and that is fine:
+        // signalling a semaphore is valid from any context, which is the real
+        // reason this works. Assigning before `run()` is hygiene, not a
+        // guarantee being leaned on: the same header says a handler set after
+        // the child has finished runs anyway (and it does, 100/100), and an
+        // exit landing before `exited.wait()` is covered by the semaphore.
+        let exited = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exited.signal() }
+
         try proc.run()
 
         // The drain and the reap run OFF this thread so the CALLER can be
         // bounded. Both are unbounded in themselves: the reads return at EOF
-        // and `waitUntilExit()` only after the reap, and a grandchild that
-        // inherited a write end defers EOF indefinitely — no signal to the
-        // direct child closes that. `CLIOneShot.finishSlack` documents exactly
+        // and `exited.wait()` returns only once the child has been reaped, and
+        // a grandchild that inherited a write end defers EOF indefinitely — no
+        // signal to the direct child closes that. `CLIOneShot.finishSlack` documents exactly
         // that residue and is reused for it. What the bound buys here:
         // `startSession` holds `isCreatingWorktree` true and shows
         // `SpawningOverlay` across this whole call, so one wedged `git` used to
@@ -328,7 +381,11 @@ enum GitWorktree {
                 output.err = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             }
             group.wait()
-            proc.waitUntilExit()
+            // `terminationStatus` is readable once this returns. Measured
+            // (200 runs, a non-zero status read back correctly), not
+            // documented — `NSTask.h` promises only that `waitUntilExit` does
+            // not wait for the handler to finish.
+            exited.wait()
             reaped.set()
             done.signal()
         }
@@ -341,6 +398,14 @@ enum GitWorktree {
             // descriptors — is the one `CLIOneShot.finishSlack` accepts, and it
             // is bounded here the same way it is there: worktree creation runs
             // a handful of commands the user asks for one at a time.
+            //
+            // Deliberately left unscoped. Two attempts to say WHICH of those
+            // leaks on WHICH wedge each replaced a vague-but-true list with a
+            // narrower false one — the second claimed the parked drains hold
+            // the pipes, when on a reap stall no drain is parked at all and the
+            // worker's own closure holds them. Every item above does leak on
+            // some path; pinning them per path needs measuring each wedge, and
+            // nobody has.
             let message = "\(executable) did not release its output within \(Int(timeout + slack))s"
             logger.error("\(message, privacy: .public)")
             throw NSError(domain: "GitWorktree", code: -2,
@@ -720,10 +785,68 @@ enum GitWorktree {
         var linked = 0
         var skipped = 0
         var failed = 0
+        /// The entries behind `failed`, in the order they were attempted.
+        ///
+        /// Carried so the alert can name them: "3 entries failed" is not
+        /// actionable. An earlier draft justified this by saying the log
+        /// redacts these paths, and that is false — the interpolated path is
+        /// `.private` at every `seed:` site, but two of them re-emit it inside
+        /// a `.public` `cp` stderr or `localizedDescription` (measured). The
+        /// real reason is simply that Console is the wrong place to send
+        /// someone standing in front of the app.
+        var failedEntries: [String] = []
 
         var summary: String {
             "cloned \(cloned), linked \(linked), skipped \(skipped), failed \(failed)"
         }
+
+        /// What to tell the user, or nil when everything arrived.
+        ///
+        /// Deliberately does not assert the files are missing. `failed` is
+        /// reached from three sites carrying at least five distinct causes: a
+        /// failed `stat`; a `createDirectory` or `createSymbolicLink` throw;
+        /// `cp` exiting non-zero; and `runCommand` throwing for either the
+        /// watchdog kill (`-1`) or a drain/reap stall (`-2`) — note the last
+        /// two THROW, so they land in the `catch` beside the link failures
+        /// rather than in the non-zero-status branch. Those causes disagree
+        /// about what is on disk afterwards: some wrote nothing, `cp` leaves
+        /// whatever it had written when it stopped on BOTH its failing paths
+        /// (measured), and the `-2` case may have copied everything —
+        /// `runCommand`'s own comment records that failure in full. Splitting
+        /// the counter so this could be specific was considered and dropped:
+        /// it would take those entries out of every existing reader of
+        /// `failed`.
+        ///
+        /// "added" rather than "copied" because the `.link` plan is in here
+        /// too, and a FIFO is symlinked rather than copied.
+        ///
+        /// Known hole, deliberately left: a listing that fails outright
+        /// returns an all-zero report, so `failed` is 0 and this says nothing
+        /// while NOTHING was seeded. Closing it means giving `ignoredEntries`
+        /// an error contract it does not have — its non-zero-status branch
+        /// returns `[]` on purpose — which is a wider change than this one.
+        var failureNotice: String? {
+            guard failed > 0 else { return nil }
+            let attempted = cloned + linked + failed
+            // Agrees with the SET, not the numerator: "1 of 5 entries", never
+            // "1 of 5 entry". `attempted >= failed >= 1` here, so the singular
+            // still reads correctly at "1 of 1 entry".
+            let noun = attempted == 1 ? "entry" : "entries"
+            let shown = failedEntries.prefix(SeedReport.noticeNameCap)
+            var body = "\(failed) of \(attempted) ignored \(noun) could not be added "
+                + "to the new worktree, or Canopy could not confirm they arrived."
+            if !shown.isEmpty {
+                body += "\n\n" + shown.map { "• \($0)" }.joined(separator: "\n")
+                let rest = failedEntries.count - shown.count
+                if rest > 0 { body += "\n• and \(rest) more" }
+            }
+            return body + "\n\nThe worktree is ready. A build that needs those "
+                + "files may fail."
+        }
+
+        /// Enough to identify what is missing without turning the alert into a
+        /// scrolling list; the count above still reports the true total.
+        static let noticeNameCap = 5
     }
 
     /// Ignored entries under `repo`, as git reports them.
@@ -807,6 +930,7 @@ enum GitWorktree {
             // write back into the root checkout, silently, counted as `linked`.
             guard let attrs = try? fm.attributesOfItem(atPath: source.path) else {
                 report.failed += 1
+                report.failedEntries.append(relative)
                 logger.notice("seed: cannot stat \(relative, privacy: .private)")
                 continue
             }
@@ -838,6 +962,7 @@ enum GitWorktree {
                         report.cloned += 1
                     } else {
                         report.failed += 1
+                        report.failedEntries.append(relative)
                         // `.private` on the path: an ignored entry's name can
                         // carry a client or product name, and these lines
                         // reach disk.
@@ -848,6 +973,7 @@ enum GitWorktree {
                 }
             } catch {
                 report.failed += 1
+                report.failedEntries.append(relative)
                 logger.notice(
                     "seed: \(relative, privacy: .private) failed: \(error.localizedDescription, privacy: .public)"
                 )

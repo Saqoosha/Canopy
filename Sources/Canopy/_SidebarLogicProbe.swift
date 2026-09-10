@@ -1863,6 +1863,38 @@ enum SidebarLogicProbe {
                [FileAttributeType.typeRegular, .typeDirectory, .typeSymbolicLink]
                    .allSatisfy { GitWorktree.plan(for: $0) == .clone })
 
+        // The decision, not the wording: nil when everything arrived, non-nil
+        // the moment anything did not, and the count is of what was ATTEMPTED.
+        // `skipped` is excluded because no skip path tries anything — but note
+        // only one of its three reachable sites is a `shouldSeed` denial; the
+        // others are the destination-containment guard and a path already
+        // present in the worktree.
+        //
+        // These build `SeedReport` values directly, so they pin the pure
+        // property and nothing about the three `failedEntries.append` sites
+        // that fill it. That wiring is pinned separately, below.
+        record("failureNotice: silent when nothing failed",
+               GitWorktree.SeedReport(cloned: 3, linked: 1, skipped: 2, failed: 0,
+                                      failedEntries: []).failureNotice == nil)
+        record("failureNotice: speaks up, counts attempts not skips, names the entry",
+               {
+                   guard let n = GitWorktree.SeedReport(
+                       cloned: 3, linked: 1, skipped: 9, failed: 1,
+                       failedEntries: ["build"]).failureNotice else { return false }
+                   // "entries" agrees with the set, not the numerator.
+                   return n.contains("1 of 5 ignored entries") && n.contains("• build")
+               }())
+        record("failureNotice: caps the list and says how many it withheld",
+               {
+                   let many = (0..<(GitWorktree.SeedReport.noticeNameCap + 3)).map { "e\($0)" }
+                   guard let n = GitWorktree.SeedReport(
+                       cloned: 0, linked: 0, skipped: 0, failed: many.count,
+                       failedEntries: many).failureNotice else { return false }
+                   // Derived from the cap, so it survives a retune; what it
+                   // pins is the arithmetic, never the number 5.
+                   return n.contains("• and 3 more") && !n.contains("• e\(many.count - 1)")
+               }())
+
         // MARK: What a new worktree branches FROM
         //
         // The order IS the policy, and it is the half that rots silently: a
@@ -2098,7 +2130,9 @@ enum SidebarLogicProbe {
         record("isGitRepo: .git file (gitlink) → true",
                GitWorktree.isGitRepo(gitFileDir))
 
-        // The ONLY assertion in this file that executes `GitWorktree.runCommand`
+        // The first of the only two assertions in this file that execute
+        // `GitWorktree.runCommand` (the other is the `seedIgnoredFiles` one
+        // below, which reaches it twice — once for `git`, once for `/bin/cp`)
         // — every other git helper above is a pure string or filesystem check,
         // so a green suite says nothing about the subprocess round trip. That
         // gap was real: the drain was rewritten to run off the calling thread
@@ -2114,6 +2148,19 @@ enum SidebarLogicProbe {
         // write end, and the failure mode of getting that wrong in a test is a
         // hung CI job rather than a red one. The bound is reasoned from
         // `CLIOneShot`, which documents the same residue.
+        //
+        // They are also the only two reaching the REAP inside `runCommand`,
+        // and what that is worth needs stating exactly, because the obvious
+        // reading is too generous. Deleting the `terminationHandler` while
+        // leaving `exited.wait()` in place does fail them (measured) — but
+        // that is a self-deadlock, not the code the handler replaced. Swapping
+        // `exited.wait()` back to `proc.waitUntilExit()`, which IS the revert,
+        // leaves both GREEN (measured, on a rebuilt Debug binary). So nothing
+        // here distinguishes the new reap from the old one, and nothing here
+        // could: the defect was never reproduced, and `GitWorktree.runCommand`
+        // records what is and is not known about why. Note the handler-deletion
+        // mutation goes red only after the full bound elapses, so it presents
+        // as a stalled probe first and a red one second.
         let spawnRepo = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProbeSpawn-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: spawnRepo) }
@@ -2137,6 +2184,98 @@ enum SidebarLogicProbe {
         let spawnIgnored = (try? GitWorktree.ignoredEntries(repo: spawnRepo)) ?? []
         record("ignoredEntries: subprocess round trip completes and drains stdout",
                spawnIgnored.contains("build/"))
+
+        // The defect that motivated the reap rewrite happened on `/bin/cp`,
+        // which runs with `wantsStdout: false` — one drain in the group, not
+        // two — so the assertion above reaches the reap by the OTHER branch
+        // and never touched this one. It asserts `cloned`/`failed` rather than
+        // just the file, because the reported symptom was precisely a copy
+        // that had placed every file and was still counted `failed`.
+        //
+        // That it covers that branch rather than something upstream of it is
+        // measured, and the obvious mutation does NOT show it: forcing every
+        // `runCommand` to report failure empties `ignoredEntries`, so the loop
+        // body never runs and `/bin/cp` is never spawned — this assertion then
+        // reddens for a reason it was not added for. Scoping the forced
+        // failure to `/bin/cp` is the discriminating one; it leaves the
+        // assertion above GREEN and reddens only this one.
+        //
+        // `perEntryTimeout` is cut to 10 s because the CI step's
+        // `timeout-minutes: 5` would otherwise be KILLED rather than reddened
+        // by the shipped 300 s default: a stalled `/bin/cp` reap now fails at
+        // about eighteen (10 + the two slacks). It bounds the `cp` call only —
+        // `seedIgnoredFiles` calls `ignoredEntries` at its own default 60 s, so
+        // a reap that stops returning generally takes ~68 s here, on git,
+        // before any `cp` runs at all.
+        //
+        // `cp -Rc` FORCES clonefile, so this assertion also depends on the
+        // runner's temporary directory being APFS. It is on both this machine
+        // and `macos-26`; a red here on some future runner may be that rather
+        // than the reap.
+        let seedDest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ProbeSeed-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: seedDest) }
+        try? FileManager.default.createDirectory(
+            at: seedDest, withIntermediateDirectories: true)
+        let seeded = GitWorktree.seedIgnoredFiles(
+            repo: spawnRepo, worktree: seedDest, perEntryTimeout: 10)
+        record("seedIgnoredFiles: a completed /bin/cp is reported cloned, not failed",
+               seeded.cloned == 1 && seeded.failed == 0
+                   && FileManager.default.fileExists(
+                       atPath: seedDest.appendingPathComponent("build/artifact.o").path))
+
+        // The `failedEntries.append` sites are the layer that can break
+        // silently, and the pure assertions above cannot see them: delete all
+        // three and every one of them stays green, because they build their
+        // own `SeedReport`s. Losing one degrades the alert to the
+        // unactionable "N entries failed" this feature exists to avoid.
+        //
+        // A mode-000 FILE, not directory — `cp -Rc` fails on the unreadable
+        // file while still placing its readable sibling (which is also the
+        // real shape: a failure that leaves the destination PARTIAL), and
+        // `removeItem` in the `defer` can still unlink it, since unlink needs
+        // only the parent's write bit. Root can read it, so this asserts
+        // nothing as uid 0; that is stated rather than hidden, and CI runs as
+        // `runner`.
+        if getuid() != 0 {
+            let failRepo = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeSeedFail-\(UUID().uuidString)")
+            let failDest = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeSeedFailDest-\(UUID().uuidString)")
+            defer {
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o644],
+                    ofItemAtPath: failRepo.appendingPathComponent("blocked/secret.o").path)
+                try? FileManager.default.removeItem(at: failRepo)
+                try? FileManager.default.removeItem(at: failDest)
+            }
+            for dir in [failRepo.appendingPathComponent("blocked"), failDest] {
+                try? FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true)
+            }
+            let failInit = Process()
+            failInit.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            failInit.arguments = ["-C", failRepo.path, "init", "-q"]
+            failInit.standardOutput = FileHandle.nullDevice
+            failInit.standardError = FileHandle.nullDevice
+            try? failInit.run()
+            failInit.waitUntilExit()
+            try? "blocked/\n".write(to: failRepo.appendingPathComponent(".gitignore"),
+                                    atomically: true, encoding: .utf8)
+            try? "x".write(to: failRepo.appendingPathComponent("blocked/keep.o"),
+                           atomically: true, encoding: .utf8)
+            try? "x".write(to: failRepo.appendingPathComponent("blocked/secret.o"),
+                           atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o000],
+                ofItemAtPath: failRepo.appendingPathComponent("blocked/secret.o").path)
+            let failed = GitWorktree.seedIgnoredFiles(
+                repo: failRepo, worktree: failDest, perEntryTimeout: 10)
+            record("seedIgnoredFiles: a failing /bin/cp is counted AND named",
+                   failed.failed == 1 && failed.failedEntries == ["blocked"])
+            record("seedIgnoredFiles: the notice reaches the user with that name in it",
+                   failed.failureNotice?.contains("• blocked") == true)
+        }
 
         record("projectDisplayName: managed worktree → repo · branch",
                GitWorktree.projectDisplayName(
