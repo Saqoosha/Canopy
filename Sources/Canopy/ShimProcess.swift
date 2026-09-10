@@ -2359,9 +2359,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // does not depend on any of them being the live one.
         //
         // A process-wide `signal(SIGPIPE, SIG_IGN)` would cover every fd at
-        // once, including any added later. It is not used because `SIG_IGN`
-        // survives `exec` into every child, and Canopy cannot know what a
-        // future one expects of it.
+        // once, including any added later, and would need no per-site rule.
+        // It is not used here because it is a wider change than this fix — it
+        // silences the signal for every write the app makes, not just the ones
+        // whose reader is a subprocess — and that is a decision to take on its
+        // own, not as a side effect of a bug fix.
+        //
+        // What it is NOT is dangerous to the children, and this comment used to
+        // say it was. Measured: with `SIG_IGN` set, a child spawned through
+        // Foundation `Process` reads SIG_DFL, because `Process` resets the
+        // disposition; only a bare `posix_spawn` passes the ignore through.
+        // Canopy spawns through `Process`, so nothing it launches directly
+        // would inherit the ignore. Deeper descendants — the CLI, and `ssh`
+        // under the wrapper — are the shim's children rather than Canopy's,
+        // and what they inherit is whatever the shim has, not what Canopy set.
         //
         // Logged rather than refused, unlike the probe above: a failing `fcntl`
         // on a fresh pipe fd would almost certainly be systemic, so refusing
