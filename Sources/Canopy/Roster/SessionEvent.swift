@@ -68,22 +68,33 @@ struct SessionEvent: Codable, Equatable, Sendable {
         return component.isEmpty ? nil : component
     }
 
-    /// 1 つの `tool_result` フレームから最初の base64 画像を取り出す。
+    /// フレーム内の全 `tool_result` を、画像用にデコードして返す。
     ///
-    /// **最初の 1 枚だけ。** 1 回の Read が複数枚返すことはあり（`ImagePreviewScript`
-    /// は配列で持っている）、そのときは 1 行 1 枚という前提を守って残りを捨てる。
+    /// **呼び出し側には 2 つとも要る。** `resultIds` はこのフレームに載った
+    /// 全 `tool_result` の `tool_use_id` —— 画像が無いものも、失敗した Read
+    /// （`content` が配列ではなく文字列）も含む。呼び出し側はこの集合を見て
+    /// 「このフレームがどの pending read を解決したか」を知り、画像が無かった
+    /// ものにも素の行を出せる。相関を持つのは呼び出し側で、ここはフレームの
+    /// 中身をそのまま報告するだけ。
+    ///
+    /// `images` は 1 つの `tool_result` につき最大 1 枚。1 回の Read が複数枚
+    /// 返すことはあり（`ImagePreviewScript` は配列で持っている）、そのときは
+    /// 1 行 1 枚という前提を守って残りを捨てる。**フレームに複数の `tool_result`
+    /// が載れば、画像を持つブロックの数だけ返す** —— 最初の 1 件で止めない。
     ///
     /// 失敗した Read は `content` が配列ではなく文字列で来る —— これも
     /// `ImagePreviewScript` の実測。
-    static func firstImageResult(inFrame message: [String: Any])
-        -> (toolUseId: String, mediaType: String, data: Data)? {
+    static func imageResults(inFrame message: [String: Any])
+        -> (resultIds: Set<String>, images: [(toolUseId: String, mediaType: String, data: Data)]) {
         guard message["type"] as? String == "user",
               let blocks = (message["message"] as? [String: Any])?["content"] as? [[String: Any]]
-        else { return nil }
+        else { return ([], []) }
+        var resultIds: Set<String> = []
+        var images: [(toolUseId: String, mediaType: String, data: Data)] = []
         for block in blocks where block["type"] as? String == "tool_result" {
-            guard let toolUseId = block["tool_use_id"] as? String,
-                  let items = block["content"] as? [[String: Any]]
-            else { continue }
+            guard let toolUseId = block["tool_use_id"] as? String else { continue }
+            resultIds.insert(toolUseId)
+            guard let items = block["content"] as? [[String: Any]] else { continue }
             for item in items where item["type"] as? String == "image" {
                 guard let source = item["source"] as? [String: Any],
                       source["type"] as? String == "base64",
@@ -91,10 +102,11 @@ struct SessionEvent: Codable, Equatable, Sendable {
                       let encoded = source["data"] as? String,
                       let data = Data(base64Encoded: encoded)
                 else { continue }
-                return (toolUseId, mediaType, data)
+                images.append((toolUseId, mediaType, data))
+                break
             }
         }
-        return nil
+        return (resultIds, images)
     }
 
     /// 1 枚の画像について電話が知る必要のあること。**バイトは含まない** ——
@@ -179,7 +191,8 @@ struct SessionEvent: Codable, Equatable, Sendable {
                        at: Date,
                        nextId: () -> String,
                        stampUser: ((String) -> String?)? = nil,
-                       onImageRead: ((_ toolUseId: String, _ fileName: String) -> Void)? = nil) -> [SessionEvent] {
+                       onImageRead: ((_ toolUseId: String, _ fileName: String, _ at: Date) -> Void)? = nil)
+        -> [SessionEvent] {
         guard let frame = ioFrame(in: message) else { return [] }
         return events(fromFrame: frame, sessionId: sessionId, resumeId: resumeId,
                       at: at, nextId: nextId, stampUser: stampUser, onImageRead: onImageRead)
@@ -203,7 +216,8 @@ struct SessionEvent: Codable, Equatable, Sendable {
                        at: Date,
                        nextId: () -> String,
                        stampUser: ((String) -> String?)? = nil,
-                       onImageRead: ((_ toolUseId: String, _ fileName: String) -> Void)? = nil) -> [SessionEvent] {
+                       onImageRead: ((_ toolUseId: String, _ fileName: String, _ at: Date) -> Void)? = nil)
+        -> [SessionEvent] {
         func make(_ kind: Kind, _ text: String, id: String? = nil) -> SessionEvent? {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
@@ -244,7 +258,7 @@ struct SessionEvent: Codable, Equatable, Sendable {
                 if let onImageRead,
                    let fileName = imageReadFileName(name: name, input: block["input"] as? [String: Any]),
                    let toolUseId = block["id"] as? String {
-                    onImageRead(toolUseId, fileName)
+                    onImageRead(toolUseId, fileName, at)
                     continue
                 }
                 guard let event = make(.tool, toolLabel(name: name, input: block["input"] as? [String: Any]))

@@ -6572,7 +6572,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ///
     /// **フレームを跨ぐ状態がここに要るのは、画像が行と別のフレームに来る
     /// から。** `pendingPhoneReply` と `lastAssistantEventId` が同じ形。
-    private var pendingImageReads: [(id: String, file: String)] = []
+    ///
+    /// `at` は `tool_use` の時点の時刻。**行の `at` はこれを使う** —— 結果が
+    /// 来た時刻や、上限で追い出された時刻では、電話が `at` でソートする
+    /// 会話の中でその Read が起きた場所からずれる。
+    private var pendingImageReads: [(id: String, file: String, at: Date)] = []
 
     /// pending の上限。結果が来ない Read（セッションが死んだ、CLI が落ちた）
     /// があるので、無限には持たない。
@@ -6588,9 +6592,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// あったことごと沈黙する。長いセッションでは結果の来ない Read（セッション
     /// が死んだ、CLI が落ちた）が 1 件ずつ積み上がり、結果がまだ来る予定の
     /// 隣人を巻き込んで押し出す経路がある — レビューで指摘された。
-    static func prunedImageReads(_ reads: [(id: String, file: String)],
-                                 cap: Int) -> (kept: [(id: String, file: String)],
-                                               dropped: [(id: String, file: String)]) {
+    static func prunedImageReads(_ reads: [(id: String, file: String, at: Date)],
+                                 cap: Int) -> (kept: [(id: String, file: String, at: Date)],
+                                               dropped: [(id: String, file: String, at: Date)]) {
         guard reads.count > cap else { return (reads, []) }
         let overflow = reads.count - cap
         return (Array(reads.suffix(cap)), Array(reads.prefix(overflow)))
@@ -6621,9 +6625,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                              guard let pending, text == pending.text else { return nil }
                                              return pending.id
                                          },
-                                         onImageRead: { [weak self] toolUseId, fileName in
+                                         onImageRead: { [weak self] toolUseId, fileName, at in
                                              guard let self else { return }
-                                             self.pendingImageReads.append((id: toolUseId, file: fileName))
+                                             self.pendingImageReads.append((id: toolUseId, file: fileName, at: at))
                                              let (kept, dropped) = Self.prunedImageReads(
                                                  self.pendingImageReads, cap: Self.maxPendingImageReads)
                                              self.pendingImageReads = kept
@@ -6635,13 +6639,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                              // 内容に近いが、件数はこの経路が発火したこと自体を示す。
                                              logger.notice("roster image pending cap dropped \(dropped.count, privacy: .public) read(s)")
                                              for entry in dropped {
+                                                 // `at` は tool_use の時刻 —— いま (Date()) にすると、
+                                                 // 電話が `at` でソートする会話の中で、追い出された行が
+                                                 // 無関係な直近イベントの隣に今の時刻で出てしまう。
                                                  RosterPublisher.current?.sendEvent(
                                                      SessionEvent(eventId: UUID().uuidString,
                                                                   sessionId: session.id.uuidString,
                                                                   resumeId: session.resumeId,
                                                                   kind: .tool,
                                                                   text: "Read: \(entry.file)",
-                                                                  at: Date()))
+                                                                  at: entry.at))
                                              }
                                          })
         let frame = SessionEvent.ioFrame(in: message)
@@ -6677,39 +6684,61 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// という関係が、壊れたサムネイルの出ない唯一の根拠。失敗したら画像なしの
     /// 素のレンチ行を出す —— 行そのものを落とすと、Read があったことすら
     /// 伝わらない。
+    ///
+    /// **フレームに載った `resultIds` の全件が対象。** 1 件だけ解決して残りを
+    /// pending に残すと、その残りはこのフレーム以外に相手が来ないので沈黙
+    /// する —— `ImagePreviewScript.noteToolResult` が結果ごとに独立して処理
+    /// しているのと同じ理由。画像が無い（文字列 content の失敗した Read、
+    /// あるいは配列だが image ブロックが無い）id も同じ扱いで、素の行を出す。
     private func publishImageResultIfAny(_ frame: [String: Any], session: OpenSession) {
-        guard let result = SessionEvent.firstImageResult(inFrame: frame),
-              let index = pendingImageReads.firstIndex(where: { $0.id == result.toolUseId })
-        else { return }
-        let file = pendingImageReads[index].file
-        pendingImageReads.remove(at: index)
+        let result = SessionEvent.imageResults(inFrame: frame)
+        guard !result.resultIds.isEmpty else { return }
 
-        let eventId = UUID().uuidString
         let sessionId = session.id.uuidString
         let resumeId = session.resumeId
-        let text = "Read: \(file)"
-        let at = Date()
-
-        func emit(_ image: SessionEvent.ImageInfo?) {
-            RosterPublisher.current?.sendEvent(
-                SessionEvent(eventId: eventId, sessionId: sessionId, resumeId: resumeId,
-                             kind: .tool, text: text, at: at, image: image))
+        var imageByToolUseId: [String: (mediaType: String, data: Data)] = [:]
+        for image in result.images {
+            imageByToolUseId[image.toolUseId] = (image.mediaType, image.data)
         }
 
-        guard result.data.count <= RosterImageUploader.maxFullBytes,
-              let size = RosterImageUploader.pixelSize(of: result.data),
-              let thumb = RosterImageUploader.thumbnail(from: result.data)
-        else {
-            emit(nil)
-            return
+        // 一致した pending は先に全部取り除く —— そうしないと、同じフレームが
+        // 再配送されたときに二重発火する（アップロードは非同期なので、行を
+        // 出す前にこの除去が終わっている必要がある）。
+        var resolved: [(id: String, file: String, at: Date)] = []
+        pendingImageReads.removeAll { entry in
+            guard result.resultIds.contains(entry.id) else { return false }
+            resolved.append(entry)
+            return true
         }
-        let info = SessionEvent.ImageInfo(width: size.width, height: size.height,
-                                          bytes: result.data.count)
-        Task { @MainActor in
-            let ok = await RosterImageUploader.upload(
-                sessionId: sessionId, eventId: eventId,
-                full: result.data, thumb: thumb, mediaType: result.mediaType)
-            emit(ok ? info : nil)
+
+        for entry in resolved {
+            let eventId = UUID().uuidString
+            let file = entry.file
+            let text = "Read: \(file)"
+            let at = entry.at
+
+            func emit(_ image: SessionEvent.ImageInfo?) {
+                RosterPublisher.current?.sendEvent(
+                    SessionEvent(eventId: eventId, sessionId: sessionId, resumeId: resumeId,
+                                 kind: .tool, text: text, at: at, image: image))
+            }
+
+            guard let image = imageByToolUseId[entry.id],
+                  image.data.count <= RosterImageUploader.maxFullBytes,
+                  let size = RosterImageUploader.pixelSize(of: image.data),
+                  let thumb = RosterImageUploader.thumbnail(from: image.data)
+            else {
+                emit(nil)
+                continue
+            }
+            let info = SessionEvent.ImageInfo(width: size.width, height: size.height,
+                                              bytes: image.data.count)
+            Task { @MainActor in
+                let ok = await RosterImageUploader.upload(
+                    sessionId: sessionId, eventId: eventId,
+                    full: image.data, thumb: thumb, mediaType: image.mediaType)
+                emit(ok ? info : nil)
+            }
         }
     }
 

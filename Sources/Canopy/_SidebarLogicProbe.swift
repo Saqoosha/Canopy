@@ -8556,13 +8556,15 @@ enum SidebarLogicProbe {
                    plain.count == 1 && plain.first?.text == "Read: shot.PNG")
 
             // クロージャを渡すと、行は出ずに tool_use_id が報告される。
-            var noted: [(String, String)] = []
+            var noted: [(String, String, Date)] = []
             let suppressed = SessionEvent.events(fromFrame: imageRead, sessionId: "S", resumeId: nil,
                                                  at: now, nextId: ids,
-                                                 onImageRead: { noted.append(($0, $1)) })
+                                                 onImageRead: { noted.append(($0, $1, $2)) })
             record("event: an image Read emits no row at tool_use time", suppressed.isEmpty)
             record("event: an image Read reports its tool_use id and file name",
                    noted.count == 1 && noted[0].0 == "toolu_1" && noted[0].1 == "shot.PNG")
+            record("event: an image Read reports the tool_use frame's time",
+                   noted.first?.2 == now)
 
             // 同じ assistant フレームに画像 Read と別のツールが並んでいても、
             // 抑止されるのは画像 Read の行だけ。
@@ -8576,7 +8578,7 @@ enum SidebarLogicProbe {
                 ]],
             ]
             let onlyBash = SessionEvent.events(fromFrame: mixedTools, sessionId: "S", resumeId: nil,
-                                               at: now, nextId: ids, onImageRead: { _, _ in })
+                                               at: now, nextId: ids, onImageRead: { _, _, _ in })
             record("event: suppression is per block, not per frame",
                    onlyBash.count == 1 && onlyBash.first?.text == "Bash: ls")
 
@@ -8592,33 +8594,100 @@ enum SidebarLogicProbe {
                     ]],
                 ]],
             ]
-            let found = SessionEvent.firstImageResult(inFrame: resultFrame)
+            let found = SessionEvent.imageResults(inFrame: resultFrame)
             record("event: a tool_result's base64 image is decoded",
-                   found?.toolUseId == "toolu_1" && found?.mediaType == "image/png"
-                       && found?.data == Data([0x89, 0x50, 0x4e, 0x47]))
+                   found.resultIds == ["toolu_1"] && found.images.count == 1
+                       && found.images.first?.toolUseId == "toolu_1"
+                       && found.images.first?.mediaType == "image/png"
+                       && found.images.first?.data == Data([0x89, 0x50, 0x4e, 0x47]))
 
             // 失敗した Read は content が文字列。ImagePreviewScript と同じ扱い。
+            // **画像は無いが、id は resultIds に載る** —— でないと呼び出し側は
+            // このフレームが失敗した Read を含むことを知れず、素の行を出せない。
             let errorResult: [String: Any] = [
                 "type": "user",
                 "message": ["content": [
                     ["type": "tool_result", "tool_use_id": "toolu_1", "content": "File not found"],
                 ]],
             ]
-            record("event: a string-content tool_result yields no image",
-                   SessionEvent.firstImageResult(inFrame: errorResult) == nil)
+            let errorFound = SessionEvent.imageResults(inFrame: errorResult)
+            record("event: a string-content tool_result yields its id but no image",
+                   errorFound.resultIds == ["toolu_1"] && errorFound.images.isEmpty)
 
-            record("event: undecodable base64 yields no image",
-                   SessionEvent.firstImageResult(inFrame: [
-                       "type": "user",
-                       "message": ["content": [
-                           ["type": "tool_result", "tool_use_id": "toolu_1", "content": [
-                               ["type": "image", "source": [
-                                   "type": "base64", "media_type": "image/png",
-                                   "data": "!!!not base64!!!",
-                               ]],
-                           ]],
-                       ]],
-                   ]) == nil)
+            let undecodableFound = SessionEvent.imageResults(inFrame: [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_1", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/png",
+                            "data": "!!!not base64!!!",
+                        ]],
+                    ]],
+                ]],
+            ])
+            record("event: undecodable base64 yields its id but no image",
+                   undecodableFound.resultIds == ["toolu_1"] && undecodableFound.images.isEmpty)
+
+            // 1 つのフレームに複数の tool_result が載る場合。片方が画像、
+            // 片方が失敗（文字列 content）—— 両方の id が resultIds に出て、
+            // 画像は成功した 1 件だけ。
+            let mixedResultFrame: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_a", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/png",
+                            "data": Data([0x89, 0x50, 0x4e, 0x47]).base64EncodedString(),
+                        ]],
+                    ]],
+                    ["type": "tool_result", "tool_use_id": "toolu_b", "content": "File not found"],
+                ]],
+            ]
+            let mixedResults = SessionEvent.imageResults(inFrame: mixedResultFrame)
+            record("event: two tool_results, one image one not, report both ids and one image",
+                   mixedResults.resultIds == ["toolu_a", "toolu_b"] && mixedResults.images.count == 1
+                       && mixedResults.images.first?.toolUseId == "toolu_a")
+
+            // 両方とも画像を持つ場合は 2 枚とも返る —— 最初の 1 件で止めない
+            // (`imageResults` のコメントが約束している「1 件で止めない」の直接の
+            // 裏付け)。
+            let twoImageResultFrame: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_a", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/png",
+                            "data": Data([0x89, 0x50, 0x4e, 0x47]).base64EncodedString(),
+                        ]],
+                    ]],
+                    ["type": "tool_result", "tool_use_id": "toolu_c", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/jpeg",
+                            "data": Data([0xff, 0xd8, 0xff, 0xdb]).base64EncodedString(),
+                        ]],
+                    ]],
+                ]],
+            ]
+            let twoImageResults = SessionEvent.imageResults(inFrame: twoImageResultFrame)
+            record("event: two tool_results both carrying images report both ids and both images",
+                   twoImageResults.resultIds == ["toolu_a", "toolu_c"] && twoImageResults.images.count == 2
+                       && Set(twoImageResults.images.map(\.toolUseId)) == ["toolu_a", "toolu_c"])
+
+            // production が実際に通る経路はこれだけ —— ShimProcess は
+            // events(fromFrame:) を直接呼ばず、envelope を剥がす
+            // events(from:) だけを呼ぶ。onImageRead をここで確かめないと、
+            // envelope 剥がしの実装がその引数を握りつぶしても、上の
+            // fromFrame 直叩きの assertion は全部緑のまま気づけない。
+            var envelopeNoted: [(String, String, Date)] = []
+            let envelopeResult = SessionEvent.events(from: envelope(imageRead), sessionId: "S", resumeId: nil,
+                                                     at: now, nextId: ids,
+                                                     onImageRead: { toolUseId, fileName, at in
+                                                         envelopeNoted.append((toolUseId, fileName, at))
+                                                     })
+            record("event: events(from:) forwards onImageRead through the envelope",
+                   envelopeResult.isEmpty && envelopeNoted.count == 1
+                       && envelopeNoted[0].0 == "toolu_1" && envelopeNoted[0].1 == "shot.PNG"
+                       && envelopeNoted[0].2 == now)
 
             // 画像フィールドを持つイベントが JSON に往復すること。
             // ここが壊れると relay には届くが電話が読めない、という形になる。
@@ -8709,8 +8778,11 @@ enum SidebarLogicProbe {
             // pending の上限。結果が来ないまま溜まる Read があるので、
             // 無限には持たない。**古いものから落とす** —— 新しいものを
             // 落とすと、直前に始まった Read の絵が永久に出ない。
-            var pending = [(id: String, file: String)]()
-            for i in 0..<40 { pending.append((id: "t\(i)", file: "f\(i).png")) }
+            let pendingBase = Date(timeIntervalSince1970: 1_700_000_000)
+            var pending = [(id: String, file: String, at: Date)]()
+            for i in 0..<40 {
+                pending.append((id: "t\(i)", file: "f\(i).png", at: pendingBase.addingTimeInterval(Double(i))))
+            }
             let pruned = ShimProcess.prunedImageReads(pending, cap: ShimProcess.maxPendingImageReads)
             record("image: pending reads are capped",
                    pruned.kept.count == ShimProcess.maxPendingImageReads)
@@ -8721,10 +8793,17 @@ enum SidebarLogicProbe {
             record("image: dropped entries come back, oldest first",
                    pruned.dropped.count == 8
                        && pruned.dropped.first?.id == "t0" && pruned.dropped.last?.id == "t7")
-            let untouched = ShimProcess.prunedImageReads([(id: "a", file: "a.png")], cap: 32)
+            // `at` は tool_use の時点の時刻。pruning はそれを kept / dropped
+            // 両方でそのまま運ぶ —— ここが崩れると、上限で落ちた行が `Date()`
+            // にフォールバックしていても、この assertion 以外では気づけない。
+            record("image: pruning preserves the tool_use time in both kept and dropped",
+                   pruned.kept.first?.at == pending[8].at && pruned.dropped.first?.at == pending[0].at)
+            let untouched = ShimProcess.prunedImageReads(
+                [(id: "a", file: "a.png", at: pendingBase)], cap: 32)
             record("image: a list under the cap is untouched",
                    untouched.kept.count == 1 && untouched.kept[0].id == "a"
-                       && untouched.kept[0].file == "a.png" && untouched.dropped.isEmpty)
+                       && untouched.kept[0].file == "a.png" && untouched.kept[0].at == pendingBase
+                       && untouched.dropped.isEmpty)
         }
 
         // MARK: - The two gates that decide whether a remote session resumes
