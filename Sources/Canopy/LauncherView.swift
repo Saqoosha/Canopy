@@ -1582,12 +1582,43 @@ struct LauncherView: View {
                 // opens first would have its first turn racing the copy.
                 if CanopySettings.shared.seedWorktreeArtifacts {
                     worktreeStage = "Copying Build Files…"
-                    await Task.detached(priority: .userInitiated) {
-                        // Discarded on purpose: the report is for the log, and
-                        // a partial seed is not a reason to withhold a worktree
-                        // the user asked for.
-                        _ = GitWorktree.seedIgnoredFiles(repo: repo, worktree: worktree)
+                    let seeded = await Task.detached(priority: .userInitiated) {
+                        GitWorktree.seedIgnoredFiles(repo: repo, worktree: worktree)
                     }.value
+                    // A partial seed is not a reason to WITHHOLD the worktree
+                    // the user asked for — but that was never a reason not to
+                    // TELL them, and the two were conflated here for as long as
+                    // this report was thrown away. The cost of the silence is
+                    // paid later, by a build that fails somewhere with no
+                    // visible connection to the launcher.
+                    //
+                    // NSAlert rather than a SwiftUI `.alert` for the reason the
+                    // catch block below gives: the user can navigate away and
+                    // destroy this view's `@State`, and a view-bound alert would
+                    // then never appear. But WINDOW-modal, unlike that block.
+                    // The likeliest trigger is a `cp` that ran to the 300 s
+                    // bound, i.e. precisely when nobody is watching — and
+                    // `runModal()` is APPLICATION-modal, so it would block input
+                    // to every other pane's live session until someone found the
+                    // dialog. A sheet blocks the one window and returns here
+                    // immediately, which also lets the `defer` clear the
+                    // "Copying Build Files…" stage instead of leaving it
+                    // spinning behind a dialog that says it finished.
+                    if let notice = seeded.failureNotice {
+                        let alert = NSAlert()
+                        alert.messageText = "Some Build Files May Be Missing"
+                        alert.informativeText = notice
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        if let window = NSApp.mainWindow
+                            ?? NSApp.windows.first(where: { $0.isVisible }) {
+                            alert.beginSheetModal(for: window, completionHandler: nil)
+                        } else {
+                            // No window to hang it on — better app-modal than
+                            // silent, which is the whole point of this branch.
+                            alert.runModal()
+                        }
+                    }
                 }
                 launchLocal(worktree, remoteHost: nil,
                             model: selectedModel, effort: selectedEffort,

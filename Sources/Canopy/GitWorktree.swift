@@ -785,10 +785,68 @@ enum GitWorktree {
         var linked = 0
         var skipped = 0
         var failed = 0
+        /// The entries behind `failed`, in the order they were attempted.
+        ///
+        /// Carried so the alert can name them: "3 entries failed" is not
+        /// actionable. An earlier draft justified this by saying the log
+        /// redacts these paths, and that is false — the interpolated path is
+        /// `.private` at every `seed:` site, but two of them re-emit it inside
+        /// a `.public` `cp` stderr or `localizedDescription` (measured). The
+        /// real reason is simply that Console is the wrong place to send
+        /// someone standing in front of the app.
+        var failedEntries: [String] = []
 
         var summary: String {
             "cloned \(cloned), linked \(linked), skipped \(skipped), failed \(failed)"
         }
+
+        /// What to tell the user, or nil when everything arrived.
+        ///
+        /// Deliberately does not assert the files are missing. `failed` is
+        /// reached from three sites carrying at least five distinct causes: a
+        /// failed `stat`; a `createDirectory` or `createSymbolicLink` throw;
+        /// `cp` exiting non-zero; and `runCommand` throwing for either the
+        /// watchdog kill (`-1`) or a drain/reap stall (`-2`) — note the last
+        /// two THROW, so they land in the `catch` beside the link failures
+        /// rather than in the non-zero-status branch. Those causes disagree
+        /// about what is on disk afterwards: some wrote nothing, `cp` leaves
+        /// whatever it had written when it stopped on BOTH its failing paths
+        /// (measured), and the `-2` case may have copied everything —
+        /// `runCommand`'s own comment records that failure in full. Splitting
+        /// the counter so this could be specific was considered and dropped:
+        /// it would take those entries out of every existing reader of
+        /// `failed`.
+        ///
+        /// "added" rather than "copied" because the `.link` plan is in here
+        /// too, and a FIFO is symlinked rather than copied.
+        ///
+        /// Known hole, deliberately left: a listing that fails outright
+        /// returns an all-zero report, so `failed` is 0 and this says nothing
+        /// while NOTHING was seeded. Closing it means giving `ignoredEntries`
+        /// an error contract it does not have — its non-zero-status branch
+        /// returns `[]` on purpose — which is a wider change than this one.
+        var failureNotice: String? {
+            guard failed > 0 else { return nil }
+            let attempted = cloned + linked + failed
+            // Agrees with the SET, not the numerator: "1 of 5 entries", never
+            // "1 of 5 entry". `attempted >= failed >= 1` here, so the singular
+            // still reads correctly at "1 of 1 entry".
+            let noun = attempted == 1 ? "entry" : "entries"
+            let shown = failedEntries.prefix(SeedReport.noticeNameCap)
+            var body = "\(failed) of \(attempted) ignored \(noun) could not be added "
+                + "to the new worktree, or Canopy could not confirm they arrived."
+            if !shown.isEmpty {
+                body += "\n\n" + shown.map { "• \($0)" }.joined(separator: "\n")
+                let rest = failedEntries.count - shown.count
+                if rest > 0 { body += "\n• and \(rest) more" }
+            }
+            return body + "\n\nThe worktree is ready. A build that needs those "
+                + "files may fail."
+        }
+
+        /// Enough to identify what is missing without turning the alert into a
+        /// scrolling list; the count above still reports the true total.
+        static let noticeNameCap = 5
     }
 
     /// Ignored entries under `repo`, as git reports them.
@@ -872,6 +930,7 @@ enum GitWorktree {
             // write back into the root checkout, silently, counted as `linked`.
             guard let attrs = try? fm.attributesOfItem(atPath: source.path) else {
                 report.failed += 1
+                report.failedEntries.append(relative)
                 logger.notice("seed: cannot stat \(relative, privacy: .private)")
                 continue
             }
@@ -903,6 +962,7 @@ enum GitWorktree {
                         report.cloned += 1
                     } else {
                         report.failed += 1
+                        report.failedEntries.append(relative)
                         // `.private` on the path: an ignored entry's name can
                         // carry a client or product name, and these lines
                         // reach disk.
@@ -913,6 +973,7 @@ enum GitWorktree {
                 }
             } catch {
                 report.failed += 1
+                report.failedEntries.append(relative)
                 logger.notice(
                     "seed: \(relative, privacy: .private) failed: \(error.localizedDescription, privacy: .public)"
                 )

@@ -1863,6 +1863,38 @@ enum SidebarLogicProbe {
                [FileAttributeType.typeRegular, .typeDirectory, .typeSymbolicLink]
                    .allSatisfy { GitWorktree.plan(for: $0) == .clone })
 
+        // The decision, not the wording: nil when everything arrived, non-nil
+        // the moment anything did not, and the count is of what was ATTEMPTED.
+        // `skipped` is excluded because no skip path tries anything — but note
+        // only one of its three reachable sites is a `shouldSeed` denial; the
+        // others are the destination-containment guard and a path already
+        // present in the worktree.
+        //
+        // These build `SeedReport` values directly, so they pin the pure
+        // property and nothing about the three `failedEntries.append` sites
+        // that fill it. That wiring is pinned separately, below.
+        record("failureNotice: silent when nothing failed",
+               GitWorktree.SeedReport(cloned: 3, linked: 1, skipped: 2, failed: 0,
+                                      failedEntries: []).failureNotice == nil)
+        record("failureNotice: speaks up, counts attempts not skips, names the entry",
+               {
+                   guard let n = GitWorktree.SeedReport(
+                       cloned: 3, linked: 1, skipped: 9, failed: 1,
+                       failedEntries: ["build"]).failureNotice else { return false }
+                   // "entries" agrees with the set, not the numerator.
+                   return n.contains("1 of 5 ignored entries") && n.contains("• build")
+               }())
+        record("failureNotice: caps the list and says how many it withheld",
+               {
+                   let many = (0..<(GitWorktree.SeedReport.noticeNameCap + 3)).map { "e\($0)" }
+                   guard let n = GitWorktree.SeedReport(
+                       cloned: 0, linked: 0, skipped: 0, failed: many.count,
+                       failedEntries: many).failureNotice else { return false }
+                   // Derived from the cap, so it survives a retune; what it
+                   // pins is the arithmetic, never the number 5.
+                   return n.contains("• and 3 more") && !n.contains("• e\(many.count - 1)")
+               }())
+
         // MARK: What a new worktree branches FROM
         //
         // The order IS the policy, and it is the half that rots silently: a
@@ -2191,6 +2223,59 @@ enum SidebarLogicProbe {
                seeded.cloned == 1 && seeded.failed == 0
                    && FileManager.default.fileExists(
                        atPath: seedDest.appendingPathComponent("build/artifact.o").path))
+
+        // The `failedEntries.append` sites are the layer that can break
+        // silently, and the pure assertions above cannot see them: delete all
+        // three and every one of them stays green, because they build their
+        // own `SeedReport`s. Losing one degrades the alert to the
+        // unactionable "N entries failed" this feature exists to avoid.
+        //
+        // A mode-000 FILE, not directory — `cp -Rc` fails on the unreadable
+        // file while still placing its readable sibling (which is also the
+        // real shape: a failure that leaves the destination PARTIAL), and
+        // `removeItem` in the `defer` can still unlink it, since unlink needs
+        // only the parent's write bit. Root can read it, so this asserts
+        // nothing as uid 0; that is stated rather than hidden, and CI runs as
+        // `runner`.
+        if getuid() != 0 {
+            let failRepo = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeSeedFail-\(UUID().uuidString)")
+            let failDest = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeSeedFailDest-\(UUID().uuidString)")
+            defer {
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o644],
+                    ofItemAtPath: failRepo.appendingPathComponent("blocked/secret.o").path)
+                try? FileManager.default.removeItem(at: failRepo)
+                try? FileManager.default.removeItem(at: failDest)
+            }
+            for dir in [failRepo.appendingPathComponent("blocked"), failDest] {
+                try? FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true)
+            }
+            let failInit = Process()
+            failInit.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            failInit.arguments = ["-C", failRepo.path, "init", "-q"]
+            failInit.standardOutput = FileHandle.nullDevice
+            failInit.standardError = FileHandle.nullDevice
+            try? failInit.run()
+            failInit.waitUntilExit()
+            try? "blocked/\n".write(to: failRepo.appendingPathComponent(".gitignore"),
+                                    atomically: true, encoding: .utf8)
+            try? "x".write(to: failRepo.appendingPathComponent("blocked/keep.o"),
+                           atomically: true, encoding: .utf8)
+            try? "x".write(to: failRepo.appendingPathComponent("blocked/secret.o"),
+                           atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o000],
+                ofItemAtPath: failRepo.appendingPathComponent("blocked/secret.o").path)
+            let failed = GitWorktree.seedIgnoredFiles(
+                repo: failRepo, worktree: failDest, perEntryTimeout: 10)
+            record("seedIgnoredFiles: a failing /bin/cp is counted AND named",
+                   failed.failed == 1 && failed.failedEntries == ["blocked"])
+            record("seedIgnoredFiles: the notice reaches the user with that name in it",
+                   failed.failureNotice?.contains("• blocked") == true)
+        }
 
         record("projectDisplayName: managed worktree → repo · branch",
                GitWorktree.projectDisplayName(
