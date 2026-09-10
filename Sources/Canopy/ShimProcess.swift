@@ -3275,6 +3275,33 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         writeToStdin(msg)
     }
 
+    /// What a broken shim stdin is reported as. One constant so the two places
+    /// that can record it cannot drift into two different sentences.
+    /// `nonisolated` because `ShimProcess` is main-actor by inference from
+    /// `WKScriptMessageHandler` — statics included — and this is read from
+    /// `writeQueue`. An immutable String needs no isolation.
+    nonisolated static let brokenPipeReason =
+        "Lost the connection to the session process — it can no longer receive input."
+
+    /// Set from `writeQueue` when a write gets `EPIPE`, read on the main actor
+    /// by `handleProcessExit`. Lock-guarded because those are different threads
+    /// and the ordering between them is a genuine race, not a formality.
+    private let brokenPipeLock = NSLock()
+    nonisolated(unsafe) private var storedBrokenPipeReason: String?
+
+    /// First writer wins: a later `EPIPE` says nothing the first did not.
+    nonisolated private func recordBrokenPipe(_ reason: String) {
+        brokenPipeLock.lock()
+        defer { brokenPipeLock.unlock() }
+        if storedBrokenPipeReason == nil { storedBrokenPipeReason = reason }
+    }
+
+    nonisolated private func recordedBrokenPipeReason() -> String? {
+        brokenPipeLock.lock()
+        defer { brokenPipeLock.unlock() }
+        return storedBrokenPipeReason
+    }
+
     private func writeToStdin(_ msg: [String: Any]) {
         writeQueue.async { [weak self] in
             guard let self else { return }
@@ -3288,7 +3315,54 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 guard let writeData = str.data(using: .utf8) else { return }
                 try self.stdinPipe?.fileHandleForWriting.write(contentsOf: writeData)
             } catch {
-                logger.error("Failed to write to shim stdin: \(error.localizedDescription, privacy: .public)")
+                // A broken pipe here is not a failed write, it is a dead
+                // session: the shim's stdin has no reader left, so nothing sent
+                // from this process will ever arrive again. Before the
+                // `F_SETNOSIGPIPE` guard in `start()` this case did not reach a
+                // catch at all — it killed the app — so the silence it leaves
+                // behind is new, and this is what makes the silence legible.
+                //
+                // The discriminator is measured, and without it this branch
+                // would fire on the ORDINARY close path: `stop()` closes the
+                // write end and leaves `stdinPipe` set, so a write already
+                // queued behind it still runs. A dead reader throws
+                // `NSCocoaErrorDomain` 512 wrapping `NSPOSIXErrorDomain` 32,
+                // while that post-close write throws the same 512 with NO
+                // underlying error at all.
+                let posix = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError
+                guard posix?.domain == NSPOSIXErrorDomain, posix?.code == Int(EPIPE) else {
+                    logger.error("Failed to write to shim stdin: \(error.localizedDescription, privacy: .public)")
+                    return
+                }
+                logger.error("Shim stdin is a broken pipe — this session can no longer receive input")
+                // Park a reason so the launcher's banner says THIS if the pane
+                // closes, instead of falling back to "the session process
+                // exited (status N)". Only when nothing better is already
+                // there: a shim that sent its own `error` frame before dying
+                // described the failure more precisely than this can.
+                //
+                // Deliberately does NOT close the pane or raise an overlay.
+                // Reacting visibly to a write failure is a behaviour change
+                // with its own blast radius, and it is a separate decision from
+                // making the failure diagnosable.
+                //
+                // Recorded under a lock as well as assigned on main, because
+                // this write and `handleProcessExit` are the SAME event — a
+                // shim dying raises both — so the two main-queue callbacks
+                // race on every occurrence rather than rarely. If the exit
+                // wins, `Detail`'s crash closure reads `lastFatalError` before
+                // the assignment below runs and reports the generic exit
+                // status; `handleProcessExit` consults the recording first for
+                // exactly that reason. The assignment still matters on its own
+                // for the case where the shim closed its stdin and stayed
+                // alive, where no exit is coming at all.
+                self.recordBrokenPipe(Self.brokenPipeReason)
+                DispatchQueue.main.async { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self, self.boundSession?.lastFatalError == nil else { return }
+                        self.boundSession?.lastFatalError = Self.brokenPipeReason
+                    }
+                }
             }
         }
     }
@@ -6267,6 +6341,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         resetActivityState()
 
         guard !isIntentionalStop else { return }
+
+        // A write that got `EPIPE` and this exit are one event. Taking the
+        // recorded reason here — ahead of the delegate call that leads to
+        // `Detail` reading `lastFatalError` — catches the case where that write
+        // has already run.
+        //
+        // It NARROWS the window rather than closing it, and the lock is not
+        // what would close it: a lock orders concurrent access, it does not
+        // make a `writeQueue` block that has not run yet run first. If this
+        // read wins, the reason is recorded afterwards with nobody left to
+        // read it. Draining `writeQueue` here would close that, and is not
+        // done: it blocks the main thread on a write to a pipe already known
+        // to be dead, and it does not help the commoner case at all — with no
+        // write in flight there is no `EPIPE` to wait for and the generic exit
+        // status is all there ever was. That baseline is what this improves
+        // on; it is not a guarantee against it.
+        if boundSession?.lastFatalError == nil, let reason = recordedBrokenPipeReason() {
+            boundSession?.lastFatalError = reason
+        }
 
         if remoteHost != nil, let sessionId = activeSessionId {
             logger.error("SSH disconnection detected (status \(status)), requesting reconnect for session \(sessionId, privacy: .public)")
