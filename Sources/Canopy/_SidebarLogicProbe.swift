@@ -2098,7 +2098,9 @@ enum SidebarLogicProbe {
         record("isGitRepo: .git file (gitlink) → true",
                GitWorktree.isGitRepo(gitFileDir))
 
-        // The ONLY assertion in this file that executes `GitWorktree.runCommand`
+        // The first of the only two assertions in this file that execute
+        // `GitWorktree.runCommand` (the other is the `seedIgnoredFiles` one
+        // below, which reaches it twice — once for `git`, once for `/bin/cp`)
         // — every other git helper above is a pure string or filesystem check,
         // so a green suite says nothing about the subprocess round trip. That
         // gap was real: the drain was rewritten to run off the calling thread
@@ -2115,18 +2117,18 @@ enum SidebarLogicProbe {
         // hung CI job rather than a red one. The bound is reasoned from
         // `CLIOneShot`, which documents the same residue.
         //
-        // These two are also the only assertions reaching the REAP inside
-        // `runCommand`, and what that is worth needs stating exactly, because
-        // the obvious reading is too generous. Deleting the
-        // `terminationHandler` while leaving `exited.wait()` in place does
-        // fail them — but that is a self-deadlock, not the code the handler
-        // replaced. Swapping `exited.wait()` back to `proc.waitUntilExit()` —
-        // the actual revert — leaves both GREEN, so nothing here distinguishes
-        // the new reap from the old one, and nothing here could: the defect
-        // was a race (see `GitWorktree.runCommand` for why it was not
-        // reproducible). Note also that the handler-deletion mutation goes red
-        // only after the full bound elapses, so it presents as a stalled probe
-        // first and a red one second.
+        // They are also the only two reaching the REAP inside `runCommand`,
+        // and what that is worth needs stating exactly, because the obvious
+        // reading is too generous. Deleting the `terminationHandler` while
+        // leaving `exited.wait()` in place does fail them (measured) — but
+        // that is a self-deadlock, not the code the handler replaced. Swapping
+        // `exited.wait()` back to `proc.waitUntilExit()`, which IS the revert,
+        // leaves both GREEN (measured, on a rebuilt Debug binary). So nothing
+        // here distinguishes the new reap from the old one, and nothing here
+        // could: the defect was a race, and `GitWorktree.runCommand` records
+        // why it was never reproduced. Note the handler-deletion mutation goes
+        // red only after the full bound elapses, so it presents as a stalled
+        // probe first and a red one second.
         let spawnRepo = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProbeSpawn-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: spawnRepo) }
@@ -2158,9 +2160,26 @@ enum SidebarLogicProbe {
         // just the file, because the reported symptom was precisely a copy
         // that had placed every file and was still counted `failed`.
         //
-        // `perEntryTimeout` is cut to 10 s so a reap that stops returning goes
-        // red in about eighteen rather than stalling the probe for five
-        // minutes on the shipped default.
+        // That it covers that branch rather than something upstream of it is
+        // measured, and the obvious mutation does NOT show it: forcing every
+        // `runCommand` to report failure empties `ignoredEntries`, so the loop
+        // body never runs and `/bin/cp` is never spawned — this assertion then
+        // reddens for a reason it was not added for. Scoping the forced
+        // failure to `/bin/cp` is the discriminating one; it leaves the
+        // assertion above GREEN and reddens only this one.
+        //
+        // `perEntryTimeout` is cut to 10 s because the CI step's
+        // `timeout-minutes: 5` would otherwise be KILLED rather than reddened
+        // by the shipped 300 s default: a stalled `/bin/cp` reap now fails at
+        // about eighteen (10 + the two slacks). It bounds the `cp` call only —
+        // `seedIgnoredFiles` calls `ignoredEntries` at its own default 60 s, so
+        // a reap that stops returning generally takes ~68 s here, on git,
+        // before any `cp` runs at all.
+        //
+        // `cp -Rc` FORCES clonefile, so this assertion also depends on the
+        // runner's temporary directory being APFS. It is on both this machine
+        // and `macos-26`; a red here on some future runner may be that rather
+        // than the reap.
         let seedDest = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProbeSeed-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: seedDest) }

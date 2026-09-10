@@ -306,36 +306,46 @@ enum GitWorktree {
         queue.asyncAfter(deadline: .now() + timeout + CLIOneShot.killGrace, execute: killer)
 
         // The child's exit is observed through `terminationHandler` rather
-        // than `waitUntilExit()`. Scope that to THIS function's reap, not to a
-        // house rule: `CLIOneShot.run`, whose constants this borrows, still
-        // uses `waitUntilExit()` in the same off-main shape and is left alone
-        // deliberately — its `abandon` work item answers the caller either
-        // way, and the other ~11 call sites are their own audit.
+        // than `waitUntilExit()`. Scope that to THIS function: it was the only
+        // call site that ran `run()` on one thread and waited on another. Every
+        // other `waitUntilExit()` in `Sources/` — twelve of them, `CLIOneShot`
+        // included, and checked rather than assumed — does both on one and the
+        // same thread, so they do not have the split named below and are left
+        // alone rather than swept.
         //
-        // MEASURED 2026-09-10, seeding a worktree of `Canopy-Mobile`: the
-        // first `/bin/cp` — an 11-file, 48 KB `.xcodeproj` — had exited, had
-        // been reaped (no zombie under the app) and had copied every one of
-        // its files, both pipes were at EOF, and the drain thread was STILL
-        // parked in `mach_msg` inside `waitUntilExit()` when the caller's
-        // bound expired 308 s later (300 plus the two slacks in force then).
-        // A clone that had copied everything was reported `failed`, and the
-        // launcher span "Copying Build Files…" over it for five minutes.
+        // MEASURED 2026-09-10, seeding a worktree of `Canopy-Mobile`: the first
+        // `/bin/cp` — an 11-file, 48 KB `.xcodeproj` — had exited, had been
+        // reaped (no zombie under the app) and had copied every one of its
+        // files, its single pipe was at EOF (`wantsStdout: false`, so there is
+        // only stderr), and the worker was still parked in `mach_msg` inside
+        // `waitUntilExit()` when the caller's bound expired 308 s later (300
+        // plus the two slacks in force then). A clone that had copied
+        // everything was reported `failed`, and the launcher showed "Copying
+        // Build Files…" over it for five minutes.
         //
-        // The reap is what makes this swap a fix rather than a relocation: a
-        // reaped child means Foundation's own exit monitor had already run to
-        // completion, and that monitor is what invokes `terminationHandler`.
+        // "Reaped" is the load-bearing word, and the step after it is inference
+        // rather than observation: a reaped child means Foundation's exit
+        // monitor had already run, and on Darwin that monitor is what invokes
+        // `terminationHandler` — so the handler would have fired for this exact
+        // failure. Nobody watched it fire; no handler was installed at the time.
         //
-        // The MECHANISM is not established, and the obvious phrasing for it is
-        // wrong — `waitUntilExit()` is documented as polling the CALLING
-        // thread's runloop, so a runloop was being driven, and "no runloop was
-        // running" cannot be the explanation. What is suspected is the
-        // topology: `run()` on one thread and the wait on a `DispatchQueue`
-        // worker, which Foundation nowhere promises to wake. Whether the
-        // wakeup was never posted or posted where nobody was waiting was not
-        // isolated, and 1,600 runs of a STANDALONE reproduction never
-        // reproduced it — which may mean the race is rare, or may mean the
-        // harness lacked whatever the app supplies. Hence dropping the
-        // dependency rather than shortening the bound.
+        // The MECHANISM is not established, and two measurements bracket it
+        // rather than settle it. A healthy `waitUntilExit()` polls the CALLING
+        // thread's runloop — documented in `NSTask.h`, and measured at ~15 Hz
+        // even on a `DispatchQueue.global` worker, so one dropped wakeup would
+        // heal itself in milliseconds — yet the failing thread was parked in
+        // `mach_msg` for essentially every sample of a 3 s `sample(1)` run.
+        // Whatever this was, it was not a single missed wakeup on an otherwise
+        // spinning poll, and "no runloop was running" does not describe it
+        // either. 1,600 runs of a STANDALONE reproduction never reproduced it,
+        // which may mean the race is rare or may mean the harness lacked
+        // whatever the app supplies. Dropping the dependency is what that state
+        // of knowledge supports; shortening the bound is not.
+        //
+        // What the swap gives up, since nothing else records it: that poll
+        // re-checks `isRunning`, so it can recover on its own, where a
+        // `terminationHandler` is one-shot and a lost delivery parks the worker
+        // for good. The caller is bounded either way by `done.wait(timeout:)`.
         //
         // `terminationHandler`'s execution context is undefined per `NSTask.h`
         // (measured once on a shared global root queue), and that is fine:
@@ -351,7 +361,8 @@ enum GitWorktree {
 
         // The drain and the reap run OFF this thread so the CALLER can be
         // bounded. Both are unbounded in themselves: the reads return at EOF
-        // and `exited.wait()` only after the reap, and a grandchild that
+        // and `exited.wait()` returns only once the child has been reaped,
+        // and a grandchild that
         // inherited a write end defers EOF indefinitely — no signal to the
         // direct child closes that. `CLIOneShot.finishSlack` documents exactly
         // that residue and is reused for it. What the bound buys here:
@@ -371,8 +382,10 @@ enum GitWorktree {
                 output.err = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             }
             group.wait()
-            // `terminationStatus` is readable once this returns: Foundation
-            // records it before it calls the handler that signals here.
+            // `terminationStatus` is readable once this returns. Measured
+            // (200 runs, a non-zero status read back correctly), not
+            // documented — `NSTask.h` promises only that `waitUntilExit` does
+            // not wait for the handler to finish.
             exited.wait()
             reaped.set()
             done.signal()
@@ -382,10 +395,17 @@ enum GitWorktree {
         if done.wait(timeout: .now() + timeout + slack) == .timedOut {
             // Deliberately does NOT cancel the killer: the escalation is still
             // this call's only chance of freeing the parked threads. When it
-            // cannot, the leak — both drains, the worker and its descriptors —
-            // is the one `CLIOneShot.finishSlack` accepts, and it
-            // is bounded here the same way it is there: worktree creation runs
-            // a handful of commands the user asks for one at a time.
+            // cannot, the leak is the drains (both of them only when stdout
+            // was wanted), the worker and its descriptors. Not the `Process`:
+            // the worker no longer captures it, and on the grandchild wedge the
+            // child has already exited, so Foundation's self-retain has let go
+            // — a child that survives SIGKILL is the one case where it stays.
+            // `CLIOneShot.finishSlack` accepts the same residue and bounds it
+            // the same way, so the reasoning is reused; its own list ("a
+            // `Process`, three `Pipe`s") is NOT this function's, because its
+            // worker does hold the process across `waitUntilExit()`. Bounded
+            // here as it is there: worktree creation runs a handful of commands
+            // the user asks for one at a time.
             let message = "\(executable) did not release its output within \(Int(timeout + slack))s"
             logger.error("\(message, privacy: .public)")
             throw NSError(domain: "GitWorktree", code: -2,
