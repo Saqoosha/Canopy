@@ -1,7 +1,10 @@
 #if DEBUG
 import AppKit
+import CoreGraphics
 import Foundation
+import ImageIO
 import os.log
+import UniformTypeIdentifiers
 
 /// Smoke tests for sidebar logic and other pure non-UI helpers (row
 /// sort/dedup/filter, JSONL session classification, background-task
@@ -8634,6 +8637,68 @@ enum SidebarLogicProbe {
             record("event: an image-less event writes no image key",
                    !(String(data: (try? JSONEncoder().encode(bare)) ?? Data(),
                             encoding: .utf8)?.contains("image") ?? true))
+        }
+
+        // 画像アップロードの純粋な部分。ネットワークには触らない。
+        do {
+            /// 単色 PNG を作る。ImageIO で作るので、リポジトリに画像を置かない。
+            func makePNG(width: Int, height: Int) -> Data? {
+                let bytesPerRow = width * 4
+                var pixels = [UInt8](repeating: 0x80, count: bytesPerRow * height)
+                guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+                      let image = CGImage(width: width, height: height,
+                                          bitsPerComponent: 8, bitsPerPixel: 32,
+                                          bytesPerRow: bytesPerRow,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                                          provider: provider, decode: nil,
+                                          shouldInterpolate: false, intent: .defaultIntent)
+                else { return nil }
+                let out = NSMutableData()
+                guard let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil)
+                else { return nil }
+                CGImageDestinationAddImage(dest, image, nil)
+                guard CGImageDestinationFinalize(dest) else { return nil }
+                pixels.removeAll()
+                return out as Data
+            }
+
+            // **`return` してはいけない。** ここは `runAllTests` の中なので、
+            // 早期 return はプローブ全体を打ち切って以降のアサーションを
+            // 黙って消す —— テスト数が減るだけで、理由はどこにも出ない。
+            let wide = makePNG(width: 1440, height: 900)
+            record("image: fixture PNG could be built", wide != nil, "makePNG returned nil")
+            if let wide {
+
+            record("image: pixelSize reads the real dimensions",
+                   RosterImageUploader.pixelSize(of: wide).map { $0 == (1440, 900) } ?? false)
+            record("image: pixelSize refuses non-image bytes",
+                   RosterImageUploader.pixelSize(of: Data("not an image".utf8)) == nil)
+
+            let thumb = RosterImageUploader.thumbnail(from: wide)
+            // 長辺が上限で、縦横比が保たれている。320×200 を期待する。
+            record("image: a thumbnail's long edge is the cap",
+                   RosterImageUploader.pixelSize(of: thumb ?? Data())
+                       .map { max($0.width, $0.height) == RosterImageUploader.thumbnailMaxPixelSize } ?? false)
+            record("image: a thumbnail keeps the aspect ratio",
+                   RosterImageUploader.pixelSize(of: thumb ?? Data())
+                       .map { $0.width == 320 && $0.height == 200 } ?? false)
+            // 縮小の目的そのもの。ここが逆転していたら R2 に置く意味が無い。
+            record("image: a thumbnail is smaller than the original",
+                   (thumb?.count ?? .max) < wide.count)
+            record("image: thumbnail refuses non-image bytes",
+                   RosterImageUploader.thumbnail(from: Data("not an image".utf8)) == nil)
+
+            // 上限より小さい画像は拡大しない。320 を下回る絵を 320 に伸ばすと
+            // バイトが増えるだけで、行に出る大きさは変わらない。
+            if let small = makePNG(width: 100, height: 60) {
+                record("image: an already-small image is not upscaled",
+                       RosterImageUploader.pixelSize(of: RosterImageUploader.thumbnail(from: small) ?? Data())
+                           .map { $0.width == 100 && $0.height == 60 } ?? false)
+            } else {
+                record("image: small fixture PNG could be built", false, "makePNG returned nil")
+            }
+            }  // if let wide
         }
 
         // MARK: - The two gates that decide whether a remote session resumes
