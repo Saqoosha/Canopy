@@ -2194,7 +2194,8 @@ enum SidebarLogicProbe {
         //
         // That it covers that branch rather than something upstream of it is
         // measured, and the obvious mutation does NOT show it: forcing every
-        // `runCommand` to report failure empties `ignoredEntries`, so the loop
+        // `runCommand` to report failure makes `ignoredEntries` throw, so the
+        // loop
         // body never runs and `/bin/cp` is never spawned — this assertion then
         // reddens for a reason it was not added for. Scoping the forced
         // failure to `/bin/cp` is the discriminating one; it leaves the
@@ -2277,12 +2278,11 @@ enum SidebarLogicProbe {
                    failed.failureNotice?.contains("• blocked") == true)
         }
 
-        // A listing that fails is not a repo with nothing to ignore, and for
-        // as long as `ignoredEntries` returned `[]` on a non-zero `git`
-        // status the two were the same all-zero report — so a worktree that
-        // seeded NOTHING opened saying nothing. No permissions games needed
-        // to reach it: a directory that is not a repo makes `git ls-files`
-        // exit non-zero every time.
+        // A failed listing is not a repo with nothing to ignore, and until
+        // now both were the same all-zero report. A directory OUTSIDE any git
+        // repository reaches it with no permissions games — git discovery
+        // ascends, so a plain directory inside one would not; `temporaryDirectory`
+        // is `/var/folders/…` here and on `macos-26`.
         do {
             let notARepo = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ProbeNotARepo-\(UUID().uuidString)")
@@ -2302,6 +2302,17 @@ enum SidebarLogicProbe {
                    unlisted.couldNotList && unlisted.failed == 0 && unlisted.cloned == 0)
             record("failureNotice: a failed listing speaks even with no failed count",
                    unlisted.failureNotice?.contains("could not list") == true)
+            // The thrown message carries the status only, because the catch
+            // site logs its description at `.public`. Measured to be worth an
+            // assertion: putting the repo path back into that message leaves
+            // the two records above green.
+            do {
+                _ = try GitWorktree.ignoredEntries(repo: notARepo)
+                record("ignoredEntries: a failed listing throws", false)
+            } catch {
+                record("ignoredEntries: the thrown message carries the status, not the path",
+                       !error.localizedDescription.contains(notARepo.path))
+            }
         }
 
         record("projectDisplayName: managed worktree → repo · branch",

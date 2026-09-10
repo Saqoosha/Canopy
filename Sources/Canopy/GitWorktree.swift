@@ -625,10 +625,11 @@ enum GitWorktree {
             let message = result.stderr.isEmpty
                 ? "git worktree add failed (exit \(result.status))"
                 : result.stderr
-            // `.private`: `message` is git's stderr, which names the worktree
-            // path — the same path the success line two below redacts. The
-            // thrown error keeps it public on purpose; that copy goes to the
-            // user's own alert, not to disk.
+            // `.private`: git's stderr can name the worktree path, which the
+            // success line at the end of this function already redacts. The
+            // thrown copy stays public — it goes to the user's alert, not to
+            // disk — so the cost here is that the reason is no longer readable
+            // in the log without private-data logging on.
             logger.error("worktree add failed (status \(result.status)): \(message, privacy: .private)")
             throw NSError(
                 domain: "GitWorktree",
@@ -789,23 +790,14 @@ enum GitWorktree {
         var linked = 0
         var skipped = 0
         var failed = 0
-        /// The entries behind `failed`, in the order they were attempted.
-        ///
-        /// Carried so the alert can name them: "3 entries failed" is not
-        /// actionable. An earlier draft justified this by saying the log
-        /// redacts these paths, and that is false — the interpolated path is
-        /// `.private` at every `seed:` site, but two of them re-emit it inside
-        /// a `.public` `cp` stderr or `localizedDescription` (measured). The
-        /// real reason is simply that Console is the wrong place to send
-        /// someone standing in front of the app.
+        /// The entries behind `failed`, so the alert can name them: "3
+        /// entries failed" is not actionable, and Console is the wrong place
+        /// to send someone standing in front of the app.
         var failedEntries: [String] = []
 
-        /// Set when the listing itself failed, so nothing was even attempted.
-        ///
-        /// A separate flag rather than a `failed` count, because there is no
-        /// entry to count: the loop never ran. It also cannot coexist with
-        /// `failed > 0` for the same reason, which is why `failureNotice`
-        /// tests it first and never has to combine the two messages.
+        /// Set when the listing failed, so nothing was even attempted. A
+        /// flag rather than a `failed` count because there is no entry to
+        /// count — the loop never ran.
         var couldNotList = false
 
         var summary: String {
@@ -832,17 +824,14 @@ enum GitWorktree {
         /// "added" rather than "copied" because the `.link` plan is in here
         /// too, and a FIFO is symlinked rather than copied.
         ///
-        /// A listing that fails outright is reported too, via `couldNotList`
-        /// — it produces no `failed` count to speak through, and used to say
-        /// nothing at all while seeding nothing at all.
+        /// A failed listing is reported too, through `couldNotList`.
         var failureNotice: String? {
             if couldNotList {
-                // Hedged for a reason that is easy to miss: the listing is
-                // what would have said whether this repo ignores anything at
-                // all, so "nothing was copied" is certain while "you are
-                // missing files" is not knowable from here.
+                // Hedged: the listing is what would have said whether this
+                // repo ignores anything, so "nothing was added" is certain and
+                // "you are missing files" is not knowable from here.
                 return "Canopy could not list this repository's ignored files, "
-                    + "so nothing was copied into the new worktree. If the "
+                    + "so nothing was added to the new worktree. If the "
                     + "repository has build artifacts it does not track, a "
                     + "build here may fail until they are restored."
             }
@@ -889,17 +878,12 @@ enum GitWorktree {
             // git's stderr here names the repository path and can name
             // individual ignored paths, and these lines reach disk.
             logger.notice("ls-files failed (status \(result.status)): \(result.stderr, privacy: .private)")
-            // THROWS rather than returning `[]`. An empty list is what a repo
-            // that ignores nothing looks like, so returning one here made a
-            // failed listing indistinguishable from success — and
-            // `seedIgnoredFiles` then reported an all-zero `SeedReport`,
-            // saying nothing while NOTHING had been seeded. That is the
-            // silence `failureNotice` exists to end, one notch worse than the
-            // partial seed it was built for.
-            //
-            // The status only: git's stderr stays in the line above, at
-            // `.private`, because this message travels into the thrown error
-            // and out through a `.public` log line at the catch site.
+            // Throws rather than returning `[]`, which is what a repo that
+            // ignores nothing returns — so a failed listing used to reach
+            // `seedIgnoredFiles` as an all-zero report and say nothing while
+            // NOTHING was seeded. The message carries the status only; git's
+            // stderr stays in the line above, because the catch site logs this
+            // description at `.public`.
             throw NSError(
                 domain: "GitWorktree", code: Int(result.status),
                 userInfo: [NSLocalizedDescriptionKey:
@@ -999,22 +983,9 @@ enum GitWorktree {
                     } else {
                         report.failed += 1
                         report.failedEntries.append(relative)
-                        // Both interpolations `.private`, and the second one
-                        // is the point: an ignored entry's name can carry a
-                        // client or product name, these lines reach disk, and
-                        // `cp` prefixes its message with the full path — so
-                        // redacting only `relative` left the same path in the
-                        // clear one field along, defeating its own measure.
-                        // Measured on a failing `cp`: `cp: /…/b.txt:
-                        // Permission denied`. `ignoredEntries` above already
-                        // redacts a subprocess's stderr for this reason and
-                        // says it is doing what "the clone-failure line below"
-                        // does; these two are that line, now agreeing with it.
-                        //
-                        // The reason is not lost, only gated: it is readable
-                        // with private-data logging enabled, and the entry
-                        // itself now reaches the user through
-                        // `SeedReport.failureNotice` rather than the log.
+                        // Both `.private`. `cp` echoes the path it was given
+                        // in its error, so redacting only `relative` left the
+                        // same path in the clear one field along.
                         logger.notice(
                             "seed: clone failed for \(relative, privacy: .private): \(result.stderr, privacy: .private)"
                         )
@@ -1023,11 +994,8 @@ enum GitWorktree {
             } catch {
                 report.failed += 1
                 report.failedEntries.append(relative)
-                // `.private` on the description for the reason above: a
-                // Foundation file error names the file and its folder
-                // ("You don't have permission to save the file "X" in the
-                // folder "Y"" — measured), so `.public` here published the
-                // very thing the `relative` redaction was hiding.
+                // `.private` for the same reason: a Foundation file error
+                // names the file and the folder it is in.
                 logger.notice(
                     "seed: \(relative, privacy: .private) failed: \(error.localizedDescription, privacy: .private)"
                 )
