@@ -153,7 +153,7 @@ final class OpenSession: Identifiable, Hashable {
     ///
     /// Two writers, and the second is why this is not "what the shim said": a
     /// fatal the shim reported over `{type:"error"}`, and a `ShimProcess.start()`
-    /// failure, which happens before any shim exists.
+    /// failure, which happens before the Node subprocess exists.
     ///
     /// The crash callback carries only an exit status, and 1 says nothing about
     /// why. This is where the message that DOES say why is parked, so the

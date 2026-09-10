@@ -135,10 +135,9 @@ final class RemoteSessionsBridge: @unchecked Sendable {
         // strongly: `shutdown()` nils `stdinPipe` and `send` guards on that, so
         // the guard only turns away sends not yet enqueued. Nothing in
         // `terminationHandler` clears the pipe either, so a shim that exits on
-        // its own leaves it live while `sendRequest`'s `isRunning` check races
-        // the exit — and `start()`'s own `webview_ready` send skips that check
-        // altogether. See `ShimProcess.start()` for the measurement and the
-        // log-not-refuse reasoning.
+        // its own leaves it live while the liveness check races the exit. See
+        // `ShimProcess.start()` for the measurement and the log-not-refuse
+        // reasoning.
         if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == -1 {
             logger.error("fcntl(F_SETNOSIGPIPE) failed on bridge stdin: \(String(cString: strerror(errno)), privacy: .public)")
         }

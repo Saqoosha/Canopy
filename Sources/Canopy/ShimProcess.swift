@@ -1503,10 +1503,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Optional OpenSession that owns this shim. Set by `WebViewContainer`
-    /// so `isWorking` transitions reach the sidebar's icon — **before**
-    /// `start()`, not after it, for the re-entrancy reason argued at that bind.
-    /// `showErrorInWebView` depends on that ordering to report a launch
-    /// failure, and nothing in the suite would catch the bind moving.
+    /// so `isWorking` transitions reach the sidebar's icon.
+    ///
+    /// Bound at more than one point, and the EARLIEST one is load-bearing:
+    /// `showErrorInWebView` can only report a launch failure if the bind
+    /// preceding `start()` has already run. Nothing in the suite would catch
+    /// that bind moving later.
     ///
     /// didSet re-syncs the session's asking flag against this shim's current
     /// internal state. On SSH reconnect a fresh shim inherits an existing
@@ -1862,9 +1864,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // reasoning and the measurement live at `start()`, for all four of the
         // sites that set this flag.
         //
-        // Refused as well as logged, unlike the other three: that write IS
-        // this probe, so there is nothing left for it to do if the guard did
-        // not take.
+        // Refused as well as logged: that write IS this probe, so there is
+        // nothing left for it to do if the guard did not take. `start()`'s own
+        // guard logs and continues, and says there why.
         guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
             logger.error(
                 "SPIKE: fcntl(F_SETNOSIGPIPE) failed: \(String(cString: strerror(errno)), privacy: .public)"
@@ -2337,35 +2339,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         proc.standardError = stderr
 
         // A write into a pipe whose reader is gone raises SIGPIPE, whose
-        // default disposition KILLS the process — nothing under `Sources/`
-        // installs `signal(SIGPIPE, SIG_IGN)`. `writeToStdin`'s `do/catch` does
-        // NOT cover it: the signal is delivered inside `write(2)`, so nothing
-        // is ever thrown and the catch never runs.
+        // default disposition KILLS the process; nothing under `Sources/`
+        // installs `signal(SIGPIPE, SIG_IGN)`. **The `do/catch` around the
+        // write is not protection** — the signal is delivered inside `write(2)`,
+        // so nothing is thrown and the catch never runs. That is the whole
+        // reason this line exists, and it is the part everyone gets wrong.
         //
-        // Reachable because a dead shim can stay reachable. Several
-        // background fan-outs write through `session.shim` — the keep-alive,
-        // the recap, the Pager roster paths — and what clears that reference is
-        // `SessionStore.closeSession`, which not every way of losing a shim
-        // goes through. `stop()` closing the write end is NOT what protects the
-        // ones that do: it returns at its own `proc.isRunning` guard whenever
-        // the process has already exited, which is exactly the crash case.
+        // Not socket-only, which was asserted twice and measured twice:
+        // `man 2 fcntl` documents the flag for "a write fails on a pipe or
+        // socket", and on a `Process` stdin pipe the default gives exit 141
+        // (128 + 13) while the flag makes the write throw `EPIPE` with the
+        // process alive.
         //
-        // The flag works on pipes, not only sockets: `man 2 fcntl` documents it
-        // for "a write fails on a pipe or socket", and it was measured on a
-        // `Process` stdin pipe — without it, exit 141 (128 + 13); with it, the
-        // write throws `EPIPE` and the process lives.
+        // It is reachable because a dead shim can stay reachable — several
+        // timer- and event-driven writers reach a `ShimProcess` through the
+        // session, and nothing on those paths asks whether the child is still
+        // running. Tracing which ones is deliberately NOT recorded here: three
+        // review rounds each falsified the previous round's route, and the flag
+        // does not depend on any of them being the live one.
         //
         // A process-wide `signal(SIGPIPE, SIG_IGN)` would cover every fd at
         // once, including any added later. It is not used because `SIG_IGN`
         // survives `exec` into every child, and Canopy cannot know what a
         // future one expects of it.
         //
-        // Logged rather than refused, unlike the probe above. A failing `fcntl`
-        // on a fresh pipe fd would almost certainly be systemic rather than
-        // one-off, so refusing would turn a latent exposure into every session
-        // failing to start; logging leaves Canopy where it was before this
-        // guard existed. The cost is real and one-directional — the kill is
-        // back, and this line is the only trace it was ever prevented.
+        // Logged rather than refused, unlike the probe above: a failing `fcntl`
+        // on a fresh pipe fd would almost certainly be systemic, so refusing
+        // would turn a latent exposure into every session failing to start.
+        // The cost is one-directional — the kill is back, and this line is the
+        // only trace it was ever prevented.
         if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == -1 {
             logger.error(
                 "fcntl(F_SETNOSIGPIPE) failed on shim stdin: \(String(cString: strerror(errno)), privacy: .public)"
@@ -6265,25 +6267,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     private func showErrorInWebView(_ message: String) {
-        // Park it on the session as well, because on the path this function
-        // exists for the injection cannot survive: every call site is a
-        // `start()` failure, and `buildWebView` calls `start()` one statement
-        // before `loadCCWebview`, so the load replaces whatever the script
-        // landed in — and `completionHandler: nil` discards any throw besides.
-        // The pane then closes. A reconnect failure is the one route into here
-        // where the injection DOES survive, since that webview is already
-        // loaded and stays, and equally the one where the line below is a
-        // no-op, because
-        // `doReconnect` binds the session only after `start()` succeeds. That
-        // is correct there: it retries rather than reporting.
+        // Park it on the session as well. Every call site is a `start()`
+        // failure, and on the one that matters — a fresh pane — the injection
+        // below does not survive: the page load that follows replaces whatever
+        // it wrote, and `completionHandler: nil` discards the throw if there
+        // was nothing to write into. Then the pane closes.
         //
-        // The rest of the path already exists (issue #194): `Detail`'s crash
-        // closure hands `lastFatalError` to `SessionStore.noteSessionFailure`,
-        // and `DetailLauncher` renders `lastSessionFailure`. The shim's own
-        // `error` frames were wired to it; a launch that never got as far as a
-        // shim was not. This inherits that path's limit rather than fixing it —
-        // `DetailLauncher` is the only reader, so with other panes still open
-        // the message waits for a launcher pane.
+        // The parked copy is the reliable half. It feeds the launcher banner
+        // built for issue #194, whose remaining hops already existed; a launch
+        // that never got as far as a shim was the one producer not wired to it.
+        // That banner's own limit is inherited rather than fixed — it draws
+        // where the launcher draws, so with other panes still open the message
+        // waits.
+        //
+        // Nil `boundSession` — the reconnect path — is a no-op here, which is
+        // correct: that path retries rather than reporting.
         boundSession?.lastFatalError = message
 
         // Escape backslash FIRST, then single quotes
