@@ -590,6 +590,14 @@ final class MacroPadController {
         window: Self.resetLoopWindow, threshold: Self.resetLoopThreshold
     )
     private var isConnected = false
+    /// The callout path a discovery pass found held by another process, or
+    /// nil when the last pass had no such answer. Written only from
+    /// `handle(_ output:)`, which sees one of these per failed pass.
+    ///
+    /// A path rather than a Bool because it is the whole remedy: `lsof` on it
+    /// names the holder. A Bool would report the same fault and leave the
+    /// user with the same search this state exists to end.
+    private var portBusyPath: String?
     /// Last command sent per key. Diffing whole commands rather than colors is
     /// what makes a period or floor change propagate; a color-only cache would
     /// silently swallow one.
@@ -997,16 +1005,38 @@ final class MacroPadController {
     /// free. A publish from outside a tracked pass costs one extra `refresh()`
     /// — see `publish`'s own doc for why the ones from inside do not.
     ///
-    /// The mapping into `Keys` lives here rather than in `adoptIdentity`
-    /// because it needs `isConnected` as well as the count.
+    /// The mapping into `Keys` lives in `link(source:…)` rather than in
+    /// `adoptIdentity` because it needs `isConnected` as well as the count.
     private func publishStatus() {
-        guard !settings.macroPadSource.isOff else {
-            status.publish(.disabled)
-            return
-        }
+        status.publish(Self.link(source: settings.macroPadSource,
+                                 isConnected: isConnected,
+                                 keyCount: keyCount,
+                                 portBusyPath: portBusyPath))
+    }
+
+    /// Every input the indicator's state is a function of, and nothing else.
+    ///
+    /// Split out of `publishStatus` so `_SidebarLogicProbe` can reach it: the
+    /// four inputs are independent and the precedence between them is the
+    /// whole content of the decision. Note what the extraction does NOT pin
+    /// — that `publishStatus` passes the right four values, and that every
+    /// path which changes one of them republishes. Both still rest on the
+    /// call sites.
+    ///
+    /// The order of the guards is the decision. `.off` outranks a held port
+    /// because a machine deliberately serving its pad over the bridge is
+    /// SUPPOSED to see `disabled` — reporting `portBusy` there would flag the
+    /// intended configuration as a fault. And `isConnected` outranks it the
+    /// other way: once a port has answered, a path left over from an earlier
+    /// pass says nothing about the link that is now up.
+    static func link(source: MacroPadSource,
+                     isConnected: Bool,
+                     keyCount: Int?,
+                     portBusyPath: String?) -> MacroPadStatus.Link {
+        guard !source.isOff else { return .disabled }
         guard isConnected else {
-            status.publish(.searching)
-            return
+            if let portBusyPath { return .portBusy(path: portBusyPath) }
+            return .searching
         }
         let keys: MacroPadStatus.Keys
         if let count = keyCount {
@@ -1014,7 +1044,7 @@ final class MacroPadController {
         } else {
             keys = .counting
         }
-        status.publish(.connected(keys))
+        return .connected(keys)
     }
 
     private var effectiveKeyCount: Int { keyCount ?? Self.assumedKeyCount }
@@ -1382,9 +1412,23 @@ final class MacroPadController {
         switch output {
         case .connected:
             isConnected = true
+            portBusyPath = nil
             fullPush()
+        case .searchFailed(let busyPath):
+            // The device emits this on every failed pass, so a plain
+            // assignment is what makes the state self-clearing: a holder that
+            // exits is reported by the next retry answering nil, with nothing
+            // here having to notice the transition. `publishStatus` drops
+            // no-op writes, so an unchanged answer costs nothing.
+            portBusyPath = busyPath
+            publishStatus()
         case .disconnected:
             isConnected = false
+            // Not carried over from before the drop: a disconnect says
+            // nothing about who holds the port NOW, and the pass that follows
+            // is what answers. Keeping a stale path would let the indicator
+            // blame a process that had already quit.
+            portBusyPath = nil
             // Very nearly redundant with `keyCount = nil` below, which
             // clears the press map through the `didSet`. Kept because the two
             // are not identical — this also drops any partial state before

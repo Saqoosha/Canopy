@@ -5871,9 +5871,47 @@ enum SidebarLogicProbe {
             // Without this the two assertions above are vacuously green on an
             // empty cycle — `isEmpty` over nothing is true. Pinning the count
             // also makes removing a state cost an edit here.
-            record("indicator: the demo cycle still covers five states",
-                   MacroPadStatus.demoCycle.count == 5,
+            record("indicator: the demo cycle still covers six states",
+                   MacroPadStatus.demoCycle.count == 6,
                    "count=\(MacroPadStatus.demoCycle.count)")
+
+            // --- which link state the indicator is asked to draw. The four
+            // inputs are independent and the precedence between them is the
+            // whole decision, so both directions of it are pinned rather than
+            // just the new case.
+            //
+            // What this does NOT pin, and the reason is the same one the
+            // extraction's own doc gives: that `publishStatus` passes the
+            // right four values, and that every path which changes one of
+            // them republishes. Both live at call sites no assertion here
+            // reaches.
+            let busy = "/dev/cu.usbmodem20103"
+            record("link: a held port reads as portBusy and carries the path",
+                   MacroPadController.link(source: .local, isConnected: false,
+                                           keyCount: nil, portBusyPath: busy)
+                   == .portBusy(path: busy),
+                   "\(MacroPadController.link(source: .local, isConnected: false, keyCount: nil, portBusyPath: busy))")
+            record("link: no attribution is still plain searching",
+                   MacroPadController.link(source: .local, isConnected: false,
+                                           keyCount: nil, portBusyPath: nil)
+                   == .searching,
+                   "\(MacroPadController.link(source: .local, isConnected: false, keyCount: nil, portBusyPath: nil))")
+            // A machine deliberately serving its pad over the bridge must be
+            // `.off` for socat to hold the port — so `.off` outranking a held
+            // port is what stops the intended configuration reading as a
+            // fault.
+            record("link: source off outranks a held port",
+                   MacroPadController.link(source: .off, isConnected: false,
+                                           keyCount: nil, portBusyPath: busy)
+                   == .disabled,
+                   "\(MacroPadController.link(source: .off, isConnected: false, keyCount: nil, portBusyPath: busy))")
+            // The other direction: a path left over from an earlier pass says
+            // nothing about a link that is now up.
+            record("link: a live connection outranks a stale busy path",
+                   MacroPadController.link(source: .local, isConnected: true,
+                                           keyCount: 6, portBusyPath: busy)
+                   == .connected(.available(6)),
+                   "\(MacroPadController.link(source: .local, isConnected: true, keyCount: 6, portBusyPath: busy))")
 
             // --- the refresh-skip predicate. The dangerous direction is
             // TIGHTENING it: a skipped refresh on the acknowledging act leaves

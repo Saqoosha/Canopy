@@ -29,6 +29,19 @@ final class MacroPadDevice: @unchecked Sendable {
         /// Port closed — unplug, crash, or a failed write. The controller
         /// drops its diff cache on this so the next connect re-pushes.
         case disconnected
+        /// One discovery pass finished without adopting anything, and says
+        /// WHY as far as `open(2)` can tell: `busyPath` names a callout
+        /// device that matched the pad and answered `EBUSY`, meaning another
+        /// process already has it — the bridge's `socat`, a `screen` session,
+        /// a CircuitPython IDE. Nil covers every other way a pass can come up
+        /// empty (nothing enumerated, opened but silent, a TCP bridge that
+        /// would not connect), which are all the same to the user.
+        ///
+        /// Emitted on EVERY failed pass rather than only on the first, so the
+        /// state is self-clearing: the controller stores the latest and a
+        /// holder going away is reported by the next retry rather than
+        /// needing its own signal.
+        case searchFailed(busyPath: String?)
         case event(MacroPadEvent)
     }
 
@@ -368,17 +381,25 @@ final class MacroPadDevice: @unchecked Sendable {
             // failed, this is the only thread back, and returning here would
             // end discovery for the lifetime of the process while the log
             // claimed a fallback existed.
+            emit(.searchFailed(busyPath: nil))
             if !hasHotplug { scheduleRetry() }
             return
         }
 
+        // Collected across the whole pass rather than per candidate: the pad
+        // exposes a console port and a data port under one product string, so
+        // a single busy pad produces two `EBUSY`s and naming either one is
+        // enough to say what is wrong. First wins because `rankedEndpoints`
+        // already puts the likely data port first.
+        var busyPath: String?
         // Not `for … where`: `openAndProbe` opens a port, writes to it, and
         // can block for `probeTimeout`. That does not belong in a filter.
         for endpoint in endpoints {
-            if openAndProbe(endpoint) { return }
+            if openAndProbe(endpoint, busyPath: &busyPath) { return }
         }
         // Every candidate stayed silent. Common during bring-up (wrong port,
         // firmware not running) and after a reset that is still booting.
+        emit(.searchFailed(busyPath: busyPath))
         scheduleRetry()
     }
 
@@ -392,7 +413,7 @@ final class MacroPadDevice: @unchecked Sendable {
     /// Opens the port, asks it to identify itself, and adopts it only if it
     /// answers. Probing rather than trusting the ranking is what makes the
     /// console-vs-data ordering a preference rather than a dependency.
-    private func openAndProbe(_ endpoint: Endpoint) -> Bool {
+    private func openAndProbe(_ endpoint: Endpoint, busyPath: inout String?) -> Bool {
         let handle: Int32
         switch endpoint {
         case .serial(let path, _):
@@ -402,9 +423,19 @@ final class MacroPadDevice: @unchecked Sendable {
                 // `screen` session, a CircuitPython IDE, or (with the remote
                 // transport) the bridge on this same machine holding the port
                 // — and it is unactionable unless it is said out loud.
+                //
+                // Saying it in the log is not enough on its own: measured on
+                // 2026-09-10, a bridge holding this pad kept Canopy out for
+                // 45 minutes while it retried every 30s, and the only trace
+                // was this line. `busyPath` is what carries it to the sidebar
+                // indicator, which had no way to tell a held port from an
+                // empty desk. Read `errno` once — `strerror` below is a call
+                // that may set it — and only for the case the user can act on.
+                let failure = errno
+                if failure == EBUSY, busyPath == nil { busyPath = path }
                 logger.notice("""
                     MacroPad: open(\(path, privacy: .public)) failed: \
-                    \(String(cString: strerror(errno)), privacy: .public)
+                    \(String(cString: strerror(failure)), privacy: .public)
                     """)
                 return false
             }

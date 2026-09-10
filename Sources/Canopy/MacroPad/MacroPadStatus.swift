@@ -40,18 +40,26 @@ final class MacroPadStatus {
         /// for `socat` to hold the port. A control that vanishes in the state
         /// it reports cannot be used to leave it.
         case disabled
-        /// Enabled, and nothing has answered a probe. Unplugged, mid-probe and
-        /// mid-retry collapse here because the device layer emits no `Output`
-        /// that separates them.
+        /// Enabled, and nothing has answered a probe. Unplugged, mid-probe
+        /// and mid-retry collapse here because the device layer emits no
+        /// `Output` that separates them — and none of the three is something
+        /// the user can act on, which is what lets them share a case.
         ///
-        /// One cause that is *not* the same to the user hides in here too: a
-        /// pad that is plugged in and powered but whose port is held by
-        /// something else — a `screen` session or a CircuitPython IDE, which
-        /// `MacroPadDevice` names as the single most common bring-up state. It
-        /// logs the failed open and returns without emitting, so this case
-        /// cannot tell it from an empty desk. The remedy differs and the
-        /// indicator cannot say so; that is a known gap, not a simplification.
+        /// The one cause in that group that IS actionable has moved out to
+        /// `portBusy`. Anything the open call could not attribute stays here,
+        /// including a TCP bridge that would not connect.
         case searching
+        /// The pad is plugged in and powered, and another process holds its
+        /// port: `open(2)` answered `EBUSY`. Carries the callout path, which
+        /// is what a person needs to go find the holder.
+        ///
+        /// Split out of `searching` because the remedy is the opposite of an
+        /// empty desk's — quit the holder, or switch THIS machine's source to
+        /// `.off` if it is the bridge serving the pad to another Canopy. It
+        /// is the state that cost the most to diagnose without it: measured
+        /// on 2026-09-10, a bridge held this pad for 45 minutes while the
+        /// indicator said `searching` and the pad simply did nothing.
+        case portBusy(path: String)
         /// A port answered a probe. See `Keys` for what the payload can mean.
         case connected(Keys)
     }
@@ -147,6 +155,7 @@ final class MacroPadStatus {
     static let demoCycle: [Link] = [
         .disabled,
         .searching,
+        .portBusy(path: "/dev/cu.usbmodem20103"),
         .connected(.counting),
         .connected(.available(4)),
         .connected(.unreachable),
@@ -388,6 +397,23 @@ struct MacroPadIndicator: View {
                               tint: AnyShapeStyle(.quaternary),
                               help: "MacroPad not connected — click to change source",
                               demoLabel: "searching")
+        case .portBusy(let path):
+            // Orange, like `connected(.unreachable)`: both mean "the hardware
+            // is there and Canopy cannot use it", which is the one group
+            // worth pulling the eye. The SYMBOL is what separates them —
+            // a lock rather than a grid, because nothing here is wrong with
+            // the pad. `lock.square` resolves on this system; the probe
+            // checks it along with every other symbol the cycle reaches,
+            // which is how `square.grid.2x2.slash` was caught.
+            //
+            // The path is in the help rather than the glyph because it is
+            // what makes the state actionable — `lsof <path>` names the
+            // holder — and because the footer has room for a glyph, not a
+            // device node.
+            return Appearance(symbol: "lock.square",
+                              tint: AnyShapeStyle(Color.orange.opacity(0.8)),
+                              help: "MacroPad port is held by another process (\(path)) — quit it, or set this Mac's source to Off if it is serving the pad over the bridge. Click to change source",
+                              demoLabel: "port busy")
         case .connected(.unreachable):
             return Appearance(symbol: "square.grid.2x2",
                               tint: AnyShapeStyle(Color.orange.opacity(0.8)),
