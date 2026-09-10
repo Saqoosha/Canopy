@@ -304,11 +304,36 @@ enum GitWorktree {
         queue.asyncAfter(deadline: .now() + timeout, execute: watchdog)
         queue.asyncAfter(deadline: .now() + timeout + CLIOneShot.killGrace, execute: killer)
 
+        // The child's exit is observed HERE, through `terminationHandler`, and
+        // never through `waitUntilExit()`.
+        //
+        // `waitUntilExit()` parks the calling thread on that thread's own
+        // CFRunLoop and depends on a wakeup arriving there. The reap below
+        // runs on a `DispatchQueue.global` worker, which owns no runloop
+        // anybody drives, and that wakeup is intermittently lost. Measured
+        // 2026-09-10 on a worktree seed of `Canopy-Mobile`: the FIRST `/bin/cp`
+        // — an 11-file, 48 KB `.xcodeproj` — had exited and been reaped (no
+        // zombie under the app, both pipes at EOF, every file already present
+        // in the destination) while the drain thread sat in `mach_msg` inside
+        // `waitUntilExit()` for the entire 308 s bound. So a clone that had
+        // COPIED EVERYTHING was reported `failed`, and the launcher showed
+        // "Copying Build Files…" for five minutes over finished work.
+        //
+        // It is a race, not a rule: 1,600 runs of this function's exact shape
+        // in a standalone binary never reproduced it, and the eight later
+        // clones in that same seed all returned normally. That is why the fix
+        // is to drop the dependency rather than to shorten the bound.
+        // `terminationHandler` is delivered by Foundation on its own queue
+        // with no runloop in the path. Assigned BEFORE `run()`, so a child
+        // that exits immediately cannot beat the handler into place.
+        let exited = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exited.signal() }
+
         try proc.run()
 
         // The drain and the reap run OFF this thread so the CALLER can be
         // bounded. Both are unbounded in themselves: the reads return at EOF
-        // and `waitUntilExit()` only after the reap, and a grandchild that
+        // and `exited` only once the child is gone, and a grandchild that
         // inherited a write end defers EOF indefinitely — no signal to the
         // direct child closes that. `CLIOneShot.finishSlack` documents exactly
         // that residue and is reused for it. What the bound buys here:
@@ -328,7 +353,9 @@ enum GitWorktree {
                 output.err = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             }
             group.wait()
-            proc.waitUntilExit()
+            // `terminationStatus` is readable once this returns: Foundation
+            // records it before it calls the handler that signals here.
+            exited.wait()
             reaped.set()
             done.signal()
         }

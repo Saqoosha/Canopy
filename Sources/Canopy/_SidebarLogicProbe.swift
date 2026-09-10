@@ -2134,6 +2134,15 @@ enum SidebarLogicProbe {
                        atomically: true, encoding: .utf8)
         // `--directory` collapses the wholly-ignored directory to one entry, so
         // this is also the assertion that the flag is still being passed.
+        //
+        // And it is the ONLY assertion that reaches `runCommand`'s reap, which
+        // is worth knowing before deleting it as a shallow smoke test: removing
+        // the `terminationHandler` that signals `exited` fails exactly here
+        // (measured, by doing it). What it cannot cover is the defect that put
+        // the handler there — a lost CFRunLoop wakeup inside `waitUntilExit()`,
+        // a race that 1,600 runs of that function's shape in a standalone
+        // binary never reproduced. Repeating this call would not change that,
+        // so it deliberately runs once.
         let spawnIgnored = (try? GitWorktree.ignoredEntries(repo: spawnRepo)) ?? []
         record("ignoredEntries: subprocess round trip completes and drains stdout",
                spawnIgnored.contains("build/"))
