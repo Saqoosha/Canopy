@@ -308,10 +308,10 @@ enum GitWorktree {
         // The child's exit is observed through `terminationHandler` rather
         // than `waitUntilExit()`. Scope that to THIS function: it was the only
         // call site that ran `run()` on one thread and waited on another. Every
-        // other `waitUntilExit()` in `Sources/` — twelve of them, `CLIOneShot`
-        // included, and checked rather than assumed — does both on one and the
-        // same thread, so they do not have the split named below and are left
-        // alone rather than swept.
+        // other `waitUntilExit()` in `Sources/` — thirteen of them, `CLIOneShot`
+        // and the probe's own `git init` included, and read rather than assumed
+        // — does both on one and the same thread, so none of them has that
+        // split, and they are left alone rather than swept.
         //
         // MEASURED 2026-09-10, seeding a worktree of `Canopy-Mobile`: the first
         // `/bin/cp` — an 11-file, 48 KB `.xcodeproj` — had exited, had been
@@ -350,10 +350,10 @@ enum GitWorktree {
         // `terminationHandler`'s execution context is undefined per `NSTask.h`
         // (measured once on a shared global root queue), and that is fine:
         // signalling a semaphore is valid from any context, which is the real
-        // reason this works. Assigning before `run()` is hygiene rather than a
-        // guarantee being relied on — a handler installed after the child has
-        // already exited still fires (measured 100/100) — and an exit landing
-        // before `exited.wait()` is covered by the semaphore's own count.
+        // reason this works. Assigning before `run()` is hygiene, not a
+        // guarantee being leaned on: the same header says a handler set after
+        // the child has finished runs anyway (and it does, 100/100), and an
+        // exit landing before `exited.wait()` is covered by the semaphore.
         let exited = DispatchSemaphore(value: 0)
         proc.terminationHandler = { _ in exited.signal() }
 
@@ -361,9 +361,9 @@ enum GitWorktree {
 
         // The drain and the reap run OFF this thread so the CALLER can be
         // bounded. Both are unbounded in themselves: the reads return at EOF
-        // and `exited.wait()` returns only once the child has been reaped,
-        // and a grandchild that
-        // inherited a write end defers EOF indefinitely — no signal to the
+        // and `exited.wait()` returns only once the child has been reaped, and
+        // a grandchild that inherited a write end defers EOF indefinitely — no
+        // signal to the
         // direct child closes that. `CLIOneShot.finishSlack` documents exactly
         // that residue and is reused for it. What the bound buys here:
         // `startSession` holds `isCreatingWorktree` true and shows
@@ -395,15 +395,17 @@ enum GitWorktree {
         if done.wait(timeout: .now() + timeout + slack) == .timedOut {
             // Deliberately does NOT cancel the killer: the escalation is still
             // this call's only chance of freeing the parked threads. When it
-            // cannot, the leak is the drains (both of them only when stdout
-            // was wanted), the worker and its descriptors. Not the `Process`:
-            // the worker no longer captures it, and on the grandchild wedge the
-            // child has already exited, so Foundation's self-retain has let go
-            // — a child that survives SIGKILL is the one case where it stays.
-            // `CLIOneShot.finishSlack` accepts the same residue and bounds it
-            // the same way, so the reasoning is reused; its own list ("a
-            // `Process`, three `Pipe`s") is NOT this function's, because its
-            // worker does hold the process across `waitUntilExit()`. Bounded
+            // cannot, what leaks is whatever is still parked: the worker
+            // always, and the drains only when it is a pipe that wedged rather
+            // than the reap — on a reap stall they have already returned at
+            // EOF — plus the pipes those parked drains hold. Not the
+            // `Process`: the worker no longer captures it, and Foundation's
+            // self-retain has let go of a child that exited, which leaves one
+            // that survives SIGKILL as the only case it stays.
+            // `CLIOneShot.finishSlack` bounds the same residue the same way, so
+            // the reasoning is reused; its own list ("a `Process`, three
+            // `Pipe`s") differs because its worker holds the process across
+            // `waitUntilExit()` and it always pipes stdin and stdout. Bounded
             // here as it is there: worktree creation runs a handful of commands
             // the user asks for one at a time.
             let message = "\(executable) did not release its output within \(Int(timeout + slack))s"

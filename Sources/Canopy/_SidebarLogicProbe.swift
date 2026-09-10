@@ -2125,8 +2125,8 @@ enum SidebarLogicProbe {
         // `exited.wait()` back to `proc.waitUntilExit()`, which IS the revert,
         // leaves both GREEN (measured, on a rebuilt Debug binary). So nothing
         // here distinguishes the new reap from the old one, and nothing here
-        // could: the defect was a race, and `GitWorktree.runCommand` records
-        // why it was never reproduced. Note the handler-deletion mutation goes
+        // could: the defect was never reproduced, and `GitWorktree.runCommand`
+        // records what is and is not known about why. Note the handler-deletion mutation goes
         // red only after the full bound elapses, so it presents as a stalled
         // probe first and a red one second.
         let spawnRepo = FileManager.default.temporaryDirectory
