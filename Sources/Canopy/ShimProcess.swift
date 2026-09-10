@@ -1502,8 +1502,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Optional OpenSession that owns this shim. Set by WebViewContainer
-    /// after spawn so isWorking transitions reach the sidebar's icon.
+    /// Optional OpenSession that owns this shim. Set by `WebViewContainer`
+    /// so `isWorking` transitions reach the sidebar's icon.
+    ///
+    /// Bound at more than one point, and the EARLIEST one is load-bearing:
+    /// `showErrorInWebView` can only report a launch failure if the bind
+    /// preceding `start()` has already run. Nothing in the suite would catch
+    /// that bind moving later.
     ///
     /// didSet re-syncs the session's asking flag against this shim's current
     /// internal state. On SSH reconnect a fresh shim inherits an existing
@@ -1853,29 +1858,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.error("SPIKE: ssh probe failed to launch: \(error.localizedDescription, privacy: .public)")
             return nil
         }
-        // `F_SETNOSIGPIPE` is required, not belt and braces. Canopy sets no
-        // `signal(SIGPIPE, SIG_IGN)` anywhere, so the default disposition KILLS
-        // the process on a write into a pipe with no reader left — and ssh
-        // exits within milliseconds on an unresolvable host or a refused key.
-        // `man 2 fcntl` documents this flag for "a write fails on a pipe or
-        // socket", so the guidance that it is socket-only is wrong; measured
-        // too, because two reviewers disagreed: default → signal 13, with the
-        // flag → EPIPE.
+        // `F_SETNOSIGPIPE` is required here, not belt and braces: ssh exits
+        // within milliseconds on an unresolvable host or a refused key, and the
+        // write two lines down would then land on a pipe with no reader. The
+        // reasoning and the measurement live at `start()`, for all four of the
+        // sites that set this flag.
         //
-        // Switching to the throwing overload alone does NOT close this. The
-        // signal arrives inside `write(2)`, so nothing is ever thrown and the
-        // catch never runs. **That applies to every other `FileHandle` write to
-        // a subprocess in this codebase** — `sendToShim`,
-        // `RemoteSessionsBridge` and `SessionTitleGenerator` all use the
-        // throwing form and none of them sets this flag. Those are pre-existing
-        // and out of this branch's scope, but the throwing form must not be
-        // read as protection there either.
-        //
-        // Checked rather than discarded, matching `MacroPadDevice`'s
-        // `SO_NOSIGPIPE` guard: a silent failure here is not survivable later —
-        // it restores exactly the kill this call exists to prevent, at a write
-        // that would otherwise look fine.
-        guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+        // Refused as well as logged: that write IS this probe, so there is
+        // nothing left for it to do if the guard did not take. `start()`'s own
+        // guard logs and continues, and says there why.
+        guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
             logger.error(
                 "SPIKE: fcntl(F_SETNOSIGPIPE) failed: \(String(cString: strerror(errno)), privacy: .public)"
             )
@@ -2345,6 +2337,42 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         proc.standardInput = stdin
         proc.standardOutput = stdout
         proc.standardError = stderr
+
+        // A write into a pipe whose reader is gone raises SIGPIPE, whose
+        // default disposition KILLS the process; nothing under `Sources/`
+        // installs `signal(SIGPIPE, SIG_IGN)`. **The `do/catch` around the
+        // write is not protection** — the signal is delivered inside `write(2)`,
+        // so nothing is thrown and the catch never runs. That is the whole
+        // reason this line exists, and it is the part everyone gets wrong.
+        //
+        // Not socket-only, which was asserted twice and measured twice:
+        // `man 2 fcntl` documents the flag for "a write fails on a pipe or
+        // socket", and on a `Process` stdin pipe the default gives exit 141
+        // (128 + 13) while the flag makes the write throw `EPIPE` with the
+        // process alive.
+        //
+        // It is reachable because a dead shim can stay reachable — several
+        // timer- and event-driven writers reach a `ShimProcess` through the
+        // session, and nothing on those paths asks whether the child is still
+        // running. Tracing which ones is deliberately NOT recorded here: three
+        // review rounds each falsified the previous round's route, and the flag
+        // does not depend on any of them being the live one.
+        //
+        // A process-wide `signal(SIGPIPE, SIG_IGN)` would cover every fd at
+        // once, including any added later. It is not used because `SIG_IGN`
+        // survives `exec` into every child, and Canopy cannot know what a
+        // future one expects of it.
+        //
+        // Logged rather than refused, unlike the probe above: a failing `fcntl`
+        // on a fresh pipe fd would almost certainly be systemic, so refusing
+        // would turn a latent exposure into every session failing to start.
+        // The cost is one-directional — the kill is back, and this line is the
+        // only trace it was ever prevented.
+        if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == -1 {
+            logger.error(
+                "fcntl(F_SETNOSIGPIPE) failed on shim stdin: \(String(cString: strerror(errno)), privacy: .public)"
+            )
+        }
 
         self.stdinPipe = stdin
         self.stdoutPipe = stdout
@@ -6239,6 +6267,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     private func showErrorInWebView(_ message: String) {
+        // Park it on the session as well. Every call site is a `start()`
+        // failure, and on the one that matters — a fresh pane — the injection
+        // below does not survive: the page load that follows replaces whatever
+        // it wrote, and `completionHandler: nil` discards the throw if there
+        // was nothing to write into. Then the pane closes.
+        //
+        // The parked copy is the reliable half. It feeds the launcher banner
+        // built for issue #194, whose remaining hops already existed; a launch
+        // that never got as far as a shim was the one producer not wired to it.
+        // That banner's own limit is inherited rather than fixed — it draws
+        // where the launcher draws, so with other panes still open the message
+        // waits.
+        //
+        // Nil `boundSession` — the reconnect path — is a no-op here, which is
+        // correct: that path retries rather than reporting.
+        boundSession?.lastFatalError = message
+
         // Escape backslash FIRST, then single quotes
         let escaped = message
             .replacingOccurrences(of: "\\", with: "\\\\")

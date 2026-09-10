@@ -170,6 +170,27 @@ enum CLIOneShot {
             process.standardOutput = stdout
             process.standardError = stderr
 
+            // The `catch` around the stdin write below cannot see a dead
+            // reader: SIGPIPE is delivered inside `write(2)` and its default
+            // disposition kills Canopy, so nothing is thrown. What makes it
+            // reachable here is that the payload is written unconditionally
+            // after `run()`; a CLI that rejects one of its flags is expected to
+            // exit before draining stdin, which is reasoning rather than
+            // something measured. See `ShimProcess.start()` for the flag's own
+            // measurement and for why a failure is logged rather than refused.
+            //
+            // `.error` where this file otherwise uses `.notice` throughout: the
+            // neighbouring lines report that one call came up empty, and this
+            // one reports that the guard against killing the app did not take.
+            // `errno` is read before the message is built, because the two
+            // interpolations ahead of it are evaluated first and composing an
+            // `OSLogMessage` may itself overwrite it. The sibling sites read it
+            // inline, where it is the only interpolation.
+            if fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == -1 {
+                let reason = String(cString: strerror(errno))
+                logger.error("\(logPrefix, privacy: .public) \(label, privacy: .public): fcntl(F_SETNOSIGPIPE) failed: \(reason, privacy: .public)")
+            }
+
             do {
                 try process.run()
             } catch {
