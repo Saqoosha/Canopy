@@ -407,16 +407,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func startRosterPublisher(store: SessionStore) {
+        // **The probe must not reach the relay, and until this guard it did.**
+        // `SidebarLogicProbe.runIfRequested()` sits in
+        // `applicationDidFinishLaunching`, and the note in "Running Tests"
+        // reads as though that is early enough to keep a probe run out of
+        // every credentialed path. It is not: this call is a `.task` on the
+        // `WindowGroup`, which SwiftUI runs BEFORE that delegate callback —
+        // the same ordering `makeRestored()` already guards against, for the
+        // same reason.
+        //
+        // Two things happened on every local probe run, measured 2026-09-10
+        // across fifteen launches. `RosterPublisher.sharedSecret()` read
+        // `sh.saqoo.Canopy.roster`, and a Debug build's designated
+        // requirement does not match the ACL the installed Release owns, so
+        // macOS raised a keychain prompt each time — correctly. And whenever
+        // one was allowed, the probe CONNECTED, publishing under
+        // `MachineIdentity.stableId()`, which is the `IOPlatformUUID` and
+        // therefore the same machine id as the real Canopy: two publishers
+        // fighting over one roster, which the phone sees as the session list
+        // flickering. Approving the prompt is the worse outcome of the two,
+        // because it silences the only signal that this is happening.
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else {
+            return
+        }
+        #endif
         guard rosterPublisher == nil else { return }
         let publisher = RosterPublisher(store: store, settings: CanopySettings.shared)
         rosterPublisher = publisher
         publisher.start()
         // The publisher owns the socket but not the sessions; this closure is
         // the seam between the two, so a reply arriving from the phone can
-        // reach the shim it addresses. Every branch that does NOT inject
-        // logs why — the phone has no other way to learn its message never
-        // landed, and `requestPhoneReply`'s own internal refusals already
-        // log a notice, so a silent `return` here would be the one gap.
+        // reach the shim it addresses. Every branch that reports a FAILURE
+        // from a live store logs why — the phone has no other way to learn
+        // its message never landed. (The shutting-down branch does not: there
+        // is no session to name and the subsystem is being torn down.) Since the
+        // queue landed, "did not inject" is no longer the same as "did not
+        // land": a queued prompt is held by this Mac and reported as a
+        // success, and it is the one branch here that deliberately logs
+        // nothing, because `submitPhoneReply` has already logged its depth
+        // and its gate — strictly more than this site knows.
+        //
+        // The refusals below are this closure's own three (no store, no
+        // session, no shim); `submitPhoneReply` adds the ones waiting cannot
+        // fix — blank text, a full queue, and a session waiting on a human.
         // The session id is safe to log `.public`; the reply TEXT never is
         // — it is user content and appears in none of these lines.
         // Every branch returns an outcome now. Each of these used to be a
@@ -433,12 +467,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) has no live shim")
                 return .refused("That session is not running — open it on the Mac first")
             }
-            if !shim.requestPhoneReply(text: envelope.text, replyId: envelope.replyId) {
-                let why = shim.ineligibilityReasonForReply() ?? "unknown"
+            switch shim.submitPhoneReply(text: envelope.text, replyId: envelope.replyId) {
+            case .injected:
+                return .delivered
+            case .queued(let why):
+                // Deliberately unlogged — see the note above the closure.
+                return .queued(why)
+            case .refused(let why):
                 logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) refused — \(why, privacy: .public)")
                 return .refused(why)
             }
-            return .delivered
         }
         // Same seam, for a permission decision instead of a typed reply.
         // `RosterReply.decisionTarget` only answers "which session" — the
@@ -917,6 +955,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // not route live sessions through it — renaming and then quitting is
         // the headline case, and it was open until this line existed.
         PeerNameStore.shared.captureNow()
+
+        // Same shape as the line above, and the same reason it is here rather
+        // than in `stop()`: quit does not route a live owned shim through
+        // that path, so a prompt the phone was told `ok` about would vanish
+        // with no trace at all. Nothing can be delivered at this point — what
+        // this leaves behind is the count in the log.
+        ShimProcess.discardAllQueuedPhoneReplies()
 
         // Saving the layout and normalizing the saved frame to one pane's
         // width are mutually exclusive — but the deciding question is

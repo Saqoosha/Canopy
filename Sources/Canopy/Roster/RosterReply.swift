@@ -57,15 +57,46 @@ struct DecisionEnvelope: Codable {
 /// relay's write succeeded and it used to answer 200 — while the Mac had no
 /// such session, no live shim, or a shim that refused. The phone showed the
 /// message as sent and nothing had happened.
+///
+/// **Three outcomes, not two**, since the queue landed: `ok: true` no longer
+/// means "injected", it means "this Mac has it". `queued` is the third, and
+/// `reason` is what separates it from `delivered` — see that factory.
+///
+/// The three members below are the only way to build one: the memberwise
+/// initialiser is private so that `ok: false` with no reason — a 409 the
+/// phone can only render as "The Mac could not use that" — cannot be
+/// constructed at all.
 struct DeliveryOutcome {
     let ok: Bool
     /// Shown on the phone. Never conversation content — these are states, not
     /// text the user wrote.
     let reason: String?
 
+    private init(ok: Bool, reason: String?) {
+        self.ok = ok
+        self.reason = reason
+    }
+
     static let delivered = DeliveryOutcome(ok: true, reason: nil)
     static func refused(_ reason: String) -> DeliveryOutcome {
         DeliveryOutcome(ok: false, reason: reason)
+    }
+
+    /// Accepted, but not injected yet — the shim is busy or waiting on an
+    /// answer, and the prompt is held until it can take one. See
+    /// `ShimProcess.submitPhoneReply`.
+    ///
+    /// **`ok: true`, and that is a wire decision, not a shortcut.** The
+    /// relay maps `ok` to the status code (200 / 409 / 503) and the phone
+    /// maps 409 to "your message did not land, here it is back". A queued
+    /// prompt DID land — it is in the Mac's hands and will be injected — so
+    /// reporting it as a refusal would put the user's words back in the
+    /// composer to be sent twice. `reason` rides along on the 200 body,
+    /// where a phone that wants to draw "queued" can read it and one that
+    /// does not ignores it, so this needs no relay change and no new phone
+    /// build to be correct.
+    static func queued(_ reason: String) -> DeliveryOutcome {
+        DeliveryOutcome(ok: true, reason: "Queued — \(reason)")
     }
 }
 

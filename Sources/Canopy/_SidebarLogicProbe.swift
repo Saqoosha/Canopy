@@ -1602,6 +1602,18 @@ enum SidebarLogicProbe {
             record("roster reply: refuses whitespace-only text",
                    RosterReply.target(for: blank, in: [a]) == nil)
 
+            // **`ok: true` for a queued prompt is the wire decision this
+            // feature rests on.** The relay maps `ok` to the status code and
+            // the phone maps a 409 to "here are your words back", so
+            // reporting a held prompt as a refusal invites sending it twice.
+            // Nothing pinned that word until this pair.
+            record("delivery outcome: a queued prompt reports success",
+                   DeliveryOutcome.queued("session busy").ok)
+            record("delivery outcome: the gate's own words ride out prefixed",
+                   DeliveryOutcome.queued("session busy").reason == "Queued — session busy")
+            record("delivery outcome: an injected prompt carries no reason",
+                   DeliveryOutcome.delivered.ok && DeliveryOutcome.delivered.reason == nil)
+
             let wrongType = ReplyEnvelope(type: "snapshot", sessionId: a.id.uuidString, text: "x", deliveryId: nil, replyId: nil)
             record("roster reply: refuses a non-reply envelope",
                    RosterReply.target(for: wrongType, in: [a]) == nil)
@@ -2194,7 +2206,8 @@ enum SidebarLogicProbe {
         //
         // That it covers that branch rather than something upstream of it is
         // measured, and the obvious mutation does NOT show it: forcing every
-        // `runCommand` to report failure empties `ignoredEntries`, so the loop
+        // `runCommand` to report failure makes `ignoredEntries` throw, so the
+        // loop
         // body never runs and `/bin/cp` is never spawned — this assertion then
         // reddens for a reason it was not added for. Scoping the forced
         // failure to `/bin/cp` is the discriminating one; it leaves the
@@ -2275,6 +2288,43 @@ enum SidebarLogicProbe {
                    failed.failed == 1 && failed.failedEntries == ["blocked"])
             record("seedIgnoredFiles: the notice reaches the user with that name in it",
                    failed.failureNotice?.contains("• blocked") == true)
+        }
+
+        // A failed listing is not a repo with nothing to ignore, and until
+        // now both were the same all-zero report. A directory OUTSIDE any git
+        // repository reaches it with no permissions games — git discovery
+        // ascends, so a plain directory inside one would not; `temporaryDirectory`
+        // is `/var/folders/…` here and on `macos-26`.
+        do {
+            let notARepo = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeNotARepo-\(UUID().uuidString)")
+            let notARepoDest = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ProbeNotARepoDest-\(UUID().uuidString)")
+            defer {
+                try? FileManager.default.removeItem(at: notARepo)
+                try? FileManager.default.removeItem(at: notARepoDest)
+            }
+            for dir in [notARepo, notARepoDest] {
+                try? FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true)
+            }
+            let unlisted = GitWorktree.seedIgnoredFiles(
+                repo: notARepo, worktree: notARepoDest, perEntryTimeout: 10)
+            record("seedIgnoredFiles: a failed listing is flagged, not read as an empty repo",
+                   unlisted.couldNotList && unlisted.failed == 0 && unlisted.cloned == 0)
+            record("failureNotice: a failed listing speaks even with no failed count",
+                   unlisted.failureNotice?.contains("could not list") == true)
+            // The thrown message carries the status only, because the catch
+            // site logs its description at `.public`. Measured to be worth an
+            // assertion: putting the repo path back into that message leaves
+            // the two records above green.
+            do {
+                _ = try GitWorktree.ignoredEntries(repo: notARepo)
+                record("ignoredEntries: a failed listing throws", false)
+            } catch {
+                record("ignoredEntries: the thrown message carries the status, not the path",
+                       !error.localizedDescription.contains(notARepo.path))
+            }
         }
 
         record("projectDisplayName: managed worktree → repo · branch",
@@ -8831,6 +8881,187 @@ enum SidebarLogicProbe {
             record("failure: dismissing clears it",
                    { store.lastSessionFailure = nil; return store.lastSessionFailure == nil }())
         }
+
+        // MARK: - Phone reply queue (a prompt sent at a busy session)
+        //
+        // The cap is DERIVED from `PhoneReplyQueue.capacity`, never re-typed:
+        // a fixture spelling the number inline turns a retune into a failure
+        // that accuses the ordering rule it was written to protect.
+        //
+        // **Each property gets its own queue.** The first version shared one
+        // across the whole block, and a mutation that broke `append`'s trim
+        // reported nine failures — six of them were later assertions reading
+        // state the first failure had poisoned. A kill count inflated that
+        // way names the wrong property: "drains oldest first" went red for a
+        // defect in trimming, which is the shape CLAUDE.md records for the
+        // pane-cap fixtures.
+        do {
+            var queue = PhoneReplyQueue()
+            record("reply queue: starts empty",
+                   queue.isEmpty && queue.count == 0)
+            record("reply queue: an empty queue has nothing to take",
+                   queue.takeNext() == nil)
+        }
+        do {
+            var queue = PhoneReplyQueue()
+            record("reply queue: whitespace is refused, not held",
+                   queue.append(text: "   \n\t ", replyId: "r-blank") == .empty)
+            record("reply queue: a refused prompt leaves the queue empty",
+                   queue.isEmpty)
+        }
+        do {
+            // The whole reason the queue is a queue. A conversation delivered
+            // out of order is a different conversation, so this is the one
+            // property worth pinning hardest.
+            var queue = PhoneReplyQueue()
+            record("reply queue: the first prompt is next",
+                   queue.append(text: "first", replyId: "r-1") == .queued(depth: 1))
+            // `isEmpty` asserted FALSE, which the first version never did —
+            // and `isEmpty` is what `submitPhoneReply` reads for FIFO
+            // precedence and `scheduleQueuedPhoneReplyDrain` reads to arm the
+            // tick. Measured: `entries.count <= 1` passed all seventeen of
+            // the assertions this block used to have.
+            record("reply queue: one waiting is not empty",
+                   !queue.isEmpty && queue.count == 1)
+            record("reply queue: depth counts from 1 and grows",
+                   queue.append(text: "second", replyId: "r-2") == .queued(depth: 2))
+            record("reply queue: drains oldest first",
+                   queue.takeNext() == PhoneReplyQueue.Entry(replyId: "r-1", text: "first"))
+            record("reply queue: then the next one",
+                   queue.takeNext() == PhoneReplyQueue.Entry(replyId: "r-2", text: "second"))
+            record("reply queue: and is empty again",
+                   queue.isEmpty)
+        }
+        do {
+            // The id travels WITH the text. Losing the pairing is invisible
+            // until the phone draws the local record and the CLI's echo as
+            // two rows.
+            var queue = PhoneReplyQueue()
+            _ = queue.append(text: "kept", replyId: nil)
+            record("reply queue: a phone that sends no id still queues",
+                   queue.takeNext() == PhoneReplyQueue.Entry(replyId: nil, text: "kept"))
+        }
+        do {
+            // Trimming happens on the way IN, so the text taken out is the
+            // text that gets injected.
+            var queue = PhoneReplyQueue()
+            _ = queue.append(text: "  padded  ", replyId: "r-3")
+            record("reply queue: text is trimmed on the way in",
+                   queue.takeNext()?.text == "padded")
+        }
+        do {
+            // The cap, asserted on both sides.
+            var full = PhoneReplyQueue()
+            for i in 0 ..< PhoneReplyQueue.capacity {
+                _ = full.append(text: "p\(i)", replyId: nil)
+            }
+            record("reply queue: fills exactly to the cap",
+                   full.count == PhoneReplyQueue.capacity)
+            record("reply queue: a full queue is not empty",
+                   !full.isEmpty)
+            // **What this one does NOT pin: the number it carries.** The
+            // expectation reads `PhoneReplyQueue.capacity`, the same constant
+            // the payload is built from, so `.full(capacity: entries.count)`
+            // would pass. That is the deliberate cost of the never-re-type
+            // rule at the top of this block; what survives is the shape and a
+            // wrong constant (`.full(capacity: 0)` fails).
+            record("reply queue: one past the cap is refused, carrying the number",
+                   full.append(text: "overflow", replyId: nil) == .full(capacity: PhoneReplyQueue.capacity))
+            // Which of the two "waiting cannot fix this" answers comes back
+            // when both apply. Blank text is the one the sender can act on.
+            record("reply queue: blank text is refused ahead of the cap",
+                   full.append(text: "   ", replyId: nil) == .empty)
+            record("reply queue: a refused overflow does not displace anything",
+                   full.count == PhoneReplyQueue.capacity
+                       && full.entries.first?.text == "p0")
+            record("reply queue: taking one makes room again",
+                   { _ = full.takeNext()
+                     return full.append(text: "now fits", replyId: nil)
+                         == .queued(depth: PhoneReplyQueue.capacity) }())
+            // The teardown reports what it destroyed — the phone was told
+            // `ok`, so the count is the only trace a dropped prompt leaves.
+            record("reply queue: clearing reports how many were dropped",
+                   full.removeAll() == PhoneReplyQueue.capacity)
+            record("reply queue: clearing an empty queue reports nothing dropped",
+                   full.removeAll() == 0 && full.isEmpty)
+        }
+
+        // MARK: - Phone reply blocking (which prompts get a 409, not a place in line)
+        //
+        // The branch that decides whether a user's words come back to them or
+        // vanish. `shimIsLive` is asserted FIRST and on its own because the
+        // first revision had no such term: it split on gate identity, so a
+        // prompt sent at a dead-but-still-bound shim queued, answered `ok`,
+        // and died with the object without a log line.
+        //
+        // **The message text is pinned literally, and the shape-only version
+        // of this block was measured to be worth very little.** With the
+        // three cases asserted as `!= nil` alone, five mutations passed all
+        // six assertions — including the one that hands the permission branch
+        // the dead-shim wording, which tells someone whose session is alive
+        // and merely waiting for an Allow to go and reopen it. A refusal is
+        // an instruction, so the instruction is the thing to pin.
+        record("reply blocking: a live idle shim blocks nothing",
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: false, awaitingAnswer: false) == nil)
+        record("reply blocking: a dead shim refuses, and says the session is not running",
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: false, awaitingAnswer: false)
+                   == "That session is not running on the Mac right now — try again shortly, or reopen it there")
+        record("reply blocking: a dead shim refuses before either human gate is consulted",
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: true, awaitingAnswer: true)
+                   == ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: false, awaitingAnswer: false))
+        record("reply blocking: an outstanding permission says to answer it on the Mac",
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: true, awaitingAnswer: false)
+                   == "That session is waiting for a permission answer — answer it on the Mac first")
+        record("reply blocking: an unanswered question says the session is waiting on one",
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: false, awaitingAnswer: true)
+                   == "That session is waiting for an answer to its own question")
+
+        // MARK: - Phone reply disposition (what the phone is actually told)
+        //
+        // The third and last lift in this feature, for the reason the first
+        // two were made: these three strings are what the user reads, and
+        // nothing could reach them while the mapping sat inline. Measured on
+        // the revision that shipped the queue — rewording any of them, or
+        // mapping `.empty` to `.queued` (a blank turn in the transcript,
+        // under a 200), passed every assertion in the suite.
+        record("reply disposition: blank text is refused, and says so",
+               ShimProcess.phoneReplyDisposition(for: .empty, gateReason: nil)
+                   == .refused("The message was empty"))
+        record("reply disposition: blank text is refused whatever the gate says",
+               ShimProcess.phoneReplyDisposition(for: .empty, gateReason: "session busy")
+                   == .refused("The message was empty"))
+        record("reply disposition: a full queue refuses, naming the number it holds",
+               ShimProcess.phoneReplyDisposition(for: .full(capacity: PhoneReplyQueue.capacity), gateReason: nil)
+                   == .refused("Already \(PhoneReplyQueue.capacity) messages waiting — let the session catch up"))
+        record("reply disposition: a queued prompt carries the gate's own words",
+               ShimProcess.phoneReplyDisposition(for: .queued(depth: 1), gateReason: "session busy")
+                   == .queued(reason: "session busy"))
+        // The `nil` gate is the case the whole queue exists for: nothing is
+        // blocking, and the prompt waits only because older ones are ahead.
+        // It is also the branch a live shim can barely be made to hit, which
+        // is why it went unwritten about until a reviewer went looking.
+        record("reply disposition: an open gate says the wait is other prompts",
+               ShimProcess.phoneReplyDisposition(for: .queued(depth: 3), gateReason: nil)
+                   == .queued(reason: "an earlier message is still waiting"))
+        record("reply disposition: depth does not change what is said",
+               ShimProcess.phoneReplyDisposition(for: .queued(depth: 1), gateReason: nil)
+                   == ShimProcess.phoneReplyDisposition(for: .queued(depth: 9), gateReason: nil))
+
+        // MARK: - Phone reply routing (which of the two doors a prompt takes)
+        //
+        // `submitPhoneReply`'s decision, lifted out of the shim so it can be
+        // reached without one. The row that matters is the third: a waiting
+        // prompt outranks an open gate. Before this predicate existed that
+        // term was inline, and deleting it — which is FIFO precedence, the
+        // property this whole feature is about — left the queue block green.
+        record("reply routing: an open gate with nothing waiting injects",
+               ShimProcess.phoneReplyMayInjectNow(queueIsEmpty: true, gateReason: nil))
+        record("reply routing: a shut gate queues even with nothing waiting",
+               !ShimProcess.phoneReplyMayInjectNow(queueIsEmpty: true, gateReason: "session busy"))
+        record("reply routing: prompts already waiting outrank an open gate",
+               !ShimProcess.phoneReplyMayInjectNow(queueIsEmpty: false, gateReason: nil))
+        record("reply routing: a shut gate with prompts waiting queues",
+               !ShimProcess.phoneReplyMayInjectNow(queueIsEmpty: false, gateReason: "session busy"))
 
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")

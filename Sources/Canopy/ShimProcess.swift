@@ -928,7 +928,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `phoneReplyInFlight` latched forever — none of its three clear paths
     /// (`isWorking` flipping true, the `result` backstop, or a reconnect's
     /// `resetActivityState`) ever fires — and `ineligibilityReasonForReply`
-    /// refuses every later reply from that shim permanently.
+    /// holds every later reply from that shim in the queue until it fills,
+    /// which before the queue landed was an outright permanent refusal.
     private var phoneReplyTimeout: DispatchWorkItem?
 
     /// Monotonic flight id, same purpose as `keepAliveGeneration`: captured
@@ -946,12 +947,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// on the main conversation) and isn't the closer comparison here.
     private static let phoneReplyTimeoutSeconds: TimeInterval = 120
 
-    /// Why a phone reply is refused right now, or nil when it would be
-    /// injected. Mirrors `keepAliveIneligibilityReason`'s shim-state checks —
-    /// same busy-shim guard, same order — but carries none of the
+    /// Why a phone reply cannot be injected right now, or nil when it can.
+    ///
+    /// **Read as "not yet", not "no".** Since the queue landed this is the
+    /// drain gate as much as the entry gate — `submitPhoneReply` holds a
+    /// prompt whose gate is shut, and `drainQueuedPhoneReplies` asks this
+    /// same question every tick until it opens. The two gates that do NOT
+    /// open on their own are pulled out ahead of it, in
+    /// `blockingReasonForReply()`.
+    ///
+    /// The reason string is carried out on the 200 body as the second half
+    /// of "Queued — …", where a phone that reads it can draw it. Note it is
+    /// no longer *shown*: before the queue this string reached the user as a
+    /// 409, and today's phone returns on a 200 without reading the body.
+    ///
+    /// Mirrors `keepAliveIneligibilityReason`'s shim-state checks —
+    /// same busy-shim guard, in the same order — but carries none of the
     /// keep-alive's own gates: a reply has no interval, no quota ceiling, and
     /// no custom-endpoint carve-out to consult.
-    func ineligibilityReasonForReply() -> String? {
+    private func ineligibilityReasonForReply() -> String? {
         if channelId == nil { return "no channelId (session not launched yet)" }
         if isWorking { return "session busy" }
         if phoneReplyInFlight { return "reply already in flight" }
@@ -960,6 +974,188 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if !pendingPermissionRequestIds.isEmpty { return "permission request outstanding" }
         if lastAssistantHadAskUserQuestion { return "session is awaiting a user answer" }
         return nil
+    }
+
+    /// Why a phone reply must be REFUSED outright rather than held, or nil
+    /// when waiting would fix it. See `phoneReplyBlockingReason` for the rule;
+    /// this half only reads the state.
+    ///
+    /// `process?.isRunning == true && !isIntentionalStop` is the liveness test
+    /// `hasActiveSession` and `activeCount` already use — one spelling, for
+    /// the reason `requestPhoneReply` no longer has its own copy of the gate.
+    /// **Both terms are load-bearing**: `proc.terminate()` is asynchronous, so
+    /// `isRunning` lingers true for a few ms after `stop()` returns, which is
+    /// exactly the window `stop()`'s own discard is placed to cover. See
+    /// `hasActiveSession`, which records the same measurement.
+    private func blockingReasonForReply() -> String? {
+        Self.phoneReplyBlockingReason(
+            shimIsLive: process?.isRunning == true && !isIntentionalStop,
+            permissionOutstanding: !pendingPermissionRequestIds.isEmpty,
+            awaitingAnswer: lastAssistantHadAskUserQuestion
+        )
+    }
+
+    /// Which prompts get a 409 instead of a place in the queue.
+    ///
+    /// **The split is "does this gate clear on its own?"** Most gates in
+    /// `ineligibilityReasonForReply()` open by themselves — a turn ends, a
+    /// latch unlatches, a channel arrives — so holding a prompt behind one is
+    /// a wait the user never has to know about. The three below do not, and
+    /// the phone cannot say so on its own: it reads only the status code, and
+    /// a queued prompt is a 200. Held here, a prompt is `ok` to the sender and
+    /// then silent for as long as the condition lasts — the exact failure
+    /// `DeliveryOutcome` was built to end, reintroduced by the queue that was
+    /// meant to help.
+    ///
+    /// **`shimIsLive` is the one that cost a review round.** The first
+    /// revision split on gate IDENTITY and not on shim LIVENESS, which misses
+    /// that two self-clearing gates are permanent on a shim that will never
+    /// run again: nothing clears `isWorking` except a live CLI's `result`
+    /// frame, and nothing clears `channelId` at all — `resetActivityState`
+    /// touches neither. So an SSH drop mid-turn (the case that file calls the
+    /// normal one) leaves `isWorking` latched true on a dead shim that
+    /// `session.shim` still points at, while the roster keeps publishing the
+    /// pane and the phone keeps drawing it as working. Every reply typed at
+    /// it queued, answered `ok`, and then died with the object — no `deinit`,
+    /// no discard, **not one log line**. On `main` those same replies got a
+    /// 409 and the words stayed in the composer.
+    ///
+    /// **What this does NOT cover is a wait that BEGINS later** — a prompt
+    /// queued behind an ordinary turn stays queued if that turn ends by
+    /// raising a hand. That one was accepted while the session was merely
+    /// busy, which was true when it was said, and the question it now waits
+    /// behind is on the same screen as the composer that sent it.
+    ///
+    /// The two human gates are "normally a human" rather than "only a human":
+    /// `cancel_request` clears a pending permission and the `result` backstop
+    /// drops an orphaned AskUserQuestion flag. Both are aborts, not answers,
+    /// and neither is worth holding a prompt against.
+    ///
+    /// Pure and static so the probe can reach it — this is the branch that
+    /// decides whether a user's words come back to them or vanish.
+    nonisolated static func phoneReplyBlockingReason(shimIsLive: Bool,
+                                                     permissionOutstanding: Bool,
+                                                     awaitingAnswer: Bool) -> String? {
+        // First, because it is the only one of the three the user cannot fix
+        // by looking at the Mac's screen.
+        if !shimIsLive {
+            // **States a fact and offers both moves, because three states
+            // reach here and no single instruction fits them.** A shim that
+            // crashed is auto-reconnecting for 3-21s and just needs another
+            // send; one caught in the ~150ms between `session.shim = shim`
+            // and `start()` has never run at all; one genuinely stopped does
+            // need reopening. "Reopen it on the Mac" was the first wording
+            // and it is wrong instruction in two of the three.
+            return "That session is not running on the Mac right now — try again shortly, or reopen it there"
+        }
+        if permissionOutstanding {
+            return "That session is waiting for a permission answer — answer it on the Mac first"
+        }
+        if awaitingAnswer {
+            return "That session is waiting for an answer to its own question"
+        }
+        return nil
+    }
+
+    /// Whether a prompt submitted right now goes straight in, or joins the
+    /// queue behind whatever is already waiting.
+    ///
+    /// **Pure, and static, so the probe can reach it.** This one expression
+    /// is the rule the whole feature rests on, and the first version of this
+    /// change left it inline in `submitPhoneReply` where nothing could pin
+    /// it: deleting the `queueIsEmpty` term — which is FIFO precedence, the
+    /// property whose loss makes a conversation a different conversation —
+    /// left all seventeen queue assertions green. `keepAliveDisposition` is
+    /// the precedent for lifting a decision out of the shim like this.
+    nonisolated static func phoneReplyMayInjectNow(queueIsEmpty: Bool, gateReason: String?) -> Bool {
+        queueIsEmpty && gateReason == nil
+    }
+
+    /// What the phone is told, given what the queue did with the prompt and
+    /// what the gate says right now.
+    ///
+    /// **Pure because the three strings below are the ones the user reads**,
+    /// and until this was lifted nothing could reach them. Measured on the
+    /// revision that shipped the queue: swapping `.empty` to a `.queued` —
+    /// which would put a blank turn in the transcript under a 200 — passed
+    /// every assertion in the suite, as did rewording any of the three. The
+    /// same lift had already been made twice in this feature for the same
+    /// reason (`phoneReplyMayInjectNow`, `phoneReplyBlockingReason`); this is
+    /// the third and last place it applies.
+    ///
+    /// `gateReason` is `ineligibilityReasonForReply()`'s answer. Its `nil`
+    /// case is the one the whole queue exists for: the gate is open and the
+    /// prompt is waiting anyway, because older ones are ahead of it.
+    nonisolated static func phoneReplyDisposition(for result: PhoneReplyQueue.AppendResult,
+                                                  gateReason: String?) -> PhoneReplyDisposition {
+        switch result {
+        case .empty:
+            return .refused("The message was empty")
+        case .full(let capacity):
+            return .refused("Already \(capacity) messages waiting — let the session catch up")
+        case .queued:
+            // Reported as it stands NOW, and it can be stale by the time the
+            // phone renders it — the turn may end a second later. That is the
+            // honest shape anyway: it says why the prompt is waiting, not how
+            // long it will wait. The reasons where saying "waiting" would be
+            // a lie the user acts on never reach here at all;
+            // `blockingReasonForReply()` refuses those before the queue.
+            return .queued(reason: gateReason ?? "an earlier message is still waiting")
+        }
+    }
+
+    /// The phone's entry point for a typed prompt: injects it if the shim
+    /// can take one right now, and otherwise queues it.
+    ///
+    /// **The queue is why this is not just `requestPhoneReply`.** Every gate
+    /// in `ineligibilityReasonForReply()` used to be a refusal the phone
+    /// showed beside the user's own words, which made a prompt sent at a busy
+    /// session something to retry by hand — a thing the Mac's composer never
+    /// asks of anyone. The gates themselves are unchanged and still decide
+    /// when an injection may happen; what changed is that a closed gate now
+    /// means "later" rather than "no".
+    ///
+    /// Refuses only what waiting cannot fix: blank text, a queue already at
+    /// `PhoneReplyQueue.capacity`, and the two gates that need a human —
+    /// see `blockingReasonForReply()`.
+    ///
+    /// **A queue that is not empty takes precedence over an open gate.**
+    /// Injecting a fresh prompt while older ones wait would deliver them out
+    /// of the order they were typed, which for a conversation is not a
+    /// reordering but a different conversation.
+    func submitPhoneReply(text: String, replyId: String? = nil) -> PhoneReplyDisposition {
+        // Ahead of everything else, including the emptiness check: a session
+        // waiting on a human must say so whether or not the text was blank,
+        // because that is the one refusal the user can act on.
+        if let blocking = blockingReasonForReply() {
+            // **The reason, not a guess at it.** This line used to say
+            // "needs an answer on the Mac" for all three, so the dead-shim
+            // case — the one this whole change exists to make findable —
+            // was recorded as a completely different cause, and it is the
+            // first line anyone reading an SSH-drop log would hit.
+            logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): refused — \(blocking, privacy: .public)")
+            return .refused(blocking)
+        }
+        if Self.phoneReplyMayInjectNow(queueIsEmpty: queuedPhoneReplies.isEmpty,
+                                       gateReason: ineligibilityReasonForReply()),
+           requestPhoneReply(text: text, replyId: replyId) {
+            return .injected
+        }
+        let appended = queuedPhoneReplies.append(text: text, replyId: replyId)
+        let disposition = Self.phoneReplyDisposition(
+            for: appended,
+            gateReason: ineligibilityReasonForReply()
+        )
+        switch (appended, disposition) {
+        case (.full(let capacity), _):
+            logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): queue full at \(capacity, privacy: .public)")
+        case (.queued(let depth), .queued(let why)):
+            logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): queued at depth \(depth, privacy: .public) — \(why, privacy: .public)")
+            scheduleQueuedPhoneReplyDrain()
+        default:
+            break
+        }
+        return disposition
     }
 
     /// Injects a reply typed on the phone as a real user turn.
@@ -972,18 +1168,33 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `phoneReplyInFlight` — see that property's doc for why `isWorking`
     /// cannot do this job alone.
     ///
-    /// Returns whether it was injected, so the caller can log a refusal
-    /// rather than leave the phone believing a message landed.
+    /// **Private: `submitPhoneReply` is the only door.** A caller that
+    /// reached this directly would skip the queue, and skipping the queue
+    /// means overtaking prompts the same user typed earlier.
+    ///
+    /// Returns whether it was injected. `submitPhoneReply` turns a false
+    /// into a wait unless the text was blank; `drainQueuedPhoneReplies`
+    /// turns one into a logged drop.
+    ///
+    /// **The gate is read from `ineligibilityReasonForReply()`, not spelled
+    /// again here.** It used to be a second hand-written copy of the same
+    /// six conditions, and the two agreeing was the only thing keeping the
+    /// drain's drop branch unreachable — so one condition added to either
+    /// list would have turned a review-visible duplication into words the
+    /// user was told had been sent, gone, with an error line that cannot
+    /// name them (the text is never logged, correctly). A guard nobody has
+    /// to keep in sync cannot drift.
     @discardableResult
-    func requestPhoneReply(text: String, replyId: String? = nil) -> Bool {
+    private func requestPhoneReply(text: String, replyId: String? = nil) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        guard !phoneReplyInFlight, !keepAliveInFlight, !recapRequestInFlight, !isWorking,
-              pendingPermissionRequestIds.isEmpty, !lastAssistantHadAskUserQuestion
-        else {
-            logger.notice("roster reply refused: \(self.ineligibilityReasonForReply() ?? "shim state changed since the gate ran", privacy: .public)")
+        if let why = ineligibilityReasonForReply() {
+            logger.notice("roster reply refused: \(why, privacy: .public)")
             return false
         }
+        // Unreachable as a refusal — `ineligibilityReasonForReply()` tests
+        // `channelId == nil` as its first branch, and nothing suspends between
+        // the two — but the unwrap itself is required by the envelope below.
         guard let channelId else {
             logger.notice("roster reply refused: no channelId")
             return false
@@ -1065,6 +1276,141 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // old sent record. Found by review; the field's own doc claimed this
         // was already true.
         pendingPhoneReply = nil
+    }
+
+    // MARK: - Phone reply queue
+
+    /// What became of a prompt the phone submitted. Returned rather than a
+    /// `Bool` because `queued` is a success the phone must be able to tell
+    /// from `injected` — same 200, different thing to say about it.
+    enum PhoneReplyDisposition: Equatable {
+        case injected
+        /// Held. `reason` is the gate that was closed — or, when the gate is
+        /// open and the queue merely is not empty, that there are older
+        /// prompts ahead of this one.
+        ///
+        /// **Carries no position.** The first version passed the depth
+        /// through here and `CanopyApp` dropped it on the floor, because
+        /// `DeliveryOutcome` has nowhere to put it; a phone that wants to
+        /// draw "3rd in line" needs a change on this side either way, and
+        /// that is the change to add it back in.
+        case queued(reason: String)
+        /// Waiting would not help — blank text, a full queue, or one of the
+        /// three in `phoneReplyBlockingReason`.
+        case refused(String)
+    }
+
+    /// Prompts waiting for a shim that can take one. See `PhoneReplyQueue`
+    /// for the ordering rules; this file owns when they are allowed to move.
+    private var queuedPhoneReplies = PhoneReplyQueue()
+
+    /// The pending drain check, or nil when none is scheduled.
+    private var phoneReplyQueueTick: DispatchWorkItem?
+
+    /// Monotonic tick id, same purpose and same discipline as
+    /// `phoneReplyGeneration`: `DispatchWorkItem.cancel()` cannot interrupt an
+    /// item already dequeued, and a stale tick that ran anyway would clear
+    /// `phoneReplyQueueTick` while it points at a LIVE successor — leaving
+    /// that successor scheduled but unregistered, so the next arm sees nil
+    /// and adds a second one. Not a spiral (each tick arms at most one), but
+    /// the poll rate doubles for the life of the queue, which is the kind of
+    /// thing nobody would ever look for.
+    private var phoneReplyQueueGeneration = 0
+
+    /// How often to re-test the gate while something is waiting.
+    ///
+    /// **A poll rather than a hook on each gate, deliberately.** The gates
+    /// clear from more places than anyone will keep listed — `isWorking`
+    /// going false, the `result` backstop, a keep-alive or recap unlatching,
+    /// the reply watchdog unlatching, `channelId` arriving, a permission
+    /// decision applying or being cancelled, an AskUserQuestion being
+    /// answered — and a queue drained only from the sites someone
+    /// remembered to wire would fail by
+    /// holding a user's words forever, silently, on whichever path was
+    /// missed. One tick that asks the same question the injector asks cannot
+    /// miss a path, and it runs only while the queue is non-empty, which is
+    /// almost never. Half a second is invisible against a turn.
+    private static let phoneReplyQueueTickSeconds: TimeInterval = 0.5
+
+    /// Arms the next drain check, unless one is already armed or there is
+    /// nothing waiting.
+    private func scheduleQueuedPhoneReplyDrain() {
+        guard phoneReplyQueueTick == nil, !queuedPhoneReplies.isEmpty else { return }
+        phoneReplyQueueGeneration &+= 1
+        let generation = phoneReplyQueueGeneration
+        let tick = DispatchWorkItem { [weak self] in
+            guard let self, self.phoneReplyQueueGeneration == generation else { return }
+            self.phoneReplyQueueTick = nil
+            self.drainQueuedPhoneReplies()
+        }
+        phoneReplyQueueTick = tick
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.phoneReplyQueueTickSeconds, execute: tick)
+    }
+
+    /// Injects the oldest waiting prompt if the shim can take one, then arms
+    /// the next check for whatever is left.
+    ///
+    /// **One per tick, and that is the serialisation.** `requestPhoneReply`
+    /// sets `phoneReplyInFlight` as it injects, so the next tick's gate is
+    /// closed until that turn is under way — the queue drains at the speed
+    /// the session finishes turns, which is the only speed it could drain at
+    /// without stacking two user turns into one.
+    private func drainQueuedPhoneReplies() {
+        guard !queuedPhoneReplies.isEmpty else { return }
+        if ineligibilityReasonForReply() == nil, let next = queuedPhoneReplies.takeNext() {
+            if !requestPhoneReply(text: next.text, replyId: next.replyId) {
+                // The gate said yes and the injector said no, so something
+                // cleared between two statements on the same run loop —
+                // nothing does that today. Dropped rather than put back:
+                // re-queuing a prompt the injector keeps rejecting spins this
+                // tick forever, and the log line is what makes the loss
+                // findable. Error, not notice: the phone was told `ok`.
+                logger.error("roster reply \(self.keepAliveLogLabel, privacy: .public): queued prompt refused at injection — dropped")
+            }
+        }
+        scheduleQueuedPhoneReplyDrain()
+    }
+
+    /// Drops every waiting prompt on every live shim.
+    ///
+    /// **For quit, which reaches no shim's own teardown.**
+    /// `applicationWillTerminate` does not call `stop()` on a live owned shim
+    /// — its own comment says so, and `stopOrphanedSessions()` skips owned
+    /// shims by construction — so before this the queue died at quit with no
+    /// line at all, which is the one thing the whole design leans on. A
+    /// `deinit` cannot stand in: deinits do not run at process exit.
+    ///
+    /// Nothing is recoverable here and nothing is meant to be. The app is
+    /// going away; what this buys is the count in the log, so "I sent that
+    /// and it never arrived" has an answer tomorrow.
+    @MainActor static func discardAllQueuedPhoneReplies() {
+        for shim in instances.allObjects {
+            shim.discardQueuedPhoneReplies()
+        }
+    }
+
+    /// Drops every waiting prompt. Reached from `resetActivityState` — the
+    /// shim died, is reconnecting, or exited on purpose — and from `stop()`,
+    /// which does not go through that function at all. Idempotent, which is
+    /// what lets both call it.
+    ///
+    /// **The trade, stated so nobody has to re-derive it.** These prompts
+    /// were acknowledged to the phone, so dropping them loses words the user
+    /// believes were sent, and the log line is the only trace. Keeping them
+    /// costs more: the same reasoning that makes `endPhoneReplyFlight` clear
+    /// its latch here applies — the shim they were addressed to is gone, and
+    /// a prompt injected into whatever comes back, minutes later and out of
+    /// the context that produced it, is words put into a conversation the
+    /// user is no longer having. An SSH reconnect is the common case and it
+    /// takes the same rule; that is a known cost, not an oversight.
+    private func discardQueuedPhoneReplies() {
+        phoneReplyQueueTick?.cancel()
+        phoneReplyQueueTick = nil
+        // Retires any tick already dequeued, which `cancel()` cannot reach.
+        phoneReplyQueueGeneration &+= 1
+        let dropped = queuedPhoneReplies.removeAll()
+        guard dropped > 0 else { return }
+        logger.error("roster reply \(self.keepAliveLogLabel, privacy: .public): dropped \(dropped, privacy: .public) queued prompt(s) — the shim is gone")
     }
 
     /// The verbatim text the CC extension's own Deny button sends, captured
@@ -2499,6 +2845,27 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     func stop() {
         isIntentionalStop = true
+        // **Before the early return, and before stdin closes.** The queue's
+        // whole loss story is "the count is in the log", and on this path it
+        // was not: `stop()` does not reach `resetActivityState` synchronously
+        // and may not reach it at all. It runs from `handleProcessExit` by
+        // way of the termination handler — a
+        // `DispatchQueue.main.async` hop that `SessionStore`'s shim swap can
+        // miss entirely (its own comment records the weak capture that drops
+        // it). Worse than the missing line: `stop()` closes stdin and then
+        // blocks the main queue collecting and killing the process tree, so a
+        // drain tick due in that window fires the moment it returns and
+        // writes a user's prompt into a closed pipe — where the failure
+        // surfaces as a generic stdin error, having already logged
+        // "injected".
+        //
+        // **This does NOT cover quit**, and reading it as though it does was
+        // the first revision's mistake. `applicationWillTerminate` never
+        // calls `stop()` on a live owned shim — its own comment says so, and
+        // `stopOrphanedSessions()` skips owned shims by construction — so on
+        // the headline quit path the queue still dies with no line at all. A
+        // `deinit` would not help either; deinits do not run at process exit.
+        discardQueuedPhoneReplies()
         guard let proc = process, proc.isRunning else { return }
 
         // Capture the peer name before the CLI deletes its record on exit.
@@ -4409,12 +4776,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // window but does not close it, and a reconnect inside it is the
         // normal case for SSH remote.
         endKeepAliveFlight()
-        // A latch that survived a reconnect would silently refuse every
-        // later reply — the shim that set it is gone, so nothing will ever
+        // A latch that survived a reconnect would hold every later reply in
+        // the queue until it filled — the shim that set it is gone, so nothing will ever
         // flip `isWorking` to clear it the ordinary way. Also cancels the
         // watchdog, which would otherwise fire later against a shim that no
         // longer has anything for it to unlatch.
         endPhoneReplyFlight()
+        discardQueuedPhoneReplies()
         // The id of an event streamed by the shim that just died. The
         // reconnected session's first completion would otherwise carry it,
         // and the phone would drop that push against an event from before
