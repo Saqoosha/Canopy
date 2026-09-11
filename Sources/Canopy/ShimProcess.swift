@@ -6600,6 +6600,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return (Array(reads.suffix(cap)), Array(reads.prefix(overflow)))
     }
 
+    /// 同じ `tool_use` が再配送されても、pending には一度しか乗せない。
+    ///
+    /// `ImagePreviewScript.noteToolUse` の `if (imageReads.has(block.id)) return;`
+    /// と同じガード —— そちらは replay 再配送を明示的に弾いている。ここで
+    /// 弾かずに毎回 append すると、同じ id が pending に 2 件並び、
+    /// `publishImageResultIfAny` の `removeAll` が両方まとめて `resolved` に
+    /// 移して同じ Read を 2 回アップロード・2 行発火する。
+    static func appendingImageRead(_ reads: [(id: String, file: String, at: Date)],
+                                   id: String, file: String,
+                                   at: Date) -> [(id: String, file: String, at: Date)] {
+        guard !reads.contains(where: { $0.id == id }) else { return reads }
+        return reads + [(id: id, file: file, at: at)]
+    }
+
     /// Turn one io_message into phone-bound events and send them.
     ///
     /// **Called after `consumeRecapTraffic` and `consumeKeepAliveTraffic`,
@@ -6627,7 +6641,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                          },
                                          onImageRead: { [weak self] toolUseId, fileName, at in
                                              guard let self else { return }
-                                             self.pendingImageReads.append((id: toolUseId, file: fileName, at: at))
+                                             self.pendingImageReads = Self.appendingImageRead(
+                                                 self.pendingImageReads, id: toolUseId, file: fileName, at: at)
                                              let (kept, dropped) = Self.prunedImageReads(
                                                  self.pendingImageReads, cap: Self.maxPendingImageReads)
                                              self.pendingImageReads = kept

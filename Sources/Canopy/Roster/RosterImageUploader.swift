@@ -24,6 +24,15 @@ enum RosterImageUploader {
     static let maxFullBytes = 8 * 1024 * 1024
 
     /// 画像の実ピクセル寸法。デコードせずにヘッダだけ読む。
+    ///
+    /// **EXIF orientation が 5〜8（90 度回転系）なら幅と高さを入れ替えて返す。**
+    /// `kCGImagePropertyPixelWidth/Height` はエンコードされたままの寸法で、
+    /// 表示上の寸法ではない。一方 `thumbnail(from:)` は
+    /// `kCGImageSourceCreateThumbnailWithTransform: true` で回転を焼き込んだ
+    /// サムネイルを作る —— ここで寸法を合わせておかないと、電話が受け取る
+    /// width/height とサムネイルの実際の見た目が矛盾する（縦横比が逆になる）。
+    /// **この関数とその transform オプションは対で変えること** —— 片方だけ
+    /// 直すと今日の壊れ方が向きを変えて再発する。
     static func pixelSize(of data: Data) -> (width: Int, height: Int)? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -31,6 +40,10 @@ enum RosterImageUploader {
               let height = props[kCGImagePropertyPixelHeight] as? Int,
               width > 0, height > 0
         else { return nil }
+        let orientation = props[kCGImagePropertyOrientation] as? Int
+        if let orientation, (5...8).contains(orientation) {
+            return (height, width)
+        }
         return (width, height)
     }
 

@@ -8744,6 +8744,39 @@ enum SidebarLogicProbe {
             record("image: pixelSize refuses non-image bytes",
                    RosterImageUploader.pixelSize(of: Data("not an image".utf8)) == nil)
 
+            /// `wide` に EXIF orientation を付けた JPEG を作る。
+            func makeJPEG(from image: Data, orientation: Int?) -> Data? {
+                guard let source = CGImageSourceCreateWithData(image as CFData, nil),
+                      let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+                else { return nil }
+                let out = NSMutableData()
+                guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil)
+                else { return nil }
+                var properties: [CFString: Any] = [:]
+                if let orientation { properties[kCGImagePropertyOrientation] = orientation }
+                CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary)
+                guard CGImageDestinationFinalize(dest) else { return nil }
+                return out as Data
+            }
+
+            // orientation 6 = 90 度回転（縦横入れ替え）。`pixelSize` はこれを
+            // 検出して幅と高さを入れ替えて返す —— でないと、回転を焼き込む
+            // `thumbnail(from:)` の実際の見た目と数字が矛盾する。
+            if let rotated = makeJPEG(from: wide, orientation: 6) {
+                record("image: pixelSize swaps dimensions for a rotated orientation",
+                       RosterImageUploader.pixelSize(of: rotated).map { $0 == (900, 1440) } ?? false)
+            } else {
+                record("image: rotated fixture JPEG could be built", false, "makeJPEG returned nil")
+            }
+            // orientation 1（明示）はそのまま —— スワップが無条件になっていない
+            // ことのピン。
+            if let upright = makeJPEG(from: wide, orientation: 1) {
+                record("image: pixelSize does not swap an upright orientation",
+                       RosterImageUploader.pixelSize(of: upright).map { $0 == (1440, 900) } ?? false)
+            } else {
+                record("image: upright fixture JPEG could be built", false, "makeJPEG returned nil")
+            }
+
             let thumb = RosterImageUploader.thumbnail(from: wide)
             // 長辺が上限で、縦横比が保たれている。320×200 を期待する。
             record("image: a thumbnail's long edge is the cap",
@@ -8804,6 +8837,22 @@ enum SidebarLogicProbe {
                    untouched.kept.count == 1 && untouched.kept[0].id == "a"
                        && untouched.kept[0].file == "a.png" && untouched.kept[0].at == pendingBase
                        && untouched.dropped.isEmpty)
+
+            // 再配送された同じ `tool_use` は 2 回目を無視する —— でないと
+            // pending に同じ id が 2 件並び、`publishImageResultIfAny` の
+            // `removeAll` が両方まとめて resolved に移して同じ Read を
+            // 2 回アップロード・2 行発火する。
+            let firstAppend = ShimProcess.appendingImageRead(
+                [], id: "t1", file: "f1.png", at: pendingBase)
+            record("image: appending a new id grows the list by one",
+                   firstAppend.count == 1 && firstAppend[0].id == "t1")
+            let replay = ShimProcess.appendingImageRead(
+                firstAppend, id: "t1", file: "REPLAY.png", at: pendingBase.addingTimeInterval(99))
+            record("image: appending a replayed id leaves the list unchanged",
+                   replay.count == 1)
+            record("image: a replayed id does not overwrite the existing entry",
+                   replay.first?.id == "t1" && replay.first?.file == "f1.png"
+                       && replay.first?.at == pendingBase)
         }
 
         // MARK: - The two gates that decide whether a remote session resumes
