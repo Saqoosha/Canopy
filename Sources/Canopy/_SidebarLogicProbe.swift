@@ -9661,6 +9661,25 @@ enum SidebarLogicProbe {
             unnamed["scope"] = ["model": ["display_name": ""]]
             record("usage projection: a scoped limit without a model name is dropped",
                    ClaudeUsageDirect.rateLimits(fromRawUsage: ["limits": [unnamed]])["model_scoped"] == nil)
+            // `weeklyAll` above has no scope, so it cannot pin the kind check
+            // on its own (measured: deleting the check left every assertion
+            // green). This entry has a model name and the wrong kind.
+            var wrongKind = scoped
+            wrongKind["kind"] = "weekly_all"
+            record("usage projection: a named limit of another kind is dropped",
+                   ClaudeUsageDirect.rateLimits(fromRawUsage: ["limits": [wrongKind]])["model_scoped"] == nil)
+            // The retry decision: a 429 with an attempt left, nothing else.
+            let tooMany = AnthropicDirect.Failure.http(status: 429, body: "")
+            record("usage retry: a 429 is retried while attempts remain",
+                   ClaudeUsageDirect.shouldRetry(after: tooMany, attempt: 1)
+                       && ClaudeUsageDirect.shouldRetry(after: tooMany, attempt: ClaudeUsageDirect.maxAttempts - 1))
+            record("usage retry: the last attempt's 429 is not retried",
+                   !ClaudeUsageDirect.shouldRetry(after: tooMany, attempt: ClaudeUsageDirect.maxAttempts))
+            record("usage retry: nothing but a 429 is retried",
+                   !ClaudeUsageDirect.shouldRetry(after: AnthropicDirect.Failure.http(status: 401, body: ""), attempt: 1)
+                       && !ClaudeUsageDirect.shouldRetry(after: AnthropicDirect.Failure.http(status: 503, body: ""), attempt: 1)
+                       && !ClaudeUsageDirect.shouldRetry(after: AnthropicDirect.Failure.noCredential, attempt: 1)
+                       && !ClaudeUsageDirect.shouldRetry(after: URLError(.notConnectedToInternet), attempt: 1))
             // End to end through the consumer: the projected dict must be
             // what `updateFromRawUsage` reads, or the launch fetch applies
             // nothing and the bars stay hidden exactly as before it existed.

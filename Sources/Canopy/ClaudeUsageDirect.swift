@@ -3,72 +3,79 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ClaudeUsageDirect")
 
-/// One GET of `/api/oauth/usage` with the Claude Code credential, so the
+/// A GET of `/api/oauth/usage` with the Claude Code credential, so the
 /// sidebar's usage bars exist before any session does.
 ///
 /// Every other writer of `SharedRateLimitData` is a `ShimProcess`: the request
 /// goes out two seconds after `launch_claude` and the raw `get_usage` half
 /// needs a `channelId`, i.e. a running CLI. So a launch that opens on the
-/// launcher — no pane, no shim — showed the account email and nothing under
-/// it until the first session had been up for two seconds. Nothing failed;
-/// nobody had asked.
+/// launcher — no pane, no shim — showed the account email with no bars under
+/// it until the first session had been up for two seconds.
 ///
-/// The endpoint is the one the CLI's own `fetchUtilization` hits (read out of
-/// 2.1.258: `St.get("/api/oauth/usage", …)` against `api.anthropic.com`), and
-/// the same bearer that `AnthropicDirect` sends. Measured: 200 with or without
-/// the `anthropic-beta` header; it is sent anyway to match the sibling call.
+/// The path is the one the CLI's own `fetchUtilization` hits (its log prefix
+/// in 2.1.258; the literal `/api/oauth/usage` sits beside it), with the same
+/// bearer `AnthropicDirect` sends. Measured: 200 with or without the
+/// `anthropic-beta` header; sent anyway to match the sibling call.
 ///
-/// **This does not refresh an expired token.** The CLI does (`refreshOAuth`
-/// on a 401), and writes the new blob back to the Keychain. A 401 here logs at
-/// `notice` and leaves the bars absent until a shim's request lands — the same
-/// outcome as before this call existed, so the failure is strictly the old
-/// behaviour rather than a new one.
+/// **No token refresh.** The CLI refreshes an expired token on a 401 and
+/// writes it back to the Keychain; this call logs the 401 and leaves the bars
+/// to the first shim's request, which `refreshLocalAccount` never blocks.
 enum ClaudeUsageDirect {
     static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
 
-    /// How many times a 429 is retried, and how far apart. Bounded because
-    /// every attempt spends the very budget that answered 429.
+    /// Attempts, not retries: three tries, two gaps. Bounded because every
+    /// attempt spends the budget that answered 429.
     static let maxAttempts = 3
+    /// Half the ~60 s budget interval, so an attempt can land between another
+    /// client's polls. Not tuned beyond that.
     static let retryDelay: Duration = .seconds(30)
 
-    /// Fetch and apply to this Mac's account. Silent success; every failure
-    /// logs once.
+    /// Fetch and apply to this Mac's account.
     ///
-    /// `shouldRequestUpdate()` is consumed on purpose, and BEFORE the request:
-    /// the throttle's job is "one request per account per interval", and this
-    /// is one. A shim opened inside that interval then skips its own — which
-    /// is fine, the numbers it would fetch are already on screen.
+    /// The account's throttle is started AFTER a successful apply, never
+    /// before the request: a shim opened inside the interval then skips its
+    /// own request only when the numbers are already on screen. Starting it
+    /// first was the first revision, and a failed fetch — expired token,
+    /// offline — then cost the first shim its 2 s request as well, leaving no
+    /// bars until the first turn.
     ///
-    /// **A 429 is retried, and only a 429.** The endpoint's budget is per
-    /// ACCOUNT, not per process — measured 2026-09-11 with the installed
-    /// Canopy polling once a minute through its shims: a direct call one
-    /// second after one of those succeeded got 429 (`Retry-After: 0`), and
-    /// the same call 41 s later got 200. The CLI's own poller does not retry
-    /// (`I_` handles 401 only) because it comes back a minute later anyway;
-    /// this call has no next minute, so it takes a few. Another Mac on the
-    /// same account is the ordinary way to hit this at a fresh launch.
+    /// Only a 429 is retried. The endpoint's budget is per ACCOUNT, roughly one
+    /// request a minute — measured 2026-09-11 beside the installed Canopy's
+    /// sessions: a direct call one second after theirs succeeded got 429
+    /// (`Retry-After: 0`), whatever the User-Agent, and 200 only in a minute
+    /// they skipped. The CLI never retries a 429 (its wrapper retries a 401
+    /// once, after a token refresh) because its poller comes back next
+    /// minute; this call has no next minute.
     @MainActor
     static func refreshLocalAccount() async {
         let account = SharedRateLimitData.shared.local
-        guard account.shouldRequestUpdate() else { return }
         for attempt in 1 ... maxAttempts {
             do {
                 let rateLimits = try await fetchRateLimits()
                 account.updateFromRawUsage(rateLimits)
+                account.noteUsageRequested()
                 logger.notice("[direct] usage: applied (attempt \(attempt, privacy: .public))")
                 return
-            } catch AnthropicDirect.Failure.http(status: 429, body: _) where attempt < maxAttempts {
+            } catch {
+                guard shouldRetry(after: error, attempt: attempt) else {
+                    AnthropicDirect.log(error, label: "usage")
+                    return
+                }
                 logger.notice("[direct] usage: HTTP 429, retrying in \(retryDelay.components.seconds, privacy: .public) s")
                 try? await Task.sleep(for: retryDelay)
-            } catch {
-                AnthropicDirect.log(error, label: "usage")
-                return
             }
         }
     }
 
+    /// The retry decision, kept pure so the probe can pin it: a 429 with an
+    /// attempt left, nothing else.
+    static func shouldRetry(after error: Error, attempt: Int) -> Bool {
+        guard case AnthropicDirect.Failure.http(status: 429, body: _) = error else { return false }
+        return attempt < maxAttempts
+    }
+
     /// The raw response reshaped into what `RateLimitAccount.updateFromRawUsage`
-    /// consumes — the same shape the CLI hands back as
+    /// consumes — the shape the CLI hands back as
     /// `get_usage_response.usage.rate_limits`.
     static func fetchRateLimits(timeout: TimeInterval = 10) async throws -> [String: Any] {
         guard let token = KeychainAuth.readAccessToken() else {
@@ -92,21 +99,19 @@ enum ClaudeUsageDirect {
         return rateLimits(fromRawUsage: object)
     }
 
-    /// Mirror the CLI's projection: the raw object as-is, plus `model_scoped`
-    /// built from the `limits[]` entries of kind `weekly_scoped` that name a
-    /// model.
+    /// The CLI's projection: the raw object as-is, plus `model_scoped` from the
+    /// `limits[]` entries of kind `weekly_scoped` that name a model.
     ///
-    /// The CLI additionally filters those by a remote allowlist
-    /// (`tengu_usage_overage_included_models`, a GrowthBook flag) that this
-    /// side cannot read, so this may show a per-model row the CLI would drop.
-    /// The first shim's `get_usage` then overwrites `model_scoped` with the
-    /// filtered list, so the widest such difference lasts until the first
-    /// session's request lands. Measured 2026-09-11: the server emitted one
-    /// scoped bucket ("Fable"), which the CLI also shows.
+    /// Not mirrored: the CLI's allowlist over those names (a GrowthBook flag
+    /// this side cannot read; with it empty the CLI shows none of these rows
+    /// and this side shows all of them), and its numeric→ISO `resets_at`
+    /// conversion (a numeric value lands as no reset date). A shim's later
+    /// `get_usage` replaces these rows only when the CLI's filtered list is
+    /// non-empty; an absent key keeps them, until their reset date.
     ///
-    /// `model_scoped` is only added when non-empty, as the CLI does — an empty
-    /// array means "server says none" to `updateFromRawUsage` and would clear
-    /// rows, while absence means "keep previous".
+    /// `model_scoped` is added only when non-empty, as the CLI does — an empty
+    /// array means "server says none" to `updateFromRawUsage` and clears rows,
+    /// while absence keeps previous.
     static func rateLimits(fromRawUsage raw: [String: Any]) -> [String: Any] {
         var result = raw
         let scoped: [[String: Any]] = ((raw["limits"] as? [[String: Any]]) ?? []).compactMap { limit in
