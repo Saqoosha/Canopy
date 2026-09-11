@@ -2,7 +2,8 @@ import Foundation
 
 /// Hides a prompt-cache refresh turn from the transcript, on screen only.
 ///
-/// Since the extension's composer grew a prompt-cache countdown (2.1.268),
+/// Extension 2.1.268's composer shows a prompt-cache countdown (that is the
+/// version it was seen in, not necessarily the one that introduced it), so
 /// `ShimProcess.consumeKeepAliveTraffic` forwards the refresh's frames to
 /// the webview so that countdown stays true — the reasoning is on that
 /// function. The price is that the webview now renders the turn: our
@@ -22,14 +23,21 @@ import Foundation
 /// and hid exactly one row, measured: the user row sits inside the turn's
 /// `stickyHeader`, so the reply is never its sibling.
 ///
-/// **What it depends on.** Class-name PREFIXES the extension has kept
-/// stable across versions — `userMessage_` for the bubble (a prefix
-/// `canopy-overrides.css` already relies on) and `turn_` for the wrapper,
-/// matched as a whole class token so `returnButton_` and the like cannot
-/// hit. With no `turn_` ancestor the bubble's own `userMessageContainer_`
-/// row is hidden instead, which leaves the reply visible; either drift
-/// costs a stray bubble once an hour, never a hidden real turn, and the
-/// `[keepalive-hide]` console line names what was hidden.
+/// **What it depends on.** Two class-name prefixes seen on 2.1.268 (the
+/// only version on this machine; `canopy-overrides.css` already relies on
+/// the first) — `userMessage_` for the bubble, matched as a substring by
+/// `[class*=]`, and `turn_` for the wrapper, matched as a whole class token
+/// so `returnButton_` and the like cannot hit. The whole-text equality on
+/// the bubble is what bounds the substring match. Three drifts, in order of
+/// how loudly they fail. `turn_` gone: the bubble's own
+/// `userMessageContainer_` row is hidden instead and the reply leaks, and
+/// the `[keepalive-hide]` line names the row. Both gone: the turn stays
+/// visible and the line says so. `userMessage_` gone, or the bubble's text
+/// no longer equal to the prompt: nothing matches, nothing is hidden, and
+/// **no line is logged at all** — the signal for that one is a
+/// `keep-alive … completed` line in the unified log with no
+/// `[keepalive-hide]` line after it. Every drift leaves a turn visible;
+/// none hides a real one, short of a user pasting the prompt verbatim.
 ///
 /// Hiding is an attribute plus an injected stylesheet rather than an inline
 /// `style`, so a re-render that rewrites `className` cannot un-hide a row.

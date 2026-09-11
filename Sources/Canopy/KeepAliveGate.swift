@@ -15,10 +15,11 @@ struct KeepAliveGate: Equatable {
     ///
     /// The window being defended is the CLI's 1-hour prompt-cache TTL
     /// (`ttl:"1h", reason:"subscriber"`, read out of the bundled CLI
-    /// 2.1.258). Five minutes of margin covers the gap between "the last
-    /// request in a turn went out" and "the turn's `result` arrived", which
-    /// is what `noteActivity` actually stamps, plus one tick of the
-    /// coordinator's own cadence.
+    /// 2.1.258). Five minutes of margin covers what the stamp cannot see:
+    /// `lastActivityAt` is set at submission and at each request's
+    /// `message_start`, which lands one time-to-first-token after the
+    /// request actually started, plus one tick of the coordinator's own
+    /// cadence.
     ///
     /// Anthropic's pricing table bills this column as "Cache hits **and
     /// refreshes**" — a hit is what re-arms the TTL, so a single small turn
@@ -44,12 +45,16 @@ struct KeepAliveGate: Equatable {
     /// and so `promptText` cannot be reworded out from under it.
     static let promptPrefix = "[Canopy keep-alive]"
 
-    /// The text injected as the keep-alive turn, and the exact string the
-    /// echo swallow matches on.
+    /// The text injected as the keep-alive turn, and the exact string both
+    /// the echo match (`ShimProcess.isKeepAliveEcho`) and the on-screen hide
+    /// (`KeepAliveHideScript`) compare against.
     ///
-    /// One constant because the two uses must never drift: a mismatch does
-    /// not fail loudly, it leaves the prompt visible in the transcript
-    /// while the reply is still swallowed, i.e. a bubble with no answer.
+    /// One constant because the three uses must never drift, and neither
+    /// drift fails loudly. A wire-side mismatch means the trackers count
+    /// the turn — `isWorking` flips, a completion notification fires, the
+    /// session is marked unread — while the screen still hides it. A
+    /// script-side mismatch leaves the whole turn, prompt and `OK`, visible
+    /// once an hour.
     ///
     /// It is written to be legible to two readers. The model, so the reply
     /// is one token and no tool runs — a request, not a constraint: the turn
@@ -62,7 +67,8 @@ struct KeepAliveGate: Equatable {
     ///
     /// It is NOT written for a human scrolling the transcript — an earlier
     /// revision claimed that, which contradicted the swallow and left the
-    /// intent genuinely ambiguous. These turns are hidden live AND on replay
+    /// intent genuinely ambiguous. These turns are hidden live
+    /// (`KeepAliveHideScript`) AND on replay
     /// (`ShimProcess.strippingKeepAliveArtifacts`).
     static let promptText = "\(promptPrefix) Prompt-cache refresh, no action needed. Do not use any tool and do not think about this. Reply with exactly: OK"
 
@@ -82,7 +88,8 @@ struct KeepAliveGate: Equatable {
     }
 
     /// The most recent non-nil reading of `observedTTL(inUsage:)`. Nil until
-    /// the first main-conversation turn writes to the cache.
+    /// the first main-conversation request — a user's turn or a refresh —
+    /// writes to the cache.
     private(set) var observedTTL: ObservedCacheTTL?
 
     /// When the session last STARTED talking to the API, as far as this
@@ -102,10 +109,10 @@ struct KeepAliveGate: Equatable {
     /// there is deliberately no cap here for it to feed.
     private(set) var sentCount = 0
 
-    /// Never moves the stamp backwards. Its two callers read different
-    /// clocks — one takes `Date()` directly, the other the coordinator's
-    /// captured tick time — so without this the stamp could regress by the
-    /// skew between them and grant an early refresh.
+    /// Never moves the stamp backwards. Its callers read two different
+    /// clocks — `Date()` at the call site, or the coordinator's captured
+    /// tick time — so without this the stamp could regress by the skew
+    /// between them and grant an early refresh.
     mutating func noteActivity(at date: Date) {
         lastActivityAt = max(lastActivityAt ?? date, date)
     }
@@ -130,8 +137,12 @@ struct KeepAliveGate: Equatable {
     /// Read the granted TTL off one frame's `usage` dictionary.
     ///
     /// `1h` wins when both are non-zero, matching the extension's own
-    /// precedence. Neither field present, or both zero, is nil: the request
-    /// wrote nothing, so it says nothing about the window.
+    /// precedence between the two fields. Neither field present, or both
+    /// zero, is nil: the request wrote nothing, so it says nothing about
+    /// the window. (The extension differs one step up — on a request with
+    /// no cache activity at all it forgets its TTL, while `noteObservedTTL`
+    /// keeps the last reading; the TTL is a property of the account, not of
+    /// the request.)
     static func observedTTL(inUsage usage: [String: Any]) -> ObservedCacheTTL? {
         guard let breakdown = usage["cache_creation"] as? [String: Any] else { return nil }
         if (breakdown["ephemeral_1h_input_tokens"] as? Int ?? 0) > 0 { return .oneHour }
@@ -145,8 +156,9 @@ struct KeepAliveGate: Equatable {
     /// when it can. A measured 5-minute window declines outright: the cache
     /// this defends is gone long before the interval elapses, so every
     /// refresh would buy a full write instead of a hit — the exact cost this
-    /// feature exists to avoid, inverted. A measured 1-hour window permits,
-    /// and that reading outranks `hasCustomApi`: the API itself said which
+    /// feature exists to avoid, inverted. A measured 1-hour window settles
+    /// the window question and hands over to the later checks, and that
+    /// reading outranks `hasCustomApi`: the API itself said which
     /// window it granted, so the guess about the endpoint has nothing left
     /// to add.
     ///

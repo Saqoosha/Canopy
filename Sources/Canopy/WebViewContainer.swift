@@ -861,9 +861,12 @@ final class ConsoleLogHandler: NSObject, WKScriptMessageHandler {
             logger.warning("[JS] \(msg, privacy: .public)")
         } else if msg.hasPrefix("[keepalive-hide]") {
             // Archived, not ring-buffered: this line is read the morning
-            // after, to say whether a refresh turn was hidden or leaked. Once
-            // an hour per pane, so the cost is bounded. Same treatment as
-            // `[cjk-emphasis]` in `ShimProcess`.
+            // after, to say what a refresh turn's hide did — and its absence
+            // after a `keep-alive … completed` line is the only signal that
+            // the bubble was never matched (see `KeepAliveHideScript`). Once
+            // an hour per pane, so the cost is bounded. The same promotion
+            // `ShimProcess` gives `[cjk-emphasis]` lines, which arrive over
+            // the shim's stderr rather than this bridge.
             logger.notice("[JS] \(msg, privacy: .public)")
         } else {
             logger.info("[JS] \(msg, privacy: .public)")
