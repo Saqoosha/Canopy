@@ -1,7 +1,10 @@
 #if DEBUG
 import AppKit
+import CoreGraphics
 import Foundation
+import ImageIO
 import os.log
+import UniformTypeIdentifiers
 
 /// Smoke tests for sidebar logic and other pure non-UI helpers (row
 /// sort/dedup/filter, JSONL session classification, background-task
@@ -8523,6 +8526,336 @@ enum SidebarLogicProbe {
             // `nil != "phone-id"` true and the assertion vacuous.
             record("event: the stamp never reaches an assistant turn",
                    notStamped.first.map { $0.eventId != "phone-id" } ?? false)
+
+            // 画像 Read。行は tool_use ではなく tool_result の時点で出る。
+            let imageRead: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "id": "toolu_1", "name": "Read",
+                     "input": ["file_path": "/Users/hiko/shot.PNG"]],
+                ]],
+            ]
+            record("event: an image Read is recognised by extension, case-insensitively",
+                   SessionEvent.imageReadFileName(name: "Read",
+                                                  input: ["file_path": "/x/shot.PNG"]) == "shot.PNG")
+            record("event: a non-image Read is not an image Read",
+                   SessionEvent.imageReadFileName(name: "Read",
+                                                  input: ["file_path": "/x/main.swift"]) == nil)
+            // allowlist の外は、拡張子が画像でも画像 Read ではない。
+            // これが緩むと、上流が足したどのツールの出力も R2 に上がりうる。
+            record("event: an unlisted tool is never an image read",
+                   SessionEvent.imageReadFileName(name: "Bash",
+                                                  input: ["file_path": "/x/shot.png"]) == nil)
+            record("event: a Read with no file_path is not an image read",
+                   SessionEvent.imageReadFileName(name: "Read", input: nil) == nil)
+
+            // 既定では今と同じ。クロージャを渡さない呼び出し側は行を失わない。
+            let plain = SessionEvent.events(fromFrame: imageRead, sessionId: "S", resumeId: nil,
+                                            at: now, nextId: ids)
+            record("event: with no image handler an image Read still emits its row",
+                   plain.count == 1 && plain.first?.text == "Read: shot.PNG")
+
+            // クロージャを渡すと、行は出ずに tool_use_id が報告される。
+            var noted: [(String, String, Date)] = []
+            let suppressed = SessionEvent.events(fromFrame: imageRead, sessionId: "S", resumeId: nil,
+                                                 at: now, nextId: ids,
+                                                 onImageRead: { noted.append(($0, $1, $2)) })
+            record("event: an image Read emits no row at tool_use time", suppressed.isEmpty)
+            record("event: an image Read reports its tool_use id and file name",
+                   noted.count == 1 && noted[0].0 == "toolu_1" && noted[0].1 == "shot.PNG")
+            record("event: an image Read reports the tool_use frame's time",
+                   noted.first?.2 == now)
+
+            // 同じ assistant フレームに画像 Read と別のツールが並んでいても、
+            // 抑止されるのは画像 Read の行だけ。
+            let mixedTools: [String: Any] = [
+                "type": "assistant",
+                "message": ["content": [
+                    ["type": "tool_use", "id": "toolu_a", "name": "Read",
+                     "input": ["file_path": "/x/shot.png"]],
+                    ["type": "tool_use", "id": "toolu_b", "name": "Bash",
+                     "input": ["command": "ls"]],
+                ]],
+            ]
+            let onlyBash = SessionEvent.events(fromFrame: mixedTools, sessionId: "S", resumeId: nil,
+                                               at: now, nextId: ids, onImageRead: { _, _, _ in })
+            record("event: suppression is per block, not per frame",
+                   onlyBash.count == 1 && onlyBash.first?.text == "Bash: ls")
+
+            // tool_result 側。ImagePreviewScript が実測した形。
+            let resultFrame: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_1", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/png",
+                            "data": Data([0x89, 0x50, 0x4e, 0x47]).base64EncodedString(),
+                        ]],
+                    ]],
+                ]],
+            ]
+            let found = SessionEvent.imageResults(inFrame: resultFrame)
+            record("event: a tool_result's base64 image is decoded",
+                   found.resultIds == ["toolu_1"] && found.images.count == 1
+                       && found.images.first?.toolUseId == "toolu_1"
+                       && found.images.first?.mediaType == "image/png"
+                       && found.images.first?.data == Data([0x89, 0x50, 0x4e, 0x47]))
+
+            // 失敗した Read は content が文字列。ImagePreviewScript と同じ扱い。
+            // **画像は無いが、id は resultIds に載る** —— でないと呼び出し側は
+            // このフレームが失敗した Read を含むことを知れず、素の行を出せない。
+            let errorResult: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_1", "content": "File not found"],
+                ]],
+            ]
+            let errorFound = SessionEvent.imageResults(inFrame: errorResult)
+            record("event: a string-content tool_result yields its id but no image",
+                   errorFound.resultIds == ["toolu_1"] && errorFound.images.isEmpty)
+
+            let undecodableFound = SessionEvent.imageResults(inFrame: [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_1", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/png",
+                            "data": "!!!not base64!!!",
+                        ]],
+                    ]],
+                ]],
+            ])
+            record("event: undecodable base64 yields its id but no image",
+                   undecodableFound.resultIds == ["toolu_1"] && undecodableFound.images.isEmpty)
+
+            // 1 つのフレームに複数の tool_result が載る場合。片方が画像、
+            // 片方が失敗（文字列 content）—— 両方の id が resultIds に出て、
+            // 画像は成功した 1 件だけ。
+            let mixedResultFrame: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_a", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/png",
+                            "data": Data([0x89, 0x50, 0x4e, 0x47]).base64EncodedString(),
+                        ]],
+                    ]],
+                    ["type": "tool_result", "tool_use_id": "toolu_b", "content": "File not found"],
+                ]],
+            ]
+            let mixedResults = SessionEvent.imageResults(inFrame: mixedResultFrame)
+            record("event: two tool_results, one image one not, report both ids and one image",
+                   mixedResults.resultIds == ["toolu_a", "toolu_b"] && mixedResults.images.count == 1
+                       && mixedResults.images.first?.toolUseId == "toolu_a")
+
+            // 両方とも画像を持つ場合は 2 枚とも返る —— 最初の 1 件で止めない
+            // (`imageResults` のコメントが約束している「1 件で止めない」の直接の
+            // 裏付け)。
+            let twoImageResultFrame: [String: Any] = [
+                "type": "user",
+                "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_a", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/png",
+                            "data": Data([0x89, 0x50, 0x4e, 0x47]).base64EncodedString(),
+                        ]],
+                    ]],
+                    ["type": "tool_result", "tool_use_id": "toolu_c", "content": [
+                        ["type": "image", "source": [
+                            "type": "base64", "media_type": "image/jpeg",
+                            "data": Data([0xff, 0xd8, 0xff, 0xdb]).base64EncodedString(),
+                        ]],
+                    ]],
+                ]],
+            ]
+            let twoImageResults = SessionEvent.imageResults(inFrame: twoImageResultFrame)
+            record("event: two tool_results both carrying images report both ids and both images",
+                   twoImageResults.resultIds == ["toolu_a", "toolu_c"] && twoImageResults.images.count == 2
+                       && Set(twoImageResults.images.map(\.toolUseId)) == ["toolu_a", "toolu_c"])
+
+            // production が実際に通る経路はこれだけ —— ShimProcess は
+            // events(fromFrame:) を直接呼ばず、envelope を剥がす
+            // events(from:) だけを呼ぶ。onImageRead をここで確かめないと、
+            // envelope 剥がしの実装がその引数を握りつぶしても、上の
+            // fromFrame 直叩きの assertion は全部緑のまま気づけない。
+            var envelopeNoted: [(String, String, Date)] = []
+            let envelopeResult = SessionEvent.events(from: envelope(imageRead), sessionId: "S", resumeId: nil,
+                                                     at: now, nextId: ids,
+                                                     onImageRead: { toolUseId, fileName, at in
+                                                         envelopeNoted.append((toolUseId, fileName, at))
+                                                     })
+            record("event: events(from:) forwards onImageRead through the envelope",
+                   envelopeResult.isEmpty && envelopeNoted.count == 1
+                       && envelopeNoted[0].0 == "toolu_1" && envelopeNoted[0].1 == "shot.PNG"
+                       && envelopeNoted[0].2 == now)
+
+            // 画像フィールドを持つイベントが JSON に往復すること。
+            // ここが壊れると relay には届くが電話が読めない、という形になる。
+            let withImage = SessionEvent(eventId: "e1", sessionId: "S", resumeId: nil,
+                                         kind: .tool, text: "Read: shot.png", at: now,
+                                         image: SessionEvent.ImageInfo(width: 1440, height: 900,
+                                                                       bytes: 434_831))
+            let roundTripped = (try? JSONEncoder().encode(withImage))
+                .flatMap { try? JSONDecoder().decode(SessionEvent.self, from: $0) }
+            record("event: an image event round-trips through JSON",
+                   roundTripped?.image == withImage.image)
+            // 画像の無いイベントは image キーを出さない。古い relay と
+            // 古い電話のデコードを変えないため。
+            let bare = SessionEvent(eventId: "e2", sessionId: "S", resumeId: nil,
+                                    kind: .tool, text: "Bash: ls", at: now)
+            record("event: an image-less event writes no image key",
+                   !(String(data: (try? JSONEncoder().encode(bare)) ?? Data(),
+                            encoding: .utf8)?.contains("image") ?? true))
+        }
+
+        // 画像アップロードの純粋な部分。ネットワークには触らない。
+        do {
+            /// 単色 PNG を作る。ImageIO で作るので、リポジトリに画像を置かない。
+            func makePNG(width: Int, height: Int) -> Data? {
+                let bytesPerRow = width * 4
+                var pixels = [UInt8](repeating: 0x80, count: bytesPerRow * height)
+                guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+                      let image = CGImage(width: width, height: height,
+                                          bitsPerComponent: 8, bitsPerPixel: 32,
+                                          bytesPerRow: bytesPerRow,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                                          provider: provider, decode: nil,
+                                          shouldInterpolate: false, intent: .defaultIntent)
+                else { return nil }
+                let out = NSMutableData()
+                guard let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil)
+                else { return nil }
+                CGImageDestinationAddImage(dest, image, nil)
+                guard CGImageDestinationFinalize(dest) else { return nil }
+                pixels.removeAll()
+                return out as Data
+            }
+
+            // **`return` してはいけない。** ここは `runAllTests` の中なので、
+            // 早期 return はプローブ全体を打ち切って以降のアサーションを
+            // 黙って消す —— テスト数が減るだけで、理由はどこにも出ない。
+            let wide = makePNG(width: 1440, height: 900)
+            record("image: fixture PNG could be built", wide != nil, "makePNG returned nil")
+            if let wide {
+
+            record("image: pixelSize reads the real dimensions",
+                   RosterImageUploader.pixelSize(of: wide).map { $0 == (1440, 900) } ?? false)
+            record("image: pixelSize refuses non-image bytes",
+                   RosterImageUploader.pixelSize(of: Data("not an image".utf8)) == nil)
+
+            /// `wide` に EXIF orientation を付けた JPEG を作る。
+            func makeJPEG(from image: Data, orientation: Int?) -> Data? {
+                guard let source = CGImageSourceCreateWithData(image as CFData, nil),
+                      let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+                else { return nil }
+                let out = NSMutableData()
+                guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil)
+                else { return nil }
+                var properties: [CFString: Any] = [:]
+                if let orientation { properties[kCGImagePropertyOrientation] = orientation }
+                CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary)
+                guard CGImageDestinationFinalize(dest) else { return nil }
+                return out as Data
+            }
+
+            // orientation 6 = 90 度回転（縦横入れ替え）。`pixelSize` はこれを
+            // 検出して幅と高さを入れ替えて返す —— でないと、回転を焼き込む
+            // `thumbnail(from:)` の実際の見た目と数字が矛盾する。
+            if let rotated = makeJPEG(from: wide, orientation: 6) {
+                record("image: pixelSize swaps dimensions for a rotated orientation",
+                       RosterImageUploader.pixelSize(of: rotated).map { $0 == (900, 1440) } ?? false)
+            } else {
+                record("image: rotated fixture JPEG could be built", false, "makeJPEG returned nil")
+            }
+            // orientation 1（明示）はそのまま —— スワップが無条件になっていない
+            // ことのピン。
+            if let upright = makeJPEG(from: wide, orientation: 1) {
+                record("image: pixelSize does not swap an upright orientation",
+                       RosterImageUploader.pixelSize(of: upright).map { $0 == (1440, 900) } ?? false)
+            } else {
+                record("image: upright fixture JPEG could be built", false, "makeJPEG returned nil")
+            }
+
+            let thumb = RosterImageUploader.thumbnail(from: wide)
+            // 長辺が上限で、縦横比が保たれている。320×200 を期待する。
+            record("image: a thumbnail's long edge is the cap",
+                   RosterImageUploader.pixelSize(of: thumb ?? Data())
+                       .map { max($0.width, $0.height) == RosterImageUploader.thumbnailMaxPixelSize } ?? false)
+            record("image: a thumbnail keeps the aspect ratio",
+                   RosterImageUploader.pixelSize(of: thumb ?? Data())
+                       .map { $0.width == 320 && $0.height == 200 } ?? false)
+            // **これは実質 vacuous で、形を残すためだけに置いてある。**
+            // 実測: 単色フィクスチャは JPEG の DCT が縮小の有無に関わらず
+            // 潰す（1,831 バイト対、元 PNG の 19,137 バイト）ので、
+            // `thumbnail()` がリサイズを丸ごと飛ばしても、この比較には勝つ。
+            // 縮小そのものをピクセル寸法で pin しているのは上の 2 つ ——
+            // `a thumbnail's long edge is the cap` と
+            // `a thumbnail keeps the aspect ratio`。
+            record("image: a thumbnail is smaller than the original",
+                   (thumb?.count ?? .max) < wide.count)
+            record("image: thumbnail refuses non-image bytes",
+                   RosterImageUploader.thumbnail(from: Data("not an image".utf8)) == nil)
+
+            // **これは `thumbnail(from:)` の `min` クランプを pin していない。**
+            // ImageIO はクランプが無くても元の寸法を超えて拡大しない（macOS で
+            // 実測: 100×60 に上限 320 を渡しても 100×60）ので、クランプを消しても
+            // このアサーションは通る。pin しているのは結果のほう —— 小さい絵が
+            // そのままの寸法で出ること。リサイズを拡大しうる経路に替えたらここが落ちる。
+            if let small = makePNG(width: 100, height: 60) {
+                record("image: an already-small image is not upscaled",
+                       RosterImageUploader.pixelSize(of: RosterImageUploader.thumbnail(from: small) ?? Data())
+                           .map { $0.width == 100 && $0.height == 60 } ?? false)
+            } else {
+                record("image: small fixture PNG could be built", false, "makePNG returned nil")
+            }
+            }  // if let wide
+
+            // pending の上限。結果が来ないまま溜まる Read があるので、
+            // 無限には持たない。**古いものから落とす** —— 新しいものを
+            // 落とすと、直前に始まった Read の絵が永久に出ない。
+            let pendingBase = Date(timeIntervalSince1970: 1_700_000_000)
+            var pending = [(id: String, file: String, at: Date)]()
+            for i in 0..<40 {
+                pending.append((id: "t\(i)", file: "f\(i).png", at: pendingBase.addingTimeInterval(Double(i))))
+            }
+            let pruned = ShimProcess.prunedImageReads(pending, cap: ShimProcess.maxPendingImageReads)
+            record("image: pending reads are capped",
+                   pruned.kept.count == ShimProcess.maxPendingImageReads)
+            record("image: pruning drops the oldest, not the newest",
+                   pruned.kept.first?.id == "t8" && pruned.kept.last?.id == "t39")
+            // 落ちた分も呼び出し側に返る —— でないと、そのぶんに画像なしの行を
+            // 出す手立てが無い。落ちるのは古い方から、この場合は t0〜t7。
+            record("image: dropped entries come back, oldest first",
+                   pruned.dropped.count == 8
+                       && pruned.dropped.first?.id == "t0" && pruned.dropped.last?.id == "t7")
+            // `at` は tool_use の時点の時刻。pruning はそれを kept / dropped
+            // 両方でそのまま運ぶ —— ここが崩れると、上限で落ちた行が `Date()`
+            // にフォールバックしていても、この assertion 以外では気づけない。
+            record("image: pruning preserves the tool_use time in both kept and dropped",
+                   pruned.kept.first?.at == pending[8].at && pruned.dropped.first?.at == pending[0].at)
+            let untouched = ShimProcess.prunedImageReads(
+                [(id: "a", file: "a.png", at: pendingBase)], cap: 32)
+            record("image: a list under the cap is untouched",
+                   untouched.kept.count == 1 && untouched.kept[0].id == "a"
+                       && untouched.kept[0].file == "a.png" && untouched.kept[0].at == pendingBase
+                       && untouched.dropped.isEmpty)
+
+            // 再配送された同じ `tool_use` は 2 回目を無視する —— でないと
+            // pending に同じ id が 2 件並び、`publishImageResultIfAny` の
+            // `removeAll` が両方まとめて resolved に移して同じ Read を
+            // 2 回アップロード・2 行発火する。
+            let firstAppend = ShimProcess.appendingImageRead(
+                [], id: "t1", file: "f1.png", at: pendingBase)
+            record("image: appending a new id grows the list by one",
+                   firstAppend.count == 1 && firstAppend[0].id == "t1")
+            let replay = ShimProcess.appendingImageRead(
+                firstAppend, id: "t1", file: "REPLAY.png", at: pendingBase.addingTimeInterval(99))
+            record("image: appending a replayed id leaves the list unchanged",
+                   replay.count == 1)
+            record("image: a replayed id does not overwrite the existing entry",
+                   replay.first?.id == "t1" && replay.first?.file == "f1.png"
+                       && replay.first?.at == pendingBase)
         }
 
         // MARK: - The two gates that decide whether a remote session resumes
