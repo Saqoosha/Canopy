@@ -556,7 +556,7 @@ final class RosterPublisher {
         // merely absent from `rows` this pass — see `liveIds` above.
         stateSince = stateSince.filter { liveIds.contains($0.key) }
         lastStates = lastStates.filter { liveIds.contains($0.key) }
-        let limits = SharedRateLimitData.shared
+        let limits = SharedRateLimitData.shared.local
         return RosterSnapshot(
             machineId: machineId,
             displayName: MachineIdentity.resolvedDisplayName(

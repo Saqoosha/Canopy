@@ -9554,6 +9554,75 @@ enum SidebarLogicProbe {
         record("reply routing: a shut gate with prompts waiting queues",
                !ShimProcess.phoneReplyMayInjectNow(queueIsEmpty: false, gateReason: "session busy"))
 
+        // MARK: - Rate limits per account (issue #214)
+        //
+        // A remote session's usage is attributed by `ShimProcess.rateLimitKey`:
+        // same email as this Mac → this Mac's record (nil); a different
+        // email → that email; unreadable → the host, so an unreadable host
+        // cannot pollute the local record. The registry then hands one
+        // record per key, in first-seen order.
+        record("rate-limit key: same email as local is the local account",
+               ShimProcess.rateLimitKey(remoteEmail: "a@saqoo.sh", localEmail: "a@saqoo.sh", host: "studio") == nil)
+        record("rate-limit key: email compares case-insensitively",
+               ShimProcess.rateLimitKey(remoteEmail: "A@Saqoo.sh", localEmail: "a@saqoo.sh", host: "studio") == nil)
+        record("rate-limit key: a different email keys by that email, lowercased",
+               ShimProcess.rateLimitKey(remoteEmail: "Work@Example.com", localEmail: "a@saqoo.sh", host: "studio")
+                   == .email("work@example.com"))
+        record("rate-limit key: an unreadable remote keys by host, never local",
+               ShimProcess.rateLimitKey(remoteEmail: nil, localEmail: "a@saqoo.sh", host: "studio") == .host("studio"))
+        record("rate-limit key: host is lowercased so one machine gets one record",
+               ShimProcess.rateLimitKey(remoteEmail: nil, localEmail: nil, host: "Studio") == .host("studio"))
+        record("rate-limit key: the SSH user name keeps its case",
+               ShimProcess.rateLimitKey(remoteEmail: nil, localEmail: nil, host: "Alice@Server") == .host("Alice@server"))
+        record("rate-limit key: no local email still separates a remote one",
+               ShimProcess.rateLimitKey(remoteEmail: "b@example.com", localEmail: nil, host: "studio") == .email("b@example.com"))
+        do {
+            let registry = SharedRateLimitData.shared
+            let before = registry.others.count
+            let a = registry.account(for: .email("probe-a@example.com"))
+            let b = registry.account(for: .host("probe-host"))
+            record("rate-limit registry: nil key is the local record",
+                   registry.account(for: nil) === registry.local)
+            record("rate-limit registry: the same key returns the same record",
+                   registry.account(for: .email("probe-a@example.com")) === a)
+            record("rate-limit registry: distinct keys get distinct records",
+                   a !== b && registry.others.count == before + 2)
+            record("rate-limit registry: records keep first-seen order",
+                   registry.others.suffix(2).map(\.label) == ["probe-a@example.com", "probe-host"])
+            record("rate-limit registry: a remote record's throttle is its own",
+                   a.shouldRequestUpdate() && b.shouldRequestUpdate() && !a.shouldRequestUpdate())
+            // A host whose SSH read failed once must fold into the account a
+            // later read learned, or two sessions on one host keep two
+            // records; learning "same as local" folds it into `local`.
+            registry.noteResolved(host: "probe-host", key: .email("probe-a@example.com"))
+            record("rate-limit registry: a learned host resolves to the account's record",
+                   registry.account(for: .host("probe-host")) === a)
+            registry.noteResolved(host: "Probe-Local", key: nil)
+            record("rate-limit registry: a host learned as local resolves to local",
+                   registry.account(for: .host("probe-local")) === registry.local)
+            let c = registry.account(for: .host("probe-unknown"))
+            registry.noteResolved(host: "probe-unknown", key: .host("probe-unknown"))
+            record("rate-limit registry: a host key learns nothing",
+                   registry.account(for: .host("probe-unknown")) === c)
+        }
+        do {
+            func account(_ json: String) -> ClaudeAccountInfo? {
+                ClaudeAccountInfo.parse(data: Data(json.utf8), source: "probe")
+            }
+            let full = account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","displayName":"Saqoosha","organizationName":"Org"}}"#)
+            record("account parse: email, display name and organization are read",
+                   full?.email == "a@saqoo.sh" && full?.displayName == "Saqoosha" && full?.organizationName == "Org")
+            record("account parse: empty optional fields become nil",
+                   account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","displayName":"","organizationName":""}}"#)
+                       .map { $0.displayName == nil && $0.organizationName == nil } ?? false)
+            record("account parse: a missing oauthAccount is no account",
+                   account(#"{"numStartups":3}"#) == nil)
+            record("account parse: an empty email is no account",
+                   account(#"{"oauthAccount":{"emailAddress":""}}"#) == nil)
+            record("account parse: a non-object root is no account",
+                   account(#"[1,2]"#) == nil && account("not json") == nil)
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

@@ -179,10 +179,8 @@ final class KeepAliveCoordinator {
         // The state this is wrong in: the reset time has passed but the
         // server has not actually rolled the window over, so one refresh
         // goes out slightly early. That costs a single cheap call, against a
-        // latch that otherwise cannot release at all.
-        let limits = SharedRateLimitData.shared
-        let quotaWindowElapsed = limits.sessionResetDate.map { $0 <= now } ?? false
-        let rateLimitPct = quotaWindowElapsed ? 0 : limits.sessionPct
+        // latch that otherwise cannot release at all. The read is inside
+        // the loop, on the pane's own account.
         var sent = 0
         var sessionPanes = 0
         for (index, pane) in store.panes.enumerated() {
@@ -191,6 +189,15 @@ final class KeepAliveCoordinator {
             guard let session = store.openSessions.first(where: { $0.id == id }),
                   let shim = session.shim
             else { continue }
+            // The ceiling is the ACCOUNT's, so read the record this session
+            // writes into. A remote session whose account has not resolved
+            // yet reads this Mac's, which can permit wrongly (local 10 %,
+            // remote 95 %) — but only inside the resolve window, at most
+            // 20 s after spawn, when `channelId` and `lastActivityAt` keep
+            // the gate shut anyway.
+            let limits = shim.rateLimitAccount ?? SharedRateLimitData.shared.local
+            let quotaWindowElapsed = limits.sessionResetDate.map { $0 <= now } ?? false
+            let rateLimitPct = quotaWindowElapsed ? 0 : limits.sessionPct
             // Debug, not info: unlike the recap's once-per-return fan-out
             // this runs every minute per pane, so a per-pane info line
             // would be the loudest thing in the log by two orders of

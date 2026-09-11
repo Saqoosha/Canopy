@@ -38,23 +38,82 @@ struct ClaudeAccountInfo {
 
     private static func parse(_ url: URL) -> ClaudeAccountInfo? {
         do {
-            let data = try Data(contentsOf: url)
-            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                logger.warning("\(url.lastPathComponent, privacy: .public) is not a JSON object")
-                return nil
-            }
-            guard let account = root["oauthAccount"] as? [String: Any],
-                  let email = account["emailAddress"] as? String, !email.isEmpty
-            else { return nil }
-            func nonEmpty(_ key: String) -> String? {
-                (account[key] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            }
-            return ClaudeAccountInfo(email: email,
-                                     displayName: nonEmpty("displayName"),
-                                     organizationName: nonEmpty("organizationName"))
+            return try parse(data: Data(contentsOf: url), source: url.lastPathComponent)
         } catch {
             logger.error("Reading \(url.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+    }
+
+    /// The `oauthAccount` in one `.claude.json`'s bytes. Nil when the file is
+    /// not a JSON object (logged), or carries no account with an email.
+    static func parse(data: Data, source: String) -> ClaudeAccountInfo? {
+        let json: Any
+        do {
+            json = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            logger.error("Parsing \(source, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        guard let root = json as? [String: Any] else {
+            logger.warning("\(source, privacy: .public) is not a JSON object")
+            return nil
+        }
+        guard let account = root["oauthAccount"] as? [String: Any],
+              let email = account["emailAddress"] as? String, !email.isEmpty
+        else { return nil }
+        func nonEmpty(_ key: String) -> String? {
+            (account[key] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        return ClaudeAccountInfo(email: email,
+                                 displayName: nonEmpty("displayName"),
+                                 organizationName: nonEmpty("organizationName"))
+    }
+
+    // MARK: - Remote
+
+    /// The account a remote host's CLI is signed in as, read over SSH. Nil
+    /// when the host cannot be reached, has no `.claude.json`, or its
+    /// `oauthAccount` has no email — the caller cannot tell those apart, and
+    /// keys the host's rate limits by host name instead.
+    ///
+    /// The whole file comes across (a few hundred KB) rather than a remote
+    /// `python3 -c` extract: the CLI's native binary needs no interpreter on
+    /// the host, so none can be assumed there. The command runs under
+    /// `/bin/sh` explicitly because ssh hands it to the login shell, and on a
+    /// fish host `${CLAUDE_CONFIG_DIR:-$HOME}` is a syntax error (measured on
+    /// `studio`) — the same reason `RemoteSessionHistory` pipes into `/bin/sh`.
+    static func remote(host: String) -> ClaudeAccountInfo? {
+        guard RemoteSessionHistory.isSpawnableHost(host) else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = [
+            "-T",
+            "-o", "LogLevel=ERROR",
+            "-o", "ConnectTimeout=10",
+            "-o", "BatchMode=yes",
+            host,
+            #"/bin/sh -c 'cat "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"'"#,
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            logger.error("ssh launch failed for \(host, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 20, execute: deadline)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        deadline.cancel()
+        guard process.terminationStatus == 0 else {
+            logger.warning("\(host, privacy: .public): reading .claude.json exited \(process.terminationStatus, privacy: .public)")
+            return nil
+        }
+        return parse(data: data, source: "\(host):.claude.json")
     }
 }

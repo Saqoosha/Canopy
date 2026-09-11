@@ -4,13 +4,133 @@ import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "RateLimit")
 
-/// Account-level rate limit data shared across all tabs.
-/// Rate limits (5hr session, weekly) are per-account, not per-session,
-/// so a single shared instance avoids redundant updates from each tab.
+/// Rate-limit data for every account the open sessions use.
+///
+/// Rate limits are per Anthropic account, not per session. One record used to
+/// serve every session, on the assumption that they all shared this Mac's
+/// account — an SSH remote session logged in elsewhere then wrote the remote
+/// account's numbers into the same record, and the sidebar flipped between the
+/// two (issue #214). Now each `ShimProcess` writes into the record for ITS
+/// account: `local` for a local session or a remote host signed in as the
+/// same account, a separate record otherwise.
 @MainActor
 @Observable
 final class SharedRateLimitData {
     static let shared = SharedRateLimitData()
+
+    /// This Mac's account. Readers that predate #214 — the roster, and the
+    /// keep-alive ceiling for a local session — read this one.
+    let local = RateLimitAccount(label: nil)
+
+    /// Every other account an open session is signed in as, in first-seen
+    /// order, keyed by the identity `RateLimitAccount.Key` describes.
+    private(set) var others: [RateLimitAccount] = []
+
+    private init() {}
+
+    /// The record a session writes into. `nil` means "this Mac's account" or
+    /// a remote host that turned out to be signed in as the same account. A
+    /// host key whose account has since been learned resolves to that
+    /// account's record (see `noteResolved`).
+    func account(for key: RateLimitAccount.Key?) -> RateLimitAccount {
+        let key = canonicalKey(for: key)
+        guard let key else { return local }
+        if let existing = others.first(where: { $0.key == key }) { return existing }
+        let account = RateLimitAccount(label: key.label, key: key)
+        others.append(account)
+        return account
+    }
+
+    /// What a host turned out to be signed in as, once any session's SSH
+    /// read succeeded. Written by `ShimProcess` when it resolves; a session
+    /// whose own read failed and fell back to `.host` then writes into the
+    /// learned account's record from its next write, because shims look
+    /// their record up by key rather than holding it. A `.host` key records
+    /// nothing — that would only say "still unknown".
+    func noteResolved(host: String, key: RateLimitAccount.Key?) {
+        if case .host = key { return }
+        hostAccounts[RateLimitAccount.Key.normalizedHost(host)] = key
+    }
+
+    /// The key a record is filed under, with a learned host folded in. Pure,
+    /// unlike `account(for:)`, which appends on a miss — so this is what a
+    /// view body may ask.
+    func canonicalKey(for key: RateLimitAccount.Key?) -> RateLimitAccount.Key? {
+        if case .host(let host) = key, let learned = hostAccounts[host] { return learned }
+        return key
+    }
+
+    private var hostAccounts: [String: RateLimitAccount.Key?] = [:]
+
+    // MARK: - Formatting
+
+    /// Format reset Date as relative string: "18m", "2h05m", "4d", "soon"
+    static nonisolated func formatResetTime(_ date: Date?) -> String {
+        guard let date else { return "" }
+        let seconds = Int(date.timeIntervalSinceNow)
+        guard seconds > 0 else { return "soon" }
+
+        let minutes = seconds / 60
+        if minutes == 0 { return "<1m" }
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        let remainMinutes = minutes % 60
+        if hours < 24 {
+            return remainMinutes > 0 ? "\(hours)h\(String(format: "%02d", remainMinutes))m" : "\(hours)h"
+        }
+        return "\(hours / 24)d"
+    }
+
+    /// Format reset Date as absolute date+time, e.g. "Today at 6:09 PM" or "May 20 at 12:00 AM".
+    /// MainActor-isolated (inherits from class) — DateFormatter is reused per call by SwiftUI body redraws.
+    static func formatAbsoluteResetTime(_ date: Date?) -> String {
+        guard let date else { return "" }
+        let formatter = DateFormatter()
+        formatter.doesRelativeDateFormatting = true
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+}
+
+/// One account's rate limits: the 5-hour and weekly windows plus the
+/// per-model buckets, written by every session signed in as that account.
+@MainActor
+@Observable
+final class RateLimitAccount {
+    /// How a remote session's account is identified. By email when the
+    /// remote host's `~/.claude.json` could be read; by host when it could
+    /// not, so an unreadable host still gets its own record rather than
+    /// polluting this Mac's.
+    enum Key: Hashable, Sendable {
+        case email(String)
+        case host(String)
+
+        var label: String {
+            switch self {
+            case .email(let email): return email
+            case .host(let host): return host
+            }
+        }
+
+        /// `user@Host` with only the host part lowercased: host names are
+        /// case-insensitive, SSH user names are not, and `Alice@server` and
+        /// `alice@server` are two logins that must not share a record.
+        static func normalizedHost(_ host: String) -> String {
+            guard let at = host.lastIndex(of: "@") else { return host.lowercased() }
+            return host[...at] + host[host.index(after: at)...].lowercased()
+        }
+    }
+
+    /// What the sidebar heads this account's block with. `nil` for the local
+    /// account, whose email comes from `ClaudeAccountInfo` at render time.
+    let label: String?
+    let key: Key?
+
+    init(label: String?, key: Key? = nil) {
+        self.label = label
+        self.key = key
+    }
 
     // 5hr session rate limit
     var sessionPct: Int = 0
@@ -61,14 +181,14 @@ final class SharedRateLimitData {
             // silently synthesizing 0% (indistinguishable from a real
             // no-usage row) we drop the entry and log. The row disappears
             // for one tick; the next well-formed payload rebuilds it.
-            guard let parsedPct = SharedRateLimitData.parseUtilizationStrict(json["utilization"]) else {
+            guard let parsedPct = RateLimitAccount.parseUtilizationStrict(json["utilization"]) else {
                 logger.warning("model_scoped entry '\(name, privacy: .public)': unparseable utilization (\(String(describing: json["utilization"]), privacy: .public)); dropping row")
                 return nil
             }
             displayName = name
             pct = parsedPct
             if let iso = json["resets_at"] as? String {
-                if let parsedDate = SharedRateLimitData.parseISO8601(iso) {
+                if let parsedDate = RateLimitAccount.parseISO8601(iso) {
                     resetDate = parsedDate
                 } else {
                     logger.warning("model_scoped entry '\(name, privacy: .public)': unparseable resets_at '\(iso, privacy: .public)'; treating as nil")
@@ -101,14 +221,12 @@ final class SharedRateLimitData {
     private var consecutiveModelScopedAbsences: Int = 0
     private static let modelScopedAbsenceWarnThreshold = 10
 
-    // Throttle: only one tab needs to request usage updates
+    // Throttle: only one session on this account needs to request usage updates
     private var lastUsageUpdateTime: Date = .distantPast
     private static let updateInterval: TimeInterval = 60
 
-    private init() {}
-
     /// Returns true if enough time has passed since the last update request.
-    /// Call this before sending request_usage_update — only the first tab to call wins.
+    /// Call this before sending request_usage_update — only the first session to call wins.
     func shouldRequestUpdate() -> Bool {
         let now = Date()
         guard now.timeIntervalSince(lastUsageUpdateTime) >= Self.updateInterval else { return false }
@@ -260,36 +378,6 @@ final class SharedRateLimitData {
 
     func effectiveWeeklyResetDate(for model: String) -> Date? {
         model.lowercased().contains("sonnet") && weeklyResetDateSonnet != nil ? weeklyResetDateSonnet : weeklyResetDate
-    }
-
-    // MARK: - Formatting
-
-    /// Format reset Date as relative string: "18m", "2h05m", "4d", "soon"
-    static nonisolated func formatResetTime(_ date: Date?) -> String {
-        guard let date else { return "" }
-        let seconds = Int(date.timeIntervalSinceNow)
-        guard seconds > 0 else { return "soon" }
-
-        let minutes = seconds / 60
-        if minutes == 0 { return "<1m" }
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        let remainMinutes = minutes % 60
-        if hours < 24 {
-            return remainMinutes > 0 ? "\(hours)h\(String(format: "%02d", remainMinutes))m" : "\(hours)h"
-        }
-        return "\(hours / 24)d"
-    }
-
-    /// Format reset Date as absolute date+time, e.g. "Today at 6:09 PM" or "May 20 at 12:00 AM".
-    /// MainActor-isolated (inherits from class) — DateFormatter is reused per call by SwiftUI body redraws.
-    static func formatAbsoluteResetTime(_ date: Date?) -> String {
-        guard let date else { return "" }
-        let formatter = DateFormatter()
-        formatter.doesRelativeDateFormatting = true
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
     }
 
     // MARK: - Parsing helpers

@@ -138,6 +138,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         instances.allObjects.filter { $0.process?.isRunning == true && !$0.isIntentionalStop }.count
     }
 
+    /// Whether any running shim writes into this rate-limit record. The
+    /// sidebar hides a remote account's block once its last session is gone;
+    /// the record itself stays in the registry, so reopening a session on
+    /// that account picks up where it left off. Read off `instances` rather
+    /// than a counter each shim maintains, because a counter needs every
+    /// teardown path to decrement and a missed one leaves a block forever.
+    ///
+    /// Compares KEYS, not records: `rateLimitAccount` appends to the registry
+    /// on a miss, and this is called from a view body.
+    @MainActor static func isWriting(to account: RateLimitAccount) -> Bool {
+        let registry = SharedRateLimitData.shared
+        return instances.allObjects.contains {
+            guard case .resolved(let key) = $0.rateLimitBinding else { return false }
+            return registry.canonicalKey(for: key) == account.key
+                && $0.process?.isRunning == true && !$0.isIntentionalStop
+        }
+    }
+
     /// Synchronously stop any running shim that no `OpenSession` still
     /// owns (e.g. orphaned by an SSH reconnect mid-flight). Called as a
     /// cleanup pass from `applicationShouldTerminate` so leftover Node.js
@@ -180,6 +198,31 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     var permissionMode: PermissionMode
     var remoteHost: String?
     var customApi: ModelProvider?
+
+    /// The rate-limit record this session's usage reports belong to. Rate
+    /// limits are per account, and an SSH remote session's CLI may be signed
+    /// in as a different account than this Mac (issue #214), so every write
+    /// goes through this rather than a shared record. A local session resolves
+    /// to `SharedRateLimitData.shared.local` in `init`; a remote session has
+    /// its host's `.claude.json` read over SSH first and stays nil until that
+    /// answers, dropping any usage that arrives in between — the resolve hop
+    /// re-requests, and writing it into the wrong account is the bug this
+    /// exists to prevent.
+    ///
+    /// Only the KEY is stored; the record is looked up on every write. That
+    /// is what lets a host-keyed record (the SSH read failed) be folded into
+    /// the account record a later session on the same host resolves — see
+    /// `SharedRateLimitData.noteResolved` — without re-binding every shim.
+    var rateLimitAccount: RateLimitAccount? {
+        guard case .resolved(let key) = rateLimitBinding else { return nil }
+        return SharedRateLimitData.shared.account(for: key)
+    }
+
+    private enum RateLimitBinding {
+        case unresolved
+        case resolved(RateLimitAccount.Key?)
+    }
+    private var rateLimitBinding: RateLimitBinding = .unresolved
 
     // MARK: - Activity tracking (drives sidebar spinner via boundSession.isThinking)
     private var sessionTitle: String = ""
@@ -2105,6 +2148,31 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         super.init()
         Self.instances.add(self)
+        if let remoteHost {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let remote = ClaudeAccountInfo.remote(host: remoteHost)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    let key = Self.rateLimitKey(remoteEmail: remote?.email,
+                                                localEmail: ClaudeAccountInfo.current()?.email,
+                                                host: remoteHost)
+                    SharedRateLimitData.shared.noteResolved(host: remoteHost, key: key)
+                    self.rateLimitBinding = .resolved(key)
+                    logger.info("\(remoteHost, privacy: .public): rate limits attributed to \(key?.label ?? "the local account", privacy: .private)")
+                    // The CLI has usually launched by now, so the first
+                    // request (2 s after `launch_claude`) found no account and
+                    // bailed; nothing else asks until a turn ends, and an idle
+                    // pane would show no bars at all. Gated on `channelId`: if
+                    // the launch has not happened yet that first request is
+                    // still coming and would find the account set, while a
+                    // request from here would consume the account's throttle
+                    // without the `get_usage` half.
+                    if self.channelId != nil { self.requestUsageUpdate() }
+                }
+            }
+        } else {
+            rateLimitBinding = .resolved(nil)
+        }
         // Set CLI version, VCS branch, initial message count, and remote host
         statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
         statusBarData?.remoteHost = remoteHost
@@ -4412,10 +4480,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Which record a remote session writes: none (this Mac's) when the host
+    /// is signed in as the same account, the email otherwise, and the host
+    /// name when the remote account could not be read — an unreadable host
+    /// gets its own record rather than polluting this Mac's.
+    nonisolated static func rateLimitKey(remoteEmail: String?, localEmail: String?, host: String) -> RateLimitAccount.Key? {
+        guard let remoteEmail else { return .host(RateLimitAccount.Key.normalizedHost(host)) }
+        if let localEmail, remoteEmail.caseInsensitiveCompare(localEmail) == .orderedSame { return nil }
+        return .email(remoteEmail.lowercased())
+    }
+
     /// Request rate limit data from extension (triggers /api/oauth/usage fetch).
-    /// Throttled globally — only one tab sends the request per interval.
+    /// Throttled per account — one session on that account sends the request
+    /// per interval. Silent while a remote session's account is unresolved;
+    /// the resolve hop re-issues the request.
     private func requestUsageUpdate() {
-        guard SharedRateLimitData.shared.shouldRequestUpdate() else { return }
+        guard let rateLimitAccount, rateLimitAccount.shouldRequestUpdate() else { return }
         let requestId = "canopy-usage-\(UUID().uuidString.prefix(8))"
         sendToShim([
             "type": "webview_message",
@@ -4471,7 +4551,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 logger.warning("get_usage response shape mismatch: type=\(respType, privacy: .public) keys=\(keys, privacy: .public)")
                 return
             }
-            SharedRateLimitData.shared.updateFromRawUsage(rateLimits)
+            rateLimitAccount?.updateFromRawUsage(rateLimits)
         }
         if let response = message["response"] as? [String: Any] {
             handle(response, requestId: message["requestId"] as? String)
@@ -6383,7 +6463,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            request["type"] as? String == "usage_update",
            let utilization = request["utilization"] as? [String: Any]
         {
-            SharedRateLimitData.shared.update(from: utilization)
+            rateLimitAccount?.update(from: utilization)
             return
         }
 

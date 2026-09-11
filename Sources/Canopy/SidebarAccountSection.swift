@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Sticky footer at the bottom of the sidebar: the account's email, its rate
-/// limits (5-hour, weekly, per model), and the version row. Rate limits apply
+/// Sticky footer at the bottom of the sidebar: one block per account (email,
+/// then its 5-hour, weekly and per-model limits), and the version row. Rate limits apply
 /// to the Anthropic account, not to any one session, which is why they live
 /// here and not in every pane's StatusBarView.
 struct SidebarAccountSection: View {
@@ -20,53 +20,85 @@ struct SidebarAccountSection: View {
         VStack(alignment: .leading, spacing: 6) {
             Divider()
                 .padding(.bottom, 2)
-            if let account = ClaudeAccountInfo.current() {
-                accountRow(account)
-            }
-            if hasAnyData {
-                // Render each row only when its own reset date is present.
-                // The API's `update(from:)` can populate one window (5hr /
-                // weekly) without the other; showing "0%, resets whenever"
-                // for the missing one would misread as "we have data".
-                if let resetDate = data.sessionResetDate {
-                    limitRow(label: "5hr",
-                             percent: fiveHourPercent,
-                             reset: fiveHourResetLabel,
-                             resetDate: resetDate,
-                             windowDuration: 5 * 3600)
-                }
-                if let resetDate = data.weeklyResetDate {
-                    limitRow(label: "Wk",
-                             percent: weeklyPercent,
-                             reset: weeklyResetLabel,
-                             resetDate: resetDate,
-                             windowDuration: 7 * 24 * 3600)
-                }
-                // Per-model weekly buckets (e.g. "Weekly Fable") from the
-                // raw get_usage payload — one row per model, same columns.
-                // Pace marker omitted here: the account-scoped 5hr + weekly
-                // rows already carry the "burning too fast" signal, and per-
-                // model buckets are noisy under bursty usage — showing a red
-                // tick on every model row would drown out the signal.
-                //
-                // Filter on `isFresh`: `updateFromRawUsage` deliberately
-                // keeps previous state when a payload lacks `model_scoped`
-                // (anti-flicker for the intermittent server omission), so
-                // this render-time filter is the mechanism that eventually
-                // hides a row once its weekly window has elapsed. The
-                // enclosing TimelineView's 60s tick re-evaluates it.
-                ForEach(data.modelScoped.filter { $0.isFresh }) { scoped in
-                    limitRow(label: scoped.displayName,
-                             percent: Double(scoped.pct) / 100.0,
-                             reset: SharedRateLimitData.formatResetTime(scoped.resetDate),
-                             resetDate: nil,
-                             windowDuration: 0)
-                }
+            // One block per account the open sessions use: this Mac's first,
+            // headed by the email its CLI recorded, then any account an SSH
+            // remote session is signed in as (issue #214). With one account
+            // this is exactly the footer it was before.
+            accountBlock(data.local, header: ClaudeAccountInfo.current()?.email, headerNeedsData: false, separated: false)
+            // Only accounts a running session still writes into: a closed
+            // remote session's block would otherwise sit there, never
+            // updating, until relaunch. It leaves within the next tick.
+            ForEach(data.others.filter { ShimProcess.isWriting(to: $0) }, id: \.key) { account in
+                accountBlock(account, header: account.label, headerNeedsData: true, separated: true)
             }
             versionFooter
         }
         .padding(.bottom, 8)
         .padding(.top, 4)
+    }
+
+    /// One account's rows, or nothing. Nothing rather than an empty stack,
+    /// because the outer `VStack` spaces every child it is given, empty or
+    /// not — a remote session between its SSH resolve and its first usage
+    /// reply would otherwise leave a blank gap. The local account's header
+    /// always shows; a remote account's waits for data, because a session
+    /// whose CLI never reports usage (a custom provider) would otherwise
+    /// leave a bare email in the footer for its whole life. `separated` adds
+    /// the gap between one account's block and the next.
+    @ViewBuilder
+    private func accountBlock(_ account: RateLimitAccount, header: String?, headerNeedsData: Bool, separated: Bool) -> some View {
+        // Show when either reset date is present — the signal StatusBarView
+        // used for the same decision.
+        let hasData = account.sessionResetDate != nil || account.weeklyResetDate != nil
+        let showHeader = header != nil && (hasData || !headerNeedsData)
+        if hasData || showHeader {
+            VStack(alignment: .leading, spacing: 6) {
+                if let header, showHeader {
+                    accountRow(header)
+                }
+                if hasData {
+                    // Render each row only when its own reset date is present.
+                    // The API's `update(from:)` can populate one window (5hr /
+                    // weekly) without the other; showing "0%, resets whenever"
+                    // for the missing one would misread as "we have data".
+                    if let resetDate = account.sessionResetDate {
+                        limitRow(label: "5hr",
+                                 percent: Double(account.sessionPct) / 100.0,
+                                 reset: SharedRateLimitData.formatResetTime(resetDate),
+                                 resetDate: resetDate,
+                                 windowDuration: 5 * 3600)
+                    }
+                    if let resetDate = account.weeklyResetDate {
+                        limitRow(label: "Wk",
+                                 percent: Double(account.weeklyPct) / 100.0,
+                                 reset: SharedRateLimitData.formatResetTime(resetDate),
+                                 resetDate: resetDate,
+                                 windowDuration: 7 * 24 * 3600)
+                    }
+                    // Per-model weekly buckets (e.g. "Weekly Fable") from the
+                    // raw get_usage payload — one row per model, same columns.
+                    // Pace marker omitted here: the account-scoped 5hr + weekly
+                    // rows already carry the "burning too fast" signal, and per-
+                    // model buckets are noisy under bursty usage — showing a red
+                    // tick on every model row would drown out the signal.
+                    //
+                    // Filter on `isFresh`: `updateFromRawUsage` deliberately
+                    // keeps previous state when a payload lacks `model_scoped`
+                    // (anti-flicker for the intermittent server omission), so
+                    // this render-time filter is the mechanism that eventually
+                    // hides a row once its weekly window has elapsed. The
+                    // enclosing TimelineView's 60s tick re-evaluates it.
+                    ForEach(account.modelScoped.filter { $0.isFresh }) { scoped in
+                        limitRow(label: scoped.displayName,
+                                 percent: Double(scoped.pct) / 100.0,
+                                 reset: SharedRateLimitData.formatResetTime(scoped.resetDate),
+                                 resetDate: nil,
+                                 windowDuration: 0)
+                    }
+                }
+            }
+            .padding(.top, separated ? 6 : 0)
+        }
     }
 
     /// Canopy + CC extension version, always shown. Used to be a
@@ -99,12 +131,15 @@ struct SidebarAccountSection: View {
         .padding(.top, 2)
     }
 
-    /// This Mac's account, heading the section. The rows below are its quota
-    /// unless an SSH remote session is logged in elsewhere — every session
-    /// writes `SharedRateLimitData`, and both writers relay the remote CLI's
-    /// numbers. Pre-existing; issue #214.
-    private func accountRow(_ account: ClaudeAccountInfo) -> some View {
-        Text(account.email)
+    /// Heads an account's block. This Mac's shows the email `ClaudeAccountInfo`
+    /// read, with the tooltip's extra detail; a remote account shows the label
+    /// its record carries (email, or host name when the email was unreadable).
+    private func accountRow(_ header: String) -> some View {
+        let local = ClaudeAccountInfo.current()
+        let tooltip = local?.email == header
+            ? [local?.displayName, header, local?.organizationName].compactMap { $0 }.joined(separator: "\n")
+            : header
+        return Text(header)
             .font(.caption)
             .fontWeight(.medium)
             .foregroundStyle(.secondary)
@@ -112,9 +147,7 @@ struct SidebarAccountSection: View {
             .truncationMode(.middle)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
-            .help([account.displayName, account.email, account.organizationName]
-                .compactMap { $0 }
-                .joined(separator: "\n"))
+            .help(tooltip)
     }
 
     private var canopyVersion: String? {
@@ -265,17 +298,4 @@ struct SidebarAccountSection: View {
         return max(0, min(1, elapsed / duration))
     }
 
-    // SharedRateLimitData has no hasSnapshot — show when either reset date
-    // is present (same signal StatusBarView uses to decide visibility).
-    private var hasAnyData: Bool {
-        data.sessionResetDate != nil || data.weeklyResetDate != nil
-    }
-    private var fiveHourPercent: Double { Double(data.sessionPct) / 100.0 }
-    private var weeklyPercent: Double { Double(data.weeklyPct) / 100.0 }
-    private var fiveHourResetLabel: String {
-        SharedRateLimitData.formatResetTime(data.sessionResetDate)
-    }
-    private var weeklyResetLabel: String {
-        SharedRateLimitData.formatResetTime(data.weeklyResetDate)
-    }
 }
