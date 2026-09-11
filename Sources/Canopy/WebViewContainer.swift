@@ -801,8 +801,7 @@ struct WebViewContainer: NSViewRepresentable {
 /// Adds "Open in Preview" to WebKit's own context menu when the right-click
 /// landed on a Read-tool thumbnail. WebKit's menu does not say which element
 /// it is for, so `ImagePreviewScript` reports the thumbnail from its
-/// `contextmenu` listener first; the stamp keeps a stale report from
-/// attaching the item to a later right-click somewhere else.
+/// `contextmenu` listener first.
 final class SessionWKWebView: WKWebView {
     struct ContextImage {
         let dataURL: String

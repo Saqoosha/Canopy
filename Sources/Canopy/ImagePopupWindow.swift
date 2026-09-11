@@ -17,9 +17,7 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ImagePopup"
 /// branch with no extra wiring; Escape closes it too.
 ///
 /// Zoom follows Preview's keys: pinch, Cmd+= / Cmd+-, Cmd+0 actual size,
-/// Cmd+9 fit. Double-click toggles fit and actual size. The context menu
-/// hands the image to Preview itself, which is the only path that writes it
-/// to disk.
+/// Cmd+9 fit. Double-click toggles fit and actual size.
 @MainActor
 final class ImagePopupWindow {
     static let shared = ImagePopupWindow()
@@ -87,15 +85,15 @@ final class ImagePopupWindow {
         // The floor may raise a small image but never past the screen fit,
         // so an extreme aspect ratio cannot open a window wider than the display.
         let scale = min(max(1, floorScale), fitScale)
-        return CGSize(width: (imageSize.width * scale).rounded(),
-                      height: (imageSize.height * scale).rounded())
+        return CGSize(width: max(imageSize.width * scale, minimumSide).rounded(),
+                      height: max(imageSize.height * scale, minimumSide).rounded())
     }
 
     /// Writes the image into a per-open temp directory (Preview needs a file)
     /// and opens it there. The temp directory is left to the OS to reap:
     /// Preview may still have it open when Canopy quits.
     static func openInPreview(data: Data, fileName: String, fileExtension: String) {
-        let base = (fileName as NSString).deletingPathExtension
+        let base = ((fileName as NSString).lastPathComponent as NSString).deletingPathExtension
         let name = (base.isEmpty ? "image" : base) + "." + fileExtension
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("Canopy-images", isDirectory: true)
@@ -179,7 +177,7 @@ private final class ImagePopupNSWindow: NSWindow {
     /// Ahead of the main menu, so Cmd+0 means "actual size" here the way it
     /// does in Preview, rather than Canopy's "show main window".
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
         guard modifiers == .command || modifiers == [.command, .shift] else {
             return super.performKeyEquivalent(with: event)
         }
