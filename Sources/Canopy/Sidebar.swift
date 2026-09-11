@@ -277,6 +277,15 @@ struct Sidebar: View {
             isUnread: isUnread(row),
             onClose: { handleClose(row) }
         )
+        // Dimmed, not hidden: the session is still real and its log is still
+        // readable — the row is how you reach it. `.opacity` rather than a
+        // foreground style so the icon and every label fade together.
+        .opacity(canOpen(row) ? 1 : 0.45)
+        .help(canOpen(row)
+            ? ""
+            : "This session's folder is gone — typically a worktree removed after merging. "
+                + "It can't be reopened while the folder is missing. "
+                + "Right-click to copy its log path and read it from another session.")
         .background(
             // BOTH backgrounds live here, inline, because `.listRowBackground`
             // stretches its content to fill the cell and eats any inset
@@ -304,7 +313,11 @@ struct Sidebar: View {
         // Closed rows: plain tap to open. Open rows: NO gesture — any tap
         // gesture here (even simultaneous) blocks .onMove dragging; their
         // clicks arrive via the List's rowClickBinding instead.
-        .gesture(row.isOpen ? nil : TapGesture().onEnded {
+        // An unopenable row keeps NO tap gesture: the click would reach
+        // `ShimProcess.start`'s missing-cwd refusal and end in a pane that
+        // opens and closes again, which is worse than nothing happening beside
+        // a visibly disabled row. Right-click still works.
+        .gesture(row.isOpen || !canOpen(row) ? nil : TapGesture().onEnded {
             let cmdHeld = NSEvent.modifierFlags.contains(.command)
             handleRowClick(row: row, addNewPane: cmdHeld)
         })
@@ -349,12 +362,43 @@ struct Sidebar: View {
             Divider()
             Button("Open in Finder") { store.openInFinder(directory) }
         }
+        // The one action that still works for a session whose worktree was
+        // removed: hand its log to another session to read. Absent rather than
+        // disabled, for the reason the Finder item above gives — and absent on
+        // a brand-new session too, whose placeholder id resolves to no file.
+        if let logPath = sessionLogPath(for: row) {
+            Button("Copy Session Log Path") { store.copyToPasteboard(logPath) }
+        }
         Button("Hide from sidebar") {
             store.hideClosedSession(rowId: row.id)
         }
         // Open rows and launcher rows both stand for something live; hiding
         // one would take a pane off the map without closing it.
         .disabled(row.isOpen)
+    }
+
+    /// Whether clicking a row can actually produce a session.
+    ///
+    /// Only a closed local row can answer no, and only because the directory
+    /// it recorded is gone (`SessionEntry.canOpen`, measured once by
+    /// `loadAllSessions` rather than per render). Every other kind either has
+    /// a live pane already, is fetched from the server, or is a launcher.
+    private func canOpen(_ row: SidebarRow) -> Bool {
+        SidebarRow.canOpen(row)
+    }
+
+    /// The session log a row's "Copy Session Log Path" should copy, or nil
+    /// when the row carries none.
+    ///
+    /// Read straight off the entry — see `SessionEntry.logPath` for why it
+    /// must not be looked up here. Closed local rows only: an open session's
+    /// conversation is already on screen, and buying its path would cost the
+    /// lookup this exists to avoid.
+    private func sessionLogPath(for row: SidebarRow) -> String? {
+        switch row {
+        case .closedLocal(let entry): return entry.logPath
+        case .open, .closedCloud, .launcher: return nil
+        }
     }
 
     /// The local folder a row's "Open in Finder" should open, or nil when the
@@ -366,7 +410,9 @@ struct Sidebar: View {
         case .open(let s):
             return s.origin.remoteHost == nil ? s.origin.workingDirectory : nil
         case .closedLocal(let entry):
-            return entry.projectDirectory
+            // Gone means gone: offering Finder a directory we already know is
+            // absent can only log a warning and look like nothing happened.
+            return entry.canOpen ? entry.projectDirectory : nil
         case .closedCloud, .launcher:
             return nil
         }

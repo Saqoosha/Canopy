@@ -1030,6 +1030,15 @@ final class SessionStore {
         return opened
     }
 
+    /// Without `clearContents()` the write still succeeds, but into the item
+    /// already there — leaving a previous copy's other representations (RTF, a
+    /// file URL) for whichever a paste target prefers.
+    func copyToPasteboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
     /// Tear down a session's shim and webview and build both again, resuming
     /// the same conversation, without touching the row or the pane it sits in.
     ///

@@ -2412,6 +2412,53 @@ enum SidebarLogicProbe {
                !ClaudeSessionHistory.shouldKeepSession(
                    projectExists: false, projectPath: "/repos/Canopy"))
 
+        // issue #222: a kept row whose folder is gone cannot be opened —
+        // `ShimProcess.start` refuses a missing spawn cwd — so the sidebar
+        // draws it disabled and skips the click rather than letting it fail.
+        // `SessionEntry.canOpen` carries the answer `loadAllSessions` already
+        // computed; only `.closedLocal` can say no.
+        let liveEntry = SessionEntry(
+            id: "00000000-0000-0000-0000-0000000000aa",
+            title: "Live",
+            timestamp: Date(),
+            projectDirectory: URL(fileURLWithPath: "/repos/Canopy")
+        )
+        let goneEntry = SessionEntry(
+            id: "00000000-0000-0000-0000-0000000000bb",
+            title: "Gone worktree",
+            timestamp: Date(),
+            projectDirectory: GitWorktree.worktreesRoot.appendingPathComponent("Canopy/gone-branch"),
+            canOpen: false
+        )
+        // NOT pinned here: `loadAllSessions` passing `canOpen: projectExists`
+        // — it reads the developer's real `~/.claude/projects`, so mutating
+        // that argument to `true` leaves every assertion below green. These
+        // cover the switch, not the wiring that feeds it.
+        record("canOpen: a closed row defaults to openable",
+               SidebarRow.canOpen(.closedLocal(liveEntry)))
+        record("canOpen: a closed row carrying canOpen=false is not openable",
+               !SidebarRow.canOpen(.closedLocal(goneEntry)))
+        record("canOpen: an open row is always openable",
+               SidebarRow.canOpen(.open(OpenSession(
+                   origin: .local(URL(fileURLWithPath: "/repos/Canopy")),
+                   resumeId: "00000000-0000-0000-0000-0000000000cc",
+                   title: "Open",
+                   project: "Canopy"))))
+        record("canOpen: a launcher row is always openable",
+               SidebarRow.canOpen(.launcher(UUID())))
+        record("canOpen: a cloud row is always openable",
+               SidebarRow.canOpen(.closedCloud(RemoteSession(
+                   id: "session_canopen",
+                   summary: "Cloud",
+                   lastModified: Date(),
+                   status: "idle",
+                   repoOwner: nil,
+                   repoName: nil,
+                   branch: nil,
+                   kind: .web,
+                   origin: nil,
+                   cwd: nil))))
+
         // VCS-reported branch wins over the folder-name guess when present.
         // Fixture folder "feature-foo" vs branch "feature/foo" — the slash
         // flatten that `git worktree add -b` does — so a match is not
