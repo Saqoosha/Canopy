@@ -228,10 +228,16 @@ final class RateLimitAccount {
     /// Returns true if enough time has passed since the last update request.
     /// Call this before sending request_usage_update — only the first session to call wins.
     func shouldRequestUpdate() -> Bool {
-        let now = Date()
-        guard now.timeIntervalSince(lastUsageUpdateTime) >= Self.updateInterval else { return false }
-        lastUsageUpdateTime = now
+        guard Date().timeIntervalSince(lastUsageUpdateTime) >= Self.updateInterval else { return false }
+        noteUsageRequested()
         return true
+    }
+
+    /// Start the throttle interval now. For a writer that already has the
+    /// numbers in hand (`ClaudeUsageDirect`), so it never blocks a shim's
+    /// request on a fetch that failed.
+    func noteUsageRequested() {
+        lastUsageUpdateTime = Date()
     }
 
     func update(from utilization: [String: Any]) {
