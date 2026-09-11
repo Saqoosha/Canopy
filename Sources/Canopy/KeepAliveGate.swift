@@ -15,10 +15,11 @@ struct KeepAliveGate: Equatable {
     ///
     /// The window being defended is the CLI's 1-hour prompt-cache TTL
     /// (`ttl:"1h", reason:"subscriber"`, read out of the bundled CLI
-    /// 2.1.258). Five minutes of margin covers the gap between "the last
-    /// request in a turn went out" and "the turn's `result` arrived", which
-    /// is what `noteActivity` actually stamps, plus one tick of the
-    /// coordinator's own cadence.
+    /// 2.1.258). Five minutes of margin covers what the stamp cannot see:
+    /// `lastActivityAt` is set at submission and at each request's
+    /// `message_start`, which lands one time-to-first-token after the
+    /// request actually started, plus one tick of the coordinator's own
+    /// cadence.
     ///
     /// Anthropic's pricing table bills this column as "Cache hits **and
     /// refreshes**" — a hit is what re-arms the TTL, so a single small turn
@@ -45,11 +46,10 @@ struct KeepAliveGate: Equatable {
     static let promptPrefix = "[Canopy keep-alive]"
 
     /// The text injected as the keep-alive turn, and the exact string the
-    /// echo swallow matches on.
+    /// echo match (`ShimProcess.isKeepAliveEcho`) compares against.
     ///
-    /// One constant because the two uses must never drift: a mismatch does
-    /// not fail loudly, it leaves the prompt visible in the transcript
-    /// while the reply is still swallowed, i.e. a bubble with no answer.
+    /// One constant because a drift does not fail loudly: the trackers and
+    /// the screen would both treat our turn as the user's.
     ///
     /// It is written to be legible to two readers. The model, so the reply
     /// is one token and no tool runs — a request, not a constraint: the turn
@@ -62,17 +62,38 @@ struct KeepAliveGate: Equatable {
     ///
     /// It is NOT written for a human scrolling the transcript — an earlier
     /// revision claimed that, which contradicted the swallow and left the
-    /// intent genuinely ambiguous. These turns are hidden live AND on replay
-    /// (`ShimProcess.strippingKeepAliveArtifacts`).
+    /// intent genuinely ambiguous. These turns are hidden live AND on
+    /// replay (`ShimProcess.strippingKeepAliveArtifacts`).
     static let promptText = "\(promptPrefix) Prompt-cache refresh, no action needed. Do not use any tool and do not think about this. Reply with exactly: OK"
 
+    /// Which prompt-cache TTL the API actually granted this session, read off
+    /// the wire rather than guessed from how the session authenticates.
+    ///
+    /// Every `assistant` frame's `usage.cache_creation` splits the tokens
+    /// written this request into `ephemeral_1h_input_tokens` and
+    /// `ephemeral_5m_input_tokens`, and the CC extension's own composer
+    /// indicator (2.1.268) reads the same two fields to decide which window
+    /// to count down. A request that only HIT the cache writes nothing and
+    /// reports zero in both, which is why a reading of nil means "no new
+    /// evidence", not "no cache".
+    enum ObservedCacheTTL: Equatable {
+        case fiveMinutes
+        case oneHour
+    }
+
+    /// The most recent non-nil reading of `observedTTL(inUsage:)`. Nil until
+    /// the first main-conversation request — a user's turn or a refresh —
+    /// writes to the cache.
+    private(set) var observedTTL: ObservedCacheTTL?
+
     /// When the session last STARTED talking to the API, as far as this
-    /// shim can tell — stamped at user submission and at a refresh's
-    /// injection, never at a turn's end. A cache entry's lifetime runs from
-    /// the start of the request that writes or reads it and generation time
-    /// counts against it, so a turn's end is minutes too late an estimate on
-    /// exactly the long agentic turns this feature is for. The reasoning is
-    /// on `ShimProcess.noteApiActivity`.
+    /// shim can tell — stamped at user submission, at a refresh's injection,
+    /// and at each request's `message_start` within a turn; never at a
+    /// turn's end. A cache entry's lifetime runs from the start of the
+    /// request that writes or reads it and generation time counts against
+    /// it, so a turn's end is minutes too late an estimate on exactly the
+    /// long agentic turns this feature is for. The reasoning is on
+    /// `ShimProcess.noteApiActivity` and `ShimProcess.trackCacheWindow`.
     private(set) var lastActivityAt: Date?
 
     /// Refreshes ATTEMPTED on this shim — `requestKeepAlive` stamps it at
@@ -82,10 +103,10 @@ struct KeepAliveGate: Equatable {
     /// there is deliberately no cap here for it to feed.
     private(set) var sentCount = 0
 
-    /// Never moves the stamp backwards. Its two callers read different
-    /// clocks — one takes `Date()` directly, the other the coordinator's
-    /// captured tick time — so without this the stamp could regress by the
-    /// skew between them and grant an early refresh.
+    /// Never moves the stamp backwards. Its callers read two different
+    /// clocks — `Date()` at the call site, or the coordinator's captured
+    /// tick time — so without this the stamp could regress by the skew
+    /// between them and grant an early refresh.
     mutating func noteActivity(at date: Date) {
         lastActivityAt = max(lastActivityAt ?? date, date)
     }
@@ -102,31 +123,67 @@ struct KeepAliveGate: Equatable {
         sentCount += 1
     }
 
+    /// Record a wire reading. Nil is ignored on purpose — see `observedTTL`.
+    mutating func noteObservedTTL(_ ttl: ObservedCacheTTL?) {
+        if let ttl { observedTTL = ttl }
+    }
+
+    /// Read the granted TTL off one frame's `usage` dictionary.
+    ///
+    /// `1h` wins when both are non-zero, matching the extension's own
+    /// precedence between the two fields. Neither field present, or both
+    /// zero, is nil: the request wrote nothing, so it says nothing about
+    /// the window. (The extension differs one step up — on a request with
+    /// no cache activity at all it forgets its TTL, while `noteObservedTTL`
+    /// keeps the last reading; the TTL is a property of the account, not of
+    /// the request.)
+    static func observedTTL(inUsage usage: [String: Any]) -> ObservedCacheTTL? {
+        guard let breakdown = usage["cache_creation"] as? [String: Any] else { return nil }
+        if (breakdown["ephemeral_1h_input_tokens"] as? Int ?? 0) > 0 { return .oneHour }
+        if (breakdown["ephemeral_5m_input_tokens"] as? Int ?? 0) > 0 { return .fiveMinutes }
+        return nil
+    }
+
     /// Why this gate declines, or nil when a refresh is due.
     ///
-    /// `hasCustomApi` skips sessions running against a caller-supplied
-    /// provider. The CLI grants the 1-hour TTL on `reason:"subscriber"` and
-    /// falls back to `5m` otherwise, so on those sessions the cache this
-    /// defends is already gone by the time the interval elapses and every
-    /// refresh would buy a full write instead of a hit — the exact cost
-    /// this feature exists to avoid, inverted. It is a conservative proxy,
-    /// not a measurement: `ENABLE_PROMPT_CACHING_1H` can widen a custom
-    /// provider's window and this cannot see it. Declining wrongly costs
-    /// nothing; permitting wrongly bills every hour.
+    /// The window itself is the first question, and `observedTTL` answers it
+    /// when it can. A measured 5-minute window declines outright: the cache
+    /// this defends is gone long before the interval elapses, so every
+    /// refresh would buy a full write instead of a hit — the exact cost this
+    /// feature exists to avoid, inverted. A measured 1-hour window settles
+    /// the window question and hands over to the later checks, and that
+    /// reading outranks `hasCustomApi`: the API itself said which
+    /// window it granted, so the guess about the endpoint has nothing left
+    /// to add.
     ///
-    /// Ordered so the cheapest and most diagnostic reason wins: the
-    /// provider carve-out, then interval validity, then whether anything is
-    /// cached, then freshness, and only then the quota ceiling. A fresh
-    /// session at 100% quota therefore reports freshness rather than quota,
-    /// which the probe pins — otherwise it would be an accident of how the
-    /// guards happen to be written.
+    /// `hasCustomApi` is the fallback for a session with no reading yet. The
+    /// CLI grants the 1-hour TTL on `reason:"subscriber"` and falls back to
+    /// `5m` otherwise, so a caller-supplied provider is declined until the
+    /// wire says otherwise. It is a conservative proxy, not a measurement:
+    /// `ENABLE_PROMPT_CACHING_1H` can widen a custom provider's window, and
+    /// before the first turn writes to the cache this cannot see it.
+    /// Declining wrongly costs nothing; permitting wrongly bills every hour.
+    ///
+    /// Ordered so the cheapest and most diagnostic reason wins: the window
+    /// (measured, then guessed), then interval validity, then whether
+    /// anything is cached, then freshness, and only then the quota ceiling.
+    /// A fresh session at 100% quota therefore reports freshness rather than
+    /// quota, which the probe pins — otherwise it would be an accident of
+    /// how the guards happen to be written.
     func ineligibilityReason(
         now: Date,
         interval: TimeInterval = KeepAliveGate.defaultInterval,
         rateLimitPct: Int,
         hasCustomApi: Bool
     ) -> String? {
-        if hasCustomApi { return "custom API provider (cache window likely 5m, not 1h)" }
+        switch observedTTL {
+        case .fiveMinutes:
+            return "cache window is 5m (measured on the wire) — a refresh would be a full write"
+        case .oneHour:
+            break
+        case nil:
+            if hasCustomApi { return "custom API provider (cache window unmeasured, likely 5m, not 1h)" }
+        }
         // `Int(_: Double)` traps on a non-finite value, and the interval
         // arrives as a parameter. `CANOPY_KEEPALIVE_MINUTES=inf` parses to
         // `.infinity`, and the coordinator rejects it one step earlier

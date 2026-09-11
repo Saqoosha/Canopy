@@ -4906,6 +4906,86 @@ enum SidebarLogicProbe {
                    gate.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: true)?
                        .contains("5m") == true)
 
+            // --- The window read off the wire outranks the endpoint guess.
+            //
+            // `usage.cache_creation` splits written tokens by TTL; the CC
+            // extension's own countdown reads the same two fields. A
+            // measured 5m declines a subscriber session outright, a
+            // measured 1h permits a custom-endpoint session the proxy would
+            // have refused, and a frame that wrote nothing (a pure cache
+            // hit) is no evidence and must not erase the last reading.
+            func usage(oneHour: Int, fiveMin: Int) -> [String: Any] {
+                ["cache_creation": ["ephemeral_1h_input_tokens": oneHour, "ephemeral_5m_input_tokens": fiveMin]]
+            }
+            record("observedTTL reads 1h off the wire",
+                   KeepAliveGate.observedTTL(inUsage: usage(oneHour: 630, fiveMin: 0)) == .oneHour)
+            record("observedTTL reads 5m off the wire",
+                   KeepAliveGate.observedTTL(inUsage: usage(oneHour: 0, fiveMin: 4200)) == .fiveMinutes)
+            record("observedTTL prefers 1h when both are written",
+                   KeepAliveGate.observedTTL(inUsage: usage(oneHour: 1, fiveMin: 9999)) == .oneHour)
+            record("observedTTL is nil for a pure cache hit",
+                   KeepAliveGate.observedTTL(inUsage: usage(oneHour: 0, fiveMin: 0)) == nil)
+            record("observedTTL is nil without a cache_creation breakdown",
+                   KeepAliveGate.observedTTL(inUsage: ["cache_read_input_tokens": 204712]) == nil)
+
+            var measured5m = KeepAliveGate()
+            measured5m.noteActivity(at: t0)
+            measured5m.noteObservedTTL(.fiveMinutes)
+            record("KeepAliveGate declines a measured 5m window even when due on a subscriber",
+                   measured5m.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+            // `now: t0` on purpose: the session is still fresh, so this is
+            // green only if the measured-5m refusal is consulted AHEAD of
+            // freshness — the ordering the doc calls a property, not an
+            // accident. At `due` it passed with the branch moved last.
+            record("KeepAliveGate reports the measured 5m window ahead of freshness",
+                   measured5m.ineligibilityReason(now: t0, interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("5m (measured") == true)
+
+            var measured1h = KeepAliveGate()
+            measured1h.noteActivity(at: t0)
+            measured1h.noteObservedTTL(.oneHour)
+            record("KeepAliveGate permits a measured 1h window on a custom endpoint",
+                   measured1h.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: true) == nil)
+            record("KeepAliveGate still declines a measured 1h window while fresh",
+                   measured1h.ineligibilityReason(now: t0, interval: interval, rateLimitPct: 0, hasCustomApi: true) != nil)
+            measured1h.noteObservedTTL(nil)
+            record("KeepAliveGate keeps the last reading when a frame wrote nothing",
+                   measured1h.observedTTL == .oneHour)
+            measured1h.noteObservedTTL(.fiveMinutes)
+            record("KeepAliveGate follows a later reading that moved the window",
+                   measured1h.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+
+            // --- cacheWindowReading: which frames feed the gate. Lifted out
+            // of `trackCacheWindow` because with the parse inline every one
+            // of these mutations was green: reading `usage` one nesting
+            // level up, dropping the main-conversation guard, dropping the
+            // `message_start` case. What the block still cannot pin is the
+            // tracker's position in the pipeline (ahead of the keep-alive
+            // split, behind the recap drop), the `recapRequestInFlight`
+            // guard on the stamp, and the wiring from each reading to
+            // `noteApiActivity` / `noteObservedTTL` — all need a live shim.
+            func frame(_ ioMsg: [String: Any]) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "io_message", "message": ioMsg] as [String: Any]]
+            }
+            let messageStart = frame(["type": "stream_event", "event": ["type": "message_start", "message": ["usage": usage(oneHour: 9, fiveMin: 0)]]])
+            record("cacheWindowReading reads message_start as a request start",
+                   ShimProcess.cacheWindowReading(messageStart) == .requestStarted)
+            record("cacheWindowReading ignores other stream events",
+                   ShimProcess.cacheWindowReading(frame(["type": "stream_event", "event": ["type": "content_block_delta"]])) == nil)
+            let mainAssistant = frame(["type": "assistant", "message": ["model": "claude-opus-5", "usage": usage(oneHour: 630, fiveMin: 0)]])
+            record("cacheWindowReading reads a main-conversation assistant frame's TTL",
+                   ShimProcess.cacheWindowReading(mainAssistant) == .usage(.oneHour))
+            record("cacheWindowReading reports a pure cache hit as no evidence, not as no frame",
+                   ShimProcess.cacheWindowReading(frame(["type": "assistant", "message": ["model": "claude-opus-5", "usage": ["cache_read_input_tokens": 204712]]])) == .usage(nil))
+            record("cacheWindowReading ignores a subagent's assistant frame",
+                   ShimProcess.cacheWindowReading(frame(["type": "assistant", "parent_tool_use_id": "toolu_1", "message": ["model": "claude-opus-5", "usage": usage(oneHour: 630, fiveMin: 0)]])) == nil)
+            record("cacheWindowReading ignores the recap fork's synthetic reply",
+                   ShimProcess.cacheWindowReading(frame(["type": "assistant", "message": ["model": "<synthetic>", "usage": usage(oneHour: 630, fiveMin: 0)]])) == nil)
+            record("cacheWindowReading reads usage from message, not from the frame",
+                   ShimProcess.cacheWindowReading(frame(["type": "assistant", "usage": usage(oneHour: 630, fiveMin: 0), "message": ["model": "claude-opus-5"]])) == nil)
+            record("cacheWindowReading ignores a non-io_message envelope",
+                   ShimProcess.cacheWindowReading(["type": "from-extension", "message": ["type": "update_state"]]) == nil)
+
             // --- Sending restarts the window and advances the counter
             var sent = KeepAliveGate()
             sent.noteActivity(at: t0)
@@ -4920,8 +5000,8 @@ enum SidebarLogicProbe {
             // --- isKeepAliveEcho: the swallow's only handle on "this turn
             // is ours". A keep-alive turn has an ordinary model id, so
             // unlike the recap there is no `<synthetic>` tag to fall back
-            // on and a miss here means the reply is swallowed while the
-            // prompt stays visible.
+            // on, and a miss here means the trackers count our turn as the
+            // user's (`isWorking`, a notification, an unread mark).
             func echoBlocks(_ text: String) -> [String: Any] {
                 ["type": "user", "message": [
                     "role": "user",
@@ -4946,6 +5026,24 @@ enum SidebarLogicProbe {
                    !ShimProcess.isKeepAliveEcho(echoBlocks("fix the failing test")))
             record("isKeepAliveEcho refuses a message with no message payload",
                    !ShimProcess.isKeepAliveEcho(["type": "user"]))
+
+            // --- keepAliveFrameForWebView: what the webview is handed.
+            func inner(_ m: [String: Any]?) -> [String: Any]? {
+                (m?["message"] as? [String: Any])?["message"] as? [String: Any]
+            }
+            record("keepAliveFrameForWebView marks the echo synthetic",
+                   inner(ShimProcess.keepAliveFrameForWebView(frame(echoString(KeepAliveGate.promptText))))?["isSynthetic"] as? Bool == true)
+            record("keepAliveFrameForWebView leaves another user frame alone",
+                   inner(ShimProcess.keepAliveFrameForWebView(frame(echoString("hi"))))?["isSynthetic"] == nil)
+            record("keepAliveFrameForWebView drops stream events",
+                   ShimProcess.keepAliveFrameForWebView(messageStart) == nil)
+            let reshapedMessage = inner(ShimProcess.keepAliveFrameForWebView(mainAssistant))?["message"] as? [String: Any]
+            record("keepAliveFrameForWebView empties the assistant content",
+                   (reshapedMessage?["content"] as? [Any])?.isEmpty == true)
+            record("keepAliveFrameForWebView keeps the assistant usage",
+                   reshapedMessage?["usage"] as? [String: Any] != nil)
+            record("keepAliveFrameForWebView passes a result through",
+                   inner(ShimProcess.keepAliveFrameForWebView(frame(["type": "result", "subtype": "success"])))?["subtype"] as? String == "success")
 
             // --- The prompt's TAG is load-bearing twice over: the
             // prompt-history skip list matches on it, and the replay filter
@@ -5040,10 +5138,11 @@ enum SidebarLogicProbe {
             record("KeepAliveGate never moves the activity stamp backwards",
                    backGate.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
 
-            // --- The SWALLOW. This is the part of the feature that deletes
-            // messages, and the part whose one shipped bug was a wrong
-            // swallow — reverting the `system/init` case used to leave the
-            // whole suite green while the pane spun forever.
+            // --- The SWALLOW. "Swallow" means skip the trackers; every
+            // frame still reaches the webview (PR #216). This is the part
+            // whose one shipped bug was a wrong swallow — reverting the
+            // `system/init` case used to leave the whole suite green while,
+            // in the days frames were dropped, the pane spun forever.
             func envelope(_ ioMsg: [String: Any]) -> [String: Any] {
                 ["type": "from-extension", "message": ["type": "io_message", "message": ioMsg] as [String: Any]]
             }
@@ -5086,8 +5185,8 @@ enum SidebarLogicProbe {
                    ShimProcess.keepAliveDisposition(streamMsg, inFlight: true, echoSeen: true) == .swallow)
             record("disposition never swallows rate_limit_event",
                    ShimProcess.keepAliveDisposition(rateLimitMsg, inFlight: true, echoSeen: true) == .passThrough)
-            // Claiming a result without the echo eats the next REAL turn's,
-            // and nothing else clears the webview's busy flag.
+            // Claiming a result without the echo eats the next REAL turn's
+            // from the trackers' view: `isWorking` never falls again.
             record("disposition abandons the flight on a result with no echo",
                    ShimProcess.keepAliveDisposition(okResult, inFlight: true, echoSeen: false) == .abandonFlightPassingThrough)
             record("disposition completes the flight on a successful result",
@@ -5102,7 +5201,7 @@ enum SidebarLogicProbe {
             record("disposition treats an unrecognised result shape as success",
                    ShimProcess.keepAliveDisposition(envelope(["type": "result"]), inFlight: true, echoSeen: true) == .completeFlight(refreshed: true))
 
-            // --- Replay. The live swallow keeps the transcript clean only
+            // --- Replay. The live reshaping keeps the screen clean only
             // for the process that injected; the JSONL keeps a real user
             // record plus a real reply, so reopening a session kept warm
             // overnight replayed a dozen bubble pairs.

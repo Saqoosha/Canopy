@@ -35,7 +35,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeepAlive")
 ///
 /// Declining past the TTL is the obvious guard and is deliberately not
 /// applied, because its wrong state is easy to name: `lastActivityAt` only
-/// advances on a real turn or a sent refresh, so a pane declined for being
+/// advances while something is talking to the API — a real turn's requests,
+/// a sent refresh, a remote permission decision — so a pane declined for being
 /// too stale would be declined forever after a single long sleep, and the
 /// feature would switch itself off permanently for anyone who closes the
 /// lid. Fixing that needs a stamp-on-decline, which is the optimistic-stamp
