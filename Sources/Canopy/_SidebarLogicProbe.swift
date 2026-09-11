@@ -4906,6 +4906,51 @@ enum SidebarLogicProbe {
                    gate.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: true)?
                        .contains("5m") == true)
 
+            // --- The window read off the wire outranks the endpoint guess.
+            //
+            // `usage.cache_creation` splits written tokens by TTL; the CC
+            // extension's own countdown reads the same two fields. A
+            // measured 5m declines a subscriber session outright, a
+            // measured 1h permits a custom-endpoint session the proxy would
+            // have refused, and a frame that wrote nothing (a pure cache
+            // hit) is no evidence and must not erase the last reading.
+            func usage(oneHour: Int, fiveMin: Int) -> [String: Any] {
+                ["cache_creation": ["ephemeral_1h_input_tokens": oneHour, "ephemeral_5m_input_tokens": fiveMin]]
+            }
+            record("observedTTL reads 1h off the wire",
+                   KeepAliveGate.observedTTL(inUsage: usage(oneHour: 630, fiveMin: 0)) == .oneHour)
+            record("observedTTL reads 5m off the wire",
+                   KeepAliveGate.observedTTL(inUsage: usage(oneHour: 0, fiveMin: 4200)) == .fiveMinutes)
+            record("observedTTL prefers 1h when both are written",
+                   KeepAliveGate.observedTTL(inUsage: usage(oneHour: 1, fiveMin: 9999)) == .oneHour)
+            record("observedTTL is nil for a pure cache hit",
+                   KeepAliveGate.observedTTL(inUsage: usage(oneHour: 0, fiveMin: 0)) == nil)
+            record("observedTTL is nil without a cache_creation breakdown",
+                   KeepAliveGate.observedTTL(inUsage: ["cache_read_input_tokens": 204712]) == nil)
+
+            var measured5m = KeepAliveGate()
+            measured5m.noteActivity(at: t0)
+            measured5m.noteObservedTTL(.fiveMinutes)
+            record("KeepAliveGate declines a measured 5m window even when due on a subscriber",
+                   measured5m.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+            record("KeepAliveGate says the 5m window was measured",
+                   measured5m.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("measured") == true)
+
+            var measured1h = KeepAliveGate()
+            measured1h.noteActivity(at: t0)
+            measured1h.noteObservedTTL(.oneHour)
+            record("KeepAliveGate permits a measured 1h window on a custom endpoint",
+                   measured1h.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: true) == nil)
+            record("KeepAliveGate still declines a measured 1h window while fresh",
+                   measured1h.ineligibilityReason(now: t0, interval: interval, rateLimitPct: 0, hasCustomApi: true) != nil)
+            measured1h.noteObservedTTL(nil)
+            record("KeepAliveGate keeps the last reading when a frame wrote nothing",
+                   measured1h.observedTTL == .oneHour)
+            measured1h.noteObservedTTL(.fiveMinutes)
+            record("KeepAliveGate follows a later reading that moved the window",
+                   measured1h.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
+
             // --- Sending restarts the window and advances the counter
             var sent = KeepAliveGate()
             sent.noteActivity(at: t0)

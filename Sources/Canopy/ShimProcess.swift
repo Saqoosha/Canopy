@@ -697,8 +697,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return !(inherited ?? "").isEmpty
     }
 
-    /// **Called at the START of a turn, never at its end, and that is the
-    /// whole correctness argument.** A prompt-cache entry's lifetime runs
+    /// **Called at the START of a request, never at a turn's end, and that
+    /// is the whole correctness argument.** A prompt-cache entry's lifetime runs
     /// from the start of the request that writes or reads it, and generation
     /// time counts against it (Anthropic's prompt-caching reference). A
     /// Claude Code turn routinely runs many minutes, so stamping at `result`
@@ -708,13 +708,63 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// long agentic turns Canopy exists for. An earlier revision did stamp
     /// at turn end and called the error "seconds"; it is minutes.
     ///
-    /// Stamping at turn start is conservative in the safe direction: an
+    /// Stamping at submission is conservative in the safe direction: an
     /// agentic turn issues many requests and each one re-arms the entry, so
     /// the true expiry is later than this estimate. The cost of being early
     /// is one extra refresh; the cost of being late is the miss this exists
-    /// to prevent.
+    /// to prevent. `trackCacheWindow` closes most of that gap by stamping
+    /// again at each request's `message_start`.
     private func noteApiActivity() {
         keepAliveGate.noteActivity(at: Date())
+    }
+
+    /// Feed `KeepAliveGate` the two things the wire says about the cache
+    /// window: which TTL the API granted, and when each request went out.
+    ///
+    /// Deliberately its own tracker rather than a branch of
+    /// `extractStatusData`, which returns early without a `statusBarData`
+    /// — the gate must not depend on the status bar being mounted.
+    ///
+    /// The TTL is read off main-conversation `assistant` frames only: a
+    /// subagent's `usage` describes the subagent's own prefix, which can be
+    /// on a different window from the conversation this defends.
+    ///
+    /// The per-request stamp is on `message_start`, which the CLI emits
+    /// once per API request within a turn (and, per the guard's comment in
+    /// `extractStatusData`, never for a subagent). `noteApiActivity` at
+    /// submission already covers the turn's FIRST request; a long agentic
+    /// turn issues many more, and the entry's lifetime runs from the last
+    /// of them. Without this stamp a 30-minute turn was declared stale
+    /// 30 minutes before it was, costing one refresh per long turn. The
+    /// frame arrives one time-to-first-token after the request started,
+    /// which puts the estimate late by seconds against a five-minute
+    /// margin — the same anchor the extension's countdown uses.
+    private func trackCacheWindow(_ message: [String: Any]) {
+        guard message["type"] as? String == "from-extension",
+              let nested = message["message"] as? [String: Any],
+              nested["type"] as? String == "io_message",
+              let ioMsg = nested["message"] as? [String: Any]
+        else { return }
+        switch ioMsg["type"] as? String {
+        case "stream_event":
+            if let event = ioMsg["event"] as? [String: Any],
+               event["type"] as? String == "message_start"
+            {
+                noteApiActivity()
+            }
+        case "assistant":
+            guard Self.isMainConversationMessage(ioMsg),
+                  let msg = ioMsg["message"] as? [String: Any],
+                  let usage = msg["usage"] as? [String: Any]
+            else { return }
+            let before = keepAliveGate.observedTTL
+            keepAliveGate.noteObservedTTL(KeepAliveGate.observedTTL(inUsage: usage))
+            if let after = keepAliveGate.observedTTL, after != before {
+                logger.notice("keep-alive \(self.keepAliveLogLabel, privacy: .public): cache window measured as \(after == .oneHour ? "1h" : "5m", privacy: .public)")
+            }
+        default:
+            break
+        }
     }
 
     /// Submit the prompt the user typed on the launch screen, if there is one.
@@ -1599,24 +1649,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// What `consumeKeepAliveTraffic` should do with one message.
     ///
-    /// Exists so the swallow — the part of this feature that DELETES messages,
-    /// and the part whose one shipped bug was a wrong swallow — is decidable
-    /// by a pure function the probe can reach. The earlier claim that it could
-    /// not be was wrong: the decision reads the message and two Bools and
-    /// nothing else, which is exactly the shape `strippingRecapFromReplay`
-    /// already has. Reverting the `system/init` swallow used to leave the
-    /// whole suite green; it is now one red assertion.
+    /// Exists so the swallow — the part of this feature that hides a turn
+    /// from Canopy's own trackers, and the part whose one shipped bug was a
+    /// wrong swallow — is decidable by a pure function the probe can reach.
+    /// The earlier claim that it could not be was wrong: the decision reads
+    /// the message and two Bools and nothing else, which is exactly the
+    /// shape `strippingRecapFromReplay` already has. Reverting the
+    /// `system/init` swallow used to leave the whole suite green; it is now
+    /// one red assertion.
+    ///
+    /// "Swallow" here means **skip the trackers**. Every swallowed frame is
+    /// still forwarded to the webview — see `consumeKeepAliveTraffic` for why
+    /// that changed and what hides the turn on screen instead.
     enum KeepAliveDisposition: Equatable {
         /// Not ours, or nothing in flight. The message continues down the
         /// pipeline untouched.
         case passThrough
-        /// Drop it, changing no state.
+        /// Skip the trackers, changing no state.
         case swallow
-        /// Drop it, and record that the CLI has acknowledged our injection.
+        /// Skip the trackers, and record that the CLI has acknowledged our
+        /// injection.
         case swallowMarkingEcho
-        /// Drop it and end the flight. `refreshed` is false when the turn
-        /// reported an error, which is NOT a refresh — see the enum's use in
-        /// `consumeKeepAliveTraffic`.
+        /// Skip the trackers and end the flight. `refreshed` is false when
+        /// the turn reported an error, which is NOT a refresh — see the
+        /// enum's use in `consumeKeepAliveTraffic`.
         case completeFlight(refreshed: Bool)
         /// End the flight but let the message through: a `result` arrived
         /// without our echo, so the turn was somebody else's.
@@ -1664,9 +1720,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         switch ioMsg["type"] as? String {
         case "command_lifecycle":
-            // Emitted twice at the start of the turn. Drives the command
-            // chip the webview renders in the transcript — visible, and
-            // attached to a message the user never typed.
+            // Emitted twice at the start of the turn. Ours, so the trackers
+            // must not see it; the webview gets it anyway and renders
+            // nothing for it that the hide script does not cover (measured
+            // on 2.1.268 — no chip appeared).
             return .swallow
 
         case "system" where ioMsg["subtype"] as? String == "init":
@@ -1678,15 +1735,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // `command_lifecycle` twice, then `system/init`, then
             // `system/status`, all BEFORE the echo. The webview treats any
             // init as "a turn just started" and only a `result` clears it —
-            // which we also swallow — so the pane spun forever with no error
-            // and no recovery. The same failure `consumeRecapTraffic`
-            // documents for the recap, rediscovered by not believing it
-            // applied here.
+            // which at the time was DROPPED — so the pane spun forever with
+            // no error and no recovery. The same failure
+            // `consumeRecapTraffic` documents for the recap, rediscovered by
+            // not believing it applied here.
             //
-            // Safe to drop mid-session for the reason given there: the
-            // webview only reads `session_id` off an init when it does not
-            // already have one, and a refresh cannot fire before the
-            // session is identified.
+            // Since the swallow stopped dropping frames from the webview,
+            // init and result both reach it and the busy flag clears on its
+            // own — measured on 2.1.268, with the pane idle. The disposition
+            // is still `.swallow` because the trackers must not see an init
+            // for a turn the user did not start.
             //
             // `system/status` is deliberately NOT swallowed. It rides the
             // same burst, but it carries the permission-mode UI state
@@ -1698,15 +1756,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         case "user":
             // The extension echoes the submitted prompt back so the webview
-            // can render it as a bubble. Ours must not appear. Matched on
-            // content, so a genuine prompt racing the refresh still reaches
-            // the transcript.
+            // can render it as a bubble. Ours is the one frame the trackers
+            // must never count as a user turn, and it is what
+            // `KeepAliveHideScript` finds on screen. Matched on content, so a
+            // genuine prompt racing the refresh still counts.
             return Self.isKeepAliveEcho(ioMsg) ? .swallowMarkingEcho : .passThrough
 
         case "assistant", "stream_event":
             // Only after the echo. Before it, a turn on the wire cannot be
             // ours — the CLI has not acknowledged our injection yet — and
-            // swallowing it would delete somebody else's reply.
+            // swallowing it would hide somebody else's reply from the
+            // trackers.
             return echoSeen ? .swallow : .passThrough
 
         case "result":
@@ -1724,27 +1784,48 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Swallow the CLI traffic generated by our own refresh injection.
-    /// Returns true when the message was consumed and must NOT reach the
-    /// webview nor any tracker.
+    /// Classify the CLI traffic generated by our own refresh injection.
+    /// Returns true when the message is ours and must skip every tracker;
+    /// the caller still forwards it to the webview.
     ///
-    /// **Why this drops before the trackers rather than after.** The
-    /// pipeline already has a later slot (`isCanopyOwnedResponse`) that
-    /// hides a message from the webview while letting the trackers see it,
-    /// and using it here looks strictly better — the `result` carries real
-    /// usage the context meter wants, unlike the recap's zeroed one. It is
-    /// wrong for three separate reasons, each of which fires overnight on a
-    /// machine nobody is at. `trackWorkingState` would flip `isWorking`, so
-    /// every pane's sidebar dot and MacroPad key would breathe "working"
-    /// once an hour all night. Its `result` branch calls
-    /// `postTaskCompletedNotification()`, so each refresh would raise a
-    /// user notification. And a turn finishing is what marks a session
-    /// unread, so by morning the pad would be lit green across every pane
-    /// with nothing behind it. What that costs instead is one tick of
-    /// context-meter staleness — the meter misses the ~40 tokens the
-    /// refresh itself added, until the next real turn's `result` supersedes
-    /// it. `rate_limit_event` is a separate io_message type and falls
-    /// through the `default` branch, so quota data still lands.
+    /// **Why the trackers never see it.** The pipeline has a later slot
+    /// (`isCanopyOwnedResponse`) that hides a message from the webview
+    /// while letting the trackers see it, and using it here looks strictly
+    /// better — the `result` carries real usage the context meter wants,
+    /// unlike the recap's zeroed one. It is wrong for three separate
+    /// reasons, each of which fires overnight on a machine nobody is at.
+    /// `trackWorkingState` would flip `isWorking`, so every pane's sidebar
+    /// dot and MacroPad key would breathe "working" once an hour all night.
+    /// Its `result` branch calls `postTaskCompletedNotification()`, so each
+    /// refresh would raise a user notification. And a turn finishing is
+    /// what marks a session unread, so by morning the pad would be lit
+    /// green across every pane with nothing behind it. What that costs
+    /// instead is one tick of context-meter staleness — the meter misses
+    /// the ~40 tokens the refresh itself added, until the next real turn's
+    /// `result` supersedes it. `rate_limit_event` is a separate io_message
+    /// type and falls through the `default` branch, so quota data still
+    /// lands.
+    ///
+    /// **Why the webview DOES see it, since 2.1.268.** The extension's
+    /// composer now shows a prompt-cache countdown, computed inside the
+    /// webview from the `assistant` frames it receives (TTL from
+    /// `usage.cache_creation`, anchor from the frame's arrival). A refresh
+    /// the webview never saw therefore did not move that countdown:
+    /// measured, a refresh at 14:23:02 left the indicator at 56m forty
+    /// seconds later, and an hour after the user's own last turn it would
+    /// have read "Prompt cache likely expired" over a cache Canopy had just
+    /// re-armed — the display contradicting the feature exactly where the
+    /// feature was working. Forwarding the frames fixed it (60m nineteen
+    /// seconds after the refresh, same build, same pane) and, with `result`
+    /// reaching the webview too, its busy flag clears on its own. What the
+    /// webview then renders — our prompt bubble and the model's `OK` — is
+    /// hidden on screen by `KeepAliveHideScript`, matched on
+    /// `KeepAliveGate.promptPrefix`. The replay filter
+    /// (`strippingKeepAliveArtifacts`) is unchanged, so a webview reload
+    /// mid-session hands the extension a transcript with no refreshes in it
+    /// and the countdown restarts from the last real turn; that reload
+    /// happens only on a web-content crash, and the cost is a display that
+    /// is conservative rather than wrong.
     ///
     /// A no-op unless a refresh is actually in flight.
     private func consumeKeepAliveTraffic(_ message: [String: Any]) -> Bool {
@@ -1754,7 +1835,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // line, for the reason `consumeRecapTraffic` gives: the swallow list
         // is derived from what the extension actually emits, and that set is
         // documented nowhere. When it drifts, this is the only record of
-        // what leaked into the webview. `notice`, not `info`: this
+        // what reached the trackers. `notice`, not `info`: this
         // subsystem's failure mode is silence at 3am, and `info` lives only
         // in a ring buffer that has rolled over long before anyone asks.
         // Bounded at a handful of lines per flight, once an interval.
@@ -1811,8 +1892,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // NOT retried early.** Rolling the injection's stamp back so
                 // the next tick could retry was tried and REMOVED: nothing
                 // else holds the session back — the latch is cleared, and
-                // `isWorking` never rose because every keep-alive frame is
-                // dropped ahead of `trackWorkingState` — so a rolled-back
+                // `isWorking` never rose because every keep-alive frame
+                // skips `trackWorkingState` — so a rolled-back
                 // failure made the session eligible again on the very next
                 // tick, 60 seconds later. Against a persistent failure (a
                 // standing 429, expired auth, a wedged CLI) that is one real
@@ -3319,10 +3400,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return
             }
             if consumeKeepAliveTraffic(innerMessage) {
+                // The webview still gets it; only the trackers are skipped.
+                // The reasons for each half are on `consumeKeepAliveTraffic`.
+                sendToWebView(innerMessage)
                 return
             }
             innerMessage = Self.strippingRecapFromReplay(innerMessage)
             innerMessage = patchAuthIfNeeded(innerMessage)
+            trackCacheWindow(innerMessage)
             trackWorkingState(innerMessage)
             trackPermissionState(stdoutMessage: msg)
             extractStatusData(innerMessage)

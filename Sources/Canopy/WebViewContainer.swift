@@ -390,6 +390,12 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
+        ucc.addUserScript(WKUserScript(
+            source: KeepAliveHideScript.javascript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
 
@@ -853,6 +859,12 @@ final class ConsoleLogHandler: NSObject, WKScriptMessageHandler {
             logger.error("[JS] \(msg, privacy: .public)")
         } else if level == "warn" {
             logger.warning("[JS] \(msg, privacy: .public)")
+        } else if msg.hasPrefix("[keepalive-hide]") {
+            // Archived, not ring-buffered: this line is read the morning
+            // after, to say whether a refresh turn was hidden or leaked. Once
+            // an hour per pane, so the cost is bounded. Same treatment as
+            // `[cjk-emphasis]` in `ShimProcess`.
+            logger.notice("[JS] \(msg, privacy: .public)")
         } else {
             logger.info("[JS] \(msg, privacy: .public)")
         }
