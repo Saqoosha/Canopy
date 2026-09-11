@@ -486,7 +486,8 @@ private struct DetailLauncher: View {
                         remoteHost: localAppState.remoteHost,
                         customApi: localAppState.customApi,
                         target: target,
-                        initialPrompt: localAppState.initialPrompt
+                        initialPrompt: localAppState.initialPrompt,
+                        settledTitle: localAppState.settledTitle
                     )
                     // A session started, so the previous failure is answered.
                     store.lastSessionFailure = nil

@@ -2050,6 +2050,23 @@ enum SidebarLogicProbe {
                    String(repeating: "word ", count: WorktreeBranchNamer.maxRawLength)) == nil)
         record("branch namer: empty output is nil",
                WorktreeBranchNamer.sanitize("   \n  ") == nil)
+        // Two-line answers: branch and session title from one call.
+        record("branch namer: parse splits branch and title",
+               WorktreeBranchNamer.parse("fix-login-race\nFix login race condition")
+                   == .init(branch: "fix-login-race", title: "Fix login race condition"))
+        record("branch namer: parse keeps the branch when the title is missing",
+               WorktreeBranchNamer.parse("fix-login-race")
+                   == .init(branch: "fix-login-race", title: nil))
+        // Without the strip, the label is slugified into the branch name.
+        record("branch namer: parse strips Branch:/Title: labels",
+               WorktreeBranchNamer.parse("Branch: fix-login-race\nTitle: Fix login race")
+                   == .init(branch: "fix-login-race", title: "Fix login race"))
+        record("branch namer: parse drops an over-long title, not the branch",
+               WorktreeBranchNamer.parse(
+                   "fix-login-race\n" + String(repeating: "a", count: SessionTitleGenerator.maxTitleLength + 1))
+                   == .init(branch: "fix-login-race", title: nil))
+        record("branch namer: parse with no usable branch is nil",
+               WorktreeBranchNamer.parse("  \n ") == nil)
         // The one spelling the CLI rejects outright: a bare `{}` fails with
         // "mcpServers: Invalid input: expected record, received undefined".
         record("branch namer: empty MCP map keeps the spelling the CLI accepts",
@@ -7682,6 +7699,20 @@ enum SidebarLogicProbe {
             record("titlegate: the cap is checked before the signal gate",
                    Gate(userOwnsTitle: false, isRunning: false, generationCount: cap, prompts: ["hi"])
                        .decide() == .doNothing(.capReached))
+            // A title settled with its worktree branch is final: generation
+            // count 0 and a rich prompt, the state that would otherwise run.
+            record("titlegate: a settled title blocks generation",
+                   Gate(userOwnsTitle: false, isRunning: false, generationCount: 0, prompts: rich,
+                        isSettled: true)
+                       .decide() == .doNothing(.settled))
+            record("titlegate: a settled title blocks the thin-prompt fallback too",
+                   Gate(userOwnsTitle: false, isRunning: false, generationCount: 0, prompts: ["hi"],
+                        isSettled: true)
+                       .decide() == .doNothing(.settled))
+            record("titlegate: ownership outranks settled",
+                   Gate(userOwnsTitle: true, isRunning: false, generationCount: 0, prompts: rich,
+                        isSettled: true)
+                       .decide() == .doNothing(.userOwnsTitle))
         }
 
         // MARK: - SessionTitleStore
@@ -7736,6 +7767,42 @@ enum SidebarLogicProbe {
                    !SessionTitleStore.isUserOwned(other))
             record("titlestore: clearUserOwned keeps the title",
                    SessionTitleStore.title(forSessionId: other) == "Auto again")
+        }
+
+        // MARK: SessionTitleStore — the settled mark (worktree-named titles)
+        do {
+            let snapshot = SessionTitleStore._probeSnapshot()
+            defer { SessionTitleStore._probeRestore(snapshot) }
+
+            let sid = UUID().uuidString
+            let other = UUID().uuidString
+
+            SessionTitleStore.save(title: "Plain", forSessionId: sid)
+            record("titlestore: an automatic title is not settled",
+                   !SessionTitleStore.isSettled(sid))
+            SessionTitleStore.save(title: "Fix login race", forSessionId: sid, settled: true)
+            record("titlestore: a settled save marks the session settled",
+                   SessionTitleStore.isSettled(sid))
+            // Sticky like the user-owned mark: the shim re-saves its title on
+            // every `rename_tab`, and those saves pass no flag.
+            SessionTitleStore.save(title: "Fix login race", forSessionId: sid)
+            record("titlestore: a later automatic save keeps the settled mark",
+                   SessionTitleStore.isSettled(sid))
+            record("titlestore: settled is not user-owned",
+                   !SessionTitleStore.isUserOwned(sid))
+            SessionTitleStore.migrate(fromSessionId: sid, toSessionId: other)
+            record("titlestore: migrate carries the settled mark",
+                   SessionTitleStore.isSettled(other) && !SessionTitleStore.isSettled(sid))
+
+            // A record written before the field existed must decode. A
+            // non-Optional field would fail the whole blob, and `load()` parks
+            // and resets on failure — every stored title gone.
+            let legacy = UUID().uuidString
+            SessionTitleStore._probeSetRawBlob(#"{"\#(legacy)":{"text":"Old","userOwned":true}}"#)
+            record("titlestore: a record without the settled key still decodes",
+                   SessionTitleStore.title(forSessionId: legacy) == "Old"
+                   && SessionTitleStore.isUserOwned(legacy)
+                   && !SessionTitleStore.isSettled(legacy))
         }
 
         // MARK: - Title-generation environment
@@ -7818,6 +7885,19 @@ enum SidebarLogicProbe {
             record("eviction: a user-named record outlives automatic ones",
                    SessionTitleStore.title(forSessionId: owned) == "human"
                    && SessionTitleStore.isUserOwned(owned))
+
+            // Same shape for the settled mark: its id is the smallest, so
+            // without the rank it is the victim.
+            SessionTitleStore._probeReset()
+            for _ in 0..<(cap - 1) {
+                SessionTitleStore.save(title: "auto", forSessionId: UUID().uuidString)
+            }
+            let settledId = "00000000-0000-4000-8000-000000000003"
+            SessionTitleStore.save(title: "settled", forSessionId: settledId, settled: true)
+            SessionTitleStore.save(title: "newest", forSessionId: "00000000-0000-4000-8000-000000000004")
+            record("eviction: a settled record outlives ordinary automatic ones",
+                   SessionTitleStore.title(forSessionId: settledId) == "settled"
+                   && SessionTitleStore.isSettled(settledId))
 
             // --- legacy migration -------------------------------------------
             // The one path standing between an existing user and losing every

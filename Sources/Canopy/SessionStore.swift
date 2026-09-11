@@ -586,11 +586,12 @@ final class SessionStore {
         remoteHost: String? = nil,
         customApi: ModelProvider? = nil,
         target: PaneTarget = .focused,
-        initialPrompt: String? = nil
+        initialPrompt: String? = nil,
+        settledTitle: String? = nil
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
-        let title = sessionTitle ?? "Untitled"
+        let title = sessionTitle ?? settledTitle ?? "Untitled"
         let project = remoteHost.map { "\($0):\(directory.lastPathComponent)" }
             ?? GitWorktree.projectDisplayName(for: directory)
         // For a brand-new session this UUID is only a placeholder; ShimProcess's
@@ -628,6 +629,7 @@ final class SessionStore {
         // when the pane mounts. `ShimProcess` reads and clears it once the CLI
         // announces itself.
         session.pendingInitialPrompt = initialPrompt
+        session.pendingSettledTitle = settledTitle
         // The launcher's prompt has exactly one hop left after this — a shim
         // that does not exist yet reads it once the CLI announces itself. This
         // line is what splits "the prompt never got here" from "it got here and

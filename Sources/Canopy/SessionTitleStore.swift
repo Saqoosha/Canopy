@@ -24,9 +24,15 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "TitleStore"
 /// every write, and the legacy read runs until the first write lands.
 enum SessionTitleStore {
     /// One stored title. `userOwned` is part of the value, not a parallel set.
+    ///
+    /// `settled` is Optional so records written before it existed still
+    /// decode: a synthesized `Decodable` requires a non-Optional key even when
+    /// the property has a default, and one record failing to decode parks the
+    /// whole store (see `load()`). Nil and false mean the same thing.
     private struct Record: Codable {
         var text: String
         var userOwned: Bool
+        var settled: Bool?
     }
 
     private static let key = "sessionTitles.v2"
@@ -47,17 +53,28 @@ enum SessionTitleStore {
     /// automatic regeneration. Passing `false` (the default) does NOT clear an
     /// existing mark — automatic generation must never be able to demote a
     /// title the user named. `clearUserOwned` is the only way back.
+    ///
+    /// `settled: true` marks an automatic title that must not be regenerated —
+    /// one written together with its worktree's branch name (see
+    /// `WorktreeBranchNamer`). It is sticky for the same reason: a later
+    /// automatic save of the same title must not un-settle it.
     /// Returns false when nothing was written, for any of three reasons: the id
     /// is not a CLI session UUID, the title is empty, or the store could not be
     /// read or encoded. The result is not decoration — a caller that ignores a
     /// rejected write shows the rename as applied while nothing was persisted,
     /// and the name evaporates at the next launch with no log on the path.
     @discardableResult
-    static func save(title: String, forSessionId sessionId: String, userOwned: Bool = false) -> Bool {
+    static func save(title: String, forSessionId sessionId: String, userOwned: Bool = false, settled: Bool = false) -> Bool {
         guard !title.isEmpty, UUID(uuidString: sessionId) != nil else { return false }
         guard case .ok(var records) = load() else { return false }
-        let wasUserOwned = records[sessionId]?.userOwned ?? false
-        records[sessionId] = Record(text: title, userOwned: userOwned || wasUserOwned)
+        let previous = records[sessionId]
+        let wasUserOwned = previous?.userOwned ?? false
+        let wasSettled = previous?.settled ?? false
+        records[sessionId] = Record(
+            text: title,
+            userOwned: userOwned || wasUserOwned,
+            settled: (settled || wasSettled) ? true : nil
+        )
         return write(evicting: records, protecting: sessionId)
     }
 
@@ -72,7 +89,14 @@ enum SessionTitleStore {
         all()[sessionId]?.userOwned ?? false
     }
 
-    /// Drop the human-authored mark, letting automatic generation resume.
+    /// Whether the stored title was settled at launch and must not be
+    /// regenerated. Independent of `isUserOwned`: a settled title is still an
+    /// automatic one, and a rename replaces it like any other.
+    static func isSettled(_ sessionId: String) -> Bool {
+        all()[sessionId]?.settled ?? false
+    }
+
+    /// Drop the human-authored mark.
     ///
     /// Nothing in the shipping UI calls this — `commitRename` treats empty
     /// input as "dismiss" rather than as "revert to automatic". It exists so
@@ -196,6 +220,14 @@ enum SessionTitleStore {
     /// carries no timestamp, so which of two equally-owned entries goes is
     /// arbitrary rather than oldest-first. Nothing here claims otherwise, and
     /// fixing it needs a new field.
+    /// Lower goes first. A settled record outranks an ordinary one because
+    /// losing it lets regeneration replace a title that matches its branch.
+    private static func evictionRank(_ record: Record?) -> Int {
+        guard let record else { return 0 }
+        if record.userOwned { return 2 }
+        return record.settled == true ? 1 : 0
+    }
+
     @discardableResult
     private static func write(evicting records: [String: Record], protecting protectedId: String?) -> Bool {
         var records = records
@@ -203,9 +235,9 @@ enum SessionTitleStore {
             let candidates = records.keys
                 .filter { $0 != protectedId }
                 .sorted { lhs, rhs in
-                    let l = records[lhs]?.userOwned ?? false
-                    let r = records[rhs]?.userOwned ?? false
-                    if l != r { return !l }
+                    let l = evictionRank(records[lhs])
+                    let r = evictionRank(records[rhs])
+                    if l != r { return l < r }
                     return lhs < rhs
                 }
             let doomed = candidates.prefix(records.count - maxEntries)
@@ -270,6 +302,12 @@ enum SessionTitleStore {
     /// key name.
     static func _probeCorrupt() {
         UserDefaults.standard.set(Data("not json".utf8), forKey: key)
+    }
+
+    /// Probe support: plant a raw v2 blob, to exercise decoding a record
+    /// written before a field existed.
+    static func _probeSetRawBlob(_ json: String) {
+        UserDefaults.standard.set(Data(json.utf8), forKey: key)
     }
 
     /// Probe support: whether an unreadable blob was parked rather than lost.
