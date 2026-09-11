@@ -2412,6 +2412,39 @@ enum SidebarLogicProbe {
                !ClaudeSessionHistory.shouldKeepSession(
                    projectExists: false, projectPath: "/repos/Canopy"))
 
+        // issue #222: a removed worktree's session spawns in the repo that
+        // worktree belonged to, recovered by name — but ONLY on a unique match,
+        // since opening against the wrong checkout is worse than not opening.
+        let goneWorktree = GitWorktree.worktreesRoot.appendingPathComponent("Canopy/gone-branch")
+        let realRepo = URL(fileURLWithPath: "/Users/hiko/repos/Personal/Canopy")
+        record("repoDirectory: unique name match resolves",
+               GitWorktree.repoDirectory(
+                   forMissingWorktree: goneWorktree,
+                   candidates: [URL(fileURLWithPath: "/repos/Other"), realRepo]) == realRepo)
+        record("repoDirectory: two repos sharing a name resolve to nothing",
+               GitWorktree.repoDirectory(
+                   forMissingWorktree: goneWorktree,
+                   candidates: [realRepo, URL(fileURLWithPath: "/elsewhere/Canopy")]) == nil)
+        record("repoDirectory: the same repo spelled twice is still one match",
+               GitWorktree.repoDirectory(
+                   forMissingWorktree: goneWorktree,
+                   candidates: [realRepo, URL(fileURLWithPath: "/Users/hiko/repos/Personal/./Canopy")])
+                   == realRepo)
+        record("repoDirectory: a near-miss name is not a match",
+               GitWorktree.repoDirectory(
+                   forMissingWorktree: goneWorktree,
+                   candidates: [URL(fileURLWithPath: "/repos/Canopy-Mobile")]) == nil)
+        record("repoDirectory: no candidates resolve to nothing",
+               GitWorktree.repoDirectory(forMissingWorktree: goneWorktree, candidates: []) == nil)
+        record("repoDirectory: a non-worktree path is never remapped",
+               GitWorktree.repoDirectory(
+                   forMissingWorktree: URL(fileURLWithPath: "/repos/Canopy"),
+                   candidates: [realRepo]) == nil)
+        record("repoDirectory: sibling layout resolves too",
+               GitWorktree.repoDirectory(
+                   forMissingWorktree: URL(fileURLWithPath: "/repos/Canopy-worktrees/gone"),
+                   candidates: [realRepo]) == realRepo)
+
         // VCS-reported branch wins over the folder-name guess when present.
         // Fixture folder "feature-foo" vs branch "feature/foo" — the slash
         // flatten that `git worktree add -b` does — so a match is not

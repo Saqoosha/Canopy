@@ -660,6 +660,31 @@ final class SessionStore {
         return session
     }
 
+    /// The directory a closed row should spawn in. Its own recorded directory,
+    /// except when that directory is GONE and was a worktree — then the
+    /// repository it belonged to, if that resolves unambiguously (issue #222).
+    ///
+    /// Only the spawn cwd moves; the row keeps its `<repo> · <branch>` label,
+    /// which is the only remaining record of which worktree this was. History
+    /// still replays from the original location: the extension's resume
+    /// precheck falls back to scanning every project folder for the session id
+    /// (measured on 2.1.268 — the `foundIn: "store"` stage, which requires a
+    /// unique hit), so a moved cwd does not drop the resume.
+    ///
+    /// Unresolvable falls through to the recorded path, which surfaces the
+    /// shim's "Directory not found" exactly as before.
+    private func spawnDirectory(for entry: SessionEntry) -> URL {
+        let recorded = entry.projectDirectory
+        guard !FileManager.default.fileExists(atPath: recorded.path),
+              let repo = GitWorktree.repoDirectory(
+                  forMissingWorktree: recorded,
+                  candidates: RecentDirectories.load()
+              )
+        else { return recorded }
+        logger.notice("Removed worktree: spawning the session in its repository instead")
+        return repo
+    }
+
     /// Open a closed local row by spawning a shim with --resume against the
     /// existing JSONL. If `permissionMode` is nil, falls back to the global
     /// default in `CanopySettings.defaultPermissionMode`.
@@ -681,7 +706,7 @@ final class SessionStore {
             return existing
         }
         return openNew(
-            directory: entry.projectDirectory,
+            directory: spawnDirectory(for: entry),
             resumeId: entry.id,
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,

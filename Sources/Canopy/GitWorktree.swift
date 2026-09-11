@@ -76,6 +76,32 @@ enum GitWorktree {
         worktreeParts(for: dir) != nil
     }
 
+    /// The live repository directory for a worktree path that no longer exists
+    /// — what a merged-and-removed worktree leaves behind (issue #222). The
+    /// worktree layout carries the repo's NAME (`<worktreesRoot>/<repo>/…`) but
+    /// never its path, and nothing persists the mapping, so it is recovered by
+    /// matching that name against directories known to be live.
+    ///
+    /// `candidates` are supplied by the caller (`RecentDirectories.load()`,
+    /// already filtered to existing non-worktree paths), which keeps this pure
+    /// and probe-reachable.
+    ///
+    /// **Resolves only on a UNIQUE match** — the same rule the CC extension
+    /// applies when it resolves a transcript by id across project folders. Two
+    /// checkouts sharing a folder name are indistinguishable from path shape
+    /// alone, and opening a session against the wrong one is worse than not
+    /// resolving it. Candidates are standardized before the count, so the same
+    /// repo spelled two ways stays one match.
+    static func repoDirectory(forMissingWorktree dir: URL, candidates: [URL]) -> URL? {
+        guard let parts = worktreeParts(for: dir) else { return nil }
+        var seen = Set<String>()
+        let matches = candidates
+            .map(\.standardizedFileURL)
+            .filter { $0.lastPathComponent == parts.repo }
+            .filter { seen.insert($0.path).inserted }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     // Purely lexical: standardizes the URL ("..", ".") then string-matches
     // the three known worktree layouts. Symlink resolution is skipped so this
     // stays cheap enough to call per sidebar-row render; false negatives are
