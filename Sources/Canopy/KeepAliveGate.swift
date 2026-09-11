@@ -45,16 +45,11 @@ struct KeepAliveGate: Equatable {
     /// and so `promptText` cannot be reworded out from under it.
     static let promptPrefix = "[Canopy keep-alive]"
 
-    /// The text injected as the keep-alive turn, and the exact string both
-    /// the echo match (`ShimProcess.isKeepAliveEcho`) and the on-screen hide
-    /// (`KeepAliveHideScript`) compare against.
+    /// The text injected as the keep-alive turn, and the exact string the
+    /// echo match (`ShimProcess.isKeepAliveEcho`) compares against.
     ///
-    /// One constant because the three uses must never drift, and neither
-    /// drift fails loudly. A wire-side mismatch means the trackers count
-    /// the turn — `isWorking` flips, a completion notification fires, the
-    /// session is marked unread — while the screen still hides it. A
-    /// script-side mismatch leaves the whole turn, prompt and `OK`, visible
-    /// once an hour.
+    /// One constant because a drift does not fail loudly: the trackers and
+    /// the screen would both treat our turn as the user's.
     ///
     /// It is written to be legible to two readers. The model, so the reply
     /// is one token and no tool runs — a request, not a constraint: the turn
@@ -67,9 +62,8 @@ struct KeepAliveGate: Equatable {
     ///
     /// It is NOT written for a human scrolling the transcript — an earlier
     /// revision claimed that, which contradicted the swallow and left the
-    /// intent genuinely ambiguous. These turns are hidden live
-    /// (`KeepAliveHideScript`) AND on replay
-    /// (`ShimProcess.strippingKeepAliveArtifacts`).
+    /// intent genuinely ambiguous. These turns are hidden live AND on
+    /// replay (`ShimProcess.strippingKeepAliveArtifacts`).
     static let promptText = "\(promptPrefix) Prompt-cache refresh, no action needed. Do not use any tool and do not think about this. Reply with exactly: OK"
 
     /// Which prompt-cache TTL the API actually granted this session, read off

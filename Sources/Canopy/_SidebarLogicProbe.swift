@@ -4961,8 +4961,9 @@ enum SidebarLogicProbe {
             // level up, dropping the main-conversation guard, dropping the
             // `message_start` case. What the block still cannot pin is the
             // tracker's position in the pipeline (ahead of the keep-alive
-            // split, behind the recap drop) and the `recapRequestInFlight`
-            // guard on the stamp — both need a live shim.
+            // split, behind the recap drop), the `recapRequestInFlight`
+            // guard on the stamp, and the wiring from each reading to
+            // `noteApiActivity` / `noteObservedTTL` — all need a live shim.
             func frame(_ ioMsg: [String: Any]) -> [String: Any] {
                 ["type": "from-extension", "message": ["type": "io_message", "message": ioMsg] as [String: Any]]
             }
@@ -4984,13 +4985,6 @@ enum SidebarLogicProbe {
                    ShimProcess.cacheWindowReading(frame(["type": "assistant", "usage": usage(oneHour: 630, fiveMin: 0), "message": ["model": "claude-opus-5"]])) == nil)
             record("cacheWindowReading ignores a non-io_message envelope",
                    ShimProcess.cacheWindowReading(["type": "from-extension", "message": ["type": "update_state"]]) == nil)
-
-            // --- KeepAliveHideScript embeds the WHOLE prompt, never the
-            // prefix. Its doc says why a prefix would hide a real turn that
-            // quotes the tag; this is the line that keeps the doc true.
-            // `promptText` has no JSON-special characters, so equality holds.
-            record("KeepAliveHideScript matches on the whole prompt text",
-                   KeepAliveHideScript.javascript.contains("var PROMPT = \"\(KeepAliveGate.promptText)\";"))
 
             // --- Sending restarts the window and advances the counter
             var sent = KeepAliveGate()
@@ -5032,6 +5026,24 @@ enum SidebarLogicProbe {
                    !ShimProcess.isKeepAliveEcho(echoBlocks("fix the failing test")))
             record("isKeepAliveEcho refuses a message with no message payload",
                    !ShimProcess.isKeepAliveEcho(["type": "user"]))
+
+            // --- keepAliveFrameForWebView: what the webview is handed.
+            func inner(_ m: [String: Any]?) -> [String: Any]? {
+                (m?["message"] as? [String: Any])?["message"] as? [String: Any]
+            }
+            record("keepAliveFrameForWebView marks the echo synthetic",
+                   inner(ShimProcess.keepAliveFrameForWebView(frame(echoString(KeepAliveGate.promptText))))?["isSynthetic"] as? Bool == true)
+            record("keepAliveFrameForWebView leaves another user frame alone",
+                   inner(ShimProcess.keepAliveFrameForWebView(frame(echoString("hi"))))?["isSynthetic"] == nil)
+            record("keepAliveFrameForWebView drops stream events",
+                   ShimProcess.keepAliveFrameForWebView(messageStart) == nil)
+            let reshapedMessage = inner(ShimProcess.keepAliveFrameForWebView(mainAssistant))?["message"] as? [String: Any]
+            record("keepAliveFrameForWebView empties the assistant content",
+                   (reshapedMessage?["content"] as? [Any])?.isEmpty == true)
+            record("keepAliveFrameForWebView keeps the assistant usage",
+                   reshapedMessage?["usage"] as? [String: Any] != nil)
+            record("keepAliveFrameForWebView passes a result through",
+                   inner(ShimProcess.keepAliveFrameForWebView(frame(["type": "result", "subtype": "success"])))?["subtype"] as? String == "success")
 
             // --- The prompt's TAG is load-bearing twice over: the
             // prompt-history skip list matches on it, and the replay filter
@@ -5189,7 +5201,7 @@ enum SidebarLogicProbe {
             record("disposition treats an unrecognised result shape as success",
                    ShimProcess.keepAliveDisposition(envelope(["type": "result"]), inFlight: true, echoSeen: true) == .completeFlight(refreshed: true))
 
-            // --- Replay. `KeepAliveHideScript` keeps the screen clean only
+            // --- Replay. The live reshaping keeps the screen clean only
             // for the process that injected; the JSONL keeps a real user
             // record plus a real reply, so reopening a session kept warm
             // overnight replayed a dozen bubble pairs.

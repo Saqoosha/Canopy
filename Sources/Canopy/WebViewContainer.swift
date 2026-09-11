@@ -390,12 +390,6 @@ struct WebViewContainer: NSViewRepresentable {
             forMainFrameOnly: true
         ))
 
-        ucc.addUserScript(WKUserScript(
-            source: KeepAliveHideScript.javascript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true
-        ))
-
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
 
@@ -859,15 +853,6 @@ final class ConsoleLogHandler: NSObject, WKScriptMessageHandler {
             logger.error("[JS] \(msg, privacy: .public)")
         } else if level == "warn" {
             logger.warning("[JS] \(msg, privacy: .public)")
-        } else if msg.hasPrefix("[keepalive-hide]") {
-            // Archived, not ring-buffered: this line is read the morning
-            // after, to say what a refresh turn's hide did — and its absence
-            // after a `keep-alive … completed` line is the only signal that
-            // the bubble was never matched (see `KeepAliveHideScript`). Once
-            // an hour per pane, so the cost is bounded. The same promotion
-            // `ShimProcess` gives `[cjk-emphasis]` lines, which arrive over
-            // the shim's stderr rather than this bridge.
-            logger.notice("[JS] \(msg, privacy: .public)")
         } else {
             logger.info("[JS] \(msg, privacy: .public)")
         }
