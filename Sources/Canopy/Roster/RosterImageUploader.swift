@@ -47,10 +47,13 @@ enum RosterImageUploader {
         return (width, height)
     }
 
-    /// 長辺 `thumbnailMaxPixelSize` の JPEG。**元より大きくはしない** ——
-    /// `kCGImageSourceCreateThumbnailFromImageIfAbsent` ではなく `Always` を
-    /// 使うと小さい絵も上限まで引き伸ばされ、バイトが増えるだけで行に出る
-    /// 大きさは変わらない。
+    /// 長辺 `thumbnailMaxPixelSize` の JPEG。**元より大きくはしない** —— ただし
+    /// それを保証しているのは下の `min` ではなく ImageIO 自身。
+    /// `CGImageSourceCreateThumbnailAtIndex` は `Always` を付けても元の寸法を
+    /// 超えて拡大しない（macOS で実測: 100×60 に上限 320 を渡しても 100×60）。
+    /// `min` はその挙動に依存しない書き方として残しているだけで、load-bearing
+    /// ではない。以前ここには「`Always` だと小さい絵が上限まで引き伸ばされる」
+    /// と書いてあったが、測ったら偽だった。
     static func thumbnail(from data: Data) -> Data? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let size = pixelSize(of: data)

@@ -8797,8 +8797,11 @@ enum SidebarLogicProbe {
             record("image: thumbnail refuses non-image bytes",
                    RosterImageUploader.thumbnail(from: Data("not an image".utf8)) == nil)
 
-            // 上限より小さい画像は拡大しない。320 を下回る絵を 320 に伸ばすと
-            // バイトが増えるだけで、行に出る大きさは変わらない。
+            // **これは `thumbnail(from:)` の `min` クランプを pin していない。**
+            // ImageIO はクランプが無くても元の寸法を超えて拡大しない（macOS で
+            // 実測: 100×60 に上限 320 を渡しても 100×60）ので、クランプを消しても
+            // このアサーションは通る。pin しているのは結果のほう —— 小さい絵が
+            // そのままの寸法で出ること。リサイズを拡大しうる経路に替えたらここが落ちる。
             if let small = makePNG(width: 100, height: 60) {
                 record("image: an already-small image is not upscaled",
                        RosterImageUploader.pixelSize(of: RosterImageUploader.thumbnail(from: small) ?? Data())
