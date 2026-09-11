@@ -352,7 +352,10 @@ enum ClaudeSessionHistory {
                 extractedCwd: metadata.cwd,
                 projectEncoded: candidate.projectEncoded
             )
-            guard fm.fileExists(atPath: projectPath) else { return nil }
+            guard shouldKeepSession(
+                projectExists: fm.fileExists(atPath: projectPath),
+                projectPath: projectPath
+            ) else { return nil }
             let title = SessionTitleStore.title(forSessionId: candidate.sessionId)
                 ?? metadata.title
 
@@ -733,6 +736,42 @@ enum ClaudeSessionHistory {
     /// the right project folder. Exposed for the sidebar logic probe.
     static func cwd(atPath path: String) -> String? {
         extractMetadata(fromPath: path).cwd
+    }
+
+    /// Whether a session whose resolved project directory is GONE should still
+    /// appear in the list. `loadAllSessions` otherwise drops any session whose
+    /// project path fails `fileExists`, which hid readable sessions launched in
+    /// a git worktree that was later removed as normal post-merge cleanup: the
+    /// launch cwd is gone, but the transcript still sits under the worktree's
+    /// encoded `~/.claude/projects` folder, and a plain `cd` back to the repo
+    /// writes no CLI `relocated` record, so `resolveProjectPath` can only
+    /// return the dead worktree path. The row still labels correctly —
+    /// `GitWorktree.projectDisplayName` derives `<repo> · <branch>` from that
+    /// path lexically, no `fileExists`.
+    ///
+    /// This restores the row to the list; it does NOT make it reopenable.
+    /// `ShimProcess.start` refuses a missing spawn cwd, so clicking a kept row
+    /// shows "Directory not found" rather than replaying history — resolving a
+    /// live cwd for a removed worktree is a separate concern, left to a
+    /// follow-up.
+    ///
+    /// Kept iff the missing directory is a recognized worktree layout. A
+    /// genuinely dead project — a deleted repo, an unmounted drive — is not one
+    /// of those layouts and stays filtered, so the list is not flooded with
+    /// junk. Pure and lexical (`isManagedWorktree` is path-shape only), so the
+    /// probe pins it without a `~/.claude/projects` tree.
+    static func keepsSessionWithMissingProject(at projectPath: String) -> Bool {
+        GitWorktree.isManagedWorktree(URL(fileURLWithPath: projectPath))
+    }
+
+    /// The keep decision `loadAllSessions` applies per candidate. Lifted out of
+    /// the call-site `guard` so the probe can pin the `exists || worktree`
+    /// composition — the extraction seam a pure helper otherwise leaves
+    /// untested (flipping `||` to `&&`, or dropping the second term, would
+    /// silently defeat the whole change). `projectExists` is the caller's
+    /// `fileExists` result.
+    static func shouldKeepSession(projectExists: Bool, projectPath: String) -> Bool {
+        projectExists || keepsSessionWithMissingProject(at: projectPath)
     }
 
     /// Resolve the on-disk project directory for a session, given the extracted

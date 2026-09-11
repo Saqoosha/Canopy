@@ -2380,6 +2380,38 @@ enum SidebarLogicProbe {
                    for: GitWorktree.worktreesRoot.appendingPathComponent("orphan-branch"))
                    == "orphan-branch")
 
+        // A worktree removed by merge-cleanup leaves a readable transcript
+        // whose launch cwd is gone; `loadAllSessions` keeps it iff the missing
+        // path is a recognized worktree layout, and drops a genuinely dead
+        // project. Lexical, so on-disk existence is irrelevant to the check.
+        record("keepsSessionWithMissingProject: managed worktree kept",
+               ClaudeSessionHistory.keepsSessionWithMissingProject(
+                   at: GitWorktree.worktreesRoot.appendingPathComponent("Canopy/gone-branch").path))
+        record("keepsSessionWithMissingProject: sibling worktree kept",
+               ClaudeSessionHistory.keepsSessionWithMissingProject(
+                   at: "/repos/Canopy-worktrees/gone-branch"))
+        record("keepsSessionWithMissingProject: in-repo worktree kept",
+               ClaudeSessionHistory.keepsSessionWithMissingProject(
+                   at: "/repos/LSE-Core/.claude/worktrees/gone-branch"))
+        record("keepsSessionWithMissingProject: plain repo dropped",
+               !ClaudeSessionHistory.keepsSessionWithMissingProject(at: "/repos/Canopy"))
+        record("keepsSessionWithMissingProject: unrelated dead path dropped",
+               !ClaudeSessionHistory.keepsSessionWithMissingProject(
+                   at: "/Volumes/Unmounted/project"))
+
+        // The call-site composition, lifted so this seam is pinned: flipping
+        // `||` to `&&` or dropping the worktree term must fail here.
+        record("shouldKeepSession: live dir kept regardless of shape",
+               ClaudeSessionHistory.shouldKeepSession(
+                   projectExists: true, projectPath: "/repos/Canopy"))
+        record("shouldKeepSession: missing worktree kept",
+               ClaudeSessionHistory.shouldKeepSession(
+                   projectExists: false,
+                   projectPath: GitWorktree.worktreesRoot.appendingPathComponent("Canopy/gone-branch").path))
+        record("shouldKeepSession: missing plain repo dropped",
+               !ClaudeSessionHistory.shouldKeepSession(
+                   projectExists: false, projectPath: "/repos/Canopy"))
+
         // VCS-reported branch wins over the folder-name guess when present.
         // Fixture folder "feature-foo" vs branch "feature/foo" — the slash
         // flatten that `git worktree add -b` does — so a match is not

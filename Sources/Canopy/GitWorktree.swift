@@ -71,8 +71,7 @@ enum GitWorktree {
     /// (`~/.claude/worktrees/<repo>/<branch>`), the sibling
     /// `<repo>-worktrees/<branch>` layout, or the in-repo
     /// `<repo>/.claude/worktrees/<branch>` layout. Path shape only; no
-    /// filesystem check. Currently the Recents filter (both `.add` and
-    /// `.load` in `RecentDirectories`) is the only caller.
+    /// filesystem check.
     static func isManagedWorktree(_ dir: URL) -> Bool {
         worktreeParts(for: dir) != nil
     }
