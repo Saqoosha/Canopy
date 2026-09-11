@@ -213,8 +213,9 @@ final class MacroPadStatus {
     }
 }
 
-/// The MacroPad source selector at the start of the sidebar's version
-/// footer, drawn as a link-state glyph.
+/// The MacroPad source selector at the trailing end of the sidebar's version
+/// footer, drawn as a link-state glyph. (The x values measured below are from
+/// its earlier leading position; the control's shape is what they describe.)
 ///
 /// It always draws, and clicking it opens the source selector — the thing
 /// that reports the state is the thing that changes it. `Settings` and the

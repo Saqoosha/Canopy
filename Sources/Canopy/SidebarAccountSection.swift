@@ -1,10 +1,9 @@
 import SwiftUI
 
-/// Sticky footer at the bottom of the sidebar. Shows account-scoped rate
-/// limits (5-hour and weekly) that used to live in every per-pane
-/// StatusBarView. Rate limits apply to the Anthropic account, not to any
-/// one session — moving them here removes the duplication across panes
-/// and buys back horizontal room in per-pane status bars.
+/// Sticky footer at the bottom of the sidebar: the account's email, its rate
+/// limits (5-hour, weekly, per model), and the version row. Rate limits apply
+/// to the Anthropic account, not to any one session, which is why they live
+/// here and not in every pane's StatusBarView.
 struct SidebarAccountSection: View {
     @Environment(\.displayScale) private var displayScale
     private var data: SharedRateLimitData { SharedRateLimitData.shared }
@@ -21,6 +20,9 @@ struct SidebarAccountSection: View {
         VStack(alignment: .leading, spacing: 6) {
             Divider()
                 .padding(.bottom, 2)
+            if let account = ClaudeAccountInfo.current() {
+                accountRow(account)
+            }
             if hasAnyData {
                 // Render each row only when its own reset date is present.
                 // The API's `update(from:)` can populate one window (5hr /
@@ -74,12 +76,6 @@ struct SidebarAccountSection: View {
     /// sidebar footer covers everything.
     private var versionFooter: some View {
         HStack(spacing: 6) {
-            // Leads the footer, ~12pt in from the sidebar's leading edge. It
-            // always draws, in every state, and clicking it opens the source
-            // selector — see `MacroPadIndicator` for why a control that
-            // vanished in the state it reports could not be used to leave it,
-            // and `MacroPadStatus.Link` for what each state means.
-            MacroPadIndicator()
             if let canopy = canopyVersion {
                 Text("Canopy \(canopy)")
             }
@@ -91,11 +87,34 @@ struct SidebarAccountSection: View {
                 Text("CC \(cc)")
                     .help("Bundled Claude Code extension version")
             }
+            Spacer(minLength: 0)
+            // Trailing, so every row's text shares one leading edge. Always
+            // drawn; clicking it opens the source selector (see
+            // `MacroPadIndicator`).
+            MacroPadIndicator()
         }
         .font(.caption2)
         .foregroundStyle(.tertiary)
         .padding(.horizontal, 12)
         .padding(.top, 2)
+    }
+
+    /// This Mac's account, heading the section. The rows below are its quota
+    /// unless an SSH remote session is logged in elsewhere — every session
+    /// writes `SharedRateLimitData`, and both writers relay the remote CLI's
+    /// numbers. Pre-existing; issue #214.
+    private func accountRow(_ account: ClaudeAccountInfo) -> some View {
+        Text(account.email)
+            .font(.caption)
+            .fontWeight(.medium)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .help([account.displayName, account.email, account.organizationName]
+                .compactMap { $0 }
+                .joined(separator: "\n"))
     }
 
     private var canopyVersion: String? {
