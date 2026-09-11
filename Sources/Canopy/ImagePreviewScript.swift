@@ -15,7 +15,7 @@ import Foundation
 ///  - decorates the "Read <file>" summary rows in the DOM with their images,
 ///    pairing rows and sequence numbers tail-aligned so the webview evicting
 ///    old rendered history from the front can't shift the mapping
-///    (click-to-zoom lightbox included).
+///    (clicking one opens it in `ImagePopupWindow`).
 ///
 /// Sequence numbers are allocated at tool_use time — before the result is known —
 /// so a failed Read or a byte-budget eviction leaves a gap (that row simply stays
@@ -313,42 +313,36 @@ enum ImagePreviewScript {
             });
             img.addEventListener('click', function(ev) {
                 ev.stopPropagation();
-                openLightbox(url);
+                openImage(url, file);
+            });
+            // Tells Swift which image the native context menu is for, so it can
+            // add "Open in Preview" (SessionWKWebView.willOpenMenu).
+            img.addEventListener('contextmenu', function() {
+                try {
+                    window.webkit.messageHandlers.canopyLink.postMessage({type: 'imageContextMenu', url: url, file: file});
+                } catch (err) {
+                    console.error('[Canopy ImagePreview] could not report context menu image: ' + (err && err.message));
+                }
             });
             img.addEventListener('keydown', function(ev) {
                 if (ev.key === 'Enter' || ev.key === ' ') {
                     ev.preventDefault();
                     ev.stopPropagation();
-                    openLightbox(url);
+                    openImage(url, file);
                 }
             });
             wrap.appendChild(img);
         }
 
-        function openLightbox(url) {
-            var overlay = document.createElement('div');
-            overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;'
-                + 'background:rgba(0,0,0,0.78);display:flex;align-items:center;'
-                + 'justify-content:center;cursor:zoom-out;';
-            var img = document.createElement('img');
-            img.src = url;
-            img.style.cssText = 'max-width:92vw;max-height:92vh;border-radius:8px;'
-                + 'box-shadow:0 8px 40px rgba(0,0,0,0.5);';
-            overlay.appendChild(img);
-            function close() {
-                overlay.remove();
-                document.removeEventListener('keydown', onKey, true);
+        // A native window, not an in-page overlay: an overlay is bounded by
+        // this pane's webview, so with several panes open it could barely
+        // enlarge anything. See ImagePopupWindow.swift.
+        function openImage(url, file) {
+            try {
+                window.webkit.messageHandlers.canopyLink.postMessage({type: 'openImage', url: url, file: file});
+            } catch (err) {
+                console.error('[Canopy ImagePreview] could not open image window: ' + (err && err.message));
             }
-            function onKey(e) {
-                if (e.key === 'Escape') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    close();
-                }
-            }
-            overlay.addEventListener('click', close);
-            document.addEventListener('keydown', onKey, true);
-            document.body.appendChild(overlay);
         }
 
         // Only mutations that touch a Read row (or our own wrapper) warrant a

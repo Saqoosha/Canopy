@@ -497,7 +497,7 @@ struct WebViewContainer: NSViewRepresentable {
                 cachedUcc.add(inputWidthHandler, name: InputWidthProbe.messageHandlerName)
             }
         } else {
-            webView = WKWebView(frame: .zero, configuration: config)
+            webView = SessionWKWebView(frame: .zero, configuration: config)
             webView.isInspectable = true
             isFreshWebView = true
             // Early-bind to the OpenSession before the (slow) loadCCWebview
@@ -796,6 +796,45 @@ struct WebViewContainer: NSViewRepresentable {
     """
 }
 
+// MARK: - Session web view
+
+/// Adds "Open in Preview" to WebKit's own context menu when the right-click
+/// landed on a Read-tool thumbnail. WebKit's menu does not say which element
+/// it is for, so `ImagePreviewScript` reports the thumbnail from its
+/// `contextmenu` listener first.
+final class SessionWKWebView: WKWebView {
+    struct ContextImage {
+        let dataURL: String
+        let fileName: String
+        let at: Date
+    }
+
+    var pendingContextImage: ContextImage?
+
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        super.willOpenMenu(menu, with: event)
+        guard let image = pendingContextImage,
+              Date().timeIntervalSince(image.at) < 1
+        else {
+            pendingContextImage = nil
+            return
+        }
+        pendingContextImage = nil
+        let item = NSMenuItem(title: "Open in Preview", action: #selector(openContextImageInPreview(_:)),
+                              keyEquivalent: "")
+        item.target = self
+        item.representedObject = image.dataURL
+        item.toolTip = image.fileName
+        menu.insertItem(item, at: 0)
+        menu.insertItem(.separator(), at: 1)
+    }
+
+    @objc private func openContextImageInPreview(_ sender: NSMenuItem) {
+        guard let dataURL = sender.representedObject as? String else { return }
+        ImagePopupWindow.openInPreview(dataURL: dataURL, fileName: sender.toolTip ?? "image")
+    }
+}
+
 // MARK: - Link click handler
 
 final class LinkClickHandler: NSObject, WKScriptMessageHandler {
@@ -809,6 +848,21 @@ final class LinkClickHandler: NSObject, WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
+        // `ImagePreviewScript` rides this handler rather than registering its
+        // own, which would need adding at all three registration sites.
+        if let dict = message.body as? [String: Any],
+           dict["type"] as? String == "openImage",
+           let url = dict["url"] as? String {
+            ImagePopupWindow.shared.show(dataURL: url, title: dict["file"] as? String ?? "Image")
+            return
+        }
+        if let dict = message.body as? [String: Any],
+           dict["type"] as? String == "imageContextMenu",
+           let url = dict["url"] as? String {
+            (message.webView as? SessionWKWebView)?.pendingContextImage =
+                .init(dataURL: url, fileName: dict["file"] as? String ?? "image", at: Date())
+            return
+        }
         guard let href = message.body as? String else {
             logger.warning("LinkClickHandler: unexpected message type: \(type(of: message.body))")
             return
