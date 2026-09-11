@@ -145,7 +145,7 @@ private final class ImagePopupNSWindow: NSWindow {
 
     init() {
         super.init(contentRect: CGRect(x: 0, y: 0, width: 400, height: 300),
-                   styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                   styleMask: [.titled, .closable, .resizable],
                    backing: .buffered, defer: false)
         isReleasedWhenClosed = false
         tabbingMode = .disallowed
