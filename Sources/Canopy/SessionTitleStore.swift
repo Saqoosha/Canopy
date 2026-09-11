@@ -96,7 +96,7 @@ enum SessionTitleStore {
         all()[sessionId]?.settled ?? false
     }
 
-    /// Drop the human-authored mark, letting automatic generation resume.
+    /// Drop the human-authored mark.
     ///
     /// Nothing in the shipping UI calls this — `commitRename` treats empty
     /// input as "dismiss" rather than as "revert to automatic". It exists so
@@ -220,6 +220,14 @@ enum SessionTitleStore {
     /// carries no timestamp, so which of two equally-owned entries goes is
     /// arbitrary rather than oldest-first. Nothing here claims otherwise, and
     /// fixing it needs a new field.
+    /// Lower goes first. A settled record outranks an ordinary one because
+    /// losing it lets regeneration replace a title that matches its branch.
+    private static func evictionRank(_ record: Record?) -> Int {
+        guard let record else { return 0 }
+        if record.userOwned { return 2 }
+        return record.settled == true ? 1 : 0
+    }
+
     @discardableResult
     private static func write(evicting records: [String: Record], protecting protectedId: String?) -> Bool {
         var records = records
@@ -227,9 +235,9 @@ enum SessionTitleStore {
             let candidates = records.keys
                 .filter { $0 != protectedId }
                 .sorted { lhs, rhs in
-                    let l = records[lhs]?.userOwned ?? false
-                    let r = records[rhs]?.userOwned ?? false
-                    if l != r { return !l }
+                    let l = evictionRank(records[lhs])
+                    let r = evictionRank(records[rhs])
+                    if l != r { return l < r }
                     return lhs < rhs
                 }
             let doomed = candidates.prefix(records.count - maxEntries)

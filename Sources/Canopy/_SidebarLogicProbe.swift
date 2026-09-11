@@ -7886,6 +7886,19 @@ enum SidebarLogicProbe {
                    SessionTitleStore.title(forSessionId: owned) == "human"
                    && SessionTitleStore.isUserOwned(owned))
 
+            // Same shape for the settled mark: its id is the smallest, so
+            // without the rank it is the victim.
+            SessionTitleStore._probeReset()
+            for _ in 0..<(cap - 1) {
+                SessionTitleStore.save(title: "auto", forSessionId: UUID().uuidString)
+            }
+            let settledId = "00000000-0000-4000-8000-000000000003"
+            SessionTitleStore.save(title: "settled", forSessionId: settledId, settled: true)
+            SessionTitleStore.save(title: "newest", forSessionId: "00000000-0000-4000-8000-000000000004")
+            record("eviction: a settled record outlives ordinary automatic ones",
+                   SessionTitleStore.title(forSessionId: settledId) == "settled"
+                   && SessionTitleStore.isSettled(settledId))
+
             // --- legacy migration -------------------------------------------
             // The one path standing between an existing user and losing every
             // stored title on upgrade.

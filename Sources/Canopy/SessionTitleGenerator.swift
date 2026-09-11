@@ -299,8 +299,7 @@ enum SessionTitleGenerator {
     /// while they lived in a private method.
     ///
     /// Order matters and is asserted: ownership outranks everything (a renamed
-    /// session must not even *consider* generating), a settled title comes
-    /// next, and the cap is checked
+    /// session must not even *consider* generating), and the cap is checked
     /// before the signal gate so an exhausted session stops installing
     /// fallbacks over a title it already has.
     struct TitleGenerationGate: Equatable {
