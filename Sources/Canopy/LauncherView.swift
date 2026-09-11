@@ -215,6 +215,11 @@ struct LauncherView: View {
     /// with nothing on screen to type into. A chip can only offer values that
     /// already exist, so anything that creates one needs somewhere to live.
     @State private var showRemoteSetup = false
+    /// Visible height of the composer's scroll view and the height of its
+    /// content, from which `composerCenteringInset` places the content in the
+    /// middle on a whole point. See `launchComposer`.
+    @State private var composerViewportHeight: CGFloat = 0
+    @State private var composerContentHeight: CGFloat = 0
 
     // Bare family aliases, so a row tracks the latest model in its family with no
     // release-day edit here. Measured 2026-09-02 on CLI 2.1.239: "fable" resolves to
@@ -293,9 +298,29 @@ struct LauncherView: View {
             .padding(.vertical, 32)
             .frame(maxWidth: 720)
             .frame(maxWidth: .infinity)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                composerContentHeight = height
+            }
+            // Centred by an explicit, whole-point top inset — never by
+            // `.defaultScrollAnchor(.center)`. The anchor scrolls to
+            // (viewport − content) / 2, and whenever that is a half point every
+            // control in the scroll content stops taking clicks (the click
+            // lands on the container and beeps) until the height changes
+            // parity. Measured on a 1x display: whether the launch screen came
+            // up dead, or died on the next live resize, depended on the window
+            // height alone, 1pt apart. See the launch-composer learnings.
+            .padding(.top, composerCenteringInset)
+        }
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.containerSize.height - geometry.contentInsets.top - geometry.contentInsets.bottom
+        } action: { _, height in
+            composerViewportHeight = max(0, height)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .defaultScrollAnchor(.center)
+    }
+
+    private var composerCenteringInset: CGFloat {
+        floor(max(0, composerViewportHeight - composerContentHeight) / 2)
     }
 
     /// Which wait, if any, is running — nil means the composer is live.
