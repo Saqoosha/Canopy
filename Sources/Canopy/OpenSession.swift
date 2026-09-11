@@ -149,6 +149,14 @@ final class OpenSession: Identifiable, Hashable {
     /// shim for as long as it has no pane. `ShimProcess` reads it once the CLI
     /// announces itself and clears it, so a reconnect cannot resubmit it.
     var pendingInitialPrompt: String?
+    /// Title generated in the same call as this session's worktree branch
+    /// name (`WorktreeBranchNamer`), waiting for the shim to adopt it as final.
+    ///
+    /// Parked here for `pendingInitialPrompt`'s reason — the shim does not
+    /// exist yet. `ShimProcess.maybeGenerateTitle` consumes it on the first
+    /// prompt, and from then on the settled mark in `SessionTitleStore` is what
+    /// stops regeneration, including across relaunches.
+    var pendingSettledTitle: String?
     /// The last fatal reported for this session, if any.
     ///
     /// Two writers, and the second is why this is not "what the shim said": a

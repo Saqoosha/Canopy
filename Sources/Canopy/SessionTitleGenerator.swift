@@ -272,6 +272,9 @@ enum SessionTitleGenerator {
     /// Why a prompt produced no generation.
     enum TitleGenerationBlock: Equatable {
         case userOwnsTitle
+        /// Named together with the worktree branch at launch; see
+        /// `SessionTitleStore.isSettled`.
+        case settled
         case alreadyRunning
         case noPrompts
         case capReached
@@ -296,7 +299,8 @@ enum SessionTitleGenerator {
     /// while they lived in a private method.
     ///
     /// Order matters and is asserted: ownership outranks everything (a renamed
-    /// session must not even *consider* generating), and the cap is checked
+    /// session must not even *consider* generating), a settled title comes
+    /// next, and the cap is checked
     /// before the signal gate so an exhausted session stops installing
     /// fallbacks over a title it already has.
     struct TitleGenerationGate: Equatable {
@@ -304,9 +308,14 @@ enum SessionTitleGenerator {
         var isRunning: Bool
         var generationCount: Int
         var prompts: [String]
+        /// Defaulted so the probe's existing fixtures need not spell it.
+        var isSettled: Bool = false
 
         func decide(maxGenerations: Int = SessionTitleGenerator.maxGenerations) -> TitleGenerationDecision {
             if userOwnsTitle { return .doNothing(.userOwnsTitle) }
+            // Before the signal gate as well as the cap: a settled session must
+            // not install a fallback over its title on a thin later prompt.
+            if isSettled { return .doNothing(.settled) }
             if isRunning { return .doNothing(.alreadyRunning) }
             if prompts.isEmpty { return .doNothing(.noPrompts) }
             if generationCount >= maxGenerations { return .doNothing(.capReached) }

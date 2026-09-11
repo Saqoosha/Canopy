@@ -108,6 +108,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// automatic title path for the rest of the session; loaded from
     /// `SessionTitleStore` on resume so it survives relaunch.
     private var userOwnsTitle = false
+    /// True once this session's title was settled together with its worktree
+    /// branch name. Suppresses regeneration — a title that already names the
+    /// task in the branch's words can only drift from it — but, unlike
+    /// `userOwnsTitle`, not a rename. Loaded from `SessionTitleStore` on resume.
+    private var titleIsSettled = false
     /// Sliding window of recent user prompts (max 5), used as context for title generation.
     private var promptHistory: [String] = []
     /// Most recent user message text, used as fallback when AI generation doesn't respond.
@@ -2134,6 +2139,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // would survive the rename but not the next launch, which is the
             // harder failure to notice.
             self.userOwnsTitle = SessionTitleStore.isUserOwned(resumeSessionId)
+            self.titleIsSettled = SessionTitleStore.isSettled(resumeSessionId)
         }
         if let resumeSessionId {
             // Seed title-generation context from the resumed conversation.
@@ -3299,7 +3305,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     if let pending = pendingGeneratedTitle {
                         pendingGeneratedTitle = nil
                         if !userOwnsTitle {
-                            if !SessionTitleStore.save(title: pending, forSessionId: sid) {
+                            if !SessionTitleStore.save(title: pending, forSessionId: sid, settled: titleIsSettled) {
                                 logger.warning("Generated title not persisted; it will not survive relaunch")
                             }
                             generatedSessionTitle = pending
@@ -4578,11 +4584,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Called on every user prompt. The guards, not the call site, decide
     /// whether anything runs.
     private func maybeGenerateTitle() {
+        // A launcher title named together with the worktree branch arrives on
+        // the first prompt — the one the launcher itself submits — and is
+        // adopted instead of generating. Cleared on the session, not on `self`,
+        // for `pendingInitialPrompt`'s reconnect reason.
+        if let session = boundSession, let settled = session.pendingSettledTitle {
+            session.pendingSettledTitle = nil
+            if !userOwnsTitle {
+                titleIsSettled = true
+                applyGeneratedTitle(settled)
+                let label = titleLogLabel
+                logger.notice("[title] \(label, privacy: .public): settled with the worktree branch")
+            }
+        }
         let gate = SessionTitleGenerator.TitleGenerationGate(
             userOwnsTitle: userOwnsTitle,
             isRunning: titleGenerationInFlight,
             generationCount: titleGenerationCount,
-            prompts: promptHistory
+            prompts: promptHistory,
+            isSettled: titleIsSettled
         )
         switch gate.decide() {
         case .doNothing(let reason):
@@ -4646,7 +4666,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // Reported, not discarded: a store that refuses the write leaves a
             // title on screen that is gone at the next launch, and without this
             // line that state is indistinguishable from a working one.
-            if !SessionTitleStore.save(title: truncated, forSessionId: sid) {
+            if !SessionTitleStore.save(title: truncated, forSessionId: sid, settled: titleIsSettled) {
                 logger.warning("Generated title not persisted; it will not survive relaunch")
             }
         } else {

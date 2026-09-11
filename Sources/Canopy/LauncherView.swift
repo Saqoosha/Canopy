@@ -1547,7 +1547,7 @@ struct LauncherView: View {
             // offered one was removed as unused, and the three-rung fallback
             // below already covers every case it did.
             worktreeStage = "Naming Branch…"
-            let named = await resolveBranchName(prompt: prompt, customApi: api)
+            let (named, settledTitle) = await resolveBranchName(prompt: prompt, customApi: api)
             // Two worktrees started from the same prompt get the same slug, and
             // `worktree add -b` fails outright on a taken name — with no field
             // left for the user to resolve it in.
@@ -1622,7 +1622,8 @@ struct LauncherView: View {
                 }
                 launchLocal(worktree, remoteHost: nil,
                             model: selectedModel, effort: selectedEffort,
-                            permission: selectedPermission, openInNewPane: cmdHeld)
+                            permission: selectedPermission, openInNewPane: cmdHeld,
+                            settledTitle: settledTitle)
             } catch {
                 // NSAlert instead of a SwiftUI .alert: the user can navigate
                 // away mid-creation, destroying this view's @State — a
@@ -1648,18 +1649,28 @@ struct LauncherView: View {
     ///
     /// The middle rung is what keeps a CLI outage, an expired login or a
     /// 20-second timeout from dropping straight to that.
-    private func resolveBranchName(prompt: String, customApi: ModelProvider?) async -> String {
+    ///
+    /// The second value is the session title from the same model call, and it
+    /// comes back only from the top rung and only when the prompt passes the
+    /// titling signal gate. Settling a title read off a thin prompt ("look at
+    /// this") would lock in exactly the contentless title that capped
+    /// regeneration exists to replace; with nil, the session is titled the
+    /// ordinary per-prompt way.
+    private func resolveBranchName(prompt: String, customApi: ModelProvider?) async -> (branch: String, settledTitle: String?) {
         if !prompt.isEmpty {
             let generated = await withCheckedContinuation { continuation in
-                WorktreeBranchNamer.generate(prompt: prompt, customApi: customApi) { name in
-                    continuation.resume(returning: name)
+                WorktreeBranchNamer.generate(prompt: prompt, customApi: customApi) { names in
+                    continuation.resume(returning: names)
                 }
             }
-            if let generated, !generated.isEmpty { return generated }
+            if let generated {
+                let title = SessionTitleGenerator.hasEnoughSignal(prompts: [prompt]) ? generated.title : nil
+                return (generated.branch, title)
+            }
             let local = GitWorktree.slugFromPrompt(prompt)
-            if !local.isEmpty { return local }
+            if !local.isEmpty { return (local, nil) }
         }
-        return GitWorktree.suggestedBranchName()
+        return (GitWorktree.suggestedBranchName(), nil)
     }
 
     /// `openInNewPane` is nil for every synchronous caller, which lets
@@ -1668,7 +1679,8 @@ struct LauncherView: View {
     /// worktree path and the SSH-continue branch below.
     private func launchLocal(
         _ dir: URL, remoteHost: String?, model: String?, effort: String?,
-        permission: PermissionMode, openInNewPane: Bool? = nil
+        permission: PermissionMode, openInNewPane: Bool? = nil,
+        settledTitle: String? = nil
     ) {
         // A remote session's transcripts live on the OTHER machine, so
         // `latestSession(for:)` — which reads this machine's
@@ -1704,7 +1716,9 @@ struct LauncherView: View {
             resumeId = latest.id
             resumeTitle = latest.title
         }
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: openInNewPane, initialPrompt: pendingPromptForLaunch)
+        // A settled title names a NEW session's task. A resumed one already
+        // has its own title, which it keeps.
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: openInNewPane, initialPrompt: pendingPromptForLaunch, settledTitle: resumeId == nil ? settledTitle : nil)
         clearPendingPrompt()
     }
 
