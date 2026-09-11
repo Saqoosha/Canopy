@@ -573,6 +573,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installKeyTypingMonitor()
         RecapCoordinator.shared.start()
         KeepAliveCoordinator.shared.start()
+        // The sidebar's usage bars have no writer until a shim runs, so a
+        // launch that opens on the launcher showed none (see
+        // `ClaudeUsageDirect`). Here rather than in a `.task` on the
+        // `WindowGroup`: this runs AFTER `runIfRequested()` has exited a probe
+        // run, so it needs no `CANOPY_RUN_LOGIC_PROBE` guard of its own.
+        Task { await ClaudeUsageDirect.refreshLocalAccount() }
 
         // SwiftUI may make the first window main before our observer is
         // registered, in which case `didBecomeMainNotification` fires

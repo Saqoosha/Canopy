@@ -9623,6 +9623,54 @@ enum SidebarLogicProbe {
                    account(#"[1,2]"#) == nil && account("not json") == nil)
         }
 
+        // MARK: - Launch-time usage fetch
+        //
+        // `ClaudeUsageDirect.rateLimits(fromRawUsage:)` mirrors the CLI's
+        // projection of `/api/oauth/usage` into `get_usage_response.usage
+        // .rate_limits`: the raw object as-is, plus `model_scoped` from the
+        // `weekly_scoped` entries of `limits[]`. Shape read out of CLI 2.1.258
+        // and the fixture off a measured response (2026-09-11).
+        do {
+            let scoped: [String: Any] = [
+                "kind": "weekly_scoped", "percent": 7, "resets_at": "2026-09-13T17:00:00+00:00",
+                "scope": ["model": ["id": NSNull(), "display_name": "Fable"], "surface": NSNull()],
+            ]
+            let weeklyAll: [String: Any] = ["kind": "weekly_all", "percent": 88, "scope": NSNull()]
+            let raw: [String: Any] = [
+                "five_hour": ["utilization": 84.0, "resets_at": "2026-09-11T09:40:00.515615+00:00"],
+                "seven_day_sonnet": NSNull(),
+                "limits": [weeklyAll, scoped],
+            ]
+            let projected = ClaudeUsageDirect.rateLimits(fromRawUsage: raw)
+            let modelScoped = projected["model_scoped"] as? [[String: Any]]
+            record("usage projection: a weekly_scoped limit becomes one model_scoped row",
+                   modelScoped?.count == 1
+                       && modelScoped?.first?["display_name"] as? String == "Fable"
+                       && modelScoped?.first?["utilization"] as? Int == 7
+                       && modelScoped?.first?["resets_at"] as? String == "2026-09-13T17:00:00+00:00")
+            record("usage projection: raw windows pass through untouched",
+                   (projected["five_hour"] as? [String: Any])?["utilization"] as? Double == 84.0
+                       && projected["seven_day_sonnet"] is NSNull)
+            // Absent means "keep previous" to `updateFromRawUsage`, while an
+            // empty array means "server says none" and clears rows — so no
+            // scoped limit must produce no key, not an empty one.
+            record("usage projection: no weekly_scoped limit adds no model_scoped key",
+                   ClaudeUsageDirect.rateLimits(fromRawUsage: ["limits": [weeklyAll]])["model_scoped"] == nil
+                       && ClaudeUsageDirect.rateLimits(fromRawUsage: [:])["model_scoped"] == nil)
+            var unnamed = scoped
+            unnamed["scope"] = ["model": ["display_name": ""]]
+            record("usage projection: a scoped limit without a model name is dropped",
+                   ClaudeUsageDirect.rateLimits(fromRawUsage: ["limits": [unnamed]])["model_scoped"] == nil)
+            // End to end through the consumer: the projected dict must be
+            // what `updateFromRawUsage` reads, or the launch fetch applies
+            // nothing and the bars stay hidden exactly as before it existed.
+            let account = RateLimitAccount(label: "probe-usage")
+            account.updateFromRawUsage(projected)
+            record("usage projection: the consumer reads the projected shape",
+                   account.sessionPct == 84 && account.sessionResetDate != nil
+                       && account.modelScoped.count == 1 && account.modelScoped.first?.displayName == "Fable")
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)
