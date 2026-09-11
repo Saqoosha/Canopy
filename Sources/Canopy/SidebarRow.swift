@@ -122,6 +122,23 @@ enum SidebarRow: Identifiable, Hashable {
         }
     }
 
+    /// Whether clicking this row can produce a session at all.
+    ///
+    /// Exhaustive rather than a single `if case`, so a new row kind has to
+    /// decide instead of inheriting "yes" — the shape `rowMenu` already uses
+    /// for renaming. Only `.closedLocal` can answer no, and only when the
+    /// directory it recorded is gone: `ShimProcess.start` refuses a missing
+    /// spawn cwd, so the click could only ever reach an error banner.
+    ///
+    /// Static and pure so the probe reaches it; `SessionEntry.canOpen` is
+    /// measured once by `loadAllSessions`, never per render.
+    static func canOpen(_ row: SidebarRow) -> Bool {
+        switch row {
+        case .closedLocal(let entry): entry.canOpen
+        case .open, .closedCloud, .launcher: true
+        }
+    }
+
     /// The row's "kind" for filtering: was this session born locally or in
     /// the cloud? An open session counts as `.local` (it lives here now); a
     /// closed cloud session counts as `.cloud`.

@@ -8,6 +8,31 @@ struct SessionEntry: Identifiable, Hashable {
     let title: String
     let timestamp: Date
     let projectDirectory: URL
+    /// False when `projectDirectory` is gone — the state a git worktree
+    /// removed after merging leaves behind. Such a session stays in the list
+    /// (#221) but CANNOT be opened: `ShimProcess.start` refuses a missing
+    /// spawn cwd, so the sidebar draws it as unopenable rather than letting a
+    /// click fail. Its transcript is still readable, which is what the row's
+    /// "Copy Session Log Path" is for.
+    ///
+    /// Defaulted to true because the only reader is the sidebar's closed-local
+    /// row, and `loadAllSessions` alone feeds those — it already has the
+    /// answer, the same `fileExists` its keep decision consults, so no row
+    /// pays a second stat. The other two loaders never reach a reader:
+    /// `loadSessionsFromDir` serves the launcher, whose directory may be gone
+    /// (see `LauncherView.latestSession`), and a remote entry's cwd is checked
+    /// on the other machine, not here.
+    var canOpen: Bool = true
+    /// This session's transcript on disk, when the loader that built the entry
+    /// already knew it. `loadAllSessions` does — it walks `.jsonl` files, so
+    /// the path IS what it enumerated — which is why the sidebar can offer
+    /// "Copy Session Log Path" without a lookup. It must stay free: a context
+    /// menu's `@ViewBuilder` is non-escaping, so it runs on every row body
+    /// evaluation, and resolving there made a hover repaint cost one
+    /// `scanForTranscript` per visible row (~3.2 ms each over 222 folders,
+    /// measured) — the use that function's own doc rules out as "always the
+    /// fallback, never the primary lookup".
+    var logPath: String? = nil
 
     var projectName: String { GitWorktree.projectDisplayName(for: projectDirectory) }
 }
@@ -352,8 +377,11 @@ enum ClaudeSessionHistory {
                 extractedCwd: metadata.cwd,
                 projectEncoded: candidate.projectEncoded
             )
+            // One stat, two consumers: whether the row survives at all, and
+            // whether it can be opened once it has.
+            let projectExists = fm.fileExists(atPath: projectPath)
             guard shouldKeepSession(
-                projectExists: fm.fileExists(atPath: projectPath),
+                projectExists: projectExists,
                 projectPath: projectPath
             ) else { return nil }
             let title = SessionTitleStore.title(forSessionId: candidate.sessionId)
@@ -363,7 +391,9 @@ enum ClaudeSessionHistory {
                 id: candidate.sessionId,
                 title: title,
                 timestamp: candidate.modDate,
-                projectDirectory: URL(fileURLWithPath: projectPath)
+                projectDirectory: URL(fileURLWithPath: projectPath),
+                canOpen: projectExists,
+                logPath: candidate.path
             )
         }
 
@@ -750,10 +780,14 @@ enum ClaudeSessionHistory {
     /// path lexically, no `fileExists`.
     ///
     /// This restores the row to the list; it does NOT make it reopenable.
-    /// `ShimProcess.start` refuses a missing spawn cwd, so clicking a kept row
-    /// shows "Directory not found" rather than replaying history — resolving a
-    /// live cwd for a removed worktree is a separate concern, left to a
-    /// follow-up.
+    /// `ShimProcess.start` refuses a missing spawn cwd, and spawning in the
+    /// repository instead was tried and rejected (#223): read off extension
+    /// 2.1.268, the webview's transcript resolver enumerates only the cwd's
+    /// encoded folders plus what `git worktree list` reports, and a removed
+    /// worktree is in neither — so the pane would open on an empty chat.
+    /// Derived from the bundle, not observed on device. The row is unopenable
+    /// instead (`SessionEntry.canOpen`), and its log is reached by path —
+    /// see the sidebar's "Copy Session Log Path".
     ///
     /// Kept iff the missing directory is a recognized worktree layout. A
     /// genuinely dead project — a deleted repo, an unmounted drive — is not one
