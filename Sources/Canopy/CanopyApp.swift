@@ -430,7 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else { return }
         #endif
         guard mirrorActivationObserver == nil else { return }
-        syncMirrorServer(store: store)
+        trackMirrorSettings(store: store)
         // Tailscale can come up after launch, so re-check whenever Canopy comes forward.
         mirrorActivationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
@@ -439,15 +439,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// One tracker at a time: it re-arms only from its own `onChange`.
     @MainActor
-    private func syncMirrorServer(store: SessionStore) {
+    private func trackMirrorSettings(store: SessionStore) {
         let settings = CanopySettings.shared
         withObservationTracking {
             _ = settings.mirrorEnabled
             _ = settings.mirrorPort
         } onChange: { [weak self] in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.syncMirrorServer(store: store) } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.trackMirrorSettings(store: store) } }
         }
+        syncMirrorServer(store: store)
+    }
+
+    @MainActor
+    private func syncMirrorServer(store: SessionStore) {
+        let settings = CanopySettings.shared
         guard settings.mirrorEnabled, let port = UInt16(exactly: settings.mirrorPort), port != 0 else {
             mirrorServer?.stop()
             mirrorServer = nil
@@ -457,7 +464,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var host = MirrorAccess.tailscaleIPv4()
         #if DEBUG
         // Developer override for loopback testing, e.g. `CANOPY_MIRROR_LISTEN=127.0.0.1`.
-        if let raw = ProcessInfo.processInfo.environment["CANOPY_MIRROR_LISTEN"], IPv4Address(raw) != nil { host = raw }
+        if let raw = ProcessInfo.processInfo.environment["CANOPY_MIRROR_LISTEN"] {
+            if IPv4Address(raw) != nil { host = raw } else { logger.error("CANOPY_MIRROR_LISTEN is not an IPv4 literal: \(raw, privacy: .public)") }
+        }
         #endif
         guard let host else {
             mirrorServer?.stop()
@@ -466,8 +475,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         if let bound = mirrorServer?.boundAddress, bound.host == host, bound.port == port { return }
-        _ = MirrorAccess.token(createIfMissing: true)
-        let server = mirrorServer ?? MirrorServer(store: store)
+        guard let token = MirrorAccess.token(createIfMissing: true) else {
+            mirrorServer?.stop()
+            mirrorServer = nil
+            MirrorServerStatus.shared.state = .noPassword
+            return
+        }
+        let server = mirrorServer ?? MirrorServer(store: store, token: token)
         mirrorServer = server
         server.start(host: host, port: port)
     }

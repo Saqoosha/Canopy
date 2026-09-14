@@ -92,7 +92,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// request Canopy itself made — falls through to the broadcast.
     private var requestOwners: [String: RequestOwner] = [:]
 
-    /// Permission and question requests still awaiting an answer, re-sent to a client that launches late.
+    /// `tool_permission_request` and `user_dialog_request` frames still awaiting an answer, re-sent to a client that launches late.
     private var outstandingDialogRequests: [String: [String: Any]] = [:]
 
     /// The primary webview's own minted channel. Equal to `channelId` while
@@ -5247,6 +5247,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// raised-hand, hourglass, or spinning subagent row — once the process
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
+        outstandingDialogRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
         // Cleared with `…Inputs`, which it is keyed alongside: both are

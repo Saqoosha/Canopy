@@ -19,10 +19,13 @@ enum MirrorAccess {
         return storeNewToken()
     }
 
-    /// Replaces the password, which invalidates every connection string copied before.
-    @discardableResult
+    /// Replaces the password; nil means the old one is still in force.
     static func resetToken() -> String? {
-        SecItemDelete(baseQuery as CFDictionary)
+        let status = SecItemDelete(baseQuery as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            logger.error("could not delete the mirror password (OSStatus \(status))")
+            return nil
+        }
         return storeNewToken()
     }
 
@@ -49,7 +52,11 @@ enum MirrorAccess {
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            logger.error("could not read the mirror password (OSStatus \(status))")
+        }
+        guard status == errSecSuccess,
               let data = item as? Data,
               let token = String(data: data, encoding: .utf8), !token.isEmpty
         else { return nil }
@@ -84,7 +91,8 @@ enum MirrorAccess {
         guard getifaddrs(&head) == 0, let first = head else { return nil }
         defer { freeifaddrs(head) }
         for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            guard let address = entry.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET) else { continue }
+            guard entry.pointee.ifa_flags & UInt32(IFF_UP) != 0,
+                  let address = entry.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET) else { continue }
             let ipv4 = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
             var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
             var addr = ipv4
