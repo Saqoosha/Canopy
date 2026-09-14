@@ -30,6 +30,8 @@ final class MirrorServer {
     private var connections: [MirrorConnection] = []
     /// The address the listener has actually reached `.ready` on; nil while binding or after a failure.
     private(set) var boundAddress: (host: String, port: UInt16)?
+    /// The address a not-yet-ready listener is binding; a second start for it must not cancel the first.
+    private(set) var pendingAddress: (host: String, port: UInt16)?
     /// Read once per bind so an attach never touches the Keychain; `resetPassword` replaces it.
     fileprivate var token: String
 
@@ -56,6 +58,7 @@ final class MirrorServer {
 
     func start(host: String, port: UInt16) {
         stop()
+        pendingAddress = (host, port)
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
@@ -68,10 +71,12 @@ final class MirrorServer {
                     case .ready:
                         logger.notice("[mirror-server] listening on \(host, privacy: .public):\(port)")
                         self.boundAddress = (host, port)
+                        self.pendingAddress = nil
                         MirrorServerStatus.shared.state = .listening(host: host, port: port)
                     case .waiting(let error), .failed(let error):
                         logger.error("[mirror-server] listener cannot bind \(host, privacy: .public):\(port): \(error.localizedDescription, privacy: .public)")
                         self.boundAddress = nil
+                        self.pendingAddress = nil
                         MirrorServerStatus.shared.state = .failed(error.localizedDescription)
                     default:
                         break
@@ -99,6 +104,7 @@ final class MirrorServer {
         listener?.cancel()
         listener = nil
         boundAddress = nil
+        pendingAddress = nil
     }
 
     fileprivate func remove(_ connection: MirrorConnection) {
