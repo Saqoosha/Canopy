@@ -8,7 +8,7 @@ import Foundation
 /// oversight: see the spec's roster section. Adding a field that quotes the
 /// transcript reopens a decision that was made deliberately.
 struct RosterSnapshot: Codable, Equatable {
-    struct Pane: Codable, Equatable {
+    struct Pane: Codable, Equatable, Hashable {
         let sessionId: String
         /// The CLI's own session id, which survives a Canopy restart while
         /// `sessionId` above does not. Optional because it is backfilled a

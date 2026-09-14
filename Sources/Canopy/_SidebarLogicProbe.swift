@@ -1699,6 +1699,43 @@ enum SidebarLogicProbe {
                    RemoteRosterWatcher.isStale(fresh, now: Date(timeIntervalSince1970: 1_000 + RemoteRosterWatcher.staleThreshold)))
         }
 
+        // Remote live rows: built from other Macs' rosters, per machine, with
+        // already-attached sessions removed (their pane has an Open row).
+        do {
+            func pane(_ id: String, live: Bool, state: String = "idle") -> RosterSnapshot.Pane {
+                RosterSnapshot.Pane(sessionId: id, resumeId: id, paneIndex: 0, title: "T \(id)", project: "P",
+                                    state: state, stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: live)
+            }
+            let now = Date(timeIntervalSince1970: 2_000)
+            let fresh = RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 2_000, sessionPct: 0, weeklyPct: 0,
+                                       panes: [pane("a", live: true, state: "working"), pane("b", live: false)])
+            let old = RosterSnapshot(machineId: "M3", displayName: "mini", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                                     panes: [pane("c", live: true)])
+            let sections = SessionStore.remoteLiveSections(
+                rosters: ["M2": fresh, "M3": old], machineIds: ["M3", "M2", "M4"], attached: ["M2:b"], now: now)
+            record("remote rows: one section per listed machine, in relay order",
+                   sections.map(\.machineId) == ["M3", "M2", "M4"])
+            record("remote rows: a machine with no snapshot yet is loading",
+                   sections[2].loading && sections[2].rows.isEmpty)
+            record("remote rows: the section title is the display name",
+                   sections[1].title == "studio")
+            record("remote rows: an attached session's row is dropped",
+                   sections[1].rows.map(\.id) == ["remote:M2:a"])
+            record("remote rows: a stale machine's rows are marked stale",
+                   { if case .remoteLive(let r) = sections[0].rows[0] { return r.stale } else { return false } }())
+            record("remote rows: a live fresh row can open",
+                   SidebarRow.canOpen(sections[1].rows[0]))
+            record("remote rows: a stale row cannot open",
+                   !SidebarRow.canOpen(sections[0].rows[0]))
+            let dead = RemoteLiveSession(machineId: "M2", machineName: "studio", row: pane("b", live: false), stale: false)
+            record("remote rows: a non-live row cannot open",
+                   !SidebarRow.canOpen(.remoteLive(dead)))
+            record("remote rows: the row is not in the Open block",
+                   !SidebarRow.remoteLive(dead).isOpen)
+            record("remote rows: activity comes from the wire state",
+                   { if case .remoteLive(let r) = sections[1].rows[0] { return r.activity == .working } else { return false } }())
+        }
+
         // Roster reply routing: which open session an envelope from the phone
         // addresses, matched on `OpenSession.ID` — minted per process, so an
         // id from a previous launch must find nothing rather than fall back

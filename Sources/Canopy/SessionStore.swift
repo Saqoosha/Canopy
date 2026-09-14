@@ -137,6 +137,46 @@ final class SessionStore {
     /// loading.
     var remoteMachineIds: [String] = []
 
+    struct RemoteMachineSection: Identifiable {
+        let machineId: String
+        let title: String
+        let rows: [SidebarRow]
+        let loading: Bool
+        var id: String { machineId }
+    }
+
+    /// Other Macs' rows, one section per listed machine, in the relay's order.
+    /// Pure so the probe pins the drop rule: a session this Mac has already
+    /// attached to has a pane and an Open row, so its remote row would be a
+    /// duplicate — the teleported-cloud-row rule, one hop over.
+    static func remoteLiveSections(rosters: [String: RosterSnapshot], machineIds: [String],
+                                   attached: Set<String>, now: Date) -> [RemoteMachineSection] {
+        machineIds.map { id in
+            guard let snapshot = rosters[id] else {
+                return RemoteMachineSection(machineId: id, title: id, rows: [], loading: true)
+            }
+            let stale = RemoteRosterWatcher.isStale(snapshot, now: now)
+            let rows = snapshot.panes.compactMap { pane -> SidebarRow? in
+                let live = RemoteLiveSession(machineId: id, machineName: snapshot.displayName, row: pane, stale: stale)
+                return attached.contains("\(id):\(live.sessionId)") ? nil : .remoteLive(live)
+            }
+            return RemoteMachineSection(machineId: id, title: snapshot.displayName, rows: rows, loading: false)
+        }
+    }
+
+    var remoteLiveSections: [RemoteMachineSection] {
+        let attached = Set(openSessions.compactMap { s -> String? in
+            guard let t = s.origin.mirrorTarget else { return nil }
+            return "\(t.machineId):\(s.resumeId)"
+        })
+        return Self.remoteLiveSections(rosters: remoteRosters, machineIds: remoteMachineIds, attached: attached, now: Date())
+    }
+
+    /// Replaced in the next task.
+    func openRemoteLive(_ remote: RemoteLiveSession, target: PaneTarget) {
+        logger.notice("openRemoteLive: not implemented yet")
+    }
+
     /// Maps local jsonl session id → cloud session id it was teleported from.
     /// Used by `visibleRows` to drop already-teleported cloud rows.
     private(set) var teleportedFromMap: [String: String] = [:]
@@ -217,7 +257,7 @@ final class SessionStore {
                 openSessionId: nil,
                 currentTitle: entry.title
             )
-        case .closedCloud, .launcher:
+        case .closedCloud, .launcher, .remoteLive:
             break
         }
     }
@@ -1576,7 +1616,7 @@ final class SessionStore {
                 if panedSessions.contains(session.id) { previousSession = session.id }
             case .launcher(let slot):
                 out.append(LauncherAnchor(slot: slot, after: previousSession))
-            case .closedLocal, .closedCloud:
+            case .closedLocal, .closedCloud, .remoteLive:
                 break
             }
         }
