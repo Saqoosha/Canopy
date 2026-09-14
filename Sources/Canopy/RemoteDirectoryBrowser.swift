@@ -95,10 +95,7 @@ struct RemoteDirectoryBrowser: View {
                         ForEach(RemoteDirectoryRules.visibleEntries(entries, showHidden: showHidden)) { entry in
                             Button {
                                 if entry.isDirectory {
-                                    let newPath = currentPath.hasSuffix("/")
-                                        ? "\(currentPath)\(entry.name)"
-                                        : "\(currentPath)/\(entry.name)"
-                                    navigateTo(newPath)
+                                    navigateTo(RemoteDirectoryRules.childPath(of: currentPath, name: entry.name))
                                 }
                             } label: {
                                 HStack(spacing: 8) {
@@ -125,10 +122,8 @@ struct RemoteDirectoryBrowser: View {
 
             Divider()
 
-            // Bottom bar. Pressing New Folder… swaps the whole bar for the
-            // name field, so the input appears where the button was rather
-            // than somewhere else in the sheet — the first version put it
-            // under the path bar and the two read as unrelated.
+            // Bottom bar. New Folder… swaps the bar for the name field, so the
+            // input appears where the button was.
             HStack {
                 if isCreatingFolder {
                     Image(systemName: "folder.badge.plus")
@@ -196,26 +191,30 @@ struct RemoteDirectoryBrowser: View {
     private func cancelCreatingFolder() {
         isCreatingFolder = false
         newFolderName = ""
+        errorMessage = nil
     }
 
     /// `mkdir` without `-p`, deliberately: an existing folder is a real
     /// answer ("File exists"), and `-p` would report success and then
     /// navigate into somebody else's directory.
     private func createFolder() {
-        guard RemoteDirectoryRules.newFolderNameProblem(newFolderName) == nil,
+        guard !isLoading,
+              RemoteDirectoryRules.newFolderNameProblem(newFolderName) == nil,
               currentPath.hasPrefix("/") else { return }
-        let target = RemoteDirectoryRules.childPath(of: currentPath, name: newFolderName)
+        let name = RemoteDirectoryRules.trimmedName(newFolderName)
+        let target = RemoteDirectoryRules.childPath(of: currentPath, name: name)
         isLoading = true
         errorMessage = nil
         Task {
             do {
+                // `--`: a name starting with "-" is a folder, not an option.
                 _ = try await runSSH(args: ["-T", "-o", "ConnectTimeout=10", sshHost,
-                                            "mkdir", shellEscape(target)])
-                logger.info("created remote folder \(target, privacy: .private) on \(sshHost, privacy: .public)")
+                                            "mkdir", "--", shellEscape(target)])
+                logger.notice("created remote folder \(target, privacy: .private) on \(sshHost, privacy: .public)")
                 cancelCreatingFolder()
                 navigateTo(target)
             } catch {
-                logger.error("mkdir failed on \(sshHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.error("mkdir failed on \(sshHost, privacy: .public): \(error.localizedDescription, privacy: .private)")
                 errorMessage = error.localizedDescription
                 isLoading = false
             }
@@ -322,28 +321,32 @@ struct RemoteDirectoryBrowser: View {
     }
 }
 
-/// The pure half of the browser's New Folder and hidden-file features,
-/// separate from the `View` so `_SidebarLogicProbe` can reach it and so it
-/// is not `@MainActor` by inference.
+/// The pure half of New Folder and the hidden-file toggle, kept off the
+/// `View` so it is not main-actor isolated and the probe can reach it.
 enum RemoteDirectoryRules {
+    static func trimmedName(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Nil when `name` may be spliced into `mkdir` as one path component.
-    /// Trims first: what the user typed with a stray space is still a name.
     static func newFolderNameProblem(_ name: String) -> String? {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = trimmedName(name)
         if trimmed.isEmpty { return "Enter a folder name." }
         if trimmed == "." || trimmed == ".." { return "That name is reserved." }
         if trimmed.contains("/") { return "A folder name cannot contain a slash." }
-        if trimmed.contains("\u{0}") { return "A folder name cannot contain NUL." }
+        // Newlines included: the listing splits `pwd` and `ls` output on them.
+        if trimmed.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
+            return "A folder name cannot contain control characters."
+        }
         return nil
     }
 
-    /// Same join the listing uses when it descends into an entry, so the
-    /// folder is created at the path the browser then navigates to.
+    /// The one join both the listing's descend and New Folder use.
     static func childPath(of directory: String, name: String) -> String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return directory.hasSuffix("/") ? "\(directory)\(trimmed)" : "\(directory)/\(trimmed)"
+        directory.hasSuffix("/") ? "\(directory)\(name)" : "\(directory)/\(name)"
     }
 
+    /// Client side, on the name only, so toggling never re-runs ssh.
     static func visibleEntries(_ entries: [RemoteDirectoryBrowser.DirEntry],
                                showHidden: Bool) -> [RemoteDirectoryBrowser.DirEntry] {
         showHidden ? entries : entries.filter { !$0.name.hasPrefix(".") }

@@ -6752,48 +6752,62 @@ enum SidebarLogicProbe {
 
         // MARK: - RemoteDirectoryRules (remote browser: New Folder + hidden files)
         //
-        // The name is spliced into `mkdir -p '<dir>/<name>'` over ssh, so the
-        // rule is "one path component or nothing". Each refusal below is a
-        // name that would either escape the current directory or make a
-        // folder the listing could not then show.
+        // The name is spliced into `mkdir '<dir>/<name>'` over ssh (no `-p`;
+        // see `createFolder`), so the rule is "one path component or nothing".
+        // Refusals are pinned by message: the message is the instruction.
 
         record("remote rules: plain name is accepted",
                RemoteDirectoryRules.newFolderNameProblem("project") == nil,
                "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("project")))")
-        record("remote rules: surrounding whitespace is trimmed, not refused",
-               RemoteDirectoryRules.newFolderNameProblem("  project  ") == nil,
-               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("  project  ")))")
         record("remote rules: dotfile name is accepted",
                RemoteDirectoryRules.newFolderNameProblem(".config") == nil,
                "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem(".config")))")
+        // Untrimmed, " . " is neither "." nor empty — only the trim refuses it.
+        record("remote rules: trimming happens before the reserved check",
+               RemoteDirectoryRules.newFolderNameProblem(" . ") == "That name is reserved.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem(" . ")))")
         record("remote rules: empty name is refused",
-               RemoteDirectoryRules.newFolderNameProblem("") != nil, "expected a problem")
+               RemoteDirectoryRules.newFolderNameProblem("") == "Enter a folder name.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("")))")
         record("remote rules: whitespace-only name is refused",
-               RemoteDirectoryRules.newFolderNameProblem("   ") != nil, "expected a problem")
+               RemoteDirectoryRules.newFolderNameProblem("   ") == "Enter a folder name.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("   ")))")
         record("remote rules: a slash is refused (one component only)",
-               RemoteDirectoryRules.newFolderNameProblem("a/b") != nil, "expected a problem")
+               RemoteDirectoryRules.newFolderNameProblem("a/b") == "A folder name cannot contain a slash.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("a/b")))")
         record("remote rules: '.' is refused",
-               RemoteDirectoryRules.newFolderNameProblem(".") != nil, "expected a problem")
+               RemoteDirectoryRules.newFolderNameProblem(".") == "That name is reserved.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem(".")))")
         record("remote rules: '..' is refused",
-               RemoteDirectoryRules.newFolderNameProblem("..") != nil, "expected a problem")
+               RemoteDirectoryRules.newFolderNameProblem("..") == "That name is reserved.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("..")))")
         record("remote rules: a NUL byte is refused",
-               RemoteDirectoryRules.newFolderNameProblem("a\u{0}b") != nil, "expected a problem")
+               RemoteDirectoryRules.newFolderNameProblem("a\u{0}b") == "A folder name cannot contain control characters.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("a\u{0}b")))")
+        record("remote rules: an inner newline is refused (the listing splits on it)",
+               RemoteDirectoryRules.newFolderNameProblem("a\nb") == "A folder name cannot contain control characters.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("a\nb")))")
+        record("remote rules: an inner CR is refused",
+               RemoteDirectoryRules.newFolderNameProblem("a\rb") == "A folder name cannot contain control characters.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("a\rb")))")
 
-        // Joining: the browser's own path join is `hasSuffix("/")`-aware and
-        // the New Folder path must produce the same spelling, or the folder is
-        // made at one path and the listing navigates to another.
+        record("remote rules: trimmedName strips both ends only",
+               RemoteDirectoryRules.trimmedName("  my folder \n") == "my folder",
+               "got \(RemoteDirectoryRules.trimmedName("  my folder \n"))")
+
+        // `childPath` is the listing's own join, so it must NOT trim — a real
+        // remote directory named " x" has to stay reachable from the listing.
         record("remote rules: join under a plain directory",
                RemoteDirectoryRules.childPath(of: "/Users/x", name: "p") == "/Users/x/p",
                "got \(RemoteDirectoryRules.childPath(of: "/Users/x", name: "p"))")
         record("remote rules: join under root does not double the slash",
                RemoteDirectoryRules.childPath(of: "/", name: "p") == "/p",
                "got \(RemoteDirectoryRules.childPath(of: "/", name: "p"))")
-        record("remote rules: join trims the name",
-               RemoteDirectoryRules.childPath(of: "/Users/x", name: " p ") == "/Users/x/p",
+        record("remote rules: join keeps the entry name verbatim",
+               RemoteDirectoryRules.childPath(of: "/Users/x", name: " p ") == "/Users/x/ p ",
                "got \(RemoteDirectoryRules.childPath(of: "/Users/x", name: " p "))")
 
-        // Hidden-file filter: client side, on the name only. `ls -1pA` keeps
-        // listing everything so toggling the flag never re-runs ssh.
+        // Hidden-file filter: client side, on the name only.
         do {
             let entries = [
                 RemoteDirectoryBrowser.DirEntry(name: ".git", isDirectory: true),
