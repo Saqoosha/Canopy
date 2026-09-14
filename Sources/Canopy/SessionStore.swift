@@ -136,6 +136,10 @@ final class SessionStore {
     /// them. A machine here with no `remoteRosters` entry yet renders as
     /// loading.
     var remoteMachineIds: [String] = []
+    /// The time remote rows are judged stale against. Advanced by
+    /// `RemoteRosterWatcher` on a timer, so a Mac that stops publishing is
+    /// dimmed without waiting for something else to re-render the sidebar.
+    var remoteClock = Date()
 
     struct RemoteMachineSection: Identifiable {
         let machineId: String
@@ -164,12 +168,13 @@ final class SessionStore {
         }
     }
 
+    /// Other Macs' rows for the sidebar, judged stale against `remoteClock`.
     var remoteLiveSections: [RemoteMachineSection] {
         let attached = Set(openSessions.compactMap { s -> String? in
             guard let t = s.origin.mirrorTarget else { return nil }
             return "\(t.machineId):\(s.resumeId)"
         })
-        return Self.remoteLiveSections(rosters: remoteRosters, machineIds: remoteMachineIds, attached: attached, now: Date())
+        return Self.remoteLiveSections(rosters: remoteRosters, machineIds: remoteMachineIds, attached: attached, now: remoteClock)
     }
 
     /// Replaced in the next task.

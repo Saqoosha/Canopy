@@ -19,11 +19,13 @@ final class RemoteRosterWatcher {
     private var pingTimers: [String: DispatchSourceTimer] = [:]
     private var lastAttempt: [String: Date] = [:]
     private var listTimer: DispatchSourceTimer?
+    private var clockTimer: DispatchSourceTimer?
     private var connectedEndpoint: String?
 
     // nonisolated because isStale, itself nonisolated, reads it.
     nonisolated static let staleThreshold: TimeInterval = 5 * 60
     static let listInterval: TimeInterval = 5 * 60
+    private static let clockInterval: TimeInterval = 30
     private static let pingInterval: TimeInterval = 30
     private static let reconnectFloor: TimeInterval = 5
 
@@ -48,6 +50,8 @@ final class RemoteRosterWatcher {
         disconnectAll()
         listTimer?.cancel()
         listTimer = nil
+        clockTimer?.cancel()
+        clockTimer = nil
         connectedEndpoint = nil
         store.remoteMachineIds = []
         store.remoteRosters = [:]
@@ -108,6 +112,12 @@ final class RemoteRosterWatcher {
         }
         listTimer = timer
         timer.resume()
+        clockTimer?.cancel()
+        let clock = Self.makeListTimer(interval: Self.clockInterval) { [weak self] in
+            Task { @MainActor in self?.store.remoteClock = Date() }
+        }
+        clockTimer = clock
+        clock.resume()
         refreshMachineList()
     }
 

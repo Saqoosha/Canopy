@@ -810,12 +810,6 @@ private struct SidebarRowView: View {
         .padding(.vertical, 4 - RowChip.verticalInset)
         .frame(minHeight: 36 - 2 * RowChip.verticalInset)
         .contentShape(Rectangle())
-        .opacity(isStaleRemote ? 0.5 : 1)
-    }
-
-    private var isStaleRemote: Bool {
-        if case .remoteLive(let r) = row { return r.stale }
-        return false
     }
 
     @ViewBuilder
@@ -828,7 +822,6 @@ private struct SidebarRowView: View {
             ActivityDot(activity: SessionActivity.of(session, isUnread: isUnread))
         } else if case .remoteLive(let remote) = row {
             ActivityDot(activity: remote.activity)
-                .opacity(remote.stale ? 0.5 : 1)
         } else {
             Image(systemName: iconName)
                 .symbolRenderingMode(.hierarchical)
