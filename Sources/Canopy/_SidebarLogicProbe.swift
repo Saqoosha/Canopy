@@ -9849,6 +9849,28 @@ enum SidebarLogicProbe {
                        && account.modelScoped.count == 1 && account.modelScoped.first?.displayName == "Fable")
         }
 
+        // Live mirror access: the password compare, the bind-address filter, and the string the phone pastes.
+        do {
+            record("mirror password: an identical token matches", MirrorAccess.tokensMatch("abc123", "abc123"))
+            record("mirror password: one differing byte does not match", !MirrorAccess.tokensMatch("abc124", "abc123"))
+            record("mirror password: a prefix of the token does not match", !MirrorAccess.tokensMatch("abc", "abc123"))
+            record("mirror password: a longer string starting with the token does not match", !MirrorAccess.tokensMatch("abc1234", "abc123"))
+            record("mirror password: an empty expected token matches nothing", !MirrorAccess.tokensMatch("", ""))
+            record("mirror bind: both ends of 100.64.0.0/10 are Tailscale",
+                   MirrorAccess.isTailscaleIPv4("100.64.0.1") && MirrorAccess.isTailscaleIPv4("100.127.255.254"))
+            record("mirror bind: just outside 100.64.0.0/10 is not Tailscale",
+                   !MirrorAccess.isTailscaleIPv4("100.63.255.255") && !MirrorAccess.isTailscaleIPv4("100.128.0.1"))
+            record("mirror bind: LAN, loopback, wildcard and malformed addresses are not Tailscale",
+                   !MirrorAccess.isTailscaleIPv4("192.168.1.2") && !MirrorAccess.isTailscaleIPv4("127.0.0.1")
+                       && !MirrorAccess.isTailscaleIPv4("0.0.0.0") && !MirrorAccess.isTailscaleIPv4("100.64.0")
+                       && !MirrorAccess.isTailscaleIPv4("100.64.0.300") && !MirrorAccess.isTailscaleIPv4("100.64.0.1.5"))
+            let connection = URLComponents(string: MirrorAccess.connectionString(host: "100.116.127.93", port: 8770, token: "tok_-en"))
+            record("mirror connection: the phone string round-trips host, port and token",
+                   connection?.scheme == MirrorAccess.urlScheme && connection?.host == "100.116.127.93" && connection?.port == 8770
+                       && connection?.queryItems?.first(where: { $0.name == "token" })?.value == "tok_-en")
+            record("mirror assets: module scripts are served as JavaScript", MirrorConnection.mimeType(forExtension: "js") == "text/javascript")
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

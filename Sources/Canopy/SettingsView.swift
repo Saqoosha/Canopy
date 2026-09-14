@@ -276,8 +276,56 @@ private struct MobileSettingsTab: View {
                     .foregroundStyle(.secondary)
             }
             .onAppear { hasStoredSecret = MachineIdentity.hasRelaySecret() }
+
+            Section {
+                Toggle("Let the iPhone open live sessions", isOn: $settings.mirrorEnabled)
+                LabeledContent("Status", value: mirrorStatusText)
+                HStack {
+                    Button("Copy Connection for iPhone") { copyMirrorConnection() }
+                        .disabled(listeningAddress == nil)
+                    Button("Reset Password") { resetMirrorPassword() }
+                        .disabled(!settings.mirrorEnabled)
+                    Spacer()
+                    if copiedConnection {
+                        Text("Copied").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Live mirror")
+            } footer: {
+                SettingsFooter(text: "Paste the connection into the iPhone app's Settings. It contains the password: anyone on your tailnet who has it can read and drive this Mac's sessions. Reset the password to stop every copy made before.")
+            }
         }
         .formStyle(.grouped)
+    }
+
+    @State private var mirrorStatus = MirrorServerStatus.shared
+    @State private var copiedConnection = false
+
+    private var listeningAddress: (host: String, port: UInt16)? {
+        if case .listening(let host, let port) = mirrorStatus.state { return (host, port) }
+        return nil
+    }
+
+    private var mirrorStatusText: String {
+        switch mirrorStatus.state {
+        case .off: "Off"
+        case .noTailscale: "Tailscale is not running on this Mac"
+        case .listening(let host, let port): "Listening on \(host):\(port)"
+        case .failed(let reason): "Cannot listen: \(reason)"
+        }
+    }
+
+    private func copyMirrorConnection() {
+        guard let address = listeningAddress, let token = MirrorAccess.token(createIfMissing: true) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(MirrorAccess.connectionString(host: address.host, port: address.port, token: token), forType: .string)
+        copiedConnection = true
+    }
+
+    private func resetMirrorPassword() {
+        MirrorAccess.resetToken()
+        copiedConnection = false
     }
 
     @State private var relaySecret: String = ""

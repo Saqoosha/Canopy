@@ -1,3 +1,4 @@
+import Network
 import os.log
 import Sparkle
 import SwiftUI
@@ -34,6 +35,7 @@ struct CanopyApp: App {
             // Same reasoning as the MacroPad task above: fires once per
             // window, `startRosterPublisher` is idempotent.
             .task { appDelegate.startRosterPublisher(store: sidebarStore) }
+            .task { appDelegate.startMirrorServer(store: sidebarStore) }
             // Reads ~/.claude/sessions for the names other Claude sessions use
             // to message these ones. Idempotent, so a re-run of this .task is
             // harmless; it watches and polls for the process lifetime.
@@ -418,9 +420,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// store is unambiguously alive and in hand, and this is idempotent so a
     /// second window's `.task` is harmless.
     private var rosterPublisher: RosterPublisher?
-    #if DEBUG
-    var mirrorServer: MirrorServer?
-    #endif
+    private var mirrorServer: MirrorServer?
+    private var mirrorActivationObserver: NSObjectProtocol?
+
+    /// Keeps the live-mirror listener in step with Settings and with this Mac's Tailscale address.
+    @MainActor
+    func startMirrorServer(store: SessionStore) {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else { return }
+        #endif
+        guard mirrorActivationObserver == nil else { return }
+        syncMirrorServer(store: store)
+        // Tailscale can come up after launch, so re-check whenever Canopy comes forward.
+        mirrorActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncMirrorServer(store: store) }
+        }
+    }
+
+    @MainActor
+    private func syncMirrorServer(store: SessionStore) {
+        let settings = CanopySettings.shared
+        withObservationTracking {
+            _ = settings.mirrorEnabled
+            _ = settings.mirrorPort
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.syncMirrorServer(store: store) } }
+        }
+        guard settings.mirrorEnabled, let port = UInt16(exactly: settings.mirrorPort), port != 0 else {
+            mirrorServer?.stop()
+            mirrorServer = nil
+            MirrorServerStatus.shared.state = .off
+            return
+        }
+        var host = MirrorAccess.tailscaleIPv4()
+        #if DEBUG
+        // Developer override for loopback testing, e.g. `CANOPY_MIRROR_LISTEN=127.0.0.1`.
+        if let raw = ProcessInfo.processInfo.environment["CANOPY_MIRROR_LISTEN"], IPv4Address(raw) != nil { host = raw }
+        #endif
+        guard let host else {
+            mirrorServer?.stop()
+            mirrorServer = nil
+            MirrorServerStatus.shared.state = .noTailscale
+            return
+        }
+        if let bound = mirrorServer?.boundAddress, bound.host == host, bound.port == port { return }
+        _ = MirrorAccess.token(createIfMissing: true)
+        let server = mirrorServer ?? MirrorServer(store: store)
+        mirrorServer = server
+        server.start(host: host, port: port)
+    }
 
     @MainActor
     func startRosterPublisher(store: SessionStore) {
@@ -447,18 +497,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else {
             return
-        }
-        #endif
-        #if DEBUG
-        if mirrorServer == nil, let raw = ProcessInfo.processInfo.environment["CANOPY_MIRROR_LISTEN"] {
-            if let address = MirrorServer.listenAddress(from: raw) {
-                let server = MirrorServer(store: store)
-                mirrorServer = server
-                server.start(host: address.host, port: address.port)
-            } else {
-                Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorServer")
-                    .error("[mirror-server] CANOPY_MIRROR_LISTEN is not <port> or <IPv4>:<port>: \(raw, privacy: .public)")
-            }
         }
         #endif
         guard rosterPublisher == nil else { return }

@@ -181,7 +181,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
 
     private func onReady() {
         logger.notice("[mirror-attach] connected")
-        sendJSONObject(["type": "attach", "sessionId": sessionId])
+        // Only reaches a server on this Mac or one sharing its password; it is a DEBUG test window.
+        sendJSONObject(["type": "attach", "sessionId": sessionId, "token": MirrorAccess.token(createIfMissing: true) ?? ""])
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
         if let webView {
@@ -218,6 +219,10 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         }
         guard let dict = object as? [String: Any] else {
             logger.error("[mirror-attach] JSON root is not an object")
+            return
+        }
+        if dict["type"] as? String == "attach_ok" {
+            logger.notice("[mirror-attach] attach_ok")
             return
         }
         if let type = dict["type"] as? String, type == "attach_error" {
