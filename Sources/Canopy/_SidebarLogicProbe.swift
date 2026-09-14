@@ -9864,6 +9864,8 @@ enum SidebarLogicProbe {
                 return ((result?["content"] as? [[String: Any]])?.first?["source"] as? [String: Any])
             }
             var stored: [String: [String: Any]] = [:]
+            record("mirror images: the store namespaces an image by the session it was replayed for",
+                   MirrorImageStore.key(sessionId: "s1", image: "abc") != MirrorImageStore.key(sessionId: "s2", image: "abc"))
             let deferred = source(ShimProcess.deferringReadImagesForMirror(replay("Read")) { stored[$0] = $1 })
             let url = deferred?["url"] as? String ?? ""
             record("mirror images: a Read image becomes a canopy-asset img URL",

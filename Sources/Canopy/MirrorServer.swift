@@ -130,6 +130,8 @@ final class MirrorConnection: MirrorSink {
     private weak var shim: ShimProcess?
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorConnection")
     private var didAttach = false
+    /// The session this connection attached to; images are only served under it.
+    private var attachedSessionId = ""
     private var cleanedUp = false
 
     init(connection: NWConnection, store: SessionStore, server: MirrorServer) {
@@ -241,7 +243,9 @@ final class MirrorConnection: MirrorSink {
         }
         didAttach = true
         self.shim = shim
-        let prefetchId = "canopy-prefetch-\(UUID().uuidString)"
+        attachedSessionId = sessionId
+        // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
+        let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
         sendJSONObject([
             "type": "attach_ok",
@@ -254,8 +258,10 @@ final class MirrorConnection: MirrorSink {
             "prefetchedSessionRequestId": prefetchId,
         ])
         shim.attachMirror(self)
-        // Starts the extension reading the transcript while the phone is still loading the page.
-        shim.receiveFromMirror(Self.prefetchRequest(sessionId: sessionId, requestId: prefetchId), from: self)
+        if !prefetchId.isEmpty {
+            // Starts the extension reading the transcript while the phone is still loading the page.
+            shim.receiveFromMirror(Self.prefetchRequest(sessionId: sessionId, requestId: prefetchId), from: self)
+        }
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")
     }
 
@@ -274,8 +280,9 @@ final class MirrorConnection: MirrorSink {
         var reply: [String: Any] = ["type": "asset_response", "id": id]
         defer { sendJSONObject(reply) }
         if let path = dict["path"] as? String, path.hasPrefix("img/") {
-            let key = String(path.dropFirst(4))
-            guard let image = MirrorImageStore.jpeg(id: key) else {
+            // Scoped to this connection's own session, so one mirror cannot pull another session's images.
+            let key = MirrorImageStore.key(sessionId: attachedSessionId, image: String(path.dropFirst(4)))
+            guard let image = MirrorImageStore.jpeg(key: key) else {
                 logger.error("[mirror-server] image \(key, privacy: .public) not in store")
                 reply["error"] = "not found"
                 return
@@ -362,22 +369,33 @@ final class MirrorConnection: MirrorSink {
 }
 
 /// Read-tool images deferred out of a phone's replay, served when its thumbnail asks for them.
+///
+/// Keyed by session and content, so a mirror can only ask for images from the session it attached to.
 @MainActor
 enum MirrorImageStore {
-    static let capacity = 500
+    /// Held base64, in bytes. A 10-turn replay carries a few images; this leaves room for several sessions at once.
+    static let capacityBytes = 128 << 20
     static let maxPixelSize = 768
     private static var sources: [String: [String: Any]] = [:]
     private static var order: [String] = []
+    private static var heldBytes = 0
 
-    static func put(id: String, source: [String: Any]) {
-        if sources[id] == nil { order.append(id) }
-        sources[id] = source
-        while order.count > capacity { sources[order.removeFirst()] = nil }
+    static func key(sessionId: String, image: String) -> String { "\(sessionId)/\(image)" }
+
+    static func put(key: String, source: [String: Any]) {
+        guard sources[key] == nil else { return }
+        sources[key] = source
+        order.append(key)
+        heldBytes += (source["data"] as? String)?.utf8.count ?? 0
+        while heldBytes > capacityBytes, let oldest = order.first {
+            order.removeFirst()
+            heldBytes -= (sources.removeValue(forKey: oldest)?["data"] as? String)?.utf8.count ?? 0
+        }
     }
 
     /// The image at phone size: a JPEG with a long edge of `maxPixelSize`, or the original bytes when re-encoding does not shrink them.
-    static func jpeg(id: String) -> (data: Data, mime: String)? {
-        guard let source = sources[id], let encoded = source["data"] as? String, let bytes = Data(base64Encoded: encoded) else { return nil }
+    static func jpeg(key: String) -> (data: Data, mime: String)? {
+        guard let source = sources[key], let encoded = source["data"] as? String, let bytes = Data(base64Encoded: encoded) else { return nil }
         if let smaller = RosterImageUploader.thumbnail(from: bytes, maxPixelSize: maxPixelSize, quality: 0.6), smaller.count < bytes.count {
             return (smaller, "image/jpeg")
         }

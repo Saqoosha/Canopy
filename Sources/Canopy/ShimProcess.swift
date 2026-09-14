@@ -4218,14 +4218,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
+                    let session = boundSession?.resumeId ?? ""
                     let trimmed = Self.deferringReadImagesForMirror(Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)) { id, source in
-                        MirrorImageStore.put(id: id, source: source)
+                        MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
                     }
                     post(Self.retargeted(trimmed, from: channelId, to: mirrors[key]?.channelId), to: target)
                 } else {
                     logger.warning("[mirror] response \(requestId, privacy: .public) for a detached mirror dropped")
                 }
             }
+            return
+        }
+
+        if let inner = payload["message"] as? [String: Any],
+           inner["type"] as? String == "response",
+           (inner["requestId"] as? String)?.hasPrefix(Self.mirrorPrefetchPrefix) == true
+        {
+            // Its mirror detached while the extension was reading; broadcasting would hand the
+            // primary webview and every other mirror a replay meant for one phone, untrimmed.
+            logger.notice("[mirror] prefetched replay for a detached mirror dropped")
             return
         }
 
@@ -4335,6 +4346,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// How much of a replayed conversation a phone receives: the last N turns the user typed.
     /// Measured 2026-09-14: a 38 MB transcript replayed 4.7 MB and took ~3.7 s to parse and draw on an iPhone.
     static let mirrorReplayUserTurns = 10
+    /// The request id prefix the mirror server uses when it fetches a replay on a phone's behalf.
+    static let mirrorPrefetchPrefix = "canopy-prefetch-"
 
     /// Replace the base64 images of `Read` tool results in a `get_session` replay with a `canopy-asset` URL the phone fetches only when the thumbnail scrolls into view.
     ///
