@@ -175,3 +175,6 @@ probe で固定する純粋な部分：
 - extension の版ずれ。`attach_ok` は `extensionVersion` を運ぶので、local と違えば warning を log する。挙動は未測定
 - filter gear をリモート行に効かせる
 - 閉じた Recents を phone に運ぶ
+- relay secret を Settings で変えても watcher はすぐ繋ぎ直さない（最大 5 分遅れる）。`RosterPublisher.secretChanged()` 相当が無い
+- mirror pane の on-device 検証（attach・Retry・Paste Connection）は未実施
+- `parseConnectionString` の scheme 比較は大文字小文字を区別する。bracket 付き IPv6 の `host:port` は読めない（今は Tailscale の IPv4 だけなので到達しない）
