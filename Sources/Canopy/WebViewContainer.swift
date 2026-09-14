@@ -344,10 +344,10 @@ struct WebViewContainer: NSViewRepresentable {
         SessionWebViewHost.install(buildWebView(coordinator: coordinator), in: host)
     }
 
-    private func buildWebView(coordinator: Coordinator) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        let ucc = WKUserContentController()
-
+    /// The user scripts every session webview carries, in injection order.
+    /// One list so a mirror webview (`MirrorSessionWindow`) cannot drift from
+    /// the pane's.
+    static func addSessionUserScripts(to ucc: WKUserContentController) {
         ucc.addUserScript(WKUserScript(
             source: Self.consoleCapture,
             injectionTime: .atDocumentStart,
@@ -389,6 +389,13 @@ struct WebViewContainer: NSViewRepresentable {
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
         ))
+    }
+
+    private func buildWebView(coordinator: Coordinator) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let ucc = WKUserContentController()
+
+        Self.addSessionUserScripts(to: ucc)
 
         let consoleHandler = ConsoleLogHandler()
         ucc.add(consoleHandler, name: "consoleLog")
@@ -569,6 +576,13 @@ struct WebViewContainer: NSViewRepresentable {
     // MARK: - Load CC webview
 
     private func loadCCWebview(_ webView: WKWebView) {
+        Self.loadCCWebview(webView, resumeSessionId: resumeSessionId,
+                           entryFileName: Self.entryFileName(for: boundSession))
+    }
+
+    /// Writes the entry HTML for `resumeSessionId` under `entryFileName` and
+    /// loads it. Static so a mirror webview loads the exact page a pane does.
+    static func loadCCWebview(_ webView: WKWebView, resumeSessionId: String?, entryFileName: String) {
         guard let extPath = CCExtension.extensionPath() else {
             webView.loadHTMLString(
                 "<html><body style='background:#ffffff;color:#333;padding:40px;font-family:sans-serif'>"
@@ -635,7 +649,7 @@ struct WebViewContainer: NSViewRepresentable {
         // The file must OUTLIVE the load, not be deleted after it:
         // `webViewWebContentProcessDidTerminate` recovers by calling
         // `webView.reload()`, which re-reads this exact URL.
-        let htmlFile = appSupportDir.appendingPathComponent(Self.entryFileName(for: boundSession))
+        let htmlFile = appSupportDir.appendingPathComponent(entryFileName)
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
         } catch {

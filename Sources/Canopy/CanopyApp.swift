@@ -174,6 +174,20 @@ struct CanopyApp: App {
             CommandMenu("MacroPad") {
                 MacroPadCommands()
             }
+
+            #if DEBUG
+            CommandMenu("Debug") {
+                Button("Mirror Focused Session") {
+                    if let session = sidebarStore.activeSession {
+                        MirrorSessionWindow.open(for: session)
+                    }
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .disabled(sidebarStore.activeSession?.shim == nil)
+                Button("Attach to Remote Session…") { MirrorAttachWindow.promptAndOpen() }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
+            }
+            #endif
         }
 
         Settings {
@@ -404,6 +418,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// store is unambiguously alive and in hand, and this is idempotent so a
     /// second window's `.task` is harmless.
     private var rosterPublisher: RosterPublisher?
+    #if DEBUG
+    var mirrorServer: MirrorServer?
+    #endif
 
     @MainActor
     func startRosterPublisher(store: SessionStore) {
@@ -430,6 +447,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else {
             return
+        }
+        #endif
+        #if DEBUG
+        if mirrorServer == nil,
+           let raw = ProcessInfo.processInfo.environment["CANOPY_MIRROR_LISTEN"],
+           let port = UInt16(raw) {
+            let server = MirrorServer(store: store)
+            mirrorServer = server
+            server.start(port: port)
         }
         #endif
         guard rosterPublisher == nil else { return }
