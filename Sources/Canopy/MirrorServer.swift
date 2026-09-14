@@ -16,16 +16,32 @@ final class MirrorServer {
         self.store = store
     }
 
-    func start(port: UInt16) {
+    /// `"8770"` binds loopback only; `"<host>:8770"` binds that one address (e.g. the Tailscale IP).
+    static func listenAddress(from raw: String) -> (host: String, port: UInt16)? {
+        let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+        switch parts.count {
+        case 1:
+            guard let port = UInt16(parts[0]), port != 0 else { return nil }
+            return ("127.0.0.1", port)
+        case 2:
+            guard !parts[0].isEmpty, let port = UInt16(parts[1]), port != 0 else { return nil }
+            return (String(parts[0]), port)
+        default:
+            return nil
+        }
+    }
+
+    func start(host: String, port: UInt16) {
         stop()
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
-            let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: port)!)
+            parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
+            let listener = try NWListener(using: parameters)
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    logger.notice("[mirror-server] listening on \(port)")
+                    logger.notice("[mirror-server] listening on \(host, privacy: .public):\(port)")
                 case .failed(let error):
                     logger.error("[mirror-server] listener failed: \(error.localizedDescription, privacy: .public)")
                 case .cancelled:
@@ -120,25 +136,18 @@ final class MirrorConnection: MirrorSink {
     nonisolated private func scheduleReceive() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            // `DispatchQueue.main` is FIFO; a Task per line is not, and `attach` must be handled first.
             if let error {
                 logger.error("[mirror-server] receive error: \(error.localizedDescription, privacy: .public)")
-                Task { @MainActor in
-                    self.cleanup()
-                }
+                DispatchQueue.main.async { MainActor.assumeIsolated { self.closeFromPeer() } }
                 return
             }
             if let data, !data.isEmpty {
                 let lines = self.lineBuffer.append(data)
-                for line in lines {
-                    Task { @MainActor in
-                        self.handleLineData(line)
-                    }
-                }
+                DispatchQueue.main.async { MainActor.assumeIsolated { lines.forEach(self.handleLineData) } }
             }
             if isComplete {
-                Task { @MainActor in
-                    self.cleanup()
-                }
+                DispatchQueue.main.async { MainActor.assumeIsolated { self.closeFromPeer() } }
                 return
             }
             self.scheduleReceive()
@@ -212,6 +221,11 @@ final class MirrorConnection: MirrorSink {
         })
     }
 
+    private func closeFromPeer() {
+        connection.cancel()
+        cleanup()
+    }
+
     private func cleanup() {
         guard !cleanedUp else { return }
         cleanedUp = true
@@ -223,7 +237,7 @@ final class MirrorConnection: MirrorSink {
 }
 
 /// Accumulates socket bytes and yields complete newline-terminated lines.
-private final class NDJSONLineBuffer: @unchecked Sendable {
+final class NDJSONLineBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = Data()
 

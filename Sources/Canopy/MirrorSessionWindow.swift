@@ -24,10 +24,7 @@ final class MirrorSessionWindow: NSObject, NSWindowDelegate {
         let config = WKWebViewConfiguration()
         let ucc = WKUserContentController()
         config.userContentController = ucc
-        // Same as the pane's webview: the entry HTML is a file:// page that
-        // loads the extension's index.js as a module from another file://
-        // path, which WebKit refuses without this. Missing it renders a
-        // blank white page with no console output at all (measured).
+        // Same as `WebViewContainer.buildWebView`; without it the page renders blank.
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
         WebViewContainer.addSessionUserScripts(to: ucc)

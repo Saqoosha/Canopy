@@ -23,7 +23,7 @@ transport の前に、Debug ビルドの **ミラー窓**（`MirrorSessionWindow
 | `request` | requestId と送り主を記録し、`response` はその webview にだけ返す | 全員に流すと他の webview が `No handler` を吐く。id は `Math.random().toString(36)` なので衝突しない |
 | 拡張→webview の request への `response` | 他の全 webview に同じ requestId の `cancel_request` を流す | permission dialog は webview-local。片方で Yes しても他方の dialog は残る（実測） |
 
-出口は逆向き：live channel を各 webview 固有の channel に書き戻して配る。`close_channel` も書き戻して配るので、全員が同時にリセットされる。
+出口は逆向き：live channel を各 webview 固有の channel に書き戻して配る。
 
 ## 実測（Debug ビルド、extension 2.1.270、GUI 入力は CGEvent、遮蔽ガード付き）
 
@@ -35,12 +35,12 @@ transport の前に、Debug ビルドの **ミラー窓**（`MirrorSessionWindow
 
 ## transport（同日、続き）
 
-ミラー client を `MirrorSink`（WKWebView か TCP 接続）に広げ、`MirrorServer`（`CANOPY_MIRROR_LISTEN=<port>` で listen、NDJSON、最初の行が `{"type":"attach","sessionId"}`）と、Debug メニュー「Attach to Remote Session…」（`host:port/sessionId`）を足した。fan-out / fan-in のロジックは 1 行も変えていない。
+ミラー client を `MirrorSink`（WKWebView か TCP 接続）に広げ、`MirrorServer`（NDJSON、最初の行が `{"type":"attach","sessionId"}`）と、Debug メニュー「Attach to Remote Session…」（`host:port/sessionId`）を足した。`CANOPY_MIRROR_LISTEN=<port>` は loopback に、`<host>:<port>` はその address にだけ bind する。
 
 - **localhost で成立。** Debug を 2 プロセス立て、B の attach 窓から送った turn が A の CLI で走り、A のペインと B の窓の両方に描かれた
 - attach の id は `OpenSession.resumeId`。`-p` で作った transcript は extension が resume できず fresh になるので、A の id は植えた id から変わる。`attach refused` のログに open sessions を列挙するようにした
 - `generate_session_title` は `channelId` を envelope ではなく `request` の中に持つ。envelope だけ書き換えると `Channel not found: <mirror channel>` で title 生成が落ちる
-- **studio → MBP、Tailscale 越しに handshake 成立。** 最初は 8770 だけ timeout（port 22 は通る）で、MBP の Application Firewall が Debug ビルドの着信を止めていた。Allow 後、studio の Python client から `attach` → `attached`、`init` → cache の `init_response` が 4 KB 返った
+- **studio → MBP、Tailscale 越しに handshake 成立。** 最初は 8770 だけ timeout（port 22 は通る）で、MBP の Application Firewall が Debug ビルドの着信を止めていた。Allow 後、studio の Python client の `attach` が通り（server log の `attached`）、`init` に cache の `init_response` が 4 KB 返った。この時点の listener は全 interface に bind していた
 - **MBP → studio、GUI で cross-machine 成立。** Debug を studio に rsync して `open -n --env CANOPY_MIRROR_LISTEN=8770`（ssh 越しの `open` で GUI セッションに立つ。env も届く）、MBP の Debug の Attach 窓から `100.72.162.115:8770/<id>` で繋いだ。窓から送った prompt が studio の CLI で走り、studio の transcript に user 1 件 + assistant 1 件が書かれ、返事が MBP の窓に描かれた。extension は両機とも 2.1.270 で、版ずれの測定はできていない
 - studio の 1 回目の起動では listener が立たなかった（env はプロセスに届いていた）。2 回目は立った。再現条件は未特定
 - `init_response` には Keychain から注入した `authStatus` が入る。attach できる者は auth 状態を受け取る。port の認証は出荷形で必須で、Tailscale の interface に bind するだけでは足りない

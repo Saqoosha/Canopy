@@ -54,10 +54,7 @@ final class MirrorAttachWindow: NSObject, NSWindowDelegate {
         let config = WKWebViewConfiguration()
         let ucc = WKUserContentController()
         config.userContentController = ucc
-        // Same as the pane's webview: the entry HTML is a file:// page that
-        // loads the extension's index.js as a module from another file://
-        // path, which WebKit refuses without this. Missing it renders a
-        // blank white page with no console output at all (measured).
+        // Same as `WebViewContainer.buildWebView`; without it the page renders blank.
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
         WebViewContainer.addSessionUserScripts(to: ucc)
@@ -73,12 +70,6 @@ final class MirrorAttachWindow: NSObject, NSWindowDelegate {
 
         let bridge = RemoteMirrorBridge(host: host, port: port, sessionId: sessionId, webView: webView)
         ucc.add(bridge, name: "vscodeHost")
-
-        WebViewContainer.loadCCWebview(
-            webView,
-            resumeSessionId: sessionId,
-            entryFileName: WebViewContainer.entryFileName(for: nil)
-        )
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
@@ -142,7 +133,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     // Touched from the Network queue in `scheduleReceive`; NWConnection is
     // thread-safe and the line buffer is locked internally.
     nonisolated(unsafe) private let connection: NWConnection
-    nonisolated(unsafe) private let lineBuffer = AttachNDJSONLineBuffer()
+    nonisolated(unsafe) private let lineBuffer = NDJSONLineBuffer()
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorAttach")
     private weak var webView: WKWebView?
     private let sessionId: String
@@ -192,6 +183,10 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         logger.notice("[mirror-attach] connected")
         sendJSONObject(["type": "attach", "sessionId": sessionId])
         scheduleReceive()
+        // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
+        if let webView {
+            WebViewContainer.loadCCWebview(webView, resumeSessionId: sessionId, entryFileName: WebViewContainer.entryFileName(for: nil))
+        }
     }
 
     nonisolated private func scheduleReceive() {
@@ -203,11 +198,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             }
             if let data, !data.isEmpty {
                 let lines = self.lineBuffer.append(data)
-                for line in lines {
-                    Task { @MainActor in
-                        self.handleLineData(line)
-                    }
-                }
+                DispatchQueue.main.async { MainActor.assumeIsolated { lines.forEach(self.handleLineData) } }
             }
             if isComplete {
                 return
@@ -255,21 +246,4 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     }
 }
 
-/// Accumulates socket bytes and yields complete newline-terminated lines.
-private final class AttachNDJSONLineBuffer: @unchecked Sendable {
-    private let lock = NSLock()
-    private var buffer = Data()
-
-    func append(_ chunk: Data) -> [Data] {
-        lock.lock()
-        defer { lock.unlock() }
-        buffer.append(chunk)
-        var lines: [Data] = []
-        while let range = buffer.range(of: Data([0x0A])) {
-            lines.append(buffer.subdata(in: buffer.startIndex..<range.lowerBound))
-            buffer.removeSubrange(buffer.startIndex..<range.upperBound)
-        }
-        return lines
-    }
-}
 #endif

@@ -4,11 +4,7 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorSink")
 
-/// One client of a session's `ShimProcess` besides its primary webview: a
-/// second WKWebView in this process, or a connection from another Canopy.
-/// The shim fans every extension frame out to each sink and takes webview
-/// messages back from each through `ShimProcess.receiveFromMirror`, so the
-/// extension keeps believing there is exactly one webview.
+/// One client of a session's `ShimProcess` besides its primary webview.
 @MainActor
 protocol MirrorSink: AnyObject {
     /// One host→webview payload, already in the `from-extension` envelope.

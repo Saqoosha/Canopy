@@ -345,8 +345,7 @@ struct WebViewContainer: NSViewRepresentable {
     }
 
     /// The user scripts every session webview carries, in injection order.
-    /// One list so a mirror webview (`MirrorSessionWindow`) cannot drift from
-    /// the pane's.
+    /// One list so a mirror webview cannot drift from the pane's.
     static func addSessionUserScripts(to ucc: WKUserContentController) {
         ucc.addUserScript(WKUserScript(
             source: Self.consoleCapture,
@@ -679,11 +678,9 @@ struct WebViewContainer: NSViewRepresentable {
     /// `ShimProcess.backfillResumeId` rewrites the resumeId mid-session and the
     /// file this webview is loaded from must not move under it.
     ///
-    /// The nil-session fallback is a fresh UUID rather than a fixed name.
-    /// `SessionContainer` is the only construction site and always passes a
-    /// session, so the branch is unreachable — but a fixed name would be a
-    /// shared path carrying exactly the race this scheme exists to remove,
-    /// sitting inside the function that removes it.
+    /// The nil-session fallback is a fresh UUID rather than a fixed name, because
+    /// a fixed name would be a shared path carrying exactly the race this scheme
+    /// exists to remove.
     static func entryFileName(for session: OpenSession?) -> String {
         "\(entryFilePrefix)\(session?.id.uuidString ?? UUID().uuidString).html"
     }

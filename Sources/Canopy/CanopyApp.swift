@@ -450,12 +450,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         #endif
         #if DEBUG
-        if mirrorServer == nil,
-           let raw = ProcessInfo.processInfo.environment["CANOPY_MIRROR_LISTEN"],
-           let port = UInt16(raw) {
-            let server = MirrorServer(store: store)
-            mirrorServer = server
-            server.start(port: port)
+        if mirrorServer == nil, let raw = ProcessInfo.processInfo.environment["CANOPY_MIRROR_LISTEN"] {
+            if let address = MirrorServer.listenAddress(from: raw) {
+                let server = MirrorServer(store: store)
+                mirrorServer = server
+                server.start(host: address.host, port: address.port)
+            } else {
+                Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorServer")
+                    .error("[mirror-server] CANOPY_MIRROR_LISTEN is not <port> or <host>:<port>: \(raw, privacy: .public)")
+            }
         }
         #endif
         guard rosterPublisher == nil else { return }

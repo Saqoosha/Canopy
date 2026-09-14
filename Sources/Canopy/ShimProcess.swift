@@ -74,22 +74,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Mirror webviews (multi-client spike)
 
-    /// A second WKWebView attached to this same shim — the tmux-attach shape,
-    /// exercised locally before any transport exists. The extension believes
-    /// there is exactly one webview, so this process is the multiplexing
-    /// point: every frame it emits fans out to the primary `webView` and
-    /// every mirror, and every frame a mirror sends is rewritten onto the
-    /// primary's channel before it reaches the extension. Each webview mints
-    /// its own `channelId` and drops an `io_message` carrying any other one
-    /// (`Session not found`, read off 2.1.270's `readMessages`), which is
-    /// why the translation runs in BOTH directions. Request ids are
-    /// `Math.random().toString(36)` per webview and need no namespacing;
-    /// responses are routed back to whichever webview asked.
+    /// A client of this shim besides the primary `webView`. Each webview drops an
+    /// `io_message` on any channel but its own, so channel ids are translated both ways.
     private struct MirrorClient {
         weak var sink: (any MirrorSink)?
-        /// The channel the mirror's webview minted in its own `launch_claude`,
-        /// learned when that message is swallowed. Nil until then, and until
-        /// then the mirror drops every `io_message` on the floor.
+        /// The channel this client minted in its own `launch_claude`.
         var channelId: String?
     }
     private var mirrors: [ObjectIdentifier: MirrorClient] = [:]
@@ -109,10 +98,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// mirror. Nil before the primary's first `launch_claude`.
     private var primaryOwnChannel: String?
     /// Whether the extension currently holds the channel in `channelId`.
-    /// Set when a `launch_claude` is forwarded, cleared by the extension's
-    /// `close_channel` for it. A webview launching while this is true is
-    /// swallowed and mapped; one launching while it is false is the real
-    /// launch, whichever webview it came from.
     private var liveChannelOpen = false
     /// The primary's `init_response`, kept so a later webview's `init` can be
     /// answered here. Forwarding it is fatal: the extension's `init` handler
@@ -134,6 +119,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if case .mirror(let owner) = $0.value { return owner != key }
             return true
         }
+        if mirrors.isEmpty { requestOwners.removeAll() }
         logger.notice("[mirror] detached; \(self.mirrors.count) mirror(s) on this shim")
     }
 
@@ -156,9 +142,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ]
     }
 
-    /// `payload` as the mirror on `mirrorChannel` must see it: the primary's
-    /// channel id swapped for the mirror's wherever it sits on the inner
-    /// frame. Anything else passes through untouched.
+    /// Swaps the inner frame's top-level `channelId` from the live one to the target's own.
     private static func retargeted(_ payload: [String: Any], from primary: String?, to mirrorChannel: String?) -> [String: Any] {
         guard let primary, let mirrorChannel,
               var inner = payload["message"] as? [String: Any],
@@ -3228,9 +3212,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         handleWebviewMessage(dict, sender: sender, isPrimary: sender != nil && sender === webView)
     }
 
-    /// A webview→host message from a mirror that is not a WKWebView in this
-    /// process (a `MirrorServer` connection). Same path as the script
-    /// message handler, minus the primary check.
+    /// A webview→host message from a `MirrorServer` connection.
     func receiveFromMirror(_ dict: [String: Any], from sink: any MirrorSink) {
         handleWebviewMessage(dict, sender: sink, isPrimary: false)
     }
@@ -3268,9 +3250,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                      to: sender)
                 return
             }
-            logger.warning("[mirror] init forwarded — no cached init_response yet; the extension will sweep every live channel")
-            requestOwners[requestId] = .mirror(mirrorKey)
-            // fall through: forwarded as a normal request
+            logger.error("[mirror] init dropped: no cached init_response yet, and forwarding it would close every live channel")
+            return
         } else if msgType == "launch_claude", let cid = dict["channelId"] as? String, !cid.isEmpty {
             if let mirrorKey { mirrors[mirrorKey]?.channelId = cid } else if isPrimary { primaryOwnChannel = cid }
             // With no mirror attached this is the pre-mirror path verbatim:
@@ -3759,9 +3740,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             innerMessage = Self.strippingRecapFromReplay(innerMessage)
             innerMessage = patchAuthIfNeeded(innerMessage)
-            // The shim has already wrapped responses in `from-extension`
-            // (window.js), so the frame of interest is one level down —
-            // the same unwrapping `patchAuthIfNeeded` does.
+            // Same `from-extension` unwrap as `patchAuthIfNeeded`.
             let frame = (innerMessage["type"] as? String == "from-extension"
                 ? innerMessage["message"] as? [String: Any] : innerMessage) ?? [:]
             if frame["type"] as? String == "response",
@@ -4235,10 +4214,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             post(Self.retargeted(payload, from: channelId, to: mirror.channelId), to: target)
         }
         for key in stale { mirrors[key] = nil }
+        if !stale.isEmpty, mirrors.isEmpty { requestOwners.removeAll() }
     }
 
-    /// One `window.postMessage` into one webview. `payload` must already be
-    /// in the `from-extension` envelope.
     /// One payload into one client. `payload` must already be in the
     /// `from-extension` envelope. The WKWebView case does the
     /// `window.postMessage`; a remote sink writes it to its socket.
