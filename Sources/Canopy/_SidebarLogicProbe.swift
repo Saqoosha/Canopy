@@ -9864,10 +9864,11 @@ enum SidebarLogicProbe {
                    !MirrorAccess.isTailscaleIPv4("192.168.1.2") && !MirrorAccess.isTailscaleIPv4("127.0.0.1")
                        && !MirrorAccess.isTailscaleIPv4("0.0.0.0") && !MirrorAccess.isTailscaleIPv4("100.64.0")
                        && !MirrorAccess.isTailscaleIPv4("100.64.0.300") && !MirrorAccess.isTailscaleIPv4("100.64.0.1.5"))
-            let connection = URLComponents(string: MirrorAccess.connectionString(host: "100.116.127.93", port: 8770, token: "tok_-en"))
-            record("mirror connection: the phone string round-trips host, port and token",
+            let connection = URLComponents(string: MirrorAccess.connectionString(host: "100.116.127.93", port: 8770, token: "tok_-en", machine: "C211-MBP"))
+            record("mirror connection: the phone string round-trips host, port, token and machine",
                    connection?.scheme == MirrorAccess.urlScheme && connection?.host == "100.116.127.93" && connection?.port == 8770
-                       && connection?.queryItems?.first(where: { $0.name == "token" })?.value == "tok_-en")
+                       && connection?.queryItems?.first(where: { $0.name == "token" })?.value == "tok_-en"
+                       && connection?.queryItems?.first(where: { $0.name == "machine" })?.value == "C211-MBP")
             record("mirror assets: module scripts are served as JavaScript",
                    MirrorConnection.mimeType(forExtension: "js") == "text/javascript" && MirrorConnection.mimeType(forExtension: "mjs") == "text/javascript")
         }
