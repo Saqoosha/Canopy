@@ -474,7 +474,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MirrorServerStatus.shared.state = .noTailscale
             return
         }
-        if let bound = mirrorServer?.boundAddress, bound.host == host, bound.port == port { return }
+        // Cancelling a listener is asynchronous: restarting one that is still binding the same address hits EADDRINUSE.
+        if let server = mirrorServer, let current = server.boundAddress ?? server.pendingAddress, current.host == host, current.port == port { return }
         guard let token = MirrorAccess.token(createIfMissing: true) else {
             mirrorServer?.stop()
             mirrorServer = nil
