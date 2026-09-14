@@ -4340,6 +4340,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// A `user` entry the human typed, as opposed to the `user` entry that carries tool results back.
     static func isTypedUserTurn(_ message: [String: Any]) -> Bool {
         guard message["type"] as? String == "user" else { return false }
+        if let parent = message["parent_tool_use_id"], !(parent is NSNull) { return false }
+        if message["isSidechain"] as? Bool == true || message["isMeta"] as? Bool == true { return false }
         guard let content = (message["message"] as? [String: Any])?["content"] else { return true }
         if content is String { return true }
         guard let blocks = content as? [[String: Any]] else { return true }

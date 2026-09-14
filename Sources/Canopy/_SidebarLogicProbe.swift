@@ -9886,6 +9886,13 @@ enum SidebarLogicProbe {
                 (((envelope["message"] as? [String: Any])?["response"] as? [String: Any])?["messages"] as? [[String: Any]])
             }
             record("mirror replay: a tool_result entry is not a typed turn", !ShimProcess.isTypedUserTurn(toolResult) && ShimProcess.isTypedUserTurn(user("x")))
+            var subagent = user("subagent prompt"); subagent["parent_tool_use_id"] = "toolu_1"
+            var sidechain = user("sidechain"); sidechain["isSidechain"] = true
+            var meta = user("caveat"); meta["isMeta"] = true
+            var mainLine = user("typed"); mainLine["parent_tool_use_id"] = NSNull()
+            record("mirror replay: subagent, sidechain and meta user entries are not typed turns",
+                   !ShimProcess.isTypedUserTurn(subagent) && !ShimProcess.isTypedUserTurn(sidechain) && !ShimProcess.isTypedUserTurn(meta)
+                       && ShimProcess.isTypedUserTurn(mainLine))
             let two = messages(of: ShimProcess.trimmingReplayForMirror(wrapped(replay), keepUserTurns: 2))
             record("mirror replay: keeps the last two typed turns and everything after them",
                    two?.count == 4 && (two?.first?["message"] as? [String: Any])?["content"] as? String == "two")
