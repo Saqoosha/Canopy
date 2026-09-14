@@ -295,12 +295,40 @@ private struct MobileSettingsTab: View {
             } footer: {
                 SettingsFooter(text: "Paste the connection into the iPhone app's Settings. It contains the password: anyone on your tailnet who has it can read and drive this Mac's sessions. Reset the password to disconnect every phone and refuse every copy made before.")
             }
+
+            Section {
+                if settings.mirrorPeers.isEmpty {
+                    Text("No other Macs paired.").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(settings.mirrorPeers.keys.sorted(), id: \.self) { machine in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(peerName(machine))
+                            Text(settings.mirrorPeers[machine] ?? "").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Forget") { forgetPeer(machine) }
+                    }
+                }
+                HStack {
+                    Button("Paste Connection from Mac") { pastePeerConnection() }
+                    Spacer()
+                    if let peerNotice {
+                        Text(peerNotice).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Other Macs")
+            } footer: {
+                SettingsFooter(text: "On the other Mac, turn on its live mirror and use Copy Connection for iPhone; then paste here. Its sessions appear in this Mac's sidebar once both Macs publish to the same relay.")
+            }
         }
         .formStyle(.grouped)
     }
 
     @State private var mirrorStatus = MirrorServerStatus.shared
     @State private var mirrorNotice: String?
+    @State private var peerNotice: String?
 
     private var listeningAddress: (host: String, port: UInt16)? {
         if case .listening(let host, let port) = mirrorStatus.state { return (host, port) }
@@ -332,6 +360,34 @@ private struct MobileSettingsTab: View {
         mirrorNotice = MirrorServer.resetPassword()
             ? "Password reset; copy the connection again"
             : "Reset failed; the old password is still in force"
+    }
+
+    private func peerName(_ machine: String) -> String {
+        SessionStore.shared?.remoteRosters[machine]?.displayName ?? machine
+    }
+
+    private func pastePeerConnection() {
+        guard let text = NSPasteboard.general.string(forType: .string),
+              let connection = MirrorAccess.parseConnectionString(text) else {
+            peerNotice = "That is not a Canopy connection (expected canopy-mirror://…)."
+            return
+        }
+        if connection.machineId == MachineIdentity.stableId() {
+            peerNotice = "That is this Mac's own connection."
+            return
+        }
+        guard MirrorAccess.storePeerToken(connection.token, machineId: connection.machineId) else {
+            peerNotice = "Could not store the password in the Keychain."
+            return
+        }
+        settings.mirrorPeers[connection.machineId] = "\(connection.host):\(connection.port)"
+        peerNotice = "Paired with \(peerName(connection.machineId))."
+    }
+
+    private func forgetPeer(_ machine: String) {
+        MirrorAccess.forgetPeerToken(machineId: machine)
+        settings.mirrorPeers[machine] = nil
+        peerNotice = nil
     }
 
     @State private var relaySecret: String = ""
