@@ -9873,6 +9873,35 @@ enum SidebarLogicProbe {
                    MirrorConnection.mimeType(forExtension: "js") == "text/javascript" && MirrorConnection.mimeType(forExtension: "mjs") == "text/javascript")
         }
 
+        // Mirror replay trim: a phone gets the last N typed turns of a `get_session` replay, cut at a turn boundary.
+        do {
+            func user(_ text: String) -> [String: Any] { ["type": "user", "message": ["role": "user", "content": text] as [String: Any]] }
+            func assistant() -> [String: Any] { ["type": "assistant", "message": ["role": "assistant"] as [String: Any]] }
+            let toolResult: [String: Any] = ["type": "user", "message": ["role": "user", "content": [["type": "tool_result", "tool_use_id": "t1"]]] as [String: Any]]
+            let replay: [[String: Any]] = [user("one"), assistant(), toolResult, assistant(), user("two"), assistant(), user("three"), assistant()]
+            func wrapped(_ messages: [[String: Any]]) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "response", "requestId": "r", "response": ["messages": messages]] as [String: Any]]
+            }
+            func messages(of envelope: [String: Any]) -> [[String: Any]]? {
+                (((envelope["message"] as? [String: Any])?["response"] as? [String: Any])?["messages"] as? [[String: Any]])
+            }
+            record("mirror replay: a tool_result entry is not a typed turn", !ShimProcess.isTypedUserTurn(toolResult) && ShimProcess.isTypedUserTurn(user("x")))
+            let two = messages(of: ShimProcess.trimmingReplayForMirror(wrapped(replay), keepUserTurns: 2))
+            record("mirror replay: keeps the last two typed turns and everything after them",
+                   two?.count == 4 && (two?.first?["message"] as? [String: Any])?["content"] as? String == "two")
+            let one = messages(of: ShimProcess.trimmingReplayForMirror(wrapped(replay), keepUserTurns: 1))
+            record("mirror replay: the cut lands on the typed turn, never inside a tool exchange",
+                   one?.count == 2 && (one?.first?["message"] as? [String: Any])?["content"] as? String == "three")
+            record("mirror replay: a replay within the budget is passed through untouched",
+                   messages(of: ShimProcess.trimmingReplayForMirror(wrapped(replay), keepUserTurns: 3))?.count == replay.count
+                       && messages(of: ShimProcess.trimmingReplayForMirror(wrapped(replay), keepUserTurns: 30))?.count == replay.count)
+            let bare: [String: Any] = ["type": "response", "requestId": "r", "response": ["messages": replay]]
+            record("mirror replay: the bare response shape is trimmed too",
+                   ((ShimProcess.trimmingReplayForMirror(bare, keepUserTurns: 1)["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count == 2)
+            record("mirror replay: a response without messages is returned as-is",
+                   (ShimProcess.trimmingReplayForMirror(["type": "response", "requestId": "r", "response": ["ok": true]], keepUserTurns: 1)["response"] as? [String: Any])?["ok"] as? Bool == true)
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

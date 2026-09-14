@@ -247,6 +247,8 @@ final class MirrorConnection: MirrorSink {
             "sessionId": sessionId,
             "html": WebViewContainer.entryHTML(resumeSessionId: sessionId) { "\(Self.assetScheme)://ext/\($0)" },
             "userScripts": WebViewContainer.sessionUserScripts.map { ["source": $0.source, "atDocumentStart": $0.atDocumentStart] },
+            // Lets the phone cache the assets it fetches, keyed by the extension they came from.
+            "extensionVersion": CCExtension.extensionVersion() ?? "",
         ])
         shim.attachMirror(self)
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")

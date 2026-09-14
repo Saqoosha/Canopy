@@ -4221,7 +4221,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
-                    post(Self.retargeted(payload, from: channelId, to: mirrors[key]?.channelId), to: target)
+                    let trimmed = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
+                    post(Self.retargeted(trimmed, from: channelId, to: mirrors[key]?.channelId), to: target)
                 } else {
                     logger.warning("[mirror] response \(requestId, privacy: .public) for a detached mirror dropped")
                 }
@@ -4330,6 +4331,50 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         recapTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.recapTimeoutSeconds, execute: timeout)
+    }
+
+    /// How much of a replayed conversation a phone receives: the last N turns the user typed.
+    /// Measured 2026-09-14: a 38 MB transcript replayed 4.7 MB and took ~3.7 s to parse and draw on an iPhone.
+    static let mirrorReplayUserTurns = 30
+
+    /// A `user` entry the human typed, as opposed to the `user` entry that carries tool results back.
+    static func isTypedUserTurn(_ message: [String: Any]) -> Bool {
+        guard message["type"] as? String == "user" else { return false }
+        guard let content = (message["message"] as? [String: Any])?["content"] else { return true }
+        if content is String { return true }
+        guard let blocks = content as? [[String: Any]] else { return true }
+        return !blocks.contains { $0["type"] as? String == "tool_result" }
+    }
+
+    /// Keep only the last `keepUserTurns` typed turns of a `get_session` replay, cutting at a turn boundary so no tool_use loses its tool_result.
+    static func trimmingReplayForMirror(_ message: [String: Any], keepUserTurns: Int) -> [String: Any] {
+        func trim(_ container: [String: Any]) -> [String: Any]? {
+            guard var response = container["response"] as? [String: Any],
+                  let messages = response["messages"] as? [[String: Any]]
+            else { return nil }
+            var seen = 0
+            var start = 0
+            for index in stride(from: messages.count - 1, through: 0, by: -1) where isTypedUserTurn(messages[index]) {
+                seen += 1
+                if seen == keepUserTurns { start = index; break }
+            }
+            guard start > 0 else { return nil }
+            logger.notice("[mirror] replay trimmed to the last \(keepUserTurns, privacy: .public) turns: \(messages.count - start, privacy: .public) of \(messages.count, privacy: .public) entries sent")
+            response["messages"] = Array(messages[start...])
+            var updated = container
+            updated["response"] = response
+            return updated
+        }
+        if let trimmed = trim(message) { return trimmed }
+        if message["type"] as? String == "from-extension",
+           let nested = message["message"] as? [String: Any],
+           let trimmed = trim(nested)
+        {
+            var updated = message
+            updated["message"] = trimmed
+            return updated
+        }
+        return message
     }
 
     /// Apply `strippingRecapArtifacts` and `strippingKeepAliveArtifacts` to
