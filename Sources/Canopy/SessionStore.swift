@@ -969,6 +969,7 @@ final class SessionStore {
         session.shim?.stop()
         session.shim = nil
         session.webView = nil
+        session.mirrorBridge = nil
         openSessions.remove(at: idx)
         removePanesForClosedSession(id)
 
@@ -2017,6 +2018,23 @@ final class SessionStore {
 
     // MARK: - Launch restore
 
+    /// The restorable equivalent of an `OpenSession.Origin`, or nil for
+    /// `.mirror` — a mirror pane's session lives on another Mac, so there is
+    /// nothing here to resume. Its pane is dropped by `sanitized` once its
+    /// resumeId is missing from `sessions`.
+    private static func restoreOrigin(for origin: OpenSession.Origin) -> SessionRestoreSnapshot.Session.Origin? {
+        switch origin {
+        case .local(let url):
+            return .local(path: url.path)
+        case .remote(let host, let path):
+            return .remote(host: host, path: path.path)
+        case .teleportedFrom(let cloudId, let path):
+            return .teleported(cloudSessionId: cloudId, path: path.path)
+        case .mirror:
+            return nil
+        }
+    }
+
     /// Snapshot the sidebar's open block and the pane strip for quit-time
     /// persistence. **Every** open session is captured, in `openSessions`
     /// order — that is the order the open block's SESSION rows are drawn in,
@@ -2037,15 +2055,7 @@ final class SessionStore {
         // "capture cannot emit a duplicate", and this clause is the whole
         // reason that holds.
         for open in openSessions where seenResumeIds.insert(open.resumeId).inserted {
-            let origin: SessionRestoreSnapshot.Session.Origin
-            switch open.origin {
-            case .local(let url):
-                origin = .local(path: url.path)
-            case .remote(let host, let path):
-                origin = .remote(host: host, path: path.path)
-            case .teleportedFrom(let cloudId, let path):
-                origin = .teleported(cloudSessionId: cloudId, path: path.path)
-            }
+            guard let origin = Self.restoreOrigin(for: open.origin) else { continue }
             sessions.append(SessionRestoreSnapshot.Session(
                 resumeId: open.resumeId,
                 title: open.title,

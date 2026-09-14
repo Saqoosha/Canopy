@@ -27,17 +27,41 @@ final class OpenSession: Identifiable, Hashable {
         /// Teleported from a cloud session id; treated as `.local` after teleport
         /// completes, but the original cloud id is retained for de-duplication.
         case teleportedFrom(cloudSessionId: String, localPath: URL)
+        /// A pane attached to a session running on ANOTHER Mac, over that
+        /// Mac's `MirrorServer`. No shim, no local folder; the transcript and
+        /// the CLI are on `host`.
+        case mirror(machineId: String, host: String, port: UInt16)
 
         var workingDirectory: URL {
             switch self {
             case .local(let url): url
             case .remote(_, let path): path
             case .teleportedFrom(_, let path): path
+            // `LinkClickHandler`'s containment guard needs a root; $HOME makes
+            // every link outside it refused, which is right for a session
+            // whose files are on the other Mac.
+            case .mirror: FileManager.default.homeDirectoryForCurrentUser
+            }
+        }
+
+        /// The folder Finder and the terminal can open, or nil when it is on
+        /// another machine. Every "open locally" consumer reads this, not
+        /// `workingDirectory`.
+        var localWorkingDirectory: URL? {
+            switch self {
+            case .local(let url): url
+            case .teleportedFrom(_, let path): path
+            case .remote, .mirror: nil
             }
         }
 
         var remoteHost: String? {
             if case .remote(let host, _) = self { return host }
+            return nil
+        }
+
+        var mirrorTarget: (machineId: String, host: String, port: UInt16)? {
+            if case .mirror(let m, let h, let p) = self { return (m, h, p) }
             return nil
         }
     }
@@ -109,7 +133,7 @@ final class OpenSession: Identifiable, Hashable {
         switch origin {
         case .local(let dir):
             return GitWorktree.projectDisplayName(for: dir, branch: statusBar.gitBranch)
-        case .remote, .teleportedFrom:
+        case .remote, .teleportedFrom, .mirror:
             return project
         }
     }
@@ -195,6 +219,11 @@ final class OpenSession: Identifiable, Hashable {
     /// nil between init and the first SessionContainer render, and for the
     /// whole of `.dormant` — which never reaches a SessionContainer.
     var webView: WKWebView?
+
+    /// The socket client driving `webView` for a `.mirror` origin. Strong
+    /// reference, same ownership rule as `shim`: the pane view re-attaches to
+    /// it on re-mount and `SessionStore.closeSession` releases it.
+    var mirrorBridge: AnyObject?
 
     /// Bumped by `SessionStore.restartSession(_:)`, and read only through
     /// `mountIdentity`.

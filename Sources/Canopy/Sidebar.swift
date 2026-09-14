@@ -408,7 +408,7 @@ struct Sidebar: View {
     private func finderDirectory(for row: SidebarRow) -> URL? {
         switch row {
         case .open(let s):
-            return s.origin.remoteHost == nil ? s.origin.workingDirectory : nil
+            return s.origin.localWorkingDirectory
         case .closedLocal(let entry):
             // Gone means gone: offering Finder a directory we already know is
             // absent can only log a warning and look like nothing happened.

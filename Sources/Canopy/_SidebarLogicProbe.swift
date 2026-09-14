@@ -1533,6 +1533,39 @@ enum SidebarLogicProbe {
         try? FileManager.default.removeItem(at: scanTranscript)
         try? FileManager.default.removeItem(at: scanProjectDir)
 
+        // Mirror origin: a pane attached to another Mac's session. It has no
+        // local folder, so every "open in Finder" consumer must read
+        // `localWorkingDirectory` and get nil; `workingDirectory` still answers
+        // (the link handler's containment guard needs a root) with $HOME.
+        do {
+            let mirror = OpenSession.Origin.mirror(machineId: "M1", host: "100.64.0.2", port: 8770)
+            record("mirror origin: workingDirectory is the home directory",
+                   mirror.workingDirectory == FileManager.default.homeDirectoryForCurrentUser)
+            record("mirror origin: localWorkingDirectory is nil",
+                   mirror.localWorkingDirectory == nil)
+            record("mirror origin: remoteHost is nil (not an SSH session)",
+                   mirror.remoteHost == nil)
+            record("mirror origin: mirrorTarget carries the address",
+                   mirror.mirrorTarget?.host == "100.64.0.2" && mirror.mirrorTarget?.port == 8770
+                       && mirror.mirrorTarget?.machineId == "M1")
+            record("local origin: localWorkingDirectory is the directory",
+                   OpenSession.Origin.local(cwd).localWorkingDirectory == cwd)
+            record("remote origin: localWorkingDirectory is nil",
+                   OpenSession.Origin.remote(host: "studio", path: cwd).localWorkingDirectory == nil)
+            let session = OpenSession(origin: mirror, resumeId: "r-m", title: "T", project: "studio · repo", status: .spawning)
+            record("mirror origin: projectLabel is the roster's project verbatim",
+                   session.projectLabel == "studio · repo")
+
+            // Save-and-Quit never records a mirror pane: the session lives on
+            // the other Mac and comes back only by attaching again.
+            let store = SessionStore()
+            store._probeSeedOpenSessions([session])
+            store.openInFocusedPane(session.id)
+            let captured = store.captureRestoreSnapshot()
+            record("restore: a mirror session is not captured",
+                   captured.sessions.isEmpty)
+        }
+
         // Roster wire encoding. The six activity states are a contract with the
         // phone: renaming a case silently changes what the roster renders, and
         // nothing else in this repo would notice.
