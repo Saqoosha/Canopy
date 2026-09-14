@@ -241,6 +241,7 @@ final class MirrorConnection: MirrorSink {
         }
         didAttach = true
         self.shim = shim
+        let prefetchId = "canopy-prefetch-\(UUID().uuidString)"
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
         sendJSONObject([
             "type": "attach_ok",
@@ -249,9 +250,19 @@ final class MirrorConnection: MirrorSink {
             "userScripts": WebViewContainer.sessionUserScripts.map { ["source": $0.source, "atDocumentStart": $0.atDocumentStart] },
             // Lets the phone cache the assets it fetches, keyed by the extension they came from.
             "extensionVersion": CCExtension.extensionVersion() ?? "",
+            // The replay is already being fetched; the phone answers its page's get_session_request with it.
+            "prefetchedSessionRequestId": prefetchId,
         ])
         shim.attachMirror(self)
+        // Starts the extension reading the transcript while the phone is still loading the page.
+        shim.receiveFromMirror(Self.prefetchRequest(sessionId: sessionId, requestId: prefetchId), from: self)
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")
+    }
+
+    /// The request a page sends for its transcript, as captured from the extension webview (2.1.270).
+    nonisolated static func prefetchRequest(sessionId: String, requestId: String) -> [String: Any] {
+        ["type": "request", "requestId": requestId,
+         "request": ["type": "get_session_request", "sessionId": sessionId, "purpose": "transcript_open"]]
     }
 
     /// The URL scheme a remote client serves extension assets under.
@@ -262,6 +273,17 @@ final class MirrorConnection: MirrorSink {
         guard let id = dict["id"] as? String else { return }
         var reply: [String: Any] = ["type": "asset_response", "id": id]
         defer { sendJSONObject(reply) }
+        if let path = dict["path"] as? String, path.hasPrefix("img/") {
+            let key = String(path.dropFirst(4))
+            guard let image = MirrorImageStore.jpeg(id: key) else {
+                logger.error("[mirror-server] image \(key, privacy: .public) not in store")
+                reply["error"] = "not found"
+                return
+            }
+            reply["mime"] = image.mime
+            reply["base64"] = image.data.base64EncodedString()
+            return
+        }
         guard let path = dict["path"] as? String, let root = CCExtension.extensionPath()?.standardizedFileURL else {
             reply["error"] = "no extension"
             return
@@ -336,6 +358,30 @@ final class MirrorConnection: MirrorSink {
         shim = nil
         server?.remove(self)
         logger.notice("[mirror-server] detached")
+    }
+}
+
+/// Read-tool images deferred out of a phone's replay, served when its thumbnail asks for them.
+@MainActor
+enum MirrorImageStore {
+    static let capacity = 500
+    static let maxPixelSize = 768
+    private static var sources: [String: [String: Any]] = [:]
+    private static var order: [String] = []
+
+    static func put(id: String, source: [String: Any]) {
+        if sources[id] == nil { order.append(id) }
+        sources[id] = source
+        while order.count > capacity { sources[order.removeFirst()] = nil }
+    }
+
+    /// The image at phone size: a JPEG with a long edge of `maxPixelSize`, or the original bytes when re-encoding does not shrink them.
+    static func jpeg(id: String) -> (data: Data, mime: String)? {
+        guard let source = sources[id], let encoded = source["data"] as? String, let bytes = Data(base64Encoded: encoded) else { return nil }
+        if let smaller = RosterImageUploader.thumbnail(from: bytes, maxPixelSize: maxPixelSize, quality: 0.6), smaller.count < bytes.count {
+            return (smaller, "image/jpeg")
+        }
+        return (bytes, source["media_type"] as? String ?? "application/octet-stream")
     }
 }
 

@@ -1,4 +1,5 @@
 import Cocoa
+import CryptoKit
 import UserNotifications
 import WebKit
 import os.log
@@ -14,7 +15,7 @@ protocol ShimProcessDelegate: AnyObject {
 /// Manages a Node.js subprocess running the vscode-shim that bridges the CC extension
 /// to Canopy's WKWebView via stdin/stdout NDJSON.
 ///
-/// Thread safety: `stdoutBuffer` is only accessed from the stdout readabilityHandler
+/// Thread safety: `stdoutLines` is only accessed from the stdout readabilityHandler
 /// (serialized by the system). All other mutable state (`isReady`, `pendingMessages`, etc.)
 /// is only accessed from the main thread. Stdin writes are serialized via `writeQueue`.
 final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
@@ -168,7 +169,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var pendingMessages: [[String: Any]] = []
 
     /// Accumulates partial lines from stdout (only accessed from readabilityHandler thread).
-    private var stdoutBuffer = Data()
+    private var stdoutLines = NDJSONLineAssembler()
     /// Descendant PIDs collected before termination, used for cleanup on unexpected exit.
     private var descendantPids: [pid_t] = []
     /// Channel ID from launch_claude, needed for the recap and usage requests.
@@ -3683,19 +3684,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Called from the stdout readabilityHandler thread. Accumulates data and
     /// extracts complete NDJSON lines, dispatching parsed messages to the main thread.
     private func handleStdoutData(_ data: Data) {
-        stdoutBuffer.append(data)
+        let started = stdoutLines.pendingSince ?? Date()
+        let lines = stdoutLines.append(data)
+        for lineData in lines {
+            // No closure literal here: this runs off the main thread inside a @MainActor-inferred class (see CLAUDE.md).
+            guard !NDJSONLineAssembler.isBlank(lineData) else { continue }
 
-        while let range = stdoutBuffer.range(of: Data([0x0A])) {
-            let lineData = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<range.lowerBound)
-            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex...range.lowerBound)
-
-            guard let line = String(data: lineData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !line.isEmpty
-            else { continue }
-
-            guard let jsonData = line.data(using: .utf8),
-                  let msg = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+            guard let msg = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                   let type = msg["type"] as? String
             else {
                 let preview = String(data: lineData.prefix(200), encoding: .utf8) ?? "<binary>"
@@ -3703,8 +3698,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 continue
             }
 
-            let preview = String(line.prefix(120))
-            logger.debug("[stdout] type=\(type, privacy: .public) preview=\(preview, privacy: .public)")
+            if lineData.count > 1_000_000 {
+                logger.notice("[stdout] \(lineData.count, privacy: .public)-byte line assembled and parsed in \(String(format: "%.3f", Date().timeIntervalSince(started)), privacy: .public)s")
+            }
+            logger.debug("[stdout] type=\(type, privacy: .public)")
 
             DispatchQueue.main.async { [weak self] in
                 self?.handleShimMessage(type: type, msg: msg)
@@ -4221,7 +4218,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
-                    let trimmed = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
+                    let trimmed = Self.deferringReadImagesForMirror(Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)) { id, source in
+                        MirrorImageStore.put(id: id, source: source)
+                    }
                     post(Self.retargeted(trimmed, from: channelId, to: mirrors[key]?.channelId), to: target)
                 } else {
                     logger.warning("[mirror] response \(requestId, privacy: .public) for a detached mirror dropped")
@@ -4335,7 +4334,72 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// How much of a replayed conversation a phone receives: the last N turns the user typed.
     /// Measured 2026-09-14: a 38 MB transcript replayed 4.7 MB and took ~3.7 s to parse and draw on an iPhone.
-    static let mirrorReplayUserTurns = 30
+    static let mirrorReplayUserTurns = 10
+
+    /// Replace the base64 images of `Read` tool results in a `get_session` replay with a `canopy-asset` URL the phone fetches only when the thumbnail scrolls into view.
+    ///
+    /// Only `Read` results: the extension draws nothing for them, so the one consumer is `ImagePreviewScript`'s thumbnail. Measured 2026-09-14: images were 78% of a 30-turn replay.
+    static func deferringReadImagesForMirror(_ message: [String: Any], store: (String, [String: Any]) -> Void) -> [String: Any] {
+        func locate(_ container: [String: Any]) -> [[String: Any]]? {
+            (container["response"] as? [String: Any])?["messages"] as? [[String: Any]]
+        }
+        let wrapped = message["type"] as? String == "from-extension"
+        let inner = wrapped ? (message["message"] as? [String: Any] ?? [:]) : message
+        guard let messages = locate(inner) else { return message }
+
+        var readIds = Set<String>()
+        for entry in messages where entry["type"] as? String == "assistant" {
+            for block in ((entry["message"] as? [String: Any])?["content"] as? [[String: Any]]) ?? []
+            where block["type"] as? String == "tool_use" && block["name"] as? String == "Read" {
+                if let id = block["id"] as? String { readIds.insert(id) }
+            }
+        }
+        guard !readIds.isEmpty else { return message }
+
+        var deferred = 0
+        var saved = 0
+        var rewritten = messages
+        for (index, entry) in messages.enumerated() where entry["type"] as? String == "user" {
+            guard var body = entry["message"] as? [String: Any], var content = body["content"] as? [[String: Any]] else { continue }
+            var changed = false
+            for (blockIndex, block) in content.enumerated()
+            where block["type"] as? String == "tool_result" && readIds.contains(block["tool_use_id"] as? String ?? "") {
+                guard var items = block["content"] as? [[String: Any]] else { continue }
+                for (itemIndex, item) in items.enumerated() where item["type"] as? String == "image" {
+                    guard let source = item["source"] as? [String: Any], source["type"] as? String == "base64",
+                          let data = source["data"] as? String
+                    else { continue }
+                    let id = SHA256.hash(data: Data(data.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
+                    store(id, source)
+                    var replacement = item
+                    replacement["source"] = ["type": "url", "url": "\(MirrorConnection.assetScheme)://ext/img/\(id)"]
+                    items[itemIndex] = replacement
+                    deferred += 1
+                    saved += data.utf8.count
+                    changed = true
+                }
+                var updatedBlock = block
+                updatedBlock["content"] = items
+                content[blockIndex] = updatedBlock
+            }
+            if changed {
+                body["content"] = content
+                var updated = entry
+                updated["message"] = body
+                rewritten[index] = updated
+            }
+        }
+        guard deferred > 0 else { return message }
+        logger.notice("[mirror] replay images deferred: \(deferred, privacy: .public), \(saved, privacy: .public) bytes not sent")
+        var response = inner["response"] as? [String: Any] ?? [:]
+        response["messages"] = rewritten
+        var updatedInner = inner
+        updatedInner["response"] = response
+        if !wrapped { return updatedInner }
+        var updated = message
+        updated["message"] = updatedInner
+        return updated
+    }
 
     /// A `user` entry the human typed, as opposed to the `user` entry that carries tool results back.
     static func isTypedUserTurn(_ message: [String: Any]) -> Bool {
