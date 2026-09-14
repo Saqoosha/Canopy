@@ -72,7 +72,7 @@ Canopy が phone と同じ **watcher** になる。自分の `MachineIdentity.st
 - `attach_error` → `SessionStore.noteSessionFailure` に理由を渡してペインを閉じる。shim crash と同じ経路で、`DetailLauncher` の banner に出る。理由の対応：`unauthorized` → 「<machine> rejected the password. Paste its connection again in Settings › Mobile」、`no such session` → 「That session is no longer running on <machine>」
 - 接続断 → `session.connection`（`ConnectionState`）を `.reconnecting` にして `ConnectionOverlayView` を出す。Retry は bridge を作り直して attach し直し、`loadCCWebview` をやり直す（server が `get_session_request` の replay で transcript を丸ごと返すので、webview は reload で復元される）。自動再接続は v1 では無し。SSH の 3 回 backoff は shim の中にあり、ここには無い
 
-**状態は roster から入れる。** mirror の `OpenSession` は shim を持たないので、`isThinking` / `isAsking` / `isWaiting` を書く者がいない。watcher が同じ `(machineId, sessionId)` の行を受けるたびに、wire state から `isThinking`（working）/ `isAsking`（asking）/ `isWaiting`（background）を書き、`statusBar` の `model` / `contextPct` / `messageCount` も入れる。これで dot と MacroPad の key が動く。io_message を Mac 側で parse して status bar を毎 turn 更新するのはやらない（見送り）。status bar は machine 名を SSH remote と同じ位置に橙で出す
+**状態は roster から入れる。** mirror の `OpenSession` は shim を持たないので、`isThinking` / `isAsking` / `isWaiting` を書く者がいない。watcher が同じ `(machineId, sessionId)` の行を受けるたびに、wire state から `isThinking`（working）/ `isAsking`（asking）/ `isWaiting`（background）を書き、`statusBar` の `model` / `messageCount` も入れる（`contextPct` は計算値で入れる口が無い。見送りに記録）。これで dot と MacroPad の key が動く。io_message を Mac 側で parse して status bar を毎 turn 更新するのはやらない（見送り）。status bar は machine 名を SSH remote と同じ位置に橙で出す
 
 **mirror セッションがやらないこと**（shim が無いので自然に外れるものと、明示的に外すもの）：
 
@@ -171,6 +171,7 @@ probe で固定する純粋な部分：
 - mirror pane の status bar を io_message から毎 turn 更新する
 - Save and Quit で mirror pane を復元する
 - 接続断の自動再接続（今は overlay + Retry）
+- mirror pane の context meter は空。`StatusBarData.contextPct` は `contextUsed` / `compactionWindow` からの計算値で、roster の百分率を入れる口が無い
 - extension の版ずれ。`attach_ok` は `extensionVersion` を運ぶので、local と違えば warning を log する。挙動は未測定
 - filter gear をリモート行に効かせる
 - 閉じた Recents を phone に運ぶ
