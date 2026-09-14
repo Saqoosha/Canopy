@@ -223,7 +223,7 @@ final class OpenSession: Identifiable, Hashable {
     /// The socket client driving `webView` for a `.mirror` origin. Strong
     /// reference, same ownership rule as `shim`: the pane view re-attaches to
     /// it on re-mount and `SessionStore.closeSession` releases it.
-    var mirrorBridge: AnyObject?
+    var mirrorBridge: RemoteMirrorBridge?
 
     /// Bumped by `SessionStore.restartSession(_:)`, and read only through
     /// `mountIdentity`.
