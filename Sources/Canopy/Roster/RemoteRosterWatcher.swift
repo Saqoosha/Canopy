@@ -21,6 +21,7 @@ final class RemoteRosterWatcher {
     private var listTimer: DispatchSourceTimer?
     private var connectedEndpoint: String?
 
+    // nonisolated because isStale, itself nonisolated, reads it.
     nonisolated static let staleThreshold: TimeInterval = 5 * 60
     static let listInterval: TimeInterval = 5 * 60
     private static let pingInterval: TimeInterval = 30
@@ -39,10 +40,17 @@ final class RemoteRosterWatcher {
 
     func stop() {
         running = false
+        tearDown()
+    }
+
+    /// Stops listing and watching and clears what the sidebar shows; used when the toggle goes off and on stop().
+    private func tearDown() {
         disconnectAll()
         listTimer?.cancel()
         listTimer = nil
+        connectedEndpoint = nil
         store.remoteMachineIds = []
+        store.remoteRosters = [:]
     }
 
     // MARK: Pure
@@ -81,11 +89,11 @@ final class RemoteRosterWatcher {
         let enabled = settings.rosterEnabled
         let endpoint = settings.rosterEndpoint
         guard enabled, !endpoint.isEmpty else {
-            if connectedEndpoint != nil { disconnectAll(); connectedEndpoint = nil }
+            if connectedEndpoint != nil { tearDown() }
             return
         }
         if connectedEndpoint != endpoint {
-            disconnectAll()
+            tearDown()
             connectedEndpoint = endpoint
             startListing()
         }
@@ -112,9 +120,10 @@ final class RemoteRosterWatcher {
 
     private func refreshMachineList() {
         guard let base = relayURL(path: "/machines"), let secret = RosterPublisher.sharedSecret() else { return }
+        let endpoint = settings.rosterEndpoint
         var request = URLRequest(url: base)
         request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else {
@@ -122,14 +131,15 @@ final class RemoteRosterWatcher {
                     return
                 }
                 let ids = try JSONDecoder().decode([String].self, from: data)
-                self?.applyMachineList(ids)
+                self?.applyMachineList(ids, endpoint: endpoint)
             } catch {
                 self?.logger.error("remote roster: /machines failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
 
-    private func applyMachineList(_ ids: [String]) {
+    private func applyMachineList(_ ids: [String], endpoint: String) {
+        guard running, settings.rosterEnabled, connectedEndpoint == endpoint else { return }
         let peers = Self.peersToWatch(machines: ids, selfId: MachineIdentity.stableId())
         store.remoteMachineIds = peers
         for gone in sockets.keys where !peers.contains(gone) { disconnect(machine: gone) }
@@ -175,7 +185,9 @@ final class RemoteRosterWatcher {
                     @unknown default: nil
                     }
                     if let data, let snapshot = Self.decodeFrame(data) {
-                        self.store.remoteRosters[machine] = snapshot
+                        if self.running && self.store.remoteMachineIds.contains(machine) {
+                            self.store.remoteRosters[machine] = snapshot
+                        }
                     }
                     self.receive(machine: machine, on: task)
                 case .failure(let error):
@@ -195,7 +207,7 @@ final class RemoteRosterWatcher {
         case .after(let delay):
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, self.running, self.sockets[machine] == nil else { return }
+                    guard let self, self.running, self.store.remoteMachineIds.contains(machine), self.sockets[machine] == nil else { return }
                     self.connect(machine: machine)
                 }
             }
