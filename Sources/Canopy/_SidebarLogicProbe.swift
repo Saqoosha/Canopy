@@ -1647,6 +1647,28 @@ enum SidebarLogicProbe {
                    RosterSnapshot.isLive(paned) == false)
         }
 
+        // Pairing: the string the phone pastes is the one another Canopy
+        // pastes. Builder and parser are inverses; a string with no machine id
+        // is refused because the peer table is keyed on it.
+        do {
+            let text = MirrorAccess.connectionString(host: "100.64.0.2", port: 8770, token: "tok_A-b", machine: "M1")
+            let parsed = MirrorAccess.parseConnectionString(text)
+            record("pairing: connection string round-trips",
+                   parsed == MirrorAccess.Connection(host: "100.64.0.2", port: 8770, token: "tok_A-b", machineId: "M1"))
+            record("pairing: surrounding whitespace is tolerated",
+                   MirrorAccess.parseConnectionString("  \(text)\n") == parsed)
+            record("pairing: a string without machine is refused",
+                   MirrorAccess.parseConnectionString("canopy-mirror://100.64.0.2:8770?token=x") == nil)
+            record("pairing: a string without token is refused",
+                   MirrorAccess.parseConnectionString("canopy-mirror://100.64.0.2:8770?machine=M1") == nil)
+            record("pairing: another scheme is refused",
+                   MirrorAccess.parseConnectionString("https://100.64.0.2:8770?token=x&machine=M1") == nil)
+            record("pairing: host:port parses",
+                   MirrorAccess.parseHostPort("100.64.0.2:8770")?.port == 8770)
+            record("pairing: host:port without a port is refused",
+                   MirrorAccess.parseHostPort("100.64.0.2") == nil)
+        }
+
         // Roster reply routing: which open session an envelope from the phone
         // addresses, matched on `OpenSession.ID` — minted per process, so an
         // id from a previous launch must find nothing rather than fall back
