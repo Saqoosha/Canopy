@@ -11,6 +11,7 @@ final class MirrorServerStatus {
     enum State: Equatable {
         case off
         case noTailscale
+        case noPassword
         case listening(host: String, port: UInt16)
         case failed(String)
     }
@@ -24,11 +25,33 @@ final class MirrorServerStatus {
 final class MirrorServer {
     private let store: SessionStore
     private var listener: NWListener?
+    /// The running server, for Settings; `NSApp.delegate` is not the adaptor's instance (see memory).
+    private(set) static weak var current: MirrorServer?
     private var connections: [MirrorConnection] = []
+    /// The address the listener has actually reached `.ready` on; nil while binding or after a failure.
     private(set) var boundAddress: (host: String, port: UInt16)?
+    /// Read once per bind so an attach never touches the Keychain; `resetPassword` replaces it.
+    fileprivate var token: String
 
-    init(store: SessionStore) {
+    init(store: SessionStore, token: String) {
         self.store = store
+        self.token = token
+        MirrorServer.current = self
+    }
+
+    /// Mints a new password and drops every attached client; false leaves the old password in force.
+    static func resetPassword() -> Bool {
+        guard let token = MirrorAccess.resetToken() else { return false }
+        current?.token = token
+        current?.dropAllConnections()
+        return true
+    }
+
+    private func dropAllConnections() {
+        for connection in connections {
+            connection.cancelFromServer()
+        }
+        connections.removeAll()
     }
 
     func start(host: String, port: UInt16) {
@@ -38,14 +61,17 @@ final class MirrorServer {
             parameters.allowLocalEndpointReuse = true
             parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
             let listener = try NWListener(using: parameters)
-            listener.stateUpdateHandler = { state in
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
                 MainActor.assumeIsolated {
+                    guard let self, let listener, self.listener === listener else { return }
                     switch state {
                     case .ready:
                         logger.notice("[mirror-server] listening on \(host, privacy: .public):\(port)")
+                        self.boundAddress = (host, port)
                         MirrorServerStatus.shared.state = .listening(host: host, port: port)
                     case .waiting(let error), .failed(let error):
                         logger.error("[mirror-server] listener cannot bind \(host, privacy: .public):\(port): \(error.localizedDescription, privacy: .public)")
+                        self.boundAddress = nil
                         MirrorServerStatus.shared.state = .failed(error.localizedDescription)
                     default:
                         break
@@ -59,7 +85,6 @@ final class MirrorServer {
             }
             listener.start(queue: .main)
             self.listener = listener
-            boundAddress = (host, port)
         } catch {
             logger.error("[mirror-server] start failed: \(error.localizedDescription, privacy: .public)")
             MirrorServerStatus.shared.state = .failed(error.localizedDescription)
@@ -148,7 +173,11 @@ final class MirrorConnection: MirrorSink {
                 return
             }
             if let data, !data.isEmpty {
-                let lines = self.lineBuffer.append(data)
+                guard let lines = self.lineBuffer.append(data) else {
+                    logger.error("[mirror-server] line over \(NDJSONLineBuffer.maxLineBytes) bytes; closing")
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self.closeFromPeer() } }
+                    return
+                }
                 DispatchQueue.main.async { MainActor.assumeIsolated { lines.forEach(self.handleLineData) } }
             }
             if isComplete {
@@ -187,11 +216,11 @@ final class MirrorConnection: MirrorSink {
         guard let type = dict["type"] as? String, type == "attach",
               let sessionId = dict["sessionId"] as? String else {
             logger.error("[mirror-server] attach refused: first line is not an attach (type=\(dict["type"] as? String ?? "nil", privacy: .public))")
-            failAttach("no such session")
+            failAttach("expected attach")
             return
         }
         guard let provided = dict["token"] as? String,
-              let expected = MirrorAccess.token(createIfMissing: false),
+              let expected = server?.token,
               MirrorAccess.tokensMatch(provided, expected)
         else {
             logger.error("[mirror-server] attach refused: wrong or missing password")
@@ -304,13 +333,17 @@ final class MirrorConnection: MirrorSink {
 
 /// Accumulates socket bytes and yields complete newline-terminated lines.
 final class NDJSONLineBuffer: @unchecked Sendable {
+    /// Above the largest legitimate line (a base64 `index.js`, ~7 MB); a peer that never sends a newline is cut off here.
+    static let maxLineBytes = 16 << 20
     private let lock = NSLock()
     private var buffer = Data()
 
-    func append(_ chunk: Data) -> [Data] {
+    /// Complete lines, or nil once an unterminated line exceeds `maxLineBytes`.
+    func append(_ chunk: Data) -> [Data]? {
         lock.lock()
         defer { lock.unlock() }
         buffer.append(chunk)
+        guard buffer.count <= Self.maxLineBytes else { return nil }
         var lines: [Data] = []
         while let range = buffer.range(of: Data([0x0A])) {
             lines.append(buffer.subdata(in: buffer.startIndex..<range.lowerBound))

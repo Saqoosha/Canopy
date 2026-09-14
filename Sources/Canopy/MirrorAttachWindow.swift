@@ -197,8 +197,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 logger.error("[mirror-attach] receive error: \(error.localizedDescription, privacy: .public)")
                 return
             }
-            if let data, !data.isEmpty {
-                let lines = self.lineBuffer.append(data)
+            if let data, !data.isEmpty, let lines = self.lineBuffer.append(data) {
                 DispatchQueue.main.async { MainActor.assumeIsolated { lines.forEach(self.handleLineData) } }
             }
             if isComplete {
