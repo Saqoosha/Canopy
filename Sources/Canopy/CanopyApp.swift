@@ -457,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 server.start(host: address.host, port: address.port)
             } else {
                 Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorServer")
-                    .error("[mirror-server] CANOPY_MIRROR_LISTEN is not <port> or <host>:<port>: \(raw, privacy: .public)")
+                    .error("[mirror-server] CANOPY_MIRROR_LISTEN is not <port> or <IPv4>:<port>: \(raw, privacy: .public)")
             }
         }
         #endif

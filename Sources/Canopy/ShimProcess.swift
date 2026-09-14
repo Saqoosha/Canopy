@@ -3269,9 +3269,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // extension does NOT echo that `close_channel` back, so it has to
             // be observed here or the next launch would be read as a second
             // client's and swallowed.
+            let own: String? = mirrorKey.flatMap { mirrors[$0]?.channelId } ?? (isPrimary ? primaryOwnChannel : nil)
             if msgType == "close_channel", let closed = dict["channelId"] as? String,
-               closed == channelId || closed == (mirrorKey.flatMap { mirrors[$0]?.channelId } ?? primaryOwnChannel)
+               closed == channelId || closed == own
             {
+                liveChannelOpen = false
+            }
+            // The extension closes every channel on the primary's `init`, without a `close_channel`.
+            if isPrimary, msgType == "request", (dict["request"] as? [String: Any])?["type"] as? String == "init" {
                 liveChannelOpen = false
             }
             // A response to an extension→webview request (a permission
@@ -3290,7 +3295,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
                 logger.notice("[mirror] response \(requestId, privacy: .public) answered by \(isPrimary ? "primary" : "mirror", privacy: .public); cancel_request sent to the others")
             }
-            let own: String? = mirrorKey.flatMap { mirrors[$0]?.channelId } ?? (isPrimary ? primaryOwnChannel : nil)
             if let own, let live = channelId, own != live {
                 if dict["channelId"] as? String == own { dict["channelId"] = live }
                 // `generate_session_title` carries the channel INSIDE

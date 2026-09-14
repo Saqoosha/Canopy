@@ -35,7 +35,7 @@ transport の前に、Debug ビルドの **ミラー窓**（`MirrorSessionWindow
 
 ## transport（同日、続き）
 
-ミラー client を `MirrorSink`（WKWebView か TCP 接続）に広げ、`MirrorServer`（NDJSON、最初の行が `{"type":"attach","sessionId"}`）と、Debug メニュー「Attach to Remote Session…」（`host:port/sessionId`）を足した。`CANOPY_MIRROR_LISTEN=<port>` は loopback に、`<host>:<port>` はその address にだけ bind する。
+ミラー client を `MirrorSink`（WKWebView か TCP 接続）に広げ、`MirrorServer`（NDJSON、最初の行が `{"type":"attach","sessionId"}`）と、Debug メニュー「Attach to Remote Session…」（`host:port/sessionId`）を足した。`CANOPY_MIRROR_LISTEN=<port>` は loopback に、`<IPv4>:<port>` はその address にだけ bind する。host 名は拒否する（NWListener は IP literal でない `requiredLocalEndpoint` を黙って無視し、全 interface の random port に bind する）。
 
 - **localhost で成立。** Debug を 2 プロセス立て、B の attach 窓から送った turn が A の CLI で走り、A のペインと B の窓の両方に描かれた
 - attach の id は `OpenSession.resumeId`。`-p` で作った transcript は extension が resume できず fresh になるので、A の id は植えた id から変わる。`attach refused` のログに open sessions を列挙するようにした

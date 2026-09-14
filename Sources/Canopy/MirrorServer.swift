@@ -16,7 +16,7 @@ final class MirrorServer {
         self.store = store
     }
 
-    /// `"8770"` binds loopback only; `"<host>:8770"` binds that one address (e.g. the Tailscale IP).
+    /// `"8770"` binds loopback only; `"<IPv4>:8770"` binds that one address (e.g. the Tailscale IP).
     static func listenAddress(from raw: String) -> (host: String, port: UInt16)? {
         let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
         switch parts.count {
@@ -24,8 +24,10 @@ final class MirrorServer {
             guard let port = UInt16(parts[0]), port != 0 else { return nil }
             return ("127.0.0.1", port)
         case 2:
-            guard !parts[0].isEmpty, let port = UInt16(parts[1]), port != 0 else { return nil }
-            return (String(parts[0]), port)
+            // IPv4 literal only: NWListener binds every interface on a random port for a hostname.
+            let host = String(parts[0])
+            guard IPv4Address(host) != nil, let port = UInt16(parts[1]), port != 0 else { return nil }
+            return (host, port)
         default:
             return nil
         }
@@ -155,7 +157,7 @@ final class MirrorConnection: MirrorSink {
     }
 
     private func handleLineData(_ data: Data) {
-        guard !data.isEmpty else { return }
+        guard !data.isEmpty, !cleanedUp else { return }
         let object: Any
         do {
             object = try JSONSerialization.jsonObject(with: data)
