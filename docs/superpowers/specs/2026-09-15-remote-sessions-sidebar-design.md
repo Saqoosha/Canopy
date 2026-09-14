@@ -178,3 +178,12 @@ probe で固定する純粋な部分：
 - relay secret を Settings で変えても watcher はすぐ繋ぎ直さない（最大 5 分遅れる）。`RosterPublisher.secretChanged()` 相当が無い
 - mirror pane の on-device 検証（attach・Retry・Paste Connection）は未実施
 - `parseConnectionString` の scheme 比較は大文字小文字を区別する。bracket 付き IPv6 の `host:port` は読めない（今は Tailscale の IPv4 だけなので到達しない）
+- `RosterPublisher` は変化があったときしか publish しないので、放置した Mac は 5 分で stale 表示になる（行は押せる）。2 分おきの heartbeat を足せば phone の stale 表示も正しくなる
+- attach 直後、相手 Mac の resumeId が backfill 前の仮 id だと、backfill 後に `noteRemoteState` と重複除外が一致しなくなる
+- 起動直後に `/machines` が失敗すると次の試行は 5 分後
+- `openRemoteLive` と `MirrorPaneView` がそれぞれ Keychain を読む。ACL の確認ダイアログが出ると SwiftUI の更新中に止まる
+- mirror を選ぶと `lastActiveResumeId` に相手 Mac の id が保存される
+- 相手側で title が変わっても mirror pane には反映されない。watch socket が切れると mirror の activity は最後の値のまま
+- `decodeFrame` は `DecodingError` を捨てるので、ログにどの key が壊れたかが出ない
+- attach 後に `.waiting` になっても overlay は出ない（`.failed` か受信エラーまで待つ）
+- single-pane で attach が拒否されると、同じ文言が launcher と sidebar の両方に出ることがある
