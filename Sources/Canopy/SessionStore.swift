@@ -329,6 +329,7 @@ final class SessionStore {
     func beginRename(row: SidebarRow) {
         switch row {
         case .open(let session):
+            guard session.origin.mirrorTarget == nil else { return }
             renameTarget = RenameTarget(
                 sessionId: session.resumeId,
                 openSessionId: session.id,
@@ -361,6 +362,7 @@ final class SessionStore {
               case .session(let openId) = panes[index].content,
               let session = openSessions.first(where: { $0.id == openId })
         else { return false }
+        guard session.origin.mirrorTarget == nil else { return false }
         renameTarget = RenameTarget(
             sessionId: session.resumeId,
             openSessionId: session.id,

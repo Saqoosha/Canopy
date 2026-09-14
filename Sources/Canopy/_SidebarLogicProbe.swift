@@ -1697,6 +1697,8 @@ enum SidebarLogicProbe {
                    !RemoteRosterWatcher.isStale(fresh, now: Date(timeIntervalSince1970: 1_000 + RemoteRosterWatcher.staleThreshold - 1)))
             record("watcher: a snapshot at the threshold is stale",
                    RemoteRosterWatcher.isStale(fresh, now: Date(timeIntervalSince1970: 1_000 + RemoteRosterWatcher.staleThreshold)))
+            record("watcher: a snapshot pane without live decodes as live",
+                   RemoteRosterWatcher.decodeFrame(Data(#"{"machineId":"M2","displayName":"studio","publishedAt":1,"sessionPct":0,"weeklyPct":0,"panes":[{"sessionId":"s","resumeId":"r","paneIndex":0,"title":"T","project":"P","state":"idle","stateSince":0,"contextPct":0,"model":"","messageCount":0}]}"#.utf8))?.panes.first?.live == true)
         }
 
         // Remote live rows: built from other Macs' rosters, per machine, with
@@ -1725,8 +1727,8 @@ enum SidebarLogicProbe {
                    { if case .remoteLive(let r) = sections[0].rows[0] { return r.stale } else { return false } }())
             record("remote rows: a live fresh row can open",
                    SidebarRow.canOpen(sections[1].rows[0]))
-            record("remote rows: a stale row cannot open",
-                   !SidebarRow.canOpen(sections[0].rows[0]))
+            record("remote rows: a stale but live row can still be attached",
+                   SidebarRow.canOpen(sections[0].rows[0]))
             let dead = RemoteLiveSession(machineId: "M2", machineName: "studio", row: pane("b", live: false), stale: false)
             record("remote rows: a non-live row cannot open",
                    !SidebarRow.canOpen(.remoteLive(dead)))
@@ -1780,6 +1782,10 @@ enum SidebarLogicProbe {
             store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0, panes: []))
             record("attach: a session gone from its home Mac's roster reads idle",
                    !existing.isAsking && !existing.isThinking && !existing.isWaiting)
+            record("mirror server: a mac client skips the phone's replay rewrites",
+                   !MirrorConnection.appliesPhoneReplayRewrites(client: "mac"))
+            record("mirror server: a phone (no client field) keeps them",
+                   MirrorConnection.appliesPhoneReplayRewrites(client: nil))
         }
 
         // Roster reply routing: which open session an envelope from the phone

@@ -48,11 +48,24 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 }
             case .waiting(let error):
                 logger.error("[mirror-attach] waiting: \(error.localizedDescription, privacy: .public)")
+                Task { @MainActor in
+                    guard let self, !self.attachedDelivered, !self.closed else { return }
+                    self.connection.cancel()
+                    self.deliverOutcome(.dropped)
+                }
             default:
                 break
             }
         }
         connection.start(queue: queue)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.attachedDelivered, !self.closed else { return }
+                logger.error("[mirror-attach] no attach_ok within 15 s; giving up")
+                self.connection.cancel()
+                self.deliverOutcome(.dropped)
+            }
+        }
     }
 
     func close() {
@@ -85,7 +98,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     private func onReady() {
         logger.notice("[mirror-attach] connected")
         // Token is caller-supplied (DEBUG window: this Mac's MirrorAccess).
-        sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token])
+        sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac"])
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
         if let webView {
@@ -134,7 +147,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func handleLineData(_ data: Data) {
-        guard !data.isEmpty else { return }
+        guard !data.isEmpty, !closed else { return }
         let object: Any
         do {
             object = try JSONSerialization.jsonObject(with: data)

@@ -830,9 +830,13 @@ final class SessionWKWebView: WKWebView {
 
 final class LinkClickHandler: NSObject, WKScriptMessageHandler {
     let workingDirectory: URL
+    /// When false, local/`file://` paths are refused (a mirror pane's files
+    /// live on the other Mac). http(s) behaviour is unchanged.
+    let opensLocalFiles: Bool
 
-    init(workingDirectory: URL) {
+    init(workingDirectory: URL, opensLocalFiles: Bool = true) {
         self.workingDirectory = workingDirectory
+        self.opensLocalFiles = opensLocalFiles
     }
 
     func userContentController(
@@ -864,6 +868,14 @@ final class LinkClickHandler: NSObject, WKScriptMessageHandler {
         var path = href.split(separator: "#", maxSplits: 1).first.map(String.init) ?? href
         if path.hasPrefix("file://") {
             path = URL(string: path)?.path ?? String(path.dropFirst(7))
+        }
+
+        if !opensLocalFiles {
+            let isHTTP = href.hasPrefix("http://") || href.hasPrefix("https://")
+            if !isHTTP {
+                logger.info("Link to a local path in a mirror pane refused: the file is on the other Mac")
+                return
+            }
         }
 
         // Try as absolute path first

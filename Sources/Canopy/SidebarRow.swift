@@ -154,16 +154,18 @@ enum SidebarRow: Identifiable, Hashable {
     ///
     /// Exhaustive rather than a single `if case`, so a new row kind has to
     /// decide instead of inheriting "yes" — the shape `rowMenu` already uses
-    /// for renaming. Only `.closedLocal` can answer no, and only when the
-    /// directory it recorded is gone: `ShimProcess.start` refuses a missing
-    /// spawn cwd, so the click could only ever reach an error banner.
+    /// for renaming. `.closedLocal` answers no when its directory is gone
+    /// (`ShimProcess.start` refuses a missing spawn cwd). `.remoteLive`
+    /// answers no when `live` is false; a stale-but-live row stays openable
+    /// so the user can still attach (the home Mac may have drifted, but the
+    /// session may still be running).
     ///
     /// Static and pure so the probe reaches it; `SessionEntry.canOpen` is
     /// measured once by `loadAllSessions`, never per render.
     static func canOpen(_ row: SidebarRow) -> Bool {
         switch row {
         case .closedLocal(let entry): entry.canOpen
-        case .remoteLive(let r): r.row.live && !r.stale
+        case .remoteLive(let r): r.row.live
         case .open, .closedCloud, .launcher: true
         }
     }

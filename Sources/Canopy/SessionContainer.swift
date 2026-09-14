@@ -20,6 +20,7 @@ struct SessionContainer: View {
                 if session.origin.mirrorTarget != nil {
                     MirrorPaneView(session: session) { message in
                         session.lastFatalError = message
+                        SessionStore.shared?.remoteAttachError = message
                         onCrash?(-2)
                     }
                     .overlay {

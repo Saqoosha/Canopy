@@ -27,7 +27,45 @@ struct RosterSnapshot: Codable, Equatable {
         /// exactly when a `ShimProcess` is running for it. Pane membership is
         /// not the test — a session displaced from its pane keeps its shim,
         /// and a `.dormant` one has a pane-less row and no shim.
+        /// Absent from a Canopy older than the flag; decoded as true, which is
+        /// what the attach server's test would have said for a session with a pane.
         let live: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case sessionId, resumeId, paneIndex, title, project, state, stateSince
+            case contextPct, model, messageCount, live
+        }
+
+        init(sessionId: String, resumeId: String?, paneIndex: Int, title: String,
+             project: String, state: String, stateSince: Int, contextPct: Int,
+             model: String, messageCount: Int, live: Bool) {
+            self.sessionId = sessionId
+            self.resumeId = resumeId
+            self.paneIndex = paneIndex
+            self.title = title
+            self.project = project
+            self.state = state
+            self.stateSince = stateSince
+            self.contextPct = contextPct
+            self.model = model
+            self.messageCount = messageCount
+            self.live = live
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            sessionId = try c.decode(String.self, forKey: .sessionId)
+            resumeId = try c.decodeIfPresent(String.self, forKey: .resumeId)
+            paneIndex = try c.decode(Int.self, forKey: .paneIndex)
+            title = try c.decode(String.self, forKey: .title)
+            project = try c.decode(String.self, forKey: .project)
+            state = try c.decode(String.self, forKey: .state)
+            stateSince = try c.decode(Int.self, forKey: .stateSince)
+            contextPct = try c.decode(Int.self, forKey: .contextPct)
+            model = try c.decode(String.self, forKey: .model)
+            messageCount = try c.decode(Int.self, forKey: .messageCount)
+            live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? true
+        }
     }
 
     let machineId: String

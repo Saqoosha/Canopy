@@ -4218,16 +4218,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
-                    let session = boundSession?.resumeId ?? ""
-                    var trimmed = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
-                    // Only a client that serves `canopy-asset` URLs: the DEBUG mirror windows are
-                    // plain WKWebViews and would draw a broken thumbnail.
-                    if target is MirrorConnection {
-                        trimmed = Self.deferringReadImagesForMirror(trimmed) { id, source in
-                            MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
+                    // A Mac client renders the whole transcript and has no canopy-asset handler: no phone rewrites.
+                    if (target as? MirrorConnection)?.isMacClient == true {
+                        post(Self.retargeted(payload, from: channelId, to: mirrors[key]?.channelId), to: target)
+                    } else {
+                        let session = boundSession?.resumeId ?? ""
+                        var trimmed = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
+                        // Only a client that serves `canopy-asset` URLs: the DEBUG mirror windows are
+                        // plain WKWebViews and would draw a broken thumbnail.
+                        if target is MirrorConnection {
+                            trimmed = Self.deferringReadImagesForMirror(trimmed) { id, source in
+                                MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
+                            }
                         }
+                        post(Self.retargeted(trimmed, from: channelId, to: mirrors[key]?.channelId), to: target)
                     }
-                    post(Self.retargeted(trimmed, from: channelId, to: mirrors[key]?.channelId), to: target)
                 } else {
                     logger.warning("[mirror] response \(requestId, privacy: .public) for a detached mirror dropped")
                 }

@@ -20,6 +20,12 @@ struct MirrorPaneView: NSViewRepresentable {
         var inputWidthHandler: InputWidthMessageHandler?
         var lastBoundSessionId: OpenSession.ID?
         var reportedMissingPairing = false
+        weak var session: OpenSession?
+
+        /// Retry restarts the session, which rebuilds the webview and re-attaches.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            session?.connection.status = .reconnectFailed
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -69,7 +75,7 @@ struct MirrorPaneView: NSViewRepresentable {
             ucc.removeScriptMessageHandler(forName: name)
         }
         let consoleHandler = ConsoleLogHandler()
-        let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory)
+        let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory, opensLocalFiles: false)
         let inputWidthHandler = InputWidthMessageHandler(statusBarData: session.statusBar)
         ucc.add(consoleHandler, name: "consoleLog")
         ucc.add(linkHandler, name: "canopyLink")
@@ -78,6 +84,7 @@ struct MirrorPaneView: NSViewRepresentable {
         coordinator.consoleHandler = consoleHandler
         coordinator.linkHandler = linkHandler
         coordinator.inputWidthHandler = inputWidthHandler
+        coordinator.session = session
         webView.navigationDelegate = coordinator
     }
 

@@ -37,9 +37,8 @@ final class OpenSession: Identifiable, Hashable {
             case .local(let url): url
             case .remote(_, let path): path
             case .teleportedFrom(_, let path): path
-            // `LinkClickHandler`'s containment guard needs a root; $HOME makes
-            // every link outside it refused, which is right for a session
-            // whose files are on the other Mac.
+            // Answers $HOME only because the type needs a URL; a mirror pane's
+            // link handler refuses local paths (`LinkClickHandler.opensLocalFiles`).
             case .mirror: FileManager.default.homeDirectoryForCurrentUser
             }
         }

@@ -62,10 +62,19 @@ final class RemoteRosterWatcher {
     /// A snapshot carries no `type`; an event or an ack does. Same rule as
     /// the phone's `RosterSocket.decode`, so an event can never be read as an
     /// empty roster.
-    nonisolated static func decodeFrame(_ data: Data) -> RosterSnapshot? {
+    nonisolated static func isSnapshotFrame(_ data: Data) -> Bool {
         struct TypeTag: Decodable { let type: String? }
-        guard let tag = try? JSONDecoder().decode(TypeTag.self, from: data), tag.type == nil else { return nil }
-        return try? JSONDecoder().decode(RosterSnapshot.self, from: data)
+        guard let tag = try? JSONDecoder().decode(TypeTag.self, from: data) else { return false }
+        return tag.type == nil
+    }
+
+    nonisolated static func decodeFrame(_ data: Data) -> RosterSnapshot? {
+        guard isSnapshotFrame(data) else { return nil }
+        do {
+            return try JSONDecoder().decode(RosterSnapshot.self, from: data)
+        } catch {
+            return nil
+        }
     }
 
     nonisolated static func peersToWatch(machines: [String], selfId: String?) -> [String] {
@@ -199,6 +208,8 @@ final class RemoteRosterWatcher {
                             self.store.remoteRosters[machine] = snapshot
                             self.store.noteRemoteState(machineId: machine, snapshot: snapshot)
                         }
+                    } else if let data, Self.isSnapshotFrame(data) {
+                        self.logger.error("remote roster: \(machine, privacy: .public) sent a snapshot this build cannot decode")
                     }
                     self.receive(machine: machine, on: task)
                 case .failure(let error):

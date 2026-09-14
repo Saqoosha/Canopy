@@ -324,7 +324,7 @@ struct Sidebar: View {
         // Dimmed, not hidden: the session is still real and its log is still
         // readable — the row is how you reach it. `.opacity` rather than a
         // foreground style so the icon and every label fade together.
-        .opacity(canOpen(row) ? 1 : 0.45)
+        .opacity(canOpen(row) && !isStaleRemote(row) ? 1 : 0.45)
         .help(disabledReason(for: row))
         .background(
             // BOTH backgrounds live here, inline, because `.listRowBackground`
@@ -381,6 +381,8 @@ struct Sidebar: View {
         // whether it can be renamed instead of silently inheriting "no".
         // Cloud titles belong to the server, and a launcher has no session.
         switch row {
+        case .open(let s) where s.origin.mirrorTarget != nil:
+            EmptyView()
         case .open, .closedLocal:
             Button("Rename…") { store.beginRename(row: row) }
         case .closedCloud, .launcher, .remoteLive:
@@ -423,23 +425,34 @@ struct Sidebar: View {
 
     /// Whether clicking a row can actually produce a session.
     ///
-    /// Only a closed local row can answer no, and only because the directory
-    /// it recorded is gone (`SessionEntry.canOpen`, measured once by
-    /// `loadAllSessions` rather than per render). Every other kind either has
-    /// a live pane already, is fetched from the server, or is a launcher.
+    /// A closed local row answers no when its directory is gone
+    /// (`SessionEntry.canOpen`, measured once by `loadAllSessions`). A remote
+    /// live row answers no when the home Mac reported `live: false`. Stale
+    /// does not block the click — see `SidebarRow.canOpen`.
     private func canOpen(_ row: SidebarRow) -> Bool {
         SidebarRow.canOpen(row)
     }
 
-    /// Tooltip when `canOpen` is false; empty string when the row is openable.
+    /// True only for a `.remoteLive` row whose home Mac has gone quiet.
+    private func isStaleRemote(_ row: SidebarRow) -> Bool {
+        if case .remoteLive(let r) = row { return r.stale }
+        return false
+    }
+
+    /// Tooltip for a dimmed or unopenable row; empty when the row is fully
+    /// available. A stale-but-live remote row stays clickable and still gets
+    /// a help string explaining the dim.
     private func disabledReason(for row: SidebarRow) -> String {
-        guard !canOpen(row) else { return "" }
         if case .remoteLive(let r) = row {
             if !r.row.live {
                 return "Not running on \(r.machineName)"
             }
-            return "\(r.machineName) has not published for a while"
+            if r.stale {
+                return "\(r.machineName) has not published for a while; its sessions may have changed"
+            }
+            return ""
         }
+        guard !canOpen(row) else { return "" }
         return "This session's folder is gone — typically a worktree removed after merging. "
             + "It can't be reopened while the folder is missing. "
             + "Right-click to copy its log path and read it from another session."
