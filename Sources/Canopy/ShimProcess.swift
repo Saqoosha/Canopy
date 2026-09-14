@@ -72,6 +72,88 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
     weak var webView: WKWebView?
 
+    // MARK: - Mirror webviews (multi-client spike)
+
+    /// A client of this shim besides the primary `webView`. Each webview drops an
+    /// `io_message` on any channel but its own, so channel ids are translated both ways.
+    private struct MirrorClient {
+        weak var sink: (any MirrorSink)?
+        /// The channel this client minted in its own `launch_claude`.
+        var channelId: String?
+    }
+    private var mirrors: [ObjectIdentifier: MirrorClient] = [:]
+
+    private enum RequestOwner {
+        case primary
+        case mirror(ObjectIdentifier)
+    }
+    /// Outstanding webview→extension request ids and who sent them, so the
+    /// `response` goes only to that webview. An id nobody recorded — a
+    /// request Canopy itself made — falls through to the broadcast.
+    private var requestOwners: [String: RequestOwner] = [:]
+
+    /// The primary webview's own minted channel. Equal to `channelId` while
+    /// the primary owns the live channel; differs once a mirror's launch was
+    /// the one forwarded, in which case the primary is translated like a
+    /// mirror. Nil before the primary's first `launch_claude`.
+    private var primaryOwnChannel: String?
+    /// Whether the extension currently holds the channel in `channelId`.
+    private var liveChannelOpen = false
+    /// The primary's `init_response`, kept so a later webview's `init` can be
+    /// answered here. Forwarding it is fatal: the extension's `init` handler
+    /// reads a second init as "the client reloaded" and closes EVERY channel
+    /// (measured — `Closing Claude on channel` lands within 10 ms of the
+    /// mirror's init, and the CLI is gone before its `launch_claude` even
+    /// arrives).
+    private var cachedInitResponse: [String: Any]?
+
+    func attachMirror(_ mirror: any MirrorSink) {
+        mirrors[ObjectIdentifier(mirror)] = MirrorClient(sink: mirror, channelId: nil)
+        logger.notice("[mirror] attached; \(self.mirrors.count) mirror(s) on this shim")
+    }
+
+    func detachMirror(_ mirror: any MirrorSink) {
+        let key = ObjectIdentifier(mirror)
+        mirrors[key] = nil
+        requestOwners = requestOwners.filter {
+            if case .mirror(let owner) = $0.value { return owner != key }
+            return true
+        }
+        if mirrors.isEmpty { requestOwners.removeAll() }
+        logger.notice("[mirror] detached; \(self.mirrors.count) mirror(s) on this shim")
+    }
+
+    /// The synthetic `system/status` Canopy injects at `launch_claude` so the
+    /// webview's permission-mode UI matches the app setting. Built per
+    /// channel because a mirror lives on its own channel id.
+    private func syntheticPermissionStatus(channelId: String) -> [String: Any] {
+        [
+            "type": "from-extension",
+            "message": [
+                "type": "io_message",
+                "channelId": channelId,
+                "message": [
+                    "type": "system",
+                    "subtype": "status",
+                    "permissionMode": permissionMode.rawValue,
+                ] as [String: Any],
+                "done": false,
+            ] as [String: Any],
+        ]
+    }
+
+    /// Swaps the inner frame's top-level `channelId` from the live one to the target's own.
+    private static func retargeted(_ payload: [String: Any], from primary: String?, to mirrorChannel: String?) -> [String: Any] {
+        guard let primary, let mirrorChannel,
+              var inner = payload["message"] as? [String: Any],
+              inner["channelId"] as? String == primary
+        else { return payload }
+        inner["channelId"] = mirrorChannel
+        var out = payload
+        out["message"] = inner
+        return out
+    }
+
     private var process: Process?
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
@@ -3125,7 +3207,113 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        guard var dict = message.body as? [String: Any] else { return }
+        guard let dict = message.body as? [String: Any] else { return }
+        let sender = message.webView
+        handleWebviewMessage(dict, sender: sender, isPrimary: sender != nil && sender === webView)
+    }
+
+    /// A webview→host message from a `MirrorServer` connection.
+    func receiveFromMirror(_ dict: [String: Any], from sink: any MirrorSink) {
+        handleWebviewMessage(dict, sender: sink, isPrimary: false)
+    }
+
+    private func handleWebviewMessage(_ incoming: [String: Any], sender: (any MirrorSink)?, isPrimary: Bool) {
+        var dict = incoming
+
+        // Multi-client fan-in. Every webview mints its own channel and its
+        // own handshake; the extension must see exactly one of each.
+        //   - `init` from a non-primary webview is answered from the cached
+        //     `init_response` (see `cachedInitResponse` for why forwarding
+        //     it kills the session).
+        //   - `launch_claude` while a channel is live is swallowed and that
+        //     webview's channel is mapped onto the live one; while none is
+        //     live it is forwarded and BECOMES the live one, whichever
+        //     webview sent it.
+        //   - anything else carrying the sender's own channel is rewritten
+        //     onto the live channel; a request's id is remembered so the
+        //     response finds its way back.
+        let msgType = dict["type"] as? String ?? "?"
+        let mirrorKey: ObjectIdentifier? = sender.flatMap { mirrors[ObjectIdentifier($0)] != nil ? ObjectIdentifier($0) : nil }
+
+        if let mirrorKey, let sender, msgType == "request",
+           (dict["request"] as? [String: Any])?["type"] as? String == "init",
+           let requestId = dict["requestId"] as? String
+        {
+            if var cached = cachedInitResponse {
+                if var state = cached["state"] as? [String: Any] {
+                    state["sweptStaleChannels"] = false
+                    cached["state"] = state
+                }
+                logger.notice("[mirror] init answered from cache for \(requestId, privacy: .public)")
+                post(["type": "from-extension",
+                      "message": ["type": "response", "requestId": requestId, "response": cached] as [String: Any]],
+                     to: sender)
+                return
+            }
+            logger.error("[mirror] init dropped: no cached init_response yet, and forwarding it would close every live channel")
+            return
+        } else if msgType == "launch_claude", let cid = dict["channelId"] as? String, !cid.isEmpty {
+            if let mirrorKey { mirrors[mirrorKey]?.channelId = cid } else if isPrimary { primaryOwnChannel = cid }
+            // With no mirror attached this is the pre-mirror path verbatim:
+            // every launch is forwarded, whatever the bookkeeping says.
+            if !mirrors.isEmpty, liveChannelOpen, let live = channelId, live != cid {
+                logger.notice("[mirror] launch_claude swallowed from \(mirrorKey == nil ? "primary" : "mirror", privacy: .public): channel \(cid, privacy: .public) ↔ live \(live, privacy: .public)")
+                if let sender { post(syntheticPermissionStatus(channelId: cid), to: sender) }
+                return
+            }
+            liveChannelOpen = true
+            logger.notice("[mirror] launch_claude forwarded from \(mirrorKey == nil ? "primary" : "mirror", privacy: .public): channel \(cid, privacy: .public) is now live")
+            // fall through: the existing intercept below assigns `channelId`
+        } else {
+            // The webview closes its own channel on restart (`/clear`) and the
+            // extension does NOT echo that `close_channel` back, so it has to
+            // be observed here or the next launch would be read as a second
+            // client's and swallowed.
+            let own: String? = mirrorKey.flatMap { mirrors[$0]?.channelId } ?? (isPrimary ? primaryOwnChannel : nil)
+            if msgType == "close_channel", let closed = dict["channelId"] as? String,
+               closed == channelId || closed == own
+            {
+                liveChannelOpen = false
+            }
+            // The extension closes every channel on the primary's `init`, without a `close_channel`.
+            if isPrimary, msgType == "request", (dict["request"] as? [String: Any])?["type"] as? String == "init" {
+                liveChannelOpen = false
+            }
+            // A response to an extension→webview request (a permission
+            // dialog, an AskUserQuestion) was answered in ONE webview; the
+            // others still show theirs, since the dialog is webview-local
+            // state (measured: the mirror's dialog stayed open after the
+            // primary's Yes had already let the tool run). `cancel_request`
+            // aborts that request's controller in the receiving webview,
+            // which is how the extension itself withdraws a request.
+            if msgType == "response", let requestId = dict["requestId"] as? String, !mirrors.isEmpty {
+                let cancel: [String: Any] = ["type": "from-extension",
+                                             "message": ["type": "cancel_request", "targetRequestId": requestId] as [String: Any]]
+                if let webView, !isPrimary { post(cancel, to: webView) }
+                for (key, mirror) in mirrors where key != mirrorKey {
+                    if let target = mirror.sink { post(cancel, to: target) }
+                }
+                logger.notice("[mirror] response \(requestId, privacy: .public) answered by \(isPrimary ? "primary" : "mirror", privacy: .public); cancel_request sent to the others")
+            }
+            if let own, let live = channelId, own != live {
+                if dict["channelId"] as? String == own { dict["channelId"] = live }
+                // `generate_session_title` carries the channel INSIDE
+                // `request` rather than on the envelope (measured: the
+                // extension answered `Channel not found: <mirror channel>`
+                // with the top-level rewrite alone).
+                if var request = dict["request"] as? [String: Any], request["channelId"] as? String == own {
+                    request["channelId"] = live
+                    dict["request"] = request
+                }
+            }
+            if let requestId = dict["requestId"] as? String, msgType == "request", !mirrors.isEmpty {
+                requestOwners[requestId] = mirrorKey.map { .mirror($0) } ?? .primary
+            }
+            if let mirrorKey {
+                let requestType = (dict["request"] as? [String: Any])?["type"] as? String ?? "-"
+                logger.notice("[mirror→shim] type=\(msgType, privacy: .public) request=\(requestType, privacy: .public) mirror=\(mirrorKey.hashValue, privacy: .public)")
+            }
+        }
 
         // Webview → host responses to permission requests close out the
         // `isAsking` flag on the bound OpenSession.
@@ -3137,20 +3325,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
             let channelId = dict["channelId"] as? String ?? ""
             self.channelId = channelId.isEmpty ? nil : channelId
-            let statusMsg: [String: Any] = [
-                "type": "from-extension",
-                "message": [
-                    "type": "io_message",
-                    "channelId": channelId,
-                    "message": [
-                        "type": "system",
-                        "subtype": "status",
-                        "permissionMode": permissionMode.rawValue,
-                    ] as [String: Any],
-                    "done": false,
-                ] as [String: Any],
-            ]
-            sendToWebView(statusMsg)
+            sendToWebView(syntheticPermissionStatus(channelId: channelId))
 
             // Request initial rate limit data after a short delay (extension needs time to activate)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
@@ -3569,6 +3744,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             innerMessage = Self.strippingRecapFromReplay(innerMessage)
             innerMessage = patchAuthIfNeeded(innerMessage)
+            // Same `from-extension` unwrap as `patchAuthIfNeeded`.
+            let frame = (innerMessage["type"] as? String == "from-extension"
+                ? innerMessage["message"] as? [String: Any] : innerMessage) ?? [:]
+            if frame["type"] as? String == "response",
+               let resp = frame["response"] as? [String: Any],
+               resp["type"] as? String == "init_response"
+            {
+                cachedInitResponse = resp
+                logger.notice("[mirror] init_response cached")
+            }
+            if frame["type"] as? String == "close_channel",
+               let closed = frame["channelId"] as? String, closed == channelId
+            {
+                liveChannelOpen = false
+                logger.notice("[mirror] live channel \(closed, privacy: .public) closed by the extension")
+            }
             trackWorkingState(innerMessage)
             trackPermissionState(stdoutMessage: msg)
             extractStatusData(innerMessage)
@@ -3986,37 +4177,55 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return
         }
 
-        guard webView != nil else {
-            logger.error("sendToWebView: webView is nil!")
-            return
-        }
-
         // Extension sends two formats:
         //   Unsolicited: {type:"from-extension", message:{...}} — already wrapped
         //   Responses:   {type:"response", requestId:"...", ...} — needs wrapping
         // VSCode internally wraps ALL extension→webview messages in {type:"from-extension"}.
-        let jsPayload: String
-        let payload: Any = dict["type"] as? String == "from-extension"
+        let payload: [String: Any] = dict["type"] as? String == "from-extension"
             ? dict
             : ["type": "from-extension", "message": dict] as [String: Any]
-        do {
-            let data = try JSONSerialization.data(withJSONObject: payload)
-            guard let jsonStr = String(data: data, encoding: .utf8) else {
-                logger.error("sendToWebView: UTF-8 encode failed")
-                return
+
+        // A response goes only to the webview that asked. Broadcasting it
+        // makes every other webview log `No handler for response`; the
+        // extension does the same for a stray second `response` from a
+        // mirror, which is the one duplication this routing does not close.
+        if let inner = payload["message"] as? [String: Any],
+           inner["type"] as? String == "response",
+           let requestId = inner["requestId"] as? String,
+           let owner = requestOwners.removeValue(forKey: requestId)
+        {
+            switch owner {
+            case .primary:
+                if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
+            case .mirror(let key):
+                if let target = mirrors[key]?.sink {
+                    post(Self.retargeted(payload, from: channelId, to: mirrors[key]?.channelId), to: target)
+                } else {
+                    logger.warning("[mirror] response \(requestId, privacy: .public) for a detached mirror dropped")
+                }
             }
-            jsPayload = jsonStr
-        } catch {
-            logger.error("sendToWebView: JSON serialization failed: \(error.localizedDescription, privacy: .public)")
             return
         }
 
-        let js = "window.postMessage(\(jsPayload),'*')"
-        webView?.evaluateJavaScript(js) { _, error in
-            if let error {
-                logger.error("sendToWebView JS error: \(error.localizedDescription, privacy: .public)")
-            }
+        guard webView != nil || !mirrors.isEmpty else {
+            logger.error("sendToWebView: webView is nil!")
+            return
         }
+        if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
+        var stale: [ObjectIdentifier] = []
+        for (key, mirror) in mirrors {
+            guard let target = mirror.sink else { stale.append(key); continue }
+            post(Self.retargeted(payload, from: channelId, to: mirror.channelId), to: target)
+        }
+        for key in stale { mirrors[key] = nil }
+        if !stale.isEmpty, mirrors.isEmpty { requestOwners.removeAll() }
+    }
+
+    /// One payload into one client. `payload` must already be in the
+    /// `from-extension` envelope. The WKWebView case does the
+    /// `window.postMessage`; a remote sink writes it to its socket.
+    private func post(_ payload: [String: Any], to target: any MirrorSink) {
+        target.deliver(payload)
     }
 
     // MARK: - Recap
