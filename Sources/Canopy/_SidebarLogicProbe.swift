@@ -9849,6 +9849,57 @@ enum SidebarLogicProbe {
                        && account.modelScoped.count == 1 && account.modelScoped.first?.displayName == "Fable")
         }
 
+        // Mirror replay images: Read-tool images become canopy-asset URLs and are kept for serving; other images stay inline.
+        do {
+            let pixel = "iVBORw0KGgo="
+            func replay(_ toolName: String) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "response", "response": ["messages": [
+                    ["type": "assistant", "message": ["content": [["type": "tool_use", "id": "t1", "name": toolName]]]],
+                    ["type": "user", "message": ["content": [["type": "tool_result", "tool_use_id": "t1", "content": [["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": pixel]]]]]]],
+                ]]]]
+            }
+            func source(_ m: [String: Any]) -> [String: Any]? {
+                let msgs = ((m["message"] as? [String: Any])?["response"] as? [String: Any])?["messages"] as? [[String: Any]]
+                let result = ((msgs?.last?["message"] as? [String: Any])?["content"] as? [[String: Any]])?.first
+                return ((result?["content"] as? [[String: Any]])?.first?["source"] as? [String: Any])
+            }
+            var stored: [String: [String: Any]] = [:]
+            record("mirror images: the store namespaces an image by the session it was replayed for",
+                   MirrorImageStore.key(sessionId: "s1", image: "abc") != MirrorImageStore.key(sessionId: "s2", image: "abc"))
+            let deferred = source(ShimProcess.deferringReadImagesForMirror(replay("Read")) { stored[$0] = $1 })
+            let url = deferred?["url"] as? String ?? ""
+            record("mirror images: a Read image becomes a canopy-asset img URL",
+                   deferred?["type"] as? String == "url" && url.hasPrefix("canopy-asset://ext/img/") && deferred?["data"] == nil)
+            record("mirror images: the deferred image is handed to the store under the id in its URL",
+                   stored[String(url.split(separator: "/").last ?? "")]?["data"] as? String == pixel)
+            var other: [String: [String: Any]] = [:]
+            record("mirror images: an image from a tool the extension draws stays inline",
+                   source(ShimProcess.deferringReadImagesForMirror(replay("mcp__browser__screenshot")) { other[$0] = $1 })?["data"] as? String == pixel && other.isEmpty)
+        }
+
+        // Shim stdout line assembly: lines split across chunks, several per chunk, and a partial tail.
+        do {
+            var assembler = NDJSONLineAssembler()
+            func text(_ lines: [Data]) -> [String] { lines.map { String(decoding: $0, as: UTF8.self) } }
+            record("stdout lines: a chunk without a newline completes nothing", text(assembler.append(Data("{\"a\":".utf8))).isEmpty)
+            record("stdout lines: a line split across chunks comes out whole",
+                   text(assembler.append(Data("1}\n{\"b\"".utf8))) == ["{\"a\":1}"])
+            record("stdout lines: several lines in one chunk come out in order, the tail kept",
+                   text(assembler.append(Data(":2}\n{\"c\":3}\n{\"d".utf8))) == ["{\"b\":2}", "{\"c\":3}"])
+            record("stdout lines: the kept tail joins the next chunk",
+                   text(assembler.append(Data("\":4}\n".utf8))) == ["{\"d\":4}"] && assembler.pendingSince == nil)
+            record("stdout lines: an empty line is returned empty, not skipped silently",
+                   text(assembler.append(Data("\n".utf8))) == [""])
+            var big = NDJSONLineAssembler()
+            let payload = Data(repeating: 0x61, count: 3_000_000) + Data([0x0A])
+            let start = Date()
+            var out: [Data] = []
+            var offset = 0
+            while offset < payload.count { out += big.append(payload[offset..<min(offset + 16_384, payload.count)]); offset += 16_384 }
+            record("stdout lines: a 3 MB line in 16 KB chunks is assembled in linear time",
+                   out.count == 1 && out[0].count == 3_000_000 && Date().timeIntervalSince(start) < 1.0)
+        }
+
         // Live mirror access: the password compare, the bind-address filter, and the string the phone pastes.
         do {
             record("mirror password: an identical token matches", MirrorAccess.tokensMatch("abc123", "abc123"))

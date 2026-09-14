@@ -107,6 +107,11 @@ final class MirrorServer {
         pendingAddress = nil
     }
 
+    /// Whether any connection is still mirroring this session, so its deferred images must stay.
+    fileprivate func isMirroring(sessionId: String) -> Bool {
+        connections.contains { $0.attachedSessionId == sessionId }
+    }
+
     fileprivate func remove(_ connection: MirrorConnection) {
         connections.removeAll { $0 === connection }
     }
@@ -130,6 +135,8 @@ final class MirrorConnection: MirrorSink {
     private weak var shim: ShimProcess?
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorConnection")
     private var didAttach = false
+    /// The session this connection attached to; images are only served under it.
+    fileprivate private(set) var attachedSessionId = ""
     private var cleanedUp = false
 
     init(connection: NWConnection, store: SessionStore, server: MirrorServer) {
@@ -241,6 +248,9 @@ final class MirrorConnection: MirrorSink {
         }
         didAttach = true
         self.shim = shim
+        attachedSessionId = sessionId
+        // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
+        let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
         sendJSONObject([
             "type": "attach_ok",
@@ -249,9 +259,21 @@ final class MirrorConnection: MirrorSink {
             "userScripts": WebViewContainer.sessionUserScripts.map { ["source": $0.source, "atDocumentStart": $0.atDocumentStart] },
             // Lets the phone cache the assets it fetches, keyed by the extension they came from.
             "extensionVersion": CCExtension.extensionVersion() ?? "",
+            // The replay is already being fetched; the phone answers its page's get_session_request with it.
+            "prefetchedSessionRequestId": prefetchId,
         ])
         shim.attachMirror(self)
+        if !prefetchId.isEmpty {
+            // Starts the extension reading the transcript while the phone is still loading the page.
+            shim.receiveFromMirror(Self.prefetchRequest(sessionId: sessionId, requestId: prefetchId), from: self)
+        }
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")
+    }
+
+    /// The request a page sends for its transcript, as captured from the extension webview (2.1.270).
+    nonisolated static func prefetchRequest(sessionId: String, requestId: String) -> [String: Any] {
+        ["type": "request", "requestId": requestId,
+         "request": ["type": "get_session_request", "sessionId": sessionId, "purpose": "transcript_open"]]
     }
 
     /// The URL scheme a remote client serves extension assets under.
@@ -262,6 +284,18 @@ final class MirrorConnection: MirrorSink {
         guard let id = dict["id"] as? String else { return }
         var reply: [String: Any] = ["type": "asset_response", "id": id]
         defer { sendJSONObject(reply) }
+        if let path = dict["path"] as? String, path.hasPrefix("img/") {
+            // Scoped to this connection's own session, so one mirror cannot pull another session's images.
+            let key = MirrorImageStore.key(sessionId: attachedSessionId, image: String(path.dropFirst(4)))
+            guard let image = MirrorImageStore.jpeg(key: key) else {
+                logger.error("[mirror-server] image \(key, privacy: .public) not in store")
+                reply["error"] = "not found"
+                return
+            }
+            reply["mime"] = image.mime
+            reply["base64"] = image.data.base64EncodedString()
+            return
+        }
         guard let path = dict["path"] as? String, let root = CCExtension.extensionPath()?.standardizedFileURL else {
             reply["error"] = "no extension"
             return
@@ -334,8 +368,48 @@ final class MirrorConnection: MirrorSink {
         cleanedUp = true
         shim?.detachMirror(self)
         shim = nil
+        let server = self.server
         server?.remove(self)
+        if !attachedSessionId.isEmpty, server?.isMirroring(sessionId: attachedSessionId) != true {
+            MirrorImageStore.discard(sessionId: attachedSessionId)
+        }
         logger.notice("[mirror-server] detached")
+    }
+}
+
+/// Read-tool images deferred out of a phone's replay, served when its thumbnail asks for them.
+///
+/// Keyed by session and content, so a mirror can only ask for images from the session it attached to.
+@MainActor
+enum MirrorImageStore {
+    static let maxPixelSize = 768
+    private static var sources: [String: [String: Any]] = [:]
+
+    static func key(sessionId: String, image: String) -> String { "\(sessionId)/\(image)" }
+
+    /// Kept for as long as a mirror of that session is attached: a thumbnail can ask for an
+    /// image minutes after the replay, and the replay no longer carries the bytes to fall back on.
+    static func put(key: String, source: [String: Any]) {
+        guard sources[key] == nil else { return }
+        sources[key] = source
+    }
+
+    /// Drops everything deferred for one session, once nothing is mirroring it.
+    static func discard(sessionId: String) {
+        let prefix = "\(sessionId)/"
+        let dropped = sources.keys.filter { $0.hasPrefix(prefix) }
+        guard !dropped.isEmpty else { return }
+        for key in dropped { sources[key] = nil }
+        logger.notice("[mirror-server] released \(dropped.count, privacy: .public) deferred image(s)")
+    }
+
+    /// The image at phone size: a JPEG with a long edge of `maxPixelSize`, or the original bytes when re-encoding does not shrink them.
+    static func jpeg(key: String) -> (data: Data, mime: String)? {
+        guard let source = sources[key], let encoded = source["data"] as? String, let bytes = Data(base64Encoded: encoded) else { return nil }
+        if let smaller = RosterImageUploader.thumbnail(from: bytes, maxPixelSize: maxPixelSize, quality: 0.6), smaller.count < bytes.count {
+            return (smaller, "image/jpeg")
+        }
+        return (bytes, source["media_type"] as? String ?? "application/octet-stream")
     }
 }
 

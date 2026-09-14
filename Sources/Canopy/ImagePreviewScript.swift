@@ -132,6 +132,8 @@ enum ImagePreviewScript {
                     typeof item.source.media_type === 'string' &&
                     item.source.data) {
                     urls.push('data:' + item.source.media_type + ';base64,' + item.source.data);
+                } else if (item.source && item.source.type === 'url' && typeof item.source.url === 'string') {
+                    urls.push(item.source.url);
                 } else {
                     malformed++;
                 }
@@ -295,6 +297,7 @@ enum ImagePreviewScript {
                 });
             }
             var img = document.createElement('img');
+            img.loading = 'lazy';
             img.src = url;
             img.setAttribute('data-canopy-key', key);
             img.alt = file;

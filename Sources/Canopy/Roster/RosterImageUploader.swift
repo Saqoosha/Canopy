@@ -55,10 +55,15 @@ enum RosterImageUploader {
     /// ではない。以前ここには「`Always` だと小さい絵が上限まで引き伸ばされる」
     /// と書いてあったが、測ったら偽だった。
     static func thumbnail(from data: Data) -> Data? {
+        thumbnail(from: data, maxPixelSize: thumbnailMaxPixelSize, quality: thumbnailQuality)
+    }
+
+    /// Same, with the long edge and JPEG quality chosen by the caller.
+    static func thumbnail(from data: Data, maxPixelSize: Int, quality: Double) -> Data? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let size = pixelSize(of: data)
         else { return nil }
-        let longEdge = min(max(size.width, size.height), thumbnailMaxPixelSize)
+        let longEdge = min(max(size.width, size.height), maxPixelSize)
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: longEdge,
@@ -72,7 +77,7 @@ enum RosterImageUploader {
         guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil)
         else { return nil }
         CGImageDestinationAddImage(dest, image, [
-            kCGImageDestinationLossyCompressionQuality: thumbnailQuality,
+            kCGImageDestinationLossyCompressionQuality: quality,
         ] as CFDictionary)
         guard CGImageDestinationFinalize(dest), out.length > 0 else { return nil }
         return out as Data
