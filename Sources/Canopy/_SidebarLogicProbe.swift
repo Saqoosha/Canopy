@@ -1645,6 +1645,15 @@ enum SidebarLogicProbe {
                    !rows.contains { $0.session.id == mirror.id })
             record("roster rows: live means a shim is present",
                    RosterSnapshot.isLive(paned) == false)
+            let u1 = OpenSession(origin: .local(cwd), resumeId: "ru1", title: "U1", project: "x", status: .dormant)
+            let u2 = OpenSession(origin: .local(cwd), resumeId: "ru2", title: "U2", project: "x", status: .dormant)
+            let launcherRows = RosterSnapshot.rows(for: [u1, paned, u2], paneIndexes: [paned.id: 1])
+            record("roster rows: unpaned rows start after a launcher-shifted strip index",
+                   launcherRows.map(\.paneIndex) == [1, 2, 3])
+            record("roster rows: unpaned rows keep openSessions order",
+                   launcherRows.dropFirst().map { $0.session.id } == [u1.id, u2.id])
+            record("roster rows: no two rows share a paneIndex",
+                   Set(launcherRows.map(\.paneIndex)).count == launcherRows.count)
         }
 
         // Pairing: the string the phone pastes is the one another Canopy

@@ -71,10 +71,11 @@ struct RosterSnapshot: Codable, Equatable {
 
     /// The sessions to publish, each with its row index. Paned sessions keep
     /// their strip index; every other open session follows in `openSessions`
-    /// order so the phone's list reads like the sidebar's Open block. A
-    /// `.mirror` origin is skipped: it is another Mac's session, and
-    /// publishing it here would show it twice on the phone and route replies
-    /// to a Mac that cannot inject them.
+    /// order so the phone's list reads like the sidebar's Open block. Unpaned
+    /// rows start after the highest strip index, because a launcher pane holds
+    /// a strip position without a row. A `.mirror` origin is skipped: it is
+    /// another Mac's session, and publishing it here would show it twice on
+    /// the phone and route replies to a Mac that cannot inject them.
     static func rows(for openSessions: [OpenSession], paneIndexes: [OpenSession.ID: Int])
         -> [(session: OpenSession, paneIndex: Int)] {
         var paned: [(session: OpenSession, paneIndex: Int)] = []
@@ -84,7 +85,7 @@ struct RosterSnapshot: Codable, Equatable {
             if let index = paneIndexes[session.id] { paned.append((session, index)) } else { unpaned.append(session) }
         }
         paned.sort { $0.paneIndex < $1.paneIndex }
-        let next = paneIndexes.count
+        let next = paneIndexes.values.max().map { $0 + 1 } ?? 0
         return paned + unpaned.enumerated().map { ($0.element, next + $0.offset) }
     }
 
