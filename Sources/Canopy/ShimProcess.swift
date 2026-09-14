@@ -4219,8 +4219,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
                     let session = boundSession?.resumeId ?? ""
-                    let trimmed = Self.deferringReadImagesForMirror(Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)) { id, source in
-                        MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
+                    var trimmed = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
+                    // Only a client that serves `canopy-asset` URLs: the DEBUG mirror windows are
+                    // plain WKWebViews and would draw a broken thumbnail.
+                    if target is MirrorConnection {
+                        trimmed = Self.deferringReadImagesForMirror(trimmed) { id, source in
+                            MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
+                        }
                     }
                     post(Self.retargeted(trimmed, from: channelId, to: mirrors[key]?.channelId), to: target)
                 } else {

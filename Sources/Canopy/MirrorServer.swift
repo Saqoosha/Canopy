@@ -107,6 +107,11 @@ final class MirrorServer {
         pendingAddress = nil
     }
 
+    /// Whether any connection is still mirroring this session, so its deferred images must stay.
+    fileprivate func isMirroring(sessionId: String) -> Bool {
+        connections.contains { $0.attachedSessionId == sessionId }
+    }
+
     fileprivate func remove(_ connection: MirrorConnection) {
         connections.removeAll { $0 === connection }
     }
@@ -131,7 +136,7 @@ final class MirrorConnection: MirrorSink {
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorConnection")
     private var didAttach = false
     /// The session this connection attached to; images are only served under it.
-    private var attachedSessionId = ""
+    fileprivate private(set) var attachedSessionId = ""
     private var cleanedUp = false
 
     init(connection: NWConnection, store: SessionStore, server: MirrorServer) {
@@ -363,7 +368,11 @@ final class MirrorConnection: MirrorSink {
         cleanedUp = true
         shim?.detachMirror(self)
         shim = nil
+        let server = self.server
         server?.remove(self)
+        if !attachedSessionId.isEmpty, server?.isMirroring(sessionId: attachedSessionId) != true {
+            MirrorImageStore.discard(sessionId: attachedSessionId)
+        }
         logger.notice("[mirror-server] detached")
     }
 }
@@ -373,24 +382,25 @@ final class MirrorConnection: MirrorSink {
 /// Keyed by session and content, so a mirror can only ask for images from the session it attached to.
 @MainActor
 enum MirrorImageStore {
-    /// Held base64, in bytes. A 10-turn replay carries a few images; this leaves room for several sessions at once.
-    static let capacityBytes = 128 << 20
     static let maxPixelSize = 768
     private static var sources: [String: [String: Any]] = [:]
-    private static var order: [String] = []
-    private static var heldBytes = 0
 
     static func key(sessionId: String, image: String) -> String { "\(sessionId)/\(image)" }
 
+    /// Kept for as long as a mirror of that session is attached: a thumbnail can ask for an
+    /// image minutes after the replay, and the replay no longer carries the bytes to fall back on.
     static func put(key: String, source: [String: Any]) {
         guard sources[key] == nil else { return }
         sources[key] = source
-        order.append(key)
-        heldBytes += (source["data"] as? String)?.utf8.count ?? 0
-        while heldBytes > capacityBytes, let oldest = order.first {
-            order.removeFirst()
-            heldBytes -= (sources.removeValue(forKey: oldest)?["data"] as? String)?.utf8.count ?? 0
-        }
+    }
+
+    /// Drops everything deferred for one session, once nothing is mirroring it.
+    static func discard(sessionId: String) {
+        let prefix = "\(sessionId)/"
+        let dropped = sources.keys.filter { $0.hasPrefix(prefix) }
+        guard !dropped.isEmpty else { return }
+        for key in dropped { sources[key] = nil }
+        logger.notice("[mirror-server] released \(dropped.count, privacy: .public) deferred image(s)")
     }
 
     /// The image at phone size: a JPEG with a long edge of `maxPixelSize`, or the original bytes when re-encoding does not shrink them.
