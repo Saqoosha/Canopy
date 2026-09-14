@@ -127,6 +127,16 @@ final class SessionStore {
     /// Cloud (claude.ai/code) sessions, refreshed via `refreshCloud()`.
     private(set) var cloud: [RemoteSession] = []
 
+    /// Other Macs' latest roster snapshots, keyed by machine id. Written only
+    /// by `RemoteRosterWatcher`; read by the sidebar and by the mirror-state
+    /// feed. A machine that has stopped publishing keeps its last snapshot,
+    /// and the sidebar shows it dimmed once it is stale.
+    var remoteRosters: [String: RosterSnapshot] = [:]
+    /// The machine ids the relay listed, minus this Mac, in the order it gave
+    /// them. A machine here with no `remoteRosters` entry yet renders as
+    /// loading.
+    var remoteMachineIds: [String] = []
+
     /// Maps local jsonl session id → cloud session id it was teleported from.
     /// Used by `visibleRows` to drop already-teleported cloud rows.
     private(set) var teleportedFromMap: [String: String] = [:]

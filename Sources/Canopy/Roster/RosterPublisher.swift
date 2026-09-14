@@ -452,7 +452,7 @@ final class RosterPublisher {
     ///
     /// `KeychainAuth` is the precedent for reading a secret in this app; this
     /// item is written by the Settings field in Task 3 and read here.
-    private static func sharedSecret() -> String? {
+    static func sharedSecret() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "sh.saqoo.Canopy.roster",

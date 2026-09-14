@@ -1678,6 +1678,27 @@ enum SidebarLogicProbe {
                    MirrorAccess.parseHostPort("100.64.0.2") == nil)
         }
 
+        // Remote roster watcher: the pure halves. Frame classification copies
+        // the phone's rule — a snapshot carries no `type`, an event does, and
+        // an event must never decode as a snapshot with no panes.
+        do {
+            let snapshotJSON = #"{"machineId":"M2","displayName":"studio","publishedAt":1700000000,"sessionPct":1,"weeklyPct":2,"panes":[]}"#
+            let eventJSON = #"{"type":"event","machineId":"M2","panes":[]}"#
+            record("watcher: a typeless frame is a snapshot",
+                   RemoteRosterWatcher.decodeFrame(Data(snapshotJSON.utf8))?.machineId == "M2")
+            record("watcher: a typed frame is not a snapshot",
+                   RemoteRosterWatcher.decodeFrame(Data(eventJSON.utf8)) == nil)
+            record("watcher: self is excluded from the peer list",
+                   RemoteRosterWatcher.peersToWatch(machines: ["A", "B", "C"], selfId: "B") == ["A", "C"])
+            record("watcher: a nil self id excludes nothing",
+                   RemoteRosterWatcher.peersToWatch(machines: ["A"], selfId: nil) == ["A"])
+            let fresh = RosterSnapshot(machineId: "M2", displayName: "s", publishedAt: 1_000, sessionPct: 0, weeklyPct: 0, panes: [])
+            record("watcher: a snapshot under the threshold is fresh",
+                   !RemoteRosterWatcher.isStale(fresh, now: Date(timeIntervalSince1970: 1_000 + RemoteRosterWatcher.staleThreshold - 1)))
+            record("watcher: a snapshot at the threshold is stale",
+                   RemoteRosterWatcher.isStale(fresh, now: Date(timeIntervalSince1970: 1_000 + RemoteRosterWatcher.staleThreshold)))
+        }
+
         // Roster reply routing: which open session an envelope from the phone
         // addresses, matched on `OpenSession.ID` — minted per process, so an
         // id from a previous launch must find nothing rather than fall back
