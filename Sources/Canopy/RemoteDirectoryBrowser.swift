@@ -134,6 +134,7 @@ struct RemoteDirectoryBrowser: View {
                         .onSubmit { createFolder() }
                     Button("Cancel") { cancelCreatingFolder() }
                         .keyboardShortcut(.cancelAction)
+                        .disabled(isLoading)
                     Button("Create") { createFolder() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(RemoteDirectoryRules.newFolderNameProblem(newFolderName) != nil || isLoading)
@@ -149,6 +150,7 @@ struct RemoteDirectoryBrowser: View {
                         .font(.caption)
                     Button("New Folder…") {
                         newFolderName = ""
+                        errorMessage = nil
                         isCreatingFolder = true
                         nameFieldFocused = true
                     }
