@@ -1605,7 +1605,7 @@ enum SidebarLogicProbe {
             panes: [RosterSnapshot.Pane(
                 sessionId: "s1", resumeId: "r1", paneIndex: 0, title: "T", project: "P · main",
                 state: "asking", stateSince: 1_699_999_000,
-                contextPct: 17, model: "opus", messageCount: 42)])
+                contextPct: 17, model: "opus", messageCount: 42, live: true)])
         let rosterJSON = (try? JSONEncoder().encode(rosterFixture)).flatMap {
             String(data: $0, encoding: .utf8)
         } ?? ""
@@ -1616,6 +1616,36 @@ enum SidebarLogicProbe {
         record("roster: JSON round-trips",
                (try? JSONDecoder().decode(
                    RosterSnapshot.self, from: Data(rosterJSON.utf8)))?.panes.first?.state == "asking")
+
+        record("roster: JSON carries live",
+               rosterJSON.contains("\"live\":true"))
+        // The wire state is read back on the watching side; the two maps are
+        // inverses so the sidebar dot and the phone dot agree.
+        record("roster: wire state round-trips for every case",
+               SessionActivity.allCases.allSatisfy {
+                   RosterSnapshot.activity(fromWireState: RosterSnapshot.wireState(for: $0)) == $0
+               })
+        record("roster: an unknown wire state decodes to nil",
+               RosterSnapshot.activity(fromWireState: "sleeping") == nil)
+
+        // Every open session is published, paned or not. An unpaned one takes
+        // the next index after the strip so the phone's order matches the
+        // sidebar's Open block; `live` says whether an attach can succeed.
+        do {
+            let paned = OpenSession(origin: .local(cwd), resumeId: "rp", title: "P", project: "x", status: .live)
+            let unpaned = OpenSession(origin: .local(cwd), resumeId: "ru", title: "U", project: "x", status: .dormant)
+            let mirror = OpenSession(origin: .mirror(machineId: "M", host: "100.64.0.9", port: 8770),
+                                     resumeId: "rm", title: "M", project: "x", status: .live)
+            let rows = RosterSnapshot.rows(for: [unpaned, paned, mirror], paneIndexes: [paned.id: 0])
+            record("roster rows: paned first at its strip index",
+                   rows.first?.session.id == paned.id && rows.first?.paneIndex == 0)
+            record("roster rows: unpaned follows, numbered after the strip",
+                   rows.count == 2 && rows[1].session.id == unpaned.id && rows[1].paneIndex == 1)
+            record("roster rows: a mirror session is never published",
+                   !rows.contains { $0.session.id == mirror.id })
+            record("roster rows: live means a shim is present",
+                   RosterSnapshot.isLive(paned) == false)
+        }
 
         // Roster reply routing: which open session an envelope from the phone
         // addresses, matched on `OpenSession.ID` — minted per process, so an

@@ -23,6 +23,11 @@ struct RosterSnapshot: Codable, Equatable {
         let contextPct: Int
         let model: String
         let messageCount: Int
+        /// Whether an attach to this session can succeed right now: true
+        /// exactly when a `ShimProcess` is running for it. Pane membership is
+        /// not the test — a session displaced from its pane keeps its shim,
+        /// and a `.dormant` one has a pane-less row and no shim.
+        let live: Bool
     }
 
     let machineId: String
@@ -55,6 +60,32 @@ struct RosterSnapshot: Codable, Equatable {
         case .unread: return "unread"
         case .error: return "error"
         }
+    }
+
+    /// Inverse of `wireState(for:)`. Nil for a name this build does not know.
+    static func activity(fromWireState state: String) -> SessionActivity? {
+        SessionActivity.allCases.first { wireState(for: $0) == state }
+    }
+
+    static func isLive(_ session: OpenSession) -> Bool { session.shim != nil }
+
+    /// The sessions to publish, each with its row index. Paned sessions keep
+    /// their strip index; every other open session follows in `openSessions`
+    /// order so the phone's list reads like the sidebar's Open block. A
+    /// `.mirror` origin is skipped: it is another Mac's session, and
+    /// publishing it here would show it twice on the phone and route replies
+    /// to a Mac that cannot inject them.
+    static func rows(for openSessions: [OpenSession], paneIndexes: [OpenSession.ID: Int])
+        -> [(session: OpenSession, paneIndex: Int)] {
+        var paned: [(session: OpenSession, paneIndex: Int)] = []
+        var unpaned: [OpenSession] = []
+        for session in openSessions {
+            if case .mirror = session.origin { continue }
+            if let index = paneIndexes[session.id] { paned.append((session, index)) } else { unpaned.append(session) }
+        }
+        paned.sort { $0.paneIndex < $1.paneIndex }
+        let next = paneIndexes.count
+        return paned + unpaned.enumerated().map { ($0.element, next + $0.offset) }
     }
 
     /// Session id → pane index, for the panes that hold a session.
