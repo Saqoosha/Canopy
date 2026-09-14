@@ -86,12 +86,14 @@ enum MirrorAccess {
     // MARK: Address
 
     /// This Mac's Tailscale IPv4, the only address the server binds in normal use.
+    /// Tailscale's interface is a `utun*` on macOS; a CGNAT address on any other interface is not it.
     static func tailscaleIPv4() -> String? {
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0, let first = head else { return nil }
         defer { freeifaddrs(head) }
         for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
             guard entry.pointee.ifa_flags & UInt32(IFF_UP) != 0,
+                  String(cString: entry.pointee.ifa_name).hasPrefix("utun"),
                   let address = entry.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET) else { continue }
             let ipv4 = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
             var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
@@ -112,13 +114,14 @@ enum MirrorAccess {
 
     // MARK: Connection string
 
-    /// What the phone pastes: `canopy-mirror://<host>:<port>?token=<password>`.
-    static func connectionString(host: String, port: UInt16, token: String) -> String {
+    /// What the phone pastes: `canopy-mirror://<host>:<port>?token=<password>&machine=<id>`.
+    /// `machine` is the roster's machine id, so the phone offers Live only on this Mac's sessions.
+    static func connectionString(host: String, port: UInt16, token: String, machine: String) -> String {
         var components = URLComponents()
         components.scheme = urlScheme
         components.host = host
         components.port = Int(port)
-        components.queryItems = [URLQueryItem(name: "token", value: token)]
+        components.queryItems = [URLQueryItem(name: "token", value: token), URLQueryItem(name: "machine", value: machine)]
         return components.string ?? ""
     }
 }

@@ -324,7 +324,7 @@ private struct MobileSettingsTab: View {
             return
         }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(MirrorAccess.connectionString(host: address.host, port: address.port, token: token), forType: .string)
+        NSPasteboard.general.setString(MirrorAccess.connectionString(host: address.host, port: address.port, token: token, machine: MachineIdentity.stableId() ?? ""), forType: .string)
         mirrorNotice = "Copied"
     }
 
