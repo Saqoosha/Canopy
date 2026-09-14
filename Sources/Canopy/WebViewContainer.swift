@@ -347,47 +347,26 @@ struct WebViewContainer: NSViewRepresentable {
     /// The user scripts every session webview carries, in injection order.
     /// One list so a mirror webview cannot drift from the pane's.
     static func addSessionUserScripts(to ucc: WKUserContentController) {
-        ucc.addUserScript(WKUserScript(
-            source: Self.consoleCapture,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        ))
+        for script in sessionUserScripts {
+            ucc.addUserScript(WKUserScript(
+                source: script.source,
+                injectionTime: script.atDocumentStart ? .atDocumentStart : .atDocumentEnd,
+                forMainFrameOnly: true
+            ))
+        }
+    }
 
-        ucc.addUserScript(WKUserScript(
-            source: VSCodeStub.javascript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        ))
-
-        ucc.addUserScript(WKUserScript(
-            source: Self.linkClickInterception,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        ))
-
-        ucc.addUserScript(WKUserScript(
-            source: ImagePreviewScript.javascript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        ))
-
-        ucc.addUserScript(WKUserScript(
-            source: InputWidthProbe.javascript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true
-        ))
-
-        ucc.addUserScript(WKUserScript(
-            source: ScrollPreserveScript.javascript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true
-        ))
-
-        ucc.addUserScript(WKUserScript(
-            source: RecapScript.javascript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true
-        ))
+    /// Also shipped to remote mirror clients, which cannot read this bundle.
+    static var sessionUserScripts: [(source: String, atDocumentStart: Bool)] {
+        [
+            (consoleCapture, true),
+            (VSCodeStub.javascript, true),
+            (linkClickInterception, true),
+            (ImagePreviewScript.javascript, true),
+            (InputWidthProbe.javascript, false),
+            (ScrollPreserveScript.javascript, false),
+            (RecapScript.javascript, false),
+        ]
     }
 
     private func buildWebView(coordinator: Coordinator) -> WKWebView {
@@ -591,44 +570,8 @@ struct WebViewContainer: NSViewRepresentable {
             return
         }
 
-        let webviewDir = extPath.appendingPathComponent("webview")
-        let cssFile = webviewDir.appendingPathComponent("index.css")
-        let jsFile = webviewDir.appendingPathComponent("index.js")
-
         logger.info("Extension path: \(extPath.path, privacy: .public)")
-        logger.info("CSS exists: \(FileManager.default.fileExists(atPath: cssFile.path), privacy: .public)")
-        logger.info("JS exists: \(FileManager.default.fileExists(atPath: jsFile.path), privacy: .public)")
-
-        // Read bundled CSS/JS content for inline embedding
-        // (Bundle.main is under /Applications, outside allowingReadAccessTo: homeDirectory,
-        //  so we inline into the HTML instead of linking to external files)
-        let overridesCSS = Self.readBundleResource("canopy-overrides", ext: "css") ?? ""
-        if overridesCSS.isEmpty { logger.error("canopy-overrides.css not found in bundle") }
-        let prismCSS = Self.readBundleResource("prism-canopy", ext: "css") ?? ""
-        if prismCSS.isEmpty { logger.warning("prism-canopy.css not found in bundle — syntax highlighting disabled") }
-        let prismJS = Self.readBundleResource("prism", ext: "js") ?? ""
-        if prismJS.isEmpty { logger.warning("prism.js not found in bundle — syntax highlighting disabled") }
-
-        let html = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <style>\(VSCodeStub.themeCSSVariables)</style>
-          <link href="\(cssFile.absoluteString)" rel="stylesheet">
-          <style>\(overridesCSS)</style>
-          <style>\(prismCSS)</style>
-        </head>
-        <body class="vscode-light">
-          <pre id="claude-error" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; margin:0; padding:12px 16px; background:#fee2e2; color:#991b1b; font-size:13px; white-space:pre-wrap;"></pre>
-          <script>new MutationObserver(function(){var e=document.getElementById('claude-error');if(e)e.style.display=e.textContent?'block':'none'}).observe(document.getElementById('claude-error'),{childList:true,characterData:true,subtree:true})</script>
-          <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")\(Self.initialAuthStatusAttr())></div>
-          <script src="\(jsFile.absoluteString)" type="module"></script>
-          <script>\(prismJS)</script>
-        </body>
-        </html>
-        """
+        let html = entryHTML(resumeSessionId: resumeSessionId) { extPath.appendingPathComponent($0).absoluteString }
 
         // Write HTML to Application Support
         let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
@@ -664,6 +607,43 @@ struct WebViewContainer: NSViewRepresentable {
         // Allow read access to home directory (covers Application Support HTML and extension resources)
         let commonParent = FileManager.default.homeDirectoryForCurrentUser
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
+    }
+
+    /// The webview entry page. `assetURL` maps an extension-relative path such as
+    /// `webview/index.js` to the URL the page should load it from.
+    static func entryHTML(resumeSessionId: String?, assetURL: (String) -> String) -> String {
+        // Read bundled CSS/JS content for inline embedding
+        // (Bundle.main is under /Applications, outside allowingReadAccessTo: homeDirectory,
+        //  so we inline into the HTML instead of linking to external files)
+        let overridesCSS = Self.readBundleResource("canopy-overrides", ext: "css") ?? ""
+        if overridesCSS.isEmpty { logger.error("canopy-overrides.css not found in bundle") }
+        let prismCSS = Self.readBundleResource("prism-canopy", ext: "css") ?? ""
+        if prismCSS.isEmpty { logger.warning("prism-canopy.css not found in bundle — syntax highlighting disabled") }
+        let prismJS = Self.readBundleResource("prism", ext: "js") ?? ""
+        if prismJS.isEmpty { logger.warning("prism.js not found in bundle — syntax highlighting disabled") }
+
+        let html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>\(VSCodeStub.themeCSSVariables)</style>
+          <link href="\(assetURL("webview/index.css"))" rel="stylesheet">
+          <style>\(overridesCSS)</style>
+          <style>\(prismCSS)</style>
+        </head>
+        <body class="vscode-light">
+          <pre id="claude-error" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; margin:0; padding:12px 16px; background:#fee2e2; color:#991b1b; font-size:13px; white-space:pre-wrap;"></pre>
+          <script>new MutationObserver(function(){var e=document.getElementById('claude-error');if(e)e.style.display=e.textContent?'block':'none'}).observe(document.getElementById('claude-error'),{childList:true,characterData:true,subtree:true})</script>
+          <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")\(Self.initialAuthStatusAttr())></div>
+          <script src="\(assetURL("webview/index.js"))" type="module"></script>
+          <script>\(prismJS)</script>
+        </body>
+        </html>
+        """
+
+        return html
     }
 
     // MARK: - Webview entry files

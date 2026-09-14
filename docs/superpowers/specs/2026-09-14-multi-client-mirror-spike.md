@@ -46,6 +46,38 @@ transport の前に、Debug ビルドの **ミラー窓**（`MirrorSessionWindow
 - `init_response` には Keychain から注入した `authStatus` が入る。attach できる者は auth 状態を受け取る。port の認証は出荷形で必須で、Tailscale の interface に bind するだけでは足りない
 - `open -n -g`（背面起動）だと窓が作られず `.task` も走らない。`open -n` は前面に出るので、テスト中のキー入力が Debug 側に落ちる（Cmd+W で一度セッションを閉じられた）
 
+## phone（同日、branch `mirror-mobile-attach` と Canopy-Mobile の worktree `mirror-attach`、未 commit）
+
+phone は extension を持たない。attach 成功時に server が `attach_ok`（entry HTML と user script 7 本）を返し、asset は `asset_request` / `asset_response`（base64）で socket 越しに引く。entry HTML は `canopy-asset://ext/webview/index.{css,js}` を参照し、extension が返す asset URI は `/resources/clawd.svg` のような root 相対なので、同じ scheme の下で解決され、frame の中身を書き換える必要が無い。
+
+- **server が返す asset は extension の `webview/` と `resources/` の下だけ。** `../extension.js`、`webview/../package.json`、`native-binary/claude` は拒否（実測）。`index.js` 5,223,326 B、`index.css` 415,265 B、`clawd.svg` は byte 一致
+- **保留中の permission / AskUserQuestion の request は、遅れて launch した client に再送する。** dialog が出た後に開いた mirror 窓に同じ dialog が出て、そこで Yes するとコマンドが走り primary の dialog も消えた（実測）
+- **iOS Simulator（iPhone 16 Pro、iOS 18.5）で往復成立。** Simulator は Mac と network を共有するので loopback の server に繋げる。Mac から送った turn が phone 幅の webview に描かれ、Simulator の composer で打った prompt が Mac の CLI で走って両方に描かれた
+- **iOS は 16px 未満の入力欄に focus すると page を拡大し、composer が画面外に出る。** phone 側で viewport を `maximum-scale=1` に上書きする user script を足して止めた
+- `log_event` が mirror の channel のまま extension に届き `Channel not found for logEvent` が出る。telemetry だけで、描画と操作には影響なし
+- Simulator は `CGEventKeyboardSetUnicodeString` を keycode 0 として読む（`A` になる）。文字ごとの keycode で打つ必要がある
+- **実機 iPhone Air（Tailscale 越し）で往復成立。** Mac の Debug を `CANOPY_MIRROR_LISTEN=<Tailscale IPv4>:8770` で起動し、Debug の Canopy-Mobile を `devicectl process launch --environment-variables '{"CANOPY_MIRROR_ATTACH":"<ip>:8770/<id>"}'` で起動した。phone で打った prompt が Mac の CLI で走り、phone から頼んだ Bash の permission dialog が phone に出て、phone で Yes を押すとコマンドが走り、結果が両方に描かれた
+- Tailscale の macOS 版は、自機の Tailscale address への自分自身からの接続を折り返さない（timeout）。到達確認は別の機械（studio）から行う
+- iPhone Mirroring 越しの入力は、テキストを `pbcopy` して Cmd+V で paste し、送信ボタンをタップする。Return は app に届かない
+
+## `/clear` の実測（同日）
+
+primary で「BANANA を覚えて」と送り、mirror 窓で `/clear` を打ち、primary で「覚えた単語は？」と聞いた。
+
+- **typed の `/clear` は画面のずれを起こさない。** webview はそれを普通の prompt として共有の CLI に送り、CLI が会話をクリアする。両方の窓が同時に `/clear` だけの画面になり、primary の質問への返事は両方の窓で `UNKNOWN` だった
+- **画面がずれるのは、webview が自分の channel を閉じて再起動するとき（`restartClaude`）だけ。** 呼ばれるのは plugin の追加・再読み込みの後と、再起動を要求する一部のコマンド画面。この経路は未測定
+- webview の「新しい会話」は、host が `create_new_conversation` を送るか `openNewInTab` のときだけ動く。Canopy はどちらも使わない
+
+## 出荷形（同日）
+
+- **Canopy の Settings › Mobile に「Live mirror」。** 初期値は off。on にすると、この Mac の Tailscale IPv4（100.64.0.0/10）にだけ bind し、Tailscale が無ければ listen せず「Tailscale is not running on this Mac」と出す。Release でも動く（検証用の 2 つの窓は DEBUG のまま）。DEBUG に限り `CANOPY_MIRROR_LISTEN=<IPv4>` で bind 先を上書きできる
+- **attach には password（token）が要る。** Canopy が 32 byte の乱数を Keychain（`sh.saqoo.Canopy.mirror`）に作り、定数時間で比較する。settings.json には書かない。Settings の「Copy Connection for iPhone」で `canopy-mirror://<ip>:<port>?token=…` を clipboard へ、「Reset Password」で作り直す
+- **phone は Settings の「Paste Connection from Mac」だけ。** address を保存し、token を Keychain に入れる。拒否されると「The Mac rejected the password」と出す
+- **実機で通した流れ（2026-09-14、iPhone Air）：** toggle off で listen しない → on で `Listening on 100.116.127.93:8770` → Copy → Universal Clipboard で phone の Paste（iOS の「ペーストを許可」が出る）→ 保存した password で attach → 往復 → Mac で Reset Password → 古い password の phone は拒否
+- **普段使いの経路も実機で成立。** roster の行 → 会話画面の Live ボタン → 保存した password で attach し、それまでの会話が描かれた。phone が送る `resumeId` は Mac の session id と一致する。Mac に無い session を開くと「This session is not open on the Mac.」と出る
+- Mac でコピーした直前に別の文字列を clipboard に入れると、Universal Clipboard はそちらを先に phone に届けることがある。phone の Paste が「Canopy の接続ではない」と言ったら、少し待って押し直せば通る
+- settings.json は Release と共有なので、Debug で on にした `canopy.mirrorEnabled` は Release の次回起動にも効く。同じ port を取り合うと後から起動した方は bind できず、Settings に理由が出る
+
 ## 残り（findings）
 
 - abort で生成された `deny` を shim で捨てる。今は extension が捨てているだけで、順序次第では本物の答えより先に届きうる

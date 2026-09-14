@@ -276,8 +276,62 @@ private struct MobileSettingsTab: View {
                     .foregroundStyle(.secondary)
             }
             .onAppear { hasStoredSecret = MachineIdentity.hasRelaySecret() }
+
+            Section {
+                Toggle("Let the iPhone open live sessions", isOn: $settings.mirrorEnabled)
+                LabeledContent("Status", value: mirrorStatusText)
+                HStack {
+                    Button("Copy Connection for iPhone") { copyMirrorConnection() }
+                        .disabled(listeningAddress == nil)
+                    Button("Reset Password") { resetMirrorPassword() }
+                        .disabled(!settings.mirrorEnabled)
+                    Spacer()
+                    if let mirrorNotice {
+                        Text(mirrorNotice).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Live mirror")
+            } footer: {
+                SettingsFooter(text: "Paste the connection into the iPhone app's Settings. It contains the password: anyone on your tailnet who has it can read and drive this Mac's sessions. Reset the password to disconnect every phone and refuse every copy made before.")
+            }
         }
         .formStyle(.grouped)
+    }
+
+    @State private var mirrorStatus = MirrorServerStatus.shared
+    @State private var mirrorNotice: String?
+
+    private var listeningAddress: (host: String, port: UInt16)? {
+        if case .listening(let host, let port) = mirrorStatus.state { return (host, port) }
+        return nil
+    }
+
+    private var mirrorStatusText: String {
+        switch mirrorStatus.state {
+        case .off: "Off"
+        case .noTailscale: "No Tailscale address on this Mac"
+        case .noPassword: "Cannot create the password in the Keychain"
+        case .listening(let host, let port): "Listening on \(host):\(port)"
+        case .failed(let reason): "Cannot listen: \(reason)"
+        }
+    }
+
+    private func copyMirrorConnection() {
+        guard let address = listeningAddress else { return }
+        guard let token = MirrorAccess.token(createIfMissing: true) else {
+            mirrorNotice = "Cannot read the password from the Keychain"
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(MirrorAccess.connectionString(host: address.host, port: address.port, token: token, machine: MachineIdentity.stableId() ?? ""), forType: .string)
+        mirrorNotice = "Copied"
+    }
+
+    private func resetMirrorPassword() {
+        mirrorNotice = MirrorServer.resetPassword()
+            ? "Password reset; copy the connection again"
+            : "Reset failed; the old password is still in force"
     }
 
     @State private var relaySecret: String = ""

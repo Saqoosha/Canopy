@@ -139,6 +139,15 @@ final class CanopySettings {
         didSet { save() }
     }
 
+    /// Off by default: on, this Mac accepts password-checked attaches on its Tailscale address.
+    var mirrorEnabled: Bool = false {
+        didSet { save() }
+    }
+
+    var mirrorPort: Int = 8770 {
+        didSet { save() }
+    }
+
     let filePath: URL
 
     /// Suppresses `save()` while `load()` is assigning. Every property's
@@ -237,6 +246,12 @@ final class CanopySettings {
         if let endpoint = dict["canopy.rosterEndpoint"] as? String {
             rosterEndpoint = endpoint
         }
+        if let mirrorOn = dict["canopy.mirrorEnabled"] as? Bool {
+            mirrorEnabled = mirrorOn
+        }
+        if let port = dict["canopy.mirrorPort"] as? Int, (1...65535).contains(port) {
+            mirrorPort = port
+        }
         // Re-clamp on load: if a stale settings.json paired bypass with a
         // disabled opt-in (manual edit, downgrade, etc.) the launcher
         // Picker would silently drop bypass while the recents default
@@ -273,6 +288,8 @@ final class CanopySettings {
         dict["canopy.machineDisplayName"] = machineDisplayName
         dict["canopy.rosterEnabled"] = rosterEnabled
         dict["canopy.rosterEndpoint"] = rosterEndpoint
+        dict["canopy.mirrorEnabled"] = mirrorEnabled
+        dict["canopy.mirrorPort"] = mirrorPort
         writeDict(dict)
     }
 

@@ -92,6 +92,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// request Canopy itself made — falls through to the broadcast.
     private var requestOwners: [String: RequestOwner] = [:]
 
+    /// `tool_permission_request` and `user_dialog_request` frames still awaiting an answer, re-sent to a client that launches late.
+    private var outstandingDialogRequests: [String: [String: Any]] = [:]
+
     /// The primary webview's own minted channel. Equal to `channelId` while
     /// the primary owns the live channel; differs once a mirror's launch was
     /// the one forwarded, in which case the primary is translated like a
@@ -3258,7 +3261,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // every launch is forwarded, whatever the bookkeeping says.
             if !mirrors.isEmpty, liveChannelOpen, let live = channelId, live != cid {
                 logger.notice("[mirror] launch_claude swallowed from \(mirrorKey == nil ? "primary" : "mirror", privacy: .public): channel \(cid, privacy: .public) ↔ live \(live, privacy: .public)")
-                if let sender { post(syntheticPermissionStatus(channelId: cid), to: sender) }
+                if let sender {
+                    post(syntheticPermissionStatus(channelId: cid), to: sender)
+                    for request in outstandingDialogRequests.values {
+                        post(Self.retargeted(request, from: live, to: cid), to: sender)
+                    }
+                }
                 return
             }
             liveChannelOpen = true
@@ -3286,6 +3294,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // primary's Yes had already let the tool run). `cancel_request`
             // aborts that request's controller in the receiving webview,
             // which is how the extension itself withdraws a request.
+            if msgType == "response", let requestId = dict["requestId"] as? String {
+                outstandingDialogRequests[requestId] = nil
+            }
             if msgType == "response", let requestId = dict["requestId"] as? String, !mirrors.isEmpty {
                 let cancel: [String: Any] = ["type": "from-extension",
                                              "message": ["type": "cancel_request", "targetRequestId": requestId] as [String: Any]]
@@ -4184,6 +4195,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let payload: [String: Any] = dict["type"] as? String == "from-extension"
             ? dict
             : ["type": "from-extension", "message": dict] as [String: Any]
+
+        if let inner = payload["message"] as? [String: Any] {
+            if inner["type"] as? String == "request",
+               let requestId = inner["requestId"] as? String,
+               let kind = (inner["request"] as? [String: Any])?["type"] as? String,
+               kind == "tool_permission_request" || kind == "user_dialog_request" {
+                outstandingDialogRequests[requestId] = payload
+            } else if inner["type"] as? String == "cancel_request", let target = inner["targetRequestId"] as? String {
+                outstandingDialogRequests[target] = nil
+            }
+        }
 
         // A response goes only to the webview that asked. Broadcasting it
         // makes every other webview log `No handler for response`; the
@@ -5225,6 +5247,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// raised-hand, hourglass, or spinning subagent row — once the process
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
+        outstandingDialogRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
         // Cleared with `…Inputs`, which it is keyed alongside: both are
