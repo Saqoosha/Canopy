@@ -137,29 +137,54 @@ struct Sidebar: View {
             SidebarAccountSection()
         }
         .overlay(alignment: .bottom) {
-            if let err = store.teleportError {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(err)
-                        .font(.caption)
-                        .lineLimit(2)
-                    Spacer(minLength: 4)
-                    Button {
-                        store.dismissTeleportError()
-                    } label: {
-                        Image(systemName: "xmark")
+            VStack(spacing: 8) {
+                if let err = store.teleportError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(err)
                             .font(.caption)
+                            .lineLimit(2)
+                        Spacer(minLength: 4)
+                        Button {
+                            store.dismissTeleportError()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    .padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .padding(8)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .padding(8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                if let err = store.remoteAttachError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(err)
+                            .font(.caption)
+                            .lineLimit(2)
+                        Spacer(minLength: 4)
+                        Button {
+                            store.remoteAttachError = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
+            .padding(.bottom, 8)
         }
         .animation(.easeInOut(duration: 0.2), value: store.teleportError)
+        .animation(.easeInOut(duration: 0.2), value: store.remoteAttachError)
         .task {
             store.isSidebarVisible = true
             await store.refreshRecents()

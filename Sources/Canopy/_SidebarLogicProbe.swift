@@ -1736,6 +1736,49 @@ enum SidebarLogicProbe {
                    { if case .remoteLive(let r) = sections[1].rows[0] { return r.activity == .working } else { return false } }())
         }
 
+        // Attaching to a remote session. Pure decisions only; the socket is
+        // measured on device.
+        do {
+            record("attach: unauthorized names the Settings fix",
+                   SessionStore.mirrorFailureMessage(reason: "unauthorized", machineName: "studio")
+                       == "studio rejected the password. Paste its connection again in Settings › Mobile.")
+            record("attach: no such session says it stopped",
+                   SessionStore.mirrorFailureMessage(reason: "no such session", machineName: "studio")
+                       == "That session is no longer running on studio.")
+            record("attach: an unknown reason is passed through with the machine",
+                   SessionStore.mirrorFailureMessage(reason: "expected attach", machineName: "studio")
+                       == "studio refused the attach: expected attach")
+
+            let store = SessionStore()
+            let remote = RemoteLiveSession(
+                machineId: "M2", machineName: "studio",
+                row: RosterSnapshot.Pane(sessionId: "s", resumeId: "r-live", paneIndex: 0, title: "T", project: "P",
+                                         state: "idle", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true),
+                stale: false)
+            let existing = OpenSession(origin: .mirror(machineId: "M2", host: "100.64.0.2", port: 8770),
+                                       resumeId: "r-live", title: "T", project: "P", status: .live)
+            let other = OpenSession(origin: .local(cwd), resumeId: "x", title: "X", project: "P", status: .live)
+            store._probeSeedOpenSessions([existing, other])
+            _ = store.openInNewPane(existing.id)
+            _ = store.openInNewPane(other.id)
+            store.setFocusedPaneIndex(1)
+            store.openRemoteLive(remote, target: .focused)
+            record("attach: a second attach to the same session focuses its pane",
+                   store.openSessions.count == 2 && store.focusedPaneIndex == 0)
+
+            // State arrives from the roster, since a mirror has no shim.
+            let snapshot = RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                                          panes: [RosterSnapshot.Pane(sessionId: "s", resumeId: "r-live", paneIndex: 0, title: "T", project: "P",
+                                                                      state: "asking", stateSince: 0, contextPct: 42, model: "opus", messageCount: 7, live: true)])
+            store.noteRemoteState(machineId: "M2", snapshot: snapshot)
+            record("attach: asking on the wire raises isAsking on the mirror session",
+                   existing.isAsking && !existing.isThinking && !existing.isWaiting)
+            record("attach: the status bar takes the roster's model and message count",
+                   existing.statusBar.model == "opus" && existing.statusBar.messageCount == 7)
+            record("attach: a local session is untouched by a remote snapshot",
+                   !other.isAsking)
+        }
+
         // Roster reply routing: which open session an envelope from the phone
         // addresses, matched on `OpenSession.ID` — minted per process, so an
         // id from a previous launch must find nothing rather than fall back

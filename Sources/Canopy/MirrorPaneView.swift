@@ -1,0 +1,129 @@
+import SwiftUI
+import WebKit
+import os
+
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorPane")
+
+/// A pane showing another Mac's session: the same WKWebView `WebViewContainer`
+/// builds, driven over TCP by `RemoteMirrorBridge` instead of by a shim.
+/// Reuses `SessionWebViewHost` so a pane swap is the same in-place subview
+/// move, and the two-hosts-one-webview re-adoption rule holds here too.
+struct MirrorPaneView: NSViewRepresentable {
+    let session: OpenSession
+    /// Called once with a user-facing message when the attach is refused or the
+    /// socket drops before `attach_ok`; the caller closes the pane.
+    let onFailure: (String) -> Void
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var consoleHandler: ConsoleLogHandler?
+        var linkHandler: LinkClickHandler?
+        var inputWidthHandler: InputWidthMessageHandler?
+        var lastBoundSessionId: OpenSession.ID?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> SessionWebViewHost {
+        let host = SessionWebViewHost()
+        host.translatesAutoresizingMaskIntoConstraints = true
+        host.autoresizingMask = [.width, .height]
+        SessionWebViewHost.install(webView(coordinator: context.coordinator), in: host)
+        context.coordinator.lastBoundSessionId = session.id
+        return host
+    }
+
+    func updateNSView(_ host: SessionWebViewHost, context: Context) {
+        guard session.id != context.coordinator.lastBoundSessionId else {
+            host.adoptExpectedWebViewIfNeeded()
+            return
+        }
+        host.subviews.forEach { $0.removeFromSuperview() }
+        SessionWebViewHost.install(webView(coordinator: context.coordinator), in: host)
+        context.coordinator.lastBoundSessionId = session.id
+    }
+
+    static func dismantleNSView(_ host: SessionWebViewHost, coordinator: Coordinator) {
+        for sub in host.subviews {
+            if let wk = sub as? WKWebView {
+                wk.navigationDelegate = nil
+                let ucc = wk.configuration.userContentController
+                for name in ["vscodeHost", "consoleLog", "canopyLink", InputWidthProbe.messageHandlerName] {
+                    ucc.removeScriptMessageHandler(forName: name)
+                }
+            }
+            sub.removeFromSuperview()
+        }
+    }
+
+    /// Registers this pane's script message handlers on `webView`, replacing
+    /// any left from an earlier mount — `dismantleNSView` removes them.
+    private func registerHandlers(on webView: WKWebView, bridge: RemoteMirrorBridge, coordinator: Coordinator) {
+        let ucc = webView.configuration.userContentController
+        for name in ["vscodeHost", "consoleLog", "canopyLink", InputWidthProbe.messageHandlerName] {
+            ucc.removeScriptMessageHandler(forName: name)
+        }
+        let consoleHandler = ConsoleLogHandler()
+        let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory)
+        let inputWidthHandler = InputWidthMessageHandler(statusBarData: session.statusBar)
+        ucc.add(consoleHandler, name: "consoleLog")
+        ucc.add(linkHandler, name: "canopyLink")
+        ucc.add(inputWidthHandler, name: InputWidthProbe.messageHandlerName)
+        ucc.add(bridge, name: "vscodeHost")
+        coordinator.consoleHandler = consoleHandler
+        coordinator.linkHandler = linkHandler
+        coordinator.inputWidthHandler = inputWidthHandler
+        webView.navigationDelegate = coordinator
+    }
+
+    /// The cached webview when the session already has one; otherwise a fresh
+    /// webview and bridge, attached in the order the DEBUG window measured:
+    /// socket ready → `attach` → page load.
+    private func webView(coordinator: Coordinator) -> WKWebView {
+        if let cached = session.webView, let bridge = session.mirrorBridge {
+            registerHandlers(on: cached, bridge: bridge, coordinator: coordinator)
+            return cached
+        }
+        guard let target = session.origin.mirrorTarget,
+              let token = MirrorAccess.peerToken(machineId: target.machineId) else {
+            logger.error("[mirror-pane] no pairing for \(session.origin.mirrorTarget?.machineId ?? "nil", privacy: .public)")
+            DispatchQueue.main.async { onFailure("No password stored for this Mac.") }
+            return WKWebView()
+        }
+        let config = WKWebViewConfiguration()
+        let ucc = WKUserContentController()
+        config.userContentController = ucc
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        WebViewContainer.addSessionUserScripts(to: ucc)
+        let webView = SessionWKWebView(frame: .zero, configuration: config)
+        webView.isInspectable = true
+
+        let bridge = RemoteMirrorBridge(host: target.host, port: target.port, sessionId: session.resumeId, token: token, webView: webView)
+        registerHandlers(on: webView, bridge: bridge, coordinator: coordinator)
+        let machineName = session.statusBar.mirrorMachine ?? target.machineId
+        bridge.onOutcome = { [weak session, weak bridge] outcome in
+            guard let session else { return }
+            switch outcome {
+            case .attached:
+                session.status = .live
+                if let remote = bridge?.extensionVersion, let local = CCExtension.extensionVersion(), remote != local {
+                    logger.notice("[mirror-pane] extension \(local, privacy: .public) here, \(remote, privacy: .public) on \(machineName, privacy: .public)")
+                }
+            case .refused(let reason):
+                onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName))
+            case .dropped:
+                if case .spawning = session.status {
+                    onFailure("Could not reach \(machineName). Is its live mirror on?")
+                } else {
+                    session.connection.status = .reconnectFailed
+                }
+            }
+        }
+        session.connection.onRetry = { [weak session] in
+            guard let session else { return }
+            SessionStore.shared?.restartSession(session.id)
+        }
+        session.webView = webView
+        session.mirrorBridge = bridge
+        return webView
+    }
+}

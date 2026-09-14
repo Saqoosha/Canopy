@@ -197,6 +197,7 @@ final class RemoteRosterWatcher {
                     if let data, let snapshot = Self.decodeFrame(data) {
                         if self.running && self.store.remoteMachineIds.contains(machine) {
                             self.store.remoteRosters[machine] = snapshot
+                            self.store.noteRemoteState(machineId: machine, snapshot: snapshot)
                         }
                     }
                     self.receive(machine: machine, on: task)

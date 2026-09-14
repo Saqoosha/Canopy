@@ -106,7 +106,18 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 }
                 return
             }
-            if let data, !data.isEmpty, let lines = self.lineBuffer.append(data) {
+            if let data, !data.isEmpty {
+                guard let lines = self.lineBuffer.append(data) else {
+                    logger.error("[mirror-attach] line over \(NDJSONLineBuffer.maxLineBytes) bytes; closing")
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            guard !self.closed else { return }
+                            self.connection.cancel()
+                            self.deliverOutcome(.dropped)
+                        }
+                    }
+                    return
+                }
                 DispatchQueue.main.async { MainActor.assumeIsolated { lines.forEach(self.handleLineData) } }
             }
             if isComplete {

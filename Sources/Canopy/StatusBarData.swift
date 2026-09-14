@@ -12,6 +12,8 @@ final class StatusBarData {
     var gitBranch: String = ""
     var vcsType: VCSType = .unknown
     var remoteHost: String?
+    /// Display name of the Mac whose session this mirror pane is attached to.
+    var mirrorMachine: String?
 
     // Compact boundary indicator
     var didCompact: Bool = false
@@ -306,6 +308,7 @@ final class StatusBarData {
         vcsType = .unknown
         didCompact = false
         remoteHost = nil
+        mirrorMachine = nil
         subagents = []
         recap = nil
         chatInputWidth = nil

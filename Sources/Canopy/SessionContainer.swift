@@ -17,35 +17,51 @@ struct SessionContainer: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                WebViewContainer(
-                    workingDirectory: session.origin.workingDirectory,
-                    resumeSessionId: session.resumeId,
-                    model: session.model,
-                    effortLevel: session.effortLevel,
-                    permissionMode: session.permissionMode,
-                    sessionTitle: session.title,
-                    statusBarData: session.statusBar,
-                    remoteHost: session.origin.remoteHost,
-                    customApi: session.customApi,
-                    connectionState: session.connection,
-                    onCrash: { code in
-                        logger.error("Session \(session.id.uuidString, privacy: .public) crashed (status \(code))")
-                        session.status = .crashed(exitCode: code)
-                        onCrash?(code)
-                    },
-                    boundSession: session
-                )
-                .overlay {
-                    ConnectionOverlayView(
+                if session.origin.mirrorTarget != nil {
+                    MirrorPaneView(session: session) { message in
+                        session.lastFatalError = message
+                        onCrash?(-2)
+                    }
+                    .overlay {
+                        ConnectionOverlayView(
+                            connectionState: session.connection,
+                            onBackToLauncher: {
+                                session.connection.status = .connected
+                            }
+                        )
+                    }
+                    .animation(.easeInOut(duration: 0.3), value: session.connection.isOverlayVisible)
+                } else {
+                    WebViewContainer(
+                        workingDirectory: session.origin.workingDirectory,
+                        resumeSessionId: session.resumeId,
+                        model: session.model,
+                        effortLevel: session.effortLevel,
+                        permissionMode: session.permissionMode,
+                        sessionTitle: session.title,
+                        statusBarData: session.statusBar,
+                        remoteHost: session.origin.remoteHost,
+                        customApi: session.customApi,
                         connectionState: session.connection,
-                        onBackToLauncher: {
-                            // In the sidebar shell there is no "back to launcher"
-                            // button; users explicitly close via the × instead.
-                            session.connection.status = .connected
-                        }
+                        onCrash: { code in
+                            logger.error("Session \(session.id.uuidString, privacy: .public) crashed (status \(code))")
+                            session.status = .crashed(exitCode: code)
+                            onCrash?(code)
+                        },
+                        boundSession: session
                     )
+                    .overlay {
+                        ConnectionOverlayView(
+                            connectionState: session.connection,
+                            onBackToLauncher: {
+                                // In the sidebar shell there is no "back to launcher"
+                                // button; users explicitly close via the × instead.
+                                session.connection.status = .connected
+                            }
+                        )
+                    }
+                    .animation(.easeInOut(duration: 0.3), value: session.connection.isOverlayVisible)
                 }
-                .animation(.easeInOut(duration: 0.3), value: session.connection.isOverlayVisible)
 
                 // The recap is NOT rendered here: it lives inside the webview,
                 // at the top of the chat composer (see `RecapScript`). Kept as a
@@ -63,7 +79,12 @@ struct SessionContainer: View {
             // the user sees a blank pane for 1–3 s and wonders if the click
             // landed.
             if case .spawning = session.status {
-                SpawningOverlay(headline: "Starting \(session.title)…", detail: session.project)
+                SpawningOverlay(
+                    headline: session.origin.mirrorTarget != nil
+                        ? "Attaching to \(session.statusBar.mirrorMachine ?? "remote Mac")…"
+                        : "Starting \(session.title)…",
+                    detail: session.project
+                )
                     .transition(.opacity)
             }
         }
@@ -72,7 +93,9 @@ struct SessionContainer: View {
             // Boot the spawning state regardless of how the OpenSession was
             // created. Flip to .live a short delay after the webview HTML
             // load — long enough to mask the first paint, short enough that
-            // the user perceives the click as instant.
+            // the user perceives the click as instant. A mirror session's
+            // bridge flips it on `attach_ok`; do not race that.
+            guard session.origin.mirrorTarget == nil else { return }
             try? await Task.sleep(for: .seconds(1.2))
             await MainActor.run {
                 if case .spawning = session.status {

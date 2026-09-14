@@ -177,9 +177,83 @@ final class SessionStore {
         return Self.remoteLiveSections(rosters: remoteRosters, machineIds: remoteMachineIds, attached: attached, now: remoteClock)
     }
 
-    /// Replaced in the next task.
+    /// Why an attach cannot even start, or nil when this Mac holds the peer's
+    /// address and password.
+    func remoteAttachRefusal(machineId: String, machineName: String) -> String? {
+        guard let address = CanopySettings.shared.mirrorPeers[machineId],
+              MirrorAccess.parseHostPort(address) != nil,
+              MirrorAccess.peerToken(machineId: machineId) != nil else {
+            return "Paste \(machineName)'s connection in Settings › Mobile first."
+        }
+        return nil
+    }
+
+    static func mirrorFailureMessage(reason: String, machineName: String) -> String {
+        switch reason {
+        case "unauthorized": "\(machineName) rejected the password. Paste its connection again in Settings › Mobile."
+        case "no such session": "That session is no longer running on \(machineName)."
+        default: "\(machineName) refused the attach: \(reason)"
+        }
+    }
+
+    /// The most recent attach refusal that never reached a pane (no pairing),
+    /// for the sidebar to show. Cleared when the user dismisses it.
+    var remoteAttachError: String?
+
     func openRemoteLive(_ remote: RemoteLiveSession, target: PaneTarget) {
-        logger.notice("openRemoteLive: not implemented yet")
+        if let existing = openSessions.first(where: {
+            $0.origin.mirrorTarget?.machineId == remote.machineId && $0.resumeId == remote.sessionId
+        }) {
+            switch target {
+            case .focused: select(.session(existing.id))
+            case .newPane:
+                if !openInNewPane(existing.id) {
+                    if panes.count >= Self.paneAbsoluteCap { showCapReachedHintOnFocusedPane() }
+                    openInFocusedPane(existing.id)
+                }
+            }
+            return
+        }
+        if let refusal = remoteAttachRefusal(machineId: remote.machineId, machineName: remote.machineName) {
+            remoteAttachError = refusal
+            logger.notice("openRemoteLive: refused before attach for \(remote.machineId, privacy: .public)")
+            return
+        }
+        guard let address = CanopySettings.shared.mirrorPeers[remote.machineId],
+              let hostPort = MirrorAccess.parseHostPort(address) else { return }
+        let session = OpenSession(
+            origin: .mirror(machineId: remote.machineId, host: hostPort.host, port: hostPort.port),
+            resumeId: remote.sessionId,
+            title: remote.row.title,
+            project: remote.row.project,
+            status: .spawning,
+            resumeIdIsExistingTranscript: true
+        )
+        session.statusBar.mirrorMachine = remote.machineName
+        openSessions.append(session)
+        switch target {
+        case .focused: select(.session(session.id))
+        case .newPane:
+            if !openInNewPane(session.id) {
+                if panes.count >= Self.paneAbsoluteCap { showCapReachedHintOnFocusedPane() }
+                openInFocusedPane(session.id)
+            }
+        }
+        logger.notice("openRemoteLive: attaching \(remote.sessionId, privacy: .public) on \(remote.machineId, privacy: .public)")
+    }
+
+    /// Feeds a mirror session's activity from its home Mac's roster: a mirror
+    /// has no shim, so nothing else writes these.
+    func noteRemoteState(machineId: String, snapshot: RosterSnapshot) {
+        for session in openSessions where session.origin.mirrorTarget?.machineId == machineId {
+            guard let pane = snapshot.panes.first(where: { ($0.resumeId ?? $0.sessionId) == session.resumeId }) else { continue }
+            let activity = RosterSnapshot.activity(fromWireState: pane.state)
+            session.isThinking = activity == .working
+            session.isAsking = activity == .asking
+            session.isWaiting = activity == .background
+            session.statusBar.model = pane.model
+            session.statusBar.messageCount = pane.messageCount
+        }
     }
 
     /// Maps local jsonl session id → cloud session id it was teleported from.
@@ -1024,6 +1098,7 @@ final class SessionStore {
         session.shim?.stop()
         session.shim = nil
         session.webView = nil
+        session.mirrorBridge?.close()
         session.mirrorBridge = nil
         openSessions.remove(at: idx)
         removePanesForClosedSession(id)
@@ -1175,10 +1250,15 @@ final class SessionStore {
         // before the child dies and never run that path at all.
         session.shim?.stop()
         session.shim = nil
+        session.mirrorBridge?.close()
+        session.mirrorBridge = nil
         session.webView = nil
 
         session.statusBar.resetAll()
         session.statusBar.remoteHost = session.origin.remoteHost
+        if case .mirror(let machineId, _, _) = session.origin {
+            session.statusBar.mirrorMachine = remoteRosters[machineId]?.displayName ?? machineId
+        }
         session.connection.status = .connected
         session.isThinking = false
         session.isAsking = false
