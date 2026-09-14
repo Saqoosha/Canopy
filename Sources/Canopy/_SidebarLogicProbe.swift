@@ -6750,6 +6750,65 @@ enum SidebarLogicProbe {
                MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel == "[fd7a::1]:8765",
                "got \(MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel)")
 
+        // MARK: - RemoteDirectoryRules (remote browser: New Folder + hidden files)
+        //
+        // The name is spliced into `mkdir -p '<dir>/<name>'` over ssh, so the
+        // rule is "one path component or nothing". Each refusal below is a
+        // name that would either escape the current directory or make a
+        // folder the listing could not then show.
+
+        record("remote rules: plain name is accepted",
+               RemoteDirectoryRules.newFolderNameProblem("project") == nil,
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("project")))")
+        record("remote rules: surrounding whitespace is trimmed, not refused",
+               RemoteDirectoryRules.newFolderNameProblem("  project  ") == nil,
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("  project  ")))")
+        record("remote rules: dotfile name is accepted",
+               RemoteDirectoryRules.newFolderNameProblem(".config") == nil,
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem(".config")))")
+        record("remote rules: empty name is refused",
+               RemoteDirectoryRules.newFolderNameProblem("") != nil, "expected a problem")
+        record("remote rules: whitespace-only name is refused",
+               RemoteDirectoryRules.newFolderNameProblem("   ") != nil, "expected a problem")
+        record("remote rules: a slash is refused (one component only)",
+               RemoteDirectoryRules.newFolderNameProblem("a/b") != nil, "expected a problem")
+        record("remote rules: '.' is refused",
+               RemoteDirectoryRules.newFolderNameProblem(".") != nil, "expected a problem")
+        record("remote rules: '..' is refused",
+               RemoteDirectoryRules.newFolderNameProblem("..") != nil, "expected a problem")
+        record("remote rules: a NUL byte is refused",
+               RemoteDirectoryRules.newFolderNameProblem("a\u{0}b") != nil, "expected a problem")
+
+        // Joining: the browser's own path join is `hasSuffix("/")`-aware and
+        // the New Folder path must produce the same spelling, or the folder is
+        // made at one path and the listing navigates to another.
+        record("remote rules: join under a plain directory",
+               RemoteDirectoryRules.childPath(of: "/Users/x", name: "p") == "/Users/x/p",
+               "got \(RemoteDirectoryRules.childPath(of: "/Users/x", name: "p"))")
+        record("remote rules: join under root does not double the slash",
+               RemoteDirectoryRules.childPath(of: "/", name: "p") == "/p",
+               "got \(RemoteDirectoryRules.childPath(of: "/", name: "p"))")
+        record("remote rules: join trims the name",
+               RemoteDirectoryRules.childPath(of: "/Users/x", name: " p ") == "/Users/x/p",
+               "got \(RemoteDirectoryRules.childPath(of: "/Users/x", name: " p "))")
+
+        // Hidden-file filter: client side, on the name only. `ls -1pA` keeps
+        // listing everything so toggling the flag never re-runs ssh.
+        do {
+            let entries = [
+                RemoteDirectoryBrowser.DirEntry(name: ".git", isDirectory: true),
+                RemoteDirectoryBrowser.DirEntry(name: "src", isDirectory: true),
+                RemoteDirectoryBrowser.DirEntry(name: ".env", isDirectory: false),
+                RemoteDirectoryBrowser.DirEntry(name: "README.md", isDirectory: false),
+            ]
+            let shown = RemoteDirectoryRules.visibleEntries(entries, showHidden: false).map(\.name)
+            record("remote rules: hidden off drops every dot-prefixed entry",
+                   shown == ["src", "README.md"], "got \(shown)")
+            let all = RemoteDirectoryRules.visibleEntries(entries, showHidden: true).map(\.name)
+            record("remote rules: hidden on keeps the listing untouched, order included",
+                   all == [".git", "src", ".env", "README.md"], "got \(all)")
+        }
+
         // MARK: - MacroPadRemoteEndpoint.liveHostUpdate (SettingsView live typing)
         //
         // Fixes the "Remote bridge" row staying hidden until Return/blur:

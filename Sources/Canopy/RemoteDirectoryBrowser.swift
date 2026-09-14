@@ -15,6 +15,12 @@ struct RemoteDirectoryBrowser: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var pathInput = "~"
+    @State private var isCreatingFolder = false
+    @State private var newFolderName = ""
+    @FocusState private var nameFieldFocused: Bool
+    // Off by default, like Finder and `NSOpenPanel`. Remembered across
+    // sheets because a person who wants dotfiles wants them every time.
+    @AppStorage("canopy.remoteBrowserShowHidden") private var showHidden = false
 
     struct DirEntry: Identifiable, Hashable {
         let id = UUID()
@@ -86,7 +92,7 @@ struct RemoteDirectoryBrowser: View {
                             .buttonStyle(.plain)
                         }
 
-                        ForEach(entries) { entry in
+                        ForEach(RemoteDirectoryRules.visibleEntries(entries, showHidden: showHidden)) { entry in
                             Button {
                                 if entry.isDirectory {
                                     let newPath = currentPath.hasSuffix("/")
@@ -119,21 +125,50 @@ struct RemoteDirectoryBrowser: View {
 
             Divider()
 
-            // Bottom bar
+            // Bottom bar. Pressing New Folder… swaps the whole bar for the
+            // name field, so the input appears where the button was rather
+            // than somewhere else in the sheet — the first version put it
+            // under the path bar and the two read as unrelated.
             HStack {
-                Text(currentPath)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-                Spacer()
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("Open") {
-                    onSelect(currentPath)
-                    dismiss()
+                if isCreatingFolder {
+                    Image(systemName: "folder.badge.plus")
+                        .foregroundStyle(.blue)
+                    TextField("New folder name", text: $newFolderName)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($nameFieldFocused)
+                        .onSubmit { createFolder() }
+                    Button("Cancel") { cancelCreatingFolder() }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Create") { createFolder() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(RemoteDirectoryRules.newFolderNameProblem(newFolderName) != nil || isLoading)
+                } else {
+                    Text(currentPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                    Spacer()
+                    Toggle("Show hidden", isOn: $showHidden)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                    Button("New Folder…") {
+                        newFolderName = ""
+                        isCreatingFolder = true
+                        nameFieldFocused = true
+                    }
+                    // `currentPath` is the remote `pwd`, so it is absolute once
+                    // a listing has landed; "~" here means none has, and there
+                    // is no directory to make a child of yet.
+                    .disabled(isLoading || !currentPath.hasPrefix("/"))
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Open") {
+                        onSelect(currentPath)
+                        dismiss()
+                    }
+                    .keyboardShortcut(.defaultAction)
                 }
-                .keyboardShortcut(.defaultAction)
             }
             .padding()
         }
@@ -155,6 +190,35 @@ struct RemoteDirectoryBrowser: View {
                 errorMessage = error.localizedDescription
             }
             isLoading = false
+        }
+    }
+
+    private func cancelCreatingFolder() {
+        isCreatingFolder = false
+        newFolderName = ""
+    }
+
+    /// `mkdir` without `-p`, deliberately: an existing folder is a real
+    /// answer ("File exists"), and `-p` would report success and then
+    /// navigate into somebody else's directory.
+    private func createFolder() {
+        guard RemoteDirectoryRules.newFolderNameProblem(newFolderName) == nil,
+              currentPath.hasPrefix("/") else { return }
+        let target = RemoteDirectoryRules.childPath(of: currentPath, name: newFolderName)
+        isLoading = true
+        errorMessage = nil
+        Task {
+            do {
+                _ = try await runSSH(args: ["-T", "-o", "ConnectTimeout=10", sshHost,
+                                            "mkdir", shellEscape(target)])
+                logger.info("created remote folder \(target, privacy: .private) on \(sshHost, privacy: .public)")
+                cancelCreatingFolder()
+                navigateTo(target)
+            } catch {
+                logger.error("mkdir failed on \(sshHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                errorMessage = error.localizedDescription
+                isLoading = false
+            }
         }
     }
 
@@ -255,5 +319,33 @@ struct RemoteDirectoryBrowser: View {
                 continuation.resume(returning: output)
             }
         }
+    }
+}
+
+/// The pure half of the browser's New Folder and hidden-file features,
+/// separate from the `View` so `_SidebarLogicProbe` can reach it and so it
+/// is not `@MainActor` by inference.
+enum RemoteDirectoryRules {
+    /// Nil when `name` may be spliced into `mkdir` as one path component.
+    /// Trims first: what the user typed with a stray space is still a name.
+    static func newFolderNameProblem(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "Enter a folder name." }
+        if trimmed == "." || trimmed == ".." { return "That name is reserved." }
+        if trimmed.contains("/") { return "A folder name cannot contain a slash." }
+        if trimmed.contains("\u{0}") { return "A folder name cannot contain NUL." }
+        return nil
+    }
+
+    /// Same join the listing uses when it descends into an entry, so the
+    /// folder is created at the path the browser then navigates to.
+    static func childPath(of directory: String, name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return directory.hasSuffix("/") ? "\(directory)\(trimmed)" : "\(directory)/\(trimmed)"
+    }
+
+    static func visibleEntries(_ entries: [RemoteDirectoryBrowser.DirEntry],
+                               showHidden: Bool) -> [RemoteDirectoryBrowser.DirEntry] {
+        showHidden ? entries : entries.filter { !$0.name.hasPrefix(".") }
     }
 }
