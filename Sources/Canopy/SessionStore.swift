@@ -244,9 +244,15 @@ final class SessionStore {
 
     /// Feeds a mirror session's activity from its home Mac's roster: a mirror
     /// has no shim, so nothing else writes these.
+    /// A session missing from the snapshot is reported idle: it has ended on its home Mac.
     func noteRemoteState(machineId: String, snapshot: RosterSnapshot) {
         for session in openSessions where session.origin.mirrorTarget?.machineId == machineId {
-            guard let pane = snapshot.panes.first(where: { ($0.resumeId ?? $0.sessionId) == session.resumeId }) else { continue }
+            guard let pane = snapshot.panes.first(where: { ($0.resumeId ?? $0.sessionId) == session.resumeId }) else {
+                session.isThinking = false
+                session.isAsking = false
+                session.isWaiting = false
+                continue
+            }
             let activity = RosterSnapshot.activity(fromWireState: pane.state)
             session.isThinking = activity == .working
             session.isAsking = activity == .asking

@@ -21,6 +21,7 @@ struct Sidebar: View {
     @Bindable var store: SessionStore
     @State private var hoveredRowId: String?
     @State private var showFilterPopover = false
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 0) {
@@ -166,6 +167,12 @@ struct Sidebar: View {
                         Text(err)
                             .font(.caption)
                             .lineLimit(2)
+                        Button("Open Settings…") {
+                            openSettings()
+                            store.remoteAttachError = nil
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
                         Spacer(minLength: 4)
                         Button {
                             store.remoteAttachError = nil

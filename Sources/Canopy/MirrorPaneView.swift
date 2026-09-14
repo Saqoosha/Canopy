@@ -19,6 +19,7 @@ struct MirrorPaneView: NSViewRepresentable {
         var linkHandler: LinkClickHandler?
         var inputWidthHandler: InputWidthMessageHandler?
         var lastBoundSessionId: OpenSession.ID?
+        var reportedMissingPairing = false
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -34,7 +35,12 @@ struct MirrorPaneView: NSViewRepresentable {
 
     func updateNSView(_ host: SessionWebViewHost, context: Context) {
         guard session.id != context.coordinator.lastBoundSessionId else {
-            host.adoptExpectedWebViewIfNeeded()
+            if let webView = session.webView, let bridge = session.mirrorBridge, webView.superview !== host {
+                host.adoptExpectedWebViewIfNeeded()
+                registerHandlers(on: webView, bridge: bridge, coordinator: context.coordinator)
+            } else {
+                host.adoptExpectedWebViewIfNeeded()
+            }
             return
         }
         host.subviews.forEach { $0.removeFromSuperview() }
@@ -86,7 +92,13 @@ struct MirrorPaneView: NSViewRepresentable {
         guard let target = session.origin.mirrorTarget,
               let token = MirrorAccess.peerToken(machineId: target.machineId) else {
             logger.error("[mirror-pane] no pairing for \(session.origin.mirrorTarget?.machineId ?? "nil", privacy: .public)")
-            DispatchQueue.main.async { onFailure("No password stored for this Mac.") }
+            if !coordinator.reportedMissingPairing {
+                coordinator.reportedMissingPairing = true
+                let machine = session.statusBar.mirrorMachine ?? "this Mac"
+                DispatchQueue.main.async {
+                    onFailure("No password stored for \(machine). Paste its connection in Settings › Mobile.")
+                }
+            }
             return WKWebView()
         }
         let config = WKWebViewConfiguration()
@@ -115,6 +127,9 @@ struct MirrorPaneView: NSViewRepresentable {
                     onFailure("Could not reach \(machineName). Is its live mirror on?")
                 } else {
                     session.connection.status = .reconnectFailed
+                    session.isThinking = false
+                    session.isAsking = false
+                    session.isWaiting = false
                 }
             }
         }

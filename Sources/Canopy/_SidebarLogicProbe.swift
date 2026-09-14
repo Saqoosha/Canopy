@@ -1777,6 +1777,9 @@ enum SidebarLogicProbe {
                    existing.statusBar.model == "opus" && existing.statusBar.messageCount == 7)
             record("attach: a local session is untouched by a remote snapshot",
                    !other.isAsking)
+            store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0, panes: []))
+            record("attach: a session gone from its home Mac's roster reads idle",
+                   !existing.isAsking && !existing.isThinking && !existing.isWaiting)
         }
 
         // Roster reply routing: which open session an envelope from the phone
