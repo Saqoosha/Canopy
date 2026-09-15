@@ -26,6 +26,7 @@ struct SessionContainer: View {
                     .overlay {
                         ConnectionOverlayView(
                             connectionState: session.connection,
+                            title: "Connection to \(session.statusBar.mirrorMachine ?? "the other Mac") Lost",
                             onBackToLauncher: {
                                 session.connection.status = .connected
                             }

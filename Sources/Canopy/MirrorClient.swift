@@ -29,10 +29,21 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         self.token = token
         self.sessionId = sessionId
         self.webView = webView
+        // Keepalive, because a server that dies without its FIN reaching us
+        // leaves this socket ESTABLISHED forever and no drop is ever reported
+        // (measured: studio's server SIGKILLed over Tailscale, the client
+        // stayed ESTABLISHED with no error). 15 s idle, 15 s between probes,
+        // 3 probes: ~45 s, the budget MacroPad's remote transport and SSH
+        // remote use. A dead peer then fails the connection, which is a drop.
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 15
+        tcp.keepaliveInterval = 15
+        tcp.keepaliveCount = 3
         self.connection = NWConnection(
             host: NWEndpoint.Host(host),
             port: NWEndpoint.Port(rawValue: port)!,
-            using: .tcp
+            using: NWParameters(tls: nil, tcp: tcp)
         )
         super.init()
         connection.stateUpdateHandler = { [weak self] state in
@@ -92,6 +103,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         case .refused, .dropped:
             terminalDelivered = true
         }
+        logger.notice("[mirror-attach] outcome \(String(describing: outcome), privacy: .public); handler set: \(self.onOutcome != nil)")
         onOutcome?(outcome)
     }
 
@@ -134,6 +146,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 DispatchQueue.main.async { MainActor.assumeIsolated { lines.forEach(self.handleLineData) } }
             }
             if isComplete {
+                logger.notice("[mirror-attach] the server closed the connection")
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         guard !self.closed else { return }
