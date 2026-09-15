@@ -11,6 +11,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     enum Outcome: Equatable { case attached, refused(String), dropped }
 
     var onOutcome: ((Outcome) -> Void)?
+    /// The origin's status line, once after `attach_ok` and on every change; never from a Mac older than 2.39.
+    var onStatus: (([String: Any]) -> Void)?
     private(set) var extensionVersion: String?
     private var attachedDelivered = false
     private var terminalDelivered = false
@@ -112,7 +114,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         guard !closed else { return }
         logger.notice("[mirror-attach] connected")
         // Token is caller-supplied: a peer's stored password, or this Mac's own for the DEBUG window.
-        sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac"])
+        sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true])
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
         if let webView {
@@ -184,6 +186,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             let message = dict["message"] as? String ?? "attach_error"
             logger.error("[mirror-attach] \(message, privacy: .public)")
             deliverOutcome(.refused(message))
+            return
+        }
+        if dict["type"] as? String == "status" {
+            // For the pane's own status bar, not the page.
+            onStatus?(dict)
             return
         }
         webView?.deliver(dict)

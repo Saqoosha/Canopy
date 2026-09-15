@@ -1816,6 +1816,104 @@ enum SidebarLogicProbe {
                    MirrorConnection.appliesPhoneReplayRewrites(client: nil))
         }
 
+        // Mirror status frame: display-ready, so the phone carries none of
+        // the threshold arithmetic. The fixture is the #106 one (1M / 64K),
+        // where the frame's window must be the CLI's compact level and not
+        // the raw context window.
+        do {
+            let empty = MirrorStatusFrame.payload(from: StatusBarData())
+            record("status frame: fresh data is a status line with the meter hidden (window 0)",
+                   empty["type"] as? String == "status" && empty["contextWindow"] as? Int == 0
+                       && empty["contextLevel"] as? String == "unknown",
+                   "\(empty)")
+            record("status frame: no model or message count on the wire",
+                   empty["model"] == nil && empty["messageCount"] == nil)
+            record("status frame: no remote host, no key",
+                   empty["remoteHost"] == nil)
+
+            let data = StatusBarData()
+            data.model = "claude-opus-5[1m]"
+            data.contextMax = 1_000_000
+            data.maxOutputTokens = 64_000
+            data.contextUsed = 123_000
+            data.messageCount = 86
+            data.gitBranch = "mbp-session-view-sync"
+            data.vcsType = .jj
+            data.remoteHost = "studio"
+            let frame = MirrorStatusFrame.payload(from: data)
+            record("status frame: window is the compact level, not contextMax",
+                   frame["contextWindow"] as? Int == 967_000 && frame["contextUsed"] as? Int == 123_000,
+                   "\(frame["contextWindow"] ?? "nil")")
+            record("status frame: pct and level are the Mac's",
+                   frame["contextPct"] as? Int == 12 && frame["contextLevel"] as? String == "ok",
+                   "\(frame["contextPct"] ?? "nil") \(frame["contextLevel"] ?? "nil")")
+            record("status frame: branch, vcs and remote host ride along",
+                   frame["branch"] as? String == "mbp-session-view-sync" && frame["vcs"] as? String == "jj"
+                       && frame["remoteHost"] as? String == "studio")
+            record("status frame: raw window and output budget ride along for a Mac pane",
+                   frame["contextMax"] as? Int == 1_000_000 && frame["maxOutputTokens"] as? Int == 64_000)
+            data.contextUsed = 1_000_000
+            record("status frame: level names the blocked state",
+                   MirrorStatusFrame.payload(from: data)["contextLevel"] as? String == "blocked")
+
+            // A Mac pane applies the raw fields and its own StatusBarData reads as the origin's.
+            let pane = StatusBarData()
+            pane.model = "opus"
+            pane.messageCount = 7
+            pane.mirrorMachine = "studio"
+            MirrorStatusFrame.apply(frame, to: pane)
+            record("status apply: the pane's meter matches the origin's",
+                   pane.compactionWindow == 967_000 && pane.contextPct == 12 && pane.contextLevel == .ok,
+                   "window=\(pane.compactionWindow) pct=\(pane.contextPct)")
+            record("status apply: branch, vcs and remote host land",
+                   pane.gitBranch == "mbp-session-view-sync" && pane.vcsType == .jj && pane.remoteHost == "studio")
+            record("status apply: the roster's model, count and machine are left alone",
+                   pane.model == "opus" && pane.messageCount == 7 && pane.mirrorMachine == "studio")
+            var noRemote = frame
+            noRemote["remoteHost"] = nil
+            noRemote["branch"] = ""
+            MirrorStatusFrame.apply(noRemote, to: pane)
+            record("status apply: a later line clears a branch and remote host that went away",
+                   pane.gitBranch == "" && pane.remoteHost == nil)
+            MirrorStatusFrame.apply(["type": "status", "branch": "x"], to: pane)
+            record("status apply: a line without the raw fields changes nothing",
+                   pane.gitBranch == "" && pane.contextUsed == 123_000)
+            MirrorStatusFrame.apply(["type": "asset_response", "contextUsed": 1, "contextMax": 2, "maxOutputTokens": 3], to: pane)
+            record("status apply: another frame type changes nothing",
+                   pane.contextUsed == 123_000)
+
+            // The publisher: one line at start, one per change, none for a
+            // write that leaves the frame as it was, none after stop. The
+            // re-arm is a main-actor Task, so each step pumps the run loop.
+            func pump() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            let live = StatusBarData()
+            live.gitBranch = "main"
+            var sent: [[String: Any]] = []
+            let publisher = MirrorStatusPublisher(data: live) { sent.append($0) }
+            publisher.start()
+            record("status publisher: sends the current frame at start",
+                   sent.count == 1 && sent.first?["branch"] as? String == "main", "\(sent.count)")
+            live.contextUsed = 300
+            pump()
+            record("status publisher: a change sends one more line",
+                   sent.count == 2 && sent.last?["contextUsed"] as? Int == 300, "\(sent.count)")
+            live.contextUsed = 300
+            live.messageCount = 3
+            pump()
+            record("status publisher: writes that leave the frame unchanged send nothing",
+                   sent.count == 2, "\(sent.count)")
+            live.gitBranch = "next"
+            live.contextUsed = 500
+            pump()
+            record("status publisher: two writes in one turn are one line",
+                   sent.count == 3 && sent.last?["contextUsed"] as? Int == 500 && sent.last?["branch"] as? String == "next", "\(sent.count)")
+            publisher.stop()
+            live.contextUsed = 700
+            pump()
+            record("status publisher: nothing after stop",
+                   sent.count == 3, "\(sent.count)")
+        }
+
         // Roster reply routing: which open session an envelope from the phone
         // addresses, matched on `OpenSession.ID` — minted per process, so an
         // id from a previous launch must find nothing rather than fall back

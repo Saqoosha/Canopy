@@ -176,6 +176,12 @@ Host → Webview:  { type: "from-extension", message: <inner> }
 Startup: init → get_claude_state → get_asset_uris → list_sessions → launch_claude (auto)
 Chat:    io_message(user) → CLI stdin
          CLI stdout → stream_event/assistant/user/result → io_message → webview
+Mirror:  attach {"status": true} → attach_ok, then {"type":"status", branch, vcs, contextUsed,
+         contextMax, maxOutputTokens, contextWindow, contextPct, contextLevel, didCompact
+         [, remoteHost]} once and on every change (MirrorStatusFrame / MirrorStatusPublisher).
+         The phone draws the display-ready trio; a Mac pane applies the raw trio to its own
+         StatusBarData (MirrorStatusFrame.apply) and recomputes. Not sent to a client that did
+         not ask, so an older phone never posts it into its page. Both clients ask since 2.39.
 ```
 
 ## CLI Bridge Details
