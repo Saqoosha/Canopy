@@ -55,7 +55,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             case .failed(let error):
                 logger.error("[mirror-attach] connection failed: \(error.localizedDescription, privacy: .public)")
                 Task { @MainActor in
-                    self?.deliverOutcome(.dropped)
+                    guard let self, !self.closed else { return }
+                    self.deliverOutcome(.dropped)
                 }
             case .waiting(let error):
                 logger.error("[mirror-attach] waiting: \(error.localizedDescription, privacy: .public)")
@@ -108,8 +109,9 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func onReady() {
+        guard !closed else { return }
         logger.notice("[mirror-attach] connected")
-        // Token is caller-supplied (DEBUG window: this Mac's MirrorAccess).
+        // Token is caller-supplied: a peer's stored password, or this Mac's own for the DEBUG window.
         sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac"])
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.

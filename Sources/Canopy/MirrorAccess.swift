@@ -114,8 +114,7 @@ enum MirrorAccess {
 
     // MARK: Connection string
 
-    /// What the phone pastes: `canopy-mirror://<host>:<port>?token=<password>&machine=<id>`.
-    /// `machine` is the roster's machine id, so the phone offers Live only on this Mac's sessions.
+    /// What a phone or another Mac pastes: `canopy-mirror://<host>:<port>?token=<password>&machine=<id>`; `machine` keys the peer table.
     static func connectionString(host: String, port: UInt16, token: String, machine: String) -> String {
         var components = URLComponents()
         components.scheme = urlScheme

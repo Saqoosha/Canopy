@@ -196,8 +196,7 @@ final class SessionStore {
         }
     }
 
-    /// The most recent attach refusal that never reached a pane (no pairing),
-    /// for the sidebar to show. Cleared when the user dismisses it.
+    /// The most recent attach refusal, for the sidebar banner: no pairing, or a pane whose attach failed.
     var remoteAttachError: String?
 
     func openRemoteLive(_ remote: RemoteLiveSession, target: PaneTarget) {
@@ -2161,10 +2160,7 @@ final class SessionStore {
 
     // MARK: - Launch restore
 
-    /// The restorable equivalent of an `OpenSession.Origin`, or nil for
-    /// `.mirror` — a mirror pane's session lives on another Mac, so there is
-    /// nothing here to resume. Its pane is dropped by `sanitized` once its
-    /// resumeId is missing from `sessions`.
+    /// The origin a snapshot records, or nil for a mirror, which is never captured (its pane is skipped too).
     private static func restoreOrigin(for origin: OpenSession.Origin) -> SessionRestoreSnapshot.Session.Origin? {
         switch origin {
         case .local(let url):
@@ -2179,7 +2175,7 @@ final class SessionStore {
     }
 
     /// Snapshot the sidebar's open block and the pane strip for quit-time
-    /// persistence. **Every** open session is captured, in `openSessions`
+    /// persistence. **Every** open session except `.mirror` is captured, in `openSessions`
     /// order — that is the order the open block's SESSION rows are drawn in,
     /// top to bottom, and restoring it is the reason sessions are emitted
     /// from `openSessions` rather than walked out of `panes`. Two things that
@@ -2196,9 +2192,11 @@ final class SessionStore {
         var seenResumeIds = Set<String>()
         // Dedupe by resumeId: `SessionRestoreSnapshot.sanitized`'s doc asserts
         // "capture cannot emit a duplicate", and this clause is the whole
-        // reason that holds.
-        for open in openSessions where seenResumeIds.insert(open.resumeId).inserted {
+        // reason that holds. Origin is checked first so a mirror's resumeId
+        // never enters the set and cannot shadow a later local session.
+        for open in openSessions {
             guard let origin = Self.restoreOrigin(for: open.origin) else { continue }
+            guard seenResumeIds.insert(open.resumeId).inserted else { continue }
             sessions.append(SessionRestoreSnapshot.Session(
                 resumeId: open.resumeId,
                 title: open.title,
@@ -2222,7 +2220,8 @@ final class SessionStore {
             case .launcher:
                 panesOut.append(.init(content: .launcher, width: slot.preferredWidth))
             case .session(let id):
-                guard let open = openSessions.first(where: { $0.id == id }) else {
+                guard let open = openSessions.first(where: { $0.id == id }),
+                      open.origin.mirrorTarget == nil else {
                     if index < focusedPaneIndex { droppedBeforeFocus += 1 }
                     continue
                 }

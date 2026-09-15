@@ -85,8 +85,7 @@ struct RosterSnapshot: Codable, Equatable {
     /// `SessionActivity` carries a seventh case, `.empty`, for a pane slot
     /// with no session behind it (a launcher pane, on the pad only) — it is
     /// never returned by `SessionActivity.of(_:isUnread:)`, so a roster pane
-    /// (built only from panes that already hold a session, see
-    /// `paneIndexes(in:)`) never carries it. The case still needs a branch to
+    /// (built from open sessions by `rows(for:paneIndexes:)`) never carries it. The case still needs a branch to
     /// keep this switch exhaustive against the type it mirrors.
     static func wireState(for activity: SessionActivity) -> String {
         switch activity {

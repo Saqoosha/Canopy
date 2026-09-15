@@ -15,9 +15,7 @@ struct RemoteLiveSession: Hashable {
     /// The publishing Mac has not been heard from for `RemoteRosterWatcher.staleThreshold`.
     let stale: Bool
 
-    /// The id an attach names: the CLI's own, which `MirrorServer` matches on
-    /// `OpenSession.resumeId`. Falls back to the process id for a pane
-    /// published before its backfill.
+    /// The CLI's own id, which `MirrorServer` matches an attach on; the process id only keeps the row's identity stable before the backfill.
     var sessionId: String { row.resumeId ?? row.sessionId }
 
     /// Idle when stale: a dot breathing "working" on a Mac that stopped
@@ -27,7 +25,7 @@ struct RemoteLiveSession: Hashable {
     }
 }
 
-/// One row in the sidebar list. Four flavours, all unified by Identifiable +
+/// One row in the sidebar list. Five flavours, all unified by Identifiable +
 /// Hashable so `List(selection:)` can target any of them.
 ///
 /// Sort order across a mixed array of rows:
@@ -38,7 +36,7 @@ struct RemoteLiveSession: Hashable {
 ///
 /// Use `SidebarRow.sorted(_:)` to apply this consistently.
 ///
-/// `.launcher` is the odd one out and deliberately so: it is the only case
+/// `.launcher` is the odd one out and deliberately so: it is a case
 /// with no session behind it, and it exists purely to keep the Open block
 /// readable as a map of the pane strip. A launcher pane used to have no row
 /// at all, which broke that correspondence exactly when a launcher was open.

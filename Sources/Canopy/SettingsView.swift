@@ -238,7 +238,7 @@ private struct MacroPadSettingsTab: View {
 /// Publishing this Mac to the phone: the roster, the relay it reaches, and
 /// the name and secret that identify this machine to it. Its own tab because
 /// it is the Mac-side half of a whole feature, and because it will keep
-/// growing while General should not.
+/// growing while General should not. Also where this Mac pairs with other Macs.
 private struct MobileSettingsTab: View {
     @Bindable private var settings = CanopySettings.shared
 

@@ -515,9 +515,7 @@ final class RosterPublisher {
         // Liveness is "still in `store.openSessions`", not "got a row this
         // pass" — an open session with no pane (`.dormant`, or displaced by
         // `openInFocusedPane`'s content-swap branch) is real and paneless is
-        // routine, not closed. Those sessions now get a roster row too; the
-        // prune still keys off open membership so a stamp survives the gap
-        // between losing a pane and getting one back. Keying off the emitted
+        // routine, not closed. Keying off the emitted
         // rows used to prune exactly those sessions' stamps, so giving one
         // back its pane later read as a brand-new state and reset
         // `stateSince` to "0s" — losing the one fact this field exists to keep.

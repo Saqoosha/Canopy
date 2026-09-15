@@ -1,6 +1,6 @@
 # 他の Mac の live セッションをサイドバーに出し、クリックで attach する
 
-2026-09-15。設計。実装はまだ。前提の実測は [2026-09-14-multi-client-mirror-spike.md](2026-09-14-multi-client-mirror-spike.md) にある。
+2026-09-15。設計と実機検証の記録。前提の実測は [2026-09-14-multi-client-mirror-spike.md](2026-09-14-multi-client-mirror-spike.md) にある。
 
 ## 目標
 

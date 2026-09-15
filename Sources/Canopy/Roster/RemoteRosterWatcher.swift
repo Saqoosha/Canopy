@@ -5,8 +5,7 @@ import os.log
 /// Watches the relay for the OTHER Macs' rosters, the way the phone does.
 ///
 /// One `/watch` socket per machine, re-listed from `/machines` every
-/// `listInterval`. Gated on the same two things as `RosterPublisher`:
-/// `settings.rosterEnabled` and a relay secret in the Keychain. The tracked
+/// `listInterval`. Gated on `settings.rosterEnabled` and a non-empty endpoint; a missing relay secret is logged and retried on the next list tick. The tracked
 /// pass reads `rosterEnabled` and `rosterEndpoint` unconditionally so the
 /// toggle and an endpoint edit both wake it.
 @MainActor
@@ -21,6 +20,7 @@ final class RemoteRosterWatcher {
     private var listTimer: DispatchSourceTimer?
     private var clockTimer: DispatchSourceTimer?
     private var connectedEndpoint: String?
+    private var loggedMissingSecret = false
 
     // nonisolated because isStale, itself nonisolated, reads it.
     nonisolated static let staleThreshold: TimeInterval = 5 * 60
@@ -45,7 +45,7 @@ final class RemoteRosterWatcher {
         tearDown()
     }
 
-    /// Stops listing and watching and clears what the sidebar shows; used when the toggle goes off and on stop().
+    /// Stops listing and watching and clears what the sidebar shows; used when the toggle goes off, on an endpoint change, and on stop().
     private func tearDown() {
         disconnectAll()
         listTimer?.cancel()
@@ -53,6 +53,7 @@ final class RemoteRosterWatcher {
         clockTimer?.cancel()
         clockTimer = nil
         connectedEndpoint = nil
+        loggedMissingSecret = false
         store.remoteMachineIds = []
         store.remoteRosters = [:]
     }
@@ -138,7 +139,14 @@ final class RemoteRosterWatcher {
     }
 
     private func refreshMachineList() {
-        guard let base = relayURL(path: "/machines"), let secret = RosterPublisher.sharedSecret() else { return }
+        guard let base = relayURL(path: "/machines") else { return }
+        guard let secret = RosterPublisher.sharedSecret() else {
+            if !loggedMissingSecret {
+                loggedMissingSecret = true
+                logger.notice("remote roster: no relay secret in the Keychain; not watching")
+            }
+            return
+        }
         let endpoint = settings.rosterEndpoint
         var request = URLRequest(url: base)
         request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
@@ -179,8 +187,14 @@ final class RemoteRosterWatcher {
     }
 
     private func connect(machine: String) {
-        guard let url = relayURL(path: "/watch", machine: machine, scheme: "wss"),
-              let secret = RosterPublisher.sharedSecret() else { return }
+        guard let url = relayURL(path: "/watch", machine: machine, scheme: "wss") else { return }
+        guard let secret = RosterPublisher.sharedSecret() else {
+            if !loggedMissingSecret {
+                loggedMissingSecret = true
+                logger.notice("remote roster: no relay secret in the Keychain; not watching")
+            }
+            return
+        }
         lastAttempt[machine] = Date()
         var request = URLRequest(url: url)
         request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")

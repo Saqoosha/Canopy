@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import AppKit
 import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorPane")
@@ -14,7 +15,7 @@ struct MirrorPaneView: NSViewRepresentable {
     /// socket drops before `attach_ok`; the caller closes the pane.
     let onFailure: (String) -> Void
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var consoleHandler: ConsoleLogHandler?
         var linkHandler: LinkClickHandler?
         var inputWidthHandler: InputWidthMessageHandler?
@@ -26,6 +27,54 @@ struct MirrorPaneView: NSViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             session?.connection.status = .reconnectFailed
         }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            logger.error("Navigation failed: \(error.localizedDescription, privacy: .public)")
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            if let url = navigationAction.request.url,
+               (url.scheme == "http" || url.scheme == "https"),
+               navigationAction.navigationType == .linkActivated
+            {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+            // Safety net: block file:// link navigations that bypass JS interception
+            if let url = navigationAction.request.url,
+               url.scheme == "file",
+               navigationAction.navigationType == .linkActivated
+            {
+                logger.warning("Blocked file:// navigation: \(url.path, privacy: .public)")
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        // Handle target="_blank" links
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if let url = navigationAction.request.url,
+               url.scheme == "http" || url.scheme == "https"
+            {
+                NSWorkspace.shared.open(url)
+            }
+            return nil
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            logger.error("Provisional navigation failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -36,6 +85,11 @@ struct MirrorPaneView: NSViewRepresentable {
         host.autoresizingMask = [.width, .height]
         SessionWebViewHost.install(webView(coordinator: context.coordinator), in: host)
         context.coordinator.lastBoundSessionId = session.id
+        let target = session.webView
+        let sessionId = session.id
+        DispatchQueue.main.async {
+            WebViewContainer.focusIfThisPaneIsFocused(target, sessionId: sessionId)
+        }
         return host
     }
 
@@ -58,6 +112,7 @@ struct MirrorPaneView: NSViewRepresentable {
         for sub in host.subviews {
             if let wk = sub as? WKWebView {
                 wk.navigationDelegate = nil
+                wk.uiDelegate = nil
                 let ucc = wk.configuration.userContentController
                 for name in ["vscodeHost", "consoleLog", "canopyLink", InputWidthProbe.messageHandlerName] {
                     ucc.removeScriptMessageHandler(forName: name)
@@ -86,10 +141,11 @@ struct MirrorPaneView: NSViewRepresentable {
         coordinator.inputWidthHandler = inputWidthHandler
         coordinator.session = session
         webView.navigationDelegate = coordinator
+        webView.uiDelegate = coordinator
     }
 
     /// The cached webview when the session already has one; otherwise a fresh
-    /// webview and bridge, attached in the order the DEBUG window measured:
+    /// webview and bridge, attached in the order the bridge requires:
     /// socket ready → `attach` → page load.
     private func webView(coordinator: Coordinator) -> WKWebView {
         if let cached = session.webView, let bridge = session.mirrorBridge {
