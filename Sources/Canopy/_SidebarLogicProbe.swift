@@ -10274,6 +10274,12 @@ enum SidebarLogicProbe {
                    (macCutMsgs?.count ?? 0) < oversized.count && macCutSize <= macBudget)
             record("mirror replay: a mac client's replay within the budget is untouched",
                    messages(of: ShimProcess.trimmingReplayForMacClient(wrapped(replay), maxBytes: macBudget))?.count == replay.count)
+            // Even one turn over the budget: the client gets an empty replay, never a line it would cut the connection on.
+            let tooBigEnv = wrapped([user(String(repeating: "y", count: 5 << 20)), assistant()])
+            let tooBigCut = ShimProcess.trimmingReplayForMacClient(tooBigEnv, maxBytes: macBudget)
+            record("mirror replay: a single turn over the budget is sent empty, not oversized",
+                   messages(of: tooBigCut)?.isEmpty == true
+                       && ((try? JSONSerialization.data(withJSONObject: tooBigCut))?.count ?? Int.max) <= macBudget)
         }
 
         // Summary

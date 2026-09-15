@@ -4489,10 +4489,32 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if let sized = try? JSONSerialization.data(withJSONObject: trimmed),
            sized.count <= maxBytes {
             logger.notice("[mirror] replay for a Mac client trimmed to \(best, privacy: .public) turns to fit \(maxBytes, privacy: .public) bytes")
-        } else {
-            logger.error("[mirror] replay for a Mac client still exceeds \(maxBytes, privacy: .public) bytes after trimming to \(best, privacy: .public) turn(s); the client will cut the connection")
+            return trimmed
         }
-        return trimmed
+        // Nothing fits: send an empty replay rather than a line the client will cut the connection on.
+        logger.error("[mirror] replay for a Mac client still exceeds \(maxBytes, privacy: .public) bytes after trimming to \(best, privacy: .public) turn(s); sending it empty")
+        return emptyingReplayMessages(message)
+    }
+
+    /// The replay with `messages` emptied, the same envelope otherwise.
+    static func emptyingReplayMessages(_ message: [String: Any]) -> [String: Any] {
+        func empty(_ container: [String: Any]) -> [String: Any]? {
+            guard var response = container["response"] as? [String: Any], response["messages"] is [[String: Any]] else { return nil }
+            response["messages"] = [[String: Any]]()
+            var updated = container
+            updated["response"] = response
+            return updated
+        }
+        if let emptied = empty(message) { return emptied }
+        if message["type"] as? String == "from-extension",
+           let nested = message["message"] as? [String: Any],
+           let emptied = empty(nested)
+        {
+            var updated = message
+            updated["message"] = emptied
+            return updated
+        }
+        return message
     }
 
     /// Keep only the last `keepUserTurns` typed turns of a `get_session` replay, cutting at a turn boundary so no tool_use loses its tool_result.
