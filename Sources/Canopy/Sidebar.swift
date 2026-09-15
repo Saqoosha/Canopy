@@ -161,26 +161,29 @@ struct Sidebar: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 if let err = store.remoteAttachError {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                        Text(err)
-                            .font(.caption)
-                            .lineLimit(2)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text(err)
+                                .font(.caption)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 4)
+                            Button {
+                                store.remoteAttachError = nil
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                        }
                         Button("Open Settings…") {
                             openSettings()
                             store.remoteAttachError = nil
                         }
                         .buttonStyle(.link)
                         .font(.caption)
-                        Spacer(minLength: 4)
-                        Button {
-                            store.remoteAttachError = nil
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.caption)
-                        }
-                        .buttonStyle(.plain)
+                        .padding(.leading, 24)
                     }
                     .padding(8)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
