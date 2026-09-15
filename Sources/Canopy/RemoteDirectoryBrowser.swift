@@ -51,7 +51,7 @@ struct RemoteDirectoryBrowser: View {
                     .foregroundStyle(.secondary)
                 TextField("Path", text: $pathInput)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { navigateTo(pathInput) }
+                    .onSubmit { if !isLoading { navigateTo(pathInput) } }
                 Button {
                     navigateTo(pathInput)
                 } label: {
