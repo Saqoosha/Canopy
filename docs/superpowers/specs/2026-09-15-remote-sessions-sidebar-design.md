@@ -176,7 +176,6 @@ probe で固定する純粋な部分：
 - filter gear をリモート行に効かせる
 - 閉じた Recents を phone に運ぶ
 - relay secret を Settings で変えても watcher はすぐ繋ぎ直さない（最大 5 分遅れる）。`RosterPublisher.secretChanged()` 相当が無い
-- mirror pane の on-device 検証（attach・Retry・Paste Connection）は未実施
 - `parseConnectionString` の scheme 比較は大文字小文字を区別する。bracket 付き IPv6 の `host:port` は読めない（今は Tailscale の IPv4 だけなので到達しない）
 - `RosterPublisher` は変化があったときしか publish しないので、放置した Mac は 5 分で stale 表示になる（行は押せる）。2 分おきの heartbeat を足せば phone の stale 表示も正しくなる
 - attach 直後、相手 Mac の resumeId が backfill 前の仮 id だと、backfill 後に `noteRemoteState` と重複除外が一致しなくなる
@@ -187,3 +186,23 @@ probe で固定する純粋な部分：
 - `decodeFrame` は `DecodingError` を捨てるので、ログにどの key が壊れたかが出ない
 - attach 後に `.waiting` になっても overlay は出ない（`.failed` か受信エラーまで待つ）
 - single-pane で attach が拒否されると、同じ文言が launcher と sidebar の両方に出ることがある
+
+## 実機検証（2026-09-15、MBP → studio、Tailscale 越し）
+
+両機ともこのブランチの Debug。studio は launch-restore で使い捨てのセッションを開いた状態で起動し、MBP から attach した。
+
+- **一覧と更新**：studio の行が relay から出た。2.34.0 の Release（`live` を送らない）が相手のときも出た。studio 側のタイトルと dot の変化がそのまま届いた
+- **ペアリング**：studio の Copy Connection → MBP の Paste Connection from Mac で peer と token が保存された。未ペアリング時は拒否バナーが出る（狭い幅で文言が切れていたので折り返すよう直した）
+- **attach と往復**：MBP から送った prompt が studio の CLI で走り、studio の transcript に書かれ、MBP のペインに描かれた。Studio セクションからその行は消え、Open に移った
+- **ペインの切り替え**：launcher に替えて戻したあとも入力が studio に届いた（handler の付け直しが効いている）
+- **サーバが落ちたとき**：最初は検出できなかった。studio のプロセスを SIGKILL しても、クライアントの TCP は ESTABLISHED のままで、何も報告されなかった。TCP keepalive（15 s / 15 s / 3）を入れたあとは、同じ操作で 15 秒後に drop が届き、overlay が出た。見出しは「SSH Connection Lost」だったので、mirror 用の文言に直した
+- **Retry**：サーバが落ちたままなら、作り直して繋がらず「Could not reach Studio」でペインが閉じる
+- **サーバが listen していないとき**：接続は `.waiting` になり、drop としてペインが閉じた
+
+## 実機で見えた残り（findings）
+
+- studio の Debug を起動した直後に mirror の listener が立たないことがある（ログも出ない）。アプリを前面に出すと同期がやり直されて立つ。spike のメモにある未特定の揺れと同じもの。起動時の同期で黙って返る分岐（`.noTailscale` など）にログが無い
+- 前面にない窓の行を 1 回クリックしても、窓が前に出るだけで attach しない。2 回目で動く。既存の行（Recents）も同じ作りなので、この機能固有ではない
+- `MirrorServer` 側（phone を含む受け手）には keepalive が無い。クライアントが消えたとき、サーバ側の接続が半開きで残りうる
+- attach の拒否やサーバ落ちの文言が、launcher とサイドバーの両方に出る（既知の重複を実機で確認）
+- mirror を選ぶと `lastActiveResumeId` に相手 Mac の id が入る（既知、実機で確認）
