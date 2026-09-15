@@ -34,8 +34,8 @@ enum MirrorStatusFrame {
     }
 
     /// Writes the raw fields of a received line into a mirror pane's `StatusBarData`, which then
-    /// reads exactly as the origin Mac's bar does. `model` and `messageCount` are the roster's
-    /// and are left alone; a line without the raw fields (none is sent today) changes nothing.
+    /// reads as the origin's bar does on the same Canopy version. `model` and `messageCount` are
+    /// the roster's and are left alone; a line without the raw fields changes nothing.
     static func apply(_ frame: [String: Any], to data: StatusBarData) {
         guard frame["type"] as? String == "status",
               let used = frame["contextUsed"] as? Int,

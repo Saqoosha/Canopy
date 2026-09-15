@@ -1884,8 +1884,15 @@ enum SidebarLogicProbe {
 
             // The publisher: one line at start, one per change, none for a
             // write that leaves the frame as it was, none after stop. The
-            // re-arm is a main-actor Task, so each step pumps the run loop.
-            func pump() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            // re-arm is a main-actor Task, so the run loop is pumped until
+            // the expected line lands (a fixed 50 ms lost once on CI) — and
+            // for a fixed span when nothing is expected.
+            func pump(for span: TimeInterval = 0.2, until done: () -> Bool = { false }) {
+                let deadline = Date().addingTimeInterval(span)
+                repeat {
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+                } while !done() && Date() < deadline
+            }
             let live = StatusBarData()
             live.gitBranch = "main"
             var sent: [[String: Any]] = []
@@ -1894,7 +1901,7 @@ enum SidebarLogicProbe {
             record("status publisher: sends the current frame at start",
                    sent.count == 1 && sent.first?["branch"] as? String == "main", "\(sent.count)")
             live.contextUsed = 300
-            pump()
+            pump(for: 2, until: { sent.count >= 2 })
             record("status publisher: a change sends one more line",
                    sent.count == 2 && sent.last?["contextUsed"] as? Int == 300, "\(sent.count)")
             live.contextUsed = 300
@@ -1904,7 +1911,7 @@ enum SidebarLogicProbe {
                    sent.count == 2, "\(sent.count)")
             live.gitBranch = "next"
             live.contextUsed = 500
-            pump()
+            pump(for: 2, until: { sent.count >= 3 })
             record("status publisher: two writes in one turn are one line",
                    sent.count == 3 && sent.last?["contextUsed"] as? Int == 500 && sent.last?["branch"] as? String == "next", "\(sent.count)")
             publisher.stop()
