@@ -141,6 +141,8 @@ final class MirrorConnection: MirrorSink {
     private(set) var isMacClient = false
     /// The session this connection attached to; images are only served under it.
     fileprivate private(set) var attachedSessionId = ""
+    /// Feeds a client that asked for the status bar at attach; nil for one that did not.
+    private var statusPublisher: MirrorStatusPublisher?
     private var cleanedUp = false
 
     /// Whether a client identity gets the phone's replay trim / image rewrite.
@@ -278,6 +280,12 @@ final class MirrorConnection: MirrorSink {
             // Starts the extension reading the transcript while the phone is still loading the page.
             shim.receiveFromMirror(Self.prefetchRequest(sessionId: sessionId, requestId: prefetchId), from: self)
         }
+        // Opt-in: a client that does not know the frame would post it into its page as a webview message.
+        if dict["status"] as? Bool == true, let data = shim.statusBarData {
+            let publisher = MirrorStatusPublisher(data: data) { [weak self] payload in self?.sendJSONObject(payload) }
+            statusPublisher = publisher
+            publisher.start()
+        }
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")
     }
 
@@ -377,6 +385,8 @@ final class MirrorConnection: MirrorSink {
     private func cleanup() {
         guard !cleanedUp else { return }
         cleanedUp = true
+        statusPublisher?.stop()
+        statusPublisher = nil
         shim?.detachMirror(self)
         shim = nil
         let server = self.server

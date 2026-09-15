@@ -175,6 +175,10 @@ struct MirrorPaneView: NSViewRepresentable {
         let bridge = RemoteMirrorBridge(host: target.host, port: target.port, sessionId: session.resumeId, token: token, webView: webView)
         registerHandlers(on: webView, bridge: bridge, coordinator: coordinator)
         let machineName = session.statusBar.mirrorMachine ?? target.machineId
+        bridge.onStatus = { [weak session] frame in
+            guard let session else { return }
+            MirrorStatusFrame.apply(frame, to: session.statusBar)
+        }
         bridge.onOutcome = { [weak session, weak bridge] outcome in
             guard let session else { return }
             switch outcome {
