@@ -164,6 +164,8 @@ struct RemoteDirectoryBrowser: View {
                         dismiss()
                     }
                     .keyboardShortcut(.defaultAction)
+                    // `currentPath` is still the previous folder until a listing lands.
+                    .disabled(isLoading)
                 }
             }
             .padding()
