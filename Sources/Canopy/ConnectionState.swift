@@ -10,7 +10,7 @@ enum ConnectionStatus: Equatable {
 @Observable
 final class ConnectionState {
     var status: ConnectionStatus = .connected
-    /// Called when user taps "Retry" button. Set by Coordinator.
+    /// Called when user taps "Retry". Set by the pane that owns the connection.
     var onRetry: (() -> Void)?
 
     var isOverlayVisible: Bool {

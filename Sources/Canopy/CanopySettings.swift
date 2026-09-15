@@ -148,6 +148,12 @@ final class CanopySettings {
         didSet { save() }
     }
 
+    /// Other Macs this one can attach to: machine id → `host:port`. The
+    /// password for each lives in the Keychain (`MirrorAccess.peerToken`).
+    var mirrorPeers: [String: String] = [:] {
+        didSet { save() }
+    }
+
     let filePath: URL
 
     /// Suppresses `save()` while `load()` is assigning. Every property's
@@ -252,6 +258,7 @@ final class CanopySettings {
         if let port = dict["canopy.mirrorPort"] as? Int, (1...65535).contains(port) {
             mirrorPort = port
         }
+        if let peers = dict["canopy.mirrorPeers"] as? [String: String] { mirrorPeers = peers }
         // Re-clamp on load: if a stale settings.json paired bypass with a
         // disabled opt-in (manual edit, downgrade, etc.) the launcher
         // Picker would silently drop bypass while the recents default
@@ -290,6 +297,7 @@ final class CanopySettings {
         dict["canopy.rosterEndpoint"] = rosterEndpoint
         dict["canopy.mirrorEnabled"] = mirrorEnabled
         dict["canopy.mirrorPort"] = mirrorPort
+        dict["canopy.mirrorPeers"] = mirrorPeers
         writeDict(dict)
     }
 

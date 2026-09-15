@@ -36,6 +36,7 @@ struct CanopyApp: App {
             // window, `startRosterPublisher` is idempotent.
             .task { appDelegate.startRosterPublisher(store: sidebarStore) }
             .task { appDelegate.startMirrorServer(store: sidebarStore) }
+            .task { appDelegate.startRemoteRosterWatcher(store: sidebarStore) }
             // Reads ~/.claude/sessions for the names other Claude sessions use
             // to message these ones. Idempotent, so a re-run of this .task is
             // harmless; it watches and polls for the process lifetime.
@@ -420,8 +421,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// store is unambiguously alive and in hand, and this is idempotent so a
     /// second window's `.task` is harmless.
     private var rosterPublisher: RosterPublisher?
+    private var remoteRosterWatcher: RemoteRosterWatcher?
     private var mirrorServer: MirrorServer?
     private var mirrorActivationObserver: NSObjectProtocol?
+
+    /// Same probe guard as `startRosterPublisher`, for the same reason: this
+    /// `.task` runs before `applicationDidFinishLaunching` exits the probe,
+    /// and it reads the relay secret and opens sockets.
+    @MainActor
+    func startRemoteRosterWatcher(store: SessionStore) {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else { return }
+        #endif
+        guard remoteRosterWatcher == nil else { return }
+        let watcher = RemoteRosterWatcher(store: store, settings: CanopySettings.shared)
+        remoteRosterWatcher = watcher
+        watcher.start()
+    }
 
     /// Keeps the live-mirror listener in step with Settings and with this Mac's Tailscale address.
     @MainActor
@@ -1082,6 +1098,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WebViewContainer.purgeOwnEntryFiles()
         macroPad?.shutdown()
         rosterPublisher?.stop()
+        remoteRosterWatcher?.stop()
         if let monitor = cmdWMonitor {
             NSEvent.removeMonitor(monitor)
             cmdWMonitor = nil

@@ -127,6 +127,140 @@ final class SessionStore {
     /// Cloud (claude.ai/code) sessions, refreshed via `refreshCloud()`.
     private(set) var cloud: [RemoteSession] = []
 
+    /// Other Macs' latest roster snapshots, keyed by machine id. Written only
+    /// by `RemoteRosterWatcher`; read by the sidebar and by the mirror-state
+    /// feed. A machine that has stopped publishing keeps its last snapshot,
+    /// and the sidebar shows it dimmed once it is stale.
+    var remoteRosters: [String: RosterSnapshot] = [:]
+    /// The machine ids the relay listed, minus this Mac, in the order it gave
+    /// them. A machine here with no `remoteRosters` entry yet renders as
+    /// loading.
+    var remoteMachineIds: [String] = []
+    /// The time remote rows are judged stale against. Advanced by
+    /// `RemoteRosterWatcher` on a timer, so a Mac that stops publishing is
+    /// dimmed without waiting for something else to re-render the sidebar.
+    var remoteClock = Date()
+
+    struct RemoteMachineSection: Identifiable {
+        let machineId: String
+        let title: String
+        let rows: [SidebarRow]
+        let loading: Bool
+        var id: String { machineId }
+    }
+
+    /// Other Macs' rows, one section per listed machine, in the relay's order.
+    /// Pure so the probe pins the drop rule: a session this Mac has already
+    /// attached to has a pane and an Open row, so its remote row would be a
+    /// duplicate — the teleported-cloud-row rule, one hop over.
+    static func remoteLiveSections(rosters: [String: RosterSnapshot], machineIds: [String],
+                                   attached: Set<String>, now: Date) -> [RemoteMachineSection] {
+        machineIds.map { id in
+            guard let snapshot = rosters[id] else {
+                return RemoteMachineSection(machineId: id, title: id, rows: [], loading: true)
+            }
+            let stale = RemoteRosterWatcher.isStale(snapshot, now: now)
+            let rows = snapshot.panes.compactMap { pane -> SidebarRow? in
+                let live = RemoteLiveSession(machineId: id, machineName: snapshot.displayName, row: pane, stale: stale)
+                return attached.contains("\(id):\(live.sessionId)") ? nil : .remoteLive(live)
+            }
+            return RemoteMachineSection(machineId: id, title: snapshot.displayName, rows: rows, loading: false)
+        }
+    }
+
+    /// Other Macs' rows for the sidebar, judged stale against `remoteClock`.
+    var remoteLiveSections: [RemoteMachineSection] {
+        let attached = Set(openSessions.compactMap { s -> String? in
+            guard let t = s.origin.mirrorTarget else { return nil }
+            return "\(t.machineId):\(s.resumeId)"
+        })
+        return Self.remoteLiveSections(rosters: remoteRosters, machineIds: remoteMachineIds, attached: attached, now: remoteClock)
+    }
+
+    /// Why an attach cannot even start, or nil when this Mac holds the peer's
+    /// address and password.
+    func remoteAttachRefusal(machineId: String, machineName: String) -> String? {
+        guard let address = CanopySettings.shared.mirrorPeers[machineId],
+              MirrorAccess.parseHostPort(address) != nil,
+              MirrorAccess.peerToken(machineId: machineId) != nil else {
+            return "Paste \(machineName)'s connection in Settings › Mobile first."
+        }
+        return nil
+    }
+
+    static func mirrorFailureMessage(reason: String, machineName: String) -> String {
+        switch reason {
+        case "unauthorized": "\(machineName) rejected the password. Paste its connection again in Settings › Mobile."
+        case "no such session": "That session is no longer running on \(machineName)."
+        default: "\(machineName) refused the attach: \(reason)"
+        }
+    }
+
+    /// The most recent attach refusal, for the sidebar banner: no pairing, or a pane whose attach failed.
+    var remoteAttachError: String?
+
+    func openRemoteLive(_ remote: RemoteLiveSession, target: PaneTarget) {
+        if let existing = openSessions.first(where: {
+            $0.origin.mirrorTarget?.machineId == remote.machineId && $0.resumeId == remote.sessionId
+        }) {
+            switch target {
+            case .focused: select(.session(existing.id))
+            case .newPane:
+                if !openInNewPane(existing.id) {
+                    if panes.count >= Self.paneAbsoluteCap { showCapReachedHintOnFocusedPane() }
+                    openInFocusedPane(existing.id)
+                }
+            }
+            return
+        }
+        if let refusal = remoteAttachRefusal(machineId: remote.machineId, machineName: remote.machineName) {
+            remoteAttachError = refusal
+            logger.notice("openRemoteLive: refused before attach for \(remote.machineId, privacy: .public)")
+            return
+        }
+        guard let address = CanopySettings.shared.mirrorPeers[remote.machineId],
+              let hostPort = MirrorAccess.parseHostPort(address) else { return }
+        let session = OpenSession(
+            origin: .mirror(machineId: remote.machineId, host: hostPort.host, port: hostPort.port),
+            resumeId: remote.sessionId,
+            title: remote.row.title,
+            project: remote.row.project,
+            status: .spawning,
+            resumeIdIsExistingTranscript: true
+        )
+        session.statusBar.mirrorMachine = remote.machineName
+        openSessions.append(session)
+        switch target {
+        case .focused: select(.session(session.id))
+        case .newPane:
+            if !openInNewPane(session.id) {
+                if panes.count >= Self.paneAbsoluteCap { showCapReachedHintOnFocusedPane() }
+                openInFocusedPane(session.id)
+            }
+        }
+        logger.notice("openRemoteLive: attaching \(remote.sessionId, privacy: .public) on \(remote.machineId, privacy: .public)")
+    }
+
+    /// Feeds a mirror session's activity from its home Mac's roster: a mirror
+    /// has no shim, so nothing else writes these.
+    /// A session missing from the snapshot is reported idle: it has ended on its home Mac.
+    func noteRemoteState(machineId: String, snapshot: RosterSnapshot) {
+        for session in openSessions where session.origin.mirrorTarget?.machineId == machineId {
+            guard let pane = snapshot.panes.first(where: { ($0.resumeId ?? $0.sessionId) == session.resumeId }) else {
+                session.isThinking = false
+                session.isAsking = false
+                session.isWaiting = false
+                continue
+            }
+            let activity = RosterSnapshot.activity(fromWireState: pane.state)
+            session.isThinking = activity == .working
+            session.isAsking = activity == .asking
+            session.isWaiting = activity == .background
+            session.statusBar.model = pane.model
+            session.statusBar.messageCount = pane.messageCount
+        }
+    }
+
     /// Maps local jsonl session id → cloud session id it was teleported from.
     /// Used by `visibleRows` to drop already-teleported cloud rows.
     private(set) var teleportedFromMap: [String: String] = [:]
@@ -194,6 +328,7 @@ final class SessionStore {
     func beginRename(row: SidebarRow) {
         switch row {
         case .open(let session):
+            guard session.origin.mirrorTarget == nil else { return }
             renameTarget = RenameTarget(
                 sessionId: session.resumeId,
                 openSessionId: session.id,
@@ -207,7 +342,7 @@ final class SessionStore {
                 openSessionId: nil,
                 currentTitle: entry.title
             )
-        case .closedCloud, .launcher:
+        case .closedCloud, .launcher, .remoteLive:
             break
         }
     }
@@ -226,6 +361,7 @@ final class SessionStore {
               case .session(let openId) = panes[index].content,
               let session = openSessions.first(where: { $0.id == openId })
         else { return false }
+        guard session.origin.mirrorTarget == nil else { return false }
         renameTarget = RenameTarget(
             sessionId: session.resumeId,
             openSessionId: session.id,
@@ -969,6 +1105,8 @@ final class SessionStore {
         session.shim?.stop()
         session.shim = nil
         session.webView = nil
+        session.mirrorBridge?.close()
+        session.mirrorBridge = nil
         openSessions.remove(at: idx)
         removePanesForClosedSession(id)
 
@@ -1119,10 +1257,15 @@ final class SessionStore {
         // before the child dies and never run that path at all.
         session.shim?.stop()
         session.shim = nil
+        session.mirrorBridge?.close()
+        session.mirrorBridge = nil
         session.webView = nil
 
         session.statusBar.resetAll()
         session.statusBar.remoteHost = session.origin.remoteHost
+        if case .mirror(let machineId, _, _) = session.origin {
+            session.statusBar.mirrorMachine = remoteRosters[machineId]?.displayName ?? machineId
+        }
         session.connection.status = .connected
         session.isThinking = false
         session.isAsking = false
@@ -1565,7 +1708,7 @@ final class SessionStore {
                 if panedSessions.contains(session.id) { previousSession = session.id }
             case .launcher(let slot):
                 out.append(LauncherAnchor(slot: slot, after: previousSession))
-            case .closedLocal, .closedCloud:
+            case .closedLocal, .closedCloud, .remoteLive:
                 break
             }
         }
@@ -2017,8 +2160,22 @@ final class SessionStore {
 
     // MARK: - Launch restore
 
+    /// The origin a snapshot records, or nil for a mirror, which is never captured (its pane is skipped too).
+    private static func restoreOrigin(for origin: OpenSession.Origin) -> SessionRestoreSnapshot.Session.Origin? {
+        switch origin {
+        case .local(let url):
+            return .local(path: url.path)
+        case .remote(let host, let path):
+            return .remote(host: host, path: path.path)
+        case .teleportedFrom(let cloudId, let path):
+            return .teleported(cloudSessionId: cloudId, path: path.path)
+        case .mirror:
+            return nil
+        }
+    }
+
     /// Snapshot the sidebar's open block and the pane strip for quit-time
-    /// persistence. **Every** open session is captured, in `openSessions`
+    /// persistence. **Every** open session except `.mirror` is captured, in `openSessions`
     /// order — that is the order the open block's SESSION rows are drawn in,
     /// top to bottom, and restoring it is the reason sessions are emitted
     /// from `openSessions` rather than walked out of `panes`. Two things that
@@ -2035,17 +2192,11 @@ final class SessionStore {
         var seenResumeIds = Set<String>()
         // Dedupe by resumeId: `SessionRestoreSnapshot.sanitized`'s doc asserts
         // "capture cannot emit a duplicate", and this clause is the whole
-        // reason that holds.
-        for open in openSessions where seenResumeIds.insert(open.resumeId).inserted {
-            let origin: SessionRestoreSnapshot.Session.Origin
-            switch open.origin {
-            case .local(let url):
-                origin = .local(path: url.path)
-            case .remote(let host, let path):
-                origin = .remote(host: host, path: path.path)
-            case .teleportedFrom(let cloudId, let path):
-                origin = .teleported(cloudSessionId: cloudId, path: path.path)
-            }
+        // reason that holds. Origin is checked first so a mirror's resumeId
+        // never enters the set and cannot shadow a later local session.
+        for open in openSessions {
+            guard let origin = Self.restoreOrigin(for: open.origin) else { continue }
+            guard seenResumeIds.insert(open.resumeId).inserted else { continue }
             sessions.append(SessionRestoreSnapshot.Session(
                 resumeId: open.resumeId,
                 title: open.title,
@@ -2069,7 +2220,8 @@ final class SessionStore {
             case .launcher:
                 panesOut.append(.init(content: .launcher, width: slot.preferredWidth))
             case .session(let id):
-                guard let open = openSessions.first(where: { $0.id == id }) else {
+                guard let open = openSessions.first(where: { $0.id == id }),
+                      open.origin.mirrorTarget == nil else {
                     if index < focusedPaneIndex { droppedBeforeFocus += 1 }
                     continue
                 }

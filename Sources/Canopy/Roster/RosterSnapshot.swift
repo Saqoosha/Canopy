@@ -8,7 +8,7 @@ import Foundation
 /// oversight: see the spec's roster section. Adding a field that quotes the
 /// transcript reopens a decision that was made deliberately.
 struct RosterSnapshot: Codable, Equatable {
-    struct Pane: Codable, Equatable {
+    struct Pane: Codable, Equatable, Hashable {
         let sessionId: String
         /// The CLI's own session id, which survives a Canopy restart while
         /// `sessionId` above does not. Optional because it is backfilled a
@@ -23,6 +23,49 @@ struct RosterSnapshot: Codable, Equatable {
         let contextPct: Int
         let model: String
         let messageCount: Int
+        /// Whether an attach to this session can succeed right now: true
+        /// exactly when a `ShimProcess` is running for it. Pane membership is
+        /// not the test — a session displaced from its pane keeps its shim,
+        /// and a `.dormant` one has a pane-less row and no shim.
+        /// Absent from a Canopy older than the flag; decoded as true, which is
+        /// what the attach server's test would have said for a session with a pane.
+        let live: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case sessionId, resumeId, paneIndex, title, project, state, stateSince
+            case contextPct, model, messageCount, live
+        }
+
+        init(sessionId: String, resumeId: String?, paneIndex: Int, title: String,
+             project: String, state: String, stateSince: Int, contextPct: Int,
+             model: String, messageCount: Int, live: Bool) {
+            self.sessionId = sessionId
+            self.resumeId = resumeId
+            self.paneIndex = paneIndex
+            self.title = title
+            self.project = project
+            self.state = state
+            self.stateSince = stateSince
+            self.contextPct = contextPct
+            self.model = model
+            self.messageCount = messageCount
+            self.live = live
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            sessionId = try c.decode(String.self, forKey: .sessionId)
+            resumeId = try c.decodeIfPresent(String.self, forKey: .resumeId)
+            paneIndex = try c.decode(Int.self, forKey: .paneIndex)
+            title = try c.decode(String.self, forKey: .title)
+            project = try c.decode(String.self, forKey: .project)
+            state = try c.decode(String.self, forKey: .state)
+            stateSince = try c.decode(Int.self, forKey: .stateSince)
+            contextPct = try c.decode(Int.self, forKey: .contextPct)
+            model = try c.decode(String.self, forKey: .model)
+            messageCount = try c.decode(Int.self, forKey: .messageCount)
+            live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? true
+        }
     }
 
     let machineId: String
@@ -42,8 +85,7 @@ struct RosterSnapshot: Codable, Equatable {
     /// `SessionActivity` carries a seventh case, `.empty`, for a pane slot
     /// with no session behind it (a launcher pane, on the pad only) — it is
     /// never returned by `SessionActivity.of(_:isUnread:)`, so a roster pane
-    /// (built only from panes that already hold a session, see
-    /// `paneIndexes(in:)`) never carries it. The case still needs a branch to
+    /// (built from open sessions by `rows(for:paneIndexes:)`) never carries it. The case still needs a branch to
     /// keep this switch exhaustive against the type it mirrors.
     static func wireState(for activity: SessionActivity) -> String {
         switch activity {
@@ -55,6 +97,33 @@ struct RosterSnapshot: Codable, Equatable {
         case .unread: return "unread"
         case .error: return "error"
         }
+    }
+
+    /// Inverse of `wireState(for:)`. Nil for a name this build does not know.
+    static func activity(fromWireState state: String) -> SessionActivity? {
+        SessionActivity.allCases.first { wireState(for: $0) == state }
+    }
+
+    static func isLive(_ session: OpenSession) -> Bool { session.shim != nil }
+
+    /// The sessions to publish, each with its row index. Paned sessions keep
+    /// their strip index; every other open session follows in `openSessions`
+    /// order so the phone's list reads like the sidebar's Open block. Unpaned
+    /// rows start after the highest strip index, because a launcher pane holds
+    /// a strip position without a row. A `.mirror` origin is skipped: it is
+    /// another Mac's session, and publishing it here would show it twice on
+    /// the phone and route replies to a Mac that cannot inject them.
+    static func rows(for openSessions: [OpenSession], paneIndexes: [OpenSession.ID: Int])
+        -> [(session: OpenSession, paneIndex: Int)] {
+        var paned: [(session: OpenSession, paneIndex: Int)] = []
+        var unpaned: [OpenSession] = []
+        for session in openSessions {
+            if case .mirror = session.origin { continue }
+            if let index = paneIndexes[session.id] { paned.append((session, index)) } else { unpaned.append(session) }
+        }
+        paned.sort { $0.paneIndex < $1.paneIndex }
+        let next = paneIndexes.values.max().map { $0 + 1 } ?? 0
+        return paned + unpaned.enumerated().map { ($0.element, next + $0.offset) }
     }
 
     /// Session id → pane index, for the panes that hold a session.

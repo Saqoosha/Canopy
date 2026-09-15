@@ -452,7 +452,7 @@ final class RosterPublisher {
     ///
     /// `KeychainAuth` is the precedent for reading a secret in this app; this
     /// item is written by the Settings field in Task 3 and read here.
-    private static func sharedSecret() -> String? {
+    static func sharedSecret() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "sh.saqoo.Canopy.roster",
@@ -515,13 +515,12 @@ final class RosterPublisher {
         // Liveness is "still in `store.openSessions`", not "got a row this
         // pass" — an open session with no pane (`.dormant`, or displaced by
         // `openInFocusedPane`'s content-swap branch) is real and paneless is
-        // routine, not closed. Keying off the emitted rows pruned exactly
-        // those sessions' stamps, so giving one back its pane later read as
-        // a brand-new state and reset `stateSince` to "0s" — losing the one
-        // fact this field exists to keep.
+        // routine, not closed. Keying off the emitted
+        // rows used to prune exactly those sessions' stamps, so giving one
+        // back its pane later read as a brand-new state and reset
+        // `stateSince` to "0s" — losing the one fact this field exists to keep.
         let liveIds = Set(store.openSessions.map(\.id))
-        for session in store.openSessions {
-            guard let paneIndex = indexes[session.id] else { continue }
+        for (session, paneIndex) in RosterSnapshot.rows(for: store.openSessions, paneIndexes: indexes) {
             let activity = SessionActivity.of(
                 session, isUnread: store.unreadSessionIds.contains(session.id))
             let wire = RosterSnapshot.wireState(for: activity)
@@ -547,7 +546,8 @@ final class RosterPublisher {
                 stateSince: stateSince[session.id] ?? now,
                 contextPct: session.statusBar.contextPct,
                 model: session.statusBar.model,
-                messageCount: session.statusBar.messageCount))
+                messageCount: session.statusBar.messageCount,
+                live: RosterSnapshot.isLive(session)))
         }
         // `OpenSession.ID` is a fresh UUID minted per process and never
         // reused, so without this both dictionaries grow for the life of a

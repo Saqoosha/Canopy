@@ -127,6 +127,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         logger.notice("[mirror] detached; \(self.mirrors.count) mirror(s) on this shim")
     }
 
+    /// A stopped shim ends its mirrors' connections, so a Mac attached to it sees a drop instead of typing into nothing.
+    private func disconnectMirrors() {
+        for client in mirrors.values {
+            (client.sink as? MirrorConnection)?.cancelFromServer()
+        }
+        mirrors.removeAll()
+        requestOwners.removeAll()
+    }
+
     /// The synthetic `system/status` Canopy injects at `launch_claude` so the
     /// webview's permission-mode UI matches the app setting. Built per
     /// channel because a mirror lives on its own channel id.
@@ -3163,6 +3172,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     func stop() {
         isIntentionalStop = true
+        disconnectMirrors()
         // **Before the early return, and before stdin closes.** The queue's
         // whole loss story is "the count is in the log", and on this path it
         // was not: `stop()` does not reach `resetActivityState` synchronously
@@ -4218,16 +4228,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
-                    let session = boundSession?.resumeId ?? ""
-                    var trimmed = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
-                    // Only a client that serves `canopy-asset` URLs: the DEBUG mirror windows are
-                    // plain WKWebViews and would draw a broken thumbnail.
-                    if target is MirrorConnection {
-                        trimmed = Self.deferringReadImagesForMirror(trimmed) { id, source in
-                            MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
+                    // A Mac client renders the whole transcript and has no canopy-asset handler: no phone rewrites.
+                    if (target as? MirrorConnection)?.isMacClient == true {
+                        post(Self.retargeted(Self.trimmingReplayForMacClient(payload), from: channelId, to: mirrors[key]?.channelId), to: target)
+                    } else {
+                        let session = boundSession?.resumeId ?? ""
+                        var trimmed = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
+                        // Only a client that serves `canopy-asset` URLs: the in-process WKWebView sink is a plain webview
+                        // and would draw a broken thumbnail.
+                        if target is MirrorConnection {
+                            trimmed = Self.deferringReadImagesForMirror(trimmed) { id, source in
+                                MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
+                            }
                         }
+                        post(Self.retargeted(trimmed, from: channelId, to: mirrors[key]?.channelId), to: target)
                     }
-                    post(Self.retargeted(trimmed, from: channelId, to: mirrors[key]?.channelId), to: target)
                 } else {
                     logger.warning("[mirror] response \(requestId, privacy: .public) for a detached mirror dropped")
                 }
@@ -4351,6 +4366,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// How much of a replayed conversation a phone receives: the last N turns the user typed.
     /// Measured 2026-09-14: a 38 MB transcript replayed 4.7 MB and took ~3.7 s to parse and draw on an iPhone.
     static let mirrorReplayUserTurns = 10
+    /// The largest replay a Mac client's `NDJSONLineBuffer` will accept, with headroom under its 16 MiB line limit.
+    static let mirrorReplayMaxBytes = 12 << 20
     /// The request id prefix the mirror server uses when it fetches a replay on a phone's behalf.
     static let mirrorPrefetchPrefix = "canopy-prefetch-"
 
@@ -4430,8 +4447,78 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return !blocks.contains { $0["type"] as? String == "tool_result" }
     }
 
+    /// Trim a Mac client's `get_session` replay until it serializes under `maxBytes` (default `mirrorReplayMaxBytes`).
+    static func trimmingReplayForMacClient(_ message: [String: Any], maxBytes: Int = mirrorReplayMaxBytes) -> [String: Any] {
+        guard let data = try? JSONSerialization.data(withJSONObject: message),
+              data.count > maxBytes
+        else { return message }
+        func typedCount(in container: [String: Any]) -> Int {
+            guard let messages = (container["response"] as? [String: Any])?["messages"] as? [[String: Any]] else { return 0 }
+            return messages.filter(isTypedUserTurn).count
+        }
+        let count: Int
+        if message["type"] as? String == "from-extension",
+           let nested = message["message"] as? [String: Any] {
+            count = typedCount(in: nested)
+        } else {
+            count = typedCount(in: message)
+        }
+        let best: Int
+        let trimmed: [String: Any]
+        if count >= 1 {
+            var lo = 1
+            var hi = count
+            var found = 1
+            while lo <= hi {
+                let mid = (lo + hi) / 2
+                let candidate = trimmingReplayForMirror(message, keepUserTurns: mid, logging: false)
+                if let sized = try? JSONSerialization.data(withJSONObject: candidate),
+                   sized.count <= maxBytes {
+                    found = mid
+                    lo = mid + 1
+                } else {
+                    hi = mid - 1
+                }
+            }
+            best = found
+            trimmed = trimmingReplayForMirror(message, keepUserTurns: best)
+        } else {
+            best = 0
+            trimmed = message
+        }
+        if let sized = try? JSONSerialization.data(withJSONObject: trimmed),
+           sized.count <= maxBytes {
+            logger.notice("[mirror] replay for a Mac client trimmed to \(best, privacy: .public) turns to fit \(maxBytes, privacy: .public) bytes")
+            return trimmed
+        }
+        // Nothing fits: send an empty replay rather than a line the client will cut the connection on.
+        logger.error("[mirror] replay for a Mac client still exceeds \(maxBytes, privacy: .public) bytes after trimming to \(best, privacy: .public) turn(s); sending it empty")
+        return emptyingReplayMessages(message)
+    }
+
+    /// The replay with `messages` emptied, the same envelope otherwise.
+    static func emptyingReplayMessages(_ message: [String: Any]) -> [String: Any] {
+        func empty(_ container: [String: Any]) -> [String: Any]? {
+            guard var response = container["response"] as? [String: Any], response["messages"] is [[String: Any]] else { return nil }
+            response["messages"] = [[String: Any]]()
+            var updated = container
+            updated["response"] = response
+            return updated
+        }
+        if let emptied = empty(message) { return emptied }
+        if message["type"] as? String == "from-extension",
+           let nested = message["message"] as? [String: Any],
+           let emptied = empty(nested)
+        {
+            var updated = message
+            updated["message"] = emptied
+            return updated
+        }
+        return message
+    }
+
     /// Keep only the last `keepUserTurns` typed turns of a `get_session` replay, cutting at a turn boundary so no tool_use loses its tool_result.
-    static func trimmingReplayForMirror(_ message: [String: Any], keepUserTurns: Int) -> [String: Any] {
+    static func trimmingReplayForMirror(_ message: [String: Any], keepUserTurns: Int, logging: Bool = true) -> [String: Any] {
         func trim(_ container: [String: Any]) -> [String: Any]? {
             guard var response = container["response"] as? [String: Any],
                   let messages = response["messages"] as? [[String: Any]]
@@ -4443,7 +4530,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if seen == keepUserTurns { start = index; break }
             }
             guard start > 0 else { return nil }
-            logger.notice("[mirror] replay trimmed to the last \(keepUserTurns, privacy: .public) turns: \(messages.count - start, privacy: .public) of \(messages.count, privacy: .public) entries sent")
+            if logging {
+                logger.notice("[mirror] replay trimmed to the last \(keepUserTurns, privacy: .public) turns: \(messages.count - start, privacy: .public) of \(messages.count, privacy: .public) entries sent")
+            }
             response["messages"] = Array(messages[start...])
             var updated = container
             updated["response"] = response

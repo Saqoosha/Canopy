@@ -135,9 +135,19 @@ final class MirrorConnection: MirrorSink {
     private weak var shim: ShimProcess?
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorConnection")
     private var didAttach = false
+    /// True when the attach came from another Mac's Canopy (not the phone).
+    /// A Mac client renders the whole transcript and has no canopy-asset
+    /// handler, so responses to it skip the phone's replay rewrites.
+    private(set) var isMacClient = false
     /// The session this connection attached to; images are only served under it.
     fileprivate private(set) var attachedSessionId = ""
     private var cleanedUp = false
+
+    /// Whether a client identity gets the phone's replay trim / image rewrite.
+    /// Absent `client` (older phones) keeps them; `"mac"` skips them.
+    nonisolated static func appliesPhoneReplayRewrites(client: String?) -> Bool {
+        client != "mac"
+    }
 
     init(connection: NWConnection, store: SessionStore, server: MirrorServer) {
         self.connection = connection
@@ -247,6 +257,7 @@ final class MirrorConnection: MirrorSink {
             return
         }
         didAttach = true
+        isMacClient = !Self.appliesPhoneReplayRewrites(client: dict["client"] as? String)
         self.shim = shim
         attachedSessionId = sessionId
         // Only for a client that says it will use the answer; an older phone asks for the transcript itself.

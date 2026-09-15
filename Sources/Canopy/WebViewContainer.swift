@@ -330,7 +330,7 @@ struct WebViewContainer: NSViewRepresentable {
     /// overwrite it and then go away.) They are defensive, not descriptive of
     /// a state anyone has seen.
     @MainActor
-    private static func focusIfThisPaneIsFocused(_ target: WKWebView?, sessionId: OpenSession.ID?) {
+    static func focusIfThisPaneIsFocused(_ target: WKWebView?, sessionId: OpenSession.ID?) {
         guard let target, let window = target.window,
               let sessionId,
               SessionStore.shared?.isFocusedPaneSession(sessionId) == true
@@ -830,9 +830,12 @@ final class SessionWKWebView: WKWebView {
 
 final class LinkClickHandler: NSObject, WKScriptMessageHandler {
     let workingDirectory: URL
+    /// When false every path link is refused: a mirror pane's files are on the other Mac.
+    let opensLocalFiles: Bool
 
-    init(workingDirectory: URL) {
+    init(workingDirectory: URL, opensLocalFiles: Bool = true) {
         self.workingDirectory = workingDirectory
+        self.opensLocalFiles = opensLocalFiles
     }
 
     func userContentController(
@@ -864,6 +867,11 @@ final class LinkClickHandler: NSObject, WKScriptMessageHandler {
         var path = href.split(separator: "#", maxSplits: 1).first.map(String.init) ?? href
         if path.hasPrefix("file://") {
             path = URL(string: path)?.path ?? String(path.dropFirst(7))
+        }
+
+        if !opensLocalFiles {
+            logger.notice("Link to a local path in a mirror pane refused: the file is on the other Mac")
+            return
         }
 
         // Try as absolute path first

@@ -1533,6 +1533,51 @@ enum SidebarLogicProbe {
         try? FileManager.default.removeItem(at: scanTranscript)
         try? FileManager.default.removeItem(at: scanProjectDir)
 
+        // Mirror origin: a pane attached to another Mac's session. It has no
+        // local folder, so every "open in Finder" consumer must read
+        // `localWorkingDirectory` and get nil; `workingDirectory` still answers
+        // (the type needs a URL; a mirror pane's link handler refuses local paths) with $HOME.
+        do {
+            let mirror = OpenSession.Origin.mirror(machineId: "M1", host: "100.64.0.2", port: 8770)
+            record("mirror origin: workingDirectory is the home directory",
+                   mirror.workingDirectory == FileManager.default.homeDirectoryForCurrentUser)
+            record("mirror origin: localWorkingDirectory is nil",
+                   mirror.localWorkingDirectory == nil)
+            record("mirror origin: remoteHost is nil (not an SSH session)",
+                   mirror.remoteHost == nil)
+            record("mirror origin: mirrorTarget carries the address",
+                   mirror.mirrorTarget?.host == "100.64.0.2" && mirror.mirrorTarget?.port == 8770
+                       && mirror.mirrorTarget?.machineId == "M1")
+            record("local origin: localWorkingDirectory is the directory",
+                   OpenSession.Origin.local(cwd).localWorkingDirectory == cwd)
+            record("remote origin: localWorkingDirectory is nil",
+                   OpenSession.Origin.remote(host: "studio", path: cwd).localWorkingDirectory == nil)
+            let session = OpenSession(origin: mirror, resumeId: "r-m", title: "T", project: "studio · repo", status: .spawning)
+            record("mirror origin: projectLabel is the roster's project verbatim",
+                   session.projectLabel == "studio · repo")
+
+            // Save-and-Quit skips a mirror's session and its pane.
+            let store = SessionStore()
+            store._probeSeedOpenSessions([session])
+            store.openInFocusedPane(session.id)
+            let captured = store.captureRestoreSnapshot()
+            record("restore: a mirror session is not captured",
+                   captured.sessions.isEmpty)
+            record("restore: a mirror pane is not captured",
+                   captured.panes.isEmpty)
+            let localSameId = OpenSession(origin: .local(cwd), resumeId: "r-m", title: "Local", project: "x", status: .live)
+            store._probeSeedOpenSessions([session, localSameId])
+            let captured2 = store.captureRestoreSnapshot()
+            record("restore: a mirror does not shadow a local session with the same resumeId",
+                   captured2.sessions.count == 1 && captured2.sessions.first?.resumeId == "r-m"
+                       && {
+                           if case .local(let path) = captured2.sessions.first?.origin {
+                               return path == cwd.path
+                           }
+                           return false
+                       }())
+        }
+
         // Roster wire encoding. The six activity states are a contract with the
         // phone: renaming a case silently changes what the roster renders, and
         // nothing else in this repo would notice.
@@ -1572,7 +1617,7 @@ enum SidebarLogicProbe {
             panes: [RosterSnapshot.Pane(
                 sessionId: "s1", resumeId: "r1", paneIndex: 0, title: "T", project: "P · main",
                 state: "asking", stateSince: 1_699_999_000,
-                contextPct: 17, model: "opus", messageCount: 42)])
+                contextPct: 17, model: "opus", messageCount: 42, live: true)])
         let rosterJSON = (try? JSONEncoder().encode(rosterFixture)).flatMap {
             String(data: $0, encoding: .utf8)
         } ?? ""
@@ -1583,6 +1628,193 @@ enum SidebarLogicProbe {
         record("roster: JSON round-trips",
                (try? JSONDecoder().decode(
                    RosterSnapshot.self, from: Data(rosterJSON.utf8)))?.panes.first?.state == "asking")
+
+        record("roster: JSON carries live",
+               rosterJSON.contains("\"live\":true"))
+        // The wire state is read back on the watching side; the two maps are
+        // inverses so the sidebar dot and the phone dot agree.
+        record("roster: wire state round-trips for every case",
+               SessionActivity.allCases.allSatisfy {
+                   RosterSnapshot.activity(fromWireState: RosterSnapshot.wireState(for: $0)) == $0
+               })
+        record("roster: an unknown wire state decodes to nil",
+               RosterSnapshot.activity(fromWireState: "sleeping") == nil)
+
+        // Every open session is published, paned or not. An unpaned one takes
+        // the next index after the strip so the phone's order matches the
+        // sidebar's Open block; `live` says whether an attach can succeed.
+        do {
+            let paned = OpenSession(origin: .local(cwd), resumeId: "rp", title: "P", project: "x", status: .live)
+            let unpaned = OpenSession(origin: .local(cwd), resumeId: "ru", title: "U", project: "x", status: .dormant)
+            let mirror = OpenSession(origin: .mirror(machineId: "M", host: "100.64.0.9", port: 8770),
+                                     resumeId: "rm", title: "M", project: "x", status: .live)
+            let rows = RosterSnapshot.rows(for: [unpaned, paned, mirror], paneIndexes: [paned.id: 0])
+            record("roster rows: paned first at its strip index",
+                   rows.first?.session.id == paned.id && rows.first?.paneIndex == 0)
+            record("roster rows: unpaned follows, numbered after the strip",
+                   rows.count == 2 && rows[1].session.id == unpaned.id && rows[1].paneIndex == 1)
+            record("roster rows: a mirror session is never published",
+                   !rows.contains { $0.session.id == mirror.id })
+            record("roster rows: live means a shim is present",
+                   RosterSnapshot.isLive(paned) == false)
+            let u1 = OpenSession(origin: .local(cwd), resumeId: "ru1", title: "U1", project: "x", status: .dormant)
+            let u2 = OpenSession(origin: .local(cwd), resumeId: "ru2", title: "U2", project: "x", status: .dormant)
+            let launcherRows = RosterSnapshot.rows(for: [u1, paned, u2], paneIndexes: [paned.id: 1])
+            record("roster rows: unpaned rows start after a launcher-shifted strip index",
+                   launcherRows.map(\.paneIndex) == [1, 2, 3])
+            record("roster rows: unpaned rows keep openSessions order",
+                   launcherRows.dropFirst().map { $0.session.id } == [u1.id, u2.id])
+            record("roster rows: no two rows share a paneIndex",
+                   Set(launcherRows.map(\.paneIndex)).count == launcherRows.count)
+            let stripA = OpenSession(origin: .local(cwd), resumeId: "sa", title: "A", project: "x", status: .live)
+            let stripB = OpenSession(origin: .local(cwd), resumeId: "sb", title: "B", project: "x", status: .live)
+            let stripOrder = RosterSnapshot.rows(for: [stripB, stripA], paneIndexes: [stripA.id: 0, stripB.id: 1])
+            record("roster rows: paned rows follow the strip order, not openSessions order",
+                   stripOrder.map { $0.session.id } == [stripA.id, stripB.id])
+        }
+
+        // Pairing: the string the phone pastes is the one another Canopy
+        // pastes. Builder and parser are inverses; a string with no machine id
+        // is refused because the peer table is keyed on it.
+        do {
+            let text = MirrorAccess.connectionString(host: "100.64.0.2", port: 8770, token: "tok_A-b", machine: "M1")
+            let parsed = MirrorAccess.parseConnectionString(text)
+            record("pairing: connection string round-trips",
+                   parsed == MirrorAccess.Connection(host: "100.64.0.2", port: 8770, token: "tok_A-b", machineId: "M1"))
+            record("pairing: surrounding whitespace is tolerated",
+                   MirrorAccess.parseConnectionString("  \(text)\n") == parsed)
+            record("pairing: a string without machine is refused",
+                   MirrorAccess.parseConnectionString("canopy-mirror://100.64.0.2:8770?token=x") == nil)
+            record("pairing: a string without token is refused",
+                   MirrorAccess.parseConnectionString("canopy-mirror://100.64.0.2:8770?machine=M1") == nil)
+            record("pairing: another scheme is refused",
+                   MirrorAccess.parseConnectionString("https://100.64.0.2:8770?token=x&machine=M1") == nil)
+            record("pairing: host:port parses",
+                   MirrorAccess.parseHostPort("100.64.0.2:8770")?.port == 8770)
+            record("pairing: host:port without a port is refused",
+                   MirrorAccess.parseHostPort("100.64.0.2") == nil)
+        }
+
+        // Remote roster watcher: the pure halves. Frame classification copies
+        // the phone's rule — a snapshot carries no `type`, an event does, and
+        // an event must never decode as a snapshot with no panes.
+        do {
+            let snapshotJSON = #"{"machineId":"M2","displayName":"studio","publishedAt":1700000000,"sessionPct":1,"weeklyPct":2,"panes":[]}"#
+            let eventJSON = #"{"type":"event","machineId":"M2","displayName":"studio","publishedAt":1700000000,"sessionPct":1,"weeklyPct":2,"panes":[]}"#
+            record("watcher: a typeless frame is a snapshot",
+                   RemoteRosterWatcher.decodeFrame(Data(snapshotJSON.utf8))?.machineId == "M2")
+            record("watcher: a typed frame is not a snapshot",
+                   RemoteRosterWatcher.decodeFrame(Data(eventJSON.utf8)) == nil)
+            record("watcher: self is excluded from the peer list",
+                   RemoteRosterWatcher.peersToWatch(machines: ["A", "B", "C"], selfId: "B") == ["A", "C"])
+            record("watcher: a nil self id excludes nothing",
+                   RemoteRosterWatcher.peersToWatch(machines: ["A"], selfId: nil) == ["A"])
+            let fresh = RosterSnapshot(machineId: "M2", displayName: "s", publishedAt: 1_000, sessionPct: 0, weeklyPct: 0, panes: [])
+            record("watcher: a snapshot under the threshold is fresh",
+                   !RemoteRosterWatcher.isStale(fresh, now: Date(timeIntervalSince1970: 1_000 + RemoteRosterWatcher.staleThreshold - 1)))
+            record("watcher: a snapshot at the threshold is stale",
+                   RemoteRosterWatcher.isStale(fresh, now: Date(timeIntervalSince1970: 1_000 + RemoteRosterWatcher.staleThreshold)))
+            record("watcher: a snapshot pane without live decodes as live",
+                   RemoteRosterWatcher.decodeFrame(Data(#"{"machineId":"M2","displayName":"studio","publishedAt":1,"sessionPct":0,"weeklyPct":0,"panes":[{"sessionId":"s","resumeId":"r","paneIndex":0,"title":"T","project":"P","state":"idle","stateSince":0,"contextPct":0,"model":"","messageCount":0}]}"#.utf8))?.panes.first?.live == true)
+            let noResume = RemoteRosterWatcher.decodeFrame(Data(#"{"machineId":"M2","displayName":"studio","publishedAt":1,"sessionPct":0,"weeklyPct":0,"panes":[{"sessionId":"s","paneIndex":0,"title":"T","project":"P","state":"idle","stateSince":0,"contextPct":0,"model":"","messageCount":0}]}"#.utf8))
+            record("watcher: a pane without resumeId decodes with nil",
+                   noResume != nil && noResume?.panes.first?.resumeId == nil)
+        }
+
+        // Remote live rows: built from other Macs' rosters, per machine, with
+        // already-attached sessions removed (their pane has an Open row).
+        do {
+            func pane(_ id: String, live: Bool, state: String = "idle", resumeId: String? = nil) -> RosterSnapshot.Pane {
+                RosterSnapshot.Pane(sessionId: id, resumeId: resumeId ?? id, paneIndex: 0, title: "T \(id)", project: "P",
+                                    state: state, stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: live)
+            }
+            let now = Date(timeIntervalSince1970: 2_000)
+            let fresh = RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 2_000, sessionPct: 0, weeklyPct: 0,
+                                       panes: [pane("sa", live: true, state: "working", resumeId: "a"), pane("b", live: true)])
+            let old = RosterSnapshot(machineId: "M3", displayName: "mini", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                                     panes: [pane("c", live: true, state: "working")])
+            let sections = SessionStore.remoteLiveSections(
+                rosters: ["M2": fresh, "M3": old], machineIds: ["M3", "M2", "M4"], attached: ["M2:b"], now: now)
+            record("remote rows: one section per listed machine, in relay order",
+                   sections.map(\.machineId) == ["M3", "M2", "M4"])
+            record("remote rows: a machine with no snapshot yet is loading",
+                   sections[2].loading && sections[2].rows.isEmpty)
+            record("remote rows: the section title is the display name",
+                   sections[1].title == "studio")
+            record("remote rows: an attached session's row is dropped",
+                   sections[1].rows.map(\.id) == ["remote:M2:a"])
+            record("remote rows: a stale machine's rows are marked stale",
+                   { if case .remoteLive(let r) = sections[0].rows[0] { return r.stale } else { return false } }())
+            record("remote rows: a live fresh row can open",
+                   SidebarRow.canOpen(sections[1].rows[0]))
+            record("remote rows: a stale but live row can still be attached",
+                   SidebarRow.canOpen(sections[0].rows[0]))
+            let dead = RemoteLiveSession(machineId: "M2", machineName: "studio", row: pane("b", live: false), stale: false)
+            record("remote rows: a non-live row cannot open",
+                   !SidebarRow.canOpen(.remoteLive(dead)))
+            record("remote rows: the row is not in the Open block",
+                   !SidebarRow.remoteLive(dead).isOpen)
+            record("remote rows: activity comes from the wire state",
+                   { if case .remoteLive(let r) = sections[1].rows[0] { return r.activity == .working } else { return false } }())
+            record("remote rows: a stale row reads idle whatever its wire state",
+                   { if case .remoteLive(let r) = sections[0].rows[0] { return r.activity == .idle } else { return false } }())
+        }
+
+        // Attaching to a remote session. Pure decisions only; the socket is
+        // measured on device.
+        do {
+            record("attach: unauthorized names the Settings fix",
+                   SessionStore.mirrorFailureMessage(reason: "unauthorized", machineName: "studio")
+                       == "studio rejected the password. Paste its connection again in Settings › Mobile.")
+            record("attach: no such session says it stopped",
+                   SessionStore.mirrorFailureMessage(reason: "no such session", machineName: "studio")
+                       == "That session is no longer running on studio.")
+            record("attach: an unknown reason is passed through with the machine",
+                   SessionStore.mirrorFailureMessage(reason: "expected attach", machineName: "studio")
+                       == "studio refused the attach: expected attach")
+
+            let store = SessionStore()
+            let remote = RemoteLiveSession(
+                machineId: "M2", machineName: "studio",
+                row: RosterSnapshot.Pane(sessionId: "s", resumeId: "r-live", paneIndex: 0, title: "T", project: "P",
+                                         state: "idle", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true),
+                stale: false)
+            let existing = OpenSession(origin: .mirror(machineId: "M2", host: "100.64.0.2", port: 8770),
+                                       resumeId: "r-live", title: "T", project: "P", status: .live)
+            let other = OpenSession(origin: .local(cwd), resumeId: "x", title: "X", project: "P", status: .live)
+            let m3 = OpenSession(origin: .mirror(machineId: "M3", host: "100.64.0.3", port: 8770),
+                                 resumeId: "r-m3", title: "M3", project: "P", status: .live)
+            m3.isAsking = true
+            store._probeSeedOpenSessions([existing, other, m3])
+            _ = store.openInNewPane(existing.id)
+            _ = store.openInNewPane(other.id)
+            store.setFocusedPaneIndex(1)
+            store.openRemoteLive(remote, target: .focused)
+            record("attach: a second attach to the same session focuses its pane",
+                   store.openSessions.count == 3 && store.focusedPaneIndex == 0)
+
+            // State arrives from the roster, since a mirror has no shim.
+            other.isAsking = true
+            let snapshot = RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                                          panes: [RosterSnapshot.Pane(sessionId: "s", resumeId: "r-live", paneIndex: 0, title: "T", project: "P",
+                                                                      state: "asking", stateSince: 0, contextPct: 42, model: "opus", messageCount: 7, live: true)])
+            store.noteRemoteState(machineId: "M2", snapshot: snapshot)
+            record("attach: asking on the wire raises isAsking on the mirror session",
+                   existing.isAsking && !existing.isThinking && !existing.isWaiting)
+            record("attach: the status bar takes the roster's model and message count",
+                   existing.statusBar.model == "opus" && existing.statusBar.messageCount == 7)
+            record("attach: a local session is untouched by a remote snapshot",
+                   other.isAsking)
+            record("attach: a mirror on another machine is untouched",
+                   m3.isAsking)
+            store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0, panes: []))
+            record("attach: a session gone from its home Mac's roster reads idle",
+                   !existing.isAsking && !existing.isThinking && !existing.isWaiting)
+            record("mirror server: a mac client skips the phone's replay rewrites",
+                   !MirrorConnection.appliesPhoneReplayRewrites(client: "mac"))
+            record("mirror server: a phone (no client field) keeps them",
+                   MirrorConnection.appliesPhoneReplayRewrites(client: nil))
+        }
 
         // Roster reply routing: which open session an envelope from the phone
         // addresses, matched on `OpenSession.ID` — minted per process, so an
@@ -10031,6 +10263,23 @@ enum SidebarLogicProbe {
                    ((ShimProcess.trimmingReplayForMirror(bare, keepUserTurns: 1)["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count == 2)
             record("mirror replay: a response without messages is returned as-is",
                    (ShimProcess.trimmingReplayForMirror(["type": "response", "requestId": "r", "response": ["ok": true]], keepUserTurns: 1)["response"] as? [String: Any])?["ok"] as? Bool == true)
+            let bigText = String(repeating: "x", count: 3 << 20)
+            let oversized = (1...6).flatMap { i -> [[String: Any]] in [user(bigText + "\(i)"), assistant()] }
+            let oversizedEnv = wrapped(oversized)
+            let macBudget = 4 << 20
+            let macCut = ShimProcess.trimmingReplayForMacClient(oversizedEnv, maxBytes: macBudget)
+            let macCutMsgs = messages(of: macCut)
+            let macCutSize = (try? JSONSerialization.data(withJSONObject: macCut))?.count ?? Int.max
+            record("mirror replay: a mac client's oversized replay is cut to the turns that fit",
+                   (macCutMsgs?.count ?? 0) < oversized.count && macCutSize <= macBudget)
+            record("mirror replay: a mac client's replay within the budget is untouched",
+                   messages(of: ShimProcess.trimmingReplayForMacClient(wrapped(replay), maxBytes: macBudget))?.count == replay.count)
+            // Even one turn over the budget: the client gets an empty replay, never a line it would cut the connection on.
+            let tooBigEnv = wrapped([user(String(repeating: "y", count: 5 << 20)), assistant()])
+            let tooBigCut = ShimProcess.trimmingReplayForMacClient(tooBigEnv, maxBytes: macBudget)
+            record("mirror replay: a single turn over the budget is sent empty, not oversized",
+                   messages(of: tooBigCut)?.isEmpty == true
+                       && ((try? JSONSerialization.data(withJSONObject: tooBigCut))?.count ?? Int.max) <= macBudget)
         }
 
         // Summary

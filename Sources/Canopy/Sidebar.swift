@@ -21,6 +21,7 @@ struct Sidebar: View {
     @Bindable var store: SessionStore
     @State private var hoveredRowId: String?
     @State private var showFilterPopover = false
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,6 +64,18 @@ struct Sidebar: View {
                         }
                         .onMove { from, to in
                             store.moveOpenRows(fromOffsets: from, toOffset: to)
+                        }
+                    }
+                }
+                ForEach(store.remoteLiveSections) { section in
+                    Section(section.title) {
+                        if section.loading {
+                            Text("Loading…").font(.system(size: 11)).foregroundStyle(.secondary)
+                        } else if section.rows.isEmpty {
+                            Text("No sessions").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        ForEach(section.rows, id: \.id) { row in
+                            rowView(row)
                         }
                     }
                 }
@@ -125,29 +138,63 @@ struct Sidebar: View {
             SidebarAccountSection()
         }
         .overlay(alignment: .bottom) {
-            if let err = store.teleportError {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(err)
-                        .font(.caption)
-                        .lineLimit(2)
-                    Spacer(minLength: 4)
-                    Button {
-                        store.dismissTeleportError()
-                    } label: {
-                        Image(systemName: "xmark")
+            VStack(spacing: 8) {
+                if let err = store.teleportError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(err)
                             .font(.caption)
+                            .lineLimit(2)
+                        Spacer(minLength: 4)
+                        Button {
+                            store.dismissTeleportError()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    .padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .padding(8)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .padding(8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                if let err = store.remoteAttachError {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text(err)
+                                .font(.caption)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 4)
+                            Button {
+                                store.remoteAttachError = nil
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Button("Open Settings…") {
+                            openSettings()
+                            store.remoteAttachError = nil
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .padding(.leading, 24)
+                    }
+                    .padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
+            .padding(.bottom, 8)
         }
         .animation(.easeInOut(duration: 0.2), value: store.teleportError)
+        .animation(.easeInOut(duration: 0.2), value: store.remoteAttachError)
         .task {
             store.isSidebarVisible = true
             await store.refreshRecents()
@@ -280,12 +327,8 @@ struct Sidebar: View {
         // Dimmed, not hidden: the session is still real and its log is still
         // readable — the row is how you reach it. `.opacity` rather than a
         // foreground style so the icon and every label fade together.
-        .opacity(canOpen(row) ? 1 : 0.45)
-        .help(canOpen(row)
-            ? ""
-            : "This session's folder is gone — typically a worktree removed after merging. "
-                + "It can't be reopened while the folder is missing. "
-                + "Right-click to copy its log path and read it from another session.")
+        .opacity(canOpen(row) && !isStaleRemote(row) ? 1 : 0.45)
+        .help(disabledReason(for: row))
         .background(
             // BOTH backgrounds live here, inline, because `.listRowBackground`
             // stretches its content to fill the cell and eats any inset
@@ -341,9 +384,11 @@ struct Sidebar: View {
         // whether it can be renamed instead of silently inheriting "no".
         // Cloud titles belong to the server, and a launcher has no session.
         switch row {
+        case .open(let s) where s.origin.mirrorTarget != nil:
+            EmptyView()
         case .open, .closedLocal:
             Button("Rename…") { store.beginRename(row: row) }
-        case .closedCloud, .launcher:
+        case .closedCloud, .launcher, .remoteLive:
             EmptyView()
         }
         if case .open(let s) = row {
@@ -352,6 +397,9 @@ struct Sidebar: View {
         }
         if case .launcher = row {
             Button("Close pane") { handleClose(row) }
+        }
+        if case .remoteLive(let r) = row {
+            Button("Copy Session ID") { store.copyToPasteboard(r.sessionId) }
         }
         // Only where a local folder exists to open: a remote session's
         // directory is on the other machine, a cloud row has none until it is
@@ -373,18 +421,44 @@ struct Sidebar: View {
             store.hideClosedSession(rowId: row.id)
         }
         // Open rows and launcher rows both stand for something live; hiding
-        // one would take a pane off the map without closing it.
-        .disabled(row.isOpen)
+        // one would take a pane off the map without closing it. A remote-live
+        // row is not owned by this Mac's hide list.
+        .disabled(row.isOpen || { if case .remoteLive = row { return true } else { return false } }())
     }
 
     /// Whether clicking a row can actually produce a session.
     ///
-    /// Only a closed local row can answer no, and only because the directory
-    /// it recorded is gone (`SessionEntry.canOpen`, measured once by
-    /// `loadAllSessions` rather than per render). Every other kind either has
-    /// a live pane already, is fetched from the server, or is a launcher.
+    /// A closed local row answers no when its directory is gone
+    /// (`SessionEntry.canOpen`, measured once by `loadAllSessions`). A remote
+    /// live row answers no when the home Mac reported `live: false`. Stale
+    /// does not block the click — see `SidebarRow.canOpen`.
     private func canOpen(_ row: SidebarRow) -> Bool {
         SidebarRow.canOpen(row)
+    }
+
+    /// True only for a `.remoteLive` row whose home Mac has gone quiet.
+    private func isStaleRemote(_ row: SidebarRow) -> Bool {
+        if case .remoteLive(let r) = row { return r.stale }
+        return false
+    }
+
+    /// Tooltip for a dimmed or unopenable row; empty when the row is fully
+    /// available. A stale-but-live remote row stays clickable and still gets
+    /// a help string explaining the dim.
+    private func disabledReason(for row: SidebarRow) -> String {
+        if case .remoteLive(let r) = row {
+            if !r.row.live {
+                return "Not running on \(r.machineName)"
+            }
+            if r.stale {
+                return "\(r.machineName) has not published for a while; its sessions may have changed"
+            }
+            return ""
+        }
+        guard !canOpen(row) else { return "" }
+        return "This session's folder is gone — typically a worktree removed after merging. "
+            + "It can't be reopened while the folder is missing. "
+            + "Right-click to copy its log path and read it from another session."
     }
 
     /// The session log a row's "Copy Session Log Path" should copy, or nil
@@ -397,7 +471,7 @@ struct Sidebar: View {
     private func sessionLogPath(for row: SidebarRow) -> String? {
         switch row {
         case .closedLocal(let entry): return entry.logPath
-        case .open, .closedCloud, .launcher: return nil
+        case .open, .closedCloud, .launcher, .remoteLive: return nil
         }
     }
 
@@ -408,12 +482,12 @@ struct Sidebar: View {
     private func finderDirectory(for row: SidebarRow) -> URL? {
         switch row {
         case .open(let s):
-            return s.origin.remoteHost == nil ? s.origin.workingDirectory : nil
+            return s.origin.localWorkingDirectory
         case .closedLocal(let entry):
             // Gone means gone: offering Finder a directory we already know is
             // absent can only log a warning and look like nothing happened.
             return entry.canOpen ? entry.projectDirectory : nil
-        case .closedCloud, .launcher:
+        case .closedCloud, .launcher, .remoteLive:
             return nil
         }
     }
@@ -491,7 +565,7 @@ struct Sidebar: View {
         case .open(let session): idx = store.paneIndex(forSession: session.id)
         // Always paned — a launcher row exists only because its pane does.
         case .launcher(let slot): idx = store.paneIndex(forSlot: slot)
-        case .closedLocal, .closedCloud: idx = nil
+        case .closedLocal, .closedCloud, .remoteLive: idx = nil
         }
         guard let idx else { return .none }
         return idx == store.focusedPaneIndex ? .strong : .weak
@@ -551,6 +625,14 @@ struct Sidebar: View {
             } else {
                 store.openCloud(cloud, target: addNewPane ? .newPane : .focused)
             }
+        case .remoteLive(let remote):
+            guard canOpen(row) else { return }
+            if addNewPane && store.panes.count >= SessionStore.paneAbsoluteCap {
+                store.showCapReachedHintOnFocusedPane()
+                store.openRemoteLive(remote, target: .focused)
+            } else {
+                store.openRemoteLive(remote, target: addNewPane ? .newPane : .focused)
+            }
         }
     }
 
@@ -563,7 +645,7 @@ struct Sidebar: View {
             if let idx = store.paneIndex(forSlot: slot) {
                 store.closePane(at: idx)
             }
-        case .closedLocal, .closedCloud:
+        case .closedLocal, .closedCloud, .remoteLive:
             break
         }
     }
@@ -786,6 +868,8 @@ private struct SidebarRowView: View {
                 .scaleEffect(0.7)
         } else if case .open(let session) = row {
             ActivityDot(activity: SessionActivity.of(session, isUnread: isUnread))
+        } else if case .remoteLive(let remote) = row {
+            ActivityDot(activity: remote.activity)
         } else {
             Image(systemName: iconName)
                 .symbolRenderingMode(.hierarchical)
@@ -796,7 +880,7 @@ private struct SidebarRowView: View {
 
     private var openIconSize: CGFloat {
         switch row {
-        case .open: return 6 // small filled dot for idle open
+        case .open, .remoteLive: return 6 // small filled dot for idle open
         case .launcher: return 12
         case .closedLocal, .closedCloud: return 14
         }
@@ -804,7 +888,7 @@ private struct SidebarRowView: View {
 
     private var openIconWeight: Font.Weight {
         switch row {
-        case .open: return .regular
+        case .open, .remoteLive: return .regular
         // Matches the "+" on the New session button above the list.
         case .launcher: return .medium
         case .closedLocal, .closedCloud: return .regular
@@ -815,7 +899,7 @@ private struct SidebarRowView: View {
         switch row {
         // Unreachable: `iconView` routes every open row to `ActivityDot`.
         // Kept so the switch stays exhaustive.
-        case .open: return "circle.fill"
+        case .open, .remoteLive: return "circle.fill"
         case .launcher: return "plus"
         case .closedLocal: return "desktopcomputer"
         case .closedCloud: return "cloud"
@@ -825,7 +909,7 @@ private struct SidebarRowView: View {
     /// Subtle gray active-row background → text stays in normal colors.
     private var iconTint: Color {
         switch row {
-        case .open:
+        case .open, .remoteLive:
             // Idle-open dot: muted secondary — not an attention grab.
             return .secondary
         case .launcher, .closedLocal, .closedCloud:
@@ -839,7 +923,7 @@ private struct SidebarRowView: View {
         if isActive { return .semibold }
         switch row {
         case .open, .launcher: return .medium
-        case .closedLocal, .closedCloud: return .regular
+        case .closedLocal, .closedCloud, .remoteLive: return .regular
         }
     }
 
@@ -847,7 +931,7 @@ private struct SidebarRowView: View {
         switch row {
         case .open: return .primary
         case .launcher: return .secondary
-        case .closedLocal, .closedCloud: return .secondary
+        case .closedLocal, .closedCloud, .remoteLive: return .secondary
         }
     }
 

@@ -44,11 +44,13 @@ enum PaneHeaderMenu {
             // captures the `OpenSession` itself — the menu outlives the click
             // only briefly, but a strong capture of a live session object is
             // not what this file should be doing.
-            let workingDirectory = session.origin.remoteHost == nil ? session.origin.workingDirectory : nil
-            menu.addItem(ClosureMenuItem(title: "Rename…") { [weak store] in
-                guard let store, let idx = store.paneIndex(forSession: openId) else { return }
-                store.beginRenameForPane(at: idx)
-            })
+            let workingDirectory = session.origin.localWorkingDirectory
+            if session.origin.mirrorTarget == nil {
+                menu.addItem(ClosureMenuItem(title: "Rename…") { [weak store] in
+                    guard let store, let idx = store.paneIndex(forSession: openId) else { return }
+                    store.beginRenameForPane(at: idx)
+                })
+            }
             menu.addItem(ClosureMenuItem(title: "Restart session") { [weak store] in
                 store?.restartSession(openId)
             })

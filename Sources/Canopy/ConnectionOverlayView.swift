@@ -2,6 +2,8 @@ import SwiftUI
 
 struct ConnectionOverlayView: View {
     let connectionState: ConnectionState
+    /// SSH remote panes keep the default; a mirror pane names the Mac it lost.
+    var title: String = "SSH Connection Lost"
     var onBackToLauncher: () -> Void
 
     var body: some View {
@@ -12,7 +14,7 @@ struct ConnectionOverlayView: View {
 
                 VStack(spacing: 16) {
                     statusIcon
-                    Text("SSH Connection Lost")
+                    Text(title)
                         .font(.headline)
                         .foregroundStyle(.white)
                     Text(connectionState.statusMessage)

@@ -7,7 +7,25 @@ enum GroupingMode: String, CaseIterable {
     case env = "Env"
 }
 
-/// One row in the sidebar list. Four flavours, all unified by Identifiable +
+/// One of another Mac's open sessions, as the relay last reported it.
+struct RemoteLiveSession: Hashable {
+    let machineId: String
+    let machineName: String
+    let row: RosterSnapshot.Pane
+    /// The publishing Mac has not been heard from for `RemoteRosterWatcher.staleThreshold`.
+    let stale: Bool
+
+    /// The CLI's own id, which `MirrorServer` matches an attach on; the process id only keeps the row's identity stable before the backfill.
+    var sessionId: String { row.resumeId ?? row.sessionId }
+
+    /// Idle when stale: a dot breathing "working" on a Mac that stopped
+    /// publishing an hour ago is a lie.
+    var activity: SessionActivity {
+        stale ? .idle : (RosterSnapshot.activity(fromWireState: row.state) ?? .idle)
+    }
+}
+
+/// One row in the sidebar list. Five flavours, all unified by Identifiable +
 /// Hashable so `List(selection:)` can target any of them.
 ///
 /// Sort order across a mixed array of rows:
@@ -18,7 +36,7 @@ enum GroupingMode: String, CaseIterable {
 ///
 /// Use `SidebarRow.sorted(_:)` to apply this consistently.
 ///
-/// `.launcher` is the odd one out and deliberately so: it is the only case
+/// `.launcher` is the odd one out and deliberately so: it is a case
 /// with no session behind it, and it exists purely to keep the Open block
 /// readable as a map of the pane strip. A launcher pane used to have no row
 /// at all, which broke that correspondence exactly when a launcher was open.
@@ -36,6 +54,9 @@ enum SidebarRow: Identifiable, Hashable {
     case closedCloud(RemoteSession)
     /// A launcher pane, keyed by the `PaneSlot.ID` it renders.
     case launcher(PaneSlot.ID)
+    /// Another Mac's open session, built by `SessionStore.remoteLiveSections`
+    /// and rendered in its own per-machine section — never in `visibleRows`.
+    case remoteLive(RemoteLiveSession)
 
     var id: String {
         switch self {
@@ -43,6 +64,7 @@ enum SidebarRow: Identifiable, Hashable {
         case .closedLocal(let e): "local:\(e.id)"
         case .closedCloud(let r): "cloud:\(r.id)"
         case .launcher(let slot): "launcher:\(slot.uuidString)"
+        case .remoteLive(let r): "remote:\(r.machineId):\(r.sessionId)"
         }
     }
 
@@ -52,6 +74,7 @@ enum SidebarRow: Identifiable, Hashable {
         case .closedLocal(let e): e.title
         case .closedCloud(let r): r.summary
         case .launcher: "New Session"
+        case .remoteLive(let r): r.row.title
         }
     }
 
@@ -78,6 +101,8 @@ enum SidebarRow: Identifiable, Hashable {
             // subtitle line entirely when this is empty, so the launcher row
             // doesn't reserve space for a second line it has nothing to say on.
             return ""
+        case .remoteLive(let r):
+            return r.row.project
         }
     }
 
@@ -108,6 +133,7 @@ enum SidebarRow: Identifiable, Hashable {
         // passing every row would reach this. Only `SidebarFilter.apply`'s
         // lastActivity cutoff depends on running before the interleave.
         case .launcher: .distantFuture
+        case .remoteLive(let r): Date(timeIntervalSince1970: TimeInterval(r.row.stateSince))
         }
     }
 
@@ -118,7 +144,7 @@ enum SidebarRow: Identifiable, Hashable {
     var isOpen: Bool {
         switch self {
         case .open, .launcher: true
-        case .closedLocal, .closedCloud: false
+        case .closedLocal, .closedCloud, .remoteLive: false
         }
     }
 
@@ -126,15 +152,18 @@ enum SidebarRow: Identifiable, Hashable {
     ///
     /// Exhaustive rather than a single `if case`, so a new row kind has to
     /// decide instead of inheriting "yes" — the shape `rowMenu` already uses
-    /// for renaming. Only `.closedLocal` can answer no, and only when the
-    /// directory it recorded is gone: `ShimProcess.start` refuses a missing
-    /// spawn cwd, so the click could only ever reach an error banner.
+    /// for renaming. `.closedLocal` answers no when its directory is gone
+    /// (`ShimProcess.start` refuses a missing spawn cwd). `.remoteLive`
+    /// answers no when `live` is false; a stale-but-live row stays openable
+    /// so the user can still attach (the home Mac may have drifted, but the
+    /// session may still be running).
     ///
     /// Static and pure so the probe reaches it; `SessionEntry.canOpen` is
     /// measured once by `loadAllSessions`, never per render.
     static func canOpen(_ row: SidebarRow) -> Bool {
         switch row {
         case .closedLocal(let entry): entry.canOpen
+        case .remoteLive(let r): r.row.live
         case .open, .closedCloud, .launcher: true
         }
     }
@@ -153,6 +182,9 @@ enum SidebarRow: Identifiable, Hashable {
         case .launcher: .local
         case .closedLocal: .local
         case .closedCloud: .cloud
+        // Never consulted: remote rows are built by SessionStore.remoteLiveSections
+        // and never reach filter.apply or SidebarGrouping.
+        case .remoteLive: .local
         }
     }
 
