@@ -18,6 +18,9 @@ struct RemoteDirectoryBrowser: View {
     @State private var isCreatingFolder = false
     @State private var newFolderName = ""
     @FocusState private var nameFieldFocused: Bool
+    // Bumped by Cancel so a mkdir that finishes afterwards is discarded.
+    @State private var folderCreationID = 0
+    @State private var mkdirInFlight = false
     // Off by default, like Finder and `NSOpenPanel`. Remembered across
     // sheets because a person who wants dotfiles wants them every time.
     @AppStorage("canopy.remoteBrowserShowHidden") private var showHidden = false
@@ -192,6 +195,12 @@ struct RemoteDirectoryBrowser: View {
     }
 
     private func cancelCreatingFolder() {
+        // Only a mkdir's spinner is ours to clear; a listing in flight keeps its own.
+        if mkdirInFlight {
+            folderCreationID += 1
+            mkdirInFlight = false
+            isLoading = false
+        }
         isCreatingFolder = false
         newFolderName = ""
         errorMessage = nil
@@ -206,6 +215,9 @@ struct RemoteDirectoryBrowser: View {
               currentPath.hasPrefix("/") else { return }
         let name = RemoteDirectoryRules.trimmedName(newFolderName)
         let target = RemoteDirectoryRules.childPath(of: currentPath, name: name)
+        folderCreationID += 1
+        let creationID = folderCreationID
+        mkdirInFlight = true
         isLoading = true
         errorMessage = nil
         Task {
@@ -214,10 +226,14 @@ struct RemoteDirectoryBrowser: View {
                 _ = try await runSSH(args: ["-T", "-o", "ConnectTimeout=10", sshHost,
                                             "mkdir", "--", shellEscape(target)])
                 logger.notice("created remote folder \(target, privacy: .private) on \(sshHost, privacy: .public)")
+                guard creationID == folderCreationID else { return }
+                mkdirInFlight = false
                 cancelCreatingFolder()
                 navigateTo(target)
             } catch {
                 logger.error("mkdir failed on \(sshHost, privacy: .public): \(error.localizedDescription, privacy: .private)")
+                guard creationID == folderCreationID else { return }
+                mkdirInFlight = false
                 errorMessage = error.localizedDescription
                 isLoading = false
             }
