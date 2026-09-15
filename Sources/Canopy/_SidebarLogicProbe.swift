@@ -1716,8 +1716,9 @@ enum SidebarLogicProbe {
                    RemoteRosterWatcher.isStale(fresh, now: Date(timeIntervalSince1970: 1_000 + RemoteRosterWatcher.staleThreshold)))
             record("watcher: a snapshot pane without live decodes as live",
                    RemoteRosterWatcher.decodeFrame(Data(#"{"machineId":"M2","displayName":"studio","publishedAt":1,"sessionPct":0,"weeklyPct":0,"panes":[{"sessionId":"s","resumeId":"r","paneIndex":0,"title":"T","project":"P","state":"idle","stateSince":0,"contextPct":0,"model":"","messageCount":0}]}"#.utf8))?.panes.first?.live == true)
+            let noResume = RemoteRosterWatcher.decodeFrame(Data(#"{"machineId":"M2","displayName":"studio","publishedAt":1,"sessionPct":0,"weeklyPct":0,"panes":[{"sessionId":"s","paneIndex":0,"title":"T","project":"P","state":"idle","stateSince":0,"contextPct":0,"model":"","messageCount":0}]}"#.utf8))
             record("watcher: a pane without resumeId decodes with nil",
-                   RemoteRosterWatcher.decodeFrame(Data(#"{"machineId":"M2","displayName":"studio","publishedAt":1,"sessionPct":0,"weeklyPct":0,"panes":[{"sessionId":"s","paneIndex":0,"title":"T","project":"P","state":"idle","stateSince":0,"contextPct":0,"model":"","messageCount":0}]}"#.utf8))?.panes.first?.resumeId == nil)
+                   noResume != nil && noResume?.panes.first?.resumeId == nil)
         }
 
         // Remote live rows: built from other Macs' rosters, per machine, with

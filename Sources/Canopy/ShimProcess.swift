@@ -4463,27 +4463,40 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         } else {
             count = typedCount(in: message)
         }
-        guard count >= 1 else { return message }
-        var lo = 1
-        var hi = count
-        var best = 1
-        while lo <= hi {
-            let mid = (lo + hi) / 2
-            let candidate = trimmingReplayForMirror(message, keepUserTurns: mid)
-            if let sized = try? JSONSerialization.data(withJSONObject: candidate),
-               sized.count <= maxBytes {
-                best = mid
-                lo = mid + 1
-            } else {
-                hi = mid - 1
+        let best: Int
+        let trimmed: [String: Any]
+        if count >= 1 {
+            var lo = 1
+            var hi = count
+            var found = 1
+            while lo <= hi {
+                let mid = (lo + hi) / 2
+                let candidate = trimmingReplayForMirror(message, keepUserTurns: mid, logging: false)
+                if let sized = try? JSONSerialization.data(withJSONObject: candidate),
+                   sized.count <= maxBytes {
+                    found = mid
+                    lo = mid + 1
+                } else {
+                    hi = mid - 1
+                }
             }
+            best = found
+            trimmed = trimmingReplayForMirror(message, keepUserTurns: best)
+        } else {
+            best = 0
+            trimmed = message
         }
-        logger.notice("[mirror] replay for a Mac client trimmed to \(best, privacy: .public) turns to fit \(maxBytes, privacy: .public) bytes")
-        return trimmingReplayForMirror(message, keepUserTurns: best)
+        if let sized = try? JSONSerialization.data(withJSONObject: trimmed),
+           sized.count <= maxBytes {
+            logger.notice("[mirror] replay for a Mac client trimmed to \(best, privacy: .public) turns to fit \(maxBytes, privacy: .public) bytes")
+        } else {
+            logger.error("[mirror] replay for a Mac client still exceeds \(maxBytes, privacy: .public) bytes after trimming to \(best, privacy: .public) turn(s); the client will cut the connection")
+        }
+        return trimmed
     }
 
     /// Keep only the last `keepUserTurns` typed turns of a `get_session` replay, cutting at a turn boundary so no tool_use loses its tool_result.
-    static func trimmingReplayForMirror(_ message: [String: Any], keepUserTurns: Int) -> [String: Any] {
+    static func trimmingReplayForMirror(_ message: [String: Any], keepUserTurns: Int, logging: Bool = true) -> [String: Any] {
         func trim(_ container: [String: Any]) -> [String: Any]? {
             guard var response = container["response"] as? [String: Any],
                   let messages = response["messages"] as? [[String: Any]]
@@ -4495,7 +4508,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if seen == keepUserTurns { start = index; break }
             }
             guard start > 0 else { return nil }
-            logger.notice("[mirror] replay trimmed to the last \(keepUserTurns, privacy: .public) turns: \(messages.count - start, privacy: .public) of \(messages.count, privacy: .public) entries sent")
+            if logging {
+                logger.notice("[mirror] replay trimmed to the last \(keepUserTurns, privacy: .public) turns: \(messages.count - start, privacy: .public) of \(messages.count, privacy: .public) entries sent")
+            }
             response["messages"] = Array(messages[start...])
             var updated = container
             updated["response"] = response
