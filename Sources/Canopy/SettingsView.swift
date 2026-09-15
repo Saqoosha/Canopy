@@ -278,10 +278,10 @@ private struct MobileSettingsTab: View {
             .onAppear { hasStoredSecret = MachineIdentity.hasRelaySecret() }
 
             Section {
-                Toggle("Let the iPhone open live sessions", isOn: $settings.mirrorEnabled)
+                Toggle("Let other devices open live sessions", isOn: $settings.mirrorEnabled)
                 LabeledContent("Status", value: mirrorStatusText)
                 HStack {
-                    Button("Copy Connection for iPhone") { copyMirrorConnection() }
+                    Button("Copy Connection") { copyMirrorConnection() }
                         .disabled(listeningAddress == nil)
                     Button("Reset Password") { resetMirrorPassword() }
                         .disabled(!settings.mirrorEnabled)
@@ -293,7 +293,7 @@ private struct MobileSettingsTab: View {
             } header: {
                 Text("Live mirror")
             } footer: {
-                SettingsFooter(text: "Paste the connection into the iPhone app's Settings. It contains the password: anyone on your tailnet who has it can read and drive this Mac's sessions. Reset the password to disconnect every phone and refuse every copy made before.")
+                SettingsFooter(text: "Paste it into the iPhone app's Settings, or into another Mac's Settings › Mobile › Other Macs. It contains the password: anyone on your tailnet who has it can read and drive this Mac's sessions. Reset the password to disconnect every phone and refuse every copy made before.")
             }
 
             Section {
@@ -320,7 +320,7 @@ private struct MobileSettingsTab: View {
             } header: {
                 Text("Other Macs")
             } footer: {
-                SettingsFooter(text: "On the other Mac, turn on its live mirror and use Copy Connection for iPhone; then paste here. Its sessions appear in this Mac's sidebar once both Macs publish to the same relay.")
+                SettingsFooter(text: "On the other Mac, turn on its live mirror and use Copy Connection; then paste here. Its sessions appear in this Mac's sidebar once both Macs publish to the same relay.")
             }
         }
         .formStyle(.grouped)
