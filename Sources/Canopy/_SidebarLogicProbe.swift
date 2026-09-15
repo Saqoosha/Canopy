@@ -6750,6 +6750,79 @@ enum SidebarLogicProbe {
                MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel == "[fd7a::1]:8765",
                "got \(MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel)")
 
+        // MARK: - RemoteDirectoryRules (remote browser: New Folder + hidden files)
+        //
+        // The name is spliced into `mkdir '<dir>/<name>'` over ssh (no `-p`;
+        // see `createFolder`), so the rule is "one path component or nothing".
+        // Refusals are pinned by message: the message is the instruction.
+
+        record("remote rules: plain name is accepted",
+               RemoteDirectoryRules.newFolderNameProblem("project") == nil,
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("project")))")
+        record("remote rules: dotfile name is accepted",
+               RemoteDirectoryRules.newFolderNameProblem(".config") == nil,
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem(".config")))")
+        // Untrimmed, " . " is neither "." nor empty — only the trim refuses it.
+        record("remote rules: trimming happens before the reserved check",
+               RemoteDirectoryRules.newFolderNameProblem(" . ") == "That name is reserved.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem(" . ")))")
+        record("remote rules: empty name is refused",
+               RemoteDirectoryRules.newFolderNameProblem("") == "Enter a folder name.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("")))")
+        record("remote rules: whitespace-only name is refused",
+               RemoteDirectoryRules.newFolderNameProblem("   ") == "Enter a folder name.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("   ")))")
+        record("remote rules: a slash is refused (one component only)",
+               RemoteDirectoryRules.newFolderNameProblem("a/b") == "A folder name cannot contain a slash.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("a/b")))")
+        record("remote rules: '.' is refused",
+               RemoteDirectoryRules.newFolderNameProblem(".") == "That name is reserved.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem(".")))")
+        record("remote rules: '..' is refused",
+               RemoteDirectoryRules.newFolderNameProblem("..") == "That name is reserved.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("..")))")
+        record("remote rules: a NUL byte is refused",
+               RemoteDirectoryRules.newFolderNameProblem("a\u{0}b") == "A folder name cannot contain control characters.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("a\u{0}b")))")
+        record("remote rules: an inner newline is refused (the listing splits on it)",
+               RemoteDirectoryRules.newFolderNameProblem("a\nb") == "A folder name cannot contain control characters.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("a\nb")))")
+        record("remote rules: an inner CR is refused",
+               RemoteDirectoryRules.newFolderNameProblem("a\rb") == "A folder name cannot contain control characters.",
+               "got \(String(describing: RemoteDirectoryRules.newFolderNameProblem("a\rb")))")
+
+        record("remote rules: trimmedName strips both ends only",
+               RemoteDirectoryRules.trimmedName("  my folder \n") == "my folder",
+               "got \(RemoteDirectoryRules.trimmedName("  my folder \n"))")
+
+        // `childPath` is the listing's own join, so it must NOT trim — a real
+        // remote directory named " x" has to stay reachable from the listing.
+        record("remote rules: join under a plain directory",
+               RemoteDirectoryRules.childPath(of: "/Users/x", name: "p") == "/Users/x/p",
+               "got \(RemoteDirectoryRules.childPath(of: "/Users/x", name: "p"))")
+        record("remote rules: join under root does not double the slash",
+               RemoteDirectoryRules.childPath(of: "/", name: "p") == "/p",
+               "got \(RemoteDirectoryRules.childPath(of: "/", name: "p"))")
+        record("remote rules: join keeps the entry name verbatim",
+               RemoteDirectoryRules.childPath(of: "/Users/x", name: " p ") == "/Users/x/ p ",
+               "got \(RemoteDirectoryRules.childPath(of: "/Users/x", name: " p "))")
+
+        // Hidden-file filter: client side, on the name only.
+        do {
+            let entries = [
+                RemoteDirectoryBrowser.DirEntry(name: ".git", isDirectory: true),
+                RemoteDirectoryBrowser.DirEntry(name: "src", isDirectory: true),
+                RemoteDirectoryBrowser.DirEntry(name: ".env", isDirectory: false),
+                RemoteDirectoryBrowser.DirEntry(name: "README.md", isDirectory: false),
+            ]
+            let shown = RemoteDirectoryRules.visibleEntries(entries, showHidden: false).map(\.name)
+            record("remote rules: hidden off drops every dot-prefixed entry",
+                   shown == ["src", "README.md"], "got \(shown)")
+            let all = RemoteDirectoryRules.visibleEntries(entries, showHidden: true).map(\.name)
+            record("remote rules: hidden on keeps the listing untouched, order included",
+                   all == [".git", "src", ".env", "README.md"], "got \(all)")
+        }
+
         // MARK: - MacroPadRemoteEndpoint.liveHostUpdate (SettingsView live typing)
         //
         // Fixes the "Remote bridge" row staying hidden until Return/blur:
