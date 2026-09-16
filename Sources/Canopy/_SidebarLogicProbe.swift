@@ -7906,6 +7906,38 @@ enum SidebarLogicProbe {
                        && reCaptured.panes.map(\.content) == [.session(resumeId: "ap-paned")],
                    "sessions=\(reCaptured.sessions.map(\.resumeId)) panes=\(reCaptured.panes.map(\.content))")
 
+            // The park/apply split is what keeps the initial window's first
+            // render on an EMPTY store — the sidebar-toggle poisoning recorded
+            // on `makeRestored()`. Pinned here: a parked snapshot touches
+            // nothing until `applyPendingRestore()`, one call applies it, and
+            // a second call (the `.task` of a re-created window) is a no-op
+            // rather than a wholesale re-assign.
+            let parkStore = SessionStore()
+            parkStore._probeParkPendingRestore(SessionRestoreSnapshot(
+                sessions: [snapSession("park-a", origin: .remote(host: "h", path: "/a"))],
+                panes: [snapPane("park-a", 700)],
+                focusedPaneIndex: 0
+            ))
+            record("restore: a parked snapshot leaves the store empty until applied",
+                   parkStore.openSessions.isEmpty && parkStore.panes.isEmpty,
+                   "sessions=\(parkStore.openSessions.count) panes=\(parkStore.panes.count)")
+            parkStore.applyPendingRestore()
+            record("restore: applyPendingRestore applies the parked snapshot",
+                   parkStore.openSessions.map(\.resumeId) == ["park-a"] && parkStore.panes.count == 1,
+                   "sessions=\(parkStore.openSessions.map(\.resumeId)) panes=\(parkStore.panes.count)")
+            let parkExtra = OpenSession(
+                origin: .remote(host: "h", path: URL(fileURLWithPath: "/b")),
+                resumeId: "park-extra",
+                title: "Extra",
+                project: "Extra",
+                status: .dormant
+            )
+            parkStore._probeSeedOpenSessions(parkStore.openSessions + [parkExtra])
+            parkStore.applyPendingRestore()
+            record("restore: a second applyPendingRestore is a no-op",
+                   parkStore.openSessions.map(\.resumeId) == ["park-a", "park-extra"] && parkStore.panes.count == 1,
+                   "sessions=\(parkStore.openSessions.map(\.resumeId)) panes=\(parkStore.panes.count)")
+
             // A snapshot that sanitize collapses leaves the store untouched.
             // What this does NOT pin is `applyRestoreSnapshot`'s own
             // `guard !clean.isEmpty` — measured: deleting that guard keeps the

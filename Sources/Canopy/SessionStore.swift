@@ -2396,10 +2396,10 @@ final class SessionStore {
         return .acceptEdits
     }
 
-    /// Factory that consumes a quit-time snapshot (if any) and schedules it onto
-    /// a fresh store. The store is returned EMPTY; a snapshot that was found is
-    /// applied one main-queue drain later, deliberately — see the deferral note
-    /// at the call below.
+    /// Factory that consumes a quit-time snapshot (if any) and parks it on a
+    /// fresh store. The store is returned EMPTY; a snapshot that was found is
+    /// applied by `applyPendingRestore()` from the window content's `.task`,
+    /// deliberately — see the note at the park site below.
     ///
     /// The consume-before-apply order is load-bearing: a snapshot that crashes
     /// the restore would otherwise be replayed on every launch forever, and
@@ -2431,74 +2431,104 @@ final class SessionStore {
             return store
         }
         SessionStorePersistence.clearRestoreSnapshot()
-        // Deferred by one main-queue drain, NOT inline — the delay is the whole
-        // point and removing it silently breaks the sidebar-toggle button.
+        // Parked here and applied from the window content's `.task` in
+        // `CanopyApp` (`applyPendingRestore`), NOT inline — the store must
+        // still be EMPTY at the first render of the initial window, and the
+        // anchor for "after the first render" is the view appearing, not a
+        // queue drain.
         //
-        // Symptom, measured on macOS 26.6: after a restore launch the
-        // `NavigationSplitView` sidebar-toggle button is hit and fires — its
-        // accessibility label flips between "Show Sidebar" and "Hide Sidebar" —
-        // but the split view never moves in response to it, for as long as that
-        // window was watched. Cmd+Opt+S and the View menu item keep working,
-        // which is what makes it read as
-        // "the button is dead" rather than "the split view is stuck". WHY those
-        // paths differ was NOT established; do not build on a mechanism here,
-        // there isn't one.
+        // Symptom when the first render sees a non-empty `panes`, measured
+        // on macOS 26.6: the `NavigationSplitView` sidebar-toggle button is
+        // hit and fires — its accessibility label flips between "Show
+        // Sidebar" and "Hide Sidebar" — but the split view never moves in
+        // response to it, for as long as that window is up. Cmd+Opt+S and
+        // the View menu item keep working. On macOS 27.0 the same state ALSO
+        // draws the button in the wrong place: 56 pt right of the sidebar's
+        // trailing edge, i.e. over the first pane's header (measured via AX
+        // at a 259 pt sidebar: x=271 instead of x=215, window-relative).
+        // WHY the paths differ was NOT established; do not build on a
+        // mechanism here, there isn't one.
         //
-        // What the deferral is anchored to is an observation, not a contract:
-        // enqueued from an `App`-level `@State` initializer, this block was
-        // measured to land after the first render. Nothing enforces that and
-        // nothing detects it regressing — the symptom is the dead button above.
-        // `Task { @MainActor in }` was never measured here; the `.task` on the
-        // window's content in `CanopyApp` was not tried either.
+        // The anchor used to be `DispatchQueue.main.async` from this
+        // `@State` initializer, measured on 26.6 to land after the first
+        // render. On 27.0 it lands BEFORE it — logged `Detail.body` with
+        // `panes.count`: the drain applied the snapshot ~50 ms ahead of the
+        // first body evaluation, which then saw `panes=1`, and the button
+        // came up misplaced and dead on 2/2 restore launches. With the apply
+        // in `.task`, the first body evaluation sees `panes=0`, the apply
+        // follows ~120 ms later, and the button sits in the sidebar and
+        // collapses/expands normally (2/2). `.task` is tied to the view
+        // appearing, so it cannot run ahead of the render the way a drain
+        // can. Whether the window has become main by then does not matter:
+        // the apply now runs before `configureCanopyWindow` and is still
+        // healthy.
         //
-        // Bisected against a working baseline rather than guessed. Healthy when
-        // panes are opened after launch (0/1/2/4 panes, after a divider drag,
-        // after Cmd+Opt+S) and broken by a restore launch carrying as few as ONE
-        // pane — so pane count is not the variable. The three heals tried, all
-        // of which failed, are a window resize, a pane close, and dropping back
-        // to one pane.
+        // Bisected against a working baseline on 26.6 rather than guessed.
+        // Healthy when panes are opened after launch (0/1/2/4 panes, after a
+        // divider drag, after Cmd+Opt+S) and broken by a restore launch
+        // carrying as few as ONE pane — so pane count is not the variable.
+        // The three heals tried, all of which failed, are a window resize, a
+        // pane close, and dropping back to one pane.
         //
-        // It is the LAUNCH that matters, not first-render-with-panes in general.
-        // Measured: destroy the window with panes still non-empty (a launcher
-        // pane, so `ShimProcess.hasActiveSession` is false and Cmd+Shift+W
-        // closes rather than hides) and re-create it with Cmd+0, and that fresh
-        // window's toggle collapses AND expands normally — twice, in both
-        // directions — even though `panes` was already populated at its own
-        // first render. So a later scene instance is fine and only the initial
-        // one is poisoned; what actually distinguishes them is unidentified.
+        // It is the LAUNCH that matters, not first-render-with-panes in
+        // general. Measured on 26.6: destroy the window with panes still
+        // non-empty (a launcher pane, so `ShimProcess.hasActiveSession` is
+        // false and Cmd+Shift+W closes rather than hides) and re-create it
+        // with Cmd+0, and that fresh window's toggle collapses AND expands
+        // normally — twice, in both directions — even though `panes` was
+        // already populated at its own first render. So a later scene
+        // instance is fine and only the initial one is poisoned; what
+        // actually distinguishes them is unidentified. (`.task` fires again
+        // for that re-created window; `applyPendingRestore` is a no-op by
+        // then.)
         //
         // Two other fixes were built and measured and BOTH failed, so don't
         // re-try them: passing an explicit `columnVisibility:` binding to the
         // NavigationSplitView (the toggle writes the binding and SwiftUI still
         // ignores it), and shrinking `WeightedPaneLayout.sizeThatFits`'s
         // nil-proposal fallback so the detail column stops reporting a wide
-        // ideal width. Several minimal repro builds all toggle fine, including one
-        // that rendered four panes at its OWN first render out of a custom
+        // ideal width. Several minimal repro builds all toggle fine, including
+        // one that rendered four panes at its OWN first render out of a custom
         // `Layout` with `.ignoresSafeArea(edges: .top)` children, WKWebViews,
         // `.toolbar(removing: .title)`, `.windowStyle(.hiddenTitleBar)` and
         // `.navigationSplitViewStyle(.balanced)`. Other builds carried a
         // Canopy-shaped sidebar or the window delegate proxy, but no single
-        // build combined everything — so this narrows the suspects, it does not
-        // eliminate them.
+        // build combined everything — so this narrows the suspects, it does
+        // not eliminate them.
         //
-        // To check whether this is still needed on a newer macOS: make the call
-        // inline again, Save-and-Quit with at least one SESSION pane (the prompt
-        // is gated on a live shim, and a strip of launcher panes stores no
-        // snapshot), relaunch, click the toggle.
+        // To re-check on a newer macOS without a GUI: plant a snapshot into
+        // the Debug build's defaults (`canopy.sessionRestore.v1`, see
+        // Session Management in CLAUDE.md), `open -n` the app, and compare
+        // the toolbar button's AX frame with the `AXSplitter`'s x — healthy
+        // is button.maxX == splitter.x - 4. Then AXPress the button and
+        // check the splitter moved.
         //
-        // The cost is not just a frame. `panes.isEmpty` renders `DetailLauncher`,
-        // so a restore launch runs launcher startup work: `LauncherView.onAppear`
-        // starts a detached `loadAllSessions()` scan and a marketplace query. A
-        // snapshot holding a launcher pane paid that anyway.
+        // The cost is not just a frame. `panes.isEmpty` renders
+        // `DetailLauncher`, so a restore launch runs launcher startup work:
+        // `LauncherView.onAppear` starts a detached `loadAllSessions()` scan
+        // and a marketplace query. A snapshot holding a launcher pane paid
+        // that anyway.
         //
         // Safe because nothing else writes what the restore assigns in that
-        // window — `openSessions`, `panes`, `focusedPaneIndex`, `selection`, and
-        // `lastActiveResumeId` (which it also persists) — and
+        // window — `openSessions`, `panes`, `focusedPaneIndex`, `selection`,
+        // and `lastActiveResumeId` (which it also persists) — and
         // `applyRestoreSnapshot` assigns them wholesale rather than merging.
-        DispatchQueue.main.async {
-            MainActor.assumeIsolated { store.applyRestoreSnapshot(snapshot) }
-        }
+        store.pendingRestore = snapshot
         return store
+    }
+
+    /// A snapshot `makeRestored()` found but has not applied yet. Consumed by
+    /// `applyPendingRestore()`.
+    @ObservationIgnored private var pendingRestore: SessionRestoreSnapshot?
+
+    /// Applies the snapshot `makeRestored()` parked, once. Called from the
+    /// window content's `.task` in `CanopyApp`, i.e. after the first render —
+    /// which is the whole point, see the note in `makeRestored()`. A second
+    /// call (a re-created window runs the `.task` again) is a no-op.
+    func applyPendingRestore() {
+        guard let snapshot = pendingRestore else { return }
+        pendingRestore = nil
+        applyRestoreSnapshot(snapshot)
     }
 
     #if DEBUG
@@ -2506,6 +2536,13 @@ final class SessionStore {
     /// file-private), so `_SidebarLogicProbe` cannot assign it directly.
     func _probeSeedOpenSessions(_ sessions: [OpenSession]) {
         openSessions = sessions
+    }
+
+    /// Probe-only: park a snapshot the way `makeRestored()` does, without
+    /// going through UserDefaults (which the probe guard in `makeRestored`
+    /// refuses to read on purpose).
+    func _probeParkPendingRestore(_ snapshot: SessionRestoreSnapshot) {
+        pendingRestore = snapshot
     }
     #endif
 }
