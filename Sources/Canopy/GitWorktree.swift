@@ -237,8 +237,9 @@ enum GitWorktree {
     /// Shared by every subprocess this file spawns rather than written out per
     /// call site, because the hazard is identical at each and is not obvious:
     /// `git` blocks forever on a git-lfs credential prompt, an askpass, or a
-    /// stuck hook, and `cp` blocks on a network volume that stops answering.
-    /// Either one hangs the launcher with no error and nothing in the log.
+    /// stuck hook, and hangs the launcher with no error and nothing in the log.
+    /// (Seeding used to run `/bin/cp` through here too — the measured note
+    /// below is from that era — and now calls `clonefile(2)` directly.)
     ///
     /// `wantsStdout` is a parameter rather than always-on. Draining two pipes
     /// in sequence deadlocks the moment the one NOT being read fills its 64KB
@@ -414,8 +415,9 @@ enum GitWorktree {
         killer.cancel()
 
         if timedOut.value {
-            // The hint is per-executable: this function also runs `/bin/cp`
-            // for seeding, where "check git hooks" is actively misleading.
+            // The hint is per-executable: seeding used to run `/bin/cp`
+            // through here, where "check git hooks" was actively misleading,
+            // and a future non-git caller would be the same.
             let hint = executable.hasSuffix("git")
                 ? " — check git hooks or LFS credential prompts"
                 : ""
@@ -676,11 +678,21 @@ enum GitWorktree {
     /// xcodegen (`Canopy.xcodeproj` is gitignored here), `node_modules`, and
     /// Unity's `Library`, whose cold reimport costs tens of minutes.
     ///
-    /// The fix is APFS `clonefile(2)` via `cp -Rc`: copy-on-write, so the copy
-    /// is near-instant and costs only metadata until the two sides diverge.
-    /// Measured on a 3.4 GB / 55,971-file Unity `Library`: **10.9 s and 46 MB
-    /// of real disk**, 1.3% of the source. That is what makes seeding cheap
-    /// enough to do unconditionally rather than per-ecosystem.
+    /// The fix is APFS `clonefile(2)`, called directly: copy-on-write, so the
+    /// copy costs only metadata until the two sides diverge. Measured on a
+    /// 132 GB / 100,509-file `references/input` tree (OPENHUB, on `studio`):
+    /// **2.88 s and 95 MB of real disk** (`df` delta; `du` cannot see shared
+    /// blocks and reports the full 132 GB on both sides). That is what makes
+    /// seeding cheap enough to do unconditionally rather than per-ecosystem.
+    ///
+    /// It used to shell out to `cp -Rc` — the same syscall, one process per
+    /// entry — and that shape cost 20.7 s on the same repo (1,842 entries,
+    /// 1,499 cloned, logged 2026-09-16). The process spawns were not the
+    /// main cost, though the first draft of this note said so: `cp -Rc` on
+    /// the whole tree in ONE process still took 13.5 s, because `cp` walks
+    /// the tree in user space and clones file by file (~8,000 files/s),
+    /// while a single directory-level `clonefile(2)` recurses in the kernel
+    /// (~35,000 files/s).
     ///
     /// The list is not configured anywhere: `git ls-files -o -i` already knows
     /// it, so this needs no equivalent of Orca's `orca.yaml
@@ -692,10 +704,11 @@ enum GitWorktree {
     /// merely a good starting point for `node_modules`, which the branch's own
     /// `install` then reconciles incrementally.
     ///
-    /// Cost scales with inode count, not bytes: ~5,100 files/s measured, so a
-    /// large `node_modules` is ~20 s.
+    /// Cost scales with inode count, not bytes: ~35,000 files/s measured, so
+    /// even a large `node_modules` is a few seconds.
     enum SeedPlan: Equatable {
-        /// Regular file, directory, or symlink — `cp -Rc`.
+        /// Regular file, directory, or symlink — `clonefile(2)` with
+        /// `CLONE_NOFOLLOW`.
         case clone
         /// Symlink to the original instead of recreating it.
         case link
@@ -757,19 +770,22 @@ enum GitWorktree {
     /// How to reproduce one entry in the worktree.
     ///
     /// **A FIFO must be linked, never cloned, and this is not hypothetical
-    /// here.** `cp` recreates a named pipe as a NEW, empty pipe — measured —
-    /// and 1Password's Environments feature mounts secrets as a FIFO at
-    /// `<repo>/.env`. A cloned one is a pipe nothing ever writes to, so the
-    /// first `dotenv` read in the worktree blocks forever: the app hangs with
-    /// no error. Re-mounting is not an escape either, because 1Password caps a
-    /// device at ten enabled local `.env` files and nothing on this side can
-    /// free a slot. A symlink to the original works, because that FIFO is
-    /// re-readable.
+    /// here.** `clonefile(2)` refuses a named pipe given as the entry
+    /// (`EINVAL`, measured; one nested inside a cloned directory is recreated
+    /// empty, as `cp -Rc` did for both) — and 1Password's Environments feature
+    /// mounts secrets as a FIFO at `<repo>/.env`. A recreated one is a pipe
+    /// nothing ever writes to, so the first `dotenv` read in the worktree
+    /// blocks forever: the app hangs with no error. Re-mounting is not an
+    /// escape either, because 1Password caps a device at ten enabled local
+    /// `.env` files and nothing on this side can free a slot. A symlink to
+    /// the original works, because that FIFO is re-readable.
     ///
     /// Sockets and device nodes take the same branch for the weaker reason
     /// that a recreated one is meaningless; nothing has been measured there.
-    /// Symlinks are NOT in that branch — `cp -Rc` reproduces a symlink as a
-    /// symlink (measured), which is already the right answer and costs nothing.
+    /// Symlinks are NOT in that branch — `clonefile(2)` under `CLONE_NOFOLLOW`
+    /// reproduces a symlink as a symlink (measured), which is already the
+    /// right answer and costs nothing. The flag is what makes that true; the
+    /// clone site says what happens without it.
     static func plan(for type: FileAttributeType) -> SeedPlan {
         switch type {
         case .typeRegular, .typeDirectory, .typeSymbolicLink:
@@ -806,19 +822,15 @@ enum GitWorktree {
         /// What to tell the user, or nil when everything arrived.
         ///
         /// Deliberately does not assert the files are missing. `failed` is
-        /// reached from three sites carrying at least five distinct causes: a
-        /// failed `stat`; a `createDirectory` or `createSymbolicLink` throw;
-        /// `cp` exiting non-zero; and `runCommand` throwing for either the
-        /// watchdog kill (`-1`) or a drain/reap stall (`-2`) — note the last
-        /// two THROW, so they land in the `catch` beside the link failures
-        /// rather than in the non-zero-status branch. Those causes disagree
-        /// about what is on disk afterwards: some wrote nothing, `cp` leaves
-        /// whatever it had written when it stopped on BOTH its failing paths
-        /// (measured), and the `-2` case may have copied everything —
-        /// `runCommand`'s own comment records that failure in full. Splitting
-        /// the counter so this could be specific was considered and dropped:
-        /// it would take those entries out of every existing reader of
-        /// `failed`.
+        /// reached from three sites carrying three distinct causes: a failed
+        /// `stat`; a `createDirectory` or `createSymbolicLink` throw; and
+        /// `clonefile(2)` returning non-zero. A failed `stat` has created
+        /// nothing; the other two run after the parent directory exists, and
+        /// the clone leaves nothing for its entry (measured, recorded at the
+        /// clone site), so an empty parent can stand where the entry should
+        /// be. Splitting the counter so this
+        /// could be specific was considered and dropped: it would take those
+        /// entries out of every existing reader of `failed`.
         ///
         /// "added" rather than "copied" because the `.link` plan is in here
         /// too, and a FIFO is symlinked rather than copied.
@@ -864,7 +876,7 @@ enum GitWorktree {
     /// (`"Assets/\303\251.png"`), and the caller would then have to unquote C
     /// escapes correctly to avoid building a path to nothing. `--directory`
     /// collapses a wholly-ignored directory to one entry, which is what keeps
-    /// `node_modules` a single `cp` instead of 100,000.
+    /// `node_modules` a single `clonefile(2)` call instead of 100,000.
     static func ignoredEntries(repo: URL, timeout: TimeInterval = 60) throws -> [String] {
         let result = try runCommand(
             "/usr/bin/git",
@@ -901,11 +913,7 @@ enum GitWorktree {
     /// here must not lose the user the worktree they asked for. Failures are
     /// counted and logged instead.
     @discardableResult
-    static func seedIgnoredFiles(
-        repo: URL,
-        worktree: URL,
-        perEntryTimeout: TimeInterval = 300
-    ) -> SeedReport {
+    static func seedIgnoredFiles(repo: URL, worktree: URL) -> SeedReport {
         var report = SeedReport()
         let entries: [String]
         do {
@@ -966,27 +974,34 @@ enum GitWorktree {
                     try fm.createSymbolicLink(at: dest, withDestinationURL: source)
                     report.linked += 1
                 case .clone:
-                    // `-c` FORCES clonefile and fails when the filesystem
+                    // One syscall per entry; a directory is cloned recursively
+                    // in the kernel. `clonefile(2)` fails when the filesystem
                     // cannot do it, which is the behaviour we want: falling
-                    // back to a real byte copy would turn an 11-second seed of
-                    // a 3.4 GB directory into minutes of disk churn the user
-                    // never asked for. A non-APFS volume gets no seed and a
-                    // log line.
-                    let result = try runCommand(
-                        "/bin/cp",
-                        ["-Rc", source.path, dest.path],
-                        timeout: perEntryTimeout
-                    )
-                    if result.status == 0 {
+                    // back to a real byte copy would turn a seconds-long seed
+                    // of a 100 GB directory into minutes of disk churn the
+                    // user never asked for. A non-APFS volume gets no seed
+                    // and a log line.
+                    //
+                    // `CLONE_NOFOLLOW` is load-bearing: without it a symlink
+                    // entry is replaced by a copy of its target, and a
+                    // dangling one fails `ENOENT` (both measured). With it the
+                    // link is reproduced as a link, which is what `cp -R` did.
+                    //
+                    // Failure is per entry and leaves NOTHING behind (measured:
+                    // a directory holding one mode-000 file fails `EACCES`
+                    // with no destination at all), where `cp -Rc` used to
+                    // place every readable sibling first. That is a trade, not
+                    // an accident — the notice names the entry either way, and
+                    // an absent directory is easier to reason about than a
+                    // partial one.
+                    if clonefile(source.path, dest.path, UInt32(CLONE_NOFOLLOW)) == 0 {
                         report.cloned += 1
                     } else {
+                        let reason = String(cString: strerror(errno))
                         report.failed += 1
                         report.failedEntries.append(relative)
-                        // Both `.private`. `cp` echoes the path it was given
-                        // in its error, so redacting only `relative` left the
-                        // same path in the clear one field along.
                         logger.notice(
-                            "seed: clone failed for \(relative, privacy: .private): \(result.stderr, privacy: .private)"
+                            "seed: clone failed for \(relative, privacy: .private): \(reason, privacy: .public)"
                         )
                     }
                 }

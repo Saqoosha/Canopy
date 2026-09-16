@@ -1621,8 +1621,7 @@ struct LauncherView: View {
                     // catch block below gives: the user can navigate away and
                     // destroy this view's `@State`, and a view-bound alert would
                     // then never appear. But WINDOW-modal, unlike that block.
-                    // The likeliest trigger is a `cp` that ran to the 300 s
-                    // bound, i.e. precisely when nobody is watching — and
+                    // The user may well have walked off during the seed — and
                     // `runModal()` is APPLICATION-modal, so it would block input
                     // to every other pane's live session until someone found the
                     // dialog. A sheet blocks the one window and returns here
