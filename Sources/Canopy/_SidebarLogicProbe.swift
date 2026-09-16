@@ -2501,12 +2501,13 @@ enum SidebarLogicProbe {
 
         // The first of the only two assertions in this file that execute
         // `GitWorktree.runCommand` (the other is the `seedIgnoredFiles` one
-        // below, which reaches it twice — once for `git`, once for `/bin/cp`)
-        // — every other git helper above is a pure string or filesystem check,
-        // so a green suite says nothing about the subprocess round trip. That
-        // gap was real: the drain was rewritten to run off the calling thread
-        // behind a `DispatchSemaphore` bound, and the whole suite stayed green
-        // because nothing had ever spawned anything.
+        // below, which reaches it once, for `git`, through `ignoredEntries`;
+        // the clone itself is a syscall now) — every other git helper above
+        // is a pure string or filesystem check, so a green suite says nothing
+        // about the subprocess round trip. That gap was real: the drain was
+        // rewritten to run off the calling thread behind a
+        // `DispatchSemaphore` bound, and the whole suite stayed green because
+        // nothing had ever spawned anything.
         //
         // A real repo rather than a fixture, because the round trip IS the
         // thing under test: spawn, stdout drain to EOF, reap, signal, read. A
@@ -2530,6 +2531,11 @@ enum SidebarLogicProbe {
         // records what is and is not known about why. Note the handler-deletion
         // mutation goes red only after the full bound elapses, so it presents
         // as a stalled probe first and a red one second.
+        //
+        // Both reach the reap by the two-drain branch (`wantsStdout: true`).
+        // The single-drain branch — the one the defect was measured on — was
+        // reached only by seeding's `/bin/cp`, and seeding no longer spawns
+        // anything, so that branch has no caller and no coverage.
         let spawnRepo = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProbeSpawn-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: spawnRepo) }
@@ -2554,45 +2560,43 @@ enum SidebarLogicProbe {
         record("ignoredEntries: subprocess round trip completes and drains stdout",
                spawnIgnored.contains("build/"))
 
-        // The defect that motivated the reap rewrite happened on `/bin/cp`,
-        // which runs with `wantsStdout: false` — one drain in the group, not
-        // two — so the assertion above reaches the reap by the OTHER branch
-        // and never touched this one. It asserts `cloned`/`failed` rather than
-        // just the file, because the reported symptom was precisely a copy
-        // that had placed every file and was still counted `failed`.
+        // Asserts `cloned`/`failed` rather than just the file, because the
+        // symptom this was first written for was precisely a copy that had
+        // placed every file and was still counted `failed` (a `/bin/cp` reap
+        // stall; seeding calls `clonefile(2)` now and spawns nothing, so that
+        // path is gone and the count is what remains worth pinning).
         //
-        // That it covers that branch rather than something upstream of it is
-        // measured, and the obvious mutation does NOT show it: forcing every
-        // `runCommand` to report failure makes `ignoredEntries` throw, so the
-        // loop
-        // body never runs and `/bin/cp` is never spawned — this assertion then
-        // reddens for a reason it was not added for. Scoping the forced
-        // failure to `/bin/cp` is the discriminating one; it leaves the
-        // assertion above GREEN and reddens only this one.
+        // `clonefile(2)` has no fallback, so this assertion also depends on
+        // the runner's temporary directory being APFS. It is on both this
+        // machine and `macos-26`; a red here on some future runner may be
+        // that rather than the seed.
         //
-        // `perEntryTimeout` is cut to 10 s because the CI step's
-        // `timeout-minutes: 5` would otherwise be KILLED rather than reddened
-        // by the shipped 300 s default: a stalled `/bin/cp` reap now fails at
-        // about eighteen (10 + the two slacks). It bounds the `cp` call only —
-        // `seedIgnoredFiles` calls `ignoredEntries` at its own default 60 s, so
-        // a reap that stops returning generally takes ~68 s here, on git,
-        // before any `cp` runs at all.
-        //
-        // `cp -Rc` FORCES clonefile, so this assertion also depends on the
-        // runner's temporary directory being APFS. It is on both this machine
-        // and `macos-26`; a red here on some future runner may be that rather
-        // than the reap.
+        // The symlink is the `CLONE_NOFOLLOW` assertion: `link` is ignored in
+        // its own right and points into `build/`. Dropping the flag clones
+        // the TARGET under the link's name — a regular file, so `islink`
+        // reads false and this reddens (measured, both directions). It is a
+        // top-level entry on purpose: a symlink INSIDE a cloned directory is
+        // reproduced as a symlink with or without the flag, so nesting it
+        // would pin nothing.
+        try? "build/\nlink\n".write(to: spawnRepo.appendingPathComponent(".gitignore"),
+                                    atomically: true, encoding: .utf8)
+        try? FileManager.default.createSymbolicLink(
+            atPath: spawnRepo.appendingPathComponent("link").path,
+            withDestinationPath: "build/artifact.o")
         let seedDest = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProbeSeed-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: seedDest) }
         try? FileManager.default.createDirectory(
             at: seedDest, withIntermediateDirectories: true)
-        let seeded = GitWorktree.seedIgnoredFiles(
-            repo: spawnRepo, worktree: seedDest, perEntryTimeout: 10)
-        record("seedIgnoredFiles: a completed /bin/cp is reported cloned, not failed",
-               seeded.cloned == 1 && seeded.failed == 0
+        let seeded = GitWorktree.seedIgnoredFiles(repo: spawnRepo, worktree: seedDest)
+        record("seedIgnoredFiles: a completed clone is reported cloned, not failed",
+               seeded.cloned == 2 && seeded.failed == 0
                    && FileManager.default.fileExists(
                        atPath: seedDest.appendingPathComponent("build/artifact.o").path))
+        let seededLink = (try? FileManager.default.destinationOfSymbolicLink(
+            atPath: seedDest.appendingPathComponent("link").path))
+        record("seedIgnoredFiles: a top-level symlink is reproduced as a symlink (CLONE_NOFOLLOW)",
+               seededLink == "build/artifact.o")
 
         // The `failedEntries.append` sites are the layer that can break
         // silently, and the pure assertions above cannot see them: delete all
@@ -2600,13 +2604,13 @@ enum SidebarLogicProbe {
         // own `SeedReport`s. Losing one degrades the alert to the
         // unactionable "N entries failed" this feature exists to avoid.
         //
-        // A mode-000 FILE, not directory — `cp -Rc` fails on the unreadable
-        // file while still placing its readable sibling (which is also the
-        // real shape: a failure that leaves the destination PARTIAL), and
-        // `removeItem` in the `defer` can still unlink it, since unlink needs
-        // only the parent's write bit. Root can read it, so this asserts
-        // nothing as uid 0; that is stated rather than hidden, and CI runs as
-        // `runner`.
+        // A mode-000 FILE inside the ignored directory. `clonefile(2)` fails
+        // the whole `blocked` entry with `EACCES` and places nothing — the
+        // readable sibling included (measured; `cp -Rc` used to place it
+        // first). `removeItem` in the `defer` can still unlink the source,
+        // since unlink needs only the parent's write bit. Root can read it,
+        // so this asserts nothing as uid 0; that is stated rather than
+        // hidden, and CI runs as `runner`.
         if getuid() != 0 {
             let failRepo = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ProbeSeedFail-\(UUID().uuidString)")
@@ -2640,8 +2644,8 @@ enum SidebarLogicProbe {
                 [.posixPermissions: 0o000],
                 ofItemAtPath: failRepo.appendingPathComponent("blocked/secret.o").path)
             let failed = GitWorktree.seedIgnoredFiles(
-                repo: failRepo, worktree: failDest, perEntryTimeout: 10)
-            record("seedIgnoredFiles: a failing /bin/cp is counted AND named",
+                repo: failRepo, worktree: failDest)
+            record("seedIgnoredFiles: a failing clone is counted AND named",
                    failed.failed == 1 && failed.failedEntries == ["blocked"])
             record("seedIgnoredFiles: the notice reaches the user with that name in it",
                    failed.failureNotice?.contains("• blocked") == true)
@@ -2666,7 +2670,7 @@ enum SidebarLogicProbe {
                     at: dir, withIntermediateDirectories: true)
             }
             let unlisted = GitWorktree.seedIgnoredFiles(
-                repo: notARepo, worktree: notARepoDest, perEntryTimeout: 10)
+                repo: notARepo, worktree: notARepoDest)
             record("seedIgnoredFiles: a failed listing is flagged, not read as an empty repo",
                    unlisted.couldNotList && unlisted.failed == 0 && unlisted.cloned == 0)
             record("failureNotice: a failed listing speaks even with no failed count",
