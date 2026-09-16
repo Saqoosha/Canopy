@@ -1079,12 +1079,15 @@ final class SessionStore {
     /// The most recent `SessionFailure`, or nil once dismissed. Read by every
     /// `DetailLauncher` on screen.
     ///
-    /// Cleared when a launcher NEWLY comes on screen by a user act, and only
-    /// then: Cmd+click on New Session (`openLauncherInNewPane`), Cmd+N over a
-    /// session pane (`openLauncherInFocusedPane`), a by-hand close that lands
-    /// on the launcher (`closeSession`), and the launcher's Start (`Detail`).
-    /// A launcher already on screen keeps its banner — Cmd+N over it, or
-    /// closing an unrelated pane beside it, is not a fresh launcher. Without
+    /// Cleared when a launcher comes on screen by a user act while NONE was
+    /// showing (`launcherIsOnScreen`): Cmd+click on New Session
+    /// (`openLauncherInNewPane`), Cmd+N over a session pane
+    /// (`openLauncherInFocusedPane`), a by-hand close that lands on the
+    /// launcher (`closeSession`), and the launcher's Start (`Detail`). A
+    /// launcher already on screen keeps its banner — Cmd+N over it, closing
+    /// an unrelated pane beside it, or opening a second launcher next to it
+    /// is not a fresh launcher, and the banner is one value every launcher
+    /// pane reads. Without
     /// the clear, a failure with nowhere to show (the pane died while other
     /// panes were open) waited for the next launcher and surfaced on one
     /// opened hours later — measured 2026-09-16: died 20:37, shown 22:58, on
@@ -1092,6 +1095,12 @@ final class SessionStore {
     /// keeps it (`keepingFailure: true`): a burst is N of those in a row, and
     /// the count is what they collapse into.
     var lastSessionFailure: SessionFailure?
+
+    /// Whether some `DetailLauncher` is rendering right now: the pane-less
+    /// one (`panes.isEmpty`) or any launcher pane.
+    var launcherIsOnScreen: Bool {
+        panes.isEmpty || panes.contains { $0.content == .launcher }
+    }
 
     /// Records a session that died, for the launcher banner.
     ///
@@ -2019,9 +2028,7 @@ final class SessionStore {
             selection = .launcher
             return
         }
-        // A launcher replacing a session pane is a fresh one; over a launcher
-        // pane this is a no-op and the banner stays — see `lastSessionFailure`.
-        if panes[focusedPaneIndex].content != .launcher { lastSessionFailure = nil }
+        if !launcherIsOnScreen { lastSessionFailure = nil }
         panes[focusedPaneIndex].content = .launcher
         syncSelectionToFocusedPane()
     }
@@ -2071,7 +2078,7 @@ final class SessionStore {
     @discardableResult
     func openLauncherInNewPane() -> Bool {
         guard panes.count < Self.paneAbsoluteCap else { return false }
-        lastSessionFailure = nil
+        if !launcherIsOnScreen { lastSessionFailure = nil }
         normalizePaneWeightsToVisualWidths()
         let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
         panes.append(PaneSlot(content: .launcher, preferredWidth: width))

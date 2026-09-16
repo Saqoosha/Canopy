@@ -10011,11 +10011,51 @@ enum SidebarLogicProbe {
             record("failure: Cmd+N over a launcher pane keeps its banner",
                    s3.lastSessionFailure != nil)
 
+            // The banner is one value every launcher pane reads, so a second
+            // launcher opened beside one showing it must not wipe it.
+            let s3b = SessionStore()
+            let a2 = OpenSession(origin: .local(cwd), resumeId: "fail-a2", title: "A2", project: "p", status: .live)
+            s3b._probeSeedOpenSessions([a2])
+            _ = s3b.openLauncherInNewPane()
+            _ = s3b.openInNewPane(a2.id)
+            s3b.noteSessionFailure(title: "T", message: "boom", status: 1)
+            s3b.openLauncherInFocusedPane()
+            record("failure: Cmd+N over a session pane beside a launcher pane keeps its banner",
+                   s3b.lastSessionFailure != nil && s3b.panes.allSatisfy { $0.content == .launcher })
+
+            let s3c = SessionStore()
+            _ = s3c.openLauncherInNewPane()
+            s3c.noteSessionFailure(title: "T", message: "boom", status: 1)
+            _ = s3c.openLauncherInNewPane()
+            record("failure: Cmd+click New Session beside a launcher pane keeps its banner",
+                   s3c.lastSessionFailure != nil && s3c.panes.count == 2)
+
+            // A by-hand close of the only session pane while a dormant session
+            // exists promotes it — no launcher, so the banner stays parked.
+            let s3d = SessionStore()
+            let p1 = OpenSession(origin: .local(cwd), resumeId: "fail-p1", title: "P1", project: "p", status: .live)
+            let p2 = OpenSession(origin: .local(cwd), resumeId: "fail-p2", title: "P2", project: "p", status: .dormant)
+            s3d._probeSeedOpenSessions([p1, p2])
+            _ = s3d.openInNewPane(p1.id)
+            s3d.noteSessionFailure(title: "T", message: "boom", status: 1)
+            s3d.closeSession(p1.id, keepingFailure: false)
+            record("failure: a by-hand close that promotes a session keeps the banner parked",
+                   s3d.lastSessionFailure != nil && s3d.panes.first?.content == .session(p2.id))
+
             let s4 = SessionStore()
+            let a4 = OpenSession(origin: .local(cwd), resumeId: "fail-a4", title: "A4", project: "p", status: .live)
+            s4._probeSeedOpenSessions([a4])
+            _ = s4.openInNewPane(a4.id)
             s4.noteSessionFailure(title: "T", message: "boom", status: 1)
             _ = s4.openLauncherInNewPane()
-            record("failure: Cmd+click New Session starts a clean launcher",
-                   s4.lastSessionFailure == nil)
+            record("failure: Cmd+click New Session beside a session pane starts a clean launcher",
+                   s4.lastSessionFailure == nil && s4.panes.count == 2)
+
+            let s4b = SessionStore()
+            s4b.noteSessionFailure(title: "T", message: "boom", status: 1)
+            _ = s4b.openLauncherInNewPane()
+            record("failure: Cmd+click New Session from the pane-less launcher keeps its banner",
+                   s4b.lastSessionFailure != nil && s4b.panes.count == 1)
 
             let s5 = SessionStore()
             while s5.panes.count < SessionStore.paneAbsoluteCap { _ = s5.openLauncherInNewPane() }
