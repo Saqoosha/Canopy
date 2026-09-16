@@ -9982,6 +9982,69 @@ enum SidebarLogicProbe {
                    { store.lastSessionFailure = nil; return store.lastSessionFailure == nil }())
         }
 
+        // The banner belongs to the launcher the crash PRODUCED. A launcher the
+        // user opens on purpose starts clean — measured 2026-09-16: a remote
+        // session died at 20:37 with other panes open (nowhere to show it),
+        // and two New Session panes Cmd+clicked at 22:58 both inherited it.
+        // Every deliberate route to a launcher is a separate site, so each
+        // gets its own assertion; a fixture reusing one store would let the
+        // first site's clear hide a regression in the next.
+        do {
+            let s1 = SessionStore()
+            s1.noteSessionFailure(title: "T", message: "boom", status: 1)
+            s1.openLauncherInFocusedPane()
+            record("failure: Cmd+N with no panes starts a clean launcher",
+                   s1.lastSessionFailure == nil)
+
+            let s2 = SessionStore()
+            let a = OpenSession(origin: .local(cwd), resumeId: "fail-a", title: "A", project: "p", status: .live)
+            s2._probeSeedOpenSessions([a])
+            _ = s2.openInNewPane(a.id)
+            s2.noteSessionFailure(title: "T", message: "boom", status: 1)
+            s2.openLauncherInFocusedPane()
+            record("failure: Cmd+N over a pane starts a clean launcher",
+                   s2.lastSessionFailure == nil && s2.panes.first?.content == .launcher)
+
+            let s3 = SessionStore()
+            s3.noteSessionFailure(title: "T", message: "boom", status: 1)
+            _ = s3.openLauncherInNewPane()
+            record("failure: Cmd+click New Session starts a clean launcher",
+                   s3.lastSessionFailure == nil)
+
+            let s4 = SessionStore()
+            s4.noteSessionFailure(title: "T", message: "boom", status: 1)
+            s4.select(.launcher)
+            record("failure: the sidebar's Launcher row starts a clean launcher",
+                   s4.lastSessionFailure == nil)
+
+            // Closing a session by hand is the other way a launcher appears
+            // (the last pane's session goes, the launcher takes its place).
+            let s5 = SessionStore()
+            let b = OpenSession(origin: .local(cwd), resumeId: "fail-b", title: "B", project: "p", status: .live)
+            s5._probeSeedOpenSessions([b])
+            _ = s5.openInNewPane(b.id)
+            s5.noteSessionFailure(title: "T", message: "boom", status: 1)
+            s5.closeSession(b.id)
+            record("failure: closing a session by hand clears it",
+                   s5.lastSessionFailure == nil && s5.panes.isEmpty)
+
+            // The crash closure's own close is the one that must NOT clear:
+            // it runs once per dying pane, and a burst is N of them in a row
+            // with no user act in between — the count is what it collapses to.
+            let s6 = SessionStore()
+            let c1 = OpenSession(origin: .local(cwd), resumeId: "fail-c1", title: "C1", project: "p", status: .live)
+            let c2 = OpenSession(origin: .local(cwd), resumeId: "fail-c2", title: "C2", project: "p", status: .live)
+            s6._probeSeedOpenSessions([c1, c2])
+            _ = s6.openInNewPane(c1.id)
+            _ = s6.openInNewPane(c2.id)
+            for dying in [c1, c2] {
+                s6.noteSessionFailure(title: dying.title, message: "boom", status: 1)
+                s6.closeSession(dying.id, keepingFailure: true)
+            }
+            record("failure: the crash path's close keeps the burst count",
+                   s6.lastSessionFailure?.count == 2 && s6.panes.isEmpty)
+        }
+
         // MARK: - Phone reply queue (a prompt sent at a busy session)
         //
         // The cap is DERIVED from `PhoneReplyQueue.capacity`, never re-typed:

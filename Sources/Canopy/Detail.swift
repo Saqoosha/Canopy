@@ -117,7 +117,7 @@ struct Detail: View {
                                 message: session.lastFatalError,
                                 status: status
                             )
-                            store.closeSession(session.id)
+                            store.closeSession(session.id, keepingFailure: true)
                         }
                         .id(session.mountIdentity)
                     }

@@ -555,6 +555,7 @@ final class SessionStore {
 
     func select(_ sel: SessionSelection) {
         selection = sel
+        if sel == .launcher { lastSessionFailure = nil }
         if case .session(let id) = sel,
            let open = openSessions.first(where: { $0.id == id }) {
             // Don't bump lastActiveAt on selection: that would re-sort the
@@ -1076,8 +1077,20 @@ final class SessionStore {
         var count: Int = 1
     }
 
-    /// The most recent `SessionFailure`, or nil once dismissed or superseded by a
-    /// session that started successfully. Read by `DetailLauncher`.
+    /// The most recent `SessionFailure`, or nil once dismissed. Read by
+    /// `DetailLauncher`.
+    ///
+    /// It belongs to the launcher the crash PRODUCED, so every route that puts
+    /// a launcher on screen by the user's own hand clears it first: Cmd+N and
+    /// the + button (`openLauncherInFocusedPane` / `openLauncherInNewPane`),
+    /// the sidebar's Launcher row (`select(.launcher)`), the launcher's own
+    /// Start, and a session closed by hand (`closeSession`). Without that, a
+    /// failure with nowhere to show — the pane died while other panes were
+    /// open — waited for the next launcher and surfaced on one opened hours
+    /// later (measured 2026-09-16: died 20:37, shown 22:58, on two New Session
+    /// panes at once). The crash closure's own `closeSession` is the one
+    /// caller that keeps it (`keepingFailure: true`), because a burst is N of
+    /// those in a row and the count is what they collapse into.
     var lastSessionFailure: SessionFailure?
 
     /// Records a session that died, for the launcher banner.
@@ -1098,8 +1111,10 @@ final class SessionStore {
         logger.error("session failure surfaced: \(text, privacy: .public)")
     }
 
-    func closeSession(_ id: UUID) {
+    /// `keepingFailure` is for the crash closure alone — see `lastSessionFailure`.
+    func closeSession(_ id: UUID, keepingFailure: Bool = false) {
         guard let idx = openSessions.firstIndex(where: { $0.id == id }) else { return }
+        if !keepingFailure { lastSessionFailure = nil }
         let session = openSessions[idx]
         logger.info("closeSession id=\(id.uuidString, privacy: .public) project=\(session.project, privacy: .public)")
         session.shim?.stop()
@@ -1997,6 +2012,7 @@ final class SessionStore {
     /// Replace focused pane's content with the launcher. Used by Cmd+N in
     /// multi-pane mode; single-pane Cmd+N routes through select(.launcher).
     func openLauncherInFocusedPane() {
+        lastSessionFailure = nil
         if panes.isEmpty {
             selection = .launcher
             return
@@ -2050,6 +2066,7 @@ final class SessionStore {
     @discardableResult
     func openLauncherInNewPane() -> Bool {
         guard panes.count < Self.paneAbsoluteCap else { return false }
+        lastSessionFailure = nil
         normalizePaneWeightsToVisualWidths()
         let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
         panes.append(PaneSlot(content: .launcher, preferredWidth: width))
