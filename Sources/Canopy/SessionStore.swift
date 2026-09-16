@@ -1076,9 +1076,31 @@ final class SessionStore {
         var count: Int = 1
     }
 
-    /// The most recent `SessionFailure`, or nil once dismissed or superseded by a
-    /// session that started successfully. Read by `DetailLauncher`.
+    /// The most recent `SessionFailure`, or nil once dismissed. Read by every
+    /// `DetailLauncher` on screen.
+    ///
+    /// Cleared when a launcher comes on screen by a user act while NONE was
+    /// showing (`launcherIsOnScreen`): Cmd+click on New Session
+    /// (`openLauncherInNewPane`), Cmd+N over a session pane
+    /// (`openLauncherInFocusedPane`), a by-hand close that lands on the
+    /// launcher (`closeSession`), and the launcher's Start (`Detail`). A
+    /// launcher already on screen keeps its banner — Cmd+N over it, closing
+    /// an unrelated pane beside it, or opening a second launcher next to it
+    /// is not a fresh launcher, and the banner is one value every launcher
+    /// pane reads. Without
+    /// the clear, a failure with nowhere to show (the pane died while other
+    /// panes were open) waited for the next launcher and surfaced on one
+    /// opened hours later — measured 2026-09-16: died 20:37, shown 22:58, on
+    /// two New Session panes at once. The crash closure's own `closeSession`
+    /// keeps it (`keepingFailure: true`): a burst is N of those in a row, and
+    /// the count is what they collapse into.
     var lastSessionFailure: SessionFailure?
+
+    /// Whether some `DetailLauncher` is rendering right now: the pane-less
+    /// one (`panes.isEmpty`) or any launcher pane.
+    var launcherIsOnScreen: Bool {
+        panes.isEmpty || panes.contains { $0.content == .launcher }
+    }
 
     /// Records a session that died, for the launcher banner.
     ///
@@ -1095,10 +1117,13 @@ final class SessionStore {
         } else {
             lastSessionFailure = SessionFailure(title: label, message: text)
         }
-        logger.error("session failure surfaced: \(text, privacy: .public)")
+        logger.error("session failure recorded: \(text, privacy: .public)")
     }
 
-    func closeSession(_ id: UUID) {
+    /// `keepingFailure` is true for the crash closure alone — see
+    /// `lastSessionFailure`. No default, so a caller that forgets it is a
+    /// compile error rather than a banner that never shows.
+    func closeSession(_ id: UUID, keepingFailure: Bool) {
         guard let idx = openSessions.firstIndex(where: { $0.id == id }) else { return }
         let session = openSessions[idx]
         logger.info("closeSession id=\(id.uuidString, privacy: .public) project=\(session.project, privacy: .public)")
@@ -1119,6 +1144,8 @@ final class SessionStore {
             }
         } else if case .session(let sel) = selection, sel == id {
             if openSessions.isEmpty {
+                // The launcher comes on screen here — see `lastSessionFailure`.
+                if !keepingFailure { lastSessionFailure = nil }
                 selection = .launcher
             } else {
                 // The closed session held the only pane. Put the next open
@@ -1994,13 +2021,14 @@ final class SessionStore {
         openInFocusedPane(ctx.available[next])
     }
 
-    /// Replace focused pane's content with the launcher. Used by Cmd+N in
-    /// multi-pane mode; single-pane Cmd+N routes through select(.launcher).
+    /// Replace focused pane's content with the launcher. Used by Cmd+N when
+    /// a pane exists; no-pane Cmd+N routes through select(.launcher).
     func openLauncherInFocusedPane() {
         if panes.isEmpty {
             selection = .launcher
             return
         }
+        if !launcherIsOnScreen { lastSessionFailure = nil }
         panes[focusedPaneIndex].content = .launcher
         syncSelectionToFocusedPane()
     }
@@ -2050,6 +2078,7 @@ final class SessionStore {
     @discardableResult
     func openLauncherInNewPane() -> Bool {
         guard panes.count < Self.paneAbsoluteCap else { return false }
+        if !launcherIsOnScreen { lastSessionFailure = nil }
         normalizePaneWeightsToVisualWidths()
         let width = focusedPane?.preferredWidth ?? Self.paneDefaultWidth
         panes.append(PaneSlot(content: .launcher, preferredWidth: width))

@@ -309,7 +309,7 @@ func legacyCloseAction() {
     }
     if let store = SessionStore.shared, let active = store.activeSession {
         logger.debug("Cmd+W: closing active session id=\(active.id.uuidString, privacy: .public)")
-        store.closeSession(active.id)
+        store.closeSession(active.id, keepingFailure: false)
     } else if let key = NSApp.keyWindow, isCanopyWindow(key) {
         logger.debug("Cmd+W: no active session, windowCloseOnly")
         windowCloseOnly(key)
