@@ -2532,10 +2532,9 @@ enum SidebarLogicProbe {
         // mutation goes red only after the full bound elapses, so it presents
         // as a stalled probe first and a red one second.
         //
-        // Both reach the reap by the two-drain branch (`wantsStdout: true`).
-        // The single-drain branch — the one the defect was measured on — was
-        // reached only by seeding's `/bin/cp`, and seeding no longer spawns
-        // anything, so that branch has no caller and no coverage.
+        // Both reach the reap by the two-drain branch (`wantsStdout: true`);
+        // the single-drain branch — the one the defect was measured on — has
+        // no coverage here since seeding stopped spawning `/bin/cp`.
         let spawnRepo = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProbeSpawn-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: spawnRepo) }

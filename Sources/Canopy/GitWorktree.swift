@@ -239,9 +239,7 @@ enum GitWorktree {
     /// `git` blocks forever on a git-lfs credential prompt, an askpass, or a
     /// stuck hook, and hangs the launcher with no error and nothing in the log.
     /// (Seeding used to run `/bin/cp` through here too — the measured note
-    /// below is from that era — and now calls `clonefile(2)` directly, so
-    /// every remaining caller is `git` and every one passes `wantsStdout:
-    /// true`; the single-stream path has no caller today.)
+    /// below is from that era — and now calls `clonefile(2)` directly.)
     ///
     /// `wantsStdout` is a parameter rather than always-on. Draining two pipes
     /// in sequence deadlocks the moment the one NOT being read fills its 64KB
@@ -689,12 +687,12 @@ enum GitWorktree {
     ///
     /// It used to shell out to `cp -Rc` — the same syscall, one process per
     /// entry — and that shape cost 20.7 s on the same repo (1,842 entries,
-    /// 1,499 cloned, logged 2026-09-16). Two things add up to the gap, and
-    /// the first draft of this note blamed only one: `cp -Rc` on the whole
-    /// tree in ONE process still took 13.5 s, because `cp` walks the tree in
-    /// user space and clones file by file (~8,000 files/s), while a single
-    /// directory-level `clonefile(2)` recurses in the kernel (~35,000
-    /// files/s). The process spawns were the other ~7 s.
+    /// 1,499 cloned, logged 2026-09-16). The process spawns were not the
+    /// main cost, though the first draft of this note said so: `cp -Rc` on
+    /// the whole tree in ONE process still took 13.5 s, because `cp` walks
+    /// the tree in user space and clones file by file (~8,000 files/s),
+    /// while a single directory-level `clonefile(2)` recurses in the kernel
+    /// (~35,000 files/s).
     ///
     /// The list is not configured anywhere: `git ls-files -o -i` already knows
     /// it, so this needs no equivalent of Orca's `orca.yaml
@@ -772,9 +770,9 @@ enum GitWorktree {
     /// How to reproduce one entry in the worktree.
     ///
     /// **A FIFO must be linked, never cloned, and this is not hypothetical
-    /// here.** `clonefile(2)` refuses a named pipe outright (`EINVAL`,
-    /// measured), and the `cp -Rc` this replaced was worse: it recreated one
-    /// as a NEW, empty pipe — measured — and 1Password's Environments feature
+    /// here.** `clonefile(2)` refuses a named pipe given as the entry
+    /// (`EINVAL`, measured; one nested inside a cloned directory is recreated
+    /// empty, as `cp -Rc` did for both) — and 1Password's Environments feature
     /// mounts secrets as a FIFO at `<repo>/.env`. A recreated one is a pipe
     /// nothing ever writes to, so the first `dotenv` read in the worktree
     /// blocks forever: the app hangs with no error. Re-mounting is not an
@@ -826,11 +824,11 @@ enum GitWorktree {
         /// Deliberately does not assert the files are missing. `failed` is
         /// reached from three sites carrying three distinct causes: a failed
         /// `stat`; a `createDirectory` or `createSymbolicLink` throw; and
-        /// `clonefile(2)` returning non-zero. The first two may have created
-        /// the parent directory before failing, and the third leaves nothing
-        /// for its entry (measured, recorded at the clone site) — but the
-        /// parent it was given IS created first, so an empty directory can
-        /// stand where the entry should be. Splitting the counter so this
+        /// `clonefile(2)` returning non-zero. A failed `stat` has created
+        /// nothing; the other two run after the parent directory exists, and
+        /// the clone leaves nothing for its entry (measured, recorded at the
+        /// clone site), so an empty parent can stand where the entry should
+        /// be. Splitting the counter so this
         /// could be specific was considered and dropped: it would take those
         /// entries out of every existing reader of `failed`.
         ///

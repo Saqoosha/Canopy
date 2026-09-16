@@ -52,10 +52,10 @@ final class CanopySettings {
     ///
     /// Default on, because without it a fresh worktree usually cannot build at
     /// all, and the copy is APFS copy-on-write — measured at 2.88 s and 95 MB
-    /// of real disk for a 132 GB / 100k-file tree. The toggle exists for the
-    /// case the measurement does not cover: a repo whose ignored tree is
-    /// enormous in FILE COUNT rather than bytes, where the cost is inode
-    /// creation (~35,000 files/s) and no amount of copy-on-write helps.
+    /// of real disk for a 132 GB / 100k-file tree. The toggle exists for a
+    /// repo whose ignored tree is enormous in FILE COUNT rather than bytes —
+    /// the cost is inode creation (~35,000 files/s), so millions of files
+    /// is where copy-on-write stops helping.
     var seedWorktreeArtifacts: Bool = true {
         didSet { save() }
     }
