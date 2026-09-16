@@ -101,6 +101,14 @@ struct WebViewContainer: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             logger.error("Provisional navigation failed: \(error.localizedDescription, privacy: .public)")
+            // Deliberately NOT routed into the reconnect retry loop. Doing so
+            // was the ONE path that could re-enter doReconnect while the
+            // previous shim's process/SSH/CLI is still alive (a page-load
+            // failure does not kill the shim), orphaning it and resuming the
+            // same remote transcript into a second concurrent CLI. A reload
+            // that never lands is a rarer, milder failure (stuck "Loading…"
+            // with a manual Retry available) than that split-brain, so it is
+            // left as a known limitation.
         }
 
         private var lastCrashReload: Date = .distantPast
@@ -121,8 +129,15 @@ struct WebViewContainer: NSViewRepresentable {
         func shimProcessDidDisconnect(_ shim: ShimProcess, sessionId: String) {
             logger.info("SSH disconnected, starting reconnection for session \(sessionId, privacy: .public)")
             lastDisconnectedSessionId = sessionId
-            reconnectAttempt = 0
-            connectionState?.status = .reconnecting(attempt: 1)
+            // Invalidate any timer already in flight WITHOUT resetting the
+            // attempt count. A resumed shim that dies again re-enters here, and
+            // its retries must keep climbing toward `maxReconnectAttempts`
+            // rather than restarting from 1 forever — the counter is reset only
+            // by `shimProcessDidBecomeReady`, i.e. a confirmed-live resume. The
+            // invalidation also closes the double-delivery window where a
+            // stderr exit and a shim-process exit both schedule a timer.
+            reconnectTimer?.invalidate()
+            reconnectTimer = nil
             connectionState?.onRetry = { [weak self] in
                 self?.retryReconnect()
             }
@@ -132,6 +147,19 @@ struct WebViewContainer: NSViewRepresentable {
         func shimProcessDidCrash(_ shim: ShimProcess, status: Int32) {
             logger.error("Shim crashed (status \(status)), returning to launcher")
             onCrash?(status)
+        }
+
+        func shimProcessDidBecomeReady(_ shim: ShimProcess) {
+            // The reconnected CLI reported its session id — the resume took.
+            // Clear the retry budget so a LATER, unrelated drop gets the full
+            // allotment again, and drop any stray pending timer.
+            guard shim === shimProcess else { return }
+            if reconnectAttempt != 0 {
+                logger.info("Reconnect confirmed live, resetting retry budget")
+            }
+            reconnectAttempt = 0
+            reconnectTimer?.invalidate()
+            reconnectTimer = nil
         }
 
         private func attemptReconnect(sessionId: String) {
@@ -198,6 +226,7 @@ struct WebViewContainer: NSViewRepresentable {
                 resumeIdIsExistingTranscript: true
             )
             newShim.delegate = self
+            newShim.isReconnect = true
             newShim.webView = webView
             ucc.add(newShim, name: "vscodeHost")
 
@@ -208,9 +237,22 @@ struct WebViewContainer: NSViewRepresentable {
                     session.shim = newShim
                     newShim.boundSession = session
                 }
-                reconnectAttempt = 0
+                // NOTE: `reconnectAttempt` is deliberately NOT reset here.
+                // `newShim.start()` returning true only means the Node shim
+                // spawned locally — the remote CLI resume has not happened yet.
+                // `shimProcessDidBecomeReady` resets the budget once the CLI
+                // actually reports back; until then a fast re-death keeps
+                // climbing toward the cap instead of looping forever.
                 connectionState?.status = .connected
-                newShim.webViewDidFinishLoad()
+                // Reload the page so the CC extension re-boots and re-drives
+                // its init → launch_claude sequence against the NEW shim. The
+                // reused webview already booted against the dead shim and only
+                // gets `webview_ready` (an unused flag in the shim) otherwise,
+                // so without the reload the new Node process never receives
+                // launch_claude and the remote CLI is never re-spawned — the
+                // overlay would clear over a dead pane. didFinish then calls
+                // newShim.webViewDidFinishLoad() naturally.
+                webView.reload()
             } else {
                 logger.error("Reconnect attempt \(self.reconnectAttempt) failed: shim start returned false")
                 ucc.removeScriptMessageHandler(forName: "vscodeHost")

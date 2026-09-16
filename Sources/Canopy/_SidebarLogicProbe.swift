@@ -9821,7 +9821,44 @@ enum SidebarLogicProbe {
             // transcripts under an encoding the requested path never names, and
             // the retry has nothing to retry with if this line is missing.
             record("remote script: the resolved path leads the output",
-                   script.hasPrefix("printf 'P %s\\n' \"`cd '/a/b' 2>/dev/null && pwd -P`\""))
+                   script.hasPrefix("printf 'P %s\\n' \"`cd '/a/b' 2>/dev/null && { pwd -W 2>/dev/null || pwd -P; }`\""))
+
+            // The braces are the assertion. Without them `cd X && pwd -W ||
+            // pwd -P` runs `pwd -P` in `$HOME` when the `cd` fails, and the
+            // "empty when the directory is gone" contract the caller relies on
+            // would silently report the home directory instead — which the
+            // retry would then look up.
+            record("remote script: a failed cd cannot fall through to pwd -P",
+                   !script.contains("&& pwd -W 2>/dev/null || pwd -P"))
+
+            // A native Windows host: Git Bash's `pwd -P` says `/c/Users/x`,
+            // the CLI files the transcript under `C--Users-x`, and only the
+            // `pwd -W` spelling encodes to that. Both drive-letter spellings
+            // must agree with each other AND carry no leading dash, which is
+            // the one place the POSIX rule differs (measured on win4090).
+            record("encodePath: a Windows path has no leading dash",
+                   ClaudeSessionHistory.encodePath("C:/Users/saqoosha/Downloads")
+                       == "C--Users-saqoosha-Downloads")
+            record("encodePath: backslash and slash spellings agree",
+                   ClaudeSessionHistory.encodePath(#"C:\Users\saqoosha\Downloads"#)
+                       == ClaudeSessionHistory.encodePath("C:/Users/saqoosha/Downloads"))
+            record("encodePath: the Git Bash spelling is still POSIX",
+                   ClaudeSessionHistory.encodePath("/c/Users/saqoosha/Downloads")
+                       == "-c-Users-saqoosha-Downloads")
+            record("encodePath: a bare drive letter with no separator is not a drive path",
+                   ClaudeSessionHistory.encodePath("C:foo") == "-C-foo")
+            // A session whose cwd IS a drive root: Git Bash's pwd -W is `C:/`,
+            // the CLI files it under `C--` (char-for-char of `C:\`). The POSIX
+            // split drops the trailing separator and would give `C-`, so the
+            // Windows branch must map the raw string. Repeated separators are
+            // the same shape and the CLI does not collapse them either.
+            record("encodePath: a Windows drive root keeps its separator",
+                   ClaudeSessionHistory.encodePath("C:/") == "C--"
+                       && ClaudeSessionHistory.encodePath(#"C:\"#) == "C--")
+            record("encodePath: repeated Windows separators are not collapsed",
+                   ClaudeSessionHistory.encodePath("C:/Users//x")
+                       == ClaudeSessionHistory.encodePath(#"C:\Users\\x"#)
+                       && ClaudeSessionHistory.encodePath("C:/Users//x") == "C--Users--x")
 
             record("remote script: a quote in the path cannot break out",
                    RemoteSessionHistory.remoteScript(

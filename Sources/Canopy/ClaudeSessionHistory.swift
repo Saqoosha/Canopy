@@ -97,15 +97,33 @@ enum ClaudeSessionHistory {
     }
 
     private static func encodePath(_ path: String, legacyDotAndSpace: Bool) -> String {
-        let components = path.split(separator: "/", omittingEmptySubsequences: true)
-        let mapped = components.map { component -> String in
-            String(component.map { ch -> Character in
-                if ch.isLetter || ch.isNumber || ch == "_" { return ch }
-                if legacyDotAndSpace, ch == "." || ch == " " { return ch }
-                return "-"
-            })
+        func mapChar(_ ch: Character) -> Character {
+            if ch.isLetter || ch.isNumber || ch == "_" { return ch }
+            if legacyDotAndSpace, ch == "." || ch == " " { return ch }
+            return "-"
         }
-        return "-" + mapped.joined(separator: "-")
+        // The Windows CLI encodes its cwd character-for-character — every
+        // separator and the drive colon included — so `C:\Users\x` and Git
+        // Bash's `C:/Users/x` both land in `C--Users-x`, and a bare drive root
+        // `C:\` in `C--` (measured on win4090). The POSIX `split` below
+        // collapses repeated and trailing separators, which is right for a
+        // real POSIX path but drops the root's trailing separator here and
+        // turns `C:/` into `C-`, a folder the CLI never writes.
+        if isWindowsDrivePath(path) {
+            return String(path.map(mapChar))
+        }
+        let components = path.split(separator: "/", omittingEmptySubsequences: true)
+        return "-" + components.map { String($0.map(mapChar)) }.joined(separator: "-")
+    }
+
+    /// `C:\…` or `C:/…` — a drive letter, a colon, and a separator.
+    static func isWindowsDrivePath(_ path: String) -> Bool {
+        let s = Array(path.utf8)
+        guard s.count >= 3 else { return false }
+        let letter = (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(s[0])
+            || (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(s[0])
+        return letter && s[1] == UInt8(ascii: ":")
+            && (s[2] == UInt8(ascii: "/") || s[2] == UInt8(ascii: "\\"))
     }
 
     /// Every folder-name variant that may hold sessions for `path`, in preference order.
