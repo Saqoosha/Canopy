@@ -10,6 +10,10 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ShimProcess
 protocol ShimProcessDelegate: AnyObject {
     func shimProcessDidDisconnect(_ shim: ShimProcess, sessionId: String)
     func shimProcessDidCrash(_ shim: ShimProcess, status: Int32)
+    /// The CLI reported a session id — it is alive and (on a reconnect) the
+    /// resume succeeded. Lets the reconnect state machine reset its retry
+    /// budget only on a confirmed-live session, never on a mere shim spawn.
+    func shimProcessDidBecomeReady(_ shim: ShimProcess)
 }
 
 /// Manages a Node.js subprocess running the vscode-shim that bridges the CC extension
@@ -281,6 +285,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     let workingDirectory: URL
     var resumeSessionId: String?
+    /// True only for a shim built by `Coordinator.doReconnect`. Gates the
+    /// `resumeSessionId` fallback in the exit forks so it applies to a genuine
+    /// reconnect (whose CLI has not reported `activeSessionId` yet) and NOT to
+    /// a first-time open of an existing remote session that dies before
+    /// connecting — that must keep going straight to the crash/error path.
+    var isReconnect: Bool = false
     /// See `OpenSession.resumeIdIsExistingTranscript`. Read only on the SSH
     /// remote path, where it gates `CANOPY_REMOTE_RESUME`.
     ///
@@ -3490,8 +3500,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if reqType == "rename_tab" || reqType == "update_session_state" {
                 // Track session ID for title persistence.
                 if let sid = request["sessionId"] as? String, UUID(uuidString: sid) != nil {
+                    let wasUnset = activeSessionId == nil
                     activeSessionId = sid
                     backfillResumeId(sid)
+                    // First time the CLI reports its id: it is alive, and on a
+                    // reconnect this is the proof the resume succeeded. Reset
+                    // the reconnect budget here rather than on shim spawn.
+                    if wasUnset { delegate?.shimProcessDidBecomeReady(self) }
                     // Save any title that was generated before we had a session ID.
                     // `userOwnsTitle` is checked here like on every other
                     // automatic path: a generation that finished before the id
@@ -7555,7 +7570,36 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         logger.error("CLI subprocess died (code \(exitCode)), stopping shim")
         resetActivityState()
         stop()
-        delegate?.shimProcessDidCrash(self, status: exitCode)
+        // `delegate` is a weak ref to the view Coordinator, which can be
+        // deallocated while this shim (owned by `OpenSession`) lives on. A
+        // dangling nil here makes the delegate calls below no-ops — the
+        // silently blank, stuck pane seen when a remote host was rebooted
+        // mid-session (win4090, 2026-09-16). Logged at `.error` so that
+        // no-op is legible.
+        if delegate == nil {
+            logger.error("CLI exit with no delegate — pane cannot be notified (session \(self.activeSessionId ?? "nil", privacy: .public))")
+        }
+        // Same fork as `handleProcessExit`. This IS the path a remote SSH drop
+        // takes: the remote CLI dies with the link, the wrapper's `ssh` exits
+        // non-zero, and the Node shim stays up to report it over stderr. Route
+        // it to the reconnect overlay (which `doReconnect` now completes by
+        // reloading the webview) rather than closing the pane.
+        // `activeSessionId ?? (isReconnect ? resumeSessionId : nil)`: a
+        // reconnect shim has not yet received the CLI's own session id (it
+        // arrives only after the resumed CLI boots), so on a repeat drop — a
+        // host still down through its reboot window, or an unresolvable
+        // `--resume` — only `resumeSessionId` is set, and routing on
+        // `activeSessionId` alone dropped those to the crash branch and closed
+        // the pane after one attempt. The `isReconnect` gate keeps a
+        // first-time open that dies before connecting (bad host, auth, missing
+        // remote claude) on the immediate crash/error path rather than
+        // spending ~21s of reconnect backoff on a connection that never was.
+        if remoteHost != nil, let sessionId = activeSessionId ?? (isReconnect ? resumeSessionId : nil) {
+            logger.error("SSH disconnection detected (CLI exit \(exitCode)), requesting reconnect for session \(sessionId, privacy: .public)")
+            delegate?.shimProcessDidDisconnect(self, sessionId: sessionId)
+        } else {
+            delegate?.shimProcessDidCrash(self, status: exitCode)
+        }
     }
 
     // MARK: - Process Exit
@@ -7595,7 +7639,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             boundSession?.lastFatalError = reason
         }
 
-        if remoteHost != nil, let sessionId = activeSessionId {
+        if remoteHost != nil, let sessionId = activeSessionId ?? (isReconnect ? resumeSessionId : nil) {
             logger.error("SSH disconnection detected (status \(status)), requesting reconnect for session \(sessionId, privacy: .public)")
             delegate?.shimProcessDidDisconnect(self, sessionId: sessionId)
         } else {

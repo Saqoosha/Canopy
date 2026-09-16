@@ -130,6 +130,14 @@ enum RemoteSessionHistory {
         // silently opens a fresh session. `~/Documents/repos` → `~/repos` is
         // the same shape on a path people actually work in.
         //
+        // A native Windows host is the same shape with a different spelling:
+        // the directory browser and the launcher speak Git Bash's
+        // `/c/Users/…`, the CLI's `process.cwd()` is `C:\Users\…`, and the
+        // transcript sits under `C--Users-…` (measured on win4090, 2026-09-16
+        // — the folder the CLI itself named when asked). The script's `P` line
+        // reports the drive-letter form there, so this retry is what makes
+        // "Continue session" work on Windows at all.
+        //
         // Deliberately a SECOND round trip rather than resolving up front:
         // resolution is a remote question (the link is on the other machine),
         // and the overwhelmingly common case is a path that resolves to
@@ -287,8 +295,18 @@ enum RemoteSessionHistory {
         // that follows matches nothing — which is exactly the case it is for.
         // Emitted unconditionally, and empty when the directory is gone, so a
         // missing line is a protocol failure rather than an ordinary outcome.
+        //
+        // `pwd -W` first: on a Windows host whose sshd shell is Git Bash it
+        // prints the drive-letter spelling (`C:/Users/…`), which is what the
+        // Windows CLI encodes its project folder from — `pwd -P` there says
+        // `/c/Users/…`, which encodes to a folder that never exists. Every
+        // other `sh` rejects `-W` and falls through. The braces are not
+        // optional: `cd … && pwd -W || pwd -P` would run `pwd -P` in the
+        // shell's current directory (the login directory after ssh) when the
+        // `cd` fails, and the empty-when-gone contract above would silently
+        // report that directory instead.
         return """
-        printf 'P %s\\n' "`cd \(singleQuoted(path)) 2>/dev/null && pwd -P`"
+        printf 'P %s\\n' "`cd \(singleQuoted(path)) 2>/dev/null && { pwd -W 2>/dev/null || pwd -P; }`"
         ls -1t \(globs) 2>/dev/null | head -\(maxCandidates) | tail -n +\(skipping + 1) | while IFS= read -r f; do
           b=`basename "$f"`
           id=${b%.jsonl}
