@@ -393,7 +393,7 @@ struct Sidebar: View {
         }
         if case .open(let s) = row {
             Button("Restart session") { store.restartSession(s.id) }
-            Button("Close session") { store.closeSession(s.id) }
+            Button("Close session") { store.closeSession(s.id, keepingFailure: false) }
         }
         if case .launcher = row {
             Button("Close pane") { handleClose(row) }
@@ -639,7 +639,7 @@ struct Sidebar: View {
     private func handleClose(_ row: SidebarRow) {
         switch row {
         case .open(let s):
-            store.closeSession(s.id)
+            store.closeSession(s.id, keepingFailure: false)
         case .launcher(let slot):
             // Closes the pane, not a session — there is no session behind it.
             if let idx = store.paneIndex(forSlot: slot) {

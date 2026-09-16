@@ -55,7 +55,7 @@ enum PaneHeaderMenu {
                 store?.restartSession(openId)
             })
             menu.addItem(ClosureMenuItem(title: "Close session") { [weak store] in
-                store?.closeSession(openId)
+                store?.closeSession(openId, keepingFailure: false)
             })
             // Absent, not disabled, for a remote session: the directory is on
             // the other machine, so there is no local folder the item could
