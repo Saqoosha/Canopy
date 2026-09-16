@@ -2456,7 +2456,7 @@ final class SessionStore {
         // first body evaluation, which then saw `panes=1`, and the button
         // came up misplaced and dead on 2/2 restore launches. With the apply
         // in `.task`, the first body evaluation sees `panes=0`, the apply
-        // follows ~100 ms later, and the button sits in the sidebar and
+        // follows ~120 ms later, and the button sits in the sidebar and
         // collapses/expands normally (2/2). `.task` is tied to the view
         // appearing, so it cannot run ahead of the render the way a drain
         // can. Whether the window has become main by then does not matter:

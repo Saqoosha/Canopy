@@ -22,6 +22,12 @@ struct CanopyApp: App {
                 Detail(store: sidebarStore)
             }
             .navigationSplitViewStyle(.balanced)
+            // The launch-restore snapshot is applied HERE, after this window's
+            // first render, and nowhere earlier — the store must be empty at
+            // that render or the sidebar-toggle button comes up dead (26.6)
+            // and misplaced (27.0). The measurements and the queue-drain
+            // anchor this replaced are on `SessionStore.makeRestored()`.
+            .task { sidebarStore.applyPendingRestore() }
             // Started here rather than in `applicationDidFinishLaunching`.
             // The old reason given — that the delegate callback runs before
             // SwiftUI builds the scene — is FALSE and has been deleted rather
@@ -31,14 +37,6 @@ struct CanopyApp: App {
             // this is the point where the store is unambiguously alive and in
             // hand, with no `SessionStore.shared` lookup. Fires once per
             // window; `startMacroPad` is idempotent.
-            // The launch-restore snapshot is applied HERE, after this window's
-            // first render, and nowhere earlier — the store must be empty at
-            // that render or the sidebar-toggle button comes up dead (26.6)
-            // and misplaced (27.0). The measurements and the queue-drain
-            // anchor this replaced are on `SessionStore.makeRestored()`.
-            // Ordered ahead of the other `.task`s so nothing below can
-            // observe a store that is about to be re-assigned wholesale.
-            .task { sidebarStore.applyPendingRestore() }
             .task { appDelegate.startMacroPad(store: sidebarStore) }
             // Same reasoning as the MacroPad task above: fires once per
             // window, `startRosterPublisher` is idempotent.
