@@ -10679,6 +10679,20 @@ enum SidebarLogicProbe {
             record("mirror replay: a single turn over the budget is sent empty, not oversized",
                    messages(of: tooBigCut)?.isEmpty == true
                        && ((try? JSONSerialization.data(withJSONObject: tooBigCut))?.count ?? Int.max) <= macBudget)
+            // The phone's fit: the turn window applies first, the byte budget under it, both on the same search.
+            let phoneCut = ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe")
+            record("mirror replay: a phone's oversized replay is cut to the turns that fit, like a Mac client's",
+                   (messages(of: phoneCut)?.count ?? 0) < oversized.count
+                       && ((try? JSONSerialization.data(withJSONObject: phoneCut))?.count ?? Int.max) <= macBudget)
+            record("mirror replay: the turn window trims a replay the budget alone would have passed",
+                   messages(of: ShimProcess.fittingReplay(wrapped(replay), maxBytes: 1 << 30, maxTurns: 2, client: "probe"))?.count == 4)
+            // What fits is measured after shaping, but what is returned is unshaped: the caller shapes it once, for real.
+            let shapedFit = ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe",
+                                                      shaped: { ShimProcess.emptyingReplayMessages($0) })
+            record("mirror replay: the budget is measured on the shaped replay and the unshaped one is returned",
+                   messages(of: shapedFit)?.count == oversized.count)
+            record("mirror replay: a phone's single turn over the budget is sent empty too",
+                   messages(of: ShimProcess.fittingReplay(tooBigEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.isEmpty == true)
         }
 
         // Summary

@@ -4248,10 +4248,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         post(Self.retargeted(Self.trimmingReplayForMacClient(payload), from: channelId, to: mirrors[key]?.channelId), to: target)
                     } else {
                         let session = boundSession?.resumeId ?? ""
-                        var trimmed = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
                         // Only a client that serves `canopy-asset` URLs: the in-process WKWebView sink is a plain webview
                         // and would draw a broken thumbnail.
-                        if target is MirrorConnection {
+                        let defersImages = target is MirrorConnection
+                        // Measured with the images already deferred, since that is the line the phone receives.
+                        var trimmed = Self.fittingReplay(
+                            payload, maxTurns: Self.mirrorReplayUserTurns, client: "a phone",
+                            shaped: defersImages ? { Self.deferringReadImagesForMirror($0) { _, _ in } } : { $0 })
+                        if defersImages {
                             trimmed = Self.deferringReadImagesForMirror(trimmed) { id, source in
                                 MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
                             }
@@ -4381,7 +4385,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// How much of a replayed conversation a phone receives: the last N turns the user typed.
     /// Measured 2026-09-14: a 38 MB transcript replayed 4.7 MB and took ~3.7 s to parse and draw on an iPhone.
     static let mirrorReplayUserTurns = 10
-    /// The largest replay a Mac client's `NDJSONLineBuffer` will accept, with headroom under its 16 MiB line limit.
+    /// The largest replay a client's line buffer will accept, with headroom under the 16 MiB line limit
+    /// both `NDJSONLineBuffer` and the phone's `LineBuffer` (Canopy-Mobile #59) enforce.
     static let mirrorReplayMaxBytes = 12 << 20
     /// The request id prefix the mirror server uses when it fetches a replay on a phone's behalf.
     static let mirrorPrefetchPrefix = "canopy-prefetch-"
@@ -4464,50 +4469,58 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Trim a Mac client's `get_session` replay until it serializes under `maxBytes` (default `mirrorReplayMaxBytes`).
     static func trimmingReplayForMacClient(_ message: [String: Any], maxBytes: Int = mirrorReplayMaxBytes) -> [String: Any] {
-        guard let data = try? JSONSerialization.data(withJSONObject: message),
-              data.count > maxBytes
-        else { return message }
-        func typedCount(in container: [String: Any]) -> Int {
+        fittingReplay(message, maxBytes: maxBytes, client: "a Mac client")
+    }
+
+    /// The typed turns of a `get_session` replay, in either envelope shape.
+    static func typedTurnCount(in message: [String: Any]) -> Int {
+        func count(in container: [String: Any]) -> Int {
             guard let messages = (container["response"] as? [String: Any])?["messages"] as? [[String: Any]] else { return 0 }
             return messages.filter(isTypedUserTurn).count
         }
-        let count: Int
-        if message["type"] as? String == "from-extension",
-           let nested = message["message"] as? [String: Any] {
-            count = typedCount(in: nested)
-        } else {
-            count = typedCount(in: message)
+        if message["type"] as? String == "from-extension", let nested = message["message"] as? [String: Any] {
+            return count(in: nested)
         }
-        let best: Int
-        let trimmed: [String: Any]
-        if count >= 1 {
-            var lo = 1
-            var hi = count
-            var found = 1
-            while lo <= hi {
-                let mid = (lo + hi) / 2
-                let candidate = trimmingReplayForMirror(message, keepUserTurns: mid, logging: false)
-                if let sized = try? JSONSerialization.data(withJSONObject: candidate),
-                   sized.count <= maxBytes {
-                    found = mid
-                    lo = mid + 1
-                } else {
-                    hi = mid - 1
-                }
+        return count(in: message)
+    }
+
+    /// `message` trimmed to the most typed turns, at most `maxTurns`, whose replay serializes under `maxBytes`
+    /// once `shaped`; emptied when not even one turn fits, since a line over the client's limit would make it cut
+    /// the connection, on every reconnect, for as long as the session stays this size.
+    ///
+    /// `shaped` is what the caller will do to the replay before sending — a phone's image deferral, nothing for a
+    /// Mac client — applied here only to measure: the caller applies it for real, once, to what this returns. The
+    /// result is untrimmed when it already fits, so a short session never pays the search.
+    static func fittingReplay(
+        _ message: [String: Any], maxBytes: Int = mirrorReplayMaxBytes, maxTurns: Int = Int.max, client: String,
+        shaped: ([String: Any]) -> [String: Any] = { $0 }
+    ) -> [String: Any] {
+        func fits(_ candidate: [String: Any]) -> Bool {
+            guard let sized = try? JSONSerialization.data(withJSONObject: shaped(candidate)) else { return false }
+            return sized.count <= maxBytes
+        }
+        let count = typedTurnCount(in: message)
+        let start = min(count, maxTurns)
+        let first = start < count ? trimmingReplayForMirror(message, keepUserTurns: start) : message
+        if fits(first) { return first }
+        var lo = 1
+        var hi = start - 1
+        var found = 0
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if fits(trimmingReplayForMirror(message, keepUserTurns: mid, logging: false)) {
+                found = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
             }
-            best = found
-            trimmed = trimmingReplayForMirror(message, keepUserTurns: best)
-        } else {
-            best = 0
-            trimmed = message
         }
-        if let sized = try? JSONSerialization.data(withJSONObject: trimmed),
-           sized.count <= maxBytes {
-            logger.notice("[mirror] replay for a Mac client trimmed to \(best, privacy: .public) turns to fit \(maxBytes, privacy: .public) bytes")
-            return trimmed
+        if found >= 1 {
+            logger.notice("[mirror] replay for \(client, privacy: .public) trimmed to \(found, privacy: .public) turns to fit \(maxBytes, privacy: .public) bytes")
+            return trimmingReplayForMirror(message, keepUserTurns: found)
         }
         // Nothing fits: send an empty replay rather than a line the client will cut the connection on.
-        logger.error("[mirror] replay for a Mac client still exceeds \(maxBytes, privacy: .public) bytes after trimming to \(best, privacy: .public) turn(s); sending it empty")
+        logger.error("[mirror] replay for \(client, privacy: .public) exceeds \(maxBytes, privacy: .public) bytes even at one turn; sending it empty")
         return emptyingReplayMessages(message)
     }
 
