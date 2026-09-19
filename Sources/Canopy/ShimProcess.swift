@@ -4253,8 +4253,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         let defersImages = target is MirrorConnection
                         // Measured with the images already deferred, since that is the line the phone receives.
                         var trimmed = Self.fittingReplay(
-                            payload, maxTurns: Self.mirrorReplayUserTurns, client: "a phone",
-                            shaped: defersImages ? { Self.deferringReadImagesForMirror($0) { _, _ in } } : { $0 })
+                            payload, maxTurns: Self.mirrorReplayUserTurns, client: defersImages ? "a phone" : "a mirror window",
+                            shaped: defersImages ? { Self.deferringReadImagesForMirror($0, logging: false) { _, _ in } } : { $0 })
                         if defersImages {
                             trimmed = Self.deferringReadImagesForMirror(trimmed) { id, source in
                                 MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
@@ -4394,7 +4394,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Replace the base64 images of `Read` tool results in a `get_session` replay with a `canopy-asset` URL the phone fetches only when the thumbnail scrolls into view.
     ///
     /// Only `Read` results: the extension draws nothing for them, so the one consumer is `ImagePreviewScript`'s thumbnail. Measured 2026-09-14: images were 78% of a 30-turn replay.
-    static func deferringReadImagesForMirror(_ message: [String: Any], store: (String, [String: Any]) -> Void) -> [String: Any] {
+    static func deferringReadImagesForMirror(_ message: [String: Any], logging: Bool = true, store: (String, [String: Any]) -> Void) -> [String: Any] {
         func locate(_ container: [String: Any]) -> [[String: Any]]? {
             (container["response"] as? [String: Any])?["messages"] as? [[String: Any]]
         }
@@ -4445,7 +4445,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
         }
         guard deferred > 0 else { return message }
-        logger.notice("[mirror] replay images deferred: \(deferred, privacy: .public), \(saved, privacy: .public) bytes not sent")
+        if logging {
+            logger.notice("[mirror] replay images deferred: \(deferred, privacy: .public), \(saved, privacy: .public) bytes not sent")
+        }
         var response = inner["response"] as? [String: Any] ?? [:]
         response["messages"] = rewritten
         var updatedInner = inner

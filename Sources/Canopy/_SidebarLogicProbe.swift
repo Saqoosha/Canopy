@@ -10691,6 +10691,30 @@ enum SidebarLogicProbe {
                                                       shaped: { ShimProcess.emptyingReplayMessages($0) })
             record("mirror replay: the budget is measured on the shaped replay and the unshaped one is returned",
                    messages(of: shapedFit)?.count == oversized.count)
+            // Shaping that halves every turn: unshaped, one 3 MiB turn fits a 4 MiB budget; shaped, two do. The
+            // search must see the shaped size, and the two turns must come back at full length.
+            func halving(_ envelope: [String: Any]) -> [String: Any] {
+                guard var inner = envelope["message"] as? [String: Any], var response = inner["response"] as? [String: Any],
+                      let entries = response["messages"] as? [[String: Any]] else { return envelope }
+                response["messages"] = entries.map { entry -> [String: Any] in
+                    guard var message = entry["message"] as? [String: Any], let text = message["content"] as? String else { return entry }
+                    message["content"] = String(text.prefix(text.count / 2))
+                    var updated = entry
+                    updated["message"] = message
+                    return updated
+                }
+                inner["response"] = response
+                var updated = envelope
+                updated["message"] = inner
+                return updated
+            }
+            let halvedFit = messages(of: ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe", shaped: halving))
+            record("mirror replay: the search measures every candidate shaped, and returns it unshaped",
+                   halvedFit?.count == 4 && ((halvedFit?.first?["message"] as? [String: Any])?["content"] as? String)?.count == bigText.count + 1)
+            // 6 turns capped at 4, and 4 do not fit: cut further, under the window.
+            let cappedFit = messages(of: ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 4, client: "probe"))
+            record("mirror replay: a window that itself exceeds the budget is cut further, under the window",
+                   cappedFit?.count == 2)
             record("mirror replay: a phone's single turn over the budget is sent empty too",
                    messages(of: ShimProcess.fittingReplay(tooBigEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.isEmpty == true)
             // Trimming to every turn still drops what precedes the first: a replay over the budget only in
