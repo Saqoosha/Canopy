@@ -4504,7 +4504,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let first = start < count ? trimmingReplayForMirror(message, keepUserTurns: start) : message
         if fits(first) { return first }
         var lo = 1
-        var hi = start - 1
+        // Trimming to every turn still drops what precedes the first one, so `count` is a candidate too.
+        var hi = start < count ? start - 1 : start
         var found = 0
         while lo <= hi {
             let mid = (lo + hi) / 2

@@ -10693,6 +10693,14 @@ enum SidebarLogicProbe {
                    messages(of: shapedFit)?.count == oversized.count)
             record("mirror replay: a phone's single turn over the budget is sent empty too",
                    messages(of: ShimProcess.fittingReplay(tooBigEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.isEmpty == true)
+            // Trimming to every turn still drops what precedes the first: a replay over the budget only in
+            // that prefix keeps all its turns, for a Mac client and a phone alike.
+            var bigResult = toolResult
+            bigResult["message"] = ["role": "user", "content": [["type": "tool_result", "tool_use_id": "t0", "content": String(repeating: "z", count: 5 << 20)]]] as [String: Any]
+            let prefixedEnv = wrapped([bigResult, user("after"), assistant()])
+            record("mirror replay: a budget blown only by entries before the first turn keeps every turn",
+                   messages(of: ShimProcess.trimmingReplayForMacClient(prefixedEnv, maxBytes: macBudget))?.count == 2
+                       && messages(of: ShimProcess.fittingReplay(prefixedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.count == 2)
         }
 
         // Summary
