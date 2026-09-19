@@ -21,7 +21,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     // Touched from the Network queue in `scheduleReceive`; NWConnection is
     // thread-safe and the line buffer is locked internally.
     nonisolated(unsafe) private let connection: NWConnection
-    nonisolated(unsafe) private let lineBuffer = NDJSONLineBuffer()
+    nonisolated(unsafe) private let lineBuffer = NDJSONLineBuffer(acceptsCompressed: true)
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorAttach")
     private weak var webView: WKWebView?
     private let sessionId: String
@@ -150,8 +150,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                     }
                     return
                 }
-                // The transcript replay is the one line this size. Its timestamp against
-                // `attach_ok` is the transfer time; the server logs its own assembly time.
+                // In practice the transcript replay; the gap from `attach_ok` is the host's assembly plus transfer.
                 for (frame, line) in zip(frames, lines) where line.count >= 1 << 20 {
                     let wire = if case .compressed(let payload, _) = frame { payload.count } else { line.count }
                     logger.notice("[mirror-attach] received a \(line.count, privacy: .public)-byte line (\(wire, privacy: .public) on the wire)")

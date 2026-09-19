@@ -129,7 +129,7 @@ final class MirrorConnection: MirrorSink {
     // Touched from the Network queue in `scheduleReceive`; NWConnection is
     // thread-safe and the line buffer is locked internally.
     nonisolated(unsafe) private let connection: NWConnection
-    nonisolated(unsafe) private let lineBuffer = NDJSONLineBuffer()
+    nonisolated(unsafe) private let lineBuffer = NDJSONLineBuffer(acceptsCompressed: false)
     private let store: SessionStore
     private weak var server: MirrorServer?
     private weak var shim: ShimProcess?
@@ -202,7 +202,7 @@ final class MirrorConnection: MirrorSink {
             }
             if let data, !data.isEmpty {
                 guard let frames = self.lineBuffer.append(data), let lines = NDJSONLineBuffer.lines(from: frames) else {
-                    logger.error("[mirror-server] unreadable frame (over \(NDJSONLineBuffer.maxLineBytes) bytes, or a bad Z header or payload); closing")
+                    logger.error("[mirror-server] unreadable frame (over \(NDJSONLineBuffer.maxLineBytes) bytes, a bad Z header, or a Z frame this side does not take); closing")
                     DispatchQueue.main.async { MainActor.assumeIsolated { self.closeFromPeer() } }
                     return
                 }
@@ -278,7 +278,7 @@ final class MirrorConnection: MirrorSink {
             "extensionVersion": CCExtension.extensionVersion() ?? "",
             // The replay is already being fetched; the phone answers its page's get_session_request with it.
             "prefetchedSessionRequestId": prefetchId,
-            // Echoed so the client knows `Z` frames follow; an older server leaves it out and sends none.
+            // Confirms the negotiation for a client that wants to check; none reads it yet.
             "compress": compressOutbound ? MirrorWire.compressionName : "",
         ])
         shim.attachMirror(self)
@@ -374,9 +374,7 @@ final class MirrorConnection: MirrorSink {
             logger.error("[mirror-server] send serialize failed: \(error.localizedDescription, privacy: .public)")
             return
         }
-        // Framed and sent on the connection's queue: deflating a multi-megabyte replay is tens
-        // of milliseconds the main thread should not spend, and every line taking one serial
-        // path is what keeps a small plain line from overtaking a large compressed one.
+        // Encoded off the main thread; one serial path keeps a small line from overtaking a large one.
         let compress = compressOutbound
         queue.async { [connection] in
             let frame = MirrorWire.encode(line: data, compress: compress)
