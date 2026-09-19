@@ -182,6 +182,10 @@ Mirror:  attach {"status": true} → attach_ok, then {"type":"status", branch, v
          The phone draws the display-ready trio; a Mac pane applies the raw trio to its own
          StatusBarData (MirrorStatusFrame.apply) and recomputes. Not sent to a client that did
          not ask, so an older phone never posts it into its page. Both clients ask since 2.39.
+         attach {"compress": "br"} → from attach_ok on, any line ≥ 4 KB that Brotli shrinks
+         goes to that client as `Z <n> <m>\n` + n bytes decoding to m (`MirrorWire`, which
+         also records why Brotli over zlib/lzma). The Mac client asks; the phone does not
+         yet. Only clients decode Z; the server refuses it (pre-auth decompression bomb).
 ```
 
 ## CLI Bridge Details
