@@ -143,6 +143,9 @@ final class MirrorConnection: MirrorSink {
     fileprivate private(set) var attachedSessionId = ""
     /// Feeds a client that asked for the status bar at attach; nil for one that did not.
     private var statusPublisher: MirrorStatusPublisher?
+    /// True once the client's `attach` asked for `MirrorWire` compression. Written on the main
+    /// actor before the first send is enqueued; every send captures it by value on the way out.
+    private var compressOutbound = false
     private var cleanedUp = false
 
     /// Whether a client identity gets the phone's replay trim / image rewrite.
@@ -198,8 +201,8 @@ final class MirrorConnection: MirrorSink {
                 return
             }
             if let data, !data.isEmpty {
-                guard let lines = self.lineBuffer.append(data) else {
-                    logger.error("[mirror-server] line over \(NDJSONLineBuffer.maxLineBytes) bytes; closing")
+                guard let frames = self.lineBuffer.append(data), let lines = NDJSONLineBuffer.lines(from: frames) else {
+                    logger.error("[mirror-server] unreadable frame (over \(NDJSONLineBuffer.maxLineBytes) bytes, or a bad Z header or payload); closing")
                     DispatchQueue.main.async { MainActor.assumeIsolated { self.closeFromPeer() } }
                     return
                 }
@@ -262,6 +265,7 @@ final class MirrorConnection: MirrorSink {
         isMacClient = !Self.appliesPhoneReplayRewrites(client: dict["client"] as? String)
         self.shim = shim
         attachedSessionId = sessionId
+        compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
         // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
         let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
@@ -274,6 +278,8 @@ final class MirrorConnection: MirrorSink {
             "extensionVersion": CCExtension.extensionVersion() ?? "",
             // The replay is already being fetched; the phone answers its page's get_session_request with it.
             "prefetchedSessionRequestId": prefetchId,
+            // Echoed so the client knows `Z` frames follow; an older server leaves it out and sends none.
+            "compress": compressOutbound ? MirrorWire.compressionName : "",
         ])
         shim.attachMirror(self)
         if !prefetchId.isEmpty {
@@ -368,13 +374,18 @@ final class MirrorConnection: MirrorSink {
             logger.error("[mirror-server] send serialize failed: \(error.localizedDescription, privacy: .public)")
             return
         }
-        var line = data
-        line.append(0x0A)
-        connection.send(content: line, completion: .contentProcessed { error in
-            if let error {
-                logger.error("[mirror-server] send failed: \(error.localizedDescription, privacy: .public)")
-            }
-        })
+        // Framed and sent on the connection's queue: deflating a multi-megabyte replay is tens
+        // of milliseconds the main thread should not spend, and every line taking one serial
+        // path is what keeps a small plain line from overtaking a large compressed one.
+        let compress = compressOutbound
+        queue.async { [connection] in
+            let frame = MirrorWire.encode(line: data, compress: compress)
+            connection.send(content: frame, completion: .contentProcessed { error in
+                if let error {
+                    logger.error("[mirror-server] send failed: \(error.localizedDescription, privacy: .public)")
+                }
+            })
+        }
     }
 
     private func closeFromPeer() {
@@ -431,27 +442,5 @@ enum MirrorImageStore {
             return (smaller, "image/jpeg")
         }
         return (bytes, source["media_type"] as? String ?? "application/octet-stream")
-    }
-}
-
-/// Accumulates socket bytes and yields complete newline-terminated lines.
-final class NDJSONLineBuffer: @unchecked Sendable {
-    /// Above the largest legitimate line (a base64 `index.js`, ~7 MB); a peer that never sends a newline is cut off here.
-    static let maxLineBytes = 16 << 20
-    private let lock = NSLock()
-    private var buffer = Data()
-
-    /// Complete lines, or nil once an unterminated line exceeds `maxLineBytes`.
-    func append(_ chunk: Data) -> [Data]? {
-        lock.lock()
-        defer { lock.unlock() }
-        buffer.append(chunk)
-        guard buffer.count <= Self.maxLineBytes else { return nil }
-        var lines: [Data] = []
-        while let range = buffer.range(of: Data([0x0A])) {
-            lines.append(buffer.subdata(in: buffer.startIndex..<range.lowerBound))
-            buffer.removeSubrange(buffer.startIndex..<range.upperBound)
-        }
-        return lines
     }
 }

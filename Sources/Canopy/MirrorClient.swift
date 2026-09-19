@@ -114,7 +114,10 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         guard !closed else { return }
         logger.notice("[mirror-attach] connected")
         // Token is caller-supplied: a peer's stored password, or this Mac's own for the DEBUG window.
-        sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true])
+        // `compress`: a Mac client takes the whole transcript in one line, and that line is
+        // what a slow uplink spends its time on (see `MirrorWire`).
+        sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
+                        "compress": MirrorWire.compressionName])
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
         if let webView {
@@ -136,8 +139,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 return
             }
             if let data, !data.isEmpty {
-                guard let lines = self.lineBuffer.append(data) else {
-                    logger.error("[mirror-attach] line over \(NDJSONLineBuffer.maxLineBytes) bytes; closing")
+                guard let frames = self.lineBuffer.append(data), let lines = NDJSONLineBuffer.lines(from: frames) else {
+                    logger.error("[mirror-attach] unreadable frame (over \(NDJSONLineBuffer.maxLineBytes) bytes, or a bad Z header or payload); closing")
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated {
                             guard !self.closed else { return }
@@ -146,6 +149,12 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                         }
                     }
                     return
+                }
+                // The transcript replay is the one line this size. Its timestamp against
+                // `attach_ok` is the transfer time; the server logs its own assembly time.
+                for (frame, line) in zip(frames, lines) where line.count >= 1 << 20 {
+                    let wire = if case .compressed(let payload, _) = frame { payload.count } else { line.count }
+                    logger.notice("[mirror-attach] received a \(line.count, privacy: .public)-byte line (\(wire, privacy: .public) on the wire)")
                 }
                 DispatchQueue.main.async { MainActor.assumeIsolated { lines.forEach(self.handleLineData) } }
             }

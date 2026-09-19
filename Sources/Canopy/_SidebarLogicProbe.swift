@@ -10503,6 +10503,69 @@ enum SidebarLogicProbe {
                    out.count == 1 && out[0].count == 3_000_000 && Date().timeIntervalSince(start) < 1.0)
         }
 
+        // Mirror wire: the Z frame beside plain lines, and the encode/decode pair around it.
+        do {
+            let small = Data("{\"type\":\"stream_event\"}".utf8)
+            let big = Data(String(repeating: "{\"type\":\"user\",\"text\":\"a line that repeats\"},", count: 400).utf8)
+            record("mirror wire: a line under the threshold goes out plain even when compression is on",
+                   MirrorWire.encode(line: small, compress: true) == small + Data([0x0A]))
+            record("mirror wire: a large line goes out plain when the connection did not negotiate",
+                   MirrorWire.encode(line: big, compress: false) == big + Data([0x0A]))
+            let framed = MirrorWire.encode(line: big, compress: true)
+            let header = framed.prefix(while: { $0 != 0x0A })
+            let fields = String(decoding: header, as: UTF8.self).split(separator: " ")
+            let payloadCount = fields.count == 3 ? Int(fields[1]) ?? -1 : -1
+            let rawCount = fields.count == 3 ? Int(fields[2]) ?? -1 : -1
+            let payload = framed.suffix(from: header.count + 1)
+            record("mirror wire: a large line becomes `Z <n> <m>\\n` + exactly n bytes, m the line's length, and fewer bytes than it had",
+                   fields.first == "Z" && payloadCount == payload.count && rawCount == big.count && framed.count < big.count)
+            record("mirror wire: the payload decodes back to the line, without a trailing newline",
+                   MirrorWire.decode(compressed: payload, rawCount: big.count) == big)
+            record("mirror wire: bytes that are not Brotli decode to nil, not to garbage",
+                   MirrorWire.decode(compressed: Data("not brotli at all".utf8), rawCount: 17) == nil)
+            record("mirror wire: a header that under-reports the length yields nil rather than a truncated line",
+                   MirrorWire.decode(compressed: payload, rawCount: big.count - 1) == nil)
+            record("mirror wire: a header that over-reports the length yields nil rather than a padded line",
+                   MirrorWire.decode(compressed: payload, rawCount: big.count + 1) == nil)
+            record("mirror wire: a length over the line limit is refused before decoding",
+                   MirrorWire.decode(compressed: payload, rawCount: NDJSONLineBuffer.maxLineBytes + 1) == nil)
+            record("mirror wire: incompressible bytes above the threshold stay plain rather than growing",
+                   MirrorWire.encode(line: Data((0..<8192).map { _ in UInt8.random(in: 0...255) }), compress: true).last == 0x0A)
+
+            // The buffer: a Z frame split at every boundary, next to plain lines on both sides.
+            let buffer = NDJSONLineBuffer()
+            var stream = small + Data([0x0A]) + framed + small + Data([0x0A])
+            var frames: [NDJSONLineBuffer.Frame] = []
+            var offset = 0
+            var broke = false
+            while offset < stream.count {
+                guard let got = buffer.append(stream[offset..<min(offset + 7, stream.count)]) else { broke = true; break }
+                frames += got
+                offset += 7
+            }
+            record("mirror wire buffer: plain, Z, plain in 7-byte chunks come out as three frames in order",
+                   !broke && frames == [.line(small), .compressed(payload, rawCount: big.count), .line(small)])
+            record("mirror wire buffer: the frames decode to the three lines",
+                   NDJSONLineBuffer.lines(from: frames) == [small, big, small])
+            record("mirror wire buffer: a Z frame whose payload has not all arrived yields nothing yet",
+                   NDJSONLineBuffer().append(framed.prefix(framed.count - 1)) == [])
+            stream = Data("Z 5 9\n".utf8) + Data("abcde".utf8) + Data("Z 0 0\n".utf8) + small + Data([0x0A])
+            record("mirror wire buffer: a zero-length Z frame and a plain line after a Z frame are both delivered",
+                   NDJSONLineBuffer().append(stream) == [.compressed(Data("abcde".utf8), rawCount: 9), .compressed(Data(), rawCount: 0), .line(small)])
+            record("mirror wire buffer: a Z header without both lengths, or with a non-number, is a broken stream (nil), not a line",
+                   NDJSONLineBuffer().append(Data("Z 5\n".utf8)) == nil && NDJSONLineBuffer().append(Data("Z x 9\n".utf8)) == nil
+                       && NDJSONLineBuffer().append(Data("Zombie\n".utf8)) == nil)
+            record("mirror wire buffer: a Z header naming either length over the line limit is refused before any payload is read",
+                   NDJSONLineBuffer().append(Data("Z \(NDJSONLineBuffer.maxLineBytes + 1) 1\n".utf8)) == nil
+                       && NDJSONLineBuffer().append(Data("Z 1 \(NDJSONLineBuffer.maxLineBytes + 1)\n".utf8)) == nil)
+            record("mirror wire buffer: a Z frame that never ends its header is cut off",
+                   NDJSONLineBuffer().append(Data("Z 123456789012 123456789".utf8)) == nil)
+            record("mirror wire buffer: a Z frame whose payload does not decode fails at decode, not at framing",
+                   NDJSONLineBuffer.lines(from: [.compressed(Data("junk".utf8), rawCount: 4)]) == nil)
+            record("mirror wire buffer: an empty line is a frame, not the start of a Z header",
+                   NDJSONLineBuffer().append(Data("\n".utf8)) == [.line(Data())])
+        }
+
         // Live mirror access: the password compare, the bind-address filter, and the string the phone pastes.
         do {
             record("mirror password: an identical token matches", MirrorAccess.tokensMatch("abc123", "abc123"))
