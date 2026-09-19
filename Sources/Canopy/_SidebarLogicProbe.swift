@@ -10679,6 +10679,52 @@ enum SidebarLogicProbe {
             record("mirror replay: a single turn over the budget is sent empty, not oversized",
                    messages(of: tooBigCut)?.isEmpty == true
                        && ((try? JSONSerialization.data(withJSONObject: tooBigCut))?.count ?? Int.max) <= macBudget)
+            // The phone's fit: the turn window applies first, the byte budget under it, both on the same search.
+            let phoneCut = ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe")
+            record("mirror replay: a phone's oversized replay is cut to the turns that fit, like a Mac client's",
+                   (messages(of: phoneCut)?.count ?? 0) < oversized.count
+                       && ((try? JSONSerialization.data(withJSONObject: phoneCut))?.count ?? Int.max) <= macBudget)
+            record("mirror replay: the turn window trims a replay the budget alone would have passed",
+                   messages(of: ShimProcess.fittingReplay(wrapped(replay), maxBytes: 1 << 30, maxTurns: 2, client: "probe"))?.count == 4)
+            // What fits is measured after shaping, but what is returned is unshaped: the caller shapes it once, for real.
+            let shapedFit = ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe",
+                                                      shaped: { ShimProcess.emptyingReplayMessages($0) })
+            record("mirror replay: the budget is measured on the shaped replay and the unshaped one is returned",
+                   messages(of: shapedFit)?.count == oversized.count)
+            // Shaping that halves every turn: unshaped, one 3 MiB turn fits a 4 MiB budget; shaped, two do. The
+            // search must see the shaped size, and the two turns must come back at full length.
+            func halving(_ envelope: [String: Any]) -> [String: Any] {
+                guard var inner = envelope["message"] as? [String: Any], var response = inner["response"] as? [String: Any],
+                      let entries = response["messages"] as? [[String: Any]] else { return envelope }
+                response["messages"] = entries.map { entry -> [String: Any] in
+                    guard var message = entry["message"] as? [String: Any], let text = message["content"] as? String else { return entry }
+                    message["content"] = String(text.prefix(text.count / 2))
+                    var updated = entry
+                    updated["message"] = message
+                    return updated
+                }
+                inner["response"] = response
+                var updated = envelope
+                updated["message"] = inner
+                return updated
+            }
+            let halvedFit = messages(of: ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe", shaped: halving))
+            record("mirror replay: the search measures every candidate shaped, and returns it unshaped",
+                   halvedFit?.count == 4 && ((halvedFit?.first?["message"] as? [String: Any])?["content"] as? String)?.count == bigText.count + 1)
+            // 6 turns capped at 4, and 4 do not fit: cut further, under the window.
+            let cappedFit = messages(of: ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 4, client: "probe"))
+            record("mirror replay: a window that itself exceeds the budget is cut further, under the window",
+                   cappedFit?.count == 2)
+            record("mirror replay: a phone's single turn over the budget is sent empty too",
+                   messages(of: ShimProcess.fittingReplay(tooBigEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.isEmpty == true)
+            // Trimming to every turn still drops what precedes the first: a replay over the budget only in
+            // that prefix keeps all its turns, for a Mac client and a phone alike.
+            var bigResult = toolResult
+            bigResult["message"] = ["role": "user", "content": [["type": "tool_result", "tool_use_id": "t0", "content": String(repeating: "z", count: 5 << 20)]]] as [String: Any]
+            let prefixedEnv = wrapped([bigResult, user("after"), assistant()])
+            record("mirror replay: a budget blown only by entries before the first turn keeps every turn",
+                   messages(of: ShimProcess.trimmingReplayForMacClient(prefixedEnv, maxBytes: macBudget))?.count == 2
+                       && messages(of: ShimProcess.fittingReplay(prefixedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.count == 2)
         }
 
         // Summary
