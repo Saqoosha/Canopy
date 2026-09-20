@@ -9,6 +9,15 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorSink"
 protocol MirrorSink: AnyObject {
     /// One host→webview payload, already in the `from-extension` envelope.
     func deliver(_ payload: [String: Any])
+
+    /// Where this client is watching from, for `canopy-remote-open.sh` to open
+    /// files on. Nil unless the client is another Mac reachable by ssh - the
+    /// phone cannot run `open`, and the session's own webview is already here.
+    var openRedirectHost: String? { get }
+}
+
+extension MirrorSink {
+    var openRedirectHost: String? { nil }
 }
 
 extension WKWebView: MirrorSink {

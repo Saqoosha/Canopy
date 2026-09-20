@@ -1695,6 +1695,37 @@ enum SidebarLogicProbe {
                    MirrorAccess.parseHostPort("100.64.0.2") == nil)
         }
 
+        // Open redirect: the one pure decision on the host side. The value is
+        // written to a file the redirect script hands to `ssh` and `scp` as an
+        // argument, so the refusals are the whole of what can go wrong here —
+        // a host that reads as a flag, or one that splits into two words.
+        // The script re-checks the same shape; this is the half a mistake in
+        // Swift would get past.
+        do {
+            record("open redirect: a plain address passes",
+                   OpenRedirect.sanitizedHost("100.64.0.2") == "100.64.0.2")
+            record("open redirect: a hostname passes",
+                   OpenRedirect.sanitizedHost("studio.example-1.local") == "studio.example-1.local")
+            record("open redirect: user@host passes",
+                   OpenRedirect.sanitizedHost("hiko@100.64.0.2") == "hiko@100.64.0.2")
+            record("open redirect: surrounding whitespace is trimmed",
+                   OpenRedirect.sanitizedHost("  100.64.0.2\n") == "100.64.0.2")
+            record("open redirect: an ssh option is refused",
+                   OpenRedirect.sanitizedHost("-oProxyCommand=evil") == nil)
+            record("open redirect: an embedded space is refused",
+                   OpenRedirect.sanitizedHost("host -oProxyCommand=x") == nil)
+            record("open redirect: a shell metacharacter is refused",
+                   OpenRedirect.sanitizedHost("host;rm -rf /") == nil)
+            record("open redirect: empty is refused",
+                   OpenRedirect.sanitizedHost("   ") == nil)
+            record("open redirect: nil is refused",
+                   OpenRedirect.sanitizedHost(nil) == nil)
+            record("open redirect: a raw IPv6 address is refused",
+                   OpenRedirect.sanitizedHost("fd7a:115c::1") == nil)
+            record("open redirect: an absurd length is refused",
+                   OpenRedirect.sanitizedHost(String(repeating: "a", count: 256)) == nil)
+        }
+
         // Remote roster watcher: the pure halves. Frame classification copies
         // the phone's rule — a snapshot carries no `type`, an event does, and
         // an event must never decode as a snapshot with no panes.
