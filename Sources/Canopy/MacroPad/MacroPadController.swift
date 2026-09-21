@@ -1878,6 +1878,43 @@ final class MacroPadController {
         refresh()
     }
 
+    /// Replace `NSApp.currentEvent` with a fresh synthetic event, so the
+    /// activation request that follows carries no stale origin time.
+    ///
+    /// `activate(ignoringOtherApps:)` and `NSRunningApplication.activate` both
+    /// go through AppKit's `_hotKeyEventIfCurrent` (read off the binary): when
+    /// `currentEvent` is a system-defined hot-key event its time becomes the
+    /// request's origin, and any other event yields none. Measured 2026-09-21
+    /// on the installed 2.41.1: every request from 16:26 to 17:27 carried one
+    /// origin time, from 11:40, and the WindowServer refused each one with
+    /// `CPS: Rejecting expired request … earlier than the time of the last
+    /// activation` while Arc was frontmost — 48 refusals, 0 successes under
+    /// Arc, the same request accepted under Chrome, Finder and Parsec. That
+    /// `currentEvent` held a hot-key event all day is inferred from that log
+    /// and the condition above; why the activations that DID succeed in
+    /// between left it in place (a probe's `currentEvent` became the
+    /// `appKitDefined` activation event after each `activate`) is not
+    /// understood. Which frontmost apps trigger the check is the
+    /// WindowServer's rule and is not modelled; what is controlled is the
+    /// origin time. Reproduced in `scripts/activation-stale-hotkey-probe.swift`
+    /// with a planted stale hot-key `currentEvent`: the plain call refused
+    /// under Arc, accepted after this dequeue.
+    ///
+    /// Posted at the head and dequeued through a mask matching only this
+    /// type, so the event that comes back is this one whatever else is
+    /// queued; the type is what matters, not the timestamp. `until: nil`
+    /// returns at once, and in the probe no timer, main-queue block or
+    /// `RunLoop.perform` ran inside the call.
+    private static func retireStaleCurrentEvent() {
+        guard let event = NSEvent.otherEvent(
+            with: .applicationDefined, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: 0,
+            context: nil, subtype: 0, data1: 0, data2: 0
+        ) else { return }
+        NSApp.postEvent(event, atStart: true)
+        _ = NSApp.nextEvent(matching: .applicationDefined, until: nil, inMode: .default, dequeue: true)
+    }
+
     private func focusPane(_ index: Int) {
         guard store.panes.indices.contains(index) else {
             // `notice`, like `handleKey`'s refusal: this drops input the user
@@ -1896,6 +1933,7 @@ final class MacroPadController {
         // harmless (idempotent) and buys an immediate `refresh()` instead of
         // waiting one Observation hop for the LED to catch up.
         noteInteraction(paneIndex: index)
+        Self.retireStaleCurrentEvent()
         // "Press it and you're there" means the app comes forward too — the
         // pad's reason to exist is being reachable while looking at something
         // else, so quietly moving focus behind another app's window would
