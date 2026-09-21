@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import os
 
@@ -78,37 +77,6 @@ enum OpenRedirect {
         }
     }
 
-    /// Opens `path` where `key`'s watcher is, by running the installed script
-    /// exactly as an agent's `open` would — so a click in a mirror pane and an
-    /// agent's `open` share one path, one set of guards and one fallback.
-    /// Fire-and-forget: the script already falls back to opening here.
-    static func openOnViewer(path: String, key: String) {
-        let script = binDirectory.appendingPathComponent("open")
-        guard FileManager.default.isExecutableFile(atPath: script.path) else {
-            logger.error("openOnViewer: script missing; opening here instead")
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
-            return
-        }
-        let proc = Process()
-        proc.executableURL = script
-        proc.arguments = [path]
-        var env = ProcessInfo.processInfo.environment
-        env["CANOPY_OPEN_KEY"] = key
-        env["PATH"] = "\(binDirectory.path):" + (env["PATH"] ?? "/usr/bin:/bin")
-        proc.environment = env
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        proc.terminationHandler = { p in
-            if p.terminationStatus != 0 {
-                logger.error("openOnViewer: script exited \(p.terminationStatus)")
-            }
-        }
-        do { try proc.run() } catch {
-            logger.error("openOnViewer: \(error.localizedDescription, privacy: .public)")
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
-        }
-    }
-
     /// Back to opening here. Safe to call when nothing was ever published.
     static func clear(key: String) {
         guard !key.isEmpty else { return }
@@ -125,5 +93,78 @@ enum OpenRedirect {
             .deletingLastPathComponent()
         let devPath = projectRoot.appendingPathComponent("Resources/canopy-remote-open.sh").path
         return FileManager.default.fileExists(atPath: devPath) ? devPath : nil
+    }
+}
+
+/// Watches `~/.canopy/outbox/<key>/` for what the redirect script leaves
+/// there when its destination is a mirror: one small file per `open`, holding
+/// an absolute path or a URL. The script cannot reach the mirror connection,
+/// and ssh-ing back to the watcher costs ~1.2 s a hop (measured) — so it
+/// drops the request here and exits, and this hands it to `MirrorFileSender`.
+///
+/// One per shim, alive only while a Mac is attached. A vnode source rather
+/// than a poll: an `open` is a click the person is waiting on.
+@MainActor
+final class OpenRedirectOutbox {
+    let directory: URL
+    private var source: DispatchSourceFileSystemObject?
+    private let onEntry: (String) -> Void
+
+    /// Nil when the directory could not be created or opened; the script's
+    /// own fallback (opening on the host) then stands.
+    init?(key: String, onEntry: @escaping (String) -> Void) {
+        guard !key.isEmpty else { return nil }
+        self.directory = OpenRedirect.root.appendingPathComponent("outbox").appendingPathComponent(key)
+        self.onEntry = onEntry
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            logger.error("outbox: mkdir failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        let fd = open(directory.path, O_EVTONLY)
+        guard fd >= 0 else {
+            logger.error("outbox: open failed: \(String(cString: strerror(errno)), privacy: .public)")
+            return nil
+        }
+        let drain: @Sendable @MainActor () -> Void = { [weak self] in self?.drain() }
+        source = Self.makeSource(fd: fd, drain: drain)
+        source?.resume()
+        drain()
+    }
+
+    func stop() {
+        source?.cancel()
+        source = nil
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// Every regular file is one request; `.tmp` is the script mid-write.
+    func drain() {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        for name in names.sorted() where !name.hasSuffix(".tmp") && !name.hasPrefix(".") {
+            let url = directory.appendingPathComponent(name)
+            defer { try? FileManager.default.removeItem(at: url) }
+            guard let raw = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let entry = raw.split(separator: "\n", maxSplits: 1).first.map(String.init)?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            guard !entry.isEmpty else { continue }
+            onEntry(entry)
+        }
+    }
+
+    // `nonisolated`, for the reason `PeerNameStore.makeWatcher` records: a
+    // closure literal written inside a `@MainActor` type and handed to
+    // `setEventHandler` (a plain, non-Sendable handler) aborts the first
+    // time the source fires on its own queue.
+    private nonisolated static func makeSource(
+        fd: CInt, drain: @escaping @Sendable @MainActor () -> Void
+    ) -> DispatchSourceFileSystemObject {
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: [.write], queue: .global(qos: .userInitiated)
+        )
+        source.setEventHandler { Task { @MainActor in drain() } }
+        source.setCancelHandler { close(fd) }
+        return source
     }
 }

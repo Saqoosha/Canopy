@@ -143,6 +143,9 @@ final class OpenSession: Identifiable, Hashable {
     var lastActiveAt: Date
     var statusBar: StatusBarData
     var connection: ConnectionState
+    /// Files the other Mac ships into a mirror pane (`MirrorFileWire`); the
+    /// pane's transfer overlay reads it. Inert for every other origin.
+    let fileTransfer = MirrorFileReceiver()
     var permissionMode: PermissionMode
     var model: String?
     var effortLevel: String?

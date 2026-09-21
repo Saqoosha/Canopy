@@ -13,6 +13,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     var onOutcome: ((Outcome) -> Void)?
     /// The origin's status line, once after `attach_ok` and on every change; never from a Mac older than 2.39.
     var onStatus: (([String: Any]) -> Void)?
+    /// A `MirrorFileWire` frame: a file the host is shipping here, or a URL to open.
+    var onFileFrame: (([String: Any]) -> Void)?
     private(set) var extensionVersion: String?
     private var attachedDelivered = false
     private var terminalDelivered = false
@@ -117,7 +119,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         // `compress`: a Mac client takes the whole transcript in one line, and that line is
         // what a slow uplink spends its time on (see `MirrorWire`).
         sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
-                        "compress": MirrorWire.compressionName])
+                        "compress": MirrorWire.compressionName, "files": true])
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
         if let webView {
@@ -199,6 +201,12 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if dict["type"] as? String == "status" {
             // For the pane's own status bar, not the page.
             onStatus?(dict)
+            return
+        }
+        if MirrorFileWire.isFileFrame(dict["type"] as? String) {
+            // For the pane's receiver, never the page: a chunk is a third of
+            // a megabyte of base64 the webview has no use for.
+            onFileFrame?(dict)
             return
         }
         webView?.deliver(dict)
