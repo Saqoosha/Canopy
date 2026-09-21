@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import os
 
@@ -74,6 +75,37 @@ enum OpenRedirect {
             logger.notice("open redirected to a watching Mac")
         } catch {
             logger.error("publish failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Opens `path` where `key`'s watcher is, by running the installed script
+    /// exactly as an agent's `open` would — so a click in a mirror pane and an
+    /// agent's `open` share one path, one set of guards and one fallback.
+    /// Fire-and-forget: the script already falls back to opening here.
+    static func openOnViewer(path: String, key: String) {
+        let script = binDirectory.appendingPathComponent("open")
+        guard FileManager.default.isExecutableFile(atPath: script.path) else {
+            logger.error("openOnViewer: script missing; opening here instead")
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
+        }
+        let proc = Process()
+        proc.executableURL = script
+        proc.arguments = [path]
+        var env = ProcessInfo.processInfo.environment
+        env["CANOPY_OPEN_KEY"] = key
+        env["PATH"] = "\(binDirectory.path):" + (env["PATH"] ?? "/usr/bin:/bin")
+        proc.environment = env
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        proc.terminationHandler = { p in
+            if p.terminationStatus != 0 {
+                logger.error("openOnViewer: script exited \(p.terminationStatus)")
+            }
+        }
+        do { try proc.run() } catch {
+            logger.error("openOnViewer: \(error.localizedDescription, privacy: .public)")
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
         }
     }
 

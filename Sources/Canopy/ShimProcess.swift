@@ -3955,6 +3955,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return
             }
             if FileManager.default.fileExists(atPath: resolved.path) {
+                // A mirror forwards its webview's `open_file` here verbatim,
+                // so without this the click lands on THIS screen — Preview on
+                // the host, ContentViewer in the host's own window. Ship it
+                // to the watcher instead; the script's own fallback is this
+                // branch's old behaviour.
+                if let requestId, case .mirror(let key)? = requestOwners[requestId],
+                   mirrors[key]?.sink?.openRedirectHost != nil
+                {
+                    logger.notice("handleOpenFile: shipping to the watching Mac")
+                    OpenRedirect.openOnViewer(path: resolved.path, key: openRedirectKey)
+                    sendToWebView([
+                        "type": "response",
+                        "requestId": requestId,
+                        "response": ["type": "open_file_response"] as [String: Any],
+                    ] as [String: Any])
+                    return
+                }
                 if openExternal {
                     logger.info("handleOpenFile: opening externally (Cmd-click): \(resolved.path, privacy: .public)")
                     if !NSWorkspace.shared.open(resolved) {
