@@ -1896,9 +1896,10 @@ final class MacroPadController {
     /// `appKitDefined` activation event after each `activate`) is not
     /// understood. Which frontmost apps trigger the check is the
     /// WindowServer's rule and is not modelled; what is controlled is the
-    /// origin time. Reproduced in a standalone probe with a planted stale
-    /// hot-key `currentEvent`: the plain call refused under Arc, accepted
-    /// after this dequeue; `NSWorkspace.openApplication` still refused.
+    /// origin time. Reproduced in `scripts/activation-stale-hotkey-probe.swift`
+    /// with a planted stale hot-key `currentEvent`: the plain call refused
+    /// under Arc, accepted after this dequeue; `NSWorkspace.openApplication`
+    /// still refused.
     ///
     /// Posted at the head and dequeued through a mask matching only this
     /// type, so the event that comes back is this one whatever else is
