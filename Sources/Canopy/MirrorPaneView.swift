@@ -179,6 +179,9 @@ struct MirrorPaneView: NSViewRepresentable {
             guard let session else { return }
             MirrorStatusFrame.apply(frame, to: session.statusBar)
         }
+        bridge.onFileFrame = { [weak session] frame in
+            session?.fileTransfer.handle(frame)
+        }
         bridge.onOutcome = { [weak session, weak bridge] outcome in
             guard let session else { return }
             switch outcome {
@@ -190,6 +193,7 @@ struct MirrorPaneView: NSViewRepresentable {
             case .refused(let reason):
                 onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName))
             case .dropped:
+                session.fileTransfer.connectionDropped()
                 if case .spawning = session.status {
                     onFailure("Could not reach \(machineName). Is its live mirror on?")
                 } else {

@@ -14,10 +14,16 @@ protocol MirrorSink: AnyObject {
     /// files on. Nil unless the client is another Mac reachable by ssh - the
     /// phone cannot run `open`, and the session's own webview is already here.
     var openRedirectHost: String? { get }
+
+    /// Whether `MirrorFileWire` frames may be sent to this client. Only a Mac:
+    /// the phone has nowhere to put a file and would post the frames into its
+    /// page.
+    var acceptsFileTransfers: Bool { get }
 }
 
 extension MirrorSink {
     var openRedirectHost: String? { nil }
+    var acceptsFileTransfers: Bool { false }
 }
 
 extension WKWebView: MirrorSink {

@@ -33,6 +33,8 @@ struct SessionContainer: View {
                         )
                     }
                     .animation(.easeInOut(duration: 0.3), value: session.connection.isOverlayVisible)
+                    .overlay { FileTransferOverlayView(receiver: session.fileTransfer) }
+                    .animation(.easeInOut(duration: 0.2), value: session.fileTransfer.isOverlayVisible)
                 } else {
                     WebViewContainer(
                         workingDirectory: session.origin.workingDirectory,

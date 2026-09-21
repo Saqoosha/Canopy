@@ -136,6 +136,36 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         } else {
             OpenRedirect.clear(key: openRedirectKey)
         }
+        // The outbox is the script's gate, so it exists only while a client
+        // that can take the bytes is attached.
+        if mirrors.values.contains(where: { $0.sink?.acceptsFileTransfers == true }) {
+            if openRedirectOutbox == nil {
+                openRedirectOutbox = OpenRedirectOutbox(key: openRedirectKey) { [weak self] entry in
+                    self?.shipToWatchingMac(entry)
+                }
+            }
+        } else {
+            openRedirectOutbox?.stop()
+            openRedirectOutbox = nil
+        }
+    }
+
+    /// Alive while a Mac is attached; see `OpenRedirectOutbox`.
+    private var openRedirectOutbox: OpenRedirectOutbox?
+
+    /// One request from the redirect script: a path or a URL, for the first
+    /// attached Mac. With none left (the mirror went while the entry sat in
+    /// the outbox) it opens here, which is what the script would have done.
+    private func shipToWatchingMac(_ entry: String) {
+        guard let sink = mirrors.values.lazy.compactMap({ $0.sink }).first(where: { $0.acceptsFileTransfers }) else {
+            NSWorkspace.shared.open(entry.hasPrefix("/") ? URL(fileURLWithPath: entry) : URL(string: entry) ?? URL(fileURLWithPath: entry))
+            return
+        }
+        if entry.hasPrefix("http://") || entry.hasPrefix("https://") || entry.hasPrefix("mailto:") {
+            MirrorFileSender.sendURL(entry, to: sink)
+        } else if !MirrorFileSender.send(path: entry, to: sink) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: entry))
+        }
     }
 
     func detachMirror(_ mirror: any MirrorSink) {
@@ -3215,6 +3245,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // detach, so clear the destination here too. A crash still leaves the
         // file; the key is per process, so a stale one is never read again.
         OpenRedirect.clear(key: openRedirectKey)
+        openRedirectOutbox?.stop()
+        openRedirectOutbox = nil
         // **Before the early return, and before stdin closes.** The queue's
         // whole loss story is "the count is in the log", and on this path it
         // was not: `stop()` does not reach `resetActivityState` synchronously
@@ -3961,10 +3993,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // to the watcher instead; the script's own fallback is this
                 // branch's old behaviour.
                 if let requestId, case .mirror(let key)? = requestOwners[requestId],
-                   mirrors[key]?.sink?.openRedirectHost != nil
+                   let sink = mirrors[key]?.sink, sink.acceptsFileTransfers
                 {
                     logger.notice("handleOpenFile: shipping to the watching Mac")
-                    OpenRedirect.openOnViewer(path: resolved.path, key: openRedirectKey)
+                    if !MirrorFileSender.send(path: resolved.path, to: sink) {
+                        NSWorkspace.shared.open(resolved)
+                    }
                     sendToWebView([
                         "type": "response",
                         "requestId": requestId,

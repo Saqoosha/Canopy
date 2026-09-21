@@ -1726,6 +1726,28 @@ enum SidebarLogicProbe {
                    OpenRedirect.sanitizedHost(String(repeating: "a", count: 256)) == nil)
         }
 
+        // Mirror file transfer: the names a `file_begin` may carry decide
+        // where bytes from another machine land on this disk, so the refusals
+        // are the whole of the safety here — a path component, a traversal,
+        // an empty name.
+        do {
+            record("mirror file: a plain name passes",
+                   MirrorFileWire.sanitizedName("RESULTS_20260919.pdf") == "RESULTS_20260919.pdf")
+            record("mirror file: a name with a slash is refused",
+                   MirrorFileWire.sanitizedName("../../.ssh/authorized_keys") == nil)
+            record("mirror file: a bare traversal is refused",
+                   MirrorFileWire.sanitizedName("..") == nil)
+            record("mirror file: an empty name is refused",
+                   MirrorFileWire.sanitizedName("") == nil && MirrorFileWire.sanitizedName(nil) == nil)
+            record("mirror file: a host with a slash is folded, never a path",
+                   MirrorFileWire.sanitizedHost("a/b") == "a-b")
+            record("mirror file: a missing host gets a fixed folder",
+                   MirrorFileWire.sanitizedHost(nil) == "remote" && MirrorFileWire.sanitizedHost("..") == "remote")
+            record("mirror file: the four frame types are the file frames",
+                   [MirrorFileWire.begin, MirrorFileWire.chunk, MirrorFileWire.end, MirrorFileWire.url]
+                       .allSatisfy(MirrorFileWire.isFileFrame) && !MirrorFileWire.isFileFrame("status"))
+        }
+
         // Remote roster watcher: the pure halves. Frame classification copies
         // the phone's rule — a snapshot carries no `type`, an event does, and
         // an event must never decode as a snapshot with no panes.

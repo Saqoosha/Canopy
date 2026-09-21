@@ -150,6 +150,13 @@ final class MirrorConnection: MirrorSink {
     /// reformatted: `scp` wants it bracketed and a link-local one needs its
     /// scope, and a host guessed wrong here ships the file nowhere and says
     /// nothing. Declining costs one file opened on this screen instead.
+    /// Set from the attach's `files: true`; a client that did not ask never
+    /// sees a `MirrorFileWire` frame, so an older Mac does not post a third
+    /// of a megabyte of base64 into its page. Its files then open here, as
+    /// they did before 2.43.
+    private var filesRequested = false
+    var acceptsFileTransfers: Bool { isMacClient && filesRequested }
+
     var openRedirectHost: String? {
         guard isMacClient, case .hostPort(let host, _) = connection.endpoint else { return nil }
         switch host {
@@ -283,6 +290,7 @@ final class MirrorConnection: MirrorSink {
         self.shim = shim
         attachedSessionId = sessionId
         compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
+        filesRequested = dict["files"] as? Bool == true
         // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
         let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
