@@ -1898,8 +1898,7 @@ final class MacroPadController {
     /// WindowServer's rule and is not modelled; what is controlled is the
     /// origin time. Reproduced in `scripts/activation-stale-hotkey-probe.swift`
     /// with a planted stale hot-key `currentEvent`: the plain call refused
-    /// under Arc, accepted after this dequeue; `NSWorkspace.openApplication`
-    /// still refused.
+    /// under Arc, accepted after this dequeue.
     ///
     /// Posted at the head and dequeued through a mask matching only this
     /// type, so the event that comes back is this one whatever else is

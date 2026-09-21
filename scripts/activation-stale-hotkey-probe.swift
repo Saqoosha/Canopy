@@ -5,10 +5,10 @@
 // Usage:
 //   swift scripts/activation-stale-hotkey-probe.swift [target-app] [method]
 //     target-app  app to bring frontmost first (default Arc — the one the
-//                 refusal was measured under; Finder also refuses in this rig)
+//                 refusal was measured under; Finder also refuses in this rig,
+//                 whose planted timestamp is older than any recent activation)
 //     method      plain    NSApp.activate(ignoringOtherApps: true) as-is
 //                 retire   dequeue one applicationDefined event first (the fix)
-//                 ls       NSWorkspace.openApplication(at: own bundle)
 //
 // Steps: activate self; bring <target> frontmost via `open -a`; plant a
 // system-defined hot-key-shaped event (subtype 6) with a 6-hour-old timestamp
@@ -16,7 +16,12 @@
 // Expected on macOS 27.0 (measured 2026-09-21): plain → refused, with
 // `CPS: Rejecting expired request` in the WindowServer log
 // (`/usr/bin/log show --last 2m --predicate 'process == "WindowServer" AND
-// eventMessage CONTAINS "Rejecting expired"'`); retire → active; ls → refused.
+// eventMessage CONTAINS "Rejecting expired"'`); retire → active. Exits 2
+// when <target> did not come frontmost, so a RESULT line is always a run
+// where another app held activation. `NSWorkspace.openApplication(at:)` is
+// deliberately not an arm: under `swift <script>` Bundle.main is the
+// toolchain's usr/bin, not an app bundle, so the call fails for its own
+// reason and measures nothing about the refusal.
 // The run steals focus for a few seconds; it exits on its own.
 import AppKit
 
@@ -37,7 +42,9 @@ func describeCurrent() -> String {
     return "currentEvent " + describe(e)
 }
 func openApp(_ name: String) {
-    let p = Process(); p.launchPath = "/usr/bin/open"; p.arguments = ["-a", name]; p.launch(); p.waitUntilExit()
+    let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = ["-a", name]
+    try! p.run(); p.waitUntilExit()
+    guard p.terminationStatus == 0 else { log("open -a \(name) failed rc=\(p.terminationStatus)"); exit(2) }
 }
 func plantStaleHotKeyEvent() {
     let stale = ProcessInfo.processInfo.systemUptime - 6 * 3600
@@ -69,21 +76,15 @@ func at(_ dt: Double, _ f: @escaping () -> Void) { t += dt; DispatchQueue.main.a
 
 at(0)   { NSApp.activate(ignoringOtherApps: true); log("activated self; \(describeCurrent())") }
 at(1.0) { log("bringing \(target) front"); openApp(target) }
-at(1.5) { log("front=\(front()) isActive=\(NSApp.isActive)"); plantStaleHotKeyEvent() }
+at(1.5) {
+    log("front=\(front()) isActive=\(NSApp.isActive)")
+    guard front() == target, !NSApp.isActive else { log("precondition failed: \(target) is not frontmost"); exit(2) }
+    plantStaleHotKeyEvent()
+}
 at(0.3) {
     log("front=\(front()); method=\(method)")
-    switch method {
-    case "retire":
-        retireStaleCurrentEvent()
-        NSApp.activate(ignoringOtherApps: true)
-    case "ls":
-        let cfg = NSWorkspace.OpenConfiguration(); cfg.activates = true
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg) { _, err in
-            log("openApplication completion err=\(String(describing: err))")
-        }
-    default:
-        NSApp.activate(ignoringOtherApps: true)
-    }
+    if method == "retire" { retireStaleCurrentEvent() }
+    NSApp.activate(ignoringOtherApps: true)
     win.makeKeyAndOrderFront(nil)
 }
 at(1.5) { log("RESULT method=\(method) target=\(target): isActive=\(NSApp.isActive) front=\(front())"); exit(0) }
