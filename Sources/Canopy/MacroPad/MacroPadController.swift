@@ -1878,6 +1878,43 @@ final class MacroPadController {
         refresh()
     }
 
+    /// Replace `NSApp.currentEvent` with a fresh synthetic event, so that the
+    /// activation request that follows carries no stale origin time.
+    ///
+    /// `activate(ignoringOtherApps:)` (and `NSRunningApplication.activate`)
+    /// stamp their WindowServer request with the time of `currentEvent` when
+    /// that event is a system-defined hot-key event — the "activation was
+    /// triggered by a hot key" allowance. `currentEvent` is whatever the run
+    /// loop dequeued last, and in this process a hot-key event was measured
+    /// sitting there for hours — WHY it survives the events dequeued in
+    /// between is not understood (a probe's `currentEvent` moved on every
+    /// activation event), so do not read this as explained. Measured
+    /// 2026-09-21 on the installed build: every request from 16:26 to 17:27
+    /// carried the same origin time from 11:40, and the WindowServer refused
+    /// each one with
+    /// `CPS: Rejecting expired request … Time of the request being originated
+    /// (…) is earlier than the time of the last activation (…)` while Arc was
+    /// frontmost — 48 refusals, 0 successes under Arc, while the same request
+    /// succeeded under Chrome, Finder and Parsec. Which frontmost apps trigger
+    /// the check is the WindowServer's rule and is not modelled here; what is
+    /// controlled is the origin time, and an event that is not a hot key
+    /// yields none. Reproduced and verified in a standalone probe: with a
+    /// planted stale hot-key `currentEvent` the plain call is refused under
+    /// Arc; dequeueing one `applicationDefined` event first, it succeeds.
+    ///
+    /// `nextEvent(matching:until:inMode:dequeue:)` with `until: nil` returns
+    /// at once, so this costs one round through the queue. Nothing else in
+    /// Canopy posts `applicationDefined` events, so the dequeued event is ours.
+    private static func retireStaleCurrentEvent() {
+        guard let event = NSEvent.otherEvent(
+            with: .applicationDefined, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: 0,
+            context: nil, subtype: 0, data1: 0, data2: 0
+        ) else { return }
+        NSApp.postEvent(event, atStart: true)
+        _ = NSApp.nextEvent(matching: .applicationDefined, until: nil, inMode: .default, dequeue: true)
+    }
+
     private func focusPane(_ index: Int) {
         guard store.panes.indices.contains(index) else {
             // `notice`, like `handleKey`'s refusal: this drops input the user
@@ -1900,6 +1937,7 @@ final class MacroPadController {
         // pad's reason to exist is being reachable while looking at something
         // else, so quietly moving focus behind another app's window would
         // deliver half the gesture.
+        Self.retireStaleCurrentEvent()
         NSApp.activate(ignoringOtherApps: true)
         if let window = NSApp.windows.first(where: { isCanopyWindow($0) }) {
             window.makeKeyAndOrderFront(nil)
