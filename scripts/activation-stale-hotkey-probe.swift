@@ -31,6 +31,7 @@ import AppKit
 let args = CommandLine.arguments
 let target = args.count > 1 ? args[1] : "Arc"
 let method = args.count > 2 ? args[2] : "plain"
+guard method == "plain" || method == "retire" else { print("unknown method \(method); use plain or retire"); exit(2) }
 
 func front() -> String { NSWorkspace.shared.frontmostApplication?.localizedName ?? "?" }
 func log(_ s: String) { print(s); fflush(stdout) }
@@ -58,6 +59,7 @@ func plantStaleHotKeyEvent() {
     NSApp.postEvent(e, atStart: true)
     _ = NSApp.nextEvent(matching: .systemDefined, until: nil, inMode: .default, dequeue: true)
     log("planted: \(describeCurrent())")
+    // ±1 ms: the dequeued event is a copy and the ns round trip breaks exact equality (measured: == exited 2 every run).
     guard let c = NSApp.currentEvent, c.type == .systemDefined, c.subtype.rawValue == 6, abs(c.timestamp - stale) < 0.001 else {
         log("precondition failed: currentEvent is not the planted stale event"); exit(2)
     }
@@ -87,8 +89,9 @@ func at(_ dt: Double, _ f: @escaping () -> Void) { t += dt; DispatchQueue.main.a
 at(0)   { NSApp.activate(ignoringOtherApps: true); log("activated self; \(describeCurrent())") }
 at(1.0) { log("bringing \(target) front"); openApp(target) }
 at(1.5) {
-    log("front=\(front()) isActive=\(NSApp.isActive)")
-    guard front() == target, !NSApp.isActive else { log("precondition failed: \(target) is not frontmost (front=\(front()))"); exit(2) }
+    let f = front()
+    log("front=\(f) isActive=\(NSApp.isActive)")
+    guard f == target, !NSApp.isActive else { log("precondition failed: need front=\(target) and isActive=false, got front=\(f) isActive=\(NSApp.isActive)"); exit(2) }
     plantStaleHotKeyEvent()
 }
 at(0.3) {
