@@ -16,9 +16,12 @@
 // Expected on macOS 27.0 (measured 2026-09-21): plain → refused, with
 // `CPS: Rejecting expired request` in the WindowServer log
 // (`/usr/bin/log show --last 2m --predicate 'process == "WindowServer" AND
-// eventMessage CONTAINS "Rejecting expired"'`); retire → active. Exits 2
-// when <target> did not come frontmost, so a RESULT line is always a run
-// where another app held activation. `NSWorkspace.openApplication(at:)` is
+// eventMessage CONTAINS "Rejecting expired"'`); retire → active. Exit status:
+// 0 when the RESULT matched that expectation, 1 when it did not, 2 when a
+// precondition failed (<target> not frontmost, stale event not planted,
+// retire did not replace currentEvent) — so `… Arc plain && … Arc retire`
+// is the A/B, and a RESULT line is always a run where another app held
+// activation over a planted stale event. `NSWorkspace.openApplication(at:)` is
 // deliberately not an arm: under `swift <script>` Bundle.main is the
 // toolchain's usr/bin, not an app bundle, so the call fails for its own
 // reason and measures nothing about the refusal.
@@ -28,6 +31,7 @@ import AppKit
 let args = CommandLine.arguments
 let target = args.count > 1 ? args[1] : "Arc"
 let method = args.count > 2 ? args[2] : "plain"
+guard method == "plain" || method == "retire" else { print("unknown method \(method); use plain or retire"); exit(2) }
 
 func front() -> String { NSWorkspace.shared.frontmostApplication?.localizedName ?? "?" }
 func log(_ s: String) { print(s); fflush(stdout) }
@@ -43,25 +47,33 @@ func describeCurrent() -> String {
 }
 func openApp(_ name: String) {
     let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = ["-a", name]
-    try! p.run(); p.waitUntilExit()
+    do { try p.run() } catch { log("could not run /usr/bin/open: \(error)"); exit(2) }
+    p.waitUntilExit()
     guard p.terminationStatus == 0 else { log("open -a \(name) failed rc=\(p.terminationStatus)"); exit(2) }
 }
 func plantStaleHotKeyEvent() {
     let stale = ProcessInfo.processInfo.systemUptime - 6 * 3600
     guard let e = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: [],
                                      timestamp: stale, windowNumber: 0, context: nil,
-                                     subtype: 6, data1: 0, data2: 0) else { log("could not make event"); return }
+                                     subtype: 6, data1: 0, data2: 0) else { log("could not make the stale event"); exit(2) }
     NSApp.postEvent(e, atStart: true)
     _ = NSApp.nextEvent(matching: .systemDefined, until: nil, inMode: .default, dequeue: true)
     log("planted: \(describeCurrent())")
+    // ±1 ms: the dequeued event is a copy and the ns round trip breaks exact equality (measured: == exited 2 every run).
+    guard let c = NSApp.currentEvent, c.type == .systemDefined, c.subtype.rawValue == 6, abs(c.timestamp - stale) < 0.001 else {
+        log("precondition failed: currentEvent is not the planted stale event"); exit(2)
+    }
 }
 func retireStaleCurrentEvent() {
     guard let e = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [],
                                      timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: 0, context: nil,
-                                     subtype: 0, data1: 0, data2: 0) else { return }
+                                     subtype: 0, data1: 0, data2: 0) else { log("could not make the retire event"); exit(2) }
     NSApp.postEvent(e, atStart: true)
     _ = NSApp.nextEvent(matching: .applicationDefined, until: nil, inMode: .default, dequeue: true)
     log("retired: \(describeCurrent())")
+    guard NSApp.currentEvent?.type == .applicationDefined else {
+        log("precondition failed: retire did not replace currentEvent"); exit(2)
+    }
 }
 
 let app = NSApplication.shared
@@ -77,8 +89,9 @@ func at(_ dt: Double, _ f: @escaping () -> Void) { t += dt; DispatchQueue.main.a
 at(0)   { NSApp.activate(ignoringOtherApps: true); log("activated self; \(describeCurrent())") }
 at(1.0) { log("bringing \(target) front"); openApp(target) }
 at(1.5) {
-    log("front=\(front()) isActive=\(NSApp.isActive)")
-    guard front() == target, !NSApp.isActive else { log("precondition failed: \(target) is not frontmost"); exit(2) }
+    let f = front()
+    log("front=\(f) isActive=\(NSApp.isActive)")
+    guard f == target, !NSApp.isActive else { log("precondition failed: need front=\(target) and isActive=false, got front=\(f) isActive=\(NSApp.isActive)"); exit(2) }
     plantStaleHotKeyEvent()
 }
 at(0.3) {
@@ -87,5 +100,10 @@ at(0.3) {
     NSApp.activate(ignoringOtherApps: true)
     win.makeKeyAndOrderFront(nil)
 }
-at(1.5) { log("RESULT method=\(method) target=\(target): isActive=\(NSApp.isActive) front=\(front())"); exit(0) }
+at(1.5) {
+    let expected = method == "retire"
+    let ok = NSApp.isActive == expected
+    log("RESULT method=\(method) target=\(target): isActive=\(NSApp.isActive) expected=\(expected) ok=\(ok) front=\(front())")
+    exit(ok ? 0 : 1)
+}
 app.run()
