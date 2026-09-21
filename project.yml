@@ -54,6 +54,10 @@ targets:
         buildPhase: resources
       - path: Resources/ssh-claude-wrapper.sh
         buildPhase: resources
+      # Read by ssh-claude-wrapper.sh from its own directory - both land in
+      # Contents/Resources - so it needs no Bundle lookup and no env var.
+      - path: Resources/canopy-remote-open.sh
+        buildPhase: resources
       - path: Resources/prism.js
         buildPhase: resources
       - path: Resources/prism-canopy.css

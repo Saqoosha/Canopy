@@ -119,11 +119,65 @@ if [ -n "${CANOPY_REMOTE_RESUME:-}" ]; then
     esac
 fi
 
+# Bring our own `open`. A Canopy remote session runs the CLI on the FAR side,
+# so an agent's `open report.pdf` reaches that host's LaunchServices and the
+# window appears on a screen nobody is sitting at. canopy-remote-open.sh is the
+# redirector and carries the whole rationale; what belongs here is how it is
+# delivered.
+#
+# It rides IN the launch command as a heredoc rather than being copied by a
+# second ssh. That buys two things: no extra round trip on every session start,
+# and no stale copy to reason about - the host always runs the shim this build
+# ships. PATH is prepended for that one process, so a hand-run `ssh host`, a
+# local terminal on the host, and a Canopy running on the host itself all keep
+# the stock `open`.
+#
+# The launch goes through `/bin/sh -c '<script>' canopy <args...>` instead of
+# being handed to the login shell verbatim, and BOTH halves of that matter.
+# `PATH="$dir:$PATH"` is only portable under sh: the Macs here log in to fish,
+# where PATH is a LIST, so that same line expands to one mangled entry per
+# element. And the CLI flags arrive as positional parameters instead of being
+# re-parsed by the far shell, which is exactly the arg-mangling limitation
+# noted at the top of this file. Measured on studio (fish) and win4090 (Git
+# Bash): identical PATH, identical args, `claude` resolved on both.
+#
+# Every failure here is silent and lands back on the stock `open`: a redirect
+# that cannot be installed must not become an `open` that does not work.
+SHIM_SRC="$(cd "$(dirname "$0")" && pwd)/canopy-remote-open.sh"
+REMOTE_SCRIPT=""
+if [ -r "$SHIM_SRC" ] && SHIM_B64=$(base64 < "$SHIM_SRC" | tr -d '\n'); then
+    # base64, and NOT a heredoc carrying the script verbatim. Measured: fish
+    # collapses \\ to \ INSIDE single quotes, where sh keeps both, so a
+    # shell_quote'd payload arrives two bytes short and silently altered - the
+    # shim's own sed expression was the casualty. Nothing is wrong with the
+    # quoting; fish simply escapes inside single quotes and sh does not. So the
+    # payload is reduced to an alphabet with no quote, no backslash and no
+    # newline in it, and this block deliberately contains no single quote of
+    # its own either: then shell_quote has nothing to escape and every login
+    # shell delivers the same bytes.
+    REMOTE_SCRIPT="canopy_b64=$SHIM_B64
+canopy_bin=\"\$HOME/.canopy/bin\"
+mkdir -p \"\$canopy_bin\" 2>/dev/null
+printf %s \"\$canopy_b64\" | base64 -d > \"\$canopy_bin/open.new\" 2>/dev/null ||
+    printf %s \"\$canopy_b64\" | base64 -D > \"\$canopy_bin/open.new\" 2>/dev/null
+if [ -s \"\$canopy_bin/open.new\" ] && chmod +x \"\$canopy_bin/open.new\" 2>/dev/null && mv -f \"\$canopy_bin/open.new\" \"\$canopy_bin/open\" 2>/dev/null; then
+    ln -sf open \"\$canopy_bin/xdg-open\" 2>/dev/null
+    PATH=\"\$canopy_bin:\$PATH\"
+    export PATH
+else
+    rm -f \"\$canopy_bin/open.new\" 2>/dev/null
+fi
+"
+fi
+REMOTE_SCRIPT="${REMOTE_SCRIPT}exec claude \"\$@\""
+# "canopy" is $0 for the script; the already-quoted flags follow as $1..$n.
+REMOTE_LAUNCH="/bin/sh -c $(shell_quote "$REMOTE_SCRIPT") canopy$REMOTE_ARGS"
+
 # cd to the remote working directory before running claude.
 # The extension passes cwd via spawn options (useless over SSH),
 # so we use CANOPY_SSH_CWD env var set by ShimProcess.
 if [ -n "${CANOPY_SSH_CWD:-}" ]; then
-    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" "cd $(shell_quote "$CANOPY_SSH_CWD") && $REMOTE_ENV claude$REMOTE_ARGS"
+    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" "cd $(shell_quote "$CANOPY_SSH_CWD") &&$REMOTE_ENV $REMOTE_LAUNCH"
 else
-    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" "$REMOTE_ENV claude$REMOTE_ARGS"
+    exec ssh -T -o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$CANOPY_SSH_HOST" "$REMOTE_ENV $REMOTE_LAUNCH"
 fi

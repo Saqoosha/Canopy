@@ -65,6 +65,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "CANOPY_REMOTE_MODEL",
         "CANOPY_REMOTE_EFFORT",
         "CANOPY_PANE",
+        "CANOPY_OPEN_KEY",
     ]
 
     /// Drops `canopyAssignedEnvKeys` from an inherited environment. Both shim
@@ -87,6 +88,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         var channelId: String?
     }
     private var mirrors: [ObjectIdentifier: MirrorClient] = [:]
+
+    /// Names this session in `~/.canopy/viewers`, where `canopy-remote-open.sh`
+    /// looks up where to open things. Per process, so a file left behind by a
+    /// crash can never be read as another session's.
+    let openRedirectKey = UUID().uuidString
 
     private enum RequestOwner {
         case primary
@@ -117,7 +123,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     func attachMirror(_ mirror: any MirrorSink) {
         mirrors[ObjectIdentifier(mirror)] = MirrorClient(sink: mirror, channelId: nil)
+        refreshOpenRedirect()
         logger.notice("[mirror] attached; \(self.mirrors.count) mirror(s) on this shim")
+    }
+
+    /// Point this session's `open` at a Mac watching it, or back at this
+    /// screen when none is. Called on every attach and detach, because that is
+    /// the whole reason the address is a file and not an environment variable.
+    private func refreshOpenRedirect() {
+        if let host = mirrors.values.lazy.compactMap({ $0.sink?.openRedirectHost }).first {
+            OpenRedirect.publish(key: openRedirectKey, host: host)
+        } else {
+            OpenRedirect.clear(key: openRedirectKey)
+        }
     }
 
     func detachMirror(_ mirror: any MirrorSink) {
@@ -128,6 +146,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return true
         }
         if mirrors.isEmpty { requestOwners.removeAll() }
+        refreshOpenRedirect()
         logger.notice("[mirror] detached; \(self.mirrors.count) mirror(s) on this shim")
     }
 
@@ -2713,8 +2732,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // macOS GUI apps inherit a minimal PATH (/usr/bin:/bin:...). We prepend the
         // Node.js binary's directory (which may come from mise/nvm) and Homebrew paths.
         // The CC extension uses system rg for @-mention file listing with gitignore support.
+        // Put our `open` ahead of the system one, so a session watched from
+        // another machine opens things on that machine. `OpenRedirect` and
+        // canopy-remote-open.sh carry the reasoning; with nobody watching the
+        // script is exactly the stock `open`, so this is inert by default.
+        var extraPaths: [String] = []
+        if let redirectBin = OpenRedirect.installScript() {
+            extraPaths.append(redirectBin.path)
+            env["CANOPY_OPEN_KEY"] = openRedirectKey
+        }
         let nodeBinDir = (nodeInfo.path as NSString).deletingLastPathComponent
-        var extraPaths = [nodeBinDir]
+        extraPaths.append(nodeBinDir)
         // Homebrew (Apple Silicon and Intel)
         for p in ["/opt/homebrew/bin", "/usr/local/bin"] {
             if !extraPaths.contains(p) { extraPaths.append(p) }
@@ -3183,6 +3211,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func stop() {
         isIntentionalStop = true
         disconnectMirrors()
+        // `disconnectMirrors` ends the connections but does not run their
+        // detach, so clear the destination here too. A crash still leaves the
+        // file; the key is per process, so a stale one is never read again.
+        OpenRedirect.clear(key: openRedirectKey)
         // **Before the early return, and before stdin closes.** The queue's
         // whole loss story is "the count is in the log", and on this path it
         // was not: `stop()` does not reach `resetActivityState` synchronously

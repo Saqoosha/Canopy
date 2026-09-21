@@ -141,6 +141,23 @@ final class MirrorConnection: MirrorSink {
     private(set) var isMacClient = false
     /// The session this connection attached to; images are only served under it.
     fileprivate private(set) var attachedSessionId = ""
+
+    /// The peer's address, so the mirrored session's `open` lands on the
+    /// screen its watcher is sitting at. Only a Mac gets one — the phone has
+    /// no `open` to run.
+    ///
+    /// IPv4 and hostnames only. An IPv6 peer is declined rather than
+    /// reformatted: `scp` wants it bracketed and a link-local one needs its
+    /// scope, and a host guessed wrong here ships the file nowhere and says
+    /// nothing. Declining costs one file opened on this screen instead.
+    var openRedirectHost: String? {
+        guard isMacClient, case .hostPort(let host, _) = connection.endpoint else { return nil }
+        switch host {
+        case .ipv4(let address): return address.debugDescription
+        case .name(let name, _): return name
+        default: return nil
+        }
+    }
     /// Feeds a client that asked for the status bar at attach; nil for one that did not.
     private var statusPublisher: MirrorStatusPublisher?
     /// True once the client's `attach` asked for `MirrorWire` compression. Written on the main
