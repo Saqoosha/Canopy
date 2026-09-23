@@ -41,15 +41,24 @@ enum ScrollPreserveScript {
     /// trivially cheap even in a React-heavy DOM.
     private static let scanIntervalMs = 1000
 
+    /// How long after a wheel / key / touch event a scroll still counts
+    /// as the user's. Wheel momentum keeps emitting wheel events, and a
+    /// held mouse button (scrollbar drag) is tracked separately, so this
+    /// only has to bridge the gap between an input event and the scroll
+    /// it causes.
+    private static let userInputWindowMs = 500
+
     static let javascript: String = """
     (function() {
         'use strict';
 
         var THRESHOLD = \(bottomThreshold);
         var SCAN_MS = \(scanIntervalMs);
+        var USER_INPUT_WINDOW_MS = \(userInputWindowMs);
 
         var known = new WeakSet();
         var atBottom = new WeakMap();
+        var lastTop = new WeakMap();
 
         function warn(msg, err) {
             try {
@@ -104,9 +113,11 @@ enum ScrollPreserveScript {
             if (known.has(el)) return;
             known.add(el);
             atBottom.set(el, checkAtBottom(el));
+            lastTop.set(el, el.scrollTop);
 
             el.addEventListener('scroll', function() {
                 atBottom.set(el, checkAtBottom(el));
+                lastTop.set(el, el.scrollTop);
             }, { passive: true });
 
             try {
@@ -159,14 +170,74 @@ enum ScrollPreserveScript {
             }
         }
 
-        // Capture-phase scroll listener: any element the user or app
-        // scrolls gets registered immediately, without waiting for the
-        // next periodic scan. Scroll events don't bubble but capture
-        // reaches them.
+        // User scroll intent. A scroll-up with none of these behind it is
+        // layout, not a person.
+        var lastInputAt = 0;
+        var pointerDown = false;
+        // Every key counts except typing into an editable: the next prompt
+        // typed mid-stream must not suspend the fix, but Tab focus moves and
+        // shortcuts can scroll the transcript.
+        function noteInput() { lastInputAt = Date.now(); }
+        window.addEventListener('wheel', noteInput, { capture: true, passive: true });
+        window.addEventListener('touchmove', noteInput, { capture: true, passive: true });
+        window.addEventListener('keydown', function(e) {
+            var typing = e.target instanceof Element &&
+                e.target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])') &&
+                !e.metaKey && !e.ctrlKey && !e.altKey &&
+                e.key !== 'Tab' && e.key !== 'Escape';
+            if (!typing) noteInput();
+        }, { capture: true, passive: true });
+        // `buttons` on every mouse event, not a mousedown/mouseup pair: a
+        // context menu, a drag-and-drop or a release outside the webview
+        // never delivers the mouseup.
+        function notePointer(e) { pointerDown = e.buttons !== 0; noteInput(); }
+        window.addEventListener('mousedown', notePointer, { capture: true, passive: true });
+        window.addEventListener('mousemove', function(e) { pointerDown = e.buttons !== 0; }, { capture: true, passive: true });
+        window.addEventListener('mouseup', notePointer, { capture: true, passive: true });
+        window.addEventListener('blur', function() { pointerDown = false; });
+        function userIsScrolling() {
+            return pointerDown || Date.now() - lastInputAt < USER_INPUT_WINDOW_MS;
+        }
+
+        // Capture-phase scroll listener. Two jobs:
+        //
+        // 1. Register any element the user or app scrolls immediately,
+        //    without waiting for the next periodic scan. Scroll events
+        //    don't bubble but capture reaches them.
+        //
+        // 2. Undo a layout clamp before the extension sees it. When a
+        //    block near the bottom briefly collapses and regrows in one
+        //    frame, the browser clamps scrollTop down and the scroll
+        //    event reports the lower value with scrollHeight already
+        //    restored. The extension's scroll handler reads any
+        //    input-less scroll-up away from the bottom as "the user
+        //    scrolled away" and stops following new messages until the
+        //    user scrolls back down by hand. Measured on 2.1.280: an
+        //    Edit tool's diff (whose height caps at 200px) produced a
+        //    scrollTop drop of exactly 200 with scrollHeight unchanged
+        //    and no input for 8 s, and the pane stayed stuck. Capture on
+        //    `document` runs before the extension's listener on the
+        //    element, so re-pinning here means it reads an unchanged
+        //    scrollTop and never flips.
         document.addEventListener('scroll', function(e) {
             var el = e.target;
-            if (el instanceof Element && !known.has(el) && isScrollable(el)) {
-                attach(el);
+            if (!(el instanceof Element)) return;
+            if (!known.has(el)) {
+                if (isScrollable(el)) attach(el);
+                return;
+            }
+            // Transcript only (other lists scrollIntoView on purpose), a drop
+            // rather than any move, and past the extension's own 1px test.
+            var dropped = el.scrollTop < lastTop.get(el);
+            var dH = el.scrollHeight - el.clientHeight - el.scrollTop;
+            if (atBottom.get(el) && dropped && dH > 1 && !userIsScrolling() &&
+                    el.querySelector('[data-transcript-message]')) {
+                var before = el.scrollTop;
+                pinToBottom(el);
+                try {
+                    console.log('[canopy-scroll-preserve] re-pinned after layout clamp: ' +
+                                Math.round(before) + ' -> ' + Math.round(el.scrollTop));
+                } catch (err) {}
             }
         }, { capture: true, passive: true });
 
