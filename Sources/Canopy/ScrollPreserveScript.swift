@@ -58,6 +58,7 @@ enum ScrollPreserveScript {
 
         var known = new WeakSet();
         var atBottom = new WeakMap();
+        var lastTop = new WeakMap();
 
         function warn(msg, err) {
             try {
@@ -112,9 +113,11 @@ enum ScrollPreserveScript {
             if (known.has(el)) return;
             known.add(el);
             atBottom.set(el, checkAtBottom(el));
+            lastTop.set(el, el.scrollTop);
 
             el.addEventListener('scroll', function() {
                 atBottom.set(el, checkAtBottom(el));
+                lastTop.set(el, el.scrollTop);
             }, { passive: true });
 
             try {
@@ -171,12 +174,25 @@ enum ScrollPreserveScript {
         // layout, not a person.
         var lastInputAt = 0;
         var pointerDown = false;
+        // Only keys that scroll. Typing the next prompt mid-stream must not
+        // count, and neither may Space typed into an editable.
+        var SCROLL_KEYS = { ArrowUp: 1, ArrowDown: 1, PageUp: 1, PageDown: 1, Home: 1, End: 1 };
         function noteInput() { lastInputAt = Date.now(); }
         window.addEventListener('wheel', noteInput, { capture: true, passive: true });
-        window.addEventListener('keydown', noteInput, { capture: true, passive: true });
         window.addEventListener('touchmove', noteInput, { capture: true, passive: true });
-        window.addEventListener('mousedown', function() { pointerDown = true; noteInput(); }, { capture: true, passive: true });
-        window.addEventListener('mouseup', function() { pointerDown = false; noteInput(); }, { capture: true, passive: true });
+        window.addEventListener('keydown', function(e) {
+            if (SCROLL_KEYS[e.key]) { noteInput(); return; }
+            if (e.key === ' ' && !(e.target instanceof Element &&
+                    e.target.closest('input, textarea, [contenteditable]'))) noteInput();
+        }, { capture: true, passive: true });
+        // `buttons` on every mouse event, not a mousedown/mouseup pair: a
+        // context menu, a drag-and-drop or a release outside the webview
+        // never delivers the mouseup.
+        function notePointer(e) { pointerDown = e.buttons !== 0; noteInput(); }
+        window.addEventListener('mousedown', notePointer, { capture: true, passive: true });
+        window.addEventListener('mousemove', function(e) { pointerDown = e.buttons !== 0; }, { capture: true, passive: true });
+        window.addEventListener('mouseup', notePointer, { capture: true, passive: true });
+        window.addEventListener('blur', function() { pointerDown = false; });
         function userIsScrolling() {
             return pointerDown || Date.now() - lastInputAt < USER_INPUT_WINDOW_MS;
         }
@@ -208,7 +224,12 @@ enum ScrollPreserveScript {
                 if (isScrollable(el)) attach(el);
                 return;
             }
-            if (atBottom.get(el) && !checkAtBottom(el) && !userIsScrolling()) {
+            // Transcript only (other lists scrollIntoView on purpose), a drop
+            // rather than any move, and past the extension's own 1px test.
+            var dropped = el.scrollTop < lastTop.get(el);
+            var dH = el.scrollHeight - el.clientHeight - el.scrollTop;
+            if (atBottom.get(el) && dropped && dH > 1 && !userIsScrolling() &&
+                    el.querySelector('[data-transcript-message]')) {
                 var before = el.scrollTop;
                 pinToBottom(el);
                 try {
