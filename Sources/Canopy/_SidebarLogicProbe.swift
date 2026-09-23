@@ -7143,39 +7143,98 @@ enum SidebarLogicProbe {
                MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel == "[fd7a::1]:8765",
                "got \(MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel)")
 
-        // MARK: - LaunchPrompt (images dropped on the launch composer)
+        // MARK: - LaunchPrompt (images dropped or pasted on the launch composer)
 
         record("launch prompt: whitespace and no images is no turn",
                LaunchPrompt.make(text: "  \n", images: []) == nil)
         do {
-            let tiny = NSBitmapImageRep(
-                bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 3, bitsPerSample: 8,
-                samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-            let png = tiny.representation(using: .png, properties: [:])!
-            let tiff = tiny.tiffRepresentation!
-            let verbatim = LaunchImage.make(data: png, mediaType: "image/png")
+            let textOnly = LaunchPrompt.make(text: " hi ", images: [])?.contentBlocks()
+            record("launch prompt: text-only is one trimmed text block",
+                   textOnly?.count == 1 && textOnly?.first?["type"] as? String == "text"
+                       && textOnly?.first?["text"] as? String == "hi")
+
+            func bitmap(_ w: Int, _ h: Int) -> NSBitmapImageRep? {
+                NSBitmapImageRep(
+                    bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8,
+                    samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+            }
+            let tiny = bitmap(4, 3)
+            let png = tiny?.representation(using: .png, properties: [:]) ?? Data()
+            let jpeg = tiny?.representation(using: .jpeg, properties: [:]) ?? Data()
+            let tiff = tiny?.tiffRepresentation ?? Data()
+            record("launch image: fixtures encoded", !png.isEmpty && !jpeg.isEmpty && !tiff.isEmpty)
+
+            let verbatim = LaunchImage.make(data: png)
             record("launch image: an accepted, small PNG is sent verbatim",
                    verbatim?.mediaType == "image/png" && verbatim?.data == png)
-            let converted = LaunchImage.make(data: tiff, mediaType: "image/tiff")
-            record("launch image: TIFF is re-encoded to an accepted type",
-                   converted.map { LaunchImage.acceptedMediaTypes.contains($0.mediaType) } == true,
+            record("launch image: the media type comes from the bytes",
+                   LaunchImage.make(data: jpeg)?.mediaType == "image/jpeg")
+            let converted = LaunchImage.make(data: tiff)
+            record("launch image: TIFF is re-encoded to PNG without upscaling",
+                   converted?.mediaType == "image/png"
+                       && converted.flatMap { NSBitmapImageRep(data: $0.data)?.pixelsWide } == 4,
                    "got \(String(describing: converted?.mediaType))")
+            let wide = Int(LaunchImage.maxDimension) + 400
+            let big = bitmap(wide, 10)?.representation(using: .png, properties: [:])
+            let shrunk = big.flatMap { LaunchImage.make(data: $0) }
+                .flatMap { NSBitmapImageRep(data: $0.data) }
+            record("launch image: an oversized image is scaled to maxDimension",
+                   shrunk?.pixelsWide == Int(LaunchImage.maxDimension),
+                   "got \(String(describing: shrunk?.pixelsWide))")
             record("launch image: non-image bytes are refused",
-                   LaunchImage.make(data: Data("hello".utf8), mediaType: "image/png") == nil)
+                   LaunchImage.make(data: Data("hello".utf8)) == nil)
 
-            let prompt = LaunchPrompt.make(text: " look ", images: [verbatim!])!
-            let blocks = prompt.contentBlocks()
-            let source = blocks.first?["source"] as? [String: Any]
-            record("launch prompt: image block first, in the webview's base64 shape",
-                   blocks.first?["type"] as? String == "image"
-                       && source?["type"] as? String == "base64"
-                       && source?["media_type"] as? String == "image/png"
-                       && source?["data"] as? String == png.base64EncodedString())
+            let images = [verbatim, LaunchImage.make(data: jpeg)].compactMap { $0 }
+            let blocks = LaunchPrompt.make(text: " look ", images: images)?.contentBlocks() ?? []
+            let sources = blocks.compactMap { $0["source"] as? [String: Any] }
+            record("launch prompt: images first in order, in the webview's base64 shape",
+                   blocks.count == 3
+                       && blocks[0]["type"] as? String == "image"
+                       && sources.first?["type"] as? String == "base64"
+                       && sources.map { $0["media_type"] as? String } == ["image/png", "image/jpeg"]
+                       && sources.first?["data"] as? String == png.base64EncodedString())
             record("launch prompt: trimmed text block last",
-                   blocks.count == 2 && blocks.last?["text"] as? String == "look")
+                   blocks.last?["type"] as? String == "text" && blocks.last?["text"] as? String == "look")
             record("launch prompt: images-only sends no empty text block",
-                   LaunchPrompt.make(text: "", images: [verbatim!])!.contentBlocks().count == 1)
+                   LaunchPrompt.make(text: "", images: images)?.contentBlocks().count == 2)
+
+            // Pasteboard precedence, on a private pasteboard.
+            let board = NSPasteboard(name: .init("canopy-probe-\(UUID().uuidString)"))
+            defer { board.releaseGlobally() }
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("canopy-probe-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let pngFile = dir.appendingPathComponent("shot.png")
+            let txtFile = dir.appendingPathComponent("notes.txt")
+            try? png.write(to: pngFile)
+            try? Data("x".utf8).write(to: txtFile)
+            let iconTIFF = bitmap(9, 9)?.tiffRepresentation ?? Data()
+
+            board.clearContents()
+            board.writeObjects([pngFile as NSURL])
+            board.setData(iconTIFF, forType: .tiff)
+            let fromFile = LaunchImage.fromPasteboard(board)
+            record("paste: an image file wins over the icon TIFF beside it",
+                   fromFile.count == 1 && fromFile.first?.data == png)
+
+            board.clearContents()
+            board.writeObjects([txtFile as NSURL])
+            board.setData(iconTIFF, forType: .tiff)
+            record("paste: a non-image file yields nothing, not its icon",
+                   LaunchImage.fromPasteboard(board).isEmpty)
+
+            board.clearContents()
+            board.setString("A1\tB1", forType: .string)
+            board.setData(iconTIFF, forType: .tiff)
+            record("paste: text beside a picture of it stays a text paste",
+                   LaunchImage.fromPasteboard(board).isEmpty)
+
+            board.clearContents()
+            board.setData(png, forType: .png)
+            record("paste: bare image data is attached",
+                   LaunchImage.fromPasteboard(board).first?.data == png)
         }
 
         // MARK: - RemoteDirectoryRules (remote browser: New Folder + hidden files)

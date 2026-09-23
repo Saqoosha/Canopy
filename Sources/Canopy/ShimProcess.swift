@@ -1105,7 +1105,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // "queued", not "submitted": `sendToShim` hands off to a write queue and
         // can also buffer into `pendingMessages` before the shim is ready, so a
         // failure surfaces later, from `writeToStdin`, at `.error`.
-        logger.notice("initial prompt: queued \(prompt.count, privacy: .public) chars")
+        logger.notice("initial prompt: queued \(prompt.count, privacy: .public) chars, \(launchPrompt.images.count, privacy: .public) images")
     }
 
     /// Inject one refresh turn.

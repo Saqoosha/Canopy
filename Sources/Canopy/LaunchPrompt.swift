@@ -1,19 +1,21 @@
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 
 /// What the launch screen hands a new session as its first turn: the typed
-/// text plus any images dropped onto the composer.
-///
-/// One value rather than a text parameter and an images parameter side by
-/// side, because the prompt travels through five hops (launcher → `AppState` →
-/// `SessionStore.openNew` → `OpenSession` → `ShimProcess`) and a second
-/// parameter is one more thing each hop can forget to carry.
-struct LaunchPrompt: Equatable {
-    var text: String
-    var images: [LaunchImage]
+/// text plus any images dropped or pasted onto the composer. One value, so no
+/// hop between the launcher and `ShimProcess` can carry one half and drop the
+/// other.
+struct LaunchPrompt {
+    let text: String
+    let images: [LaunchImage]
 
-    /// Nil when there is nothing to send, so every call site keeps the
-    /// "nil means no first turn" reading the plain-string version had.
+    private init(text: String, images: [LaunchImage]) {
+        self.text = text
+        self.images = images
+    }
+
+    /// The only way to build one; nil when there is nothing to send.
     static func make(text: String, images: [LaunchImage]) -> LaunchPrompt? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty && images.isEmpty { return nil }
@@ -43,32 +45,44 @@ struct LaunchPrompt: Equatable {
     }
 }
 
-/// One image dropped onto the launch composer, already in a form the API
-/// accepts.
-struct LaunchImage: Identifiable, Equatable {
+/// One image dropped or pasted onto the launch composer, already in a form
+/// the API accepts.
+struct LaunchImage: Identifiable {
     let id = UUID()
     let mediaType: String
     let data: Data
+
+    private init(mediaType: String, data: Data) {
+        self.mediaType = mediaType
+        self.data = data
+    }
 
     /// The four media types the API — and the CC webview's own attach path —
     /// accept for an image block.
     static let acceptedMediaTypes: Set<String> = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 
-    /// Longest side an image is sent at. The API downscales anything past
-    /// ~1568px itself and refuses past 8000, so sending more only costs bytes.
+    /// Longest side an image is sent at — the CLI's own default for images.
     static let maxDimension: CGFloat = 2000
 
     /// Per-image byte ceiling. The API's limit is 5 MB of base64, which is
     /// ~3.75 MB raw; staying under it with margin.
     static let maxBytes = 3_500_000
 
-    /// Build from raw file bytes. A file already in an accepted type and
-    /// within both limits is sent verbatim (a GIF keeps its animation, a PNG
+    /// Build from raw image bytes. Bytes already in an accepted type and
+    /// within both limits are sent verbatim (a GIF keeps its animation, a PNG
     /// its transparency); anything else — HEIC, TIFF, an oversized
-    /// screenshot — is re-encoded. Nil when the bytes are not an image.
-    static func make(data: Data, mediaType: String?) -> LaunchImage? {
+    /// screenshot — is re-encoded. Nil when the bytes are not an image or
+    /// cannot be brought under the limits.
+    ///
+    /// The type is read from the bytes, never from a file extension: a JPEG
+    /// saved as `.png` would otherwise go out labelled wrong and the API
+    /// refuses the whole turn.
+    static func make(data: Data) -> LaunchImage? {
         guard let bitmap = NSBitmapImageRep(data: data) else { return nil }
         let size = CGSize(width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+        let mediaType = CGImageSourceCreateWithData(data as CFData, nil)
+            .flatMap { CGImageSourceGetType($0) }
+            .flatMap { UTType($0 as String)?.preferredMIMEType }
         if let mediaType, acceptedMediaTypes.contains(mediaType),
            data.count <= maxBytes, max(size.width, size.height) <= maxDimension {
             return LaunchImage(mediaType: mediaType, data: data)
@@ -110,7 +124,7 @@ struct LaunchImage: Identifiable, Equatable {
     /// An image file on disk; nil for anything that is not one.
     static func make(fileURL url: URL) -> LaunchImage? {
         guard isImageFile(url), let bytes = try? Data(contentsOf: url) else { return nil }
-        return make(data: bytes, mediaType: mediaType(forFileURL: url))
+        return make(data: bytes)
     }
 
     /// The images a paste would carry.
@@ -119,31 +133,27 @@ struct LaunchImage: Identifiable, Equatable {
     /// answer: copying a file in Finder also puts that file's ICON on the
     /// pasteboard as TIFF, so falling through would attach a picture of a
     /// document icon. A copied non-image file therefore yields nothing, and
-    /// the paste goes through as text. Otherwise the first image
-    /// representation wins — a screenshot or "Copy Image" in a browser.
+    /// the paste goes through as text. Text wins next: Excel, Numbers and Word
+    /// put a picture of the selection beside the text they copy. Otherwise the
+    /// first image representation wins — a screenshot or "Copy Image".
     static func fromPasteboard(_ pasteboard: NSPasteboard) -> [LaunchImage] {
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self],
                                              options: [.urlReadingFileURLsOnly: true]) as? [URL],
            !urls.isEmpty {
             return urls.compactMap { make(fileURL: $0) }
         }
+        if pasteboard.types?.contains(.string) == true { return [] }
         for type in pasteboard.types ?? [] {
-            guard let uti = UTType(type.rawValue), uti.conforms(to: .image),
+            guard UTType(type.rawValue)?.conforms(to: .image) == true,
                   let data = pasteboard.data(forType: type),
-                  let image = make(data: data, mediaType: uti.preferredMIMEType)
+                  let image = make(data: data)
             else { continue }
             return [image]
         }
         return []
     }
 
-    /// Media type from a file's extension, for the verbatim path above.
-    static func mediaType(forFileURL url: URL) -> String? {
-        UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
-    }
-
-    /// Whether a dropped file is an image at all, so a folder drop and an
-    /// image drop can share one drop target.
+    /// Whether a file's extension names an image type.
     static func isImageFile(_ url: URL) -> Bool {
         UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
     }

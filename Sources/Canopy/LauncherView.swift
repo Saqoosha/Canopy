@@ -183,7 +183,7 @@ struct LauncherView: View {
     /// sessions that never relocate.) A launcher that demanded a task up front
     /// would delete that half.
     @State private var initialPrompt = ""
-    /// Images dropped onto the launcher, sent with the first turn.
+    /// Images dropped or pasted onto the launcher, sent with the first turn.
     @State private var attachedImages: [LaunchImage] = []
     @FocusState private var isPromptFocused: Bool
     /// Cmd+V monitor, installed only while the prompt field has focus.
@@ -1342,11 +1342,11 @@ struct LauncherView: View {
         }
     }
 
-    /// The typed prompt, or nil when the field is empty.
+    /// The typed prompt plus attached images, or nil when both are empty.
     ///
     /// Read by EVERY launch route this view owns, not just the Start button:
-    /// clicking a recent directory, a session-history row, or a teleported web
-    /// session all submit it too. One rule — whatever is in the field is sent
+    /// SSH continue, the worktree route and a teleported web session all
+    /// submit it too. One rule — whatever is in the field is sent
     /// to whatever session you open — because the alternative is a field that
     /// silently does nothing depending on which control was clicked, and
     /// nothing on screen would say which those are.
@@ -1361,7 +1361,7 @@ struct LauncherView: View {
     /// puts the session in a NEW pane and leaves the launcher pane standing —
     /// with the prompt still in the box, and the next Start would submit it a
     /// second time. Clearing is also what makes the field agree with what will
-    /// happen: text sitting in it means text that is about to be sent.
+    /// happen: whatever sits in the composer is about to be sent.
     private func clearPendingPrompt() {
         initialPrompt = ""
         attachedImages = []
@@ -2027,16 +2027,19 @@ struct LauncherView: View {
 
     /// Cmd+V with an image on the clipboard attaches it instead of pasting.
     ///
-    /// An NSEvent monitor rather than `.onPasteCommand`, because the
-    /// TextField's field editor answers `paste:` itself and a SwiftUI paste
-    /// handler on the field never sees it. Installed only while this
-    /// launcher's prompt has focus, so another pane's Cmd+V — or a launcher
-    /// beside this one — is untouched. A clipboard with no image passes the
-    /// event through, so text paste is unchanged.
+    /// An NSEvent monitor, because the TextField's field editor answers
+    /// `paste:` itself (expected, not measured). Edit ▸ Paste from the menu
+    /// is not covered. Installed only while this
+    /// launcher's prompt has focus, and scoped to the window it has focus in
+    /// with a text editor as first responder and no sheet up — SwiftUI focus
+    /// survives a sheet or another window taking the keyboard.
     private func installPasteMonitor() {
         guard pasteMonitor == nil else { return }
+        weak var window = NSApp.keyWindow
         pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+            guard let window, event.window === window, window.attachedSheet == nil,
+                  window.firstResponder is NSTextView,
+                  event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
                   event.charactersIgnoringModifiers?.lowercased() == "v"
             else { return event }
             let images = LaunchImage.fromPasteboard(.general)
@@ -2055,6 +2058,9 @@ struct LauncherView: View {
     /// dragged out of a browser or a screenshot thumbnail — is attached to the
     /// first turn. Both share one drop target so the user does not have to aim.
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        // The composer is hidden or frozen while these run and the launch
+        // reads the prompt after them, so a drop now would be sent unseen.
+        guard !isCreatingWorktree, !isResolvingRemoteSession else { return false }
         var accepted = false
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
@@ -2076,7 +2082,7 @@ struct LauncherView: View {
                 .first(where: { $0.conforms(to: .image) }) {
                 accepted = true
                 provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
-                    guard let data, let image = LaunchImage.make(data: data, mediaType: type.preferredMIMEType)
+                    guard let data, let image = LaunchImage.make(data: data)
                     else { return }
                     DispatchQueue.main.async { attachedImages.append(image) }
                 }

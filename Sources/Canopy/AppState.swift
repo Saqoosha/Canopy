@@ -57,7 +57,7 @@ final class AppState {
     var resumeSessionId: String?
     var resumeSessionTitle: String?
 
-    /// The prompt typed on the launch screen, to be submitted as the session's
+    /// The first turn composed on the launch screen (text and/or images), to be submitted as the session's
     /// first turn once its CLI is up. Nil for every route that has no launch
     /// screen behind it (a sidebar click, a restore, Cmd+O).
     var initialPrompt: LaunchPrompt?

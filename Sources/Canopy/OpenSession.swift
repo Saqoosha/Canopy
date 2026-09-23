@@ -166,8 +166,8 @@ final class OpenSession: Identifiable, Hashable {
     /// still running. Feeds `SessionActivity.of` as the `background` rung.
     /// Mutually exclusive with `isThinking` — only true between turns.
     var isWaiting: Bool = false
-    /// Prompt typed on the launch screen, waiting for this session's CLI to
-    /// come up so it can be submitted as the first turn.
+    /// The first turn composed on the launch screen (text and/or images),
+    /// waiting for this session's CLI to come up.
     ///
     /// It lives here rather than on `ShimProcess` because the shim does not
     /// exist when the launcher hands it over — `SessionContainer` spawns one
