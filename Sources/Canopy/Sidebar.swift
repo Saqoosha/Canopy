@@ -393,6 +393,21 @@ struct Sidebar: View {
         }
         if case .open(let s) = row {
             Button("Restart session") { store.restartSession(s.id) }
+            if s.origin.remoteHost == nil,
+               s.origin.mirrorTarget == nil,
+               !ClaudeAccountStore.load().isEmpty {
+                Menu("Account") {
+                    let accounts = ClaudeAccountStore.load()
+                    Button((s.claudeAccount == nil ? "✓ " : "") + "Default") {
+                        store.switchAccount(s.id, to: nil)
+                    }
+                    ForEach(accounts) { account in
+                        Button((s.claudeAccount?.id == account.id ? "✓ " : "") + account.name) {
+                            store.switchAccount(s.id, to: account)
+                        }
+                    }
+                }
+            }
             Button("Close session") { store.closeSession(s.id, keepingFailure: false) }
         }
         if case .launcher = row {

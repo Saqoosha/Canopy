@@ -14,6 +14,7 @@ struct WebViewContainer: NSViewRepresentable {
     var statusBarData: StatusBarData?
     var remoteHost: String?
     var customApi: ModelProvider?
+    var claudeAccount: ClaudeAccount?
     var connectionState: ConnectionState?
     var onCrash: ((Int32) -> Void)?
     /// The OpenSession that owns this WebView's shim and WKWebView.
@@ -43,6 +44,7 @@ struct WebViewContainer: NSViewRepresentable {
         var permissionMode: PermissionMode = .acceptEdits
         var statusBarData: StatusBarData?
         var customApi: ModelProvider?
+        var claudeAccount: ClaudeAccount?
 
         private var reconnectTimer: Timer?
         private var reconnectAttempt = 0
@@ -214,6 +216,7 @@ struct WebViewContainer: NSViewRepresentable {
                 statusBarData: statusBarData,
                 remoteHost: remoteHost,
                 customApi: customApi,
+                claudeAccount: claudeAccount,
                 // `sessionId` came from the CLI itself (`activeSessionId`, via
                 // the disconnect delegate) for a session that was mid-turn when
                 // the link dropped, so it names a real remote transcript by
@@ -463,6 +466,7 @@ struct WebViewContainer: NSViewRepresentable {
                 statusBarData: statusBarData,
                 remoteHost: remoteHost,
                 customApi: customApi,
+                claudeAccount: claudeAccount,
                 // Read off the session rather than threaded through this
                 // view's own properties: the flag only ever accompanies
                 // `resumeSessionId`, and `boundSession` is already here.
@@ -494,6 +498,7 @@ struct WebViewContainer: NSViewRepresentable {
         coordinator.permissionMode = permissionMode
         coordinator.statusBarData = statusBarData
         coordinator.customApi = customApi
+        coordinator.claudeAccount = claudeAccount
         coordinator.onCrash = onCrash
 
         config.userContentController = ucc

@@ -54,6 +54,29 @@ enum PaneHeaderMenu {
             menu.addItem(ClosureMenuItem(title: "Restart session") { [weak store] in
                 store?.restartSession(openId)
             })
+            if session.origin.remoteHost == nil,
+               session.origin.mirrorTarget == nil {
+                let accounts = ClaudeAccountStore.load()
+                if !accounts.isEmpty {
+                    let accountMenu = NSMenu()
+                    let currentId = session.claudeAccount?.id
+                    let defaultItem = ClosureMenuItem(title: "Default") { [weak store] in
+                        store?.switchAccount(openId, to: nil)
+                    }
+                    defaultItem.state = currentId == nil ? .on : .off
+                    accountMenu.addItem(defaultItem)
+                    for account in accounts {
+                        let item = ClosureMenuItem(title: account.name) { [weak store] in
+                            store?.switchAccount(openId, to: account)
+                        }
+                        item.state = currentId == account.id ? .on : .off
+                        accountMenu.addItem(item)
+                    }
+                    let accountItem = NSMenuItem(title: "Account", action: nil, keyEquivalent: "")
+                    accountItem.submenu = accountMenu
+                    menu.addItem(accountItem)
+                }
+            }
             menu.addItem(ClosureMenuItem(title: "Close session") { [weak store] in
                 store?.closeSession(openId, keepingFailure: false)
             })

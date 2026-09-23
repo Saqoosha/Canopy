@@ -70,6 +70,14 @@ struct ClaudeAccountInfo {
                                  organizationName: nonEmpty("organizationName"))
     }
 
+    /// The account a `ClaudeAccount`'s config dir is signed in as. Uncached:
+    /// read once per shim, off the main thread.
+    static func inConfigDir(_ dir: URL) -> ClaudeAccountInfo? {
+        let url = dir.appendingPathComponent(".claude.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return parse(data: data, source: url.lastPathComponent)
+    }
+
     // MARK: - Remote
 
     /// The account a remote host's CLI is signed in as, read over SSH. Nil

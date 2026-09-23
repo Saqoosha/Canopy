@@ -357,6 +357,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     var permissionMode: PermissionMode
     var remoteHost: String?
     var customApi: ModelProvider?
+    /// The login this session runs under; nil is the default one. Ignored for
+    /// SSH remote sessions, whose CLI signs in on the other machine.
+    let claudeAccount: ClaudeAccount?
 
     /// The rate-limit record this session's usage reports belong to. Rate
     /// limits are per account, and an SSH remote session's CLI may be signed
@@ -382,6 +385,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case resolved(RateLimitAccount.Key?)
     }
     private var rateLimitBinding: RateLimitBinding = .unresolved
+    /// Set once this shim has retried an empty `get_usage`, so a CLI that
+    /// never has numbers costs one retry, not one a minute.
+    private var retriedEmptyUsage = false
 
     // MARK: - Activity tracking (drives sidebar spinner via boundSession.isThinking)
     private var sessionTitle: String = ""
@@ -2264,8 +2270,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var cliResolvedModel: String = ""
 
     @MainActor
-    init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, resumeIdIsExistingTranscript: Bool) {
+    init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, claudeAccount: ClaudeAccount? = nil, resumeIdIsExistingTranscript: Bool) {
         self.workingDirectory = workingDirectory
+        self.claudeAccount = remoteHost == nil ? claudeAccount : nil
         self.resumeSessionId = resumeSessionId
         self.resumeIdIsExistingTranscript = resumeIdIsExistingTranscript
         self.model = model
@@ -2322,6 +2329,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     // still coming and would find the account set, while a
                     // request from here would consume the account's throttle
                     // without the `get_usage` half.
+                    if self.channelId != nil { self.requestUsageUpdate() }
+                }
+            }
+        } else if let claudeAccount = self.claudeAccount {
+            // Same attribution as a remote session signed in elsewhere: this
+            // session's usage belongs to the account's own record, not to
+            // this Mac's default login.
+            let dir = claudeAccount.configURL
+            let label = claudeAccount.name
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let email = ClaudeAccountInfo.inConfigDir(dir)?.email
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    let key = Self.rateLimitKey(remoteEmail: email,
+                                                localEmail: ClaudeAccountInfo.current()?.email,
+                                                host: label)
+                    self.rateLimitBinding = .resolved(key)
                     if self.channelId != nil { self.requestUsageUpdate() }
                 }
             }
@@ -2930,6 +2954,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // settings file by pre-env-var Canopy builds, so the CLI spawns
             // directly. User-configured custom wrappers are preserved.
             CanopySettings.shared.clearStaleSSHWrapper()
+        }
+
+        // Second login: the CLI and the extension both read CLAUDE_CONFIG_DIR,
+        // and the CLI keys its Keychain item by that path. Synced first so the
+        // account sees the default login's settings, hooks and transcripts.
+        if let account = claudeAccount {
+            ClaudeConfigDirSync.sync(account)
+            env["CLAUDE_CONFIG_DIR"] = account.configDir
+            logger.notice("Claude account: \(account.name, privacy: .public)")
         }
 
         // Custom API Provider: inject env vars before CLI starts.
@@ -5098,6 +5131,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // reaching the webview (isCanopyOwnedResponse), so a silent
             // return here would make the per-model usage rows disappear
             // with zero diagnostics anywhere — always log the mismatch.
+            // A freshly spawned CLI answers before its own first usage fetch
+            // (measured: the reply 13 s ahead of the fetch after an account
+            // switch) with a `usage` that has no `rate_limits`. That request
+            // already spent the account's one-a-minute throttle, so without a
+            // retry the bars stay blank until a turn ends a minute later.
+            if response["type"] as? String == "get_usage_response",
+               let usage = response["usage"] as? [String: Any],
+               usage["rate_limits"] == nil {
+                guard !retriedEmptyUsage else { return }
+                retriedEmptyUsage = true
+                logger.info("get_usage had no rate_limits yet; retrying once")
+                rateLimitAccount?.releaseUsageThrottle()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                    self?.requestUsageUpdate()
+                }
+                return
+            }
             guard response["type"] as? String == "get_usage_response",
                   let usage = response["usage"] as? [String: Any],
                   let rateLimits = usage["rate_limits"] as? [String: Any]

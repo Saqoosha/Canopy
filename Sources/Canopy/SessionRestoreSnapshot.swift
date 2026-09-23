@@ -90,6 +90,10 @@ struct SessionRestoreSnapshot: Codable, Equatable {
         var model: String?
         var effortLevel: String?
         var providerId: String?
+        /// Id of the `ClaudeAccount` this session was on at capture. Nil is
+        /// the default login (and the decode for snapshots written before
+        /// this field existed).
+        var accountId: String?
         var lastActiveAt: Date
         /// `OpenSession.resumeIdIsExistingTranscript` as it stood at capture.
         ///

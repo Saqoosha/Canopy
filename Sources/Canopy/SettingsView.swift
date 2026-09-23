@@ -12,6 +12,9 @@ struct SettingsView: View {
             ProvidersSettingsTab()
                 .tabItem { Label("Providers", systemImage: "server.rack") }
 
+            ClaudeAccountsSettingsTab()
+                .tabItem { Label("Accounts", systemImage: "person.crop.circle") }
+
             // MacroPad and Mobile are whole features, not stray preferences,
             // and General had grown to eleven controls carrying both. General
             // is for the small toggles with nowhere else to live.
@@ -597,6 +600,97 @@ private struct ProvidersSettingsTab: View {
             } onCancel: {
                 showEditSheet = false
             }
+        }
+    }
+}
+
+// MARK: - Claude Accounts
+
+private struct ClaudeAccountsSettingsTab: View {
+    @State private var accounts: [ClaudeAccount] = ClaudeAccountStore.load()
+    @State private var defaultId: String = ClaudeAccountStore.defaultAccountId()
+    @State private var newName: String = ""
+    @State private var newConfigDir: String = ""
+
+    private var canAdd: Bool {
+        !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && ClaudeAccountStore.normalizedConfigDir(newConfigDir) != nil
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                if accounts.isEmpty {
+                    Text("No extra accounts yet.")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ForEach(accounts) { account in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(account.name)
+                                    .font(.body.weight(.medium))
+                                Text(account.configDir)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                ClaudeAccountStore.delete(account.id)
+                                accounts = ClaudeAccountStore.load()
+                                defaultId = ClaudeAccountStore.defaultAccountId()
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Remove account")
+                        }
+                    }
+                }
+            } header: {
+                Text("Claude Accounts")
+            } footer: {
+                SettingsFooter(text: "Extra Claude logins. Each one is a separate CLAUDE_CONFIG_DIR that shares your settings, hooks and transcripts with the default login. Log in once in Terminal: CLAUDE_CONFIG_DIR=<dir> claude, then /login.")
+            }
+
+            Section {
+                TextField("Name", text: $newName)
+                TextField("Config directory", text: $newConfigDir, prompt: Text("~/.claude-alt"))
+                Button("Add") {
+                    guard let dir = ClaudeAccountStore.normalizedConfigDir(newConfigDir) else { return }
+                    let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty else { return }
+                    var updated = accounts
+                    updated.append(ClaudeAccount(name: name, configDir: dir))
+                    ClaudeAccountStore.save(updated)
+                    accounts = ClaudeAccountStore.load()
+                    newName = ""
+                    newConfigDir = ""
+                }
+                .disabled(!canAdd)
+            }
+
+            Section {
+                Picker("New sessions use", selection: Binding(
+                    get: { defaultId },
+                    set: { newValue in
+                        defaultId = newValue
+                        ClaudeAccountStore.setDefault(newValue.isEmpty ? nil : newValue)
+                    }
+                )) {
+                    Text("Default login").tag("")
+                    ForEach(accounts) { account in
+                        Text(account.name).tag(account.id)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            accounts = ClaudeAccountStore.load()
+            defaultId = ClaudeAccountStore.defaultAccountId()
         }
     }
 }
