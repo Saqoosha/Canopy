@@ -2062,7 +2062,7 @@ struct LauncherView: View {
         // reads the prompt after them, so a drop now would be sent unseen.
         guard !isCreatingWorktree, !isResolvingRemoteSession else { return false }
         var accepted = false
-        for provider in providers {
+        for (index, provider) in providers.enumerated() {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 accepted = true
                 provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
@@ -2072,6 +2072,8 @@ struct LauncherView: View {
                     var isDir: ObjCBool = false
                     guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
                     if isDir.boolValue {
+                        // Only the first item may pick the folder; loads finish in any order.
+                        guard index == 0 else { return }
                         DispatchQueue.main.async { selectedDirectory = url }
                     } else if let image = LaunchImage.make(fileURL: url) {
                         DispatchQueue.main.async { attachedImages.append(image) }
