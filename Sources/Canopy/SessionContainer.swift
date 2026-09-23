@@ -28,7 +28,7 @@ struct SessionContainer: View {
                             connectionState: session.connection,
                             title: "Connection to \(session.statusBar.mirrorMachine ?? "the other Mac") Lost",
                             onBackToLauncher: {
-                                session.connection.status = .connected
+                                SessionStore.shared?.replaceSessionWithLauncher(session.id)
                             }
                         )
                     }
@@ -58,9 +58,7 @@ struct SessionContainer: View {
                         ConnectionOverlayView(
                             connectionState: session.connection,
                             onBackToLauncher: {
-                                // In the sidebar shell there is no "back to launcher"
-                                // button; users explicitly close via the × instead.
-                                session.connection.status = .connected
+                                SessionStore.shared?.replaceSessionWithLauncher(session.id)
                             }
                         )
                     }
