@@ -722,7 +722,7 @@ final class SessionStore {
         remoteHost: String? = nil,
         customApi: ModelProvider? = nil,
         target: PaneTarget = .focused,
-        initialPrompt: String? = nil,
+        initialPrompt: LaunchPrompt? = nil,
         settledTitle: String? = nil
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
@@ -772,7 +772,7 @@ final class SessionStore {
         // was not sent", which is otherwise indistinguishable from the outside:
         // both look like a session that opens with an empty chat. Length only,
         // never the text.
-        logger.notice("openNew: initialPrompt \(initialPrompt?.count ?? -1, privacy: .public) chars")
+        logger.notice("openNew: initialPrompt \(initialPrompt?.text.count ?? -1, privacy: .public) chars, \(initialPrompt?.images.count ?? 0, privacy: .public) images")
         // Don't persist remote-host paths in recents (matches existing behaviour).
         if remoteHost == nil {
             RecentDirectories.add(directory)

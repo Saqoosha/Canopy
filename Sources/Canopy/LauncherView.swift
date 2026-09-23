@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// One pill in the launcher's context row.
 ///
@@ -182,6 +183,11 @@ struct LauncherView: View {
     /// sessions that never relocate.) A launcher that demanded a task up front
     /// would delete that half.
     @State private var initialPrompt = ""
+    /// Images dropped onto the launcher, sent with the first turn.
+    @State private var attachedImages: [LaunchImage] = []
+    @FocusState private var isPromptFocused: Bool
+    /// Cmd+V monitor, installed only while the prompt field has focus.
+    @State private var pasteMonitor: Any?
     /// Which step of the worktree hand-off is running, for `preparingHeadline`
     /// — which the launcher renders on `SpawningOverlay`, not on the button.
     /// Three of them can take seconds and they fail for unrelated reasons, so
@@ -383,7 +389,7 @@ struct LauncherView: View {
                 .padding(20)
                 .frame(minWidth: 560, minHeight: 420)
         }
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+        .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
         }
     }
@@ -907,6 +913,11 @@ struct LauncherView: View {
 
     private var composerBox: some View {
         VStack(spacing: 0) {
+            if !attachedImages.isEmpty {
+                attachedImageStrip
+                    .padding(.horizontal, 14)
+                    .padding(.top, 12)
+            }
             TextField("", text: $initialPrompt, prompt: Text(composerPlaceholder), axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
@@ -948,6 +959,11 @@ struct LauncherView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 6)
                 .disabled(isCreatingWorktree || isResolvingRemoteSession)
+                .focused($isPromptFocused)
+                .onChange(of: isPromptFocused) { _, focused in
+                    if focused { installPasteMonitor() } else { removePasteMonitor() }
+                }
+                .onDisappear { removePasteMonitor() }
 
             HStack(spacing: 5) {
                 moreMenu
@@ -966,6 +982,46 @@ struct LauncherView: View {
                 .stroke(isDropTargeted ? Color.accentColor : Color.primary.opacity(0.12),
                         lineWidth: isDropTargeted ? 2 : 1)
         )
+    }
+
+    /// Thumbnails of the dropped images, each with a remove button.
+    private var attachedImageStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachedImages) { image in
+                    ZStack(alignment: .topTrailing) {
+                        Group {
+                            if let thumbnail = NSImage(data: image.data) {
+                                Image(nsImage: thumbnail)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            } else {
+                                Color.secondary.opacity(0.2)
+                            }
+                        }
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.primary.opacity(0.12), lineWidth: 1))
+
+                        Button {
+                            attachedImages.removeAll { $0.id == image.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, Color.black.opacity(0.6))
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 5, y: -5)
+                        .help("Remove image")
+                    }
+                    .padding(.top, 5)
+                    .padding(.trailing, 5)
+                }
+            }
+        }
+        .disabled(isCreatingWorktree || isResolvingRemoteSession)
     }
 
     /// Everything that is neither context nor a model setting.
@@ -1294,9 +1350,8 @@ struct LauncherView: View {
     /// to whatever session you open — because the alternative is a field that
     /// silently does nothing depending on which control was clicked, and
     /// nothing on screen would say which those are.
-    private var pendingPromptForLaunch: String? {
-        let trimmed = initialPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+    private var pendingPromptForLaunch: LaunchPrompt? {
+        LaunchPrompt.make(text: initialPrompt, images: attachedImages)
     }
 
     /// Empty the prompt field after it has been handed to a session.
@@ -1309,6 +1364,7 @@ struct LauncherView: View {
     /// happen: text sitting in it means text that is about to be sent.
     private func clearPendingPrompt() {
         initialPrompt = ""
+        attachedImages = []
     }
 
     // MARK: - Web Sessions Section
@@ -1969,19 +2025,64 @@ struct LauncherView: View {
         }
     }
 
-    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        provider.loadItem(forTypeIdentifier: "public.file-url") { data, _ in
-            guard let data = data as? Data,
-                  let url = URL(dataRepresentation: data, relativeTo: nil)
-            else { return }
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
-                  isDir.boolValue
-            else { return }
-            DispatchQueue.main.async { selectedDirectory = url }
+    /// Cmd+V with an image on the clipboard attaches it instead of pasting.
+    ///
+    /// An NSEvent monitor rather than `.onPasteCommand`, because the
+    /// TextField's field editor answers `paste:` itself and a SwiftUI paste
+    /// handler on the field never sees it. Installed only while this
+    /// launcher's prompt has focus, so another pane's Cmd+V — or a launcher
+    /// beside this one — is untouched. A clipboard with no image passes the
+    /// event through, so text paste is unchanged.
+    private func installPasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers?.lowercased() == "v"
+            else { return event }
+            let images = LaunchImage.fromPasteboard(.general)
+            guard !images.isEmpty else { return event }
+            attachedImages.append(contentsOf: images)
+            return nil
         }
-        return true
+    }
+
+    private func removePasteMonitor() {
+        if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+        pasteMonitor = nil
+    }
+
+    /// A folder picks the working directory; an image — a file, or image data
+    /// dragged out of a browser or a screenshot thumbnail — is attached to the
+    /// first turn. Both share one drop target so the user does not have to aim.
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var accepted = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                accepted = true
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                    guard let data = data as? Data,
+                          let url = URL(dataRepresentation: data, relativeTo: nil)
+                    else { return }
+                    var isDir: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+                    if isDir.boolValue {
+                        DispatchQueue.main.async { selectedDirectory = url }
+                    } else if let image = LaunchImage.make(fileURL: url) {
+                        DispatchQueue.main.async { attachedImages.append(image) }
+                    }
+                }
+            } else if let type = provider.registeredTypeIdentifiers
+                .compactMap({ UTType($0) })
+                .first(where: { $0.conforms(to: .image) }) {
+                accepted = true
+                provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+                    guard let data, let image = LaunchImage.make(data: data, mediaType: type.preferredMIMEType)
+                    else { return }
+                    DispatchQueue.main.async { attachedImages.append(image) }
+                }
+            }
+        }
+        return accepted
     }
 }
 

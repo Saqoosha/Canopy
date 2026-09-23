@@ -174,7 +174,7 @@ final class OpenSession: Identifiable, Hashable {
     /// lazily when the pane mounts, and a launch-restored session may have no
     /// shim for as long as it has no pane. `ShimProcess` reads it once the CLI
     /// announces itself and clears it, so a reconnect cannot resubmit it.
-    var pendingInitialPrompt: String?
+    var pendingInitialPrompt: LaunchPrompt?
     /// Title generated in the same call as this session's worktree branch
     /// name (`WorktreeBranchNamer`), waiting for the shim to adopt it as final.
     ///

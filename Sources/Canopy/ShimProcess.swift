@@ -1039,9 +1039,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.notice("initial prompt: no bound session at init — a prompt, if any, is unreachable")
             return
         }
-        guard let prompt = session.pendingInitialPrompt,
-              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return }
+        guard let launchPrompt = session.pendingInitialPrompt else { return }
+        let prompt = launchPrompt.text
         guard let channelId else {
             logger.notice("initial prompt: deferred, no channelId yet")
             return
@@ -1062,7 +1061,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     "uuid": UUID().uuidString.lowercased(),
                     "message": [
                         "role": "user",
-                        "content": [["type": "text", "text": prompt]],
+                        "content": launchPrompt.contentBlocks(),
                     ] as [String: Any],
                 ] as [String: Any],
             ] as [String: Any],
@@ -1085,17 +1084,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // bound session" either — is what says the function was never called,
         // which is the shape the init deadlock had. Length only, never the
         // text.
-        logger.notice("initial prompt: submitted, \(prompt.count, privacy: .public) chars")
+        logger.notice("initial prompt: submitted, \(prompt.count, privacy: .public) chars, \(launchPrompt.images.count, privacy: .public) images")
         isWorking = true
         recapGate.noteUserTurn()
         // Same reason: `KeepAliveGate` declines with "no API activity yet —
         // nothing cached to keep" while `lastActivityAt` is nil, and nothing
         // else would ever set it for a session whose only turn came from here.
         noteApiActivity()
-        promptHistory.append(prompt)
-        promptHistory = Self.trimmedPromptHistory(promptHistory)
-        lastUserMessageText = prompt
-        maybeGenerateTitle()
+        // An images-only first turn has no text to seed titling with.
+        if !prompt.isEmpty {
+            promptHistory.append(prompt)
+            promptHistory = Self.trimmedPromptHistory(promptHistory)
+            lastUserMessageText = prompt
+            maybeGenerateTitle()
+        }
 
         // `.private` on the text: it is verbatim user content, and these lines
         // reach disk. The length is public because "did it send" and "did it

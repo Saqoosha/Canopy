@@ -7143,6 +7143,41 @@ enum SidebarLogicProbe {
                MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel == "[fd7a::1]:8765",
                "got \(MacroPadRemoteEndpoint(host: "fd7a::1", port: 8765).displayLabel)")
 
+        // MARK: - LaunchPrompt (images dropped on the launch composer)
+
+        record("launch prompt: whitespace and no images is no turn",
+               LaunchPrompt.make(text: "  \n", images: []) == nil)
+        do {
+            let tiny = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 3, bitsPerSample: 8,
+                samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            let png = tiny.representation(using: .png, properties: [:])!
+            let tiff = tiny.tiffRepresentation!
+            let verbatim = LaunchImage.make(data: png, mediaType: "image/png")
+            record("launch image: an accepted, small PNG is sent verbatim",
+                   verbatim?.mediaType == "image/png" && verbatim?.data == png)
+            let converted = LaunchImage.make(data: tiff, mediaType: "image/tiff")
+            record("launch image: TIFF is re-encoded to an accepted type",
+                   converted.map { LaunchImage.acceptedMediaTypes.contains($0.mediaType) } == true,
+                   "got \(String(describing: converted?.mediaType))")
+            record("launch image: non-image bytes are refused",
+                   LaunchImage.make(data: Data("hello".utf8), mediaType: "image/png") == nil)
+
+            let prompt = LaunchPrompt.make(text: " look ", images: [verbatim!])!
+            let blocks = prompt.contentBlocks()
+            let source = blocks.first?["source"] as? [String: Any]
+            record("launch prompt: image block first, in the webview's base64 shape",
+                   blocks.first?["type"] as? String == "image"
+                       && source?["type"] as? String == "base64"
+                       && source?["media_type"] as? String == "image/png"
+                       && source?["data"] as? String == png.base64EncodedString())
+            record("launch prompt: trimmed text block last",
+                   blocks.count == 2 && blocks.last?["text"] as? String == "look")
+            record("launch prompt: images-only sends no empty text block",
+                   LaunchPrompt.make(text: "", images: [verbatim!])!.contentBlocks().count == 1)
+        }
+
         // MARK: - RemoteDirectoryRules (remote browser: New Folder + hidden files)
         //
         // The name is spliced into `mkdir '<dir>/<name>'` over ssh (no `-p`;
