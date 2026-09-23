@@ -759,7 +759,8 @@ final class SessionStore {
             model: model,
             effortLevel: effortLevel,
             customApi: customApi,
-            claudeAccount: claudeAccount,
+            // A remote CLI signs in on the other machine.
+            claudeAccount: remoteHost == nil ? claudeAccount : nil,
             resumeIdIsExistingTranscript: resumeId != nil
         )
         // Parked on the session rather than passed to `ShimProcess`, because

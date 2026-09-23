@@ -7839,7 +7839,8 @@ enum SidebarLogicProbe {
                 permissionMode: .plan,
                 model: "opus",
                 effortLevel: "high",
-                customApi: ModelProvider(id: "provider-xyz", name: "Probe")
+                customApi: ModelProvider(id: "provider-xyz", name: "Probe"),
+                claudeAccount: ClaudeAccount(id: "acct-xyz", name: "Probe", configDir: "/tmp/probe-acct")
             )
             let capStore2 = SessionStore()
             capStore2._probeSeedOpenSessions([capFull])
@@ -7851,8 +7852,16 @@ enum SidebarLogicProbe {
                        && cf?.model == "opus" && cf?.effortLevel == "high"
                        && cf?.providerId == "provider-xyz"
                        && cf?.origin == .local(path: cwd.path)
-                       && cf?.lastActiveAt == Date(timeIntervalSince1970: 776_000_000),
+                       && cf?.lastActiveAt == Date(timeIntervalSince1970: 776_000_000)
+                       && cf?.accountId == "acct-xyz",
                    "got \(String(describing: cf))")
+            // Snapshots written before accountId existed must still decode;
+            // a missing key is the default login, not a failure.
+            let legacyAccountJSON = Data(#"{"resumeId":"r","title":"t","project":"p","origin":{"local":{"path":"/tmp"}},"permissionMode":"default","lastActiveAt":0}"#.utf8)
+            let legacyAccountDecoded = try? JSONDecoder().decode(SessionRestoreSnapshot.Session.self, from: legacyAccountJSON)
+            record("restore: a snapshot without accountId decodes as nil",
+                   legacyAccountDecoded?.accountId == nil && legacyAccountDecoded?.resumeId == "r",
+                   "got \(String(describing: legacyAccountDecoded))")
 
             // Widths are copied, not recomputed — assert against whatever
             // `normalizePaneWeightsToVisualWidths()` produced rather than a
@@ -10575,6 +10584,206 @@ enum SidebarLogicProbe {
                    account(#"{"oauthAccount":{"emailAddress":""}}"#) == nil)
             record("account parse: a non-object root is no account",
                    account(#"[1,2]"#) == nil && account("not json") == nil)
+        }
+
+        // MARK: - Claude accounts (multi-account switching)
+        //
+        // `isSafeConfigDir` / `normalizedConfigDir` refuse anything that would
+        // let sync rearrange `~` or `~/.claude`. `linkEntries` shares the base
+        // dir into an account dir; `syncMCPServers` copies mcpServers only.
+        do {
+            let fm = FileManager.default
+            let root = fm.temporaryDirectory.appendingPathComponent("canopy-probe-accounts-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            let home = root.appendingPathComponent("home", isDirectory: true)
+            let base = home.appendingPathComponent(".claude", isDirectory: true)
+            try fm.createDirectory(at: base, withIntermediateDirectories: true)
+
+            func safe(_ path: String) -> Bool {
+                ClaudeAccountStore.isSafeConfigDir(path, base: base, home: home)
+            }
+            let alt = home.appendingPathComponent(".claude-alt").path
+            record("account safe-dir: a sibling of the base is allowed",
+                   safe(alt))
+            record("account safe-dir: the base itself is refused",
+                   !safe(base.path))
+            record("account safe-dir: a path inside the base is refused",
+                   !safe(base.appendingPathComponent("alt").path))
+            record("account safe-dir: the home directory is refused",
+                   !safe(home.path))
+            record("account safe-dir: an ancestor of home is refused",
+                   !safe(root.path))
+            record("account safe-dir: filesystem root is refused",
+                   !safe("/"))
+            let alias = root.appendingPathComponent("alias")
+            try fm.createSymbolicLink(atPath: alias.path, withDestinationPath: base.path)
+            record("account safe-dir: a symlink to the base is refused",
+                   !safe(alias.path))
+            record("account safe-dir: a case variant of the base is refused",
+                   !safe(home.appendingPathComponent(".CLAUDE").path))
+            record("account safe-dir: a relative path is refused",
+                   !safe("rel/path"))
+
+            record("account normalize: empty and whitespace-only are nil",
+                   ClaudeAccountStore.normalizedConfigDir("") == nil
+                       && ClaudeAccountStore.normalizedConfigDir("   ") == nil)
+            record("account normalize: a relative path is nil",
+                   ClaudeAccountStore.normalizedConfigDir("rel/path") == nil)
+            record("account normalize: bare tilde (the real home) is nil",
+                   ClaudeAccountStore.normalizedConfigDir("~") == nil)
+            let nonexistentUnderHome = NSHomeDirectory() + "/.canopy-probe-nonexistent-dir"
+            record("account normalize: a nonexistent absolute path under home expands",
+                   ClaudeAccountStore.normalizedConfigDir("~/.canopy-probe-nonexistent-dir")
+                       == nonexistentUnderHome)
+
+            // linkEntries: share everything except the unshared set; move a
+            // colliding real file aside; leave hand-made foreign links alone.
+            let linkBase = root.appendingPathComponent("b", isDirectory: true)
+            let linkAcct = root.appendingPathComponent("a", isDirectory: true)
+            try fm.createDirectory(at: linkBase, withIntermediateDirectories: true)
+            try fm.createDirectory(at: linkAcct, withIntermediateDirectories: true)
+            try "base-md".write(to: linkBase.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
+            try fm.createDirectory(at: linkBase.appendingPathComponent("projects", isDirectory: true),
+                                   withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: linkBase.appendingPathComponent(".claude.json"))
+            try fm.createDirectory(at: linkBase.appendingPathComponent("backups", isDirectory: true),
+                                   withIntermediateDirectories: true)
+            try Data().write(to: linkBase.appendingPathComponent(".DS_Store"))
+            try "base-settings".write(to: linkBase.appendingPathComponent("settings.json"),
+                                      atomically: true, encoding: .utf8)
+            try "base-foo".write(to: linkBase.appendingPathComponent("foo"), atomically: true, encoding: .utf8)
+            try "acct-settings".write(to: linkAcct.appendingPathComponent("settings.json"),
+                                      atomically: true, encoding: .utf8)
+            try "local".write(to: linkAcct.appendingPathComponent("local.txt"),
+                              atomically: true, encoding: .utf8)
+            try fm.createSymbolicLink(atPath: linkAcct.appendingPathComponent("foo").path,
+                                      withDestinationPath: "/nonexistent-elsewhere")
+
+            ClaudeConfigDirSync.linkEntries(from: linkBase, into: linkAcct)
+
+            let claudeLink = linkAcct.appendingPathComponent("CLAUDE.md")
+            let claudeDest = try? fm.destinationOfSymbolicLink(atPath: claudeLink.path)
+            record("account link: CLAUDE.md is a symlink to the base file",
+                   claudeDest == linkBase.appendingPathComponent("CLAUDE.md").path,
+                   "dest=\(String(describing: claudeDest))")
+            let projectsDest = try? fm.destinationOfSymbolicLink(
+                atPath: linkAcct.appendingPathComponent("projects").path)
+            record("account link: projects/ is a symlink to the base dir",
+                   projectsDest == linkBase.appendingPathComponent("projects").path,
+                   "dest=\(String(describing: projectsDest))")
+            func absent(_ name: String) -> Bool {
+                let p = linkAcct.appendingPathComponent(name).path
+                return !fm.fileExists(atPath: p)
+                    && (try? fm.destinationOfSymbolicLink(atPath: p)) == nil
+            }
+            record("account link: unshared entries are not created in the account dir",
+                   absent(".claude.json") && absent("backups") && absent(".DS_Store"))
+            let settingsDest = try? fm.destinationOfSymbolicLink(
+                atPath: linkAcct.appendingPathComponent("settings.json").path)
+            record("account link: a colliding real settings.json becomes a symlink to the base",
+                   settingsDest == linkBase.appendingPathComponent("settings.json").path,
+                   "dest=\(String(describing: settingsDest))")
+            let aside = linkAcct.appendingPathComponent(ClaudeConfigDirSync.asideDirName, isDirectory: true)
+            let asideNames = (try? fm.contentsOfDirectory(atPath: aside.path)) ?? []
+            let asideSettings = asideNames.filter { $0.hasPrefix("settings.json-") }
+            let asideBody = asideSettings.first.flatMap {
+                try? String(contentsOf: aside.appendingPathComponent($0), encoding: .utf8)
+            }
+            record("account link: the real settings.json is moved aside intact",
+                   asideSettings.count == 1 && asideBody == "acct-settings"
+                       && asideNames.count == 1,
+                   "names=\(asideNames) body=\(String(describing: asideBody))")
+            let localPath = linkAcct.appendingPathComponent("local.txt").path
+            record("account link: an account-only regular file is left alone",
+                   fm.fileExists(atPath: localPath)
+                       && (try? fm.destinationOfSymbolicLink(atPath: localPath)) == nil)
+            let fooDest = try? fm.destinationOfSymbolicLink(
+                atPath: linkAcct.appendingPathComponent("foo").path)
+            record("account link: a hand-made foreign symlink is kept",
+                   fooDest == "/nonexistent-elsewhere",
+                   "dest=\(String(describing: fooDest))")
+
+            ClaudeConfigDirSync.linkEntries(from: linkBase, into: linkAcct)
+            let asideNames2 = (try? fm.contentsOfDirectory(atPath: aside.path)) ?? []
+            record("account link: a second run leaves .canopy-aside unchanged (idempotent)",
+                   asideNames2.count == 1 && asideNames2 == asideNames,
+                   "names=\(asideNames2)")
+
+            try fm.removeItem(at: linkBase.appendingPathComponent("CLAUDE.md"))
+            ClaudeConfigDirSync.linkEntries(from: linkBase, into: linkAcct)
+            record("account link: a deleted base entry drops its account symlink",
+                   absent("CLAUDE.md"))
+
+            try fm.createSymbolicLink(
+                atPath: linkAcct.appendingPathComponent("backups").path,
+                withDestinationPath: linkBase.appendingPathComponent("backups").path)
+            ClaudeConfigDirSync.linkEntries(from: linkBase, into: linkAcct)
+            record("account link: a hand-linked unshared entry is swept",
+                   absent("backups"))
+
+            // syncMCPServers: copy mcpServers only; refuse to overwrite bad JSON;
+            // write 0600; skip the write when already equal.
+            let mcpRoot = root.appendingPathComponent("m", isDirectory: true)
+            try fm.createDirectory(at: mcpRoot, withIntermediateDirectories: true)
+            let baseJSON = mcpRoot.appendingPathComponent("base.claude.json")
+            let acctJSON = mcpRoot.appendingPathComponent("acct.claude.json")
+
+            try Data("{not json".utf8).write(to: acctJSON)
+            let badBefore = try Data(contentsOf: acctJSON)
+            try Data(#"{"mcpServers":{"a":{"command":"x"}}}"#.utf8).write(to: baseJSON)
+            ClaudeConfigDirSync.syncMCPServers(from: baseJSON, into: acctJSON)
+            let badAfter = try Data(contentsOf: acctJSON)
+            record("account mcp: unreadable account JSON is left untouched",
+                   badAfter == badBefore)
+
+            try fm.removeItem(at: acctJSON)
+            try fm.removeItem(at: baseJSON)
+            ClaudeConfigDirSync.syncMCPServers(from: baseJSON, into: acctJSON)
+            record("account mcp: a missing base leaves a missing account file",
+                   !fm.fileExists(atPath: acctJSON.path))
+
+            try Data(#"{"mcpServers":{"a":{"command":"x"}}}"#.utf8).write(to: baseJSON)
+            try Data(#"{"oauthAccount":{"emailAddress":"x@y"},"foo":1,"mcpServers":{"old":{}}}"#.utf8)
+                .write(to: acctJSON)
+            ClaudeConfigDirSync.syncMCPServers(from: baseJSON, into: acctJSON)
+            let synced = try JSONSerialization.jsonObject(with: Data(contentsOf: acctJSON)) as? [String: Any]
+            let syncedEmail = (synced?["oauthAccount"] as? [String: Any])?["emailAddress"] as? String
+            let syncedServers = synced?["mcpServers"] as? [String: Any]
+            record("account mcp: servers are replaced while other keys are kept",
+                   syncedEmail == "x@y" && synced?["foo"] as? Int == 1
+                       && syncedServers?.keys.sorted() == ["a"],
+                   "email=\(String(describing: syncedEmail)) foo=\(String(describing: synced?["foo"])) "
+                       + "keys=\(String(describing: syncedServers?.keys.sorted()))")
+            let perms = try fm.attributesOfItem(atPath: acctJSON.path)[.posixPermissions] as? NSNumber
+            record("account mcp: a written file is mode 0600",
+                   perms?.intValue == 0o600,
+                   "perms=\(String(describing: perms))")
+
+            try fm.removeItem(at: acctJSON)
+            ClaudeConfigDirSync.syncMCPServers(from: baseJSON, into: acctJSON)
+            let created = try JSONSerialization.jsonObject(with: Data(contentsOf: acctJSON)) as? [String: Any]
+            let createdPerms = try fm.attributesOfItem(atPath: acctJSON.path)[.posixPermissions] as? NSNumber
+            record("account mcp: a missing account file is created with only mcpServers at 0600",
+                   created?.keys.sorted() == ["mcpServers"]
+                       && (created?["mcpServers"] as? [String: Any])?.keys.sorted() == ["a"]
+                       && createdPerms?.intValue == 0o600,
+                   "keys=\(String(describing: created?.keys.sorted())) perms=\(String(describing: createdPerms))")
+
+            let equalBytes = try Data(contentsOf: acctJSON)
+            let equalMtime = try fm.attributesOfItem(atPath: acctJSON.path)[.modificationDate] as? Date
+            ClaudeConfigDirSync.syncMCPServers(from: baseJSON, into: acctJSON)
+            let afterEqualBytes = try Data(contentsOf: acctJSON)
+            let afterEqualMtime = try fm.attributesOfItem(atPath: acctJSON.path)[.modificationDate] as? Date
+            record("account mcp: equal servers skip the write (mtime and bytes unchanged)",
+                   afterEqualBytes == equalBytes && afterEqualMtime == equalMtime)
+
+            let leftovers = ((try? fm.contentsOfDirectory(atPath: mcpRoot.path)) ?? [])
+                .filter { $0.hasPrefix(".claude.json.canopy-") }
+            record("account mcp: no leftover canopy temp files",
+                   leftovers.isEmpty,
+                   "leftovers=\(leftovers)")
+        } catch {
+            record("account fixtures: setup failed", false, "\(error)")
         }
 
         // MARK: - Launch-time usage fetch

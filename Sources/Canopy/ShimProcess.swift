@@ -2337,14 +2337,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // session's usage belongs to the account's own record, not to
             // this Mac's default login.
             let dir = claudeAccount.configURL
-            let label = claudeAccount.name
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let email = ClaudeAccountInfo.inConfigDir(dir)?.email
                 DispatchQueue.main.async {
                     guard let self else { return }
+                    // An unreadable account falls back to its directory, a
+                    // name no SSH host can share.
                     let key = Self.rateLimitKey(remoteEmail: email,
                                                 localEmail: ClaudeAccountInfo.current()?.email,
-                                                host: label)
+                                                host: dir.path)
                     self.rateLimitBinding = .resolved(key)
                     if self.channelId != nil { self.requestUsageUpdate() }
                 }
@@ -5103,6 +5104,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // is swallowed by isCanopyOwnedResponse so the webview never sees
         // an unmatched requestId. channelId is required (the extension
         // routes get_usage to a per-channel CLI query).
+        requestRawUsage()
+    }
+
+    private func requestRawUsage() {
         if let channelId {
             sendToShim([
                 "type": "webview_message",
@@ -5125,29 +5130,27 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func extractRawUsage(_ message: [String: Any]) {
         func handle(_ response: [String: Any], requestId: String?) {
             guard let requestId, requestId.hasPrefix("canopy-getusage-") else { return }
+            // A freshly spawned CLI can answer before its own first usage
+            // fetch (seen 13 s ahead of it after an account switch) with no
+            // `rate_limits`. Ask the CLI once more; the account's throttle is
+            // left alone, so this costs no extra request to the usage endpoint.
+            if response["type"] as? String == "get_usage_response",
+               let usage = response["usage"] as? [String: Any],
+               usage["rate_limits"] == nil, !retriedEmptyUsage {
+                retriedEmptyUsage = true
+                logger.notice("get_usage had no rate_limits yet; asking again in 15 s")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                    self?.requestRawUsage()
+                }
+                return
+            }
+
             // Past this point the response is OURS, and any shape mismatch
             // means the CLI/extension changed the payload (or answered
             // with an error). These responses are also swallowed before
             // reaching the webview (isCanopyOwnedResponse), so a silent
             // return here would make the per-model usage rows disappear
             // with zero diagnostics anywhere — always log the mismatch.
-            // A freshly spawned CLI answers before its own first usage fetch
-            // (measured: the reply 13 s ahead of the fetch after an account
-            // switch) with a `usage` that has no `rate_limits`. That request
-            // already spent the account's one-a-minute throttle, so without a
-            // retry the bars stay blank until a turn ends a minute later.
-            if response["type"] as? String == "get_usage_response",
-               let usage = response["usage"] as? [String: Any],
-               usage["rate_limits"] == nil {
-                guard !retriedEmptyUsage else { return }
-                retriedEmptyUsage = true
-                logger.info("get_usage had no rate_limits yet; retrying once")
-                rateLimitAccount?.releaseUsageThrottle()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
-                    self?.requestUsageUpdate()
-                }
-                return
-            }
             guard response["type"] as? String == "get_usage_response",
                   let usage = response["usage"] as? [String: Any],
                   let rateLimits = usage["rate_limits"] as? [String: Any]

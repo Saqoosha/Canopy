@@ -32,10 +32,17 @@ enum ClaudeAccountStore {
     private static let accountsKey = "claudeAccounts"
     private static let defaultKey = "defaultClaudeAccountId"
 
+    /// The sidebar row's context menu is built on every body evaluation, so
+    /// `load()` is too; decode once and drop the copy on `save`.
+    nonisolated(unsafe) private static var cached: [ClaudeAccount]?
+
     static func load() -> [ClaudeAccount] {
+        if let cached { return cached }
         guard let data = UserDefaults.standard.data(forKey: accountsKey) else { return [] }
         do {
-            return try JSONDecoder().decode([ClaudeAccount].self, from: data)
+            let accounts = try JSONDecoder().decode([ClaudeAccount].self, from: data)
+            cached = accounts
+            return accounts
         } catch {
             logger.error("Failed to decode Claude accounts: \(error.localizedDescription, privacy: .public)")
             return []
@@ -48,6 +55,7 @@ enum ClaudeAccountStore {
             return
         }
         UserDefaults.standard.set(data, forKey: accountsKey)
+        cached = nil
     }
 
     static func account(id: String?) -> ClaudeAccount? {
@@ -74,13 +82,38 @@ enum ClaudeAccountStore {
     }
 
     /// `~` expanded and made absolute; nil for an empty or relative path,
-    /// which the CLI would refuse.
+    /// which the CLI would refuse, and for one `isSafeConfigDir` rejects.
     static func normalizedConfigDir(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let expanded = (trimmed as NSString).expandingTildeInPath
         guard expanded.hasPrefix("/") else { return nil }
-        return URL(fileURLWithPath: expanded).standardizedFileURL.path
+        let path = URL(fileURLWithPath: expanded).standardizedFileURL.path
+        return isSafeConfigDir(path) ? path : nil
+    }
+
+    /// Sync moves real entries aside and plants links, so it must only ever
+    /// run on a directory of its own. Refused: the base dir itself or any
+    /// directory inside it, and the home directory or any ancestor of it or
+    /// of the base — typing `~` would otherwise rearrange the home folder.
+    /// Compared after resolving symlinks, so an alias of the base is caught.
+    static func isSafeConfigDir(_ path: String, base: URL = ClaudeConfigDirSync.baseLocations().dir,
+                                home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        // Lowercased because APFS is case-insensitive by default: `~/.Claude`
+        // is the base. Errs toward refusing on a case-sensitive volume.
+        func resolved(_ url: URL) -> String {
+            url.standardizedFileURL.resolvingSymlinksInPath().path.lowercased()
+        }
+        let dir = resolved(URL(fileURLWithPath: path, isDirectory: true))
+        func isSameOrInside(_ a: String, _ b: String) -> Bool {
+            a == b || a.hasPrefix(b == "/" ? "/" : b + "/")
+        }
+        let basePath = resolved(base)
+        let homePath = resolved(home)
+        if isSameOrInside(dir, basePath) { return false }
+        if isSameOrInside(basePath, dir) || isSameOrInside(homePath, dir) { return false }
+        return true
     }
 }
 
@@ -103,7 +136,8 @@ enum ClaudeConfigDirSync {
     static let asideDirName = ".canopy-aside"
 
     /// The default config dir and the `.claude.json` that goes with it,
-    /// honouring an inherited `CLAUDE_CONFIG_DIR` the same way the CLI does.
+    /// honouring an inherited `CLAUDE_CONFIG_DIR` the same way
+    /// `ClaudeAccountInfo.current()` does.
     static func baseLocations() -> (dir: URL, json: URL) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         if let dir = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"], !dir.isEmpty {
@@ -114,19 +148,23 @@ enum ClaudeConfigDirSync {
                 home.appendingPathComponent(".claude.json"))
     }
 
-    /// Runs before every shim spawn on this account. Cheap — one directory
-    /// listing each side, plus one small JSON read — and every failure is
-    /// logged and skipped: a missing link costs a setting, not the session.
+    /// Runs before every shim spawn on this account. A failure skips that
+    /// entry, not the session.
     static func sync(_ account: ClaudeAccount) {
         let (baseDir, baseJSON) = baseLocations()
         let dir = account.configURL
-        guard dir.standardizedFileURL.path != baseDir.standardizedFileURL.path else { return }
+        guard ClaudeAccountStore.isSafeConfigDir(account.configDir, base: baseDir) else {
+            logger.error("Refusing to sync account \(account.name, privacy: .public): its directory overlaps the default config or home directory")
+            return
+        }
         linkEntries(from: baseDir, into: dir)
         syncMCPServers(from: baseJSON, into: dir.appendingPathComponent(".claude.json"))
     }
 
-    static func linkEntries(from baseDir: URL, into dir: URL) {
+    static func linkEntries(from base: URL, into dir: URL) {
         let fm = FileManager.default
+        // One spelling for both the links written and the stale-link sweep.
+        let baseDir = base.standardizedFileURL
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
@@ -144,11 +182,8 @@ enum ClaudeConfigDirSync {
         for name in wanted {
             let link = dir.appendingPathComponent(name)
             let target = baseDir.appendingPathComponent(name).path
-            if let existing = try? fm.destinationOfSymbolicLink(atPath: link.path) {
-                if existing == target { continue }
-                // A link somewhere else was put there by hand; leave it.
-                continue
-            }
+            // Any existing link is left alone.
+            if (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil { continue }
             if fm.fileExists(atPath: link.path) {
                 // A real entry — usually one the CLI created when the account
                 // was logged in, before anything was linked. Moved aside so
@@ -173,7 +208,7 @@ enum ClaudeConfigDirSync {
         // Links into the base that should not be there: an entry that is gone
         // (so a deleted setting does not linger), or one of `unsharedEntries`
         // linked by hand.
-        let basePrefix = baseDir.standardizedFileURL.path + "/"
+        let basePrefix = baseDir.path + "/"
         for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where !wanted.contains(name) {
             let link = dir.appendingPathComponent(name)
             guard let dest = try? fm.destinationOfSymbolicLink(atPath: link.path),
@@ -188,10 +223,8 @@ enum ClaudeConfigDirSync {
     /// server added with `claude mcp add` under the account is replaced — add
     /// servers from the default login.
     ///
-    /// The CLI rewrites this file too. The write is atomic (temp + rename, the
-    /// way the CLI writes it) and happens only when the servers differ, so it
-    /// races a running session's own write only on the spawn right after an
-    /// MCP change.
+    /// The CLI rewrites this file too: a CLI write landing between this read
+    /// and the swap is lost. Written only when the servers differ.
     static func syncMCPServers(from baseJSON: URL, into accountJSON: URL) {
         guard let baseData = try? Data(contentsOf: baseJSON),
               let base = (try? JSONSerialization.jsonObject(with: baseData)) as? [String: Any]
@@ -200,11 +233,14 @@ enum ClaudeConfigDirSync {
             return
         }
         let servers = (base["mcpServers"] as? [String: Any]) ?? [:]
+        // Never overwrite a file we cannot read — it holds the login. Only a
+        // file that does not exist yet starts empty.
         var account: [String: Any] = [:]
-        if let data = try? Data(contentsOf: accountJSON) {
-            guard let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-                // Never overwrite a file we cannot read — it holds the login.
-                logger.error("Account .claude.json unparseable; MCP servers not synced")
+        if FileManager.default.fileExists(atPath: accountJSON.path) {
+            guard let data = try? Data(contentsOf: accountJSON),
+                  let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else {
+                logger.error("Account .claude.json unreadable; MCP servers not synced")
                 return
             }
             account = parsed
@@ -214,9 +250,33 @@ enum ClaudeConfigDirSync {
         account["mcpServers"] = servers
         do {
             let data = try JSONSerialization.data(withJSONObject: account, options: [.prettyPrinted])
-            try data.write(to: accountJSON, options: .atomic)
-            // The CLI keeps this file 0600; an atomic write would leave 0644.
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: accountJSON.path)
+            // Created 0600 before any byte lands — `mcpServers` can carry
+            // secrets — then swapped in, so the file is never readable by
+            // others and never half-written.
+            let fm = FileManager.default
+            let temp = accountJSON.deletingLastPathComponent()
+                .appendingPathComponent(".claude.json.canopy-\(UUID().uuidString)")
+            let fd = open(temp.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+            guard fd >= 0 else {
+                logger.error("Cannot create temp .claude.json: errno \(errno)")
+                return
+            }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            do {
+                try handle.write(contentsOf: data)
+                try handle.close()
+            } catch {
+                try? fm.removeItem(at: temp)
+                throw error
+            }
+            // rename(2), not `replaceItemAt`: that one carries the old file's
+            // mode over the new one.
+            guard rename(temp.path, accountJSON.path) == 0 else {
+                let code = errno
+                try? fm.removeItem(at: temp)
+                logger.error("Cannot replace account .claude.json: errno \(code)")
+                return
+            }
             logger.notice("Synced \(servers.count) MCP server(s) into an account's .claude.json")
         } catch {
             logger.error("Cannot write account .claude.json: \(error.localizedDescription, privacy: .public)")

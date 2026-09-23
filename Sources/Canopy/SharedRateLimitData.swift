@@ -240,12 +240,6 @@ final class RateLimitAccount {
         lastUsageUpdateTime = Date()
     }
 
-    /// Give the interval back after a request that came back with no numbers,
-    /// so the next trigger asks again instead of waiting out the minute.
-    func releaseUsageThrottle() {
-        lastUsageUpdateTime = .distantPast
-    }
-
     func update(from utilization: [String: Any]) {
         if let entry = utilization["fiveHour"] as? [String: Any] {
             sessionPct = entry["utilization"].map { Self.parseUtilization($0) } ?? 0
