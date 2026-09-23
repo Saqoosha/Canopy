@@ -1120,6 +1120,20 @@ final class SessionStore {
         logger.error("session failure recorded: \(text, privacy: .public)")
     }
 
+    /// The connection overlay's "Back to Launcher": the session's pane becomes a
+    /// launcher in place, then the session closes. The pane is converted first
+    /// so `closeSession` finds no pane to remove — without that, a multi-pane
+    /// strip would lose the pane outright instead of showing a launcher in it.
+    func replaceSessionWithLauncher(_ id: OpenSession.ID) {
+        if !launcherIsOnScreen { lastSessionFailure = nil }
+        for i in panes.indices {
+            if case .session(let sid) = panes[i].content, sid == id {
+                panes[i].content = .launcher
+            }
+        }
+        closeSession(id, keepingFailure: true)
+    }
+
     /// `keepingFailure` is true for the crash closure alone — see
     /// `lastSessionFailure`. No default, so a caller that forgets it is a
     /// compile error rather than a banner that never shows.
