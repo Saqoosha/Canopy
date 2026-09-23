@@ -1043,13 +1043,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
         guard let channelId else {
-            // Deferred, not dropped — and the retry is a real call site, not a
-            // hope. An earlier version of this comment claimed the channelId
-            // backstop "recovers it from the next channel-scoped message, so a
-            // later `init` gets another chance": the backstop assigned the id
-            // and never re-invoked this, and `init` only re-fires on a turn the
-            // user types. So the prompt they typed *to avoid* typing one was
-            // lost silently. The backstop now calls this directly.
             logger.notice("initial prompt: deferred, no channelId yet")
             return
         }
@@ -3433,9 +3426,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // session (io_message, request, interrupt_claude, etc.) carries
         // channelId on the top-level dict. Channel-agnostic messages (init,
         // get_claude_state, get_asset_uris, list_sessions) don't, and the
-        // !cid.isEmpty guard correctly skips them. If `launch_claude` failed
-        // to set channelId for any reason, the next channel-scoped message
-        // recovers it. Title generation no longer depends on channelId at all
+        // !cid.isEmpty guard correctly skips them. Since extension 2.1.280 this
+        // fires on every session, ahead of `launch_claude`. Title generation no longer depends on channelId at all
         // (it runs the CLI directly); what breaks without this is the recap —
         // `recapIneligibilityReason`'s channelId branch — and `requestUsageUpdate`.
         // Deleting the backstop and testing titles would therefore look fine.
@@ -3445,14 +3437,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let cid = dict["channelId"] as? String, !cid.isEmpty
         {
             let msgType = dict["type"] as? String ?? "?"
-            logger.info(
+            logger.notice(
                 "channelId recovered via backstop from \(msgType, privacy: .public) message"
             )
             self.channelId = cid
-            // The channel is what `sendPendingInitialPrompt` was missing if it
-            // ran before this; retry now rather than waiting for a turn the
-            // user would have to type.
-            sendPendingInitialPrompt()
         }
 
         // A Bool, not the text: `maybeGenerateTitle` takes no argument and
@@ -3635,11 +3623,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // the hook point, which is the rule CLAUDE.md already states for
         // exactly this.
         //
-        // The `channelId` backstop above was the other call site and is dead
-        // for a second, independent reason: `launch_claude` has just assigned
-        // `channelId`, so that branch's `== nil` guard can never hold after
-        // it. Neither site could fire, which is why the failure had no
-        // partial mode — the prompt was lost every time.
+        // This is the only call site: the extension drops an io_message for a
+        // channel it has not opened yet, with only a log warning.
         if dict["type"] as? String == "launch_claude" {
             sendPendingInitialPrompt()
         }
