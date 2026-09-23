@@ -237,14 +237,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Channel ID from launch_claude, needed for the recap and usage requests.
     /// NOT for titles any more — those no longer go through the extension.
     private var channelId: String?
-    /// Set once a `launch_claude` has been forwarded to the shim. The launcher's
-    /// first prompt must not be sent before it: the extension drops an
-    /// `io_message` for a channel it has not seen (`Channel not found`, a log
-    /// warning and nothing else), and extension 2.1.280's webview sends a
-    /// channel-scoped message ahead of its `launch_claude` — it mints the
-    /// channel id before awaiting its connection — so the `channelId` backstop
-    /// used to fire first and submit the prompt into that void.
-    private var launchClaudeForwarded = false
     /// True after an AI-generated title (or fallback) has been applied.
     /// Blocks raw webview title overwrites; the extension keeps re-sending
     /// stale internal titles unless we explicitly replace them.
@@ -1051,13 +1043,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
         guard let channelId else {
-            // Deferred, not dropped — and the retry is a real call site, not a
-            // hope. An earlier version of this comment claimed the channelId
-            // backstop "recovers it from the next channel-scoped message, so a
-            // later `init` gets another chance": the backstop assigned the id
-            // and never re-invoked this, and `init` only re-fires on a turn the
-            // user types. So the prompt they typed *to avoid* typing one was
-            // lost silently. The backstop now calls this directly.
             logger.notice("initial prompt: deferred, no channelId yet")
             return
         }
@@ -3441,9 +3426,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // session (io_message, request, interrupt_claude, etc.) carries
         // channelId on the top-level dict. Channel-agnostic messages (init,
         // get_claude_state, get_asset_uris, list_sessions) don't, and the
-        // !cid.isEmpty guard correctly skips them. If `launch_claude` failed
-        // to set channelId for any reason, the next channel-scoped message
-        // recovers it. Title generation no longer depends on channelId at all
+        // !cid.isEmpty guard correctly skips them. Since extension 2.1.280 this
+        // fires on every session, ahead of `launch_claude`. Title generation no longer depends on channelId at all
         // (it runs the CLI directly); what breaks without this is the recap —
         // `recapIneligibilityReason`'s channelId branch — and `requestUsageUpdate`.
         // Deleting the backstop and testing titles would therefore look fine.
@@ -3457,13 +3441,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 "channelId recovered via backstop from \(msgType, privacy: .public) message"
             )
             self.channelId = cid
-            // The channel is what `sendPendingInitialPrompt` was missing if it
-            // ran before this; retry now rather than waiting for a turn the
-            // user would have to type — but only once the extension has been
-            // asked to open that channel (see `launchClaudeForwarded`).
-            if launchClaudeForwarded {
-                sendPendingInitialPrompt()
-            }
         }
 
         // A Bool, not the text: `maybeGenerateTitle` takes no argument and
@@ -3646,13 +3623,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // the hook point, which is the rule CLAUDE.md already states for
         // exactly this.
         //
-        // The `channelId` backstop above is the other call site, and it is
-        // gated on `launchClaudeForwarded`: extension 2.1.280's webview sends a
-        // channel-scoped message BEFORE its `launch_claude`, so the backstop
-        // fired first and submitted the prompt to a channel the extension did
-        // not have yet, which drops it with only a log warning.
+        // This is the only call site: the extension drops an io_message for a
+        // channel it has not opened yet, with only a log warning.
         if dict["type"] as? String == "launch_claude" {
-            launchClaudeForwarded = true
             sendPendingInitialPrompt()
         }
         if sawUserPromptThisMessage {
