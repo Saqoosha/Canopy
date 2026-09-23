@@ -290,7 +290,7 @@ struct LauncherView: View {
                 }
                 #endif
                 launchHeader
-                extensionUpdateBanner
+                extensionUpdateSlot
                 contextChipRow
                 composerBox
             }
@@ -516,7 +516,6 @@ struct LauncherView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.primary)
         }
-        .padding(.bottom, 4)
     }
 
     private var headlineText: String {
@@ -1116,39 +1115,76 @@ struct LauncherView: View {
 
     // MARK: - Extension Update Banner
 
+    /// The banner's slot is always laid out, banner or not, so the icon,
+    /// headline, chips and composer never move when a banner appears or goes
+    /// away. It reserves the height of the update-available card — the tallest
+    /// ordinary state — with an invisible copy of it; a long failure message
+    /// can still grow the slot past that. Equal padding above and below, so
+    /// the gap between headline and banner matches the one between banner and
+    /// chips.
+    private var extensionUpdateSlot: some View {
+        ZStack {
+            updateAvailableCard(latestVersion: "0.0.0", currentVersion: "0.0.0")
+                .hidden()
+                .accessibilityHidden(true)
+            extensionUpdateBanner
+        }
+        .padding(.vertical, 18)
+    }
+
+    private func updateAvailableCard(latestVersion: String, currentVersion: String?) -> some View {
+        updateBannerCard(icon: "arrow.down.circle", iconColor: .blue, tint: .blue) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Extension update available")
+                    .font(.system(size: 12, weight: .semibold))
+                HStack(spacing: 6) {
+                    if let currentVersion {
+                        Text("v\(currentVersion) → v\(latestVersion)")
+                    } else {
+                        Text("v\(latestVersion)")
+                    }
+                    Text("·").foregroundStyle(.tertiary)
+                    Link("Changelog", destination: ExtensionUpdater.changelogURL)
+                        .foregroundStyle(Color.accentColor)
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            }
+            Button("Update") {
+                Task { await updater.triggerInstall() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+    }
+
     @ViewBuilder
     private var extensionUpdateBanner: some View {
         switch updater.state {
         case .updateAvailable(let latestVersion, let currentVersion):
-            updateBannerCard(icon: "arrow.down.circle", iconColor: .blue, tint: .blue) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Extension update available")
-                        .font(.system(size: 12, weight: .semibold))
-                    HStack(spacing: 6) {
-                        if let currentVersion {
-                            Text("v\(currentVersion) → v\(latestVersion)")
-                        } else {
-                            Text("v\(latestVersion)")
-                        }
-                        Text("·").foregroundStyle(.tertiary)
-                        Link("Changelog", destination: ExtensionUpdater.changelogURL)
-                            .foregroundStyle(Color.accentColor)
-                    }
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                }
-                Button("Update") {
-                    Task { await updater.triggerInstall() }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
+            updateAvailableCard(latestVersion: latestVersion, currentVersion: currentVersion)
 
-        case .downloading, .installing:
-            let text = updater.state == .downloading ? "Downloading extension…" : "Installing extension…"
+        case .downloading:
             updateBannerCard(tint: .secondary) {
                 ProgressView().controlSize(.small)
-                Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("Downloading extension…")
+                    // Sized for "100%" so the card does not change width as
+                    // the digits tick over.
+                    ZStack(alignment: .trailing) {
+                        Text("100%").hidden()
+                        Text(downloadProgressText)
+                    }
+                    .monospacedDigit()
+                }
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            }
+
+        case .installing:
+            updateBannerCard(tint: .secondary) {
+                ProgressView().controlSize(.small)
+                Text("Installing extension…").font(.system(size: 12)).foregroundStyle(.secondary)
             }
 
         case .done(let version):
@@ -1176,6 +1212,16 @@ struct LauncherView: View {
         case .idle, .checking, .upToDate:
             EmptyView()
         }
+    }
+
+    /// A percentage when the size is known, else the megabytes received so
+    /// far — and nothing before the first byte, rather than "0.0 MB".
+    private var downloadProgressText: String {
+        guard let progress = updater.downloadProgress, progress.received > 0 else { return "" }
+        if let fraction = progress.fraction {
+            return "\(Int(fraction * 100))%"
+        }
+        return String(format: "%.1f MB", Double(progress.received) / 1_000_000)
     }
 
     /// Ceiling for the update card, so a long failure message wraps instead of
@@ -1210,12 +1256,6 @@ struct LauncherView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(tint.opacity(0.16), lineWidth: 1)
         )
-        // Inside the card, so the idle state — which renders `EmptyView` —
-        // cannot contribute a gap for a banner that is not there. It stacks on
-        // the enclosing VStack's own 12, so the visible gap is ~30: this card
-        // is an interruption between the headline and the composer, and at a
-        // tighter spacing it read as a third element of the same group.
-        .padding(.vertical, 18)
     }
 
     // MARK: - Session Options

@@ -21,6 +21,28 @@ final class ExtensionUpdater {
 
     private(set) var state: State = .idle
 
+    /// How far the VSIX download has got. Non-nil only while `state` is
+    /// `.downloading`, and even then nil until the first poll lands.
+    private(set) var downloadProgress: DownloadProgress?
+
+    struct DownloadProgress: Equatable {
+        var received: Int64
+        /// The response's `Content-Length`, nil when the server sent none.
+        var total: Int64?
+
+        /// Measured against the marketplace: it serves the VSIX with
+        /// `Content-Encoding: gzip`, so URLSession reports the expected size
+        /// as unknown (-1, on the task and on the response alike) and
+        /// `Progress.fractionCompleted` sits at 0.99 from the first byte. `received` counts decoded bytes while
+        /// `Content-Length` is the encoded size; a VSIX is already a zip, so
+        /// the two are within ~0.2% (99.24 MB against 99.10 MB) and the ratio
+        /// is clamped rather than corrected.
+        var fraction: Double? {
+            guard let total, total > 0 else { return nil }
+            return min(1, Double(received) / Double(total))
+        }
+    }
+
     func checkForUpdate() async {
         guard state == .idle || state == .upToDate || state.isTerminal else { return }
 
@@ -118,17 +140,71 @@ final class ExtensionUpdater {
             throw UpdateError.invalidURL
         }
         logger.info("Downloading extension v\(version, privacy: .public) from marketplace")
-        let (localURL, response) = try await URLSession.shared.download(from: url)
+        let destURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-code-\(version)-\(UUID().uuidString.prefix(8)).vsix")
+
+        // A task handle rather than the async `download(from:)`, which hides
+        // the task and so its byte counts. Polled rather than observed: KVO on
+        // the counters fires per chunk, far more often than a label can use.
+        var task: URLSessionDownloadTask?
+        let poller = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                if let task {
+                    // The header, not `expectedContentLength`: that is -1 too
+                    // under gzip, measured.
+                    let header = (task.response as? HTTPURLResponse)?
+                        .value(forHTTPHeaderField: "Content-Length")
+                    self?.downloadProgress = DownloadProgress(
+                        received: task.countOfBytesReceived,
+                        total: header.flatMap { Int64($0) }
+                    )
+                }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        defer {
+            poller.cancel()
+            downloadProgress = nil
+        }
+
+        let response: URLResponse = try await withCheckedThrowingContinuation { continuation in
+            let downloadTask = Self.makeDownloadTask(url: url, movingTo: destURL, continuation: continuation)
+            task = downloadTask
+            downloadTask.resume()
+        }
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode)
         else {
+            try? FileManager.default.removeItem(at: destURL)
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw UpdateError.downloadFailed(statusCode: code)
         }
-        let destURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claude-code-\(version)-\(UUID().uuidString.prefix(8)).vsix")
-        try FileManager.default.moveItem(at: localURL, to: destURL)
         return destURL
+    }
+
+    /// `nonisolated` so the completion closure is not written inside this
+    /// `@MainActor` type: URLSession runs it on its own queue, and the
+    /// downloaded file only exists until it returns, so the move happens there.
+    private nonisolated static func makeDownloadTask(
+        url: URL, movingTo destURL: URL,
+        continuation: CheckedContinuation<URLResponse, Error>
+    ) -> URLSessionDownloadTask {
+        URLSession.shared.downloadTask(with: url) { localURL, response, error in
+            if let error {
+                continuation.resume(throwing: error)
+                return
+            }
+            guard let localURL, let response else {
+                continuation.resume(throwing: URLError(.badServerResponse))
+                return
+            }
+            do {
+                try FileManager.default.moveItem(at: localURL, to: destURL)
+                continuation.resume(returning: response)
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
     }
 
     // MARK: - Install
