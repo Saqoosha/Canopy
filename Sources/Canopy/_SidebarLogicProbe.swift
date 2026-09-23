@@ -10127,6 +10127,51 @@ enum SidebarLogicProbe {
             record("failure: a by-hand close that promotes a session keeps the banner parked",
                    s3d.lastSessionFailure != nil && s3d.panes.first?.content == .session(p2.id))
 
+            // Connection overlay's "Back to Launcher": the pane becomes a launcher
+            // in place (same slot, same width), the session closes, nothing is promoted.
+            let r1 = SessionStore()
+            let ra = OpenSession(origin: .local(cwd), resumeId: "back-a", title: "A", project: "p", status: .live)
+            let rb = OpenSession(origin: .local(cwd), resumeId: "back-b", title: "B", project: "p", status: .live)
+            r1._probeSeedOpenSessions([ra, rb])
+            _ = r1.openInNewPane(ra.id)
+            _ = r1.openInNewPane(rb.id)
+            let slotA = r1.panes[0]
+            r1.replaceSessionWithLauncher(ra.id)
+            record("back to launcher: multi-pane keeps the pane and makes it a launcher",
+                   r1.panes.count == 2
+                   && r1.panes[0].content == .launcher
+                   && r1.panes[0].id == slotA.id
+                   && r1.panes[0].preferredWidth == slotA.preferredWidth
+                   && r1.panes[1].content == .session(rb.id)
+                   && !r1.openSessions.contains { $0.id == ra.id }
+                   && r1.focusedPaneIndex == 1
+                   && r1.selection == .session(rb.id))
+
+            let r2 = SessionStore()
+            let rc = OpenSession(origin: .local(cwd), resumeId: "back-c", title: "C", project: "p", status: .live)
+            let rd = OpenSession(origin: .local(cwd), resumeId: "back-d", title: "D", project: "p", status: .dormant)
+            r2._probeSeedOpenSessions([rc, rd])
+            _ = r2.openInNewPane(rc.id)
+            r2.noteSessionFailure(title: "T", message: "boom", status: 1)
+            r2.replaceSessionWithLauncher(rc.id)
+            record("back to launcher: single pane shows a launcher, does not promote a dormant session",
+                   r2.panes.count == 1
+                   && r2.panes[0].content == .launcher
+                   && r2.selection == .launcher
+                   && r2.openSessions.first { $0.id == rd.id }?.status == .dormant)
+            record("back to launcher: a newly shown launcher starts clean",
+                   r2.lastSessionFailure == nil)
+
+            let r3 = SessionStore()
+            let re = OpenSession(origin: .local(cwd), resumeId: "back-e", title: "E", project: "p", status: .live)
+            r3._probeSeedOpenSessions([re])
+            _ = r3.openLauncherInNewPane()
+            _ = r3.openInNewPane(re.id)
+            r3.noteSessionFailure(title: "T", message: "boom", status: 1)
+            r3.replaceSessionWithLauncher(re.id)
+            record("back to launcher: beside a launcher pane keeps its banner",
+                   r3.lastSessionFailure != nil && r3.panes.allSatisfy { $0.content == .launcher })
+
             let s4 = SessionStore()
             let a4 = OpenSession(origin: .local(cwd), resumeId: "fail-a4", title: "A4", project: "p", status: .live)
             s4._probeSeedOpenSessions([a4])

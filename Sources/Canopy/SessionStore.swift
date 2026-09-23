@@ -1134,8 +1134,7 @@ final class SessionStore {
         closeSession(id, keepingFailure: true)
     }
 
-    /// `keepingFailure` is true for the crash closure alone — see
-    /// `lastSessionFailure`. No default, so a caller that forgets it is a
+    /// `keepingFailure`: see `lastSessionFailure`. No default, so a caller that forgets it is a
     /// compile error rather than a banner that never shows.
     func closeSession(_ id: UUID, keepingFailure: Bool) {
         guard let idx = openSessions.firstIndex(where: { $0.id == id }) else { return }
