@@ -30,13 +30,7 @@ final class ExtensionUpdater {
         /// The response's `Content-Length`, nil when the server sent none.
         var total: Int64?
 
-        /// Measured against the marketplace: it serves the VSIX with
-        /// `Content-Encoding: gzip`, so URLSession reports the expected size
-        /// as unknown (-1, on the task and on the response alike) and
-        /// `Progress.fractionCompleted` sits at 0.99 from the first byte. `received` counts decoded bytes while
-        /// `Content-Length` is the encoded size; a VSIX is already a zip, so
-        /// the two are within ~0.2% (99.24 MB against 99.10 MB) and the ratio
-        /// is clamped rather than corrected.
+        /// Decoded bytes over the gzip-encoded Content-Length, clamped.
         var fraction: Double? {
             guard let total, total > 0 else { return nil }
             return min(1, Double(received) / Double(total))
@@ -143,21 +137,19 @@ final class ExtensionUpdater {
         let destURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("claude-code-\(version)-\(UUID().uuidString.prefix(8)).vsix")
 
-        // A task handle rather than the async `download(from:)`, which hides
-        // the task and so its byte counts. Polled rather than observed: KVO on
-        // the counters fires per chunk, far more often than a label can use.
+        // A task handle, not `download(from:)`, which hides its byte counts.
         var task: URLSessionDownloadTask?
         let poller = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                if let task {
-                    // The header, not `expectedContentLength`: that is -1 too
-                    // under gzip, measured.
+                if let task, let self {
+                    // The header, not `expectedContentLength`: that is -1 under gzip.
                     let header = (task.response as? HTTPURLResponse)?
                         .value(forHTTPHeaderField: "Content-Length")
-                    self?.downloadProgress = DownloadProgress(
+                    let progress = DownloadProgress(
                         received: task.countOfBytesReceived,
                         total: header.flatMap { Int64($0) }
                     )
+                    if progress != self.downloadProgress { self.downloadProgress = progress }
                 }
                 try? await Task.sleep(for: .milliseconds(200))
             }
@@ -182,9 +174,7 @@ final class ExtensionUpdater {
         return destURL
     }
 
-    /// `nonisolated` so the completion closure is not written inside this
-    /// `@MainActor` type: URLSession runs it on its own queue, and the
-    /// downloaded file only exists until it returns, so the move happens there.
+    /// The downloaded file only exists until the completion returns, so it is moved there.
     private nonisolated static func makeDownloadTask(
         url: URL, movingTo destURL: URL,
         continuation: CheckedContinuation<URLResponse, Error>

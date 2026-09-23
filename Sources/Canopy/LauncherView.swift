@@ -1127,6 +1127,7 @@ struct LauncherView: View {
             updateAvailableCard(latestVersion: "0.0.0", currentVersion: "0.0.0")
                 .hidden()
                 .accessibilityHidden(true)
+                .frame(width: 1)  // reserve its height only, never its width
             extensionUpdateBanner
         }
         .padding(.vertical, 18)
@@ -1169,8 +1170,6 @@ struct LauncherView: View {
                 ProgressView().controlSize(.small)
                 HStack(spacing: 4) {
                     Text("Downloading extension…")
-                    // Sized for "100%" so the card does not change width as
-                    // the digits tick over.
                     ZStack(alignment: .trailing) {
                         Text("100%").hidden()
                         Text(downloadProgressText)
