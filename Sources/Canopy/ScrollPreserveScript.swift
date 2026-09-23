@@ -174,16 +174,18 @@ enum ScrollPreserveScript {
         // layout, not a person.
         var lastInputAt = 0;
         var pointerDown = false;
-        // Only keys that scroll. Typing the next prompt mid-stream must not
-        // count, and neither may Space typed into an editable.
-        var SCROLL_KEYS = { ArrowUp: 1, ArrowDown: 1, PageUp: 1, PageDown: 1, Home: 1, End: 1 };
+        // Every key counts except typing into an editable: the next prompt
+        // typed mid-stream must not suspend the fix, but Tab focus moves and
+        // shortcuts can scroll the transcript.
         function noteInput() { lastInputAt = Date.now(); }
         window.addEventListener('wheel', noteInput, { capture: true, passive: true });
         window.addEventListener('touchmove', noteInput, { capture: true, passive: true });
         window.addEventListener('keydown', function(e) {
-            if (SCROLL_KEYS[e.key]) { noteInput(); return; }
-            if (e.key === ' ' && !(e.target instanceof Element &&
-                    e.target.closest('input, textarea, [contenteditable]'))) noteInput();
+            var typing = e.target instanceof Element &&
+                e.target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])') &&
+                !e.metaKey && !e.ctrlKey && !e.altKey &&
+                e.key !== 'Tab' && e.key !== 'Escape';
+            if (!typing) noteInput();
         }, { capture: true, passive: true });
         // `buttons` on every mouse event, not a mousedown/mouseup pair: a
         // context menu, a drag-and-drop or a release outside the webview
