@@ -23,9 +23,9 @@ final class StatusBarData {
     // Compact boundary indicator
     var didCompact: Bool = false
 
-    /// Subagent activity rows for the current turn (CLI-style task list,
-    /// rendered by SubagentListView). Snapshot pushed from ShimProcess's
-    /// SubagentTracker whenever it changes.
+    /// Subagent activity rows for the current turn. Snapshot pushed from
+    /// ShimProcess's SubagentTracker whenever it changes. Nothing renders
+    /// it any more — the extension draws its own agents pill.
     var subagents: [SubagentInfo] = []
 
     /// "What were we doing" recap for an idle session the user has come back
@@ -52,7 +52,7 @@ final class StatusBarData {
     /// Live width (in AppKit points) of the CC extension's chat-input
     /// column, measured from the webview via `InputWidthProbe`. `nil` until
     /// the probe reports its first value or when the target element can't
-    /// be found. `SubagentListView` mirrors this width so its rows line up
+    /// be found. Native rows under the webview size to it so they line up
     /// with the input area instead of sprawling edge-to-edge.
     ///
     /// `didSet` clamps any non-positive assignment back to `nil` — the
