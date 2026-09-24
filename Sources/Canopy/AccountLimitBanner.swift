@@ -62,6 +62,16 @@ struct AccountLimitBanner: View {
     @State private var dismissed: RateLimitHit?
 
     var body: some View {
+        // Group so the cleared-hit reset below has a view to hang on even
+        // when the banner itself is hidden.
+        Group { banner }
+            .onChange(of: session.statusBar.limitHit) { _, hit in
+                if hit == nil { dismissed = nil }
+            }
+    }
+
+    @ViewBuilder
+    private var banner: some View {
         let data = session.statusBar
         if let hit = data.limitHit, hit != dismissed,
            session.origin.remoteHost == nil, session.origin.mirrorTarget == nil {
