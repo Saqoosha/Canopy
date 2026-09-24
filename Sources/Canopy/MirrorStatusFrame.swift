@@ -124,7 +124,7 @@ final class MirrorStatusPublisher {
 /// with `"usage": true` on its attach: `{"type":"usage","email":…,"rate_limits":{…}}`, where
 /// `rate_limits` is the raw `/api/oauth/usage` shape so the client parses it with the same
 /// `RateLimitAccount.updateFromRawUsage` a shim's `get_usage` reply goes through. The phone
-/// never asks: it draws the roster's two percentages instead.
+/// never asks.
 enum MirrorUsageFrame {
     static func payload(email: String, rateLimits: [String: Any]) -> [String: Any] {
         ["type": "usage", "email": email, "rate_limits": rateLimits]
@@ -143,9 +143,9 @@ enum MirrorUsageFrame {
 
 /// Sends `MirrorUsageFrame` for one shim's account to one sink, on attach and on every change.
 ///
-/// The shim's account can still be unresolved at attach (an SSH remote session on the origin
-/// reads its host's `.claude.json` first), and `ShimProcess` is not observable, so that wait is
-/// polled — bounded, because a host-keyed account never gains an email.
+/// The shim's binding can still be unresolved at attach (an SSH remote session or a non-default
+/// login reads its `.claude.json` first), and `ShimProcess` is not observable, so that wait is
+/// polled for at most two minutes. Everything after it is observed.
 @MainActor
 final class MirrorUsagePublisher {
     private weak var shim: ShimProcess?
@@ -171,7 +171,7 @@ final class MirrorUsagePublisher {
 
     private func publish() {
         guard !stopped, let shim else { return }
-        guard let account = shim.rateLimitAccount, let email = shim.rateLimitEmail else {
+        guard shim.rateLimitAccount != nil else {
             guard resolveRetries < Self.maxResolveRetries else { return }
             resolveRetries += 1
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.resolveRetryInterval) { [weak self] in
@@ -179,13 +179,17 @@ final class MirrorUsagePublisher {
             }
             return
         }
-        let rateLimits = withObservationTracking {
-            account.rawUsagePayload()
+        // Record and email are read inside the tracked pass, so a host key folded into an
+        // email later (`SharedRateLimitData.noteResolved`) re-fires this.
+        let payload = withObservationTracking { () -> [String: Any]? in
+            guard let account = shim.rateLimitAccount, let email = shim.rateLimitEmail,
+                  let rateLimits = account.rawUsagePayload()
+            else { return nil }
+            return MirrorUsageFrame.payload(email: email, rateLimits: rateLimits)
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in self?.publish() }
         }
-        guard let rateLimits else { return }
-        let payload = MirrorUsageFrame.payload(email: email, rateLimits: rateLimits)
+        guard let payload else { return }
         guard let encoded = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
               encoded != lastSent
         else { return }

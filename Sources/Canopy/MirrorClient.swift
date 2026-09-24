@@ -18,8 +18,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     /// The origin session's account usage (`MirrorUsageFrame`), once it has any and on every
     /// change; never from a Mac that predates the frame.
     var onUsage: (([String: Any]) -> Void)?
-    /// The record this bridge's usage lines are filed under, set by the pane on the first one.
-    /// Nil when the origin runs as this Mac's own account.
+    /// The record this bridge's usage lines are filed under, set by the pane from each one; nil
+    /// before the first and for this Mac's own account.
     var usageKey: RateLimitAccount.Key?
 
     /// Every live bridge, for `isWriting(to:)`. Weak, so a closed pane needs no deregistration.

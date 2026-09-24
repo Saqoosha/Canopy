@@ -21,8 +21,8 @@ struct SidebarAccountSection: View {
             Divider()
                 .padding(.bottom, 2)
             // One block per account the open sessions use: this Mac's first,
-            // headed by the email its CLI recorded, then any account an SSH
-            // remote session is signed in as (issue #214). With one account
+            // headed by the email its CLI recorded, then any other account a
+            // session or mirror pane runs as (issue #214). With one account
             // this is exactly the footer it was before.
             accountBlock(data.local, header: ClaudeAccountInfo.current()?.email, headerNeedsData: false, separated: false)
             // Only accounts a running session or an attached mirror pane

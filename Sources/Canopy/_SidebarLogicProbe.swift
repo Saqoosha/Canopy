@@ -10598,11 +10598,23 @@ enum SidebarLogicProbe {
             record("mirror usage: per-model rows round-trip",
                    copy.modelScoped == [RateLimitAccount.ModelScopedLimit(
                        json: ["display_name": "Fable", "utilization": 63, "resets_at": "2026-09-26T05:20:00Z"])!])
+            record("mirror usage: utilization goes out as an Int percent",
+                   (source.rawUsagePayload()?["seven_day"] as? [String: Any])?["utilization"] is Int)
+            let fiveHourOnly = RateLimitAccount(label: "probe-5h")
+            fiveHourOnly.updateFromRawUsage(["five_hour": ["utilization": 3, "resets_at": "2026-09-21T14:13:20Z"]])
+            record("mirror usage: one window is enough to send",
+                   fiveHourOnly.rawUsagePayload() != nil)
+            source.updateFromRawUsage(["model_scoped": NSNull()])
+            source.rawUsagePayload().map(copy.updateFromRawUsage)
+            record("mirror usage: an emptied per-model list clears the copy",
+                   copy.modelScoped.isEmpty)
             let frame = MirrorUsageFrame.payload(email: "Work@Example.com", rateLimits: source.rawUsagePayload() ?? [:])
             record("mirror usage: another account's frame files under its email",
                    MirrorUsageFrame.key(forFrame: frame, localEmail: "a@saqoo.sh") == .email("work@example.com"))
             record("mirror usage: this Mac's own account is not filed again",
                    MirrorUsageFrame.key(forFrame: frame, localEmail: "work@example.com") == nil)
+            record("mirror usage: an empty email is dropped",
+                   MirrorUsageFrame.key(forFrame: ["type": "usage", "email": "", "rate_limits": [:] as [String: Any]], localEmail: nil) == nil)
             record("mirror usage: a frame without an email is dropped",
                    MirrorUsageFrame.key(forFrame: ["type": "usage", "rate_limits": [:] as [String: Any]], localEmail: nil) == nil)
         }
