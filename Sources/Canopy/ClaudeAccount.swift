@@ -98,8 +98,9 @@ enum ClaudeAccountStore {
     /// of the base — typing `~` would otherwise rearrange the home folder.
     /// Compared after resolving symlinks, so an alias of the base is caught.
     /// An existing directory must also look like a config dir of its own —
-    /// empty, or holding `.claude.json` or `.canopy-aside` — so pointing at
-    /// a repo or `~/Documents` does not move its `CLAUDE.md` aside.
+    /// empty, holding `.claude.json` or `.canopy-aside`, or already holding a
+    /// link into the base from an earlier sync — so pointing at a repo or
+    /// `~/Documents` does not move its `CLAUDE.md` aside.
     static func isSafeConfigDir(_ path: String, base: URL = ClaudeConfigDirSync.baseLocations().dir,
                                 home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
         guard path.hasPrefix("/") else { return false }
@@ -118,9 +119,15 @@ enum ClaudeAccountStore {
         if isSameOrInside(basePath, dir) || isSameOrInside(homePath, dir) { return false }
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
         let meaningful = entries.filter { $0 != ".DS_Store" }
+        let hasBaseLink = meaningful.contains { name in
+            guard let dest = try? FileManager.default.destinationOfSymbolicLink(
+                atPath: (path as NSString).appendingPathComponent(name)) else { return false }
+            return isSameOrInside(resolved(URL(fileURLWithPath: dest)), basePath)
+        }
         return meaningful.isEmpty
             || meaningful.contains(".claude.json")
             || meaningful.contains(ClaudeConfigDirSync.asideDirName)
+            || hasBaseLink
     }
 }
 

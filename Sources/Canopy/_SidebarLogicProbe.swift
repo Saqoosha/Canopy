@@ -10640,6 +10640,17 @@ enum SidebarLogicProbe {
                                    withIntermediateDirectories: true)
             try Data("x".utf8).write(to: asideDir.appendingPathComponent("settings.json"))
             record("account safe-dir: a folder already holding .canopy-aside is allowed", safe(asideDir.path))
+            // A first sync with no collisions and no MCP servers leaves only
+            // links behind; the next sync must still accept it.
+            let linkedDir = root.appendingPathComponent("linked", isDirectory: true)
+            try fm.createDirectory(at: linkedDir, withIntermediateDirectories: true)
+            try fm.createSymbolicLink(at: linkedDir.appendingPathComponent("rules"),
+                                      withDestinationURL: base.appendingPathComponent("rules"))
+            record("account safe-dir: a folder holding a link into the base is allowed", safe(linkedDir.path))
+            try fm.createSymbolicLink(at: repo.appendingPathComponent("elsewhere"),
+                                      withDestinationURL: URL(fileURLWithPath: "/nonexistent-elsewhere"))
+            try fm.removeItem(at: repo.appendingPathComponent(".claude.json"))
+            record("account safe-dir: a link pointing outside the base does not count", !safe(repo.path))
 
             record("account normalize: empty and whitespace-only are nil",
                    ClaudeAccountStore.normalizedConfigDir("") == nil
