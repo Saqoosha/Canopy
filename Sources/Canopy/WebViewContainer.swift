@@ -292,6 +292,7 @@ struct WebViewContainer: NSViewRepresentable {
         let host = SessionWebViewHost()
         host.translatesAutoresizingMaskIntoConstraints = true
         host.autoresizingMask = [.width, .height]
+        host.delegateOwner = context.coordinator
         attachWebView(to: host, coordinator: context.coordinator)
         context.coordinator.lastBoundSessionId = boundSession?.id
         // First-mount focus: same rationale as updateNSView. host.window
@@ -993,20 +994,39 @@ final class SessionWebViewHost: NSView {
     /// latent until launch restore shipped.
     weak var expectedWebView: NSView?
 
+    /// The coordinator of the representable that owns this host. Observed on
+    /// 2.45.0: a mirror pane that took input normally while every
+    /// `target="_blank"` link did nothing, fixed by closing and reopening it.
+    /// The inferred cause, not yet caught in the act: the losing host's
+    /// coordinator is the last to set the webview's delegates, both delegate
+    /// properties are WEAK, and adoption did not re-point them — so they go
+    /// nil when SwiftUI releases that coordinator, while the script handlers,
+    /// held strongly by the user content controller, keep working. The
+    /// notice below is how to confirm it.
+    weak var delegateOwner: (any WKNavigationDelegate & WKUIDelegate)?
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         adoptExpectedWebViewIfNeeded()
     }
 
     /// Re-parent `expectedWebView` back under this host when this host is the
-    /// one on screen. A no-op in the overwhelmingly common case where the
-    /// webview never moved.
+    /// one on screen, and point its delegates back at this host's coordinator.
+    /// A no-op in the overwhelmingly common case where the webview never moved.
     func adoptExpectedWebViewIfNeeded() {
-        guard window != nil,
-              let expectedWebView,
-              expectedWebView.superview !== self
-        else { return }
+        guard window != nil, let expectedWebView else { return }
+        reassertDelegates(on: expectedWebView)
+        guard expectedWebView.superview !== self else { return }
         Self.install(expectedWebView, in: self)
+    }
+
+    private func reassertDelegates(on view: NSView) {
+        guard let webView = view as? WKWebView, let owner = delegateOwner,
+              webView.uiDelegate !== owner || webView.navigationDelegate !== owner
+        else { return }
+        logger.notice("Host re-pointed webview delegates at its own coordinator (uiDelegate was \(webView.uiDelegate == nil ? "nil" : "another coordinator", privacy: .public))")
+        webView.navigationDelegate = owner
+        webView.uiDelegate = owner
     }
 
     /// Pin `webView` to every edge of `host`. Fresh constraints each time:

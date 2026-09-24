@@ -83,6 +83,7 @@ struct MirrorPaneView: NSViewRepresentable {
         let host = SessionWebViewHost()
         host.translatesAutoresizingMaskIntoConstraints = true
         host.autoresizingMask = [.width, .height]
+        host.delegateOwner = context.coordinator
         SessionWebViewHost.install(webView(coordinator: context.coordinator), in: host)
         context.coordinator.lastBoundSessionId = session.id
         let target = session.webView
