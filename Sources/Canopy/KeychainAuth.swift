@@ -15,7 +15,14 @@ enum KeychainAuth {
     static func readAuthStatus() -> [String: Any]? {
         if let cached { return cached }
         guard let oauth = readOAuthFromKeychain() else { return nil }
-        let scopes = oauth["scopes"] as? [String] ?? []
+        // A blob without `scopes` is a damaged login (measured on studio
+        // 2026-09-24). Report it as logged out, matching what the shim's
+        // keychain-login-guard.js shows the extension, so the webview offers
+        // /login instead of claiming a "console" login that cannot work.
+        guard let scopes = oauth["scopes"] as? [String] else {
+            logger.warning("Keychain OAuth blob has no scopes; treating as logged out")
+            return nil
+        }
         let authMethod = scopes.contains("user:inference") ? "claudeai" : "console"
         let subscriptionType = oauth["subscriptionType"] as? String
         logger.info("Auth from Keychain: \(authMethod, privacy: .public)")

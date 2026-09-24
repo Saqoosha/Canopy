@@ -1323,3 +1323,45 @@ describe("assembleVscodeModule", () => {
     assert.equal(stderrChunks.length, 0);
   });
 });
+
+describe("keychain-login-guard", () => {
+  const guard = require("../Resources/vscode-shim/keychain-login-guard.js");
+  const damaged = JSON.stringify({ claudeAiOauth: { accessToken: "a", refreshToken: "r", expiresAt: 1 }, organizationUuid: "o" }) + "\n";
+  const healthy = JSON.stringify({ claudeAiOauth: { accessToken: "a", scopes: ["user:inference"] } });
+
+  it("drops claudeAiOauth when scopes is missing, keeping other keys and the trailing newline", () => {
+    assert.equal(guard.sanitizeCredentialText(damaged), JSON.stringify({ organizationUuid: "o" }) + "\n");
+  });
+
+  it("leaves a healthy, non-JSON, or oauth-less payload alone", () => {
+    assert.equal(guard.sanitizeCredentialText(healthy), null);
+    assert.equal(guard.sanitizeCredentialText("not json"), null);
+    assert.equal(guard.sanitizeCredentialText(JSON.stringify({ organizationUuid: "o" })), null);
+  });
+
+  it("matches the extension's read forms and not its writes", () => {
+    assert.equal(guard.isCredentialRead(["security", "find-generic-password", "-a", "u", "-w", "-s", "Claude Code-credentials"]), true);
+    assert.equal(guard.isCredentialRead(["/bin/sh", "-c", 'security find-generic-password -a "u" -w -s "Claude Code-credentials"']), true);
+    assert.equal(guard.isCredentialRead(['security find-generic-password -a "u" -w -s "Claude Code-credentials"']), true);
+    assert.equal(guard.isCredentialRead(["security", "add-generic-password", "-U", "-a", "u", "-s", "Claude Code-credentials", "-w", "x"]), false);
+    assert.equal(guard.isCredentialRead(["security", "find-generic-password", "-a", "u", "-w", "-s", "Other"]), false);
+  });
+
+  it("filters spawnSync, execFileSync and execSync output for a credential read only", () => {
+    const calls = [];
+    const fake = {
+      spawnSync: () => ({ stdout: Buffer.from(damaged), output: [null, Buffer.from(damaged), null] }),
+      execFileSync: () => damaged,
+      execSync: () => Buffer.from(damaged),
+    };
+    guard.install(fake, (l) => calls.push(l));
+    const read = ["find-generic-password", "-a", "u", "-w", "-s", "Claude Code-credentials"];
+    const r = fake.spawnSync("security", read);
+    assert.equal(r.stdout.toString(), '{"organizationUuid":"o"}\n');
+    assert.equal(r.output[1], r.stdout);
+    assert.equal(fake.execFileSync("security", read), '{"organizationUuid":"o"}\n');
+    assert.equal(fake.execSync(`security ${read.join(" ")}`).toString(), '{"organizationUuid":"o"}\n');
+    assert.equal(fake.spawnSync("git", ["status"]).stdout.toString(), damaged);
+    assert.equal(calls.length, 3);
+  });
+});
