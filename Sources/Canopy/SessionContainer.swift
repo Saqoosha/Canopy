@@ -73,6 +73,8 @@ struct SessionContainer: View {
                 SubagentListView(data: session.statusBar)
                     .animation(.easeInOut(duration: 0.2), value: session.statusBar.subagents.count)
 
+                AccountLimitBanner(session: session)
+
                 StatusBarView(data: session.statusBar)
             }
 

@@ -10586,6 +10586,45 @@ enum SidebarLogicProbe {
                    account(#"[1,2]"#) == nil && account("not json") == nil)
         }
 
+        // MARK: - Account limit banner
+        //
+        // Mirrors the webview's own "hit your limit" condition: status
+        // "rejected" with a rateLimitType. An allowed status clears it.
+        do {
+            func ev(_ info: [String: Any]) -> [String: Any] { ["type": "rate_limit_event", "rate_limit_info": info] }
+            let rejected = RateLimitHit.signal(from: ev(["status": "rejected", "rateLimitType": "five_hour", "resetsAt": 1_790_223_000]))
+            record("limit banner: rejected with a type is a hit",
+                   rejected == .hit(RateLimitHit(limitType: "five_hour", resetsAt: Date(timeIntervalSince1970: 1_790_223_000))),
+                   "got \(rejected)")
+            record("limit banner: allowed clears",
+                   RateLimitHit.signal(from: ev(["status": "allowed", "rateLimitType": "five_hour"])) == .cleared)
+            record("limit banner: allowed_warning clears",
+                   RateLimitHit.signal(from: ev(["status": "allowed_warning", "rateLimitType": "five_hour"])) == .cleared)
+            record("limit banner: rejected without a type is not a hit (the webview shows nothing either)",
+                   RateLimitHit.signal(from: ev(["status": "rejected"])) == .unknown)
+            record("limit banner: another frame type is ignored",
+                   RateLimitHit.signal(from: ["type": "result", "rate_limit_info": ["status": "rejected", "rateLimitType": "five_hour"]]) == .unknown)
+            record("limit banner: a missing resetsAt still hits, with no time",
+                   RateLimitHit.signal(from: ev(["status": "rejected", "rateLimitType": "seven_day"])) == .hit(RateLimitHit(limitType: "seven_day", resetsAt: nil)))
+            record("limit banner: labels", RateLimitHit(limitType: "five_hour", resetsAt: nil).limitLabel == "5-hour"
+                   && RateLimitHit(limitType: "seven_day", resetsAt: nil).limitLabel == "weekly"
+                   && RateLimitHit(limitType: "seven_day_opus", resetsAt: nil).limitLabel == "seven day opus")
+
+            let work = ClaudeAccount(id: "w", name: "Work", configDir: "/tmp/w")
+            let side = ClaudeAccount(id: "s", name: "Side", configDir: "/tmp/s")
+            record("limit banner: from the default login, every account is offered",
+                   AccountLimitBanner.targets(current: nil, accounts: [work, side]).map(\.name) == ["Work", "Side"])
+            record("limit banner: from an account, Default comes first and the current account is left out",
+                   AccountLimitBanner.targets(current: work, accounts: [work, side]).map(\.name) == ["Default", "Side"])
+            record("limit banner: no accounts, nothing to offer",
+                   AccountLimitBanner.targets(current: nil, accounts: []).isEmpty)
+            record("limit banner: Default target switches to the nil account",
+                   AccountLimitBanner.targets(current: work, accounts: [work]).first?.account == nil)
+            record("limit banner: message names the account and the window",
+                   AccountLimitBanner.message(account: work, hit: RateLimitHit(limitType: "five_hour", resetsAt: nil))
+                       == "Work hit its 5-hour limit")
+        }
+
         // MARK: - Claude accounts (multi-account switching)
         //
         // `isSafeConfigDir` / `normalizedConfigDir` refuse anything that would

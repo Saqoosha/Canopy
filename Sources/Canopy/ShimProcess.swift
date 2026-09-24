@@ -7103,6 +7103,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         switch ioType {
+        case "rate_limit_event":
+            switch RateLimitHit.signal(from: ioMsg) {
+            case .hit(let hit):
+                if data.limitHit != hit {
+                    logger.notice("rate limit hit: \(hit.limitType, privacy: .public)")
+                    data.limitHit = hit
+                }
+            case .cleared:
+                if data.limitHit != nil { data.limitHit = nil }
+            case .unknown:
+                break
+            }
         case "system":
             // `subtype` and a non-empty `model` are both required because the
             // CLI emits `system` frames under several subtypes (status,
