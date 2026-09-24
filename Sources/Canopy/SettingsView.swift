@@ -15,20 +15,40 @@ struct SettingsView: View {
             ClaudeAccountsSettingsTab()
                 .tabItem { Label("Accounts", systemImage: "person.crop.circle") }
 
-            // MacroPad and Mobile are whole features, not stray preferences,
+            // MacroPad and Sharing are whole features, not stray preferences,
             // and General had grown to eleven controls carrying both. General
             // is for the small toggles with nowhere else to live.
             MacroPadSettingsTab()
                 .tabItem { Label("MacroPad", systemImage: "keyboard") }
 
-            MobileSettingsTab()
-                .tabItem { Label("Mobile", systemImage: "iphone") }
+            // Sharing is this Mac serving others (phone and other Macs alike);
+            // Remote is this Mac reaching other machines (SSH hosts, paired Macs).
+            SharingSettingsTab()
+                .tabItem { Label("Sharing", systemImage: "dot.radiowaves.left.and.right") }
 
             RemoteSettingsTab()
                 .tabItem { Label("Remote", systemImage: "network") }
         }
-        .frame(width: 460)
-        .fixedSize()
+        // Resizable: the grouped Forms scroll, so any height above the
+        // minimum works, and the relay URL and footers want the width.
+        .frame(minWidth: 460, idealWidth: 460, maxWidth: .infinity,
+               minHeight: 320, idealHeight: 616, maxHeight: .infinity)
+        .background(ResizableWindowEnabler())
+    }
+}
+
+/// SwiftUI's `Settings` scene creates its window without `.resizable` in the
+/// style mask, and `.windowResizability` does not add it, so the frame's
+/// max-size alone leaves the window fixed. Insert it once the view is in a window.
+private struct ResizableWindowEnabler: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Host() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class Host: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.styleMask.insert(.resizable)
+        }
     }
 }
 
@@ -236,19 +256,17 @@ private struct MacroPadSettingsTab: View {
     }
 }
 
-// MARK: - Mobile
+// MARK: - Sharing
 
-/// Publishing this Mac to the phone: the roster, the relay it reaches, and
-/// the name and secret that identify this machine to it. Its own tab because
-/// it is the Mac-side half of a whole feature, and because it will keep
-/// growing while General should not. Also where this Mac pairs with other Macs.
-private struct MobileSettingsTab: View {
+/// This Mac serving others: the roster it publishes to the relay, the name and
+/// secret that identify it there, and the live mirror that lets a phone or
+/// another Mac open its sessions. Pairing with other Macs is the consuming
+/// side and lives in Remote.
+private struct SharingSettingsTab: View {
     @Bindable private var settings = CanopySettings.shared
 
     var body: some View {
         Form {
-            // No section title: the tab is already called Mobile, and a
-            // header repeating it reads as a second, narrower grouping.
             Section {
                 Toggle("Publish this Mac's panes", isOn: $settings.rosterEnabled)
                 TextField("Relay URL", text: $settings.rosterEndpoint)
@@ -274,9 +292,11 @@ private struct MobileSettingsTab: View {
                 Text(hasStoredSecret ? "A secret is stored." : "No secret stored.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("Shown on the phone. Leave empty to use the Mac's own name. The secret is kept in the Keychain, not in settings.json — that file is plaintext and is shared with the installed Release build.")
+                Text("Shown on the phone and on other Macs. Leave empty to use the Mac's own name. The secret is kept in the Keychain, not in settings.json — that file is plaintext and is shared with the installed Release build.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } header: {
+                Text("Relay")
             }
             .onAppear { hasStoredSecret = MachineIdentity.hasRelaySecret() }
 
@@ -296,34 +316,7 @@ private struct MobileSettingsTab: View {
             } header: {
                 Text("Live mirror")
             } footer: {
-                SettingsFooter(text: "Paste it into the iPhone app's Settings, or into another Mac's Settings › Mobile › Other Macs. It contains the password: anyone on your tailnet who has it can read and drive this Mac's sessions. Reset the password to disconnect every phone and refuse every copy made before.")
-            }
-
-            Section {
-                if settings.mirrorPeers.isEmpty {
-                    Text("No other Macs paired.").font(.caption).foregroundStyle(.secondary)
-                }
-                ForEach(settings.mirrorPeers.keys.sorted(), id: \.self) { machine in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(peerName(machine))
-                            Text(settings.mirrorPeers[machine] ?? "").font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Forget") { forgetPeer(machine) }
-                    }
-                }
-                HStack {
-                    Button("Paste Connection from Mac") { pastePeerConnection() }
-                    Spacer()
-                    if let peerNotice {
-                        Text(peerNotice).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            } header: {
-                Text("Other Macs")
-            } footer: {
-                SettingsFooter(text: "On the other Mac, turn on its live mirror and use Copy Connection; then paste here. Its sessions appear in this Mac's sidebar once both Macs publish to the same relay.")
+                SettingsFooter(text: "Paste it into the iPhone app's Settings, or into another Mac's Settings › Remote › Other Macs. It contains the password: anyone on your tailnet who has it can read and drive this Mac's sessions. Reset the password to disconnect every phone and refuse every copy made before.")
             }
         }
         .formStyle(.grouped)
@@ -331,7 +324,6 @@ private struct MobileSettingsTab: View {
 
     @State private var mirrorStatus = MirrorServerStatus.shared
     @State private var mirrorNotice: String?
-    @State private var peerNotice: String?
 
     private var listeningAddress: (host: String, port: UInt16)? {
         if case .listening(let host, let port) = mirrorStatus.state { return (host, port) }
@@ -363,34 +355,6 @@ private struct MobileSettingsTab: View {
         mirrorNotice = MirrorServer.resetPassword()
             ? "Password reset; copy the connection again"
             : "Reset failed; the old password is still in force"
-    }
-
-    private func peerName(_ machine: String) -> String {
-        SessionStore.shared?.remoteRosters[machine]?.displayName ?? machine
-    }
-
-    private func pastePeerConnection() {
-        guard let text = NSPasteboard.general.string(forType: .string),
-              let connection = MirrorAccess.parseConnectionString(text) else {
-            peerNotice = "That is not a Canopy connection (expected canopy-mirror://…)."
-            return
-        }
-        if connection.machineId == MachineIdentity.stableId() {
-            peerNotice = "That is this Mac's own connection."
-            return
-        }
-        guard MirrorAccess.storePeerToken(connection.token, machineId: connection.machineId) else {
-            peerNotice = "Could not store the password in the Keychain."
-            return
-        }
-        settings.mirrorPeers[connection.machineId] = "\(connection.host):\(connection.port)"
-        peerNotice = "Paired with \(peerName(connection.machineId))."
-    }
-
-    private func forgetPeer(_ machine: String) {
-        MirrorAccess.forgetPeerToken(machineId: machine)
-        settings.mirrorPeers[machine] = nil
-        peerNotice = nil
     }
 
     @State private var relaySecret: String = ""
@@ -450,7 +414,9 @@ private struct PermissionsSettingsTab: View {
 // MARK: - Remote
 
 private struct RemoteSettingsTab: View {
+    @Bindable private var settings = CanopySettings.shared
     @State private var sshHosts: [String] = SSHHostStore.hosts()
+    @State private var peerNotice: String?
 
     var body: some View {
         Form {
@@ -478,8 +444,37 @@ private struct RemoteSettingsTab: View {
                         }
                     }
                 }
+            } header: {
+                Text("SSH Hosts")
             } footer: {
                 SettingsFooter(text: "Hosts you've connected to from the launcher are remembered here for quick reuse.")
+            }
+
+            Section {
+                if settings.mirrorPeers.isEmpty {
+                    Text("No other Macs paired.").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(settings.mirrorPeers.keys.sorted(), id: \.self) { machine in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(peerName(machine))
+                            Text(settings.mirrorPeers[machine] ?? "").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Forget") { forgetPeer(machine) }
+                    }
+                }
+                HStack {
+                    Button("Paste Connection from Mac") { pastePeerConnection() }
+                    Spacer()
+                    if let peerNotice {
+                        Text(peerNotice).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Other Macs")
+            } footer: {
+                SettingsFooter(text: "On the other Mac, turn on Settings › Sharing › Live mirror and use Copy Connection; then paste here. Its sessions appear in this Mac's sidebar once both Macs publish to the same relay.")
             }
         }
         .formStyle(.grouped)
@@ -487,6 +482,34 @@ private struct RemoteSettingsTab: View {
         // additions made elsewhere (launcher) don't propagate live. Refresh
         // whenever the tab becomes active so the list stays current.
         .onAppear { sshHosts = SSHHostStore.hosts() }
+    }
+
+    private func peerName(_ machine: String) -> String {
+        SessionStore.shared?.remoteRosters[machine]?.displayName ?? machine
+    }
+
+    private func pastePeerConnection() {
+        guard let text = NSPasteboard.general.string(forType: .string),
+              let connection = MirrorAccess.parseConnectionString(text) else {
+            peerNotice = "That is not a Canopy connection (expected canopy-mirror://…)."
+            return
+        }
+        if connection.machineId == MachineIdentity.stableId() {
+            peerNotice = "That is this Mac's own connection."
+            return
+        }
+        guard MirrorAccess.storePeerToken(connection.token, machineId: connection.machineId) else {
+            peerNotice = "Could not store the password in the Keychain."
+            return
+        }
+        settings.mirrorPeers[connection.machineId] = "\(connection.host):\(connection.port)"
+        peerNotice = "Paired with \(peerName(connection.machineId))."
+    }
+
+    private func forgetPeer(_ machine: String) {
+        MirrorAccess.forgetPeerToken(machineId: machine)
+        settings.mirrorPeers[machine] = nil
+        peerNotice = nil
     }
 }
 
