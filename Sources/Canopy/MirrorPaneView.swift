@@ -15,13 +15,21 @@ struct MirrorPaneView: NSViewRepresentable {
     /// socket drops before `attach_ok`; the caller closes the pane.
     let onFailure: (String) -> Void
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, SessionWebViewHostOwner {
         var consoleHandler: ConsoleLogHandler?
         var linkHandler: LinkClickHandler?
         var inputWidthHandler: InputWidthMessageHandler?
         var lastBoundSessionId: OpenSession.ID?
         var reportedMissingPairing = false
         weak var session: OpenSession?
+
+        /// See `SessionWebViewHost.owner`.
+        func reclaim(_ webView: WKWebView) {
+            guard webView.uiDelegate !== self || webView.navigationDelegate !== self else { return }
+            logger.notice("Host re-pointed mirror webview delegates at its own coordinator (ui was \(SessionWebViewHost.delegateState(webView.uiDelegate, owner: self), privacy: .public), navigation was \(SessionWebViewHost.delegateState(webView.navigationDelegate, owner: self), privacy: .public))")
+            webView.navigationDelegate = self
+            webView.uiDelegate = self
+        }
 
         /// Retry restarts the session, which rebuilds the webview and re-attaches.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -83,6 +91,7 @@ struct MirrorPaneView: NSViewRepresentable {
         let host = SessionWebViewHost()
         host.translatesAutoresizingMaskIntoConstraints = true
         host.autoresizingMask = [.width, .height]
+        host.owner = context.coordinator
         SessionWebViewHost.install(webView(coordinator: context.coordinator), in: host)
         context.coordinator.lastBoundSessionId = session.id
         let target = session.webView
