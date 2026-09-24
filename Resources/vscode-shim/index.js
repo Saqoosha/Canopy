@@ -10,8 +10,7 @@ const Module = require("node:module");
 const path = require("node:path");
 const fs = require("node:fs");
 
-// Before extension.js loads: a Keychain login missing `scopes` must reach the
-// extension as "logged out" rather than crash getAuthStatus. See the module.
+// Must run before extension.js loads — see keychain-login-guard.js.
 require("./keychain-login-guard.js").install(require("node:child_process"), (line) =>
   process.stderr.write(line + "\n"),
 );

@@ -1347,21 +1347,81 @@ describe("keychain-login-guard", () => {
     assert.equal(guard.isCredentialRead(["security", "find-generic-password", "-a", "u", "-w", "-s", "Other"]), false);
   });
 
-  it("filters spawnSync, execFileSync and execSync output for a credential read only", () => {
-    const calls = [];
+  const read = ["find-generic-password", "-a", "u", "-w", "-s", "Claude Code-credentials"];
+  const cleanedText = '{"organizationUuid":"o"}\n';
+
+  function recordingFake() {
+    const seen = [];
+    const rec = (name, ret) => function (...args) { seen.push({ name, self: this, args }); return ret(); };
     const fake = {
-      spawnSync: () => ({ stdout: Buffer.from(damaged), output: [null, Buffer.from(damaged), null] }),
-      execFileSync: () => damaged,
-      execSync: () => Buffer.from(damaged),
+      spawnSync: rec("spawnSync", () => ({ stdout: Buffer.from(damaged), output: [null, Buffer.from(damaged), null] })),
+      execFileSync: rec("execFileSync", () => damaged),
+      execSync: rec("execSync", () => Buffer.from(damaged)),
+      spawn: rec("spawn", () => "child"),
+      execFile: rec("execFile", () => "child"),
     };
-    guard.install(fake, (l) => calls.push(l));
-    const read = ["find-generic-password", "-a", "u", "-w", "-s", "Claude Code-credentials"];
-    const r = fake.spawnSync("security", read);
-    assert.equal(r.stdout.toString(), '{"organizationUuid":"o"}\n');
+    return { fake, seen };
+  }
+
+  it("filters sync credential reads, keeping the output type and passing arguments through", () => {
+    const { fake, seen } = recordingFake();
+    const logs = [];
+    guard.install(fake, (l) => logs.push(l));
+    const opts = { env: { A: "1" }, timeout: 5 };
+    const r = fake.spawnSync("security", read, opts);
+    assert.ok(Buffer.isBuffer(r.stdout));
+    assert.equal(r.stdout.toString(), cleanedText);
     assert.equal(r.output[1], r.stdout);
-    assert.equal(fake.execFileSync("security", read), '{"organizationUuid":"o"}\n');
-    assert.equal(fake.execSync(`security ${read.join(" ")}`).toString(), '{"organizationUuid":"o"}\n');
+    assert.equal(seen[0].args[2], opts);
+    assert.equal(seen[0].self, fake);
+    const f = fake.execFileSync("security", read, opts);
+    assert.equal(typeof f, "string");
+    assert.equal(f, cleanedText);
+    assert.equal(seen[1].args[2], opts);
+    const e = fake.execSync(`security ${read.join(" ")}`, opts);
+    assert.ok(Buffer.isBuffer(e));
+    assert.equal(e.toString(), cleanedText);
+    assert.equal(seen[2].args[1], opts);
+    assert.equal(logs.length, 3);
+  });
+
+  it("leaves every non-credential sync call untouched", () => {
+    const { fake } = recordingFake();
+    guard.install(fake, () => assert.fail("must not log"));
     assert.equal(fake.spawnSync("git", ["status"]).stdout.toString(), damaged);
-    assert.equal(calls.length, 3);
+    assert.equal(fake.execFileSync("git", ["status"]), damaged);
+    assert.equal(fake.execSync("git status").toString(), damaged);
+  });
+
+  it("re-routes async credential reads through the guard child and leaves others alone", () => {
+    const { fake, seen } = recordingFake();
+    guard.install(fake, () => {});
+    const opts = { shell: true, env: { A: "1" } };
+    fake.spawn("security", read, opts);
+    assert.equal(seen[0].args[0], process.execPath);
+    assert.equal(seen[0].args[1][1], "--filter-read");
+    assert.deepEqual(JSON.parse(seen[0].args[1][2]), { file: "security", args: read, shell: true });
+    assert.deepEqual(seen[0].args[2], { shell: false, env: { A: "1" } });
+    const cb = () => {};
+    fake.execFile("security", read, { encoding: "utf-8" }, cb);
+    assert.equal(seen[1].args[0], process.execPath);
+    assert.deepEqual(seen[1].args[2], { encoding: "utf-8", shell: false });
+    assert.equal(seen[1].args[3], cb);
+    fake.spawn("git", ["status"], opts);
+    fake.execFile("git", ["status"], cb);
+    assert.deepEqual(seen[2].args, ["git", ["status"], opts]);
+    assert.deepEqual(seen[3].args, ["git", ["status"], cb]);
+  });
+
+  it("guard child prints the read filtered and keeps its exit status", () => {
+    const { spawnSync } = require("node:child_process");
+    const guardPath = require.resolve("../Resources/vscode-shim/keychain-login-guard.js");
+    const script = `printf '%s' '${damaged.trim()}'; echo; exit 3`;
+    const r = spawnSync(process.execPath, [guardPath, "--filter-read", JSON.stringify({ file: script, args: [], shell: true })]);
+    assert.equal(r.stdout.toString(), cleanedText);
+    assert.equal(r.status, 3);
+    const healthyRun = spawnSync(process.execPath, [guardPath, "--filter-read", JSON.stringify({ file: "/bin/echo", args: [healthy], shell: false })]);
+    assert.equal(healthyRun.stdout.toString(), healthy + "\n");
+    assert.equal(healthyRun.status, 0);
   });
 });

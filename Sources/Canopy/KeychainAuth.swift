@@ -15,10 +15,9 @@ enum KeychainAuth {
     static func readAuthStatus() -> [String: Any]? {
         if let cached { return cached }
         guard let oauth = readOAuthFromKeychain() else { return nil }
-        // A blob without `scopes` is a damaged login (measured on studio
-        // 2026-09-24). Report it as logged out, matching what the shim's
-        // keychain-login-guard.js shows the extension, so the webview offers
-        // /login instead of claiming a "console" login that cannot work.
+        // A blob without `scopes` is a damaged login (studio, 2026-09-24):
+        // report logged out so the webview offers /login, as the shim's
+        // keychain-login-guard.js does for the extension.
         guard let scopes = oauth["scopes"] as? [String] else {
             logger.warning("Keychain OAuth blob has no scopes; treating as logged out")
             return nil
