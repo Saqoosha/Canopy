@@ -10,6 +10,11 @@ const Module = require("node:module");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Must run before extension.js loads — see keychain-login-guard.js.
+require("./keychain-login-guard.js").install(require("node:child_process"), (line) =>
+  process.stderr.write(line + "\n"),
+);
+
 // SSH remote: the workspace folder lives on the remote machine and is absent
 // locally. CC extension 2.1.112 calls fs.realpathSync(workspaceFolder) without
 // try/catch during webview view setup, crashing the shim with ENOENT. Patch

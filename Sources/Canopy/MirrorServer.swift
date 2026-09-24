@@ -297,7 +297,9 @@ final class MirrorConnection: MirrorSink {
         sendJSONObject([
             "type": "attach_ok",
             "sessionId": sessionId,
-            "html": WebViewContainer.entryHTML(resumeSessionId: sessionId) { "\(Self.assetScheme)://ext/\($0)" },
+            "html": WebViewContainer.entryHTML(resumeSessionId: sessionId, includeKeychainAuth: shim.claudeAccount == nil) {
+                "\(Self.assetScheme)://ext/\($0)"
+            },
             "userScripts": WebViewContainer.sessionUserScripts.map { ["source": $0.source, "atDocumentStart": $0.atDocumentStart] },
             // Lets the phone cache the assets it fetches, keyed by the extension they came from.
             "extensionVersion": CCExtension.extensionVersion() ?? "",
