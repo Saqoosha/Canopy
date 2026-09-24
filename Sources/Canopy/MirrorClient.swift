@@ -15,6 +15,27 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     var onStatus: (([String: Any]) -> Void)?
     /// A `MirrorFileWire` frame: a file the host is shipping here, or a URL to open.
     var onFileFrame: (([String: Any]) -> Void)?
+    /// The origin session's account usage (`MirrorUsageFrame`), once it has any and on every
+    /// change; never from a Mac that predates the frame.
+    var onUsage: (([String: Any]) -> Void)?
+    /// The record this bridge's usage lines are filed under, set by the pane from each one; nil
+    /// before the first and for this Mac's own account.
+    var usageKey: RateLimitAccount.Key?
+
+    /// Every live bridge, for `isWriting(to:)`. Weak, so a closed pane needs no deregistration.
+    private static let instances = NSHashTable<RemoteMirrorBridge>.weakObjects()
+
+    /// Whether an attached mirror pane feeds this record — the sidebar's counterpart to
+    /// `ShimProcess.isWriting(to:)`, so a remote account's block stays while its pane is attached
+    /// and leaves after a drop.
+    static func isWriting(to account: RateLimitAccount) -> Bool {
+        let registry = SharedRateLimitData.shared
+        return instances.allObjects.contains {
+            guard let key = $0.usageKey else { return false }
+            return registry.canonicalKey(for: key) == account.key
+                && $0.attachedDelivered && !$0.terminalDelivered && !$0.closed
+        }
+    }
     private(set) var extensionVersion: String?
     private var attachedDelivered = false
     private var terminalDelivered = false
@@ -50,6 +71,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             using: NWParameters(tls: nil, tcp: tcp)
         )
         super.init()
+        Self.instances.add(self)
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
@@ -119,7 +141,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         // `compress`: a Mac client takes the whole transcript in one line, and that line is
         // what a slow uplink spends its time on (see `MirrorWire`).
         sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
-                        "compress": MirrorWire.compressionName, "files": true])
+                        "compress": MirrorWire.compressionName, "files": true, "usage": true])
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
         if let webView {
@@ -201,6 +223,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if dict["type"] as? String == "status" {
             // For the pane's own status bar, not the page.
             onStatus?(dict)
+            return
+        }
+        if dict["type"] as? String == "usage" {
+            // For the sidebar's usage section, not the page.
+            onUsage?(dict)
             return
         }
         if MirrorFileWire.isFileFrame(dict["type"] as? String) {

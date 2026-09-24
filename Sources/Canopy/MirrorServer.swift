@@ -167,6 +167,8 @@ final class MirrorConnection: MirrorSink {
     }
     /// Feeds a client that asked for the status bar at attach; nil for one that did not.
     private var statusPublisher: MirrorStatusPublisher?
+    /// Feeds a Mac client that asked for the session's account usage at attach.
+    private var usagePublisher: MirrorUsagePublisher?
     /// True once the client's `attach` asked for `MirrorWire` compression. Written on the main
     /// actor before the first send is enqueued; every send captures it by value on the way out.
     private var compressOutbound = false
@@ -319,6 +321,11 @@ final class MirrorConnection: MirrorSink {
             statusPublisher = publisher
             publisher.start()
         }
+        if isMacClient, dict["usage"] as? Bool == true {
+            let publisher = MirrorUsagePublisher(shim: shim) { [weak self] payload in self?.sendJSONObject(payload) }
+            usagePublisher = publisher
+            publisher.start()
+        }
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")
     }
 
@@ -423,6 +430,8 @@ final class MirrorConnection: MirrorSink {
         cleanedUp = true
         statusPublisher?.stop()
         statusPublisher = nil
+        usagePublisher?.stop()
+        usagePublisher = nil
         shim?.detachMirror(self)
         shim = nil
         let server = self.server
