@@ -1024,7 +1024,8 @@ final class SessionWebViewHost: NSView {
         guard let webView = view as? WKWebView, let owner = delegateOwner,
               webView.uiDelegate !== owner || webView.navigationDelegate !== owner
         else { return }
-        logger.notice("Host re-pointed webview delegates at its own coordinator (uiDelegate was \(webView.uiDelegate == nil ? "nil" : "another coordinator", privacy: .public))")
+        func state(_ d: AnyObject?) -> String { d == nil ? "nil" : d === owner ? "own" : "another coordinator" }
+        logger.notice("Host re-pointed webview delegates at its own coordinator (ui was \(state(webView.uiDelegate), privacy: .public), navigation was \(state(webView.navigationDelegate), privacy: .public))")
         webView.navigationDelegate = owner
         webView.uiDelegate = owner
     }
