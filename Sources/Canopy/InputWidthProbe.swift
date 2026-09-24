@@ -5,8 +5,9 @@ import os.log
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "InputWidthProbe")
 
 /// Measures the live width of the CC extension's chat-input column and
-/// forwards it to Swift so `SubagentListView` can line up with the input
-/// area instead of sprawling edge-to-edge on wide windows.
+/// forwards it to Swift so native rows under the webview (`AccountLimitBanner`,
+/// `StatusBarView`'s responsive collapse) can size to the input area instead
+/// of sprawling edge-to-edge on wide windows.
 ///
 /// The chat input is a contenteditable `<div>` in current CC builds (a
 /// real `<textarea>` in older ones), wrapped in a stack of Tailwind-style
@@ -129,8 +130,7 @@ enum InputWidthProbe {
         /// Pick the closest ancestor of `el` that renders as a rounded card
         /// — the CC extension wraps its chat-input area in a rounded
         /// container with `border-radius > 0` and a visible border. That
-        /// card's outer width is what we want the subagent list to line up
-        /// with. Falls back to the first width-constrained ancestor with
+        /// card's outer width is what the native rows below size to. Falls back to the first width-constrained ancestor with
         /// a sanity-checked minimum width. Returns null if no plausible
         /// column exists — callers should treat that as "no measurement".
         function findChatColumn(el) {

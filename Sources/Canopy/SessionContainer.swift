@@ -69,10 +69,9 @@ struct SessionContainer: View {
                 // The recap is NOT rendered here: it lives inside the webview,
                 // at the top of the chat composer (see `RecapScript`). Kept as a
                 // note because the surrounding rows are native and the absence
-                // is otherwise easy to read as an oversight.
-                SubagentListView(data: session.statusBar)
-                    .animation(.easeInOut(duration: 0.2), value: session.statusBar.subagents.count)
-
+                // is otherwise easy to read as an oversight. Subagent activity
+                // is not rendered here either — the extension draws its own
+                // "N agents" pill in the composer.
                 AccountLimitBanner(session: session)
 
                 StatusBarView(data: session.statusBar)
