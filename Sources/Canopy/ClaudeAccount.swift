@@ -97,6 +97,9 @@ enum ClaudeAccountStore {
     /// directory inside it, and the home directory or any ancestor of it or
     /// of the base — typing `~` would otherwise rearrange the home folder.
     /// Compared after resolving symlinks, so an alias of the base is caught.
+    /// An existing directory must also look like a config dir of its own —
+    /// empty, or holding `.claude.json` or `.canopy-aside` — so pointing at
+    /// a repo or `~/Documents` does not move its `CLAUDE.md` aside.
     static func isSafeConfigDir(_ path: String, base: URL = ClaudeConfigDirSync.baseLocations().dir,
                                 home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
         guard path.hasPrefix("/") else { return false }
@@ -113,7 +116,11 @@ enum ClaudeAccountStore {
         let homePath = resolved(home)
         if isSameOrInside(dir, basePath) { return false }
         if isSameOrInside(basePath, dir) || isSameOrInside(homePath, dir) { return false }
-        return true
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+        let meaningful = entries.filter { $0 != ".DS_Store" }
+        return meaningful.isEmpty
+            || meaningful.contains(".claude.json")
+            || meaningful.contains(ClaudeConfigDirSync.asideDirName)
     }
 }
 
@@ -154,7 +161,7 @@ enum ClaudeConfigDirSync {
         let (baseDir, baseJSON) = baseLocations()
         let dir = account.configURL
         guard ClaudeAccountStore.isSafeConfigDir(account.configDir, base: baseDir) else {
-            logger.error("Refusing to sync account \(account.name, privacy: .public): its directory overlaps the default config or home directory")
+            logger.error("Refusing to sync account \(account.name, privacy: .public): its directory overlaps the default config or home directory, or is not a config directory")
             return
         }
         linkEntries(from: baseDir, into: dir)

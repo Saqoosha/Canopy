@@ -12,6 +12,8 @@ final class StatusBarData {
     var gitBranch: String = ""
     var vcsType: VCSType = .unknown
     var remoteHost: String?
+    /// The second login this session runs under; nil is the default login.
+    var accountName: String?
     /// Display name of the Mac whose session this mirror pane is attached to.
     var mirrorMachine: String?
 
@@ -308,6 +310,7 @@ final class StatusBarData {
         vcsType = .unknown
         didCompact = false
         remoteHost = nil
+        accountName = nil
         mirrorMachine = nil
         subagents = []
         recap = nil

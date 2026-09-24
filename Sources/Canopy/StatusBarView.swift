@@ -36,7 +36,7 @@ struct StatusBarView: View {
         // (double separators when e.g. remote is present but model is
         // empty, and orphan leading separator when model is empty and
         // branch is the first visible item).
-        let hasRemote = data.remoteHost != nil || data.mirrorMachine != nil
+        let hasRemote = data.remoteHost != nil || data.mirrorMachine != nil || data.accountName != nil
         let hasModel = !data.model.isEmpty
         let hasBranch = !data.gitBranch.isEmpty
         let hasContext = data.contextMax > 0
@@ -53,6 +53,10 @@ struct StatusBarView: View {
                         if let remote = data.remoteHost {
                             pill(remote, icon: "network", color: .orange)
                                 .help("SSH remote: \(remote)")
+                        }
+                        if let account = data.accountName {
+                            pill(account, icon: "person.crop.circle", color: .blue)
+                                .help("Claude account: \(account)")
                         }
                         if let mirror = data.mirrorMachine {
                             pill(mirror, icon: "antenna.radiowaves.left.and.right", color: .orange)
@@ -140,6 +144,10 @@ struct StatusBarView: View {
                     if let remote = data.remoteHost {
                         pill(remote, icon: "network", color: .orange)
                             .help("SSH remote: \(remote)")
+                    }
+                    if let account = data.accountName {
+                        pill(account, icon: "person.crop.circle", color: .blue)
+                            .help("Claude account: \(account)")
                     }
                     if let mirror = data.mirrorMachine {
                         pill(mirror, icon: "antenna.radiowaves.left.and.right", color: .orange)

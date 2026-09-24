@@ -10623,6 +10623,23 @@ enum SidebarLogicProbe {
                    !safe(home.appendingPathComponent(".CLAUDE").path))
             record("account safe-dir: a relative path is refused",
                    !safe("rel/path"))
+            // An existing folder that is not a config dir is refused, so a
+            // repo's CLAUDE.md is never moved aside.
+            let repo = root.appendingPathComponent("repo", isDirectory: true)
+            try fm.createDirectory(at: repo, withIntermediateDirectories: true)
+            try Data("repo-md".utf8).write(to: repo.appendingPathComponent("CLAUDE.md"))
+            record("account safe-dir: an ordinary non-empty folder is refused", !safe(repo.path))
+            try Data("{}".utf8).write(to: repo.appendingPathComponent(".claude.json"))
+            record("account safe-dir: a folder holding .claude.json is allowed", safe(repo.path))
+            let emptyDir = root.appendingPathComponent("empty", isDirectory: true)
+            try fm.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+            try Data().write(to: emptyDir.appendingPathComponent(".DS_Store"))
+            record("account safe-dir: an empty folder (ignoring .DS_Store) is allowed", safe(emptyDir.path))
+            let asideDir = root.appendingPathComponent("aside", isDirectory: true)
+            try fm.createDirectory(at: asideDir.appendingPathComponent(ClaudeConfigDirSync.asideDirName, isDirectory: true),
+                                   withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: asideDir.appendingPathComponent("settings.json"))
+            record("account safe-dir: a folder already holding .canopy-aside is allowed", safe(asideDir.path))
 
             record("account normalize: empty and whitespace-only are nil",
                    ClaudeAccountStore.normalizedConfigDir("") == nil

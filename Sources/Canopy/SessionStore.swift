@@ -2341,6 +2341,9 @@ final class SessionStore {
             }
             let provider = s.providerId.flatMap { id in providers.first { $0.id == id } }
             let account = ClaudeAccountStore.account(id: s.accountId)
+            if let id = s.accountId, account == nil {
+                logger.warning("restore: account \(id, privacy: .public) no longer exists; \(s.resumeId, privacy: .public) comes back on the default login")
+            }
             let open = OpenSession(
                 origin: origin,
                 resumeId: s.resumeId,

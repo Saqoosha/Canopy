@@ -2356,6 +2356,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Set CLI version, VCS branch, initial message count, and remote host
         statusBarData?.cliVersion = CCExtension.extensionVersion() ?? ""
         statusBarData?.remoteHost = remoteHost
+        statusBarData?.accountName = self.claudeAccount?.name
         let dir = workingDirectory
         // Same relocation follow as the per-turn refresh, for the session that
         // arrives already moved rather than moving while Canopy watches: a
