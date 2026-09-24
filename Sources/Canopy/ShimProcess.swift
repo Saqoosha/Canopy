@@ -380,6 +380,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return SharedRateLimitData.shared.account(for: key)
     }
 
+    /// The email `rateLimitAccount` belongs to, for a mirror client that files
+    /// the numbers under it. Nil while unresolved, and for a host-keyed record
+    /// (the SSH read failed), whose host name means nothing on another Mac.
+    var rateLimitEmail: String? {
+        guard case .resolved(let key) = rateLimitBinding else { return nil }
+        switch key {
+        case nil: return ClaudeAccountInfo.current()?.email
+        case .email(let email)?: return email
+        case .host?: return nil
+        }
+    }
+
     private enum RateLimitBinding {
         case unresolved
         case resolved(RateLimitAccount.Key?)

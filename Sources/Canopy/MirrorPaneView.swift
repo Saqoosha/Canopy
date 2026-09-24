@@ -179,6 +179,14 @@ struct MirrorPaneView: NSViewRepresentable {
             guard let session else { return }
             MirrorStatusFrame.apply(frame, to: session.statusBar)
         }
+        bridge.onUsage = { [weak bridge] frame in
+            guard let bridge,
+                  let key = MirrorUsageFrame.key(forFrame: frame, localEmail: ClaudeAccountInfo.current()?.email),
+                  let rateLimits = frame["rate_limits"] as? [String: Any]
+            else { return }
+            bridge.usageKey = key
+            SharedRateLimitData.shared.account(for: key).updateFromRawUsage(rateLimits)
+        }
         bridge.onFileFrame = { [weak session] frame in
             session?.fileTransfer.handle(frame)
         }

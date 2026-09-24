@@ -377,6 +377,34 @@ final class RateLimitAccount {
         }
     }
 
+    /// This record in the raw `rate_limits` shape `updateFromRawUsage` reads,
+    /// for a mirror client on another Mac (`MirrorUsagePublisher`). Nil while
+    /// neither window has arrived — the sidebar keys its whole block off the
+    /// reset dates, so a payload without them would only render zeros.
+    /// Utilization goes out as an `Int` percent: a `Double` at or below 1.0 is
+    /// read back as a fraction.
+    func rawUsagePayload() -> [String: Any]? {
+        guard sessionResetDate != nil || weeklyResetDate != nil else { return nil }
+        func window(_ pct: Int, _ reset: Date?) -> [String: Any] {
+            var entry: [String: Any] = ["utilization": pct]
+            if let reset { entry["resets_at"] = Self.isoFormatterStandard.string(from: reset) }
+            return entry
+        }
+        var payload: [String: Any] = [
+            "five_hour": window(sessionPct, sessionResetDate),
+            "seven_day": window(weeklyPct, weeklyResetDate),
+            "model_scoped": modelScoped.map { scoped -> [String: Any] in
+                var entry = window(scoped.pct, scoped.resetDate)
+                entry["display_name"] = scoped.displayName
+                return entry
+            },
+        ]
+        if weeklyResetDateSonnet != nil {
+            payload["seven_day_sonnet"] = window(weeklyPctSonnet, weeklyResetDateSonnet)
+        }
+        return payload
+    }
+
     /// Effective weekly limit: Sonnet-specific when using Sonnet, otherwise all-models.
     func effectiveWeeklyPct(for model: String) -> Int {
         model.lowercased().contains("sonnet") && weeklyResetDateSonnet != nil ? weeklyPctSonnet : weeklyPct

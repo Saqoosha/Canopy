@@ -119,3 +119,77 @@ final class MirrorStatusPublisher {
         send(payload)
     }
 }
+
+/// The session's Claude account usage, as one NDJSON line for a Mac mirror client that asked
+/// with `"usage": true` on its attach: `{"type":"usage","email":…,"rate_limits":{…}}`, where
+/// `rate_limits` is the raw `/api/oauth/usage` shape so the client parses it with the same
+/// `RateLimitAccount.updateFromRawUsage` a shim's `get_usage` reply goes through. The phone
+/// never asks: it draws the roster's two percentages instead.
+enum MirrorUsageFrame {
+    static func payload(email: String, rateLimits: [String: Any]) -> [String: Any] {
+        ["type": "usage", "email": email, "rate_limits": rateLimits]
+    }
+
+    /// The record a received line is filed under on this Mac: nil when the origin runs as this
+    /// Mac's own account, whose numbers this Mac already fetches itself.
+    static func key(forFrame frame: [String: Any], localEmail: String?) -> RateLimitAccount.Key? {
+        guard frame["type"] as? String == "usage",
+              let email = frame["email"] as? String, !email.isEmpty,
+              frame["rate_limits"] is [String: Any]
+        else { return nil }
+        return ShimProcess.rateLimitKey(remoteEmail: email, localEmail: localEmail, host: "")
+    }
+}
+
+/// Sends `MirrorUsageFrame` for one shim's account to one sink, on attach and on every change.
+///
+/// The shim's account can still be unresolved at attach (an SSH remote session on the origin
+/// reads its host's `.claude.json` first), and `ShimProcess` is not observable, so that wait is
+/// polled — bounded, because a host-keyed account never gains an email.
+@MainActor
+final class MirrorUsagePublisher {
+    private weak var shim: ShimProcess?
+    private let send: ([String: Any]) -> Void
+    private var lastSent: Data?
+    private var stopped = false
+    private var resolveRetries = 0
+    private static let resolveRetryInterval: TimeInterval = 5
+    private static let maxResolveRetries = 24
+
+    init(shim: ShimProcess, send: @escaping ([String: Any]) -> Void) {
+        self.shim = shim
+        self.send = send
+    }
+
+    func start() {
+        publish()
+    }
+
+    func stop() {
+        stopped = true
+    }
+
+    private func publish() {
+        guard !stopped, let shim else { return }
+        guard let account = shim.rateLimitAccount, let email = shim.rateLimitEmail else {
+            guard resolveRetries < Self.maxResolveRetries else { return }
+            resolveRetries += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.resolveRetryInterval) { [weak self] in
+                MainActor.assumeIsolated { self?.publish() }
+            }
+            return
+        }
+        let rateLimits = withObservationTracking {
+            account.rawUsagePayload()
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in self?.publish() }
+        }
+        guard let rateLimits else { return }
+        let payload = MirrorUsageFrame.payload(email: email, rateLimits: rateLimits)
+        guard let encoded = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              encoded != lastSent
+        else { return }
+        lastSent = encoded
+        send(payload)
+    }
+}

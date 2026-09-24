@@ -25,10 +25,11 @@ struct SidebarAccountSection: View {
             // remote session is signed in as (issue #214). With one account
             // this is exactly the footer it was before.
             accountBlock(data.local, header: ClaudeAccountInfo.current()?.email, headerNeedsData: false, separated: false)
-            // Only accounts a running session still writes into: a closed
-            // remote session's block would otherwise sit there, never
-            // updating, until relaunch. It leaves within the next tick.
-            ForEach(data.others.filter { ShimProcess.isWriting(to: $0) }, id: \.key) { account in
+            // Only accounts a running session or an attached mirror pane
+            // still writes into: a closed one's block would otherwise sit
+            // there, never updating, until relaunch. It leaves within the
+            // next tick.
+            ForEach(data.others.filter { ShimProcess.isWriting(to: $0) || RemoteMirrorBridge.isWriting(to: $0) }, id: \.key) { account in
                 accountBlock(account, header: account.label, headerNeedsData: true, separated: true)
             }
             versionFooter
