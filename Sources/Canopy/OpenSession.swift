@@ -150,6 +150,10 @@ final class OpenSession: Identifiable, Hashable {
     var model: String?
     var effortLevel: String?
     var customApi: ModelProvider?
+    /// Second Claude login for this session (`CLAUDE_CONFIG_DIR`). Nil is the
+    /// default login — same meaning as everywhere else a `ClaudeAccount?`
+    /// appears.
+    var claudeAccount: ClaudeAccount?
     /// True while Claude is generating a response (assistant / stream_event
     /// messages flowing). Updated by `ShimProcess.boundSession` mirror.
     /// Feeds `SessionActivity.of`, which the sidebar dot and the MacroPad
@@ -264,6 +268,7 @@ final class OpenSession: Identifiable, Hashable {
         model: String? = nil,
         effortLevel: String? = nil,
         customApi: ModelProvider? = nil,
+        claudeAccount: ClaudeAccount? = nil,
         resumeIdIsExistingTranscript: Bool = false
     ) {
         self.id = id
@@ -280,6 +285,7 @@ final class OpenSession: Identifiable, Hashable {
         self.model = model
         self.effortLevel = effortLevel
         self.customApi = customApi
+        self.claudeAccount = claudeAccount
         self.statusBar.remoteHost = origin.remoteHost
     }
 

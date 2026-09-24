@@ -721,6 +721,7 @@ final class SessionStore {
         permissionMode: PermissionMode = .acceptEdits,
         remoteHost: String? = nil,
         customApi: ModelProvider? = nil,
+        claudeAccount: ClaudeAccount? = ClaudeAccountStore.defaultAccount(),
         target: PaneTarget = .focused,
         initialPrompt: LaunchPrompt? = nil,
         settledTitle: String? = nil
@@ -758,6 +759,8 @@ final class SessionStore {
             model: model,
             effortLevel: effortLevel,
             customApi: customApi,
+            // A remote CLI signs in on the other machine.
+            claudeAccount: remoteHost == nil ? claudeAccount : nil,
             resumeIdIsExistingTranscript: resumeId != nil
         )
         // Parked on the session rather than passed to `ShimProcess`, because
@@ -822,6 +825,7 @@ final class SessionStore {
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,
             customApi: ModelProviderStore.selectedProvider(),
+            claudeAccount: ClaudeAccountStore.defaultAccount(),
             target: target
         )
     }
@@ -980,6 +984,7 @@ final class SessionStore {
             project: project,
             status: .spawning,
             permissionMode: permissionMode,
+            claudeAccount: ClaudeAccountStore.defaultAccount(),
             // The teleport bridge just wrote that transcript, so the flag is
             // factually true. Inert — a teleported session is local, and the
             // flag is only read on the SSH remote path — but left false it was
@@ -1313,6 +1318,15 @@ final class SessionStore {
         session.lastFatalError = nil
         session.status = isPaned ? .spawning : .dormant
         session.restartGeneration += 1
+    }
+
+    /// Moves a session to another login and restarts it on the same conversation.
+    func switchAccount(_ id: UUID, to account: ClaudeAccount?) {
+        guard let session = openSessions.first(where: { $0.id == id }) else { return }
+        guard session.claudeAccount?.id != account?.id else { return }
+        session.claudeAccount = account
+        logger.notice("switchAccount id=\(id.uuidString, privacy: .public) account=\(account?.name ?? "default", privacy: .public)")
+        restartSession(id)
     }
 
     // MARK: - Refresh
@@ -2248,6 +2262,7 @@ final class SessionStore {
                 model: open.model,
                 effortLevel: open.effortLevel,
                 providerId: open.customApi?.id,
+                accountId: open.claudeAccount?.id,
                 lastActiveAt: open.lastActiveAt,
                 resumeIdIsExistingTranscript: open.resumeIdIsExistingTranscript
             ))
@@ -2325,6 +2340,10 @@ final class SessionStore {
                 origin = .teleportedFrom(cloudSessionId: cloudId, localPath: URL(fileURLWithPath: path))
             }
             let provider = s.providerId.flatMap { id in providers.first { $0.id == id } }
+            let account = ClaudeAccountStore.account(id: s.accountId)
+            if let id = s.accountId, account == nil {
+                logger.warning("restore: account \(id, privacy: .public) no longer exists; \(s.resumeId, privacy: .public) comes back on the default login")
+            }
             let open = OpenSession(
                 origin: origin,
                 resumeId: s.resumeId,
@@ -2336,6 +2355,7 @@ final class SessionStore {
                 model: s.model,
                 effortLevel: s.effortLevel,
                 customApi: provider,
+                claudeAccount: account,
                 // Carried from the snapshot, NOT asserted here. Asserting
                 // `true` was this fix's own first revision and a reviewer
                 // found what it broke: a snapshot does not only hold ids the
