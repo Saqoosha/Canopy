@@ -14,6 +14,9 @@ final class StatusBarData {
     var remoteHost: String?
     /// The second login this session runs under; nil is the default login.
     var accountName: String?
+    /// Set while the CLI reports this session's login as out of quota;
+    /// `AccountLimitBanner` offers the other logins while it is.
+    var limitHit: RateLimitHit?
     /// Display name of the Mac whose session this mirror pane is attached to.
     var mirrorMachine: String?
 
@@ -311,6 +314,7 @@ final class StatusBarData {
         didCompact = false
         remoteHost = nil
         accountName = nil
+        limitHit = nil
         mirrorMachine = nil
         subagents = []
         recap = nil
