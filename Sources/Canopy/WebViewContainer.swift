@@ -24,7 +24,7 @@ struct WebViewContainer: NSViewRepresentable {
     /// wrapper has already gone out of scope.
     var boundSession: OpenSession?
 
-    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, ShimProcessDelegate {
+    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, ShimProcessDelegate, SessionWebViewHostOwner {
         var shimProcess: ShimProcess?
         var consoleHandler: ConsoleLogHandler?
         var linkHandler: LinkClickHandler?
@@ -45,6 +45,22 @@ struct WebViewContainer: NSViewRepresentable {
         var statusBarData: StatusBarData?
         var customApi: ModelProvider?
         var claudeAccount: ClaudeAccount?
+
+        /// See `SessionWebViewHost.owner`. The live shim is read off the
+        /// session because a reconnect run by another coordinator replaced it.
+        func reclaim(_ webView: WKWebView) {
+            let shim = shimProcess?.boundSession?.shim ?? shimProcess
+            guard webView.uiDelegate !== self || webView.navigationDelegate !== self
+                || (shim != nil && shim?.delegate !== self)
+            else { return }
+            logger.notice("Host re-pointed session delegates at its own coordinator (ui was \(SessionWebViewHost.delegateState(webView.uiDelegate, owner: self), privacy: .public), navigation was \(SessionWebViewHost.delegateState(webView.navigationDelegate, owner: self), privacy: .public), shim was \(shim.map { SessionWebViewHost.delegateState($0.delegate, owner: self) } ?? "absent", privacy: .public))")
+            webView.navigationDelegate = self
+            webView.uiDelegate = self
+            if let shim {
+                shim.delegate = self
+                shimProcess = shim
+            }
+        }
 
         private var reconnectTimer: Timer?
         private var reconnectAttempt = 0
@@ -292,7 +308,7 @@ struct WebViewContainer: NSViewRepresentable {
         let host = SessionWebViewHost()
         host.translatesAutoresizingMaskIntoConstraints = true
         host.autoresizingMask = [.width, .height]
-        host.delegateOwner = context.coordinator
+        host.owner = context.coordinator
         attachWebView(to: host, coordinator: context.coordinator)
         context.coordinator.lastBoundSessionId = boundSession?.id
         // First-mount focus: same rationale as updateNSView. host.window
@@ -969,6 +985,13 @@ final class ConsoleLogHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// The coordinator behind a `SessionWebViewHost`: re-points the weak
+/// delegates it owns at itself when its host shows the webview.
+@MainActor
+protocol SessionWebViewHostOwner: AnyObject {
+    func reclaim(_ webView: WKWebView)
+}
+
 /// Host NSView that contains the active session's WKWebView as its sole
 /// subview. Wrapping in a host lets `WebViewContainer.updateNSView` swap
 /// the WKWebView in-place when the bound session changes — much faster
@@ -998,12 +1021,12 @@ final class SessionWebViewHost: NSView {
     /// 2.45.0: a mirror pane that took input normally while every
     /// `target="_blank"` link did nothing, fixed by closing and reopening it.
     /// The inferred cause, not yet caught in the act: the losing host's
-    /// coordinator is the last to set the webview's delegates, both delegate
-    /// properties are WEAK, and adoption did not re-point them — so they go
-    /// nil when SwiftUI releases that coordinator, while the script handlers,
-    /// held strongly by the user content controller, keep working. The
-    /// notice below is how to confirm it.
-    weak var delegateOwner: (any WKNavigationDelegate & WKUIDelegate)?
+    /// coordinator is the last to set the webview's delegates (and a local
+    /// session's `shim.delegate`), all of them WEAK, and adoption did not
+    /// re-point them — so they go nil when SwiftUI releases that coordinator,
+    /// while the script handlers, held strongly by the user content
+    /// controller, keep working. The notice in `reclaim` is how to confirm it.
+    weak var owner: (any SessionWebViewHostOwner)?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -1015,19 +1038,14 @@ final class SessionWebViewHost: NSView {
     /// A no-op in the overwhelmingly common case where the webview never moved.
     func adoptExpectedWebViewIfNeeded() {
         guard window != nil, let expectedWebView else { return }
-        reassertDelegates(on: expectedWebView)
+        if let webView = expectedWebView as? WKWebView { owner?.reclaim(webView) }
         guard expectedWebView.superview !== self else { return }
         Self.install(expectedWebView, in: self)
     }
 
-    private func reassertDelegates(on view: NSView) {
-        guard let webView = view as? WKWebView, let owner = delegateOwner,
-              webView.uiDelegate !== owner || webView.navigationDelegate !== owner
-        else { return }
-        func state(_ d: AnyObject?) -> String { d == nil ? "nil" : d === owner ? "own" : "another coordinator" }
-        logger.notice("Host re-pointed webview delegates at its own coordinator (ui was \(state(webView.uiDelegate), privacy: .public), navigation was \(state(webView.navigationDelegate), privacy: .public))")
-        webView.navigationDelegate = owner
-        webView.uiDelegate = owner
+    /// The prior state of one weak delegate, for the re-point notice.
+    static func delegateState(_ current: AnyObject?, owner: AnyObject) -> String {
+        current == nil ? "nil" : current === owner ? "own" : "another coordinator"
     }
 
     /// Pin `webView` to every edge of `host`. Fresh constraints each time:
