@@ -180,7 +180,7 @@ final class MirrorUsagePublisher {
             return
         }
         // Everything is read inside the tracked pass, the numbers before the email, so an email
-        // that becomes known later (a folded host key, a login) goes out with the next update.
+        // that becomes known later (a folded host key, a `.claude.json` read) goes out with the next update.
         let payload = withObservationTracking { () -> [String: Any]? in
             guard let rateLimits = shim.rateLimitAccount?.rawUsagePayload(),
                   let email = shim.rateLimitEmail
