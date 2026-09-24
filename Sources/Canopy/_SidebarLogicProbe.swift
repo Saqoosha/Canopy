@@ -5174,7 +5174,11 @@ enum SidebarLogicProbe {
             record("restart: the focused pane's session is the one that may take the keyboard",
                    store.isFocusedPaneSession(liveA.id) && !store.isFocusedPaneSession(liveB.id))
 
+            // The limit banner's button restarts through here; the hit must
+            // not survive onto the login the session just moved to.
+            liveA.statusBar.limitHit = RateLimitHit(limitType: "five_hour", resetsAt: nil)
             store.restartSession(liveA.id)
+            record("restart: a rate-limit hit is cleared", liveA.statusBar.limitHit == nil)
             record("restart: the mount identity changes, so SwiftUI re-mounts",
                    liveA.mountIdentity != identityBefore,
                    "gen=\(liveA.restartGeneration)")
@@ -10606,6 +10610,19 @@ enum SidebarLogicProbe {
                    RateLimitHit.signal(from: ["type": "result", "rate_limit_info": ["status": "rejected", "rateLimitType": "five_hour"]]) == .unknown)
             record("limit banner: a missing resetsAt still hits, with no time",
                    RateLimitHit.signal(from: ev(["status": "rejected", "rateLimitType": "seven_day"])) == .hit(RateLimitHit(limitType: "seven_day", resetsAt: nil)))
+            record("limit banner: an unrecognised status is not a clear",
+                   RateLimitHit.signal(from: ev(["status": "something_new", "rateLimitType": "five_hour"])) == .unknown)
+            record("limit banner: an empty type is not a hit",
+                   RateLimitHit.signal(from: ev(["status": "rejected", "rateLimitType": ""])) == .unknown)
+            // The shim's latch: what `extractStatusData` writes for each signal.
+            let held = RateLimitHit(limitType: "five_hour", resetsAt: nil)
+            let newer = RateLimitHit(limitType: "seven_day", resetsAt: nil)
+            record("limit banner: a hit replaces the current one",
+                   RateLimitHit.next(current: held, signal: .hit(newer)) == newer)
+            record("limit banner: cleared drops the current hit",
+                   RateLimitHit.next(current: held, signal: .cleared) == nil)
+            record("limit banner: unknown keeps the current hit",
+                   RateLimitHit.next(current: held, signal: .unknown) == held)
             record("limit banner: labels", RateLimitHit(limitType: "five_hour", resetsAt: nil).limitLabel == "5-hour"
                    && RateLimitHit(limitType: "seven_day", resetsAt: nil).limitLabel == "weekly"
                    && RateLimitHit(limitType: "seven_day_opus", resetsAt: nil).limitLabel == "seven day opus")
@@ -10623,6 +10640,9 @@ enum SidebarLogicProbe {
             record("limit banner: message names the account and the window",
                    AccountLimitBanner.message(account: work, hit: RateLimitHit(limitType: "five_hour", resetsAt: nil))
                        == "Work hit its 5-hour limit")
+            record("limit banner: the default login is named, and a reset time is appended",
+                   AccountLimitBanner.message(account: nil, hit: RateLimitHit(limitType: "seven_day", resetsAt: Date()))
+                       .hasPrefix("Default hit its weekly limit · resets "))
         }
 
         // MARK: - Claude accounts (multi-account switching)

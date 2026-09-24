@@ -33,6 +33,16 @@ struct RateLimitHit: Equatable {
         }
     }
 
+    /// What a session's hit becomes after one signal: a hit replaces it,
+    /// an allowed status clears it, anything else leaves it alone.
+    static func next(current: RateLimitHit?, signal: Signal) -> RateLimitHit? {
+        switch signal {
+        case .hit(let hit): hit
+        case .cleared: nil
+        case .unknown: current
+        }
+    }
+
     /// "5-hour", "weekly", or the CLI's own name with underscores spaced.
     var limitLabel: String {
         switch limitType {
@@ -91,17 +101,17 @@ struct AccountLimitBanner: View {
     }
 
     struct Target: Equatable {
-        let id: String
         let name: String
         let account: ClaudeAccount?
+        var id: String { account?.id ?? "" }
     }
 
     /// Every login except the one the session is on, the default first.
     static func targets(current: ClaudeAccount?, accounts: [ClaudeAccount]) -> [Target] {
         var result: [Target] = []
-        if current != nil { result.append(Target(id: "", name: "Default", account: nil)) }
+        if current != nil { result.append(Target(name: "Default", account: nil)) }
         for account in accounts where account.id != current?.id {
-            result.append(Target(id: account.id, name: account.name, account: account))
+            result.append(Target(name: account.name, account: account))
         }
         return result
     }
