@@ -10643,6 +10643,11 @@ enum SidebarLogicProbe {
             record("limit banner: the default login is named, and a reset time is appended",
                    AccountLimitBanner.message(account: nil, hit: RateLimitHit(limitType: "seven_day", resetsAt: Date()))
                        .hasPrefix("Default hit its weekly limit · resets "))
+            let inThreeDays = Date().addingTimeInterval(3 * 86_400)
+            let weekday = inThreeDays.formatted(.dateTime.weekday(.abbreviated))
+            record("limit banner: a reset on another day names the day",
+                   AccountLimitBanner.message(account: nil, hit: RateLimitHit(limitType: "seven_day", resetsAt: inThreeDays))
+                       .contains(weekday))
         }
 
         // MARK: - Claude accounts (multi-account switching)

@@ -70,17 +70,33 @@ struct AccountLimitBanner: View {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.circle.fill")
                         .foregroundStyle(.orange)
-                    Text(Self.message(account: session.claudeAccount, hit: hit))
+                    let text = Text(Self.message(account: session.claudeAccount, hit: hit))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    Spacer(minLength: 4)
-                    ForEach(targets, id: \.id) { target in
-                        Button("Continue on \(target.name)") {
-                            SessionStore.shared?.switchAccount(session.id, to: target.account)
+                    // A pane can be as narrow as 100 pt; the buttons fold into
+                    // one menu when they would not fit beside the message.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            text.fixedSize()
+                            Spacer(minLength: 4)
+                            ForEach(targets, id: \.id) { target in
+                                Button("Continue on \(target.name)") { switchTo(target) }
+                                    .controlSize(.small)
+                            }
                         }
-                        .controlSize(.small)
+                        HStack(spacing: 8) {
+                            text
+                            Spacer(minLength: 4)
+                            Menu("Switch") {
+                                ForEach(targets, id: \.id) { target in
+                                    Button("Continue on \(target.name)") { switchTo(target) }
+                                }
+                            }
+                            .controlSize(.small)
+                            .fixedSize()
+                        }
                     }
                     Button {
                         dismissed = hit
@@ -98,6 +114,10 @@ struct AccountLimitBanner: View {
                 .background(.white)
             }
         }
+    }
+
+    private func switchTo(_ target: Target) {
+        SessionStore.shared?.switchAccount(session.id, to: target.account)
     }
 
     struct Target: Equatable {
@@ -119,7 +139,11 @@ struct AccountLimitBanner: View {
     static func message(account: ClaudeAccount?, hit: RateLimitHit) -> String {
         var text = "\(account?.name ?? "Default") hit its \(hit.limitLabel) limit"
         if let resets = hit.resetsAt {
-            text += " · resets \(resets.formatted(date: .omitted, time: .shortened))"
+            // A weekly window can reset days away, so name the day then.
+            let format: Date.FormatStyle = Calendar.current.isDateInToday(resets)
+                ? .dateTime.hour().minute()
+                : .dateTime.weekday(.abbreviated).hour().minute()
+            text += " · resets \(resets.formatted(format))"
         }
         return text
     }
