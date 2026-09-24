@@ -179,11 +179,11 @@ final class MirrorUsagePublisher {
             }
             return
         }
-        // Record and email are read inside the tracked pass, so a host key folded into an
-        // email later (`SharedRateLimitData.noteResolved`) re-fires this.
+        // Everything is read inside the tracked pass, the numbers before the email, so an email
+        // that becomes known later (a folded host key, a login) goes out with the next update.
         let payload = withObservationTracking { () -> [String: Any]? in
-            guard let account = shim.rateLimitAccount, let email = shim.rateLimitEmail,
-                  let rateLimits = account.rawUsagePayload()
+            guard let rateLimits = shim.rateLimitAccount?.rawUsagePayload(),
+                  let email = shim.rateLimitEmail
             else { return nil }
             return MirrorUsageFrame.payload(email: email, rateLimits: rateLimits)
         } onChange: { [weak self] in
