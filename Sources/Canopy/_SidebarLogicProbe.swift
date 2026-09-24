@@ -1818,7 +1818,7 @@ enum SidebarLogicProbe {
         do {
             record("attach: unauthorized names the Settings fix",
                    SessionStore.mirrorFailureMessage(reason: "unauthorized", machineName: "studio")
-                       == "studio rejected the password. Paste its connection again in Settings › Mobile.")
+                       == "studio rejected the password. Paste its connection again in Settings › Remote.")
             record("attach: no such session says it stopped",
                    SessionStore.mirrorFailureMessage(reason: "no such session", machineName: "studio")
                        == "That session is no longer running on studio.")

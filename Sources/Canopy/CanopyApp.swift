@@ -202,6 +202,7 @@ struct CanopyApp: App {
         Settings {
             SettingsView()
         }
+        .windowResizability(.contentMinSize)
     }
 
     // MARK: - Sidebar shell helpers

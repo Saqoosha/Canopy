@@ -183,14 +183,14 @@ final class SessionStore {
         guard let address = CanopySettings.shared.mirrorPeers[machineId],
               MirrorAccess.parseHostPort(address) != nil,
               MirrorAccess.peerToken(machineId: machineId) != nil else {
-            return "Paste \(machineName)'s connection in Settings › Mobile first."
+            return "Paste \(machineName)'s connection in Settings › Remote first."
         }
         return nil
     }
 
     static func mirrorFailureMessage(reason: String, machineName: String) -> String {
         switch reason {
-        case "unauthorized": "\(machineName) rejected the password. Paste its connection again in Settings › Mobile."
+        case "unauthorized": "\(machineName) rejected the password. Paste its connection again in Settings › Remote."
         case "no such session": "That session is no longer running on \(machineName)."
         default: "\(machineName) refused the attach: \(reason)"
         }

@@ -159,7 +159,7 @@ struct MirrorPaneView: NSViewRepresentable {
                 coordinator.reportedMissingPairing = true
                 let machine = session.statusBar.mirrorMachine ?? "this Mac"
                 DispatchQueue.main.async {
-                    onFailure("No password stored for \(machine). Paste its connection in Settings › Mobile.")
+                    onFailure("No password stored for \(machine). Paste its connection in Settings › Remote.")
                 }
             }
             return WKWebView()
