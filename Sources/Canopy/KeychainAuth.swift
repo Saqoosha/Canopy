@@ -6,14 +6,9 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeychainAut
 /// Reads CC OAuth tokens from macOS Keychain and builds an authStatus object.
 /// CC CLI stores tokens under service "Claude Code-credentials", account = $USER.
 enum KeychainAuth {
-    /// Cached result to avoid spawning `security` on every message.
-    /// Only accessed from main thread (WebViewContainer setup + ShimProcess message handling).
-    private nonisolated(unsafe) static var cached: [String: Any]?
-
     /// Read authStatus as a dictionary (for injecting into extension messages).
-    /// Results are cached after the first successful read.
+    /// Not cached: a login damaged while Canopy runs must stop being injected as healthy.
     static func readAuthStatus() -> [String: Any]? {
-        if let cached { return cached }
         guard let oauth = readOAuthFromKeychain() else { return nil }
         // A blob without `scopes` is a damaged login (studio, 2026-09-24):
         // report logged out so the webview offers /login, as the shim's
@@ -30,7 +25,6 @@ enum KeychainAuth {
             "email": NSNull(), // Keychain has no email; webview expects the key
             "subscriptionType": subscriptionType ?? NSNull(),
         ]
-        cached = result
         return result
     }
 

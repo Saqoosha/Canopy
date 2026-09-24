@@ -602,12 +602,15 @@ struct WebViewContainer: NSViewRepresentable {
 
     private func loadCCWebview(_ webView: WKWebView) {
         Self.loadCCWebview(webView, resumeSessionId: resumeSessionId,
-                           entryFileName: Self.entryFileName(for: boundSession))
+                           entryFileName: Self.entryFileName(for: boundSession),
+                           includeKeychainAuth: boundSession?.claudeAccount == nil)
     }
 
     /// Writes the entry HTML for `resumeSessionId` under `entryFileName` and
     /// loads it. Static so a mirror webview loads the exact page a pane does.
-    static func loadCCWebview(_ webView: WKWebView, resumeSessionId: String?, entryFileName: String) {
+    static func loadCCWebview(
+        _ webView: WKWebView, resumeSessionId: String?, entryFileName: String, includeKeychainAuth: Bool = true
+    ) {
         guard let extPath = CCExtension.extensionPath() else {
             webView.loadHTMLString(
                 "<html><body style='background:#ffffff;color:#333;padding:40px;font-family:sans-serif'>"
@@ -618,7 +621,9 @@ struct WebViewContainer: NSViewRepresentable {
         }
 
         logger.info("Extension path: \(extPath.path, privacy: .public)")
-        let html = entryHTML(resumeSessionId: resumeSessionId) { extPath.appendingPathComponent($0).absoluteString }
+        let html = entryHTML(resumeSessionId: resumeSessionId, includeKeychainAuth: includeKeychainAuth) {
+            extPath.appendingPathComponent($0).absoluteString
+        }
 
         // Write HTML to Application Support
         let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
@@ -658,7 +663,11 @@ struct WebViewContainer: NSViewRepresentable {
 
     /// The webview entry page. `assetURL` maps an extension-relative path such as
     /// `webview/index.js` to the URL the page should load it from.
-    static func entryHTML(resumeSessionId: String?, assetURL: (String) -> String) -> String {
+    /// `includeKeychainAuth` is false for a non-default `ClaudeAccount`: the Keychain read here is the default
+    /// account's, and injecting it would hide that account's own logged-out state and /login.
+    static func entryHTML(
+        resumeSessionId: String?, includeKeychainAuth: Bool = true, assetURL: (String) -> String
+    ) -> String {
         // Read bundled CSS/JS content for inline embedding
         // (Bundle.main is under /Applications, outside allowingReadAccessTo: homeDirectory,
         //  so we inline into the HTML instead of linking to external files)
@@ -683,7 +692,7 @@ struct WebViewContainer: NSViewRepresentable {
         <body class="vscode-light">
           <pre id="claude-error" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; margin:0; padding:12px 16px; background:#fee2e2; color:#991b1b; font-size:13px; white-space:pre-wrap;"></pre>
           <script>new MutationObserver(function(){var e=document.getElementById('claude-error');if(e)e.style.display=e.textContent?'block':'none'}).observe(document.getElementById('claude-error'),{childList:true,characterData:true,subtree:true})</script>
-          <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")\(Self.initialAuthStatusAttr())></div>
+          <div id="root"\(resumeSessionId.map { " data-initial-session=\"\($0)\"" } ?? "")\(includeKeychainAuth ? Self.initialAuthStatusAttr() : "")></div>
           <script src="\(assetURL("webview/index.js"))" type="module"></script>
           <script>\(prismJS)</script>
         </body>

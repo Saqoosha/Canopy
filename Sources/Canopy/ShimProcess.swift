@@ -3215,7 +3215,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // Each side's spelling of the prefix can be pinned but their
                 // agreement cannot: `cjk-emphasis-stream.test.js` pins the JS
                 // side's, and nothing pins this literal or `window.js`'s.
-                if line.hasPrefix("[cjk-emphasis]") {
+                // `[keychain-guard]` (keychain-login-guard.js) is read back later for the same reason.
+                if line.hasPrefix("[cjk-emphasis]") || line.hasPrefix("[keychain-guard]") {
                     logger.notice("[shim] \(line, privacy: .public)")
                 } else {
                     logger.info("[shim] \(line, privacy: .public)")
@@ -4182,7 +4183,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            var state = response["state"] as? [String: Any]
         {
             logger.info("init_response state from extension: initialPermissionMode=\(state["initialPermissionMode"] as? String ?? "nil", privacy: .public) allowSkip=\(state["allowDangerouslySkipPermissions"] as? Bool ?? false, privacy: .public)")
-            if state["authStatus"] == nil || state["authStatus"] is NSNull {
+            // The Keychain read is the default account's; a non-default account must keep its own state.
+            if claudeAccount == nil, state["authStatus"] == nil || state["authStatus"] is NSNull {
                 if let keychainAuth = KeychainAuth.readAuthStatus() {
                     state["authStatus"] = keychainAuth
                     logger.info("Injected Keychain authStatus into init_response")
