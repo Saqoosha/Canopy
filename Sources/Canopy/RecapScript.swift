@@ -275,10 +275,18 @@ enum RecapScript {
                 // The input area sits over the scrolling transcript in a
                 // transparent container, so a background-less row lets chat
                 // content show straight through it (observed: recap text
-                // overlapping a tool-output block). An opaque background plus
-                // a stacking context puts the row cleanly on top.
-                'position:relative',
-                'z-index:5'
+                // overlapping a tool-output block). The opaque background is
+                // what fixes that; the transcript is already beneath us,
+                // because the composer overlay is `z-index:20`.
+                //
+                // No z-index here, deliberately. The slash-command /
+                // @-mention popup is `position:absolute; bottom:100%` with
+                // z-index auto, so it rises out of the input card into
+                // exactly this row's box. With z-index auto on both, the
+                // later node paints on top — the popup, since the row is the
+                // column's first child. A `z-index:5` here painted the recap
+                // over the menu (CSS read from extension 2.1.280).
+                'position:relative'
             ].join(';');
             // Opacity would make the background translucent too, defeating
             // the point — dim the text instead, per element.
