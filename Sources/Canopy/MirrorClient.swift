@@ -37,9 +37,9 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         }
     }
     private(set) var extensionVersion: String?
-    /// Set before the socket is ready by a pane whose webview has a `MirrorAssetSchemeHandler`: the attach then
-    /// asks for Read images as `canopy-asset` URLs, so the replay does not carry them as base64.
-    var fetchesImages = false
+    /// True for a pane whose webview has a `MirrorAssetSchemeHandler`: the attach then asks for Read images as
+    /// `canopy-asset` URLs, so the replay does not carry them as base64.
+    private let fetchesImages: Bool
     /// `asset_request`s waiting for their `asset_response`, by request id.
     private var pendingAssets: [String: ([String: Any]) -> Void] = [:]
 
@@ -61,7 +61,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     private let sessionId: String
     private var closed = false
 
-    init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView) {
+    init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView, fetchesImages: Bool = false) {
+        self.fetchesImages = fetchesImages
         self.token = token
         self.sessionId = sessionId
         self.webView = webView
@@ -139,12 +140,12 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     /// The original bytes behind a thumbnail's `canopy-asset://ext/img/<id>` URL, as a data URL for
     /// `ImagePopupWindow`; nil when `url` is not one or the origin cannot serve it.
     func fullImageDataURL(for url: String, completion: @escaping (String?) -> Void) {
-        let prefix = "\(MirrorConnection.assetScheme)://ext/img/"
-        guard url.hasPrefix(prefix) else {
+        guard let path = Self.fullImagePath(forThumbnailURL: url) else {
+            logger.error("[mirror-attach] not a mirror thumbnail URL: \(url.prefix(40), privacy: .public)")
             completion(nil)
             return
         }
-        requestAsset(path: "imgfull/" + url.dropFirst(prefix.count)) { reply in
+        requestAsset(path: path) { reply in
             guard let mime = reply["mime"] as? String, let base64 = reply["base64"] as? String else {
                 logger.error("[mirror-attach] full-size image unavailable: \(reply["error"] as? String ?? "no data", privacy: .public)")
                 completion(nil)
@@ -152,6 +153,13 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             }
             completion("data:\(mime);base64,\(base64)")
         }
+    }
+
+    /// The `asset_request` path for the original behind a thumbnail's `canopy-asset://ext/img/<id>`.
+    nonisolated static func fullImagePath(forThumbnailURL url: String) -> String? {
+        let prefix = "\(MirrorConnection.assetScheme)://ext/img/"
+        guard url.hasPrefix(prefix), url.count > prefix.count else { return nil }
+        return "imgfull/" + url.dropFirst(prefix.count)
     }
 
     private func failPendingAssets() {
@@ -189,8 +197,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         // Token is caller-supplied: a peer's stored password, or this Mac's own for the DEBUG window.
         // `compress`: the transcript replay arrives as one line, and that line is what a slow
         // uplink spends its time on (see `MirrorWire`).
-        // `images`: Read images arrive as `canopy-asset` URLs this pane fetches on scroll, instead of base64 that
-        // made up most of a replay and barely compresses.
+        // `images` (`fetchesImages`): Read images arrive as `canopy-asset` URLs fetched on scroll, not as base64.
         sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
                         "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages])
         scheduleReceive()
@@ -331,7 +338,9 @@ final class MirrorAssetSchemeHandler: NSObject, WKURLSchemeHandler {
         }
         live[key] = urlSchemeTask
         bridge.requestAsset(path: String(url.path.dropFirst())) { [weak self] reply in
-            guard let self, let task = self.live.removeValue(forKey: key) else { return }
+            // Identity, not just the key: a stopped task's address can be reused by a later one.
+            guard let self, let task = self.live[key], task === urlSchemeTask else { return }
+            self.live[key] = nil
             guard let mime = reply["mime"] as? String, let base64 = reply["base64"] as? String,
                   let data = Data(base64Encoded: base64)
             else {

@@ -18,10 +18,9 @@ import Foundation
 /// peer expand ~60 wire bytes into 16 MiB per frame ahead of the token check (16 MiB of
 /// zeros is a 14-byte Brotli stream), so its buffer refuses them.
 ///
-/// Why: a Mac's mirror pane receives the whole transcript in one `get_session` response, and
-/// that line is text — measured 2026-09-19, a 1.9 MB replay over a 150 KB/s uplink was 13 s
-/// of the 16 s a pane took to open. Images were already moved off the replay for the phone
-/// (`deferringReadImagesForMirror`); this covers what is left, which is JSON.
+/// Why: a mirror pane receives its transcript in one `get_session` response, and that line is
+/// text — measured 2026-09-19, a 1.9 MB replay over a 150 KB/s uplink was 13 s of the 16 s a
+/// pane took to open.
 ///
 /// Why Brotli, measured on a 4.28 MB session JSONL: Foundation's `.zlib` 4.17× in 59 ms,
 /// `.lzfse` 4.83× in 23 ms, `COMPRESSION_BROTLI` 4.88× in 16 ms, `.lzma` 6.08× in 595 ms.

@@ -897,7 +897,7 @@ final class SessionWKWebView: WKWebView {
         guard let url = sender.representedObject as? String else { return }
         let fileName = sender.toolTip ?? "image"
         // A mirror pane's thumbnail is a `canopy-asset` URL; the full image is still on the origin Mac.
-        if let bridge = RemoteMirrorBridge.bridge(for: self), !url.hasPrefix("data:") {
+        if url.hasPrefix(MirrorConnection.assetScheme + ":"), let bridge = RemoteMirrorBridge.bridge(for: self) {
             bridge.fullImageDataURL(for: url) { dataURL in
                 if let dataURL { ImagePopupWindow.openInPreview(dataURL: dataURL, fileName: fileName) }
             }
@@ -930,7 +930,7 @@ final class LinkClickHandler: NSObject, WKScriptMessageHandler {
            let url = dict["url"] as? String {
             let title = dict["file"] as? String ?? "Image"
             // A mirror pane's thumbnail is a `canopy-asset` URL; the full image is still on the origin Mac.
-            if let bridge = RemoteMirrorBridge.bridge(for: message.webView), !url.hasPrefix("data:") {
+            if url.hasPrefix(MirrorConnection.assetScheme + ":"), let bridge = RemoteMirrorBridge.bridge(for: message.webView) {
                 bridge.fullImageDataURL(for: url) { dataURL in
                     if let dataURL { ImagePopupWindow.shared.show(dataURL: dataURL, title: title) }
                 }

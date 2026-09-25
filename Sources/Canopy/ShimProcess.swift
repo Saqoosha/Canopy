@@ -1,5 +1,7 @@
 import Cocoa
 import CryptoKit
+import ImageIO
+import UniformTypeIdentifiers
 import UserNotifications
 import WebKit
 import os.log
@@ -4365,8 +4367,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     let shaped: [String: Any]
                     if let connection = target as? MirrorConnection {
                         let session = boundSession?.resumeId ?? ""
-                        var replay = Self.trimmingReplayForMirror(
-                            payload, keepUserTurns: connection.isMacClient ? Self.mirrorMacReplayUserTurns : Self.mirrorReplayUserTurns)
+                        var replay = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.replayTurnLimit(isMacClient: connection.isMacClient))
                         if Self.defersReplayImages(isMacClient: connection.isMacClient, fetchesImages: connection.fetchesImages) {
                             replay = Self.deferringReadImagesForMirror(replay) { id, source in
                                 MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
@@ -4504,13 +4505,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     static let mirrorReplayUserTurns = 10
     /// The same for a Mac mirror pane, which got the whole transcript until 2026-09-25, all of it across the origin's uplink.
     static let mirrorMacReplayUserTurns = 50
+
+    nonisolated static func replayTurnLimit(isMacClient: Bool) -> Int {
+        isMacClient ? mirrorMacReplayUserTurns : mirrorReplayUserTurns
+    }
     /// The largest replay a client's line buffer will accept, with headroom under the 16 MiB line limit
     /// both `NDJSONLineBuffer` and the phone's `LineBuffer` (Canopy-Mobile #59) enforce.
     static let mirrorReplayMaxBytes = 12 << 20
     /// The request id prefix the mirror server uses when it fetches a replay on a phone's behalf.
     static let mirrorPrefetchPrefix = "canopy-prefetch-"
 
-    /// Replace the base64 images of `Read` tool results in a `get_session` replay with a `canopy-asset` URL the phone fetches only when the thumbnail scrolls into view.
+    /// Replace the base64 images of `Read` tool results in a `get_session` replay with a `canopy-asset` URL the remote client fetches only when the thumbnail scrolls into view.
     ///
     /// Only `Read` results: the extension draws nothing for them, so the one consumer is `ImagePreviewScript`'s thumbnail. Measured 2026-09-14: images were 78% of a 30-turn replay.
     static func deferringReadImagesForMirror(_ message: [String: Any], logging: Bool = true, store: (String, [String: Any]) -> Void) -> [String: Any] {
@@ -4578,7 +4583,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Whether a remote client's replay carries `canopy-asset` URLs in place of Read images. A phone always
-    /// fetches them; a Mac only once its attach says it can (`"images": true`, 2.47+), since an older one
+    /// fetches them; a Mac only once its attach says it can (`"images": true`), since an older one
     /// has no scheme handler and would draw nothing.
     ///
     /// Measured 2026-09-25 on a Mac pane of a studio session: a 10.8 MB replay went out as 7.5 MB of Brotli,
@@ -4587,17 +4592,41 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         !isMacClient || fetchesImages
     }
 
-    /// The long edge a replayed inline image is re-encoded to for a remote client. The API downsizes an image to
-    /// about this before the model sees it, so the mirror shows what the model saw.
+    /// The long edge a replayed inline image is re-encoded to for a remote client: the API's own long-edge cap.
     static let mirrorInlineImageMaxPixelSize = 1568
 
-    /// A base64 image re-encoded as JPEG at `mirrorInlineImageMaxPixelSize`, or nil when that does not shrink it.
+    /// A base64 image larger than `mirrorInlineImageMaxPixelSize` re-encoded as JPEG at that size, with any
+    /// transparency flattened onto white (the webview's background); nil when it is not larger or does not shrink.
+    ///
+    /// The size gate is read off the header, so an image that would not shrink costs nothing: measured 2026-09-25,
+    /// re-encoding costs 3-38 ms each on the main actor, and images at or under the limit barely shrank.
     nonisolated static func shrinkMirrorImage(base64: String) -> String? {
         guard let bytes = Data(base64Encoded: base64),
-              let smaller = RosterImageUploader.thumbnail(from: bytes, maxPixelSize: mirrorInlineImageMaxPixelSize, quality: 0.8),
-              smaller.count < bytes.count
+              let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              max(width, height) > mirrorInlineImageMaxPixelSize,
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: mirrorInlineImageMaxPixelSize,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+              ] as CFDictionary),
+              let context = CGContext(data: nil, width: thumbnail.width, height: thumbnail.height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
         else { return nil }
-        return smaller.base64EncodedString()
+        let rect = CGRect(x: 0, y: 0, width: thumbnail.width, height: thumbnail.height)
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(rect)
+        context.draw(thumbnail, in: rect)
+        let out = NSMutableData()
+        guard let opaque = context.makeImage(),
+              let destination = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(destination, opaque, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        guard CGImageDestinationFinalize(destination), out.length < bytes.count else { return nil }
+        return (out as Data).base64EncodedString()
     }
 
     /// A `get_session` replay with the bytes a remote client cannot use taken out, in either envelope shape:
@@ -4605,9 +4634,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// - the `signature` of a thinking block whose text is empty. The webview reads a signature only for a block with
     ///   text (extension 2.1.281, `if(!$.thinking?.trim()||!$.signature)return!1`), and an empty-text block is what
     ///   the CLI replays for summarized thinking. Measured 2026-09-25: 634 KB across 316 blocks, incompressible.
-    /// - every base64 image still inline (a screenshot tool's, one the user pasted), passed through `shrinkImage`.
-    ///   These stay base64 because the extension draws nothing for any other source type. Read images are
-    ///   `deferringReadImagesForMirror`'s, and are URLs by the time this runs.
+    /// - every base64 image still inline, passed through `shrinkImage`. These stay base64 because the extension
+    ///   draws nothing for any other source type.
     ///
     /// Returns `message` itself when nothing changed.
     static func slimmingReplayForMirror(_ message: [String: Any], shrinkImage: (String) -> String?) -> [String: Any] {
@@ -4692,11 +4720,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if content is String { return true }
         guard let blocks = content as? [[String: Any]] else { return true }
         return !blocks.contains { $0["type"] as? String == "tool_result" }
-    }
-
-    /// Trim a Mac client's `get_session` replay until it serializes under `maxBytes` (default `mirrorReplayMaxBytes`).
-    static func trimmingReplayForMacClient(_ message: [String: Any], maxBytes: Int = mirrorReplayMaxBytes) -> [String: Any] {
-        fittingReplay(message, maxBytes: maxBytes, client: "a Mac client")
     }
 
     /// The typed turns of a `get_session` replay, in either envelope shape.

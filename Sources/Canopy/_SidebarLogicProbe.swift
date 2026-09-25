@@ -1863,9 +1863,9 @@ enum SidebarLogicProbe {
             store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0, panes: []))
             record("attach: a session gone from its home Mac's roster reads idle",
                    !existing.isAsking && !existing.isThinking && !existing.isWaiting)
-            record("mirror server: a mac client skips the phone's replay rewrites",
+            record("mirror server: a mac client is not a phone",
                    !MirrorConnection.appliesPhoneReplayRewrites(client: "mac"))
-            record("mirror server: a phone (no client field) keeps them",
+            record("mirror server: a client with no client field is a phone",
                    MirrorConnection.appliesPhoneReplayRewrites(client: nil))
             record("mirror server: a phone's replay defers Read images",
                    ShimProcess.defersReplayImages(isMacClient: false, fetchesImages: false))
@@ -1873,6 +1873,24 @@ enum SidebarLogicProbe {
                    ShimProcess.defersReplayImages(isMacClient: true, fetchesImages: true))
             record("mirror server: an older Mac (no images flag) keeps them inline",
                    !ShimProcess.defersReplayImages(isMacClient: true, fetchesImages: false))
+            record("mirror replay: a phone keeps the phone's turn window",
+                   ShimProcess.replayTurnLimit(isMacClient: false) == ShimProcess.mirrorReplayUserTurns)
+            record("mirror replay: a Mac keeps the wider Mac turn window",
+                   ShimProcess.replayTurnLimit(isMacClient: true) == ShimProcess.mirrorMacReplayUserTurns
+                       && ShimProcess.mirrorMacReplayUserTurns > ShimProcess.mirrorReplayUserTurns)
+            record("mirror server: img/ asks for the thumbnail",
+                   MirrorConnection.imageAssetRequest(path: "img/abc").map { $0.image == "abc" && !$0.full } == true)
+            record("mirror server: imgfull/ asks for the original",
+                   MirrorConnection.imageAssetRequest(path: "imgfull/abc").map { $0.image == "abc" && $0.full } == true)
+            record("mirror server: other paths are not image requests",
+                   MirrorConnection.imageAssetRequest(path: "imgx/abc") == nil
+                       && MirrorConnection.imageAssetRequest(path: "webview/index.js") == nil)
+            record("mirror client: a thumbnail URL maps to the original's path, which the server reads as full",
+                   RemoteMirrorBridge.fullImagePath(forThumbnailURL: "canopy-asset://ext/img/abc")
+                       .flatMap(MirrorConnection.imageAssetRequest(path:)).map { $0.image == "abc" && $0.full } == true)
+            record("mirror client: a data URL has no original to fetch",
+                   RemoteMirrorBridge.fullImagePath(forThumbnailURL: "data:image/png;base64,AAAA") == nil
+                       && RemoteMirrorBridge.fullImagePath(forThumbnailURL: "canopy-asset://ext/img/") == nil)
         }
 
         // Mirror status frame: display-ready, so the phone carries none of
@@ -11211,16 +11229,16 @@ enum SidebarLogicProbe {
             let oversized = (1...6).flatMap { i -> [[String: Any]] in [user(bigText + "\(i)"), assistant()] }
             let oversizedEnv = wrapped(oversized)
             let macBudget = 4 << 20
-            let macCut = ShimProcess.trimmingReplayForMacClient(oversizedEnv, maxBytes: macBudget)
+            let macCut = ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, client: "probe")
             let macCutMsgs = messages(of: macCut)
             let macCutSize = (try? JSONSerialization.data(withJSONObject: macCut))?.count ?? Int.max
             record("mirror replay: a mac client's oversized replay is cut to the turns that fit",
                    (macCutMsgs?.count ?? 0) < oversized.count && macCutSize <= macBudget)
             record("mirror replay: a mac client's replay within the budget is untouched",
-                   messages(of: ShimProcess.trimmingReplayForMacClient(wrapped(replay), maxBytes: macBudget))?.count == replay.count)
+                   messages(of: ShimProcess.fittingReplay(wrapped(replay), maxBytes: macBudget, client: "probe"))?.count == replay.count)
             // Even one turn over the budget: the client gets an empty replay, never a line it would cut the connection on.
             let tooBigEnv = wrapped([user(String(repeating: "y", count: 5 << 20)), assistant()])
-            let tooBigCut = ShimProcess.trimmingReplayForMacClient(tooBigEnv, maxBytes: macBudget)
+            let tooBigCut = ShimProcess.fittingReplay(tooBigEnv, maxBytes: macBudget, client: "probe")
             record("mirror replay: a single turn over the budget is sent empty, not oversized",
                    messages(of: tooBigCut)?.isEmpty == true
                        && ((try? JSONSerialization.data(withJSONObject: tooBigCut))?.count ?? Int.max) <= macBudget)
@@ -11237,6 +11255,7 @@ enum SidebarLogicProbe {
                 ["type": "assistant", "message": ["role": "assistant", "content": [
                     ["type": "thinking", "thinking": "", "signature": "SIG-EMPTY"],
                     ["type": "thinking", "thinking": "real text", "signature": "SIG-KEPT"],
+                    ["type": "thinking", "thinking": " \n", "signature": "SIG-WHITESPACE"],
                 ]]],
                 ["type": "user", "message": ["role": "user", "content": [
                     ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "BIG"]],
@@ -11253,7 +11272,49 @@ enum SidebarLogicProbe {
             record("mirror slim: an empty thinking block's signature is dropped",
                    slimThinking.first?["signature"] as? String == "")
             record("mirror slim: a thinking block with text keeps its signature",
-                   slimThinking.last?["signature"] as? String == "SIG-KEPT")
+                   slimThinking.dropFirst().first?["signature"] as? String == "SIG-KEPT")
+            record("mirror slim: a whitespace-only thinking block counts as empty",
+                   slimThinking.last?["signature"] as? String == "")
+            let bareSlim = ShimProcess.slimmingReplayForMirror(["type": "response", "response": ["messages": slimReplay]]) { _ in nil }
+            record("mirror slim: a bare response envelope is slimmed too",
+                   ((((bareSlim["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"]
+                       as? [[String: Any]])?.first?["signature"] as? String == "")
+            // The real shrinker: only an image over the limit is re-encoded, and transparency lands on white.
+            func probeImage(width: Int, height: Int, alpha: UInt8) -> String? {
+                let rowBytes = width * 4
+                let pixels = [UInt8](repeating: 0, count: rowBytes * height).enumerated().map { $0.offset % 4 == 3 ? alpha : 0 }
+                guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+                      let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: rowBytes,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                                          provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+                else { return nil }
+                let out = NSMutableData()
+                guard let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil) else { return nil }
+                CGImageDestinationAddImage(dest, image, nil)
+                guard CGImageDestinationFinalize(dest) else { return nil }
+                return (out as Data).base64EncodedString()
+            }
+            func decoded(_ base64: String?) -> CGImage? {
+                guard let base64, let data = Data(base64Encoded: base64),
+                      let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+                return CGImageSourceCreateImageAtIndex(source, 0, nil)
+            }
+            let limit = ShimProcess.mirrorInlineImageMaxPixelSize
+            let shrunk = decoded(ShimProcess.shrinkMirrorImage(base64: probeImage(width: limit * 2, height: limit, alpha: 0) ?? ""))
+            record("mirror slim: an image over the limit comes back at the limit",
+                   shrunk.map { max($0.width, $0.height) == limit } == true)
+            var corner: [UInt8] = [0, 0, 0, 0]
+            if let shrunk, let context = CGContext(data: &corner, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
+                context.draw(shrunk, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            }
+            record("mirror slim: a transparent image is flattened onto white, not black",
+                   corner[0] > 240 && corner[1] > 240 && corner[2] > 240)
+            record("mirror slim: an image at the limit is left alone",
+                   ShimProcess.shrinkMirrorImage(base64: probeImage(width: limit, height: limit / 2, alpha: 255) ?? "") == nil)
+            record("mirror slim: bytes that are not an image are left alone",
+                   ShimProcess.shrinkMirrorImage(base64: "bm90IGFuIGltYWdl") == nil)
             record("mirror slim: a pasted image is re-encoded as JPEG",
                    slimSource(slimUser.first)?["data"] as? String == "SMALL" && slimSource(slimUser.first)?["media_type"] as? String == "image/jpeg")
             record("mirror slim: an image the shrinker declines is left as it was",
@@ -11298,7 +11359,7 @@ enum SidebarLogicProbe {
             bigResult["message"] = ["role": "user", "content": [["type": "tool_result", "tool_use_id": "t0", "content": String(repeating: "z", count: 5 << 20)]]] as [String: Any]
             let prefixedEnv = wrapped([bigResult, user("after"), assistant()])
             record("mirror replay: a budget blown only by entries before the first turn keeps every turn",
-                   messages(of: ShimProcess.trimmingReplayForMacClient(prefixedEnv, maxBytes: macBudget))?.count == 2
+                   messages(of: ShimProcess.fittingReplay(prefixedEnv, maxBytes: macBudget, client: "probe"))?.count == 2
                        && messages(of: ShimProcess.fittingReplay(prefixedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.count == 2)
         }
 

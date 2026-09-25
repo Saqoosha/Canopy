@@ -184,9 +184,9 @@ struct MirrorPaneView: NSViewRepresentable {
         let webView = SessionWKWebView(frame: .zero, configuration: config)
         webView.isInspectable = true
 
-        let bridge = RemoteMirrorBridge(host: target.host, port: target.port, sessionId: session.resumeId, token: token, webView: webView)
+        let bridge = RemoteMirrorBridge(host: target.host, port: target.port, sessionId: session.resumeId, token: token,
+                                        webView: webView, fetchesImages: true)
         assetHandler.bridge = bridge
-        bridge.fetchesImages = true
         registerHandlers(on: webView, bridge: bridge, coordinator: coordinator)
         let machineName = session.statusBar.mirrorMachine ?? target.machineId
         bridge.onStatus = { [weak session] frame in
