@@ -192,9 +192,11 @@ Mirror:  attach {"status": true} → attach_ok, then {"type":"status", branch, v
          also records why Brotli over zlib/lzma). Both clients ask (phone since
          Canopy-Mobile #59). Only clients decode Z; the server refuses it (pre-auth
          decompression bomb). A get_session replay is fitted under mirrorReplayMaxBytes
-         (12 MiB) for BOTH clients (`fittingReplay`): a phone's is measured after its image
-         deferral and under its 10-turn window, and one that cannot fit at one turn goes
-         out empty. Both line buffers cut the connection at 16 MiB, on every reconnect.
+         (12 MiB) for BOTH clients (`fittingReplay`), after a 10-turn window (phone) or 50 (Mac),
+         Read-image deferral, and `slimmingReplayForMirror`; one that cannot fit at one turn
+         goes out empty. attach {"images": true} (Mac clients only) → Read images come as
+         canopy-asset URLs; `asset_request` img/<id> is the 768px thumbnail, imgfull/<id> the
+         original. Both line buffers cut the connection at 16 MiB, on every reconnect.
 ```
 
 ## CLI Bridge Details

@@ -136,9 +136,12 @@ final class MirrorConnection: MirrorSink {
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorConnection")
     private var didAttach = false
     /// True when the attach came from another Mac's Canopy (not the phone).
-    /// A Mac client renders the whole transcript and has no canopy-asset
-    /// handler, so responses to it skip the phone's replay rewrites.
+    /// A Mac client gets files, usage and `open` redirects a phone does not;
+    /// see `fetchesImages` for the image rewrite.
     private(set) var isMacClient = false
+    /// True when a Mac client's attach said it serves `canopy-asset` image URLs (`"images": true`),
+    /// so its replay can carry them in place of base64 the way a phone's does.
+    private(set) var fetchesImages = false
     /// The session this connection attached to; images are only served under it.
     fileprivate private(set) var attachedSessionId = ""
 
@@ -174,8 +177,7 @@ final class MirrorConnection: MirrorSink {
     private var compressOutbound = false
     private var cleanedUp = false
 
-    /// Whether a client identity gets the phone's replay trim / image rewrite.
-    /// Absent `client` (older phones) keeps them; `"mac"` skips them.
+    /// Whether a client identity is a phone. Absent `client` (older phones) is one; `"mac"` is not.
     nonisolated static func appliesPhoneReplayRewrites(client: String?) -> Bool {
         client != "mac"
     }
@@ -293,6 +295,7 @@ final class MirrorConnection: MirrorSink {
         attachedSessionId = sessionId
         compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
         filesRequested = dict["files"] as? Bool == true
+        fetchesImages = isMacClient && dict["images"] as? Bool == true
         // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
         let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
@@ -336,17 +339,17 @@ final class MirrorConnection: MirrorSink {
     }
 
     /// The URL scheme a remote client serves extension assets under.
-    static let assetScheme = "canopy-asset"
+    nonisolated static let assetScheme = "canopy-asset"
 
     /// Answers one `asset_request` with a file under the extension's `webview/` or `resources/`.
     private func serveAsset(_ dict: [String: Any]) {
         guard let id = dict["id"] as? String else { return }
         var reply: [String: Any] = ["type": "asset_response", "id": id]
         defer { sendJSONObject(reply) }
-        if let path = dict["path"] as? String, path.hasPrefix("img/") {
+        if let path = dict["path"] as? String, let request = Self.imageAssetRequest(path: path) {
             // Scoped to this connection's own session, so one mirror cannot pull another session's images.
-            let key = MirrorImageStore.key(sessionId: attachedSessionId, image: String(path.dropFirst(4)))
-            guard let image = MirrorImageStore.jpeg(key: key) else {
+            let key = MirrorImageStore.key(sessionId: attachedSessionId, image: request.image)
+            guard let image = request.full ? MirrorImageStore.original(key: key) : MirrorImageStore.jpeg(key: key) else {
                 logger.error("[mirror-server] image \(key, privacy: .public) not in store")
                 reply["error"] = "not found"
                 return
@@ -368,6 +371,14 @@ final class MirrorConnection: MirrorSink {
         }
         reply["mime"] = Self.mimeType(forExtension: file.pathExtension)
         reply["base64"] = data.base64EncodedString()
+    }
+
+    /// A deferred-image request: `img/<id>` at thumbnail size, `imgfull/<id>` the original bytes a Mac asks for
+    /// to open one full size. Nil for any other path.
+    nonisolated static func imageAssetRequest(path: String) -> (image: String, full: Bool)? {
+        if path.hasPrefix("imgfull/") { return (String(path.dropFirst("imgfull/".count)), true) }
+        if path.hasPrefix("img/") { return (String(path.dropFirst("img/".count)), false) }
+        return nil
     }
 
     static func mimeType(forExtension ext: String) -> String {
@@ -443,7 +454,7 @@ final class MirrorConnection: MirrorSink {
     }
 }
 
-/// Read-tool images deferred out of a phone's replay, served when its thumbnail asks for them.
+/// Read-tool images deferred out of a remote client's replay, served when its thumbnail asks for them.
 ///
 /// Keyed by session and content, so a mirror can only ask for images from the session it attached to.
 @MainActor
@@ -469,7 +480,13 @@ enum MirrorImageStore {
         logger.notice("[mirror-server] released \(dropped.count, privacy: .public) deferred image(s)")
     }
 
-    /// The image at phone size: a JPEG with a long edge of `maxPixelSize`, or the original bytes when re-encoding does not shrink them.
+    /// The image as the transcript holds it.
+    static func original(key: String) -> (data: Data, mime: String)? {
+        guard let source = sources[key], let encoded = source["data"] as? String, let bytes = Data(base64Encoded: encoded) else { return nil }
+        return (bytes, source["media_type"] as? String ?? "application/octet-stream")
+    }
+
+    /// The image at thumbnail size: a JPEG with a long edge of `maxPixelSize`, or the original bytes when re-encoding does not shrink them.
     static func jpeg(key: String) -> (data: Data, mime: String)? {
         guard let source = sources[key], let encoded = source["data"] as? String, let bytes = Data(base64Encoded: encoded) else { return nil }
         if let smaller = RosterImageUploader.thumbnail(from: bytes, maxPixelSize: maxPixelSize, quality: 0.6), smaller.count < bytes.count {

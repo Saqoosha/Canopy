@@ -894,8 +894,16 @@ final class SessionWKWebView: WKWebView {
     }
 
     @objc private func openContextImageInPreview(_ sender: NSMenuItem) {
-        guard let dataURL = sender.representedObject as? String else { return }
-        ImagePopupWindow.openInPreview(dataURL: dataURL, fileName: sender.toolTip ?? "image")
+        guard let url = sender.representedObject as? String else { return }
+        let fileName = sender.toolTip ?? "image"
+        // A mirror pane's thumbnail is a `canopy-asset` URL; the full image is still on the origin Mac.
+        if url.hasPrefix(MirrorConnection.assetScheme + ":"), let bridge = RemoteMirrorBridge.bridge(for: self) {
+            bridge.fullImageDataURL(for: url) { dataURL in
+                if let dataURL { ImagePopupWindow.openInPreview(dataURL: dataURL, fileName: fileName) }
+            }
+            return
+        }
+        ImagePopupWindow.openInPreview(dataURL: url, fileName: fileName)
     }
 }
 
@@ -920,7 +928,15 @@ final class LinkClickHandler: NSObject, WKScriptMessageHandler {
         if let dict = message.body as? [String: Any],
            dict["type"] as? String == "openImage",
            let url = dict["url"] as? String {
-            ImagePopupWindow.shared.show(dataURL: url, title: dict["file"] as? String ?? "Image")
+            let title = dict["file"] as? String ?? "Image"
+            // A mirror pane's thumbnail is a `canopy-asset` URL; the full image is still on the origin Mac.
+            if url.hasPrefix(MirrorConnection.assetScheme + ":"), let bridge = RemoteMirrorBridge.bridge(for: message.webView) {
+                bridge.fullImageDataURL(for: url) { dataURL in
+                    if let dataURL { ImagePopupWindow.shared.show(dataURL: dataURL, title: title) }
+                }
+                return
+            }
+            ImagePopupWindow.shared.show(dataURL: url, title: title)
             return
         }
         if let dict = message.body as? [String: Any],

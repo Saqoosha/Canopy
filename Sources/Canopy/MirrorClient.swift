@@ -37,6 +37,17 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         }
     }
     private(set) var extensionVersion: String?
+    /// True for a pane whose webview has a `MirrorAssetSchemeHandler`: the attach then asks for Read images as
+    /// `canopy-asset` URLs, so the replay does not carry them as base64.
+    private let fetchesImages: Bool
+    /// `asset_request`s waiting for their `asset_response`, by request id.
+    private var pendingAssets: [String: ([String: Any]) -> Void] = [:]
+
+    /// The live bridge driving `webView`, for a message handler that only has the webview.
+    static func bridge(for webView: WKWebView?) -> RemoteMirrorBridge? {
+        guard let webView else { return nil }
+        return instances.allObjects.first { $0.webView === webView }
+    }
     private var attachedDelivered = false
     private var terminalDelivered = false
     private let token: String
@@ -50,7 +61,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     private let sessionId: String
     private var closed = false
 
-    init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView) {
+    init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView, fetchesImages: Bool = false) {
+        self.fetchesImages = fetchesImages
         self.token = token
         self.sessionId = sessionId
         self.webView = webView
@@ -110,6 +122,50 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         guard !closed else { return }
         closed = true
         connection.cancel()
+        failPendingAssets()
+    }
+
+    /// Asks the origin for `path` under its `canopy-asset` root; `completion` gets the `asset_response`, or an
+    /// object with only `error` once the connection is gone.
+    func requestAsset(path: String, completion: @escaping ([String: Any]) -> Void) {
+        guard !closed, !terminalDelivered else {
+            completion(["error": "not connected"])
+            return
+        }
+        let id = UUID().uuidString
+        pendingAssets[id] = completion
+        sendJSONObject(["type": "asset_request", "id": id, "path": path])
+    }
+
+    /// The original bytes behind a thumbnail's `canopy-asset://ext/img/<id>` URL, as a data URL for
+    /// `ImagePopupWindow`; nil when `url` is not one or the origin cannot serve it.
+    func fullImageDataURL(for url: String, completion: @escaping (String?) -> Void) {
+        guard let path = Self.fullImagePath(forThumbnailURL: url) else {
+            logger.error("[mirror-attach] not a mirror thumbnail URL: \(url.prefix(40), privacy: .public)")
+            completion(nil)
+            return
+        }
+        requestAsset(path: path) { reply in
+            guard let mime = reply["mime"] as? String, let base64 = reply["base64"] as? String else {
+                logger.error("[mirror-attach] full-size image unavailable: \(reply["error"] as? String ?? "no data", privacy: .public)")
+                completion(nil)
+                return
+            }
+            completion("data:\(mime);base64,\(base64)")
+        }
+    }
+
+    /// The `asset_request` path for the original behind a thumbnail's `canopy-asset://ext/img/<id>`.
+    nonisolated static func fullImagePath(forThumbnailURL url: String) -> String? {
+        let prefix = "\(MirrorConnection.assetScheme)://ext/img/"
+        guard url.hasPrefix(prefix), url.count > prefix.count else { return nil }
+        return "imgfull/" + url.dropFirst(prefix.count)
+    }
+
+    private func failPendingAssets() {
+        let pending = pendingAssets
+        pendingAssets.removeAll()
+        for completion in pending.values { completion(["error": "not connected"]) }
     }
 
     func userContentController(
@@ -129,6 +185,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             attachedDelivered = true
         case .refused, .dropped:
             terminalDelivered = true
+            failPendingAssets()
         }
         logger.notice("[mirror-attach] outcome \(String(describing: outcome), privacy: .public); handler set: \(self.onOutcome != nil)")
         onOutcome?(outcome)
@@ -138,10 +195,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         guard !closed else { return }
         logger.notice("[mirror-attach] connected")
         // Token is caller-supplied: a peer's stored password, or this Mac's own for the DEBUG window.
-        // `compress`: a Mac client takes the whole transcript in one line, and that line is
-        // what a slow uplink spends its time on (see `MirrorWire`).
+        // `compress`: the transcript replay arrives as one line, and that line is what a slow
+        // uplink spends its time on (see `MirrorWire`).
+        // `images` (`fetchesImages`): Read images arrive as `canopy-asset` URLs fetched on scroll, not as base64.
         sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
-                        "compress": MirrorWire.compressionName, "files": true, "usage": true])
+                        "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages])
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
         if let webView {
@@ -225,6 +283,13 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             onStatus?(dict)
             return
         }
+        if dict["type"] as? String == "asset_response" {
+            // For the scheme handler or the image window that asked, never the page.
+            if let id = dict["id"] as? String, let completion = pendingAssets.removeValue(forKey: id) {
+                completion(dict)
+            }
+            return
+        }
         if dict["type"] as? String == "usage" {
             // For the sidebar's usage section, not the page.
             onUsage?(dict)
@@ -254,5 +319,42 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 logger.error("[mirror-attach] send failed: \(error.localizedDescription, privacy: .public)")
             }
         })
+    }
+}
+
+/// Serves a mirror pane's `canopy-asset://ext/img/<id>` thumbnails by asking the origin Mac over the bridge,
+/// the Mac counterpart of the phone's handler. Only images: the page itself loads from this Mac's extension.
+@MainActor
+final class MirrorAssetSchemeHandler: NSObject, WKURLSchemeHandler {
+    weak var bridge: RemoteMirrorBridge?
+    /// Tasks WebKit has not stopped. A stopped task must never be answered, or WebKit raises.
+    private var live: [ObjectIdentifier: WKURLSchemeTask] = [:]
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        let key = ObjectIdentifier(urlSchemeTask)
+        guard let url = urlSchemeTask.request.url, url.host == "ext", url.path.hasPrefix("/img/"), let bridge else {
+            urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
+            return
+        }
+        live[key] = urlSchemeTask
+        bridge.requestAsset(path: String(url.path.dropFirst())) { [weak self] reply in
+            // Capturing the task keeps its address from being reused by a later task while this is pending.
+            guard let self, let task = self.live[key], task === urlSchemeTask else { return }
+            self.live[key] = nil
+            guard let mime = reply["mime"] as? String, let base64 = reply["base64"] as? String,
+                  let data = Data(base64Encoded: base64)
+            else {
+                logger.error("[mirror-attach] image \(url.lastPathComponent, privacy: .public) unavailable: \(reply["error"] as? String ?? "no data", privacy: .public)")
+                task.didFailWithError(URLError(.fileDoesNotExist))
+                return
+            }
+            task.didReceive(URLResponse(url: url, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil))
+            task.didReceive(data)
+            task.didFinish()
+        }
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        live[ObjectIdentifier(urlSchemeTask)] = nil
     }
 }
