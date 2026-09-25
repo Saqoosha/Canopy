@@ -178,10 +178,15 @@ struct MirrorPaneView: NSViewRepresentable {
         config.userContentController = ucc
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         WebViewContainer.addSessionUserScripts(to: ucc)
+        // Retained by the configuration for the webview's life.
+        let assetHandler = MirrorAssetSchemeHandler()
+        config.setURLSchemeHandler(assetHandler, forURLScheme: MirrorConnection.assetScheme)
         let webView = SessionWKWebView(frame: .zero, configuration: config)
         webView.isInspectable = true
 
         let bridge = RemoteMirrorBridge(host: target.host, port: target.port, sessionId: session.resumeId, token: token, webView: webView)
+        assetHandler.bridge = bridge
+        bridge.fetchesImages = true
         registerHandlers(on: webView, bridge: bridge, coordinator: coordinator)
         let machineName = session.statusBar.mirrorMachine ?? target.machineId
         bridge.onStatus = { [weak session] frame in

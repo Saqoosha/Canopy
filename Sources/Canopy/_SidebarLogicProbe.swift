@@ -1867,6 +1867,12 @@ enum SidebarLogicProbe {
                    !MirrorConnection.appliesPhoneReplayRewrites(client: "mac"))
             record("mirror server: a phone (no client field) keeps them",
                    MirrorConnection.appliesPhoneReplayRewrites(client: nil))
+            record("mirror server: a phone's replay defers Read images",
+                   ShimProcess.defersReplayImages(isMacClient: false, fetchesImages: false))
+            record("mirror server: a Mac that asked for images gets them deferred",
+                   ShimProcess.defersReplayImages(isMacClient: true, fetchesImages: true))
+            record("mirror server: an older Mac (no images flag) keeps them inline",
+                   !ShimProcess.defersReplayImages(isMacClient: true, fetchesImages: false))
         }
 
         // Mirror status frame: display-ready, so the phone carries none of
@@ -11225,6 +11231,36 @@ enum SidebarLogicProbe {
                        && ((try? JSONSerialization.data(withJSONObject: phoneCut))?.count ?? Int.max) <= macBudget)
             record("mirror replay: the turn window trims a replay the budget alone would have passed",
                    messages(of: ShimProcess.fittingReplay(wrapped(replay), maxBytes: 1 << 30, maxTurns: 2, client: "probe"))?.count == 4)
+            // Slimming: an empty thinking block loses its signature, a thinking block with text keeps it, and every
+            // base64 image still inline goes through the shrinker, which may decline.
+            let slimReplay: [[String: Any]] = [
+                ["type": "assistant", "message": ["role": "assistant", "content": [
+                    ["type": "thinking", "thinking": "", "signature": "SIG-EMPTY"],
+                    ["type": "thinking", "thinking": "real text", "signature": "SIG-KEPT"],
+                ]]],
+                ["type": "user", "message": ["role": "user", "content": [
+                    ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "BIG"]],
+                    ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "KEEP"]],
+                    ["type": "tool_result", "tool_use_id": "t1", "content": [
+                        ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "BIG"]],
+                    ]],
+                ]]],
+            ]
+            let slimmed = messages(of: ShimProcess.slimmingReplayForMirror(wrapped(slimReplay)) { $0 == "BIG" ? "SMALL" : nil }) ?? []
+            let slimThinking = ((slimmed.first?["message"] as? [String: Any])?["content"] as? [[String: Any]]) ?? []
+            let slimUser = ((slimmed.last?["message"] as? [String: Any])?["content"] as? [[String: Any]]) ?? []
+            func slimSource(_ item: [String: Any]?) -> [String: Any]? { item?["source"] as? [String: Any] }
+            record("mirror slim: an empty thinking block's signature is dropped",
+                   slimThinking.first?["signature"] as? String == "")
+            record("mirror slim: a thinking block with text keeps its signature",
+                   slimThinking.last?["signature"] as? String == "SIG-KEPT")
+            record("mirror slim: a pasted image is re-encoded as JPEG",
+                   slimSource(slimUser.first)?["data"] as? String == "SMALL" && slimSource(slimUser.first)?["media_type"] as? String == "image/jpeg")
+            record("mirror slim: an image the shrinker declines is left as it was",
+                   slimSource(slimUser.dropFirst().first)?["data"] as? String == "KEEP"
+                       && slimSource(slimUser.dropFirst().first)?["media_type"] as? String == "image/png")
+            record("mirror slim: an image inside a tool result is re-encoded too",
+                   slimSource(((slimUser.last?["content"] as? [[String: Any]]) ?? []).first)?["data"] as? String == "SMALL")
             // What fits is measured after shaping, but what is returned is unshaped: the caller shapes it once, for real.
             let shapedFit = ShimProcess.fittingReplay(oversizedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe",
                                                       shaped: { ShimProcess.emptyingReplayMessages($0) })
