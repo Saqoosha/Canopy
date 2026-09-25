@@ -4365,7 +4365,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     let shaped: [String: Any]
                     if let connection = target as? MirrorConnection {
                         let session = boundSession?.resumeId ?? ""
-                        var replay = Self.trimmingReplayForMirror(payload, keepUserTurns: Self.mirrorReplayUserTurns)
+                        var replay = Self.trimmingReplayForMirror(
+                            payload, keepUserTurns: connection.isMacClient ? Self.mirrorMacReplayUserTurns : Self.mirrorReplayUserTurns)
                         if Self.defersReplayImages(isMacClient: connection.isMacClient, fetchesImages: connection.fetchesImages) {
                             replay = Self.deferringReadImagesForMirror(replay) { id, source in
                                 MirrorImageStore.put(key: MirrorImageStore.key(sessionId: session, image: id), source: source)
@@ -4498,11 +4499,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.recapTimeoutSeconds, execute: timeout)
     }
 
-    /// How much of a replayed conversation a remote client receives, phone or Mac: the last N turns the user typed.
+    /// How much of a replayed conversation a phone receives: the last N turns the user typed.
     /// Measured 2026-09-14: a 38 MB transcript replayed 4.7 MB and took ~3.7 s to parse and draw on an iPhone.
-    /// A Mac got the whole transcript until 2026-09-25; nobody scrolls a mirror pane back hundreds of turns, and
-    /// every one of them crossed the origin's uplink first.
     static let mirrorReplayUserTurns = 10
+    /// The same for a Mac mirror pane, which got the whole transcript until 2026-09-25, all of it across the origin's uplink.
+    static let mirrorMacReplayUserTurns = 50
     /// The largest replay a client's line buffer will accept, with headroom under the 16 MiB line limit
     /// both `NDJSONLineBuffer` and the phone's `LineBuffer` (Canopy-Mobile #59) enforce.
     static let mirrorReplayMaxBytes = 12 << 20
