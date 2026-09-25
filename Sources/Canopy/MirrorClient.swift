@@ -338,7 +338,7 @@ final class MirrorAssetSchemeHandler: NSObject, WKURLSchemeHandler {
         }
         live[key] = urlSchemeTask
         bridge.requestAsset(path: String(url.path.dropFirst())) { [weak self] reply in
-            // Identity, not just the key: a stopped task's address can be reused by a later one.
+            // Capturing the task keeps its address from being reused by a later task while this is pending.
             guard let self, let task = self.live[key], task === urlSchemeTask else { return }
             self.live[key] = nil
             guard let mime = reply["mime"] as? String, let base64 = reply["base64"] as? String,
