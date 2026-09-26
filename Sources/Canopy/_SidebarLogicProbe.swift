@@ -3002,6 +3002,18 @@ enum SidebarLogicProbe {
             record("RecentDirectories.add: normal dir persists as before",
                    UserDefaults.standard.stringArray(forKey: key) == [normalDir.path])
 
+            // add() dedupes by path: a slashless URL for the same directory
+            // compared unequal under `URL ==` and was re-inserted.
+            let slashless = URL(fileURLWithPath: normalDir.path, isDirectory: false)
+            RecentDirectories.add(slashless)
+            record("RecentDirectories.add: slashless URL dedupes by path",
+                   UserDefaults.standard.stringArray(forKey: key) == [normalDir.path])
+
+            // load() collapses duplicates persisted by pre-fix builds.
+            UserDefaults.standard.set([normalDir.path, normalDir.path], forKey: key)
+            record("RecentDirectories.load: persisted duplicates collapse",
+                   RecentDirectories.load().map(\.path) == [normalDir.path])
+
             // Restore the pre-probe UserDefaults key + synchronize (exit()
             // skips the run-loop flush) + best-effort tmp cleanup.
             if let priorStored {

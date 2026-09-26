@@ -27,10 +27,7 @@ enum RecentDirectories {
         // Callers don't need to gate.
         guard !GitWorktree.isManagedWorktree(url) else { return }
         var dirs = load()
-        // Compare by path, not `URL ==`: that compares absoluteString, and
-        // `URL(fileURLWithPath:)` adds a trailing slash for an existing
-        // directory while `isDirectory: false` does not — so the same folder
-        // compared unequal, was re-inserted, and `.path` stored it identically.
+        // By path: `URL ==` treats a trailing slash as a difference.
         dirs.removeAll { $0.path == url.path }
         dirs.insert(url, at: 0)
         if dirs.count > maxEntries { dirs = Array(dirs.prefix(maxEntries)) }
