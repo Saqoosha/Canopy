@@ -6,6 +6,9 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeychainAut
 /// Reads CC OAuth tokens from macOS Keychain and builds an authStatus object.
 /// CC CLI stores tokens under service "Claude Code-credentials", account = $USER.
 enum KeychainAuth {
+    /// The default login's item. A `ClaudeAccount` adds a suffix to it.
+    static let defaultService = "Claude Code-credentials"
+
     /// Read authStatus as a dictionary (for injecting into extension messages).
     /// Not cached: a login damaged while Canopy runs must stop being injected as healthy.
     static func readAuthStatus() -> [String: Any]? {
@@ -81,8 +84,8 @@ enum KeychainAuth {
     /// is off for the life of the process, paying the CLI's 7-8 s on every
     /// call. A silent nil would make that undiagnosable, which is the thing
     /// this reader was added to prevent rather than relocate.
-    static func readAccessToken() -> String? {
-        guard let blob = readKeychainBlob() else { return nil }
+    static func readAccessToken(service: String = defaultService) -> String? {
+        guard let blob = readKeychainBlob(service: service) else { return nil }
         guard let oauth = blob["claudeAiOauth"] as? [String: Any] else {
             logger.warning("Keychain JSON missing 'claudeAiOauth' key")
             return nil
@@ -96,11 +99,11 @@ enum KeychainAuth {
 
     /// Single source of truth: spawns `security find-generic-password` and
     /// returns the parsed JSON blob. All other readers go through this.
-    private static func readKeychainBlob() -> [String: Any]? {
+    private static func readKeychainBlob(service: String = defaultService) -> [String: Any]? {
         let username = ProcessInfo.processInfo.environment["USER"] ?? NSUserName()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        proc.arguments = ["find-generic-password", "-a", username, "-w", "-s", "Claude Code-credentials"]
+        proc.arguments = ["find-generic-password", "-a", username, "-w", "-s", service]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice

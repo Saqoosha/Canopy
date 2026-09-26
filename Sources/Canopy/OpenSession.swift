@@ -154,6 +154,9 @@ final class OpenSession: Identifiable, Hashable {
     /// default login — same meaning as everywhere else a `ClaudeAccount?`
     /// appears.
     var claudeAccount: ClaudeAccount?
+    /// Set when this session was started on another login because the
+    /// preferred one was out of quota; `AccountLimitBanner` says so.
+    var accountAutoSwitch: AccountAutoSwitch?
     /// True while Claude is generating a response (assistant / stream_event
     /// messages flowing). Updated by `ShimProcess.boundSession` mirror.
     /// Feeds `SessionActivity.of`, which the sidebar dot and the MacroPad

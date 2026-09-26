@@ -62,6 +62,14 @@ final class SharedRateLimitData {
 
     private var hostAccounts: [String: RateLimitAccount.Key?] = [:]
 
+    /// The record for a key if one exists. Pure, like `canonicalKey`: asking
+    /// about an account nobody has fetched must not create a record for it.
+    func existing(for key: RateLimitAccount.Key?) -> RateLimitAccount? {
+        let key = canonicalKey(for: key)
+        guard let key else { return local }
+        return others.first { $0.key == key }
+    }
+
     // MARK: - Formatting
 
     /// Format reset Date as relative string: "18m", "2h05m", "4d", "soon"
@@ -403,6 +411,21 @@ final class RateLimitAccount {
             payload["seven_day_sonnet"] = window(weeklyPctSonnet, weeklyResetDateSonnet)
         }
         return payload
+    }
+
+    /// Whether a new session on this account would be refused, read off the
+    /// last numbers. A window at 100% counts only until its reset time, so
+    /// stale numbers cannot keep an account marked out forever. The weekly
+    /// window is named first because it is the longer wait.
+    func availability(now: Date = Date()) -> AccountAvailability {
+        guard sessionResetDate != nil || weeklyResetDate != nil else { return .unknown }
+        if weeklyPct >= 100, let reset = weeklyResetDate, reset > now {
+            return .exhausted(limitLabel: "weekly", resetsAt: reset)
+        }
+        if sessionPct >= 100, let reset = sessionResetDate, reset > now {
+            return .exhausted(limitLabel: "5-hour", resetsAt: reset)
+        }
+        return .available
     }
 
     /// Effective weekly limit: Sonnet-specific when using Sonnet, otherwise all-models.

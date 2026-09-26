@@ -683,7 +683,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `ClaudeUsageDirect`). Here rather than in a `.task` on the
         // `WindowGroup`: this runs AFTER `runIfRequested()` has exited a probe
         // run, so it needs no `CANOPY_RUN_LOGIC_PROBE` guard of its own.
-        Task { await ClaudeUsageDirect.refreshLocalAccount() }
+        Task {
+            await ClaudeUsageDirect.refreshLocalAccount()
+            await ClaudeUsageDirect.refreshOtherAccounts()
+        }
 
         // SwiftUI may make the first window main before our observer is
         // registered, in which case `didBecomeMainNotification` fires

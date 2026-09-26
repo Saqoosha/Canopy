@@ -48,20 +48,49 @@ enum ClaudeUsageDirect {
     /// minute; this call has no next minute.
     @MainActor
     static func refreshLocalAccount() async {
-        let account = SharedRateLimitData.shared.local
+        await refresh(SharedRateLimitData.shared.local, keychainService: KeychainAuth.defaultService, label: "usage")
+    }
+
+    /// Fetch every other login's usage too, so a new session can be started
+    /// on one with quota left before any session has run on it
+    /// (`ClaudeAccountPicker`). One at a time: each has its own budget, but
+    /// there is no hurry. A login whose `.claude.json` names the same account
+    /// as the default login is already covered by `refreshLocalAccount`.
+    @MainActor
+    static func refreshOtherAccounts() async {
+        let registry = SharedRateLimitData.shared
+        let localEmail = ClaudeAccountInfo.current()?.email
+        let accounts = ClaudeAccountStore.load()
+        logger.notice("[direct] usage: \(accounts.count, privacy: .public) other login(s) to fetch")
+        for account in accounts {
+            let dir = account.configURL
+            let email = await Task.detached { ClaudeAccountInfo.inConfigDir(dir)?.email }.value
+            let key = ShimProcess.rateLimitKey(remoteEmail: email, localEmail: localEmail, host: dir.path)
+            guard key != nil else {
+                logger.notice("[direct] usage[\(account.name, privacy: .public)]: same account as the default login; skipped")
+                continue
+            }
+            registry.noteResolved(host: dir.path, key: key)
+            await refresh(registry.account(for: key), keychainService: account.keychainService,
+                          label: "usage[\(account.name)]")
+        }
+    }
+
+    @MainActor
+    private static func refresh(_ account: RateLimitAccount, keychainService: String, label: String) async {
         for attempt in 1 ... maxAttempts {
             do {
-                let rateLimits = try await fetchRateLimits()
+                let rateLimits = try await fetchRateLimits(keychainService: keychainService)
                 account.updateFromRawUsage(rateLimits)
                 account.noteUsageRequested()
-                logger.notice("[direct] usage: applied (attempt \(attempt, privacy: .public))")
+                logger.notice("[direct] \(label, privacy: .public): applied (attempt \(attempt, privacy: .public))")
                 return
             } catch {
                 guard shouldRetry(after: error, attempt: attempt) else {
-                    AnthropicDirect.log(error, label: "usage")
+                    AnthropicDirect.log(error, label: label)
                     return
                 }
-                logger.notice("[direct] usage: HTTP 429, retrying in \(retryDelay.components.seconds, privacy: .public) s")
+                logger.notice("[direct] \(label, privacy: .public): HTTP 429, retrying in \(retryDelay.components.seconds, privacy: .public) s")
                 try? await Task.sleep(for: retryDelay)
             }
         }
@@ -77,8 +106,9 @@ enum ClaudeUsageDirect {
     /// The raw response reshaped into what `RateLimitAccount.updateFromRawUsage`
     /// consumes — the shape the CLI hands back as
     /// `get_usage_response.usage.rate_limits`.
-    static func fetchRateLimits(timeout: TimeInterval = 10) async throws -> [String: Any] {
-        guard let token = KeychainAuth.readAccessToken() else {
+    static func fetchRateLimits(keychainService: String = KeychainAuth.defaultService,
+                                timeout: TimeInterval = 10) async throws -> [String: Any] {
+        guard let token = KeychainAuth.readAccessToken(service: keychainService) else {
             throw AnthropicDirect.Failure.noCredential
         }
         var request = URLRequest(url: endpoint)
