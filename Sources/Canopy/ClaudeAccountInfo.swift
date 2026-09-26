@@ -70,6 +70,23 @@ struct ClaudeAccountInfo {
                                  organizationName: nonEmpty("organizationName"))
     }
 
+    @MainActor private static var dirCache: [String: (mtime: Date, info: ClaudeAccountInfo?)] = [:]
+
+    /// `inConfigDir`, cached by mtime like `current()`, for a caller on the
+    /// main thread that asks per session start.
+    @MainActor
+    static func cachedInConfigDir(_ dir: URL) -> ClaudeAccountInfo? {
+        let url = dir.appendingPathComponent(".claude.json")
+        guard let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else {
+            dirCache[dir.path] = nil
+            return nil
+        }
+        if let hit = dirCache[dir.path], hit.mtime == mtime { return hit.info }
+        let info = inConfigDir(dir)
+        dirCache[dir.path] = (mtime, info)
+        return info
+    }
+
     /// The account a `ClaudeAccount`'s config dir is signed in as. Uncached:
     /// read once per shim, off the main thread.
     static func inConfigDir(_ dir: URL) -> ClaudeAccountInfo? {

@@ -721,7 +721,6 @@ final class SessionStore {
         permissionMode: PermissionMode = .acceptEdits,
         remoteHost: String? = nil,
         customApi: ModelProvider? = nil,
-        claudeAccount: ClaudeAccount? = ClaudeAccountStore.defaultAccount(),
         target: PaneTarget = .focused,
         initialPrompt: LaunchPrompt? = nil,
         settledTitle: String? = nil
@@ -749,6 +748,8 @@ final class SessionStore {
         // the same information state it at their own call sites —
         // `openCloudAsync`, `backfillResumeId`, and `applyRestoreSnapshot`,
         // which carries the recorded value rather than asserting one.
+        // A remote CLI signs in on the other machine, so no login is picked.
+        let accountChoice = remoteHost == nil ? launchAccountChoice() : nil
         let session = OpenSession(
             origin: origin,
             resumeId: resumeId ?? UUID().uuidString,
@@ -759,8 +760,7 @@ final class SessionStore {
             model: model,
             effortLevel: effortLevel,
             customApi: customApi,
-            // A remote CLI signs in on the other machine.
-            claudeAccount: remoteHost == nil ? claudeAccount : nil,
+            claudeAccount: accountChoice?.account,
             resumeIdIsExistingTranscript: resumeId != nil
         )
         // Parked on the session rather than passed to `ShimProcess`, because
@@ -769,6 +769,7 @@ final class SessionStore {
         // announces itself.
         session.pendingInitialPrompt = initialPrompt
         session.pendingSettledTitle = settledTitle
+        session.accountAutoSwitch = accountChoice?.autoSwitch
         // The launcher's prompt has exactly one hop left after this — a shim
         // that does not exist yet reads it once the CLI announces itself. This
         // line is what splits "the prompt never got here" from "it got here and
@@ -825,7 +826,6 @@ final class SessionStore {
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,
             customApi: ModelProviderStore.selectedProvider(),
-            claudeAccount: ClaudeAccountStore.defaultAccount(),
             target: target
         )
     }
@@ -977,6 +977,7 @@ final class SessionStore {
         let title = result.summary ?? session.summary
         let project = (session.repoOwner.map { "\($0)/\(session.repoName ?? "?")" })
             ?? cwd.lastPathComponent
+        let accountChoice = launchAccountChoice()
         let opened = OpenSession(
             origin: .teleportedFrom(cloudSessionId: session.id, localPath: cwd),
             resumeId: localId,
@@ -984,7 +985,7 @@ final class SessionStore {
             project: project,
             status: .spawning,
             permissionMode: permissionMode,
-            claudeAccount: ClaudeAccountStore.defaultAccount(),
+            claudeAccount: accountChoice.account,
             // The teleport bridge just wrote that transcript, so the flag is
             // factually true. Inert — a teleported session is local, and the
             // flag is only read on the SSH remote path — but left false it was
@@ -992,6 +993,7 @@ final class SessionStore {
             // already matches, which for this site it always does.
             resumeIdIsExistingTranscript: true
         )
+        opened.accountAutoSwitch = accountChoice.autoSwitch
         // Append (don't insert at top): match openNew's browser-tab
         // convention so cloud reopens don't push existing Open rows
         // around.
@@ -1320,11 +1322,44 @@ final class SessionStore {
         session.restartGeneration += 1
     }
 
+    /// The login a new local session starts on — the default one, or another
+    /// when the default is out of quota (`ClaudeAccountPicker`). Read off the
+    /// numbers `ClaudeUsageDirect` fetched at launch and the running sessions
+    /// keep current, plus any session already told "rejected" by its CLI.
+    func launchAccountChoice(now: Date = Date()) -> ClaudeAccountPicker.Choice {
+        let registry = SharedRateLimitData.shared
+        let localEmail = ClaudeAccountInfo.current()?.email
+        let choice = ClaudeAccountPicker.pick(
+            preferred: ClaudeAccountStore.defaultAccount(),
+            accounts: ClaudeAccountStore.load()
+        ) { account in
+            let hit = openSessions.lazy
+                .filter { $0.origin.remoteHost == nil && $0.claudeAccount?.id == account?.id }
+                .compactMap(\.statusBar.limitHit)
+                .first { $0.resetsAt.map { $0 > now } ?? true }
+            if let hit { return .exhausted(limitLabel: hit.limitLabel, resetsAt: hit.resetsAt) }
+            let key: RateLimitAccount.Key?
+            if let account {
+                let email = ClaudeAccountInfo.cachedInConfigDir(account.configURL)?.email
+                key = ShimProcess.rateLimitKey(remoteEmail: email, localEmail: localEmail,
+                                               host: account.configURL.path)
+            } else {
+                key = nil
+            }
+            return registry.existing(for: key)?.availability(now: now) ?? .unknown
+        }
+        if let note = choice.autoSwitch {
+            logger.notice("launch account: \(note.fromName, privacy: .public) is at its \(note.limitLabel, privacy: .public) limit; starting on \(ClaudeAccountPicker.displayName(choice.account), privacy: .public)")
+        }
+        return choice
+    }
+
     /// Moves a session to another login and restarts it on the same conversation.
     func switchAccount(_ id: UUID, to account: ClaudeAccount?) {
         guard let session = openSessions.first(where: { $0.id == id }) else { return }
         guard session.claudeAccount?.id != account?.id else { return }
         session.claudeAccount = account
+        session.accountAutoSwitch = nil
         logger.notice("switchAccount id=\(id.uuidString, privacy: .public) account=\(account?.name ?? "default", privacy: .public)")
         restartSession(id)
     }

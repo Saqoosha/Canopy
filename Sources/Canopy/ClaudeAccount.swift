@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os.log
 
@@ -26,6 +27,60 @@ struct ClaudeAccount: Identifiable, Codable, Equatable, Hashable {
     var configDir: String
 
     var configURL: URL { URL(fileURLWithPath: configDir, isDirectory: true) }
+
+    /// The Keychain item the CLI keeps this login in: the default item's name
+    /// plus the first 8 hex of sha256 of the path (measured on CLI 2.1.258,
+    /// and against both dirs on this machine).
+    var keychainService: String {
+        let digest = SHA256.hash(data: Data(configDir.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return "\(KeychainAuth.defaultService)-\(hex.prefix(8))"
+    }
+}
+
+/// Where a login stands for starting a new session on it.
+enum AccountAvailability: Equatable {
+    case available
+    /// No usage numbers yet — the account has not been fetched or run.
+    case unknown
+    case exhausted(limitLabel: String, resetsAt: Date?)
+}
+
+/// A new session was started on another login because the preferred one was
+/// out of quota. Shown once in the pane, so the switch is never silent.
+struct AccountAutoSwitch: Equatable {
+    let fromName: String
+    let limitLabel: String
+    let resetsAt: Date?
+}
+
+/// Picks the login a new session starts on: the default one unless it is out
+/// of quota, in which case the first other login known to have quota left,
+/// then one with no numbers yet. When every login is out, the default — the
+/// behaviour before this existed, and the banner still offers the others.
+enum ClaudeAccountPicker {
+    struct Choice: Equatable {
+        let account: ClaudeAccount?
+        let autoSwitch: AccountAutoSwitch?
+    }
+
+    static func pick(preferred: ClaudeAccount?,
+                     accounts: [ClaudeAccount],
+                     availability: (ClaudeAccount?) -> AccountAvailability) -> Choice {
+        guard case .exhausted(let label, let resets) = availability(preferred) else {
+            return Choice(account: preferred, autoSwitch: nil)
+        }
+        let candidates = AccountLimitBanner.targets(current: preferred, accounts: accounts).map(\.account)
+        let chosen = candidates.first { availability($0) == .available }
+            ?? candidates.first { availability($0) == .unknown }
+        guard let chosen else { return Choice(account: preferred, autoSwitch: nil) }
+        return Choice(account: chosen,
+                      autoSwitch: AccountAutoSwitch(fromName: displayName(preferred),
+                                                    limitLabel: label, resetsAt: resets))
+    }
+
+    /// "Default" for the default login, as `AccountLimitBanner` names it.
+    static func displayName(_ account: ClaudeAccount?) -> String { account?.name ?? "Default" }
 }
 
 enum ClaudeAccountStore {

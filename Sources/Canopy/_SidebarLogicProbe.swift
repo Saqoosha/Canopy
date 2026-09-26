@@ -10730,6 +10730,42 @@ enum SidebarLogicProbe {
             record("limit banner: a reset on another day names the day",
                    AccountLimitBanner.message(account: nil, hit: RateLimitHit(limitType: "seven_day", resetsAt: inThreeDays))
                        .contains(weekday))
+
+            // Auto-pick: the login a new session starts on.
+            let out = AccountAvailability.exhausted(limitLabel: "weekly", resetsAt: inThreeDays)
+            func pick(_ preferred: ClaudeAccount?, _ table: [String: AccountAvailability]) -> ClaudeAccountPicker.Choice {
+                ClaudeAccountPicker.pick(preferred: preferred, accounts: [work, side]) { table[$0?.id ?? ""] ?? .unknown }
+            }
+            record("auto-pick: a preferred login with quota is kept, with no note",
+                   pick(nil, ["": .available, "w": .available]) == .init(account: nil, autoSwitch: nil))
+            record("auto-pick: a preferred login with no numbers is kept",
+                   pick(nil, ["": .unknown, "w": .available]).account == nil)
+            let fromDefault = pick(nil, ["": out, "w": .unknown, "s": .available])
+            record("auto-pick: an exhausted default moves to a login known to have quota, ahead of an unknown one",
+                   fromDefault.account == side
+                       && fromDefault.autoSwitch == AccountAutoSwitch(fromName: "Default", limitLabel: "weekly", resetsAt: inThreeDays))
+            record("auto-pick: with no login known to have quota, an unknown one beats staying out",
+                   pick(nil, ["": out, "w": out, "s": .unknown]).account == side)
+            record("auto-pick: an exhausted account can move to the default login",
+                   pick(work, ["w": out, "": .available]).account == nil)
+            record("auto-pick: every login out keeps the preferred one, with no note",
+                   pick(work, ["w": out, "": out, "s": out]) == .init(account: work, autoSwitch: nil))
+
+            let usage = RateLimitAccount(label: nil)
+            record("auto-pick: a record with no windows is unknown", usage.availability() == .unknown)
+            usage.sessionPct = 40; usage.sessionResetDate = Date().addingTimeInterval(3600)
+            usage.weeklyPct = 99; usage.weeklyResetDate = inThreeDays
+            record("auto-pick: under 100% in both windows is available", usage.availability() == .available)
+            usage.weeklyPct = 100
+            record("auto-pick: a full weekly window is exhausted until its reset",
+                   usage.availability() == .exhausted(limitLabel: "weekly", resetsAt: inThreeDays)
+                       && usage.availability(now: inThreeDays.addingTimeInterval(1)) == .available)
+            usage.weeklyPct = 50; usage.sessionPct = 100
+            record("auto-pick: a full 5-hour window is exhausted too",
+                   usage.availability() == .exhausted(limitLabel: "5-hour", resetsAt: usage.sessionResetDate))
+            record("auto-pick: an account's keychain item is the default's plus the path hash",
+                   ClaudeAccount(name: "Alt", configDir: "/Users/hiko/.claude-alt").keychainService
+                       == "Claude Code-credentials-3dfa023f")
         }
 
         // MARK: - Claude accounts (multi-account switching)
