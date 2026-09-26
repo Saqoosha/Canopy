@@ -12,6 +12,11 @@ enum RecentDirectories {
             // builds are masked (not physically scrubbed) here, and any
             // subsequent `add(_:)` rewrites the filtered list back to disk.
             .filter { !GitWorktree.isManagedWorktree($0) }
+            // Collapse duplicates persisted by builds that compared with
+            // `URL ==` (see `add`); keep the first, i.e. most recent.
+            .reduce(into: [URL]()) { kept, url in
+                if !kept.contains(where: { $0.path == url.path }) { kept.append(url) }
+            }
     }
 
     static func add(_ url: URL) {
@@ -22,7 +27,11 @@ enum RecentDirectories {
         // Callers don't need to gate.
         guard !GitWorktree.isManagedWorktree(url) else { return }
         var dirs = load()
-        dirs.removeAll { $0 == url }
+        // Compare by path, not `URL ==`: that compares absoluteString, and
+        // `URL(fileURLWithPath:)` adds a trailing slash for an existing
+        // directory while `isDirectory: false` does not — so the same folder
+        // compared unequal, was re-inserted, and `.path` stored it identically.
+        dirs.removeAll { $0.path == url.path }
         dirs.insert(url, at: 0)
         if dirs.count > maxEntries { dirs = Array(dirs.prefix(maxEntries)) }
         UserDefaults.standard.set(dirs.map(\.path), forKey: key)
@@ -30,7 +39,7 @@ enum RecentDirectories {
 
     static func remove(_ url: URL) {
         var dirs = load()
-        dirs.removeAll { $0 == url }
+        dirs.removeAll { $0.path == url.path }
         UserDefaults.standard.set(dirs.map(\.path), forKey: key)
     }
 }
