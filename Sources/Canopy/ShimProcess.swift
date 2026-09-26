@@ -2360,6 +2360,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     let key = Self.rateLimitKey(remoteEmail: email,
                                                 localEmail: ClaudeAccountInfo.current()?.email,
                                                 host: dir.path)
+                    // A session that started before this directory was
+                    // logged in fell back to the path; fold it into the email
+                    // now known, as the SSH branch does for a host.
+                    SharedRateLimitData.shared.noteResolved(host: dir.path, key: key)
                     self.rateLimitBinding = .resolved(key)
                     if self.channelId != nil { self.requestUsageUpdate() }
                 }
