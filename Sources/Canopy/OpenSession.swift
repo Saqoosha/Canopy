@@ -155,7 +155,7 @@ final class OpenSession: Identifiable, Hashable {
     /// appears.
     var claudeAccount: ClaudeAccount?
     /// Set when this session was started on another login because the
-    /// default was out of quota; `AccountLimitBanner` says so until dismissed.
+    /// preferred one was out of quota; `AccountLimitBanner` says so.
     var accountAutoSwitch: AccountAutoSwitch?
     /// True while Claude is generating a response (assistant / stream_event
     /// messages flowing). Updated by `ShimProcess.boundSession` mirror.

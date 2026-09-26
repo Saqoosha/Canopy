@@ -41,23 +41,23 @@ struct ClaudeAccount: Identifiable, Codable, Equatable, Hashable {
 /// Where a login stands for starting a new session on it.
 enum AccountAvailability: Equatable {
     case available
-    /// No usage numbers yet — the account has not been fetched or run.
+    /// No usable numbers: not fetched yet, or the fetch failed.
     case unknown
     case exhausted(limitLabel: String, resetsAt: Date?)
 }
 
 /// A new session was started on another login because the preferred one was
-/// out of quota. Shown once in the pane, so the switch is never silent.
+/// out of quota. Shown in the pane, so the switch is never silent.
 struct AccountAutoSwitch: Equatable {
     let fromName: String
     let limitLabel: String
     let resetsAt: Date?
 }
 
-/// Picks the login a new session starts on: the default one unless it is out
-/// of quota, in which case the first other login known to have quota left,
-/// then one with no numbers yet. When every login is out, the default — the
-/// behaviour before this existed, and the banner still offers the others.
+/// Picks the login a new session starts on: the preferred one
+/// (`ClaudeAccountStore.defaultAccount()`) unless it is out of quota, in which case the first other login known to have quota left,
+/// then one with no numbers yet. When every login is out, the preferred one —
+/// the behaviour before this existed.
 enum ClaudeAccountPicker {
     struct Choice: Equatable {
         let account: ClaudeAccount?

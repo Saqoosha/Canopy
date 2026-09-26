@@ -748,8 +748,9 @@ final class SessionStore {
         // the same information state it at their own call sites —
         // `openCloudAsync`, `backfillResumeId`, and `applyRestoreSnapshot`,
         // which carries the recorded value rather than asserting one.
+
         // A remote CLI signs in on the other machine, so no login is picked.
-        let accountChoice = remoteHost == nil ? launchAccountChoice() : nil
+        let accountChoice = remoteHost == nil ? launchAccountChoice(customApi: customApi) : nil
         let session = OpenSession(
             origin: origin,
             resumeId: resumeId ?? UUID().uuidString,
@@ -1322,11 +1323,15 @@ final class SessionStore {
         session.restartGeneration += 1
     }
 
-    /// The login a new local session starts on — the default one, or another
-    /// when the default is out of quota (`ClaudeAccountPicker`). Read off the
+    /// The login a local session starts on — the preferred one, or another
+    /// when it is out of quota (`ClaudeAccountPicker`). Read off the
     /// numbers `ClaudeUsageDirect` fetched at launch and the running sessions
     /// keep current, plus any session already told "rejected" by its CLI.
-    func launchAccountChoice(now: Date = Date()) -> ClaudeAccountPicker.Choice {
+    func launchAccountChoice(customApi: ModelProvider? = nil, now: Date = Date()) -> ClaudeAccountPicker.Choice {
+        // A custom endpoint's quota is not the login's, so its limit says nothing here.
+        if ShimProcess.sessionUsesCustomEndpoint(customApi) {
+            return .init(account: ClaudeAccountStore.defaultAccount(), autoSwitch: nil)
+        }
         let registry = SharedRateLimitData.shared
         let localEmail = ClaudeAccountInfo.current()?.email
         let choice = ClaudeAccountPicker.pick(
@@ -1336,7 +1341,7 @@ final class SessionStore {
             let hit = openSessions.lazy
                 .filter { $0.origin.remoteHost == nil && $0.claudeAccount?.id == account?.id }
                 .compactMap(\.statusBar.limitHit)
-                .first { $0.resetsAt.map { $0 > now } ?? true }
+                .first { ($0.resetsAt ?? .distantPast) > now }
             if let hit { return .exhausted(limitLabel: hit.limitLabel, resetsAt: hit.resetsAt) }
             let key: RateLimitAccount.Key?
             if let account {

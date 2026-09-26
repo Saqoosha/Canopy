@@ -10746,8 +10746,12 @@ enum SidebarLogicProbe {
                        && fromDefault.autoSwitch == AccountAutoSwitch(fromName: "Default", limitLabel: "weekly", resetsAt: inThreeDays))
             record("auto-pick: with no login known to have quota, an unknown one beats staying out",
                    pick(nil, ["": out, "w": out, "s": .unknown]).account == side)
-            record("auto-pick: an exhausted account can move to the default login",
-                   pick(work, ["w": out, "": .available]).account == nil)
+            record("auto-pick: an exhausted account can move to the default login, and the note names it",
+                   pick(work, ["w": out, "": .available])
+                       == .init(account: nil, autoSwitch: AccountAutoSwitch(fromName: "Work", limitLabel: "weekly", resetsAt: inThreeDays)))
+            record("auto-pick: the pane note names both logins and the window",
+                   AccountLimitBanner.autoSwitchMessage(AccountAutoSwitch(fromName: "Default", limitLabel: "5-hour", resetsAt: nil), to: work)
+                       == "Started on Work · Default is at its 5-hour limit")
             record("auto-pick: every login out keeps the preferred one, with no note",
                    pick(work, ["w": out, "": out, "s": out]) == .init(account: work, autoSwitch: nil))
 
@@ -10760,9 +10764,23 @@ enum SidebarLogicProbe {
             record("auto-pick: a full weekly window is exhausted until its reset",
                    usage.availability() == .exhausted(limitLabel: "weekly", resetsAt: inThreeDays)
                        && usage.availability(now: inThreeDays.addingTimeInterval(1)) == .available)
-            usage.weeklyPct = 50; usage.sessionPct = 100
-            record("auto-pick: a full 5-hour window is exhausted too",
-                   usage.availability() == .exhausted(limitLabel: "5-hour", resetsAt: usage.sessionResetDate))
+            usage.sessionPct = 100
+            record("auto-pick: with both windows full, the weekly one is named",
+                   usage.availability() == .exhausted(limitLabel: "weekly", resetsAt: inThreeDays))
+            usage.weeklyPct = 50
+            record("auto-pick: a full 5-hour window is exhausted until its reset",
+                   usage.availability() == .exhausted(limitLabel: "5-hour", resetsAt: usage.sessionResetDate)
+                       && usage.availability(now: Date().addingTimeInterval(3601)) == .available)
+            let fiveHourOnly = RateLimitAccount(label: nil)
+            fiveHourOnly.sessionPct = 10; fiveHourOnly.sessionResetDate = Date().addingTimeInterval(3600)
+            record("auto-pick: a record with only a 5-hour window is not unknown",
+                   fiveHourOnly.availability() == .available)
+            let registry = SharedRateLimitData.shared
+            let before = registry.others.count
+            record("auto-pick: looking up an unfetched account creates no record",
+                   registry.existing(for: .email("probe-unfetched@example.invalid")) == nil
+                       && registry.others.count == before
+                       && registry.existing(for: nil) === registry.local)
             record("auto-pick: an account's keychain item is the default's plus the path hash",
                    ClaudeAccount(name: "Alt", configDir: "/Users/hiko/.claude-alt").keychainService
                        == "Claude Code-credentials-3dfa023f")
