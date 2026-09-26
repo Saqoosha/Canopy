@@ -82,6 +82,13 @@ private struct ResizableWindowEnabler: NSViewRepresentable {
                 // Keep the top-left corner where AppKit's autosave put it.
                 frame.origin.y += frame.height - size.height
                 frame.size = size
+                // A size saved on a larger display must still fit this one.
+                if let visible = window.screen?.visibleFrame {
+                    frame.size.width = min(frame.width, visible.width)
+                    frame.size.height = min(frame.height, visible.height)
+                    frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+                    frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+                }
                 window.setFrame(frame, display: true)
             }
         }
