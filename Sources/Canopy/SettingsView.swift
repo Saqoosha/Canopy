@@ -40,14 +40,50 @@ struct SettingsView: View {
 /// SwiftUI's `Settings` scene creates its window without `.resizable` in the
 /// style mask, and `.windowResizability` does not add it, so the frame's
 /// max-size alone leaves the window fixed. Insert it once the view is in a window.
+///
+/// It also owns the window's size across launches. AppKit's autosave does
+/// write `NSWindow Frame com_apple_SwiftUI_Settings_window`, but SwiftUI then
+/// sizes the window to the content's ideal size, so only the position survived.
+/// The size is saved at the end of a user's live resize only — SwiftUI's own
+/// programmatic resizes also fire `didResize` and would overwrite it with the
+/// ideal size — and re-applied one runloop turn after attach, past SwiftUI's sizing.
 private struct ResizableWindowEnabler: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { Host() }
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     private final class Host: NSView {
+        private static let sizeKey = "canopy.settingsWindowSize"
+        private var resizeObserver: NSObjectProtocol?
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            window?.styleMask.insert(.resizable)
+            if let resizeObserver {
+                NotificationCenter.default.removeObserver(resizeObserver)
+                self.resizeObserver = nil
+            }
+            guard let window else { return }
+            window.styleMask.insert(.resizable)
+
+            resizeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didEndLiveResizeNotification, object: window, queue: .main
+            ) { [weak window] _ in
+                MainActor.assumeIsolated {
+                    guard let window else { return }
+                    UserDefaults.standard.set(NSStringFromSize(window.frame.size), forKey: Self.sizeKey)
+                }
+            }
+
+            guard let saved = UserDefaults.standard.string(forKey: Self.sizeKey) else { return }
+            let size = NSSizeFromString(saved)
+            guard size.width > 0, size.height > 0 else { return }
+            DispatchQueue.main.async { [weak window] in
+                guard let window else { return }
+                var frame = window.frame
+                // Keep the top-left corner where AppKit's autosave put it.
+                frame.origin.y += frame.height - size.height
+                frame.size = size
+                window.setFrame(frame, display: true)
+            }
         }
     }
 }
