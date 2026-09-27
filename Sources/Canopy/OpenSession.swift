@@ -233,6 +233,14 @@ final class OpenSession: Identifiable, Hashable {
     /// reference, same ownership rule as `shim`: the pane view re-attaches to
     /// it on re-mount and `SessionStore.closeSession` releases it.
     var mirrorBridge: RemoteMirrorBridge?
+    /// What the first attach asks the other Mac to start, for a row picked
+    /// from its Recents or folder list. Cleared once attached, so a Retry
+    /// re-attaches rather than starting a second session.
+    var pendingMirrorOpen: MirrorOpenRequest?
+    /// The other Mac's `OpenSession.id` for this mirror, from `attach_ok` —
+    /// the id its roster publishes. `resumeId` alone stops matching once a
+    /// new session's placeholder is replaced by the CLI's id over there.
+    var mirrorHostSessionId: String?
 
     /// Bumped by `SessionStore.restartSession(_:)`, and read only through
     /// `mountIdentity`.

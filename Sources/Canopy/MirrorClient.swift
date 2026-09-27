@@ -37,6 +37,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         }
     }
     private(set) var extensionVersion: String?
+    /// The origin's `OpenSession.id` for this session, from `attach_ok`; nil from a Mac that predates it.
+    private(set) var hostSessionId: String?
     /// True for a pane whose webview has a `MirrorAssetSchemeHandler`: the attach then asks for Read images as
     /// `canopy-asset` URLs, so the replay does not carry them as base64.
     private let fetchesImages: Bool
@@ -59,10 +61,13 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorAttach")
     private weak var webView: WKWebView?
     private let sessionId: String
+    private let openRequest: MirrorOpenRequest?
     private var closed = false
 
-    init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView, fetchesImages: Bool = false) {
+    init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView, fetchesImages: Bool = false,
+         open: MirrorOpenRequest? = nil) {
         self.fetchesImages = fetchesImages
+        self.openRequest = open
         self.token = token
         self.sessionId = sessionId
         self.webView = webView
@@ -198,8 +203,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         // `compress`: the transcript replay arrives as one line, and that line is what a slow
         // uplink spends its time on (see `MirrorWire`).
         // `images` (`fetchesImages`): Read images arrive as `canopy-asset` URLs fetched on scroll, not as base64.
-        sendJSONObject(["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
-                        "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages])
+        var attach: [String: Any] = ["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
+                                     "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages]
+        // `open`: start this session over there if nothing is running it yet (a Recents or folder row).
+        if let openRequest { attach["open"] = openRequest.wire }
+        sendJSONObject(attach)
         scheduleReceive()
         // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
         if let webView {
@@ -269,6 +277,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if dict["type"] as? String == "attach_ok" {
             logger.notice("[mirror-attach] attach_ok")
             extensionVersion = dict["extensionVersion"] as? String
+            hostSessionId = (dict["hostSessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             deliverOutcome(.attached)
             return
         }

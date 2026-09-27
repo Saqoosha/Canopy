@@ -162,7 +162,8 @@ final class SessionStore {
             let stale = RemoteRosterWatcher.isStale(snapshot, now: now)
             let rows = snapshot.panes.compactMap { pane -> SidebarRow? in
                 let live = RemoteLiveSession(machineId: id, machineName: snapshot.displayName, row: pane, stale: stale)
-                return attached.contains("\(id):\(live.sessionId)") ? nil : .remoteLive(live)
+                let hidden = attached.contains("\(id):\(live.sessionId)") || attached.contains("\(id):\(pane.sessionId)")
+                return hidden ? nil : .remoteLive(live)
             }
             return RemoteMachineSection(machineId: id, title: snapshot.displayName, rows: rows, loading: false)
         }
@@ -170,9 +171,11 @@ final class SessionStore {
 
     /// Other Macs' rows for the sidebar, judged stale against `remoteClock`.
     var remoteLiveSections: [RemoteMachineSection] {
-        let attached = Set(openSessions.compactMap { s -> String? in
-            guard let t = s.origin.mirrorTarget else { return nil }
-            return "\(t.machineId):\(s.resumeId)"
+        // Keyed by the origin's process id too, which `attach_ok` reports:
+        // a new session's resumeId is a placeholder the origin later replaces.
+        let attached = Set(openSessions.flatMap { s -> [String] in
+            guard let t = s.origin.mirrorTarget else { return [] }
+            return ["\(t.machineId):\(s.resumeId)"] + (s.mirrorHostSessionId.map { ["\(t.machineId):\($0)"] } ?? [])
         })
         return Self.remoteLiveSections(rosters: remoteRosters, machineIds: remoteMachineIds, attached: attached, now: remoteClock)
     }
@@ -218,27 +221,104 @@ final class SessionStore {
             logger.notice("openRemoteLive: refused before attach for \(remote.machineId, privacy: .public)")
             return
         }
-        guard let address = CanopySettings.shared.mirrorPeers[remote.machineId],
+        attachMirrorPane(machineId: remote.machineId, machineName: remote.machineName, resumeId: remote.sessionId,
+                         title: remote.row.title, project: remote.row.project, open: nil, target: target)
+    }
+
+    /// Another Mac's closed session, resumed over there with no pane on its
+    /// screen and attached here.
+    func openRemoteRecent(machineId: String, machineName: String, recent: MirrorRecents.Session, target: PaneTarget) {
+        if let existing = openSessions.first(where: {
+            $0.origin.mirrorTarget?.machineId == machineId && $0.resumeId == recent.id
+        }) {
+            focusOrPane(existing.id, target: target)
+            return
+        }
+        guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return }
+        remoteRecents[machineId]?.sessions.removeAll { $0.id == recent.id }
+        attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: recent.id,
+                         title: recent.title, project: recent.project, open: .resume, target: target)
+    }
+
+    /// A new session in one of another Mac's recent folders, attached here.
+    func openRemoteFolder(machineId: String, machineName: String, path: String, target: PaneTarget) {
+        guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return }
+        let name = (path as NSString).lastPathComponent
+        attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: UUID().uuidString,
+                         title: "Untitled", project: name, open: .new(cwd: path), target: target)
+    }
+
+    /// True when the attach may go ahead; otherwise records why for the sidebar banner.
+    private func refuseRemoteAttachIfUnpaired(machineId: String, machineName: String) -> Bool {
+        guard let refusal = remoteAttachRefusal(machineId: machineId, machineName: machineName) else { return true }
+        remoteAttachError = refusal
+        logger.notice("remote open refused before attach for \(machineId, privacy: .public)")
+        return false
+    }
+
+    private func focusOrPane(_ id: OpenSession.ID, target: PaneTarget) {
+        switch target {
+        case .focused: select(.session(id))
+        case .newPane:
+            if !openInNewPane(id) {
+                if panes.count >= Self.paneAbsoluteCap { showCapReachedHintOnFocusedPane() }
+                openInFocusedPane(id)
+            }
+        }
+    }
+
+    private func attachMirrorPane(machineId: String, machineName: String, resumeId: String, title: String,
+                                  project: String, open: MirrorOpenRequest?, target: PaneTarget) {
+        guard let address = CanopySettings.shared.mirrorPeers[machineId],
               let hostPort = MirrorAccess.parseHostPort(address) else { return }
         let session = OpenSession(
-            origin: .mirror(machineId: remote.machineId, host: hostPort.host, port: hostPort.port),
-            resumeId: remote.sessionId,
-            title: remote.row.title,
-            project: remote.row.project,
+            origin: .mirror(machineId: machineId, host: hostPort.host, port: hostPort.port),
+            resumeId: resumeId,
+            title: title,
+            project: project,
             status: .spawning,
             resumeIdIsExistingTranscript: true
         )
-        session.statusBar.mirrorMachine = remote.machineName
+        session.statusBar.mirrorMachine = machineName
+        session.pendingMirrorOpen = open
         openSessions.append(session)
-        switch target {
-        case .focused: select(.session(session.id))
-        case .newPane:
-            if !openInNewPane(session.id) {
-                if panes.count >= Self.paneAbsoluteCap { showCapReachedHintOnFocusedPane() }
-                openInFocusedPane(session.id)
+        focusOrPane(session.id, target: target)
+        logger.notice("attachMirrorPane: attaching \(resumeId, privacy: .public) on \(machineId, privacy: .public) open=\(String(describing: open), privacy: .public)")
+    }
+
+    /// Other Macs' closed sessions and recent folders, by machine id, as their
+    /// servers last answered `list_recents`. Absent until fetched.
+    var remoteRecents: [String: MirrorRecents] = [:]
+    /// Why the last fetch for a machine failed; cleared by a success.
+    var remoteRecentsError: [String: String] = [:]
+    private var remoteRecentsInFlight: Set<String> = []
+
+    /// Ask a paired Mac for its Recents. A no-op while one is in flight or
+    /// when there is no pairing (the section then has nothing to offer).
+    func refreshRemoteRecents(machineId: String) {
+        guard !remoteRecentsInFlight.contains(machineId),
+              let address = CanopySettings.shared.mirrorPeers[machineId],
+              let hostPort = MirrorAccess.parseHostPort(address),
+              let token = MirrorAccess.peerToken(machineId: machineId) else { return }
+        remoteRecentsInFlight.insert(machineId)
+        MirrorRecentsClient.fetch(host: hostPort.host, port: hostPort.port, token: token) { [weak self] result in
+            guard let self else { return }
+            self.remoteRecentsInFlight.remove(machineId)
+            switch result {
+            case .success(let recents):
+                self.remoteRecents[machineId] = recents
+                self.remoteRecentsError[machineId] = nil
+            case .failure(.refused(let message)):
+                // "expected attach" is a server that predates `list_recents`.
+                self.remoteRecentsError[machineId] = switch message {
+                case "unauthorized": "Password rejected"
+                case "expected attach": "Update Canopy on that Mac to see them"
+                default: message
+                }
+            case .failure(.unreachable):
+                self.remoteRecentsError[machineId] = "Not reachable (is its live mirror on?)"
             }
         }
-        logger.notice("openRemoteLive: attaching \(remote.sessionId, privacy: .public) on \(remote.machineId, privacy: .public)")
     }
 
     /// Feeds a mirror session's activity from its home Mac's roster: a mirror
@@ -246,7 +326,9 @@ final class SessionStore {
     /// A session missing from the snapshot is reported idle: it has ended on its home Mac.
     func noteRemoteState(machineId: String, snapshot: RosterSnapshot) {
         for session in openSessions where session.origin.mirrorTarget?.machineId == machineId {
-            guard let pane = snapshot.panes.first(where: { ($0.resumeId ?? $0.sessionId) == session.resumeId }) else {
+            guard let pane = snapshot.panes.first(where: {
+                ($0.resumeId ?? $0.sessionId) == session.resumeId || $0.sessionId == session.mirrorHostSessionId
+            }) else {
                 session.isThinking = false
                 session.isAsking = false
                 session.isWaiting = false
@@ -258,6 +340,12 @@ final class SessionStore {
             session.isWaiting = activity == .background
             session.statusBar.model = pane.model
             session.statusBar.messageCount = pane.messageCount
+            // A new session started from here carries a placeholder id until
+            // the origin's CLI names it; follow the origin so Retry re-attaches.
+            if let resumeId = pane.resumeId, resumeId != session.resumeId, pane.sessionId == session.mirrorHostSessionId {
+                session.resumeId = resumeId
+            }
+            if !pane.title.isEmpty, pane.title != session.title { session.title = pane.title }
         }
     }
 
@@ -829,6 +917,74 @@ final class SessionStore {
             customApi: ModelProviderStore.selectedProvider(),
             target: target
         )
+    }
+
+    /// Start a session for another Mac's mirror pane without putting it on
+    /// this screen: an open row, a running shim, no pane.
+    ///
+    /// Every other shim is spawned by `WebViewContainer` when a pane mounts,
+    /// which would grow this Mac's window under nobody's hand. Here the
+    /// attaching mirror is the only webview, so its `init` is the one the
+    /// extension sees (`ShimProcess` forwards it when there is no primary).
+    /// When someone here later clicks the row, the pane mounts, reuses this
+    /// shim, and its own `init` is answered from the cache.
+    ///
+    /// Nothing watches this shim die the way a pane's coordinator does: the
+    /// row stays open with a dead shim until closed by hand, and the mirror
+    /// sees a drop.
+    func startHeadlessSession(directory: URL, resumeId: String, isExistingTranscript: Bool, title: String?) -> ShimProcess? {
+        if openSessions.contains(where: { $0.resumeId == resumeId }) {
+            return startHeadlessSession(resumeId: resumeId)
+        }
+        let provider = ModelProviderStore.selectedProvider()
+        let accountChoice = launchAccountChoice(customApi: provider)
+        let session = OpenSession(
+            origin: .local(directory),
+            resumeId: resumeId,
+            title: title ?? "Untitled",
+            project: GitWorktree.projectDisplayName(for: directory),
+            status: .dormant,
+            permissionMode: CanopySettings.shared.defaultPermissionMode,
+            customApi: provider,
+            claudeAccount: accountChoice.account,
+            resumeIdIsExistingTranscript: isExistingTranscript
+        )
+        session.accountAutoSwitch = accountChoice.autoSwitch
+        openSessions.append(session)
+        if !isExistingTranscript { RecentDirectories.add(directory) }
+        return startHeadlessSession(resumeId: resumeId)
+    }
+
+    /// Spawn the shim for an open row that has none (a new headless row, or
+    /// a launch-restored `.dormant` one). Returns the running shim, or nil
+    /// when it could not start.
+    func startHeadlessSession(resumeId: String) -> ShimProcess? {
+        guard let session = openSessions.first(where: { $0.resumeId == resumeId }),
+              session.origin.mirrorTarget == nil else { return nil }
+        if let shim = session.shim { return shim }
+        let shim = ShimProcess(
+            workingDirectory: session.origin.workingDirectory,
+            resumeSessionId: session.resumeId,
+            model: session.model,
+            effortLevel: session.effortLevel,
+            permissionMode: session.permissionMode,
+            sessionTitle: session.title,
+            statusBarData: session.statusBar,
+            remoteHost: session.origin.remoteHost,
+            customApi: session.customApi,
+            claudeAccount: session.claudeAccount,
+            resumeIdIsExistingTranscript: session.resumeIdIsExistingTranscript
+        )
+        session.shim = shim
+        shim.boundSession = session
+        guard shim.start() else {
+            logger.error("startHeadlessSession: shim start failed for \(resumeId, privacy: .public)")
+            session.shim = nil
+            return nil
+        }
+        session.status = .live
+        logger.notice("startHeadlessSession: \(resumeId, privacy: .public) running with no pane")
+        return shim
     }
 
     /// Open a closed cloud row by running the teleport flow. Spawns a

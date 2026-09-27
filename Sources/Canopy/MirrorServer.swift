@@ -268,7 +268,61 @@ final class MirrorConnection: MirrorSink {
         shim?.receiveFromMirror(dict, from: self)
     }
 
+    /// The one line a `list_recents` connection gets before it is closed.
+    /// Same password as an attach: it names every project folder here.
+    private func answerRecents(_ dict: [String: Any]) {
+        guard let provided = dict["token"] as? String,
+              let expected = server?.token,
+              MirrorAccess.tokensMatch(provided, expected)
+        else {
+            logger.error("[mirror-server] list_recents refused: wrong or missing password")
+            failAttach("unauthorized")
+            return
+        }
+        let open = Set(store.openSessions.map(\.resumeId))
+        let sessions = store.recents.filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
+        let folders = RecentDirectories.load().filter { FileManager.default.fileExists(atPath: $0.path) }
+        let data = (try? JSONSerialization.data(withJSONObject: MirrorRecents.replyPayload(sessions: sessions, folders: folders))) ?? Data()
+        // Closed only once the line has left, for `failAttach`'s measured reason.
+        connection.send(content: data + Data([0x0A]), completion: .contentProcessed { [connection] _ in
+            connection.cancel()
+        })
+        cleanup()
+        logger.notice("[mirror-server] list_recents answered: \(min(sessions.count, MirrorRecents.maxSessions)) session(s), \(min(folders.count, MirrorRecents.maxFolders)) folder(s)")
+    }
+
+    /// The shim an `open` request asks for, started with no pane on this Mac.
+    /// Nil when there is nothing to open — a folder that is gone, or a closed
+    /// session this Mac does not list.
+    private func startRequestedSession(_ request: MirrorOpenRequest, sessionId: String) -> ShimProcess? {
+        switch request {
+        case .resume:
+            if store.openSessions.contains(where: { $0.resumeId == sessionId }) {
+                // Open but dormant: it already knows its own folder.
+                return store.startHeadlessSession(resumeId: sessionId)
+            }
+            guard let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen else {
+                logger.error("[mirror-server] open refused: \(sessionId, privacy: .public) is not a session here")
+                return nil
+            }
+            return store.startHeadlessSession(directory: entry.projectDirectory, resumeId: sessionId,
+                                              isExistingTranscript: true, title: entry.title)
+        case .new(let cwd):
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
+                logger.error("[mirror-server] open refused: no folder at \(cwd, privacy: .private)")
+                return nil
+            }
+            return store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
+                                              isExistingTranscript: false, title: nil)
+        }
+    }
+
     private func handleAttach(_ dict: [String: Any]) {
+        if dict["type"] as? String == MirrorRecents.listType {
+            answerRecents(dict)
+            return
+        }
         guard let type = dict["type"] as? String, type == "attach",
               let sessionId = dict["sessionId"] as? String else {
             logger.error("[mirror-server] attach refused: first line is not an attach (type=\(dict["type"] as? String ?? "nil", privacy: .public))")
@@ -284,7 +338,11 @@ final class MirrorConnection: MirrorSink {
             return
         }
         let open = store.openSessions.map { "\($0.resumeId)(shim=\($0.shim != nil))" }.joined(separator: ", ")
-        guard let shim = store.openSessions.first(where: { $0.resumeId == sessionId })?.shim else {
+        var existing = store.openSessions.first(where: { $0.resumeId == sessionId })?.shim
+        if existing == nil, let request = MirrorOpenRequest(wire: dict["open"] as? [String: Any]) {
+            existing = startRequestedSession(request, sessionId: sessionId)
+        }
+        guard let shim = existing else {
             logger.error("[mirror-server] attach refused: no shim for \(sessionId, privacy: .public); open sessions: \(open, privacy: .public)")
             failAttach("no such session")
             return
@@ -302,6 +360,10 @@ final class MirrorConnection: MirrorSink {
         sendJSONObject([
             "type": "attach_ok",
             "sessionId": sessionId,
+            // The id the roster publishes this session under. A new session's
+            // `sessionId` above is a placeholder the CLI's id replaces, and
+            // this is what lets the client follow it.
+            "hostSessionId": shim.boundSession?.id.uuidString ?? "",
             "html": WebViewContainer.entryHTML(resumeSessionId: sessionId, includeKeychainAuth: shim.claudeAccount == nil) {
                 "\(Self.assetScheme)://ext/\($0)"
             },

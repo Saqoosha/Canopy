@@ -72,11 +72,18 @@ struct Sidebar: View {
                         if section.loading {
                             Text("Loading…").font(.system(size: 11)).foregroundStyle(.secondary)
                         } else if section.rows.isEmpty {
-                            Text("No sessions").font(.system(size: 11)).foregroundStyle(.secondary)
+                            Text("No open sessions").font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                         ForEach(section.rows, id: \.id) { row in
                             rowView(row)
                         }
+                        remoteRecentsRows(section)
+                    }
+                    // Fetched when the section appears and again whenever its
+                    // open rows change — a session closed over there is a
+                    // Recents row from then on.
+                    .task(id: "\(section.machineId):\(section.rows.count)") {
+                        store.refreshRemoteRecents(machineId: section.machineId)
                     }
                 }
                 ForEach(closedSections, id: \.title) { section in
@@ -312,6 +319,59 @@ struct Sidebar: View {
                 handleRowClick(row: row, addNewPane: cmdHeld)
             }
         )
+    }
+
+    /// Another Mac's recent folders (as a New Session menu) and closed
+    /// sessions, under its open rows. Both start the session over there with
+    /// no pane on its screen and attach it here.
+    @ViewBuilder
+    private func remoteRecentsRows(_ section: SessionStore.RemoteMachineSection) -> some View {
+        let recents = store.remoteRecents[section.machineId]
+        if let recents, !recents.folders.isEmpty {
+            Menu {
+                ForEach(recents.folders, id: \.self) { path in
+                    Button((path as NSString).abbreviatingWithTildeInPath) {
+                        store.openRemoteFolder(machineId: section.machineId, machineName: section.title, path: path,
+                                               target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused)
+                    }
+                }
+            } label: {
+                Label("New Session in…", systemImage: "plus")
+                    .font(.system(size: 12))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .padding(.leading, 10 - RowChip.horizontalInset)
+            .listRowSeparator(.hidden)
+            .selectionDisabled()
+        }
+        ForEach(recents?.sessions ?? []) { recent in
+            RemoteRecentRowView(recent: recent, isHovered: hoveredRowId == "remote-recent:\(section.machineId):\(recent.id)")
+                .background(
+                    RoundedRectangle(cornerRadius: RowChip.cornerRadius)
+                        .fill(hoveredRowId == "remote-recent:\(section.machineId):\(recent.id)"
+                              ? Color.primary.opacity(0.06) : Color.clear)
+                )
+                .onHover { h in hoveredRowId = h ? "remote-recent:\(section.machineId):\(recent.id)" : nil }
+                .contentShape(Rectangle())
+                .gesture(TapGesture().onEnded {
+                    store.openRemoteRecent(machineId: section.machineId, machineName: section.title, recent: recent,
+                                           target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused)
+                })
+                .selectionDisabled()
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(
+                    top: 1 + RowChip.verticalInset,
+                    leading: RowChip.horizontalInset,
+                    bottom: 1 + RowChip.verticalInset,
+                    trailing: RowChip.horizontalInset
+                ))
+        }
+        if let error = store.remoteRecentsError[section.machineId] {
+            Text("Recents: \(error)").font(.system(size: 11)).foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder
@@ -799,6 +859,39 @@ private struct FilterPopover: View {
 }
 
 // MARK: - Row
+
+/// A closed session on another Mac, drawn at a closed local row's geometry.
+private struct RemoteRecentRowView: View {
+    let recent: MirrorRecents.Session
+    let isHovered: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "desktopcomputer")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(recent.title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(recent.project)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(.leading, 10 - RowChip.horizontalInset)
+        .padding(.trailing, 6 - RowChip.horizontalInset)
+        .padding(.vertical, 4 - RowChip.verticalInset)
+        .frame(minHeight: 36 - 2 * RowChip.verticalInset)
+        .help(recent.timestamp.formatted(date: .abbreviated, time: .shortened))
+    }
+}
 
 private struct SidebarRowView: View {
     let row: SidebarRow

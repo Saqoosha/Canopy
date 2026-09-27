@@ -3387,7 +3387,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                      to: sender)
                 return
             }
+            // A session started for a mirror (`SessionStore.startHeadlessSession`)
+            // has no pane here, so no primary will ever send the first init.
+            // The extension holds no channel yet, so there is nothing for it
+            // to close; the response is cached on the way back like any other.
+            if webView == nil, !liveChannelOpen {
+                requestOwners[requestId] = .mirror(mirrorKey)
+                logger.notice("[mirror] init forwarded from a mirror: no primary webview on this session")
+                sendToShim(["type": "webview_message", "message": dict])
+                return
+            }
             logger.error("[mirror] init dropped: no cached init_response yet, and forwarding it would close every live channel")
+            return
+        } else if isPrimary, primaryOwnChannel == nil, liveChannelOpen, !mirrors.isEmpty,
+                  (dict["request"] as? [String: Any])?["type"] as? String == "init",
+                  let requestId = dict["requestId"] as? String, var cached = cachedInitResponse, let webView
+        {
+            if var state = cached["state"] as? [String: Any] {
+                state["sweptStaleChannels"] = false
+                cached["state"] = state
+            }
+            // The primary arriving after a mirror started this session: a pane
+            // taking a headless row. Forwarding its init would close the
+            // mirror's live channel, for the reason `cachedInitResponse` gives.
+            // A primary that has launched before (`primaryOwnChannel` set) is a
+            // reload and keeps the old path.
+            logger.notice("[mirror] primary init answered from cache: a mirror holds the live channel")
+            post(["type": "from-extension",
+                  "message": ["type": "response", "requestId": requestId, "response": cached] as [String: Any]],
+                 to: webView)
             return
         } else if msgType == "launch_claude", let cid = dict["channelId"] as? String, !cid.isEmpty {
             if let mirrorKey { mirrors[mirrorKey]?.channelId = cid } else if isPrimary { primaryOwnChannel = cid }
@@ -4402,7 +4430,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         guard webView != nil || !mirrors.isEmpty else {
-            logger.error("sendToWebView: webView is nil!")
+            // A session started for a mirror (`SessionStore.startHeadlessSession`)
+            // has no page here by design, and its CLI keeps talking after the
+            // mirror leaves; one error per frame would flood the archive.
+            if boundSession?.webView != nil { logger.error("sendToWebView: webView is nil!") }
             return
         }
         if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
