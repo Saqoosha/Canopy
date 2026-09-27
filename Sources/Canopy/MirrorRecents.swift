@@ -63,14 +63,17 @@ struct MirrorRecents: Equatable {
 }
 
 /// What an `attach` asks the server to start when no shim is running for its
-/// session id. Sent on the FIRST attach only: a Retry that carried it again
-/// would start a second session wherever the first had already moved on.
+/// session id. Sent until an attach succeeds (`OpenSession.pendingMirrorOpen`).
 enum MirrorOpenRequest: Equatable {
-    /// Resume a closed session; the server reads its folder off its own disk.
+    /// Resume a closed session; the server takes its folder from its own Recents.
     case resume
     /// A new session in `cwd` on the other Mac, under the attach's session id
     /// as a placeholder the CLI's own id later replaces.
     case new(cwd: String)
+
+    /// `attach_error` messages for an open the server refused or could not start.
+    static let notOpenable = "cannot open"
+    static let startFailed = "start failed"
 
     var wire: [String: Any] {
         switch self {

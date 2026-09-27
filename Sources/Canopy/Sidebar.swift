@@ -80,7 +80,7 @@ struct Sidebar: View {
                         remoteRecentsRows(section)
                     }
                     // Fetched when the section appears and again whenever its
-                    // open rows change — a session closed over there is a
+                    // open-row count changes — a session closed over there is a
                     // Recents row from then on.
                     .task(id: "\(section.machineId):\(section.rows.count)") {
                         store.refreshRemoteRecents(machineId: section.machineId)
@@ -346,7 +346,8 @@ struct Sidebar: View {
             .listRowSeparator(.hidden)
             .selectionDisabled()
         }
-        ForEach(recents?.sessions ?? []) { recent in
+        let attached = Set(store.openSessions.filter { $0.origin.mirrorTarget?.machineId == section.machineId }.map(\.resumeId))
+        ForEach((recents?.sessions ?? []).filter { !attached.contains($0.id) }) { recent in
             RemoteRecentRowView(recent: recent, isHovered: hoveredRowId == "remote-recent:\(section.machineId):\(recent.id)")
                 .background(
                     RoundedRectangle(cornerRadius: RowChip.cornerRadius)

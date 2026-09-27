@@ -195,6 +195,8 @@ final class SessionStore {
         switch reason {
         case "unauthorized": "\(machineName) rejected the password. Paste its connection again in Settings › Remote."
         case "no such session": "That session is no longer running on \(machineName)."
+        case MirrorOpenRequest.notOpenable: "\(machineName) could not open that session: its folder or transcript is gone."
+        case MirrorOpenRequest.startFailed: "\(machineName) could not start the session. Check Canopy on that Mac."
         default: "\(machineName) refused the attach: \(reason)"
         }
     }
@@ -235,7 +237,6 @@ final class SessionStore {
             return
         }
         guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return }
-        remoteRecents[machineId]?.sessions.removeAll { $0.id == recent.id }
         attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: recent.id,
                          title: recent.title, project: recent.project, open: .resume, target: target)
     }
@@ -929,9 +930,8 @@ final class SessionStore {
     /// When someone here later clicks the row, the pane mounts, reuses this
     /// shim, and its own `init` is answered from the cache.
     ///
-    /// Nothing watches this shim die the way a pane's coordinator does: the
-    /// row stays open with a dead shim until closed by hand, and the mirror
-    /// sees a drop.
+    /// If the shim dies, `ShimProcess.handleProcessExit` drops its mirrors and
+    /// returns the row to `.dormant`.
     func startHeadlessSession(directory: URL, resumeId: String, isExistingTranscript: Bool, title: String?) -> ShimProcess? {
         if openSessions.contains(where: { $0.resumeId == resumeId }) {
             return startHeadlessSession(resumeId: resumeId)
@@ -951,17 +951,22 @@ final class SessionStore {
         )
         session.accountAutoSwitch = accountChoice.autoSwitch
         openSessions.append(session)
+        guard let shim = startHeadlessSession(resumeId: resumeId) else {
+            // Nobody here asked for this row; a failed start must not leave it behind.
+            openSessions.removeAll { $0.id == session.id }
+            return nil
+        }
         if !isExistingTranscript { RecentDirectories.add(directory) }
-        return startHeadlessSession(resumeId: resumeId)
+        return shim
     }
 
     /// Spawn the shim for an open row that has none (a new headless row, or
-    /// a launch-restored `.dormant` one). Returns the running shim, or nil
-    /// when it could not start.
+    /// a launch-restored `.dormant` one). Returns a live shim, or nil when it
+    /// could not start or the row's existing shim is dead.
     func startHeadlessSession(resumeId: String) -> ShimProcess? {
         guard let session = openSessions.first(where: { $0.resumeId == resumeId }),
               session.origin.mirrorTarget == nil else { return nil }
-        if let shim = session.shim { return shim }
+        if let shim = session.shim { return shim.isLive ? shim : nil }
         let shim = ShimProcess(
             workingDirectory: session.origin.workingDirectory,
             resumeSessionId: session.resumeId,
@@ -978,7 +983,7 @@ final class SessionStore {
         session.shim = shim
         shim.boundSession = session
         guard shim.start() else {
-            logger.error("startHeadlessSession: shim start failed for \(resumeId, privacy: .public)")
+            logger.error("startHeadlessSession: shim start failed for \(resumeId, privacy: .public): \(session.lastFatalError ?? "no reason", privacy: .public)")
             session.shim = nil
             return nil
         }

@@ -1901,6 +1901,29 @@ enum SidebarLogicProbe {
             store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0, panes: []))
             record("attach: a session gone from its home Mac's roster reads idle",
                    !existing.isAsking && !existing.isThinking && !existing.isWaiting)
+
+            // A session started from here attaches under a placeholder; the
+            // origin's OpenSession.id (from attach_ok) is what finds its row.
+            let started = OpenSession(origin: .mirror(machineId: "M2", host: "100.64.0.2", port: 8770),
+                                      resumeId: "placeholder", title: "Untitled", project: "P", status: .live)
+            started.mirrorHostSessionId = "H1"
+            let unmatched = OpenSession(origin: .mirror(machineId: "M2", host: "100.64.0.2", port: 8770),
+                                        resumeId: "other", title: "Keep", project: "P", status: .live)
+            store._probeSeedOpenSessions([existing, other, m3, started, unmatched])
+            store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(
+                machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                panes: [RosterSnapshot.Pane(sessionId: "H1", resumeId: "cli-id", paneIndex: 0, title: "Named there", project: "P",
+                                            state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true),
+                        RosterSnapshot.Pane(sessionId: "", resumeId: "zzz", paneIndex: 1, title: "", project: "P",
+                                            state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true)]))
+            record("attach: a mirror matched by the origin's session id reads its state",
+                   started.isThinking)
+            record("attach: it adopts the origin's resumeId once the CLI names the session",
+                   started.resumeId == "cli-id")
+            record("attach: it takes the origin's title",
+                   started.title == "Named there")
+            record("attach: a mirror with no origin session id is not matched by an empty one",
+                   !unmatched.isThinking && unmatched.resumeId == "other" && unmatched.title == "Keep")
             record("mirror server: a mac client is not a phone",
                    !MirrorConnection.appliesPhoneReplayRewrites(client: "mac"))
             record("mirror server: a client with no client field is a phone",

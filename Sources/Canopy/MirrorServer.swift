@@ -291,31 +291,37 @@ final class MirrorConnection: MirrorSink {
         logger.notice("[mirror-server] list_recents answered: \(min(sessions.count, MirrorRecents.maxSessions)) session(s), \(min(folders.count, MirrorRecents.maxFolders)) folder(s)")
     }
 
-    /// The shim an `open` request asks for, started with no pane on this Mac.
-    /// Nil when there is nothing to open — a folder that is gone, or a closed
-    /// session this Mac does not list.
-    private func startRequestedSession(_ request: MirrorOpenRequest, sessionId: String) -> ShimProcess? {
+    /// The shim an `open` request asks for, started with no pane on this Mac,
+    /// or the `attach_error` message saying why there is none.
+    private func startRequestedSession(_ request: MirrorOpenRequest, sessionId: String) -> Result<ShimProcess, OpenFailure> {
+        let shim: ShimProcess?
         switch request {
         case .resume:
             if store.openSessions.contains(where: { $0.resumeId == sessionId }) {
                 // Open but dormant: it already knows its own folder.
-                return store.startHeadlessSession(resumeId: sessionId)
-            }
-            guard let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen else {
+                shim = store.startHeadlessSession(resumeId: sessionId)
+            } else if let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen {
+                shim = store.startHeadlessSession(directory: entry.projectDirectory, resumeId: sessionId,
+                                                  isExistingTranscript: true, title: entry.title)
+            } else {
                 logger.error("[mirror-server] open refused: \(sessionId, privacy: .public) is not a session here")
-                return nil
+                return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
             }
-            return store.startHeadlessSession(directory: entry.projectDirectory, resumeId: sessionId,
-                                              isExistingTranscript: true, title: entry.title)
         case .new(let cwd):
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 logger.error("[mirror-server] open refused: no folder at \(cwd, privacy: .private)")
-                return nil
+                return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
             }
-            return store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
+            shim = store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
                                               isExistingTranscript: false, title: nil)
         }
+        return shim.map { .success($0) } ?? .failure(OpenFailure(MirrorOpenRequest.startFailed))
+    }
+
+    private struct OpenFailure: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
     }
 
     private func handleAttach(_ dict: [String: Any]) {
@@ -338,9 +344,14 @@ final class MirrorConnection: MirrorSink {
             return
         }
         let open = store.openSessions.map { "\($0.resumeId)(shim=\($0.shim != nil))" }.joined(separator: ", ")
-        var existing = store.openSessions.first(where: { $0.resumeId == sessionId })?.shim
+        var existing = store.openSessions.first(where: { $0.resumeId == sessionId })?.shim.flatMap { $0.isLive ? $0 : nil }
         if existing == nil, let request = MirrorOpenRequest(wire: dict["open"] as? [String: Any]) {
-            existing = startRequestedSession(request, sessionId: sessionId)
+            switch startRequestedSession(request, sessionId: sessionId) {
+            case .success(let shim): existing = shim
+            case .failure(let failure):
+                failAttach(failure.message)
+                return
+            }
         }
         guard let shim = existing else {
             logger.error("[mirror-server] attach refused: no shim for \(sessionId, privacy: .public); open sessions: \(open, privacy: .public)")
