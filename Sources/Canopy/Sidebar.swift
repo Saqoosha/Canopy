@@ -79,10 +79,9 @@ struct Sidebar: View {
                         }
                         remoteRecentsRows(section)
                     }
-                    // Fetched when the section appears and again whenever its
-                    // open-row count changes — a session closed over there is a
-                    // Recents row from then on.
-                    .task(id: "\(section.machineId):\(section.rows.count)") {
+                    // Refetched when the section finishes loading or its open rows
+                    // change — a session closed over there is a Recents row from then on.
+                    .task(id: "\(section.machineId):\(section.loading):\(section.rows.map(\.id).joined(separator: ","))") {
                         store.refreshRemoteRecents(machineId: section.machineId)
                     }
                 }
