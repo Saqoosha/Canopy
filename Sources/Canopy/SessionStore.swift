@@ -927,8 +927,9 @@ final class SessionStore {
     /// which would grow this Mac's window under nobody's hand. Here the
     /// attaching mirror is the only webview, so its `init` is the one the
     /// extension sees (`ShimProcess` forwards it when there is no primary).
-    /// When someone here later clicks the row, the pane mounts, reuses this
-    /// shim, and its own `init` is answered from the cache.
+    /// A pane that later takes the row reuses this shim; its `init` is answered
+    /// from the cache while the mirror is attached, and forwarded (closing the
+    /// channel) once it has left.
     ///
     /// If the shim dies, `ShimProcess.handleProcessExit` drops its mirrors and
     /// returns the row to `.dormant`.

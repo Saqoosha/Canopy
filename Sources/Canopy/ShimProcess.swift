@@ -279,13 +279,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// All living ShimProcess instances (weak references, auto-removed on dealloc).
     @MainActor private static var instances = NSHashTable<ShimProcess>.weakObjects()
 
+    /// Running and not being stopped on purpose.
+    var isLive: Bool { process?.isRunning == true && !isIntentionalStop }
+
     /// Whether any shim process is currently running. Used by AppDelegate's
     /// quit-time confirmation alert. `isIntentionalStop` shims are excluded —
     /// `proc.terminate()` is async, so `process.isRunning` lingers true for a
     /// few ms after `stop()` returns and would otherwise trip the prompt.
-    /// Running and not being stopped on purpose.
-    var isLive: Bool { process?.isRunning == true && !isIntentionalStop }
-
     @MainActor static var hasActiveSession: Bool {
         instances.allObjects.contains { $0.process?.isRunning == true && !$0.isIntentionalStop }
     }
@@ -3402,7 +3402,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             logger.error("[mirror] init dropped: no cached init_response yet, and forwarding it would close every live channel")
             return
-        } else if isPrimary, primaryOwnChannel == nil, liveChannelOpen,
+        } else if isPrimary, primaryOwnChannel == nil, liveChannelOpen, !mirrors.isEmpty,
                   (dict["request"] as? [String: Any])?["type"] as? String == "init",
                   let requestId = dict["requestId"] as? String, var cached = cachedInitResponse, let webView
         {
@@ -3411,11 +3411,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 cached["state"] = state
             }
             // The primary arriving after a mirror started this session: a pane
-            // taking a headless row. Forwarding its init would close the live
-            // channel that mirror launched, attached or not.
+            // taking a headless row while the mirror is still attached.
+            // Forwarding its init would close the mirror's live channel.
             // A primary that has launched before (`primaryOwnChannel` set) is a
             // reload and keeps the old path.
-            logger.notice("[mirror] primary init answered from cache: a mirror launched the live channel")
+            logger.notice("[mirror] primary init answered from cache: a mirror holds the live channel")
             post(["type": "from-extension",
                   "message": ["type": "response", "requestId": requestId, "response": cached] as [String: Any]],
                  to: webView)
