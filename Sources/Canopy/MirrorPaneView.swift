@@ -185,7 +185,7 @@ struct MirrorPaneView: NSViewRepresentable {
         webView.isInspectable = true
 
         let bridge = RemoteMirrorBridge(host: target.host, port: target.port, sessionId: session.resumeId, token: token,
-                                        webView: webView, fetchesImages: true)
+                                        webView: webView, fetchesImages: true, open: session.pendingMirrorOpen)
         assetHandler.bridge = bridge
         registerHandlers(on: webView, bridge: bridge, coordinator: coordinator)
         let machineName = session.statusBar.mirrorMachine ?? target.machineId
@@ -208,6 +208,8 @@ struct MirrorPaneView: NSViewRepresentable {
             switch outcome {
             case .attached:
                 session.status = .live
+                session.pendingMirrorOpen = nil
+                if let hostId = bridge?.hostSessionId { session.mirrorHostSessionId = hostId }
                 if let remote = bridge?.extensionVersion, let local = CCExtension.extensionVersion(), remote != local {
                     logger.notice("[mirror-pane] extension \(local, privacy: .public) here, \(remote, privacy: .public) on \(machineName, privacy: .public)")
                 }

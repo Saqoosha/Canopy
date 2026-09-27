@@ -1748,6 +1748,38 @@ enum SidebarLogicProbe {
                        .allSatisfy(MirrorFileWire.isFileFrame) && !MirrorFileWire.isFileFrame("status"))
         }
 
+        // Remote Recents: the reply a server builds must read back on the
+        // client, and an `open` request is what makes a server spawn a shim,
+        // so the wire must refuse anything that is not one of the two kinds.
+        do {
+            let entry = SessionEntry(id: "abc", title: "Fix it", timestamp: Date(timeIntervalSince1970: 1_000),
+                                     projectDirectory: URL(fileURLWithPath: "/tmp/ProbeProject"))
+            let reply = MirrorRecents.replyPayload(sessions: [entry], folders: [URL(fileURLWithPath: "/tmp/ProbeProject")])
+            let parsed = MirrorRecents.parse(reply)
+            record("mirror recents: a server's reply parses back with its session and folder",
+                   parsed?.sessions.first?.id == "abc" && parsed?.sessions.first?.title == "Fix it"
+                       && parsed?.sessions.first?.timestamp == Date(timeIntervalSince1970: 1_000)
+                       && parsed?.folders == ["/tmp/ProbeProject"])
+            let many = (0..<(MirrorRecents.maxSessions + 5)).map {
+                SessionEntry(id: "s\($0)", title: "t", timestamp: Date(), projectDirectory: URL(fileURLWithPath: "/tmp"))
+            }
+            record("mirror recents: the reply is capped at maxSessions",
+                   MirrorRecents.parse(MirrorRecents.replyPayload(sessions: many, folders: []))?.sessions.count == MirrorRecents.maxSessions)
+            record("mirror recents: an attach_error is not a reply",
+                   MirrorRecents.parse(["type": "attach_error", "message": "unauthorized"]) == nil)
+            record("mirror recents: a relative folder and an id-less session are dropped",
+                   MirrorRecents.parse(["type": MirrorRecents.replyType, "folders": ["relative", "/abs"],
+                                        "sessions": [["title": "no id"]]]) == MirrorRecents(sessions: [], folders: ["/abs"]))
+            record("mirror open: both kinds round-trip the wire",
+                   MirrorOpenRequest(wire: MirrorOpenRequest.resume.wire) == .resume
+                       && MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/x").wire) == .new(cwd: "/tmp/x"))
+            record("mirror open: an unknown kind, a missing or relative cwd, and no request at all are refused",
+                   MirrorOpenRequest(wire: ["kind": "exec"]) == nil
+                       && MirrorOpenRequest(wire: ["kind": "new"]) == nil
+                       && MirrorOpenRequest(wire: ["kind": "new", "cwd": "tmp"]) == nil
+                       && MirrorOpenRequest(wire: nil) == nil)
+        }
+
         // Remote roster watcher: the pure halves. Frame classification copies
         // the phone's rule — a snapshot carries no `type`, an event does, and
         // an event must never decode as a snapshot with no panes.
@@ -1796,6 +1828,12 @@ enum SidebarLogicProbe {
                    sections[1].title == "studio")
             record("remote rows: an attached session's row is dropped",
                    sections[1].rows.map(\.id) == ["remote:M2:a"])
+            // A session this Mac started over there attaches under a
+            // placeholder resumeId; the origin's process id is what still matches.
+            let byHostId = SessionStore.remoteLiveSections(
+                rosters: ["M2": fresh], machineIds: ["M2"], attached: ["M2:sa"], now: now)
+            record("remote rows: a session attached under the origin's process id is dropped",
+                   byHostId[0].rows.map(\.id) == ["remote:M2:b"])
             record("remote rows: a stale machine's rows are marked stale",
                    { if case .remoteLive(let r) = sections[0].rows[0] { return r.stale } else { return false } }())
             record("remote rows: a live fresh row can open",
@@ -1863,6 +1901,29 @@ enum SidebarLogicProbe {
             store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0, panes: []))
             record("attach: a session gone from its home Mac's roster reads idle",
                    !existing.isAsking && !existing.isThinking && !existing.isWaiting)
+
+            // A session started from here attaches under a placeholder; the
+            // origin's OpenSession.id (from attach_ok) is what finds its row.
+            let started = OpenSession(origin: .mirror(machineId: "M2", host: "100.64.0.2", port: 8770),
+                                      resumeId: "placeholder", title: "Untitled", project: "P", status: .live)
+            started.mirrorHostSessionId = "H1"
+            let unmatched = OpenSession(origin: .mirror(machineId: "M2", host: "100.64.0.2", port: 8770),
+                                        resumeId: "other", title: "Keep", project: "P", status: .live)
+            store._probeSeedOpenSessions([existing, other, m3, started, unmatched])
+            store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(
+                machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                panes: [RosterSnapshot.Pane(sessionId: "H1", resumeId: "cli-id", paneIndex: 0, title: "Named there", project: "P",
+                                            state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true),
+                        RosterSnapshot.Pane(sessionId: "", resumeId: "zzz", paneIndex: 1, title: "", project: "P",
+                                            state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true)]))
+            record("attach: a mirror matched by the origin's session id reads its state",
+                   started.isThinking)
+            record("attach: it adopts the origin's resumeId once the CLI names the session",
+                   started.resumeId == "cli-id")
+            record("attach: it takes the origin's title",
+                   started.title == "Named there")
+            record("attach: a mirror with no origin session id is not matched by an empty one",
+                   !unmatched.isThinking && unmatched.resumeId == "other" && unmatched.title == "Keep")
             record("mirror server: a mac client is not a phone",
                    !MirrorConnection.appliesPhoneReplayRewrites(client: "mac"))
             record("mirror server: a client with no client field is a phone",
