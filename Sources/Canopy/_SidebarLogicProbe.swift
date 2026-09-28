@@ -1790,6 +1790,8 @@ enum SidebarLogicProbe {
                    LauncherView.cleanedSessionTitle("why does <command-name>/recap</command-name> vanish") == "why does /recap vanish")
             record("peer title: the caveat is dropped and the text after it kept",
                    LauncherView.cleanedSessionTitle("<local-command-caveat>Caveat: x</local-command-caveat>hello") == "hello")
+            record("peer title: a shell escape's wrapper is stripped",
+                   LauncherView.cleanedSessionTitle("<bash-input>git status</bash-input>") == "git status")
             record("peer title: ordinary angle brackets survive",
                    LauncherView.cleanedSessionTitle("fix Array<Int> handling") == "fix Array<Int> handling")
             record("peer title: nothing left reads Untitled",

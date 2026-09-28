@@ -951,7 +951,8 @@ struct LauncherView: View {
         let groups = Self.peerSessionGroups(sessions, preferring: peerFolder.map { ($0 as NSString).lastPathComponent })
         return Menu {
             if sessions.isEmpty {
-                Text(store.remoteRecents[peer.machineId] == nil ? "Loading…" : "No closed sessions")
+                Text(store.remoteRecentsError[peer.machineId]
+                     ?? (store.remoteRecents[peer.machineId] == nil ? "Loading…" : "No closed sessions"))
             }
             ForEach(groups, id: \.project) { group in
                 Section(group.project.isEmpty ? "Other" : group.project) {
@@ -1013,7 +1014,8 @@ struct LauncherView: View {
             return name.hasPrefix("/") ? String(name) : "/" + name
         }
         var text = trimmed.replacing(/<local-command-caveat>[\s\S]*?(<\/local-command-caveat>|$)/, with: " ")
-        text = text.replacing(/<\/?(?:command-[a-z-]+|local-command-[a-z-]+|system-reminder)>/, with: " ")
+        // The CLI's tags are lowercase and hyphenated; `Array<Int>` and `<div>` are not.
+        text = text.replacing(/<\/?[a-z]+(?:-[a-z]+)+>/, with: " ")
         text = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         return text.isEmpty ? "Untitled" : text
     }
