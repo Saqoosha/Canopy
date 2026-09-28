@@ -88,6 +88,7 @@ enum SidebarRow: Identifiable, Hashable {
     var project: String {
         switch self {
         case .open(let s):
+            if case .local(let dir) = s.origin, GitWorktree.isManagedWorktree(dir) { return GitWorktree.repoName(for: dir) }
             return s.project
         case .closedLocal(let e):
             // The repo, not `projectName`: that one appends a worktree's

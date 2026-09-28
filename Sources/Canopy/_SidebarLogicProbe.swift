@@ -3020,7 +3020,13 @@ enum SidebarLogicProbe {
                        id: "root", title: "t", timestamp: Date(),
                        projectDirectory: URL(fileURLWithPath: "/tmp/Canopy")))
                    let sections = SidebarGrouping.sections(from: [wt, root], mode: .project)
-                   return wt.project == "Canopy"
+                   let openWt = SidebarRow.open(OpenSession(
+                       origin: .local(GitWorktree.worktreesRoot.appendingPathComponent("Canopy/feature-foo")),
+                       resumeId: "owt", title: "t",
+                       project: GitWorktree.projectDisplayName(for: GitWorktree.worktreesRoot
+                           .appendingPathComponent("Canopy/feature-foo")),
+                       status: .live))
+                   return wt.project == "Canopy" && openWt.project == "Canopy"
                        && wt.displayProject == "Canopy · feature-foo"
                        && sections.count == 1 && sections.first?.rows.count == 2
                }())
