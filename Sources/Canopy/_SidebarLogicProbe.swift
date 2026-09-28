@@ -3008,6 +3008,23 @@ enum SidebarLogicProbe {
                        && row.displayProject == "Canopy · feature/foo"
                }())
 
+        // Same rule for a CLOSED worktree session: its bucket is the repo,
+        // not `projectName`'s "repo · branch", or every closed worktree gets
+        // its own `.project` section.
+        record("closed worktree row groups under its repo",
+               {
+                   let wt = SidebarRow.closedLocal(SessionEntry(
+                       id: "wt", title: "t", timestamp: Date(),
+                       projectDirectory: GitWorktree.worktreesRoot.appendingPathComponent("Canopy/feature-foo")))
+                   let root = SidebarRow.closedLocal(SessionEntry(
+                       id: "root", title: "t", timestamp: Date(),
+                       projectDirectory: URL(fileURLWithPath: "/tmp/Canopy")))
+                   let sections = SidebarGrouping.sections(from: [wt, root], mode: .project)
+                   return wt.project == "Canopy"
+                       && wt.displayProject == "Canopy · feature-foo"
+                       && sections.count == 1 && sections.first?.rows.count == 2
+               }())
+
         record("isManagedWorktree: managed layout → true",
                GitWorktree.isManagedWorktree(
                    GitWorktree.worktreesRoot.appendingPathComponent("Canopy/fix-foo")))

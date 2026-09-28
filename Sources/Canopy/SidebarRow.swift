@@ -90,7 +90,10 @@ enum SidebarRow: Identifiable, Hashable {
         case .open(let s):
             return s.project
         case .closedLocal(let e):
-            return e.projectName
+            // The repo, not `projectName`: that one appends a worktree's
+            // branch, which gave every closed worktree session its own
+            // `.project` section and its own filter-picker entry.
+            return GitWorktree.repoName(for: e.projectDirectory)
         case .closedCloud(let r):
             if let owner = r.repoOwner, let name = r.repoName {
                 return "\(owner)/\(name)"
@@ -107,14 +110,18 @@ enum SidebarRow: Identifiable, Hashable {
     }
 
     /// What the row's subtitle actually shows. Identical to `project` except
-    /// for an open session, which appends the branch its VCS reports so two
-    /// panes on two branches of one repo are distinguishable. Deliberately a
+    /// for a local session, which appends the branch (an open one's from its
+    /// VCS, a closed one's from its worktree path) so two
+    /// sessions on two branches of one repo are distinguishable. Deliberately a
     /// second property rather than a change to `project`: the two answers
     /// serve opposite needs — grouping wants the coarsest label that still
     /// names the repo, the subtitle wants the finest one that names the work.
     var displayProject: String {
-        if case .open(let s) = self { return s.projectLabel }
-        return project
+        switch self {
+        case .open(let s): return s.projectLabel
+        case .closedLocal(let e): return e.projectName
+        case .closedCloud, .launcher, .remoteLive: return project
+        }
     }
 
     /// Drives the closed-block sort order only. The open block ignores
