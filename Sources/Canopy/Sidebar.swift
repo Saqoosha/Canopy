@@ -225,7 +225,7 @@ struct Sidebar: View {
     @ViewBuilder
     private var emptyStateView: some View {
         VStack(alignment: .center, spacing: 8) {
-            if store.isSearching && !store.filter.isActive {
+            if store.isSearching {
                 Image(systemName: "magnifyingglass")
                     .font(.title2)
                     .foregroundStyle(.tertiary)
@@ -233,6 +233,12 @@ struct Sidebar: View {
                      ? "Searching…" : "No sessions match \"\(store.searchText)\".")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if store.filter.isActive {
+                    Button("Clear filters") {
+                        store.filter = SidebarFilter()
+                    }
+                    .controlSize(.small)
+                }
             } else if store.filter.isActive {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .font(.title2)
