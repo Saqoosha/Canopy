@@ -74,7 +74,7 @@ struct Sidebar: View {
                 }
                 // Search covers this Mac's sessions only; the remote blocks
                 // would sit unfiltered above the results.
-                ForEach(store.searchText.isEmpty ? store.remoteLiveSections : []) { section in
+                ForEach(store.isSearching ? [] : store.remoteLiveSections) { section in
                     Section(isExpanded: remoteSectionExpanded(section.machineId)) {
                         if section.loading {
                             Text("Loading…").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -225,7 +225,7 @@ struct Sidebar: View {
     @ViewBuilder
     private var emptyStateView: some View {
         VStack(alignment: .center, spacing: 8) {
-            if !store.searchText.isEmpty {
+            if store.isSearching && !store.filter.isActive {
                 Image(systemName: "magnifyingglass")
                     .font(.title2)
                     .foregroundStyle(.tertiary)

@@ -129,20 +129,25 @@ final class SessionStore {
     /// every session on disk — the cap is what makes older sessions unfindable.
     var searchText = "" {
         didSet {
-            if oldValue.isEmpty, !searchText.isEmpty { refreshSearchIndex() }
+            if !wasSearching(oldValue), isSearching { refreshSearchIndex() }
         }
     }
+
+    /// Whitespace alone is not a query.
+    var isSearching: Bool { wasSearching(searchText) }
+    private func wasSearching(_ text: String) -> Bool { !SessionSearch.terms(text).isEmpty }
 
     /// Every local session, uncapped. Built on the first keystroke of each
     /// search and kept (stale) while the next build runs.
     private(set) var searchIndex: [SessionEntry]?
     private(set) var isBuildingSearchIndex = false
+    private var searchIndexRebuildPending = false
 
     /// Bumped by Find Session (Cmd+F); the sidebar focuses its field on change.
     var searchFocusRequest = 0
 
     func refreshSearchIndex() {
-        guard !isBuildingSearchIndex else { return }
+        guard !isBuildingSearchIndex else { searchIndexRebuildPending = true; return }
         isBuildingSearchIndex = true
         Task {
             let started = Date()
@@ -152,7 +157,20 @@ final class SessionStore {
             logger.notice("Search index: \(all.count, privacy: .public) sessions in \(Int(Date().timeIntervalSince(started) * 1000), privacy: .public) ms")
             searchIndex = all
             isBuildingSearchIndex = false
+            if searchIndexRebuildPending {
+                searchIndexRebuildPending = false
+                refreshSearchIndex()
+            }
         }
+    }
+
+    /// Closed local sessions to show. While searching, `recents` is laid over
+    /// the index so a rename or a close since the last build shows at once.
+    static func closedSource(searching: Bool, recents: [SessionEntry],
+                             searchIndex: [SessionEntry]?) -> [SessionEntry] {
+        guard searching, let searchIndex else { return recents }
+        let recentIds = Set(recents.map(\.id))
+        return recents + searchIndex.filter { !recentIds.contains($0.id) }
     }
 
     /// Cloud (claude.ai/code) sessions, refreshed via `refreshCloud()`.
@@ -629,8 +647,7 @@ final class SessionStore {
         // would be a duplicate.
         let openResumeIds = Set(openSessions.map(\.resumeId))
         let terms = SessionSearch.terms(searchText)
-        let closedSource = terms.isEmpty ? recents : (searchIndex ?? recents)
-        let recentRows = closedSource
+        let recentRows = Self.closedSource(searching: !terms.isEmpty, recents: recents, searchIndex: searchIndex)
             .filter { !openResumeIds.contains($0.id) && !hiddenIds.contains($0.id) }
             .map(SidebarRow.closedLocal)
         let cloudRows = cloud
@@ -1573,9 +1590,9 @@ final class SessionStore {
         // 1. Sessions list — render the sidebar as soon as this returns.
         let all = await Task.detached { ClaudeSessionHistory.loadAllSessions() }.value
         await MainActor.run { self.recents = all }
-        // Warm the search index in the background so the first search does
-        // not wait on a full header scan.
-        if searchIndex == nil { refreshSearchIndex() }
+        // Warm the search index at launch so the first search does not wait
+        // on a full header scan, and keep it current after that.
+        refreshSearchIndex()
 
         // 2. Teleport-from map — used only for cloud-row dedup. If it's
         //    slow, the user just sees the cloud row briefly until it

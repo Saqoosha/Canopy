@@ -11,7 +11,7 @@ enum SessionSearch {
     }
 
     static func matches(_ terms: [String], _ row: SidebarRow) -> Bool {
-        matches(terms, fields: [row.title, row.displayProject, row.project])
+        matches(terms, fields: [row.title, row.displayProject])
     }
 
     static func matches(_ terms: [String], fields: [String]) -> Bool {

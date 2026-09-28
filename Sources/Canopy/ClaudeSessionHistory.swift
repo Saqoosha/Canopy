@@ -444,7 +444,8 @@ enum ClaudeSessionHistory {
         let hit = metadataCache[path]
         metadataCacheLock.unlock()
         if let hit, hit.modified == modified { return hit.metadata }
-        let metadata = extractMetadata(fromPath: path)
+        // A file that failed to open is not cached, so the next scan retries it.
+        guard let metadata = extractMetadataIfReadable(fromPath: path) else { return unreadableMetadata }
         metadataCacheLock.lock()
         metadataCache[path] = (modified, metadata)
         metadataCacheLock.unlock()
@@ -996,9 +997,13 @@ enum ClaudeSessionHistory {
     /// 111.9 → 1,045.2 MiB — which is the argument for keeping that list on
     /// the caller rather than moving it down.
     private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
-        guard let handle = FileHandle(forReadingAtPath: path) else {
-            return ("Untitled", nil, false, false)
-        }
+        extractMetadataIfReadable(fromPath: path) ?? unreadableMetadata
+    }
+
+    private static let unreadableMetadata: Metadata = ("Untitled", nil, false, false)
+
+    private static func extractMetadataIfReadable(fromPath path: String) -> Metadata? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
 
         var scanner = HeaderScanner()
