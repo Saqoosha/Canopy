@@ -21,6 +21,10 @@ struct Sidebar: View {
     @Bindable var store: SessionStore
     @State private var hoveredRowId: String?
     @State private var showFilterPopover = false
+    /// Machine ids whose remote section is folded, newline-joined. Per-viewer
+    /// UI state, so plain `@AppStorage`; an id that stops being listed just
+    /// sits here unused.
+    @AppStorage("canopy.sidebar.collapsedRemoteMachines") private var collapsedRemoteMachines = ""
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
@@ -68,7 +72,7 @@ struct Sidebar: View {
                     }
                 }
                 ForEach(store.remoteLiveSections) { section in
-                    Section(section.title) {
+                    Section(isExpanded: remoteSectionExpanded(section.machineId)) {
                         if section.loading {
                             Text("Loading…").font(.system(size: 11)).foregroundStyle(.secondary)
                         } else if section.rows.isEmpty {
@@ -78,6 +82,8 @@ struct Sidebar: View {
                             rowView(row)
                         }
                         remoteRecentsRows(section)
+                    } header: {
+                        Text(section.title)
                     }
                     // Refetched when the section finishes loading or its open rows
                     // change — a session closed over there is a Recents row from then on.
@@ -316,6 +322,17 @@ struct Sidebar: View {
                       let row = store.visibleRows.first(where: { $0.id == id }) else { return }
                 let cmdHeld = NSEvent.modifierFlags.contains(.command)
                 handleRowClick(row: row, addNewPane: cmdHeld)
+            }
+        )
+    }
+
+    private func remoteSectionExpanded(_ machineId: String) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedRemoteMachines.split(separator: "\n").contains(Substring(machineId)) },
+            set: { expanded in
+                var ids = collapsedRemoteMachines.split(separator: "\n").map(String.init).filter { $0 != machineId }
+                if !expanded { ids.append(machineId) }
+                collapsedRemoteMachines = ids.joined(separator: "\n")
             }
         )
     }
