@@ -3031,6 +3031,33 @@ enum SidebarLogicProbe {
                        && sections.count == 1 && sections.first?.rows.count == 2
                }())
 
+        // Session search: every whitespace-separated term must appear in the
+        // title or project, case- and diacritic-insensitively, in any order.
+        do {
+            let row = SidebarRow.closedLocal(SessionEntry(
+                id: "srch", title: "Can you make mirror pane", timestamp: Date(),
+                projectDirectory: GitWorktree.worktreesRoot.appendingPathComponent("Canopy/mirror-pane")))
+            let t = SessionSearch.terms
+            record("search: terms split on any whitespace", t("  a\tb  c ") == ["a", "b", "c"])
+            record("search: case-insensitive title match", SessionSearch.matches(t("MIRROR"), row))
+            record("search: terms in any order, across title and project",
+                   SessionSearch.matches(t("canopy make"), row))
+            record("search: branch in the subtitle is searchable", SessionSearch.matches(t("mirror-pane"), row))
+            record("search: every term must match", !SessionSearch.matches(t("mirror elevenlabs"), row))
+            let recent = SessionEntry(id: "r", title: "renamed", timestamp: Date(), projectDirectory: URL(fileURLWithPath: "/tmp/x"))
+            let staleCopy = SessionEntry(id: "r", title: "old", timestamp: Date(), projectDirectory: URL(fileURLWithPath: "/tmp/x"))
+            let old = SessionEntry(id: "o", title: "older", timestamp: Date(), projectDirectory: URL(fileURLWithPath: "/tmp/x"))
+            record("search: not searching reads recents",
+                   SessionStore.closedSource(searching: false, recents: [recent], searchIndex: [staleCopy, old]).map(\.id) == ["r"])
+            record("search: no index yet falls back to recents",
+                   SessionStore.closedSource(searching: true, recents: [recent], searchIndex: nil).map(\.id) == ["r"])
+            record("search: recents laid over the index, no duplicate",
+                   SessionStore.closedSource(searching: true, recents: [recent], searchIndex: [staleCopy, old])
+                       .map(\.title) == ["renamed", "older"])
+            record("search: diacritic-insensitive",
+                   SessionSearch.matches(["cafe"], fields: ["Café notes"]))
+        }
+
         record("isManagedWorktree: managed layout → true",
                GitWorktree.isManagedWorktree(
                    GitWorktree.worktreesRoot.appendingPathComponent("Canopy/fix-foo")))
@@ -4537,6 +4564,28 @@ enum SidebarLogicProbe {
 
             func dragSession(_ n: String) -> OpenSession {
                 OpenSession(origin: .local(cwd), resumeId: "drag-\(n)", title: n, project: "p", status: .live)
+            }
+
+            // Session search in `visibleRows`: the query filters open rows,
+            // never a launcher pane's row, and whitespace is not a query.
+            do {
+                let store = SessionStore()
+                let alpha = OpenSession(origin: .local(cwd), resumeId: "srch-a", title: "alpha task", project: "p", status: .live)
+                let beta = OpenSession(origin: .local(cwd), resumeId: "srch-b", title: "beta task", project: "p", status: .live)
+                store._probeSeedOpenSessions([alpha, beta])
+                _ = store.openInNewPane(alpha.id)
+                _ = store.openLauncherInNewPane()
+                store.searchText = "  \t"
+                record("search: whitespace is not a query", !store.isSearching)
+                store.searchText = "ALPHA"
+                let open = store.visibleRows.filter { if case .open = $0 { return true } else { return false } }
+                record("search: query filters open rows",
+                       open.map(\.title) == ["alpha task"])
+                store.searchText = "zzzz"
+                record("search: a launcher row survives a non-matching query",
+                       store.visibleRows.contains { if case .launcher = $0 { return true } else { return false } }
+                       && !store.visibleRows.contains { $0.title == "alpha task" })
+                store.searchText = ""
             }
 
             // [A][B][C], drag C above B → [A][C][B]

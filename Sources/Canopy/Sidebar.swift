@@ -21,6 +21,7 @@ struct Sidebar: View {
     @Bindable var store: SessionStore
     @State private var hoveredRowId: String?
     @State private var showFilterPopover = false
+    @FocusState private var searchFocused: Bool
     /// Machine ids whose remote section is folded, newline-joined. Per-viewer
     /// UI state, so plain `@AppStorage`; an id that stops being listed just
     /// sits here unused.
@@ -29,12 +30,12 @@ struct Sidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Top: + New session + grouping mode + filter gear
-            VStack(spacing: 4) {
-                HStack(spacing: 4) {
-                    newSessionButton
-                        .layoutPriority(1)
-                    Spacer(minLength: 0)
+            // Top: + New session / search + filter / grouping mode, all
+            // sharing one leading and trailing edge.
+            VStack(spacing: 6) {
+                newSessionButton
+                HStack(spacing: 6) {
+                    searchField
                     filterButton
                 }
                 groupingModePicker
@@ -71,7 +72,9 @@ struct Sidebar: View {
                         }
                     }
                 }
-                ForEach(store.remoteLiveSections) { section in
+                // Search covers this Mac's sessions only; the remote blocks
+                // would sit unfiltered above the results.
+                ForEach(store.isSearching ? [] : store.remoteLiveSections) { section in
                     Section(isExpanded: remoteSectionExpanded(section.machineId)) {
                         if section.loading {
                             Text("Loading…").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -222,7 +225,21 @@ struct Sidebar: View {
     @ViewBuilder
     private var emptyStateView: some View {
         VStack(alignment: .center, spacing: 8) {
-            if store.filter.isActive {
+            if store.isSearching {
+                Image(systemName: "magnifyingglass")
+                    .font(.title2)
+                    .foregroundStyle(.tertiary)
+                Text(store.isBuildingSearchIndex && store.searchIndex == nil
+                     ? "Searching…" : "No sessions match \"\(store.searchText)\".")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if store.filter.isActive {
+                    Button("Clear filters") {
+                        store.filter = SidebarFilter()
+                    }
+                    .controlSize(.small)
+                }
+            } else if store.filter.isActive {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .font(.title2)
                     .foregroundStyle(.tertiary)
@@ -249,15 +266,63 @@ struct Sidebar: View {
         .padding(.vertical, 24)
     }
 
-    private var groupingModePicker: some View {
-        Picker("Group by", selection: $store.groupingMode) {
-            ForEach(GroupingMode.allCases, id: \.self) { mode in
-                Text(mode.rawValue).tag(mode)
+    private var searchField: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search sessions", text: $store.searchText)
+                .textFieldStyle(.plain)
+                .focused($searchFocused)
+                .onExitCommand { store.searchText = ""; searchFocused = false }
+            if store.isBuildingSearchIndex {
+                ProgressView().controlSize(.mini)
+            }
+            if !store.searchText.isEmpty {
+                Button {
+                    store.searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
             }
         }
-        .pickerStyle(.segmented)
-        .controlSize(.small)
-        .labelsHidden()
+        .font(.system(size: 12))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+        .onChange(of: store.searchFocusRequest) { searchFocused = true }
+    }
+
+    /// Equal-width segments spanning the sidebar. A native segmented Picker
+    /// sizes to its labels on macOS and ignores `.frame(maxWidth:)`, so it
+    /// could not share the edges of the rows above it.
+    private var groupingModePicker: some View {
+        HStack(spacing: 2) {
+            ForEach(GroupingMode.allCases, id: \.self) { mode in
+                let selected = store.groupingMode == mode
+                Button {
+                    store.groupingMode = mode
+                } label: {
+                    Text(mode.rawValue)
+                        .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                        .foregroundStyle(selected ? Color.primary : Color.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(selected ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+                                .shadow(color: .black.opacity(selected ? 0.12 : 0), radius: 1, y: 0.5)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Group by")
     }
 
     private var filterButton: some View {
