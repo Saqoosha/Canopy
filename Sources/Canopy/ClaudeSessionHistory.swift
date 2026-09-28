@@ -345,8 +345,9 @@ enum ClaudeSessionHistory {
     /// Load sessions across all projects, sorted by most recent.
     /// Collects file metadata first (no file reads), sorts by date, then
     /// parses headers newest-first until `maxSessionsToKeep` sessions have
-    /// SURVIVED the filters below — bounded by `maxSessionsToScan`.
-    static func loadAllSessions() -> [SessionEntry] {
+    /// SURVIVED the filters below — bounded by `maxSessionsToScan`. Search
+    /// passes `.max` for both to read every session on disk.
+    static func loadAllSessions(keep: Int = maxSessionsToKeep, scanLimit: Int = maxSessionsToScan) -> [SessionEntry] {
         guard FileManager.default.fileExists(atPath: claudeDir.path) else { return [] }
 
         let fm = FileManager.default
@@ -386,10 +387,10 @@ enum ClaudeSessionHistory {
 
         let selection = selectNewest(
             candidates,
-            keep: maxSessionsToKeep,
-            scanLimit: maxSessionsToScan
+            keep: keep,
+            scanLimit: scanLimit
         ) { candidate -> SessionEntry? in
-            let metadata = extractMetadata(fromPath: candidate.path)
+            let metadata = cachedMetadata(path: candidate.path, modified: candidate.modDate)
             guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { return nil }
             let projectPath = resolveProjectPath(
                 extractedCwd: metadata.cwd,
@@ -420,15 +421,34 @@ enum ClaudeSessionHistory {
         // means the disk holds nothing more. `scanned >= maxSessionsToScan`
         // cannot tell those apart when the corpus happens to be exactly that
         // size, which is the distinction `selectNewest` returns `scanned` for.
-        if selection.kept.count < maxSessionsToKeep, selection.scanned < candidates.count {
+        if selection.kept.count < keep, selection.scanned < candidates.count {
             logger.notice("""
                 Session scan hit its ceiling: \(selection.scanned, privacy: .public) files read, \
-                \(selection.kept.count, privacy: .public) of \(maxSessionsToKeep, privacy: .public) rows kept, \
+                \(selection.kept.count, privacy: .public) of \(keep, privacy: .public) rows kept, \
                 \(candidates.count, privacy: .public) candidates on disk
                 """)
         }
 
         return selection.kept
+    }
+
+    private typealias Metadata = (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool)
+    nonisolated(unsafe) private static var metadataCache: [String: (modified: Date, metadata: Metadata)] = [:]
+    private static let metadataCacheLock = NSLock()
+
+    /// `extractMetadata` memoized on (path, mtime). The uncapped search scan
+    /// reads every header — measured 6.4–7.0 s for 2,729 files — so only the
+    /// files that changed since the last scan are read again.
+    private static func cachedMetadata(path: String, modified: Date) -> Metadata {
+        metadataCacheLock.lock()
+        let hit = metadataCache[path]
+        metadataCacheLock.unlock()
+        if let hit, hit.modified == modified { return hit.metadata }
+        let metadata = extractMetadata(fromPath: path)
+        metadataCacheLock.lock()
+        metadataCache[path] = (modified, metadata)
+        metadataCacheLock.unlock()
+        return metadata
     }
 
     /// Walk `candidates` in order, keeping whatever `evaluate` accepts, and

@@ -83,6 +83,10 @@ struct CanopyApp: App {
                     sidebarOpenFolder()
                 }
                 .keyboardShortcut("o")
+                Button("Find Session…") {
+                    sidebarStore.searchFocusRequest += 1
+                }
+                .keyboardShortcut("f")
                 Divider()
                 // Browser-style: label is always "Close Session" regardless
                 // of selection state. The actual handler is the keyDown monitor

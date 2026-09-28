@@ -124,6 +124,37 @@ final class SessionStore {
     /// Local JSONL history, refreshed via `refreshRecents()`.
     private(set) var recents: [SessionEntry] = []
 
+    /// The sidebar's search query. Non-empty switches the closed rows from
+    /// `recents` (capped at `maxSessionsToKeep`) to `searchIndex`, which holds
+    /// every session on disk — the cap is what makes older sessions unfindable.
+    var searchText = "" {
+        didSet {
+            if oldValue.isEmpty, !searchText.isEmpty { refreshSearchIndex() }
+        }
+    }
+
+    /// Every local session, uncapped. Built on the first keystroke of each
+    /// search and kept (stale) while the next build runs.
+    private(set) var searchIndex: [SessionEntry]?
+    private(set) var isBuildingSearchIndex = false
+
+    /// Bumped by Find Session (Cmd+F); the sidebar focuses its field on change.
+    var searchFocusRequest = 0
+
+    func refreshSearchIndex() {
+        guard !isBuildingSearchIndex else { return }
+        isBuildingSearchIndex = true
+        Task {
+            let started = Date()
+            let all = await Task.detached {
+                ClaudeSessionHistory.loadAllSessions(keep: .max, scanLimit: .max)
+            }.value
+            logger.notice("Search index: \(all.count, privacy: .public) sessions in \(Int(Date().timeIntervalSince(started) * 1000), privacy: .public) ms")
+            searchIndex = all
+            isBuildingSearchIndex = false
+        }
+    }
+
     /// Cloud (claude.ai/code) sessions, refreshed via `refreshCloud()`.
     private(set) var cloud: [RemoteSession] = []
 
@@ -597,7 +628,9 @@ final class SessionStore {
         // the open row is the live representation; showing the recents copy
         // would be a duplicate.
         let openResumeIds = Set(openSessions.map(\.resumeId))
-        let recentRows = recents
+        let terms = SessionSearch.terms(searchText)
+        let closedSource = terms.isEmpty ? recents : (searchIndex ?? recents)
+        let recentRows = closedSource
             .filter { !openResumeIds.contains($0.id) && !hiddenIds.contains($0.id) }
             .map(SidebarRow.closedLocal)
         let cloudRows = cloud
@@ -606,7 +639,7 @@ final class SessionStore {
         let allRows: [SidebarRow] =
             openSessions.map(SidebarRow.open) + recentRows + cloudRows
         let deduped = SidebarRow.deduped(allRows, teleportedFromMap: teleportedFromMap)
-        let sorted = SidebarRow.sorted(deduped)
+        let sorted = SidebarRow.sorted(terms.isEmpty ? deduped : deduped.filter { SessionSearch.matches(terms, $0) })
         // Launcher rows are added AFTER dedup / sort / filter, never before.
         // They stand for a live pane, and a pane the filter can hide would put
         // the row-order-is-the-pane-strip correspondence back where it started.
@@ -1540,6 +1573,9 @@ final class SessionStore {
         // 1. Sessions list — render the sidebar as soon as this returns.
         let all = await Task.detached { ClaudeSessionHistory.loadAllSessions() }.value
         await MainActor.run { self.recents = all }
+        // Warm the search index in the background so the first search does
+        // not wait on a full header scan.
+        if searchIndex == nil { refreshSearchIndex() }
 
         // 2. Teleport-from map — used only for cloud-row dedup. If it's
         //    slow, the user just sees the cloud row briefly until it

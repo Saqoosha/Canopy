@@ -3031,6 +3031,23 @@ enum SidebarLogicProbe {
                        && sections.count == 1 && sections.first?.rows.count == 2
                }())
 
+        // Session search: every whitespace-separated term must appear in the
+        // title or project, case- and diacritic-insensitively, in any order.
+        do {
+            let row = SidebarRow.closedLocal(SessionEntry(
+                id: "srch", title: "Can you make mirror pane", timestamp: Date(),
+                projectDirectory: GitWorktree.worktreesRoot.appendingPathComponent("Canopy/mirror-pane")))
+            let t = SessionSearch.terms
+            record("search: terms split on any whitespace", t("  a\tb  c ") == ["a", "b", "c"])
+            record("search: case-insensitive title match", SessionSearch.matches(t("MIRROR"), row))
+            record("search: terms in any order, across title and project",
+                   SessionSearch.matches(t("canopy make"), row))
+            record("search: branch in the subtitle is searchable", SessionSearch.matches(t("mirror-pane"), row))
+            record("search: every term must match", !SessionSearch.matches(t("mirror elevenlabs"), row))
+            record("search: diacritic-insensitive",
+                   SessionSearch.matches(["cafe"], fields: ["Café notes"]))
+        }
+
         record("isManagedWorktree: managed layout → true",
                GitWorktree.isManagedWorktree(
                    GitWorktree.worktreesRoot.appendingPathComponent("Canopy/fix-foo")))
