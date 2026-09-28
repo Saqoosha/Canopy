@@ -137,7 +137,16 @@ private extension View {
 
 struct LauncherView: View {
     @Bindable var appState: AppState
+    /// Read for other Macs' Recents and used to attach a session started on
+    /// one. Every other launch goes through `appState`.
+    @Bindable var store: SessionStore
     @State private var selectedDirectory: URL?
+    /// Another Mac (by machine id) chosen in the location chip. A session
+    /// started there runs on that Mac and is attached here as a mirror pane,
+    /// so it shares none of the local/SSH launch path below.
+    @State private var peerMachineId: String?
+    /// A folder on that Mac, from its Recents.
+    @State private var peerFolder: String?
     @State private var recentDirectories: [URL] = []
     @State private var isDropTargeted = false
     @State private var remoteHost: String = ""
@@ -384,6 +393,7 @@ struct LauncherView: View {
             }
         }
         .onChange(of: selectedDirectory) { refreshBranchName() }
+        .onChange(of: peerMachineId.flatMap { store.remoteRecents[$0] }) { preselectPeerFolder() }
         .sheet(isPresented: $showWebSessions) {
             webSessionsSection
                 .padding(20)
@@ -525,6 +535,9 @@ struct LauncherView: View {
     }
 
     private var headlineText: String {
+        if let peer = selectedPeer {
+            return "What should we build in \(peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title)?"
+        }
         let place = isRemoteMode
             ? (remoteHost.isEmpty ? nil : remoteHost)
             : selectedDirectory?.lastPathComponent
@@ -549,12 +562,17 @@ struct LauncherView: View {
         // whatever the folder was on.
         ChipFlowLayout(spacing: 6, lineSpacing: 6) {
             locationChip
-            directoryChip
-            if !isRemoteMode, selectedDirectoryIsGitRepo {
-                worktreeChip
-                branchChip
+            if let peer = selectedPeer {
+                peerFolderChip(peer)
+                peerResumeChip(peer)
+            } else {
+                directoryChip
+                if !isRemoteMode, selectedDirectoryIsGitRepo {
+                    worktreeChip
+                    branchChip
+                }
+                continueChip
             }
-            continueChip
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -741,8 +759,20 @@ struct LauncherView: View {
         Menu {
             Button {
                 isRemoteMode = false
+                peerMachineId = nil
             } label: {
-                Label("This Mac", systemImage: isRemoteMode ? "" : "checkmark")
+                Label("This Mac", systemImage: isRemoteMode || selectedPeer != nil ? "" : "checkmark")
+            }
+            if !pairedPeers.isEmpty {
+                Section("Other Macs") {
+                    ForEach(pairedPeers, id: \.machineId) { peer in
+                        Button {
+                            selectPeer(peer.machineId)
+                        } label: {
+                            Label(peer.title, systemImage: selectedPeer?.machineId == peer.machineId ? "checkmark" : "")
+                        }
+                    }
+                }
             }
             if !savedHosts.isEmpty {
                 Section("SSH") {
@@ -750,20 +780,28 @@ struct LauncherView: View {
                         Button {
                             remoteHost = host
                             isRemoteMode = true
+                            peerMachineId = nil
                         } label: {
-                            Label(host, systemImage: isRemoteMode && remoteHost == host ? "checkmark" : "")
+                            Label(host, systemImage: isRemoteMode && selectedPeer == nil && remoteHost == host ? "checkmark" : "")
                         }
                     }
                 }
             }
             Divider()
-            Button("Connect to host…") { showRemoteSetup = true }
+            Button("Connect to host…") {
+                peerMachineId = nil
+                showRemoteSetup = true
+            }
         } label: {
-            ChipLabel(
-                icon: isRemoteMode ? "network" : "desktopcomputer",
-                text: isRemoteMode ? (remoteHost.isEmpty ? "SSH host…" : remoteHost) : "This Mac",
-                muted: isRemoteMode && remoteHost.isEmpty
-            )
+            if let peer = selectedPeer {
+                ChipLabel(icon: "laptopcomputer", text: peer.title)
+            } else {
+                ChipLabel(
+                    icon: isRemoteMode ? "network" : "desktopcomputer",
+                    text: isRemoteMode ? (remoteHost.isEmpty ? "SSH host…" : remoteHost) : "This Mac",
+                    muted: isRemoteMode && remoteHost.isEmpty
+                )
+            }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -834,6 +872,147 @@ struct LauncherView: View {
         }
     }
 
+    /// Other Macs this one holds a connection for. An unpaired Mac cannot
+    /// answer `list_recents`, so it has nothing to offer here.
+    private var pairedPeers: [SessionStore.RemoteMachineSection] {
+        store.remoteLiveSections.filter {
+            store.remoteAttachRefusal(machineId: $0.machineId, machineName: $0.title) == nil
+        }
+    }
+
+    /// The chosen Mac while it is still listed and paired; nil otherwise, so a
+    /// Mac that drops off the relay puts the launcher back on this one.
+    private var selectedPeer: SessionStore.RemoteMachineSection? {
+        guard let peerMachineId else { return nil }
+        return pairedPeers.first { $0.machineId == peerMachineId }
+    }
+
+    private func selectPeer(_ machineId: String) {
+        isRemoteMode = false
+        if peerMachineId != machineId { peerFolder = nil }
+        peerMachineId = machineId
+        store.refreshRemoteRecents(machineId: machineId)
+        preselectPeerFolder()
+    }
+
+    /// The most recent folder, once that Mac's Recents have arrived.
+    private func preselectPeerFolder() {
+        guard let peerMachineId, peerFolder == nil else { return }
+        peerFolder = store.remoteRecents[peerMachineId]?.folders.first
+    }
+
+    private func peerFolderChip(_ peer: SessionStore.RemoteMachineSection) -> some View {
+        let recents = store.remoteRecents[peer.machineId]
+        return Menu {
+            if let recents, !recents.folders.isEmpty {
+                Section("Recent on \(peer.title)") {
+                    ForEach(recents.folders, id: \.self) { path in
+                        Button((path as NSString).abbreviatingWithTildeInPath) { peerFolder = path }
+                    }
+                }
+            } else if let error = store.remoteRecentsError[peer.machineId] {
+                Text(error)
+            } else {
+                Text(recents == nil ? "Loading…" : "No recent folders")
+            }
+        } label: {
+            ChipLabel(
+                icon: "folder",
+                text: peerFolder.map { ($0 as NSString).lastPathComponent } ?? "Choose folder",
+                muted: peerFolder == nil
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+        .help(peerFolder ?? "No folder chosen")
+    }
+
+    /// That Mac's closed sessions, one section per project — the selected
+    /// folder's project first, then the rest by most recent session. Picking
+    /// one opens it at once: it resumes over there, so nothing in the composer
+    /// below applies to it.
+    private func peerResumeChip(_ peer: SessionStore.RemoteMachineSection) -> some View {
+        let attached = Set(store.openSessions.filter { $0.origin.mirrorTarget?.machineId == peer.machineId }.map(\.resumeId))
+        let sessions = (store.remoteRecents[peer.machineId]?.sessions ?? []).filter { !attached.contains($0.id) }
+        let groups = Self.peerSessionGroups(sessions, preferring: peerFolder.map { ($0 as NSString).lastPathComponent })
+        return Menu {
+            if sessions.isEmpty {
+                Text(store.remoteRecents[peer.machineId] == nil ? "Loading…" : "No closed sessions")
+            }
+            ForEach(groups, id: \.project) { group in
+                Section(group.project.isEmpty ? "Other" : group.project) {
+                    ForEach(group.sessions) { recent in
+                        Button {
+                            store.openRemoteRecent(machineId: peer.machineId, machineName: peer.title, recent: recent,
+                                                   target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused)
+                        } label: {
+                            Text(Self.peerSessionLabel(recent))
+                        }
+                    }
+                }
+            }
+        } label: {
+            ChipLabel(icon: "arrow.uturn.backward", text: "Resume…", muted: true)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .chipStyle()
+    }
+
+    /// `MirrorRecents.Session.project` is "Project" or "Project · branch".
+    private static func splitProject(_ project: String) -> (name: String, branch: String?) {
+        let parts = project.components(separatedBy: " · ")
+        guard parts.count > 1 else { return (project, nil) }
+        return (parts[0], parts.dropFirst().joined(separator: " · "))
+    }
+
+    static func peerSessionGroups(_ sessions: [MirrorRecents.Session],
+                                  preferring preferred: String?) -> [(project: String, sessions: [MirrorRecents.Session])] {
+        var order: [String] = []
+        var byProject: [String: [MirrorRecents.Session]] = [:]
+        for session in sessions.sorted(by: { $0.timestamp > $1.timestamp }) {
+            let name = splitProject(session.project).name
+            if byProject[name] == nil { order.append(name) }
+            byProject[name, default: []].append(session)
+        }
+        if let preferred, let i = order.firstIndex(of: preferred) {
+            order.insert(order.remove(at: i), at: 0)
+        }
+        return order.map { ($0, byProject[$0] ?? []) }
+    }
+
+    /// Title (tag-cleaned and capped), branch when there is one, and age.
+    static func peerSessionLabel(_ session: MirrorRecents.Session, now: Date = Date()) -> String {
+        var title = cleanedSessionTitle(session.title)
+        if title.count > 60 { title = String(title.prefix(59)) + "…" }
+        var label = title
+        if let branch = splitProject(session.project).branch { label += "  ·  \(branch)" }
+        return label + "  ·  " + shortAge(from: session.timestamp, to: now)
+    }
+
+    /// A first prompt can be a slash command's or a local command's wrapper
+    /// markup; show the command, drop the caveat, strip any other tag.
+    static func cleanedSessionTitle(_ raw: String) -> String {
+        if let name = raw.firstMatch(of: /<command-name>\s*([^<]*?)\s*<\/command-name>/)?.1, !name.isEmpty {
+            return name.hasPrefix("/") ? String(name) : "/" + name
+        }
+        var text = raw.replacing(/<local-command-caveat>[\s\S]*?(<\/local-command-caveat>|$)/, with: "")
+        text = text.replacing(/<[^>]+>/, with: " ")
+        text = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return text.isEmpty ? "Untitled" : text
+    }
+
+    private static func shortAge(from date: Date, to now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        switch seconds {
+        case ..<3600: return "\(max(1, Int(seconds / 60)))m"
+        case ..<86_400: return "\(Int(seconds / 3600))h"
+        case ..<(86_400 * 30): return "\(Int(seconds / 86_400))d"
+        default: return "\(Int(seconds / (86_400 * 30)))mo"
+        }
+    }
+
     private var continueChip: some View {
         Menu {
             Button {
@@ -879,7 +1058,7 @@ struct LauncherView: View {
     /// a persisted preference, and flipping it here would silently lose the
     /// user's setting the moment they turned the worktree off again.
     private var willContinueSession: Bool {
-        continueSession && !willCreateWorktree
+        continueSession && !willCreateWorktree && selectedPeer == nil
     }
 
     /// Whether this launch will actually cut a worktree.
@@ -899,13 +1078,15 @@ struct LauncherView: View {
     /// raw toggle deliberately: it renders only inside the gate, so the two
     /// are equivalent there and reading the toggle is what the chip is FOR.
     private var willCreateWorktree: Bool {
-        startInWorktree && !isRemoteMode && selectedDirectoryIsGitRepo
+        startInWorktree && !isRemoteMode && selectedPeer == nil && selectedDirectoryIsGitRepo
     }
 
     private var composerPlaceholder: String {
         // Each mode says what this box will actually do with the text, because
         // the three outcomes genuinely differ: a fresh turn, a turn appended to
         // an existing conversation, or a turn that also names a branch.
+        // A peer launch sends only the folder (`MirrorOpenRequest.new`).
+        if selectedPeer != nil { return "Start the session, then type in its pane" }
         if willContinueSession { return "Pick up where you left off" }
         if willCreateWorktree { return "Describe a task — it names the branch too" }
         return "Describe a task or ask a question"
@@ -958,7 +1139,7 @@ struct LauncherView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
                 .padding(.bottom, 6)
-                .disabled(isCreatingWorktree || isResolvingRemoteSession)
+                .disabled(isCreatingWorktree || isResolvingRemoteSession || selectedPeer != nil)
                 .focused($isPromptFocused)
                 .onChange(of: isPromptFocused) { _, focused in
                     if focused { installPasteMonitor() } else { removePasteMonitor() }
@@ -966,10 +1147,14 @@ struct LauncherView: View {
                 .onDisappear { removePasteMonitor() }
 
             HStack(spacing: 5) {
-                moreMenu
-                modelChip
-                if isAnthropicProvider { effortChip }
-                permissionChip
+                Group {
+                    moreMenu
+                    modelChip
+                    if isAnthropicProvider { effortChip }
+                    permissionChip
+                }
+                // The other Mac starts the CLI with its own settings.
+                .disabled(selectedPeer != nil)
                 Spacer(minLength: 8)
                 sendButton
             }
@@ -1148,6 +1333,7 @@ struct LauncherView: View {
 
     private var canStart: Bool {
         if isCreatingWorktree || isResolvingRemoteSession { return false }
+        if selectedPeer != nil { return peerFolder != nil }
         // **Deliberately NOT gated on base-ref resolution.** A gate here was
         // written and reverted in review: it cleared only from the completion
         // of three `Task.detached` reads that funnel into
@@ -1617,6 +1803,12 @@ struct LauncherView: View {
         // lookup Task, and each Task that finishes calls `launchSession`, so
         // holding Enter opens a pane per press against one resume id.
         guard !isResolvingRemoteSession else { return }
+        if let peer = selectedPeer {
+            guard let peerFolder else { return }
+            store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder,
+                                   target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused)
+            return
+        }
         let selectedModel = model.isEmpty ? nil : model
         let selectedEffort = effortLevel.isEmpty ? nil : effortLevel
         let selectedPermission = resolvedPermission

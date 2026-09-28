@@ -464,7 +464,7 @@ private struct DetailLauncher: View {
     }
 
     private var launcher: some View {
-        LauncherView(appState: localAppState)
+        LauncherView(appState: localAppState, store: store)
             .onChange(of: localAppState.screen) {
                 // The Launcher uses an AppState-based screen transition. When
                 // it flips to .session we hand off to the SessionStore, which
