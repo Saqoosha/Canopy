@@ -145,6 +145,9 @@ struct LauncherView: View {
     /// started there runs on that Mac and is attached here as a mirror pane,
     /// so it shares none of the local/SSH launch path below.
     @State private var peerMachineId: String?
+    /// Its name when picked, so the choice survives the Mac briefly leaving
+    /// the relay's list instead of silently falling back to This Mac.
+    @State private var peerTitle = ""
     /// A folder on that Mac, from its Recents.
     @State private var peerFolder: String?
     @State private var recentDirectories: [URL] = []
@@ -394,6 +397,9 @@ struct LauncherView: View {
         }
         .onChange(of: selectedDirectory) { refreshBranchName() }
         .onChange(of: peerMachineId.flatMap { store.remoteRecents[$0] }) { preselectPeerFolder() }
+        .task(id: peerRecentsKey) {
+            if let peerMachineId { store.refreshRemoteRecents(machineId: peerMachineId) }
+        }
         .sheet(isPresented: $showWebSessions) {
             webSessionsSection
                 .padding(20)
@@ -767,7 +773,7 @@ struct LauncherView: View {
                 Section("Other Macs") {
                     ForEach(pairedPeers, id: \.machineId) { peer in
                         Button {
-                            selectPeer(peer.machineId)
+                            selectPeer(peer)
                         } label: {
                             Label(peer.title, systemImage: selectedPeer?.machineId == peer.machineId ? "checkmark" : "")
                         }
@@ -872,26 +878,33 @@ struct LauncherView: View {
         }
     }
 
-    /// Other Macs this one holds a connection for. An unpaired Mac cannot
-    /// answer `list_recents`, so it has nothing to offer here.
-    private var pairedPeers: [SessionStore.RemoteMachineSection] {
-        store.remoteLiveSections.filter {
-            store.remoteAttachRefusal(machineId: $0.machineId, machineName: $0.title) == nil
-        }
+    struct Peer { let machineId: String; let title: String }
+
+    /// Other Macs this one has an address for. The password is checked when a
+    /// session is opened (keychain reads here would run on every redraw).
+    private var pairedPeers: [Peer] {
+        store.remoteLiveSections
+            .filter { CanopySettings.shared.mirrorPeers[$0.machineId] != nil }
+            .map { Peer(machineId: $0.machineId, title: $0.title) }
     }
 
-    /// The chosen Mac while it is still listed and paired; nil otherwise, so a
-    /// Mac that drops off the relay puts the launcher back on this one.
-    private var selectedPeer: SessionStore.RemoteMachineSection? {
-        guard let peerMachineId else { return nil }
-        return pairedPeers.first { $0.machineId == peerMachineId }
+    private var selectedPeer: Peer? {
+        peerMachineId.map { id in Peer(machineId: id, title: pairedPeers.first { $0.machineId == id }?.title ?? peerTitle) }
     }
 
-    private func selectPeer(_ machineId: String) {
+    /// Changes when the chosen Mac's open sessions do — one closed over there
+    /// becomes a Resume row, so its Recents are fetched again.
+    private var peerRecentsKey: String {
+        guard let peerMachineId else { return "" }
+        let rows = store.remoteLiveSections.first { $0.machineId == peerMachineId }?.rows.map(\.id) ?? []
+        return peerMachineId + ":" + rows.joined(separator: ",")
+    }
+
+    private func selectPeer(_ peer: Peer) {
         isRemoteMode = false
-        if peerMachineId != machineId { peerFolder = nil }
-        peerMachineId = machineId
-        store.refreshRemoteRecents(machineId: machineId)
+        if peerMachineId != peer.machineId { peerFolder = nil }
+        peerMachineId = peer.machineId
+        peerTitle = peer.title
         preselectPeerFolder()
     }
 
@@ -901,7 +914,7 @@ struct LauncherView: View {
         peerFolder = store.remoteRecents[peerMachineId]?.folders.first
     }
 
-    private func peerFolderChip(_ peer: SessionStore.RemoteMachineSection) -> some View {
+    private func peerFolderChip(_ peer: Peer) -> some View {
         let recents = store.remoteRecents[peer.machineId]
         return Menu {
             if let recents, !recents.folders.isEmpty {
@@ -932,7 +945,7 @@ struct LauncherView: View {
     /// folder's project first, then the rest by most recent session. Picking
     /// one opens it at once: it resumes over there, so nothing in the composer
     /// below applies to it.
-    private func peerResumeChip(_ peer: SessionStore.RemoteMachineSection) -> some View {
+    private func peerResumeChip(_ peer: Peer) -> some View {
         let attached = Set(store.openSessions.filter { $0.origin.mirrorTarget?.machineId == peer.machineId }.map(\.resumeId))
         let sessions = (store.remoteRecents[peer.machineId]?.sessions ?? []).filter { !attached.contains($0.id) }
         let groups = Self.peerSessionGroups(sessions, preferring: peerFolder.map { ($0 as NSString).lastPathComponent })
@@ -992,13 +1005,15 @@ struct LauncherView: View {
     }
 
     /// A first prompt can be a slash command's or a local command's wrapper
-    /// markup; show the command, drop the caveat, strip any other tag.
+    /// markup; show the command, drop the caveat, strip the CLI's own tags.
     static func cleanedSessionTitle(_ raw: String) -> String {
-        if let name = raw.firstMatch(of: /<command-name>\s*([^<]*?)\s*<\/command-name>/)?.1, !name.isEmpty {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<command-"),
+           let name = trimmed.firstMatch(of: /<command-name>\s*([^<]*?)\s*<\/command-name>/)?.1, !name.isEmpty {
             return name.hasPrefix("/") ? String(name) : "/" + name
         }
-        var text = raw.replacing(/<local-command-caveat>[\s\S]*?(<\/local-command-caveat>|$)/, with: "")
-        text = text.replacing(/<[^>]+>/, with: " ")
+        var text = trimmed.replacing(/<local-command-caveat>[\s\S]*?(<\/local-command-caveat>|$)/, with: " ")
+        text = text.replacing(/<\/?(?:command-[a-z-]+|local-command-[a-z-]+|system-reminder)>/, with: " ")
         text = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         return text.isEmpty ? "Untitled" : text
     }
