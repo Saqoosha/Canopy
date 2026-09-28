@@ -1770,6 +1770,37 @@ enum SidebarLogicProbe {
             record("mirror recents: a relative folder and an id-less session are dropped",
                    MirrorRecents.parse(["type": MirrorRecents.replyType, "folders": ["relative", "/abs"],
                                         "sessions": [["title": "no id"]]]) == MirrorRecents(sessions: [], folders: ["/abs"]))
+            // The launcher's Resume menu over another Mac's closed sessions.
+            let t0 = Date(timeIntervalSince1970: 1_000_000)
+            func peerSession(_ id: String, _ project: String, _ age: TimeInterval, title: String = "t") -> MirrorRecents.Session {
+                MirrorRecents.Session(id: id, title: title, project: project, timestamp: t0.addingTimeInterval(-age))
+            }
+            let peerSessions = [peerSession("a1", "A", 300), peerSession("b1", "B · fix-x", 100),
+                                peerSession("b2", "B", 400), peerSession("c1", "C", 200)]
+            let groups = LauncherView.peerSessionGroups(peerSessions, preferring: nil)
+            record("peer resume: groups by project name, newest group first, branch folded in",
+                   groups.map(\.project) == ["B", "C", "A"] && groups[0].sessions.map(\.id) == ["b1", "b2"])
+            record("peer resume: the preferred project moves to the top, the rest keep their order",
+                   LauncherView.peerSessionGroups(peerSessions, preferring: "A").map(\.project) == ["A", "B", "C"])
+            record("peer resume: an unknown preferred project changes nothing",
+                   LauncherView.peerSessionGroups(peerSessions, preferring: "Z").map(\.project) == ["B", "C", "A"])
+            record("peer title: a slash command's wrapper shows as the command",
+                   LauncherView.cleanedSessionTitle("<command-message>ship-it</command-message> <command-name>/ship-it</command-name>") == "/ship-it")
+            record("peer title: a prompt quoting the wrapper is not a command",
+                   LauncherView.cleanedSessionTitle("why does <command-name>/recap</command-name> vanish") == "why does /recap vanish")
+            record("peer title: the caveat is dropped and the text after it kept",
+                   LauncherView.cleanedSessionTitle("<local-command-caveat>Caveat: x</local-command-caveat>hello") == "hello")
+            record("peer title: a shell escape's wrapper is stripped",
+                   LauncherView.cleanedSessionTitle("<bash-input>git status</bash-input>") == "git status")
+            record("peer title: ordinary angle brackets survive",
+                   LauncherView.cleanedSessionTitle("fix Array<Int> handling") == "fix Array<Int> handling")
+            record("peer title: nothing left reads Untitled",
+                   LauncherView.cleanedSessionTitle("<local-command-caveat>Caveat") == "Untitled")
+            record("peer label: title, branch and age",
+                   LauncherView.peerSessionLabel(peerSession("x", "B · fix-x", 7_200, title: "Do it"), now: t0) == "Do it  ·  fix-x  ·  2h")
+            let long = LauncherView.peerSessionLabel(peerSession("x", "B", 30, title: String(repeating: "a", count: 61)), now: t0)
+            record("peer label: a long title is capped at 60 characters, and under a minute reads 1m",
+                   long == String(repeating: "a", count: 59) + "…  ·  1m")
             record("mirror open: both kinds round-trip the wire",
                    MirrorOpenRequest(wire: MirrorOpenRequest.resume.wire) == .resume
                        && MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/x").wire) == .new(cwd: "/tmp/x"))

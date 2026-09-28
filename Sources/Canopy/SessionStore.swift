@@ -343,13 +343,16 @@ final class SessionStore {
     var remoteRecentsError: [String: String] = [:]
     private var remoteRecentsInFlight: Set<String> = []
 
-    /// Ask a paired Mac for its Recents. A no-op while one is in flight or
-    /// when there is no pairing (the section then has nothing to offer).
+    /// Ask a paired Mac for its Recents. A no-op while one is in flight;
+    /// without a usable pairing it records why instead.
     func refreshRemoteRecents(machineId: String) {
-        guard !remoteRecentsInFlight.contains(machineId),
-              let address = CanopySettings.shared.mirrorPeers[machineId],
+        guard !remoteRecentsInFlight.contains(machineId) else { return }
+        guard let address = CanopySettings.shared.mirrorPeers[machineId],
               let hostPort = MirrorAccess.parseHostPort(address),
-              let token = MirrorAccess.peerToken(machineId: machineId) else { return }
+              let token = MirrorAccess.peerToken(machineId: machineId) else {
+            remoteRecentsError[machineId] = "Paste its connection in Settings › Remote first"
+            return
+        }
         remoteRecentsInFlight.insert(machineId)
         MirrorRecentsClient.fetch(host: hostPort.host, port: hostPort.port, token: token) { [weak self] result in
             guard let self else { return }
