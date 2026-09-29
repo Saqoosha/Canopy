@@ -1770,7 +1770,7 @@ enum SidebarLogicProbe {
             record("mirror recents: a relative folder and an id-less session are dropped",
                    MirrorRecents.parse(["type": MirrorRecents.replyType, "folders": ["relative", "/abs"],
                                         "sessions": [["title": "no id"]]]) == MirrorRecents(sessions: [], folders: ["/abs"]))
-            // Canopy Server control protocol (Plan A, Task 2).
+            // Canopy Server control protocol.
             record("control hello: a local peer needs no token",
                    ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version],
                                               trustsPeer: true, expectedToken: nil) == .ok)
@@ -1803,13 +1803,14 @@ enum SidebarLogicProbe {
             do {
                 let controlDir = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-control-probe-\(UUID().uuidString)")
                 try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("zeta"), withIntermediateDirectories: true)
-                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("Alpha"), withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("alpha"), withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("Beta"), withIntermediateDirectories: true)
                 try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent(".hidden"), withIntermediateDirectories: true)
                 FileManager.default.createFile(atPath: controlDir.appendingPathComponent("b.txt").path, contents: Data())
                 defer { try? FileManager.default.removeItem(at: controlDir) }
                 let listed = try? ControlProtocol.listDirectory(path: controlDir.path, showHidden: false).get()
                 record("control browse: directories first, case-insensitive, hidden dropped",
-                       listed?.map(\.name) == ["Alpha", "zeta", "b.txt"], "\(listed?.map(\.name) ?? [])")
+                       listed?.map(\.name) == ["alpha", "Beta", "zeta", "b.txt"], "\(listed?.map(\.name) ?? [])")
                 record("control browse: hidden shown on request",
                        (try? ControlProtocol.listDirectory(path: controlDir.path, showHidden: true).get())?.map(\.name).contains(".hidden") == true)
                 record("control browse: a relative path is refused",
@@ -1824,7 +1825,11 @@ enum SidebarLogicProbe {
                 record("control mkdir: an existing folder is reported, not entered",
                        ControlProtocol.mkdir(parent: controlDir.path, name: "zeta") == .failure(ControlProtocol.ControlError("already exists")))
                 record("control mkdir: a slash in the name is refused by the shared rule",
-                       (try? ControlProtocol.mkdir(parent: controlDir.path, name: "a/b").get()) == nil)
+                       ControlProtocol.mkdir(parent: controlDir.path, name: "a/b")
+                           == .failure(ControlProtocol.ControlError("A folder name cannot contain a slash.")))
+                record("control mkdir: '..' is refused and nothing is created beside the parent",
+                       ControlProtocol.mkdir(parent: controlDir.appendingPathComponent("zeta").path, name: "..")
+                           == .failure(ControlProtocol.ControlError("That name is reserved.")))
                 let openOK = ControlProtocol.parseOpenParams(["cwd": controlDir.path, "model": "opus", "permissionMode": "plan",
                                                               "initialPrompt": "hi", "worktreeBranch": "fix-x"], allowBypass: false)
                 record("control open: all fields parse",
@@ -1837,7 +1842,7 @@ enum SidebarLogicProbe {
                        ControlProtocol.parseOpenParams(["cwd": controlDir.path, "permissionMode": "yolo"], allowBypass: false)
                            == .failure(ControlProtocol.ControlError("unknown permission mode")))
             }
-            // Canopy Server reaper (Plan A, Task 3).
+            // Canopy Server reaper.
             do {
                 let reapT0 = Date(timeIntervalSince1970: 2_000_000)
                 let reapLimit = SessionReaper.defaultIdleLimit
@@ -1856,7 +1861,7 @@ enum SidebarLogicProbe {
                 record("reaper: a quietSince in the future (clock change) is kept",
                        !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: -60), now: reapT0, limit: reapLimit))
             }
-            // Canopy Server socket path (Plan A, Task 4).
+            // Canopy Server socket path.
             do {
                 let probeHome = URL(fileURLWithPath: "/Users/someone")
                 let releaseSock = DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: probeHome)
@@ -1873,25 +1878,38 @@ enum SidebarLogicProbe {
                 record("daemon socket: the fallback still separates Debug from Release",
                        DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: longHome) != longSock)
             }
-            // Canopy Server LaunchAgent (Plan A, Task 8).
+            // Canopy Server LaunchAgent.
             record("daemon agent: Debug and Release register different plists",
                    DaemonRegistration.plistName(bundleId: "sh.saqoo.Canopy") == "sh.saqoo.Canopy.daemon.plist"
                        && DaemonRegistration.plistName(bundleId: "sh.saqoo.Canopy.debug") == "sh.saqoo.Canopy.debug.daemon.plist")
-            do {
+            // Both plists ship in every bundle, so the Release one users get is checked too.
+            for agentBundleId in ["sh.saqoo.Canopy", "sh.saqoo.Canopy.debug"] {
                 let agentPlist = Bundle.main.bundleURL
                     .appendingPathComponent("Contents/Library/LaunchAgents")
-                    .appendingPathComponent(DaemonRegistration.plistName(bundleId: Bundle.main.bundleIdentifier ?? ""))
+                    .appendingPathComponent(DaemonRegistration.plistName(bundleId: agentBundleId))
                 let agent = NSDictionary(contentsOf: agentPlist)
-                record("daemon agent: this build's plist is in the bundle", agent != nil, agentPlist.path)
-                record("daemon agent: its label matches this build's bundle id",
-                       agent?["Label"] as? String == "\(Bundle.main.bundleIdentifier ?? "").daemon")
-                record("daemon agent: it runs the bundle's own binary with --daemon",
+                record("daemon agent (\(agentBundleId)): plist is in the bundle", agent != nil, agentPlist.path)
+                record("daemon agent (\(agentBundleId)): label matches the bundle id",
+                       agent?["Label"] as? String == "\(agentBundleId).daemon")
+                record("daemon agent (\(agentBundleId)): runs the bundle's own binary with --daemon",
                        agent?["BundleProgram"] as? String == "Contents/MacOS/Canopy"
                            && (agent?["ProgramArguments"] as? [String])?.last == "--daemon")
-                record("daemon agent: it is limited to the Aqua session (login keychain)",
+                record("daemon agent (\(agentBundleId)): limited to the Aqua session (login keychain)",
                        agent?["LimitLoadToSessionType"] as? String == "Aqua")
+                record("daemon agent (\(agentBundleId)): a clean exit is not restarted",
+                       (agent?["KeepAlive"] as? [String: Any])?["SuccessfulExit"] as? Bool == false)
             }
-            // Canopy Server final-review fixes (Plan A).
+            // The daemon re-reads these three keys from the shared settings.json on its own.
+            record("daemon config: no file or garbage reads as defaults",
+                   DaemonConfig.parse(nil) == DaemonConfig.defaults && DaemonConfig.parse(Data("{".utf8)) == DaemonConfig.defaults)
+            record("daemon config: the three keys are read",
+                   DaemonConfig.parse(Data(#"{"canopy.mirrorEnabled":true,"claudeCode.allowDangerouslySkipPermissions":true,"canopy.daemonPort":9000}"#.utf8))
+                       == DaemonConfig(mirrorEnabled: true, allowBypass: true, daemonPort: 9000))
+            record("daemon config: an out-of-range port keeps the default",
+                   DaemonConfig.parse(Data(#"{"canopy.daemonPort":70000}"#.utf8)).daemonPort == DaemonConfig.defaults.daemonPort)
+            record("daemon config: Mirror and the bypass opt-in default to off",
+                   !DaemonConfig.defaults.mirrorEnabled && !DaemonConfig.defaults.allowBypass)
+            // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)
             record("control limit: absent uses the default, a positive value passes through",

@@ -21,7 +21,7 @@ enum DaemonRegistration {
         SMAppService.agent(plistName: plistName(bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy"))
     }
 
-    /// Called at every GUI launch: registers once, then finds it enabled and returns.
+    /// Called at every GUI launch; idempotent. See `shouldRegister`.
     @MainActor
     static func ensureRegistered() {
         #if DEBUG

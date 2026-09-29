@@ -30,11 +30,12 @@ enum DaemonPaths {
         return UInt16(port)
     }
 
-    /// Whether another process is accepting on `path`. Only a stale file may
-    /// be unlinked; unlinking a live one would orphan that daemon's sessions.
+    /// False only when `path` is provably stale (no file, or nobody accepting).
+    /// Any other failure counts as live: unlinking a live socket would strand
+    /// that daemon's sessions, and refusing to start is the recoverable mistake.
     static func socketIsLive(path: String) -> Bool {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return true }
         defer { close(fd) }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -43,11 +44,12 @@ enum DaemonPaths {
         withUnsafeMutableBytes(of: &addr.sun_path) { buf in
             for (i, b) in bytes.enumerated() { buf[i] = b }
         }
-        return withUnsafePointer(to: &addr) {
+        let result = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
-        } == 0
+        }
+        return result == 0 || (errno != ENOENT && errno != ECONNREFUSED)
     }
 
     static var current: String {

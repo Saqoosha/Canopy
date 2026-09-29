@@ -10,6 +10,8 @@
 
 **Spec:** [docs/superpowers/specs/2026-09-29-canopy-server-design.md](../specs/2026-09-29-canopy-server-design.md)
 
+**実装は計画の後でレビューを受けて変わっている**（Debug の TCP ポート +1、Debug の登録は opt-in、Mirror が Off なら TCP なし、`startLocal -> Bool`、SIGTERM、`allowBypass`、`DaemonConfig` の読み直し ほか）。コードは PR #267 が正で、下のコード片は当時の計画のまま。
+
 ## Global Constraints
 
 - Mac のみ。Xcode 26 toolchain でビルドする（CLAUDE.md「Tech Stack」）
@@ -1404,13 +1406,13 @@ Expected: `ls` が 2 つの plist を直下に出す。`daemon agent:` 2 件 PAS
 - [ ] **Step 5: 実機で登録を確かめる**
 
 ```bash
-open -n build/Build/Products/Debug/Canopy.app
+CANOPY_REGISTER_DAEMON=1 build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy &
 sleep 5
 launchctl print gui/$(id -u)/sh.saqoo.Canopy.debug.daemon | head -20
 ```
 Expected: `state = running` と `program = …/Canopy`、引数に `--daemon`。Canopy（GUI）を終了しても daemon の pid が残る（`launchctl print` で確かめる）。
 
-後片付け（Debug の agent を残さない）: `launchctl bootout gui/$(id -u)/sh.saqoo.Canopy.debug.daemon`、または System Settings › Login Items から外す。
+後片付け（Debug の agent を残さない）: `build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy --unregister-daemon`。`launchctl bootout` はログイン項目の登録を残すので使わない。
 
 - [ ] **Step 6: Commit（許可があれば）**
 
@@ -1438,7 +1440,7 @@ STUDIO_IP=<studio の Tailscale IPv4>
 { printf '{"type":"hello","protocolVersion":1,"token":"%s"}\n' "$TOKEN"
   printf '%s\n' '{"type":"request","id":"1","verb":"browse_dir","params":{"path":"/Users/hiko"}}' \
                 '{"type":"request","id":"2","verb":"list_sessions","params":{"scope":"recent","limit":5}}'
-  sleep 4; } | nc "$STUDIO_IP" 8767 | cut -c1-200
+  sleep 4; } | nc "$STUDIO_IP" 8768  # Debug は daemonPort+1。studio の Mirror が On であること | cut -c1-200
 ```
 
 Expected: `hello_ok`、id 1 と 2 の `response`。wrong token では `hello_error` で切られる（1 回確かめる）。

@@ -1,7 +1,7 @@
 import Foundation
 
-/// The Canopy Server control connection's wire shapes. Pure, so the probe
-/// reaches every rule without a daemon, a socket or a shim.
+/// The Canopy Server control connection's wire shapes. No daemon, socket or
+/// shim needed, so the probe reaches every rule.
 ///
 /// A control connection is a `MirrorServer` connection whose first line is
 /// `hello`. After `hello_ok`, the client sends `request` lines and gets one

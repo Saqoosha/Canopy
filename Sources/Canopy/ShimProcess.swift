@@ -95,8 +95,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// primary, so for it this is every client.
     var mirrorCount: Int { mirrors.count }
 
-    /// When this session last became quiet: the last client detaching or the
-    /// last turn ending, whichever is later. Read by `DaemonReaper`.
+    /// When this session last became quiet: shim creation, the last mirror
+    /// detaching, or the last turn ending, whichever is latest. Read by `DaemonReaper`.
     private(set) var quietSince = Date()
 
     var reaperInputs: SessionReaper.Inputs {

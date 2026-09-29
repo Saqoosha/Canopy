@@ -5,11 +5,12 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ControlSess
 
 /// One client's control connection to the daemon, after `hello`.
 /// Requests are answered one `response` per id; `subscribe` adds
-/// `session_state` pushes whenever an open session's row changes.
+/// `session_state` pushes when a row's id, title, state, clients or running changes.
 @MainActor
 final class ControlSession {
     private let store: SessionStore
     private let send: ([String: Any]) -> Void
+    private let allowBypass: () -> Bool
     private var subscribed = false
     private var lastPushed: [[String: String]]?
     private var recheck: Timer?
@@ -20,8 +21,9 @@ final class ControlSession {
     /// re-reads the rows on a timer and pushes only when they differ.
     static let recheckInterval: TimeInterval = 5
 
-    init(store: SessionStore, send: @escaping ([String: Any]) -> Void) {
+    init(store: SessionStore, allowBypass: @escaping () -> Bool, send: @escaping ([String: Any]) -> Void) {
         self.store = store
+        self.allowBypass = allowBypass
         self.send = send
     }
 
@@ -103,8 +105,7 @@ final class ControlSession {
 
     private func openSession(_ request: ControlProtocol.Request) {
         let params: ControlProtocol.OpenParams
-        switch ControlProtocol.parseOpenParams(request.params,
-                                               allowBypass: CanopySettings.shared.allowDangerouslySkipPermissions) {
+        switch ControlProtocol.parseOpenParams(request.params, allowBypass: allowBypass()) {
         case .success(let parsed): params = parsed
         case .failure(let error):
             fail(request, error.message)

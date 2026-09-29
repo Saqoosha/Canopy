@@ -973,8 +973,16 @@ final class SessionStore {
         )
     }
 
-    /// Start a session for another Mac's mirror pane without putting it on
-    /// this screen: an open row, a running shim, no pane.
+    /// What a control `open_session` can set on a new headless session.
+    struct HeadlessOptions {
+        var model: String? = nil
+        var effort: String? = nil
+        var permissionMode: PermissionMode? = nil
+        var initialPrompt: String? = nil
+    }
+
+    /// Start a session for a client that is not a pane on this Mac: an open
+    /// row, a running shim, no pane.
     ///
     /// Every other shim is spawned by `WebViewContainer` when a pane mounts,
     /// which would grow this Mac's window under nobody's hand. Here the
@@ -986,14 +994,6 @@ final class SessionStore {
     ///
     /// If the shim dies, `ShimProcess.handleProcessExit` drops its mirrors and
     /// returns the row to `.dormant`.
-    /// What a control `open_session` can set on a new headless session.
-    struct HeadlessOptions {
-        var model: String? = nil
-        var effort: String? = nil
-        var permissionMode: PermissionMode? = nil
-        var initialPrompt: String? = nil
-    }
-
     func startHeadlessSession(directory: URL, resumeId: String, isExistingTranscript: Bool, title: String?,
                               options: HeadlessOptions = .init()) -> ShimProcess? {
         if openSessions.contains(where: { $0.resumeId == resumeId }) {

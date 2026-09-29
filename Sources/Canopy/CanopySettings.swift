@@ -148,8 +148,8 @@ final class CanopySettings {
         didSet { save() }
     }
 
-    /// The `Canopy --daemon` TCP port on Tailscale. Separate from `mirrorPort`
-    /// while the GUI still runs its own mirror listener on the same address.
+    /// The `Canopy --daemon` TCP port on Tailscale (Release; see `DaemonPaths.tcpPort`).
+    /// Separate from `mirrorPort` while the GUI still runs its own mirror listener.
     var daemonPort: Int = 8767 {
         didSet { save() }
     }

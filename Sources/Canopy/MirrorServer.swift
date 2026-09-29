@@ -36,7 +36,17 @@ final class MirrorServer {
     /// The address a not-yet-ready listener is binding; a second start for it must not cancel the first.
     private(set) var pendingAddress: (host: String, port: UInt16)?
     /// Read once per bind so an attach never touches the Keychain; `resetPassword` replaces it.
-    private(set) var token: String
+    fileprivate var token: String
+    /// Daemon only: a `hello` first line opens a control connection. The GUI's
+    /// mirror listener keeps refusing it, so its panes cannot be stopped from outside.
+    var acceptsControl = false
+    /// Daemon only: re-read the password from the Keychain on each TCP
+    /// connection, because a reset happens in the GUI process.
+    var refreshesToken = false
+    /// This Mac's bypass-permissions opt-in, asked per `open_session`.
+    var bypassAllowed: () -> Bool = { false }
+    /// Daemon only: the local socket stopped listening after it was up.
+    var onLocalFailure: (() -> Void)?
 
     init(store: SessionStore, token: String) {
         self.store = store
@@ -52,6 +62,18 @@ final class MirrorServer {
         return true
     }
 
+    /// A reset in the GUI replaces the Keychain item; the old password must stop working here too.
+    private func refreshToken() {
+        let current = MirrorAccess.token(createIfMissing: false) ?? ""
+        guard current != token else { return }
+        logger.notice("[mirror-server] password changed; dropping TCP clients")
+        token = current
+        for connection in connections where !connection.trustsPeer {
+            connection.cancelFromServer()
+        }
+        connections.removeAll { !$0.trustsPeer }
+    }
+
     private func dropAllConnections() {
         for connection in connections {
             connection.cancelFromServer()
@@ -60,7 +82,7 @@ final class MirrorServer {
     }
 
     func start(host: String, port: UInt16) {
-        stop()
+        stopTCP()
         pendingAddress = (host, port)
         do {
             let parameters = NWParameters.tcp
@@ -88,7 +110,7 @@ final class MirrorServer {
             }
             listener.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor in
-                    self?.accept(connection)
+                    self?.accept(connection, trustsPeer: false)
                 }
             }
             listener.start(queue: .main)
@@ -100,10 +122,15 @@ final class MirrorServer {
     }
 
     func stop() {
-        for connection in connections {
+        stopTCP()
+    }
+
+    /// Stops the TCP listener and its connections; local-socket clients stay.
+    func stopTCP() {
+        for connection in connections where !connection.trustsPeer {
             connection.cancelFromServer()
         }
-        connections.removeAll()
+        connections.removeAll { !$0.trustsPeer }
         listener?.cancel()
         listener = nil
         boundAddress = nil
@@ -111,9 +138,8 @@ final class MirrorServer {
     }
 
     /// The daemon's own socket. Trusted by file permission (0600), so a
-    /// connection from it needs no password. False when another process is
-    /// already accepting on `socketPath`: its file is left alone, because
-    /// unlinking it would strand that daemon's sessions behind no socket.
+    /// connection from it needs no password. False when it cannot listen,
+    /// including when another process already accepts on `socketPath`.
     @discardableResult
     func startLocal(socketPath: String) -> Bool {
         stopLocal()
@@ -138,6 +164,7 @@ final class MirrorServer {
                         logger.notice("[mirror-server] local socket ready")
                     case .waiting(let error), .failed(let error):
                         logger.error("[mirror-server] local socket cannot bind: \(error.localizedDescription, privacy: .public)")
+                        self.onLocalFailure?()
                     default:
                         break
                     }
@@ -151,11 +178,16 @@ final class MirrorServer {
             localSocketPath = socketPath
         } catch {
             logger.error("[mirror-server] local socket start failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
         return true
     }
 
     func stopLocal() {
+        for connection in connections where connection.trustsPeer {
+            connection.cancelFromServer()
+        }
+        connections.removeAll { $0.trustsPeer }
         localListener?.cancel()
         localListener = nil
         if let path = localSocketPath { try? FileManager.default.removeItem(atPath: path) }
@@ -171,7 +203,8 @@ final class MirrorServer {
         connections.removeAll { $0 === connection }
     }
 
-    private func accept(_ connection: NWConnection, trustsPeer: Bool = false) {
+    private func accept(_ connection: NWConnection, trustsPeer: Bool) {
+        if !trustsPeer, refreshesToken { refreshToken() }
         let mirror = MirrorConnection(connection: connection, store: store, server: self, trustsPeer: trustsPeer)
         connections.append(mirror)
         mirror.start()
@@ -547,9 +580,16 @@ final class MirrorConnection: MirrorSink {
 
     /// A `hello` first line makes this a control connection (`ControlSession`).
     private func openControl(_ dict: [String: Any]) {
+        guard server?.acceptsControl == true else {
+            logger.error("[mirror-server] hello refused: this listener has no control API")
+            failHello("no control API here")
+            return
+        }
         switch ControlProtocol.checkHello(dict, trustsPeer: trustsPeer, expectedToken: server?.token) {
         case .ok:
-            control = ControlSession(store: store) { [weak self] payload in self?.sendJSONObject(payload) }
+            control = ControlSession(store: store, allowBypass: server?.bypassAllowed ?? { false }) { [weak self] payload in
+                self?.sendJSONObject(payload)
+            }
             didAttach = true
             compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
             sendJSONObject(["type": "hello_ok", "protocolVersion": ControlProtocol.version,
