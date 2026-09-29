@@ -407,18 +407,25 @@ final class MirrorConnection: MirrorSink {
             } else if let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen {
                 shim = store.startHeadlessSession(directory: entry.projectDirectory, resumeId: sessionId,
                                                   isExistingTranscript: true, title: entry.title)
+            } else if let path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId),
+                      let cwd = ClaudeSessionHistory.cwd(atPath: path) {
+                // Recents is refreshed asynchronously and may not hold a session that was
+                // just created, teleported or restored; the transcript on disk is the authority.
+                shim = store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
+                                                  isExistingTranscript: true, title: nil)
             } else {
                 logger.error("[mirror-server] open refused: \(sessionId, privacy: .public) is not a session here")
                 return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
             }
-        case .new(let cwd, _):
+        case .new(let cwd, let options):
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 logger.error("[mirror-server] open refused: no folder at \(cwd, privacy: .private)")
                 return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
             }
             shim = store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
-                                              isExistingTranscript: false, title: nil)
+                                              isExistingTranscript: false, title: nil,
+                                              options: SessionStore.HeadlessOptions(options))
         }
         return shim.map { .success($0) } ?? .failure(OpenFailure(MirrorOpenRequest.startFailed))
     }

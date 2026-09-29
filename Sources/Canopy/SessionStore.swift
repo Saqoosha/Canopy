@@ -979,6 +979,11 @@ final class SessionStore {
         var effort: String? = nil
         var permissionMode: PermissionMode? = nil
         var initialPrompt: String? = nil
+        var promptImages: [LaunchImage] = []
+        var settledTitle: String? = nil
+        /// Nil: this Mac's own choice (`ModelProviderStore.selectedProvider`, `launchAccountChoice`).
+        var provider: ModelProvider? = nil
+        var account: ClaudeAccount? = nil
     }
 
     /// Start a session for a client that is not a pane on this Mac: an open
@@ -999,25 +1004,28 @@ final class SessionStore {
         if openSessions.contains(where: { $0.resumeId == resumeId }) {
             return startHeadlessSession(resumeId: resumeId)
         }
-        let provider = ModelProviderStore.selectedProvider()
+        let provider = options.provider ?? ModelProviderStore.selectedProvider()
         let accountChoice = launchAccountChoice(customApi: provider)
         let session = OpenSession(
             origin: .local(directory),
             resumeId: resumeId,
-            title: title ?? "Untitled",
+            title: title ?? options.settledTitle ?? "Untitled",
             project: GitWorktree.projectDisplayName(for: directory),
             status: .dormant,
             permissionMode: options.permissionMode ?? CanopySettings.shared.defaultPermissionMode,
             model: options.model,
             effortLevel: options.effort,
             customApi: provider,
-            claudeAccount: accountChoice.account,
+            claudeAccount: options.account ?? accountChoice.account,
             resumeIdIsExistingTranscript: isExistingTranscript
         )
         // Sent by the launch_claude intercept, i.e. once the first client's
         // webview attaches — a headless session has no webview of its own.
-        if let text = options.initialPrompt { session.pendingInitialPrompt = LaunchPrompt.make(text: text, images: []) }
-        session.accountAutoSwitch = accountChoice.autoSwitch
+        if options.initialPrompt != nil || !options.promptImages.isEmpty {
+            session.pendingInitialPrompt = LaunchPrompt.make(text: options.initialPrompt ?? "", images: options.promptImages)
+        }
+        session.pendingSettledTitle = options.settledTitle
+        if options.account == nil { session.accountAutoSwitch = accountChoice.autoSwitch }
         openSessions.append(session)
         guard let shim = startHeadlessSession(resumeId: resumeId) else {
             // Nobody here asked for this row; a failed start must not leave it behind.
@@ -2863,4 +2871,16 @@ final class SessionStore {
         pendingRestore = snapshot
     }
     #endif
+}
+
+extension SessionStore.HeadlessOptions {
+    /// Ids from the wire resolved to this Mac's providers and logins. An id this
+    /// Mac does not know falls back to its own choice rather than refusing.
+    init(_ wire: NewSessionOptions) {
+        self.init(model: wire.model, effort: wire.effort, permissionMode: wire.permissionMode,
+                  initialPrompt: wire.promptText, promptImages: wire.promptImages.compactMap(LaunchImage.fromWire),
+                  settledTitle: wire.settledTitle,
+                  provider: wire.providerId.flatMap { id in ModelProviderStore.load().first { $0.id == id } },
+                  account: wire.accountId.flatMap { ClaudeAccountStore.account(id: $0) })
+    }
 }
