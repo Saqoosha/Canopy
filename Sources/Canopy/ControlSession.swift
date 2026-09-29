@@ -216,7 +216,10 @@ final class ControlSession {
             reply(request, ["requested": false, "reason": reason])
             return
         }
-        shim.requestRecap()
+        guard shim.requestRecap() else {
+            reply(request, ["requested": false, "reason": "not eligible"])
+            return
+        }
         reply(request, ["requested": true])
     }
 

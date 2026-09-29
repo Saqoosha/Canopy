@@ -240,16 +240,22 @@ struct MirrorPaneView: NSViewRepresentable {
             switch frame {
             case .showContent(let title, let content, let startLine, let endLine):
                 ContentViewer.show(content: content, title: title, in: webView, startLine: startLine, endLine: endLine)
-            case .evalJS(let js):
-                webView?.evaluateJavaScript(js, completionHandler: nil)
+            case .recap(let text):
+                if let webView { ShimProcess.injectRecap(text, into: webView) }
+            case .errorBanner(let message):
+                if let webView { ShimProcess.injectErrorBanner(message, into: webView) }
             case .alert(let requestId, let message, let severity, let buttons):
                 let alert = NSAlert()
                 alert.messageText = message
                 alert.alertStyle = severity == "error" ? .critical : severity == "warning" ? .warning : .informational
                 buttons.forEach { alert.addButton(withTitle: $0) }
                 alert.addButton(withTitle: "Dismiss")
-                let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-                bridge?.sendUIAnswer(MirrorUIAnswer(requestId: requestId, button: index < buttons.count ? buttons[index] : nil))
+                let button = MirrorUIAlert.button(response: alert.runModal().rawValue, buttons: buttons)
+                guard let bridge else {
+                    logger.notice("alert \(requestId, privacy: .public) answered after its pane closed; the session's client left, so it was dismissed there")
+                    return
+                }
+                bridge.sendUIAnswer(MirrorUIAnswer(requestId: requestId, button: button))
             case .notify(let title, let body):
                 guard !NSApp.isActive else { return }
                 SessionNotifier.post(title: title, body: body)

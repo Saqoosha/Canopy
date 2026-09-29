@@ -20,8 +20,8 @@ protocol MirrorSink: AnyObject {
     /// page.
     var acceptsFileTransfers: Bool { get }
 
-    /// A Mac's Canopy (not the phone): it can take UI frames.
-    var isMacClient: Bool { get }
+    /// A Mac's Canopy that asked for UI frames at attach (`"ui": true`).
+    var acceptsUI: Bool { get }
 
     /// On this Mac, over the daemon's local socket.
     var isLocalClient: Bool { get }
@@ -33,7 +33,7 @@ protocol MirrorSink: AnyObject {
 extension MirrorSink {
     var openRedirectHost: String? { nil }
     var acceptsFileTransfers: Bool { false }
-    var isMacClient: Bool { false }
+    var acceptsUI: Bool { false }
     var isLocalClient: Bool { false }
     func deliverUI(_ frame: MirrorUIFrame) {}
 }

@@ -83,6 +83,7 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         KeepAliveCoordinator.shared.targets = { store in
             KeepAliveCoordinator.daemonTargets(store.openSessions).map { ("session \($0.resumeId.prefix(8))", $0) }
         }
+        KeepAliveCoordinator.shared.isEnabled = { [weak self] in self?.config.keepAliveEnabled ?? false }
         KeepAliveCoordinator.shared.start()
 
         let reaper = DaemonReaper(store: store)

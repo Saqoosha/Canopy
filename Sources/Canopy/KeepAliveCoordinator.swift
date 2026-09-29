@@ -127,13 +127,15 @@ final class KeepAliveCoordinator {
 
     private init() {}
 
-    /// Begin the tick loop. Idempotent — a second call is ignored rather
-    /// than starting a second self-rescheduling chain, which would double
-    /// the tick rate permanently with no way to wind back down.
     /// The daemon's sessions worth keeping warm: running, with a client attached.
     /// It has no panes; an attached client is its "someone is coming back".
     static func daemonTargets(_ sessions: [OpenSession]) -> [OpenSession] {
-        sessions.filter { ($0.shim?.mirrorCount ?? 0) > 0 }
+        sessions.filter { isDaemonTarget(mirrorCount: $0.shim?.mirrorCount) }
+    }
+
+    /// `mirrorCount` nil: no shim running.
+    nonisolated static func isDaemonTarget(mirrorCount: Int?) -> Bool {
+        (mirrorCount ?? 0) > 0
     }
 
     /// Where `tick` looks. The GUI keeps the pane scope; the daemon sets `daemonTargets`.
@@ -145,6 +147,13 @@ final class KeepAliveCoordinator {
         }
     }
 
+    /// The Settings toggle. The daemon reads it from `DaemonConfig` instead:
+    /// its `CanopySettings` is loaded once and would miss a change made in the GUI.
+    var isEnabled: () -> Bool = { CanopySettings.shared.keepAliveEnabled }
+
+    /// Begin the tick loop. Idempotent — a second call is ignored rather
+    /// than starting a second self-rescheduling chain, which would double
+    /// the tick rate permanently with no way to wind back down.
     func start() {
         guard pendingTick == nil else { return }
         // `notice`: whether the loop started at all is a once-per-launch
@@ -175,7 +184,7 @@ final class KeepAliveCoordinator {
 
     private func tick() {
         defer { scheduleTick() }
-        guard CanopySettings.shared.keepAliveEnabled else { return }
+        guard isEnabled() else { return }
         guard let store = SessionStore.shared else {
             logger.error("keep-alive tick: SessionStore.shared is nil — no panes examined")
             return

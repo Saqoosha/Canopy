@@ -142,7 +142,7 @@ final class RecapCoordinator {
                     switch await control.request("request_recap", params) {
                     case .success(let result):
                         if result["requested"] as? Bool != true {
-                            logger.info("pane \(index, privacy: .public): daemon skipped recap — \(result["reason"] as? String ?? "?", privacy: .public)")
+                            logger.notice("pane \(index, privacy: .public): daemon skipped recap — \(result["reason"] as? String ?? "?", privacy: .public)")
                         }
                     case .failure(let failure):
                         logger.error("pane \(index, privacy: .public): request_recap failed: \(String(describing: failure), privacy: .public)")

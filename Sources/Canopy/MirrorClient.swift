@@ -203,7 +203,9 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         // uplink spends its time on (see `MirrorWire`).
         // `images` (`fetchesImages`): Read images arrive as `canopy-asset` URLs fetched on scroll, not as base64.
         var attach: [String: Any] = ["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
-                                     "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages]
+                                     "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages,
+                                     // Only a pane that shows them; the DEBUG attach window would leave an alert unanswered.
+                                     "ui": onUIFrame != nil]
         if let key { attach["key"] = key }
         if !sendsToken { attach["token"] = nil }
         // `open`: start this session over there if nothing is running it yet (a Recents or folder row).

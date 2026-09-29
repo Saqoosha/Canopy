@@ -1,6 +1,6 @@
 import Foundation
 
-/// The three settings the daemon acts on, read straight from the shared
+/// The settings the daemon acts on, read straight from the shared
 /// settings.json. Not `CanopySettings`: that instance is loaded once and
 /// rewrites the file on load, while the GUI changes these keys in another
 /// process and the daemon must follow without writing anything back.
@@ -8,6 +8,7 @@ struct DaemonConfig: Equatable {
     var mirrorEnabled: Bool
     var allowBypass: Bool
     var daemonPort: Int
+    var keepAliveEnabled = true
 
     static let defaults = DaemonConfig(mirrorEnabled: false, allowBypass: false, daemonPort: 8767)
 
@@ -21,6 +22,7 @@ struct DaemonConfig: Equatable {
         if let on = dict["canopy.mirrorEnabled"] as? Bool { config.mirrorEnabled = on }
         if let allow = dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool { config.allowBypass = allow }
         if let port = dict["canopy.daemonPort"] as? Int, (1...65535).contains(port) { config.daemonPort = port }
+        if let keepAlive = dict["canopy.keepAliveEnabled"] as? Bool { config.keepAliveEnabled = keepAlive }
         return config
     }
 }

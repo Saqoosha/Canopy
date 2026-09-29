@@ -61,7 +61,7 @@ enum RecapScript {
     /// `JSONSerialization` is used rather than hand-rolled escaping so quotes,
     /// backslashes, newlines, and lone surrogates in model output can't break
     /// out of the literal.
-    private static func jsStringLiteral(_ value: String) -> String {
+    static func jsStringLiteral(_ value: String) -> String {
         // `.fragmentsAllowed` lets a bare string encode without wrapping it in
         // an array. On the (unreachable) encode failure, fall back to an empty
         // literal: showing nothing beats injecting malformed JS that would

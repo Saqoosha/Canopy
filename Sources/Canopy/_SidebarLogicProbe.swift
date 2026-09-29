@@ -2138,33 +2138,81 @@ enum SidebarLogicProbe {
                    MirrorConnection.isSessionIdShaped("d249fc17-cfc3-4ab7-a2ab-976110f83c2f")
                        && !MirrorConnection.isSessionIdShaped("../../etc/x") && !MirrorConnection.isSessionIdShaped(""))
             // Canopy Server UI frames (daemon → Mac client).
+            func throughJSON(_ wire: [String: Any]) -> [String: Any] {
+                guard let data = try? JSONSerialization.data(withJSONObject: wire),
+                      let back = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [:] }
+                return back
+            }
             for frame in [MirrorUIFrame.showContent(title: "a.swift", content: "let x = 1", startLine: 3, endLine: 5),
                           .showContent(title: "out", content: "", startLine: nil, endLine: nil),
-                          .evalJS("window.x()"),
+                          .recap("Where we were"), .recap(nil), .errorBanner("it's\nbroken"),
                           .alert(requestId: "r1", message: "Sure?", severity: "warning", buttons: ["Yes", "No"]),
                           .notify(title: "Canopy", body: "done")] {
-                record("ui frame: \(frame) round-trips", MirrorUIFrame(wire: frame.wire) == frame)
+                record("ui frame: \(frame) round-trips through JSON", MirrorUIFrame(wire: throughJSON(frame.wire)) == frame)
             }
             record("ui frame: another type is not a UI frame", MirrorUIFrame(wire: ["type": "status"]) == nil)
-            record("ui frame: an unknown action is ignored",
-                   MirrorUIFrame(wire: ["type": MirrorUIFrame.type, "action": "explode"]) == nil)
+            record("ui frame: an unknown action (the retired eval_js too) is ignored",
+                   MirrorUIFrame(wire: ["type": MirrorUIFrame.type, "action": "explode"]) == nil
+                       && MirrorUIFrame(wire: ["type": MirrorUIFrame.type, "action": "eval_js", "js": "x()"]) == nil)
+            record("ui frame: an alert with no requestId cannot be answered, so it is dropped",
+                   MirrorUIFrame(wire: ["type": MirrorUIFrame.type, "action": "alert", "message": "?"]) == nil)
             record("ui answer: a button and no button both round-trip",
-                   MirrorUIAnswer(wire: MirrorUIAnswer(requestId: "r1", button: "Yes").wire) == MirrorUIAnswer(requestId: "r1", button: "Yes")
-                       && MirrorUIAnswer(wire: MirrorUIAnswer(requestId: "r1", button: nil).wire) == MirrorUIAnswer(requestId: "r1", button: nil))
+                   MirrorUIAnswer(wire: throughJSON(MirrorUIAnswer(requestId: "r1", button: "Yes").wire)) == MirrorUIAnswer(requestId: "r1", button: "Yes")
+                       && MirrorUIAnswer(wire: throughJSON(MirrorUIAnswer(requestId: "r1", button: nil).wire)) == MirrorUIAnswer(requestId: "r1", button: nil))
+            let small = String(repeating: "a", count: 10)
+            record("ui content: text under the cap is sent whole", MirrorUIFrame.inlineContent(small) == small)
+            let big = String(repeating: "あ", count: MirrorUIFrame.maxInlineContentBytes / 3 + 10)
+            let cut = MirrorUIFrame.inlineContent(big)
+            record("ui content: text over the cap is cut on a character boundary and says so",
+                   cut.utf8.count < big.utf8.count && cut.hasSuffix("MB in all)") && cut.hasPrefix("あああ")
+                       && cut.utf8.count <= MirrorUIFrame.maxInlineContentBytes + 64)
+            let mac = ShimProcess.UIClient(acceptsUI: true, isLocal: false)
+            let local = ShimProcess.UIClient(acceptsUI: true, isLocal: true)
+            let phone = ShimProcess.UIClient(acceptsUI: false, isLocal: false)
             record("ui target: the Mac client that asked gets it",
-                   ShimProcess.uiTarget(requester: 1, clients: [true, true]) == 1)
-            record("ui target: a phone that asked hands it to the first Mac",
-                   ShimProcess.uiTarget(requester: 0, clients: [false, true]) == 1)
+                   ShimProcess.uiTarget(requester: 1, clients: [local, mac]) == 1)
+            record("ui target: a phone that asked hands it to a Mac, the local one first",
+                   ShimProcess.uiTarget(requester: 0, clients: [phone, mac, local]) == 2)
+            record("ui target: without fallback, a phone's request goes to nobody",
+                   ShimProcess.uiTarget(requester: 0, clients: [phone, local], fallback: false) == nil
+                       && ShimProcess.uiTarget(requester: 1, clients: [phone, local], fallback: false) == 1)
             record("ui target: no Mac client, nobody gets it",
-                   ShimProcess.uiTarget(requester: 0, clients: [false, false]) == nil)
-            record("ui target: no requester, the first Mac client",
-                   ShimProcess.uiTarget(requester: nil, clients: [false, true, true]) == 1)
+                   ShimProcess.uiTarget(requester: 0, clients: [phone, phone]) == nil)
+            record("ui target: no requester, the local Mac, else any Mac",
+                   ShimProcess.uiTarget(requester: nil, clients: [phone, mac, local]) == 2
+                       && ShimProcess.uiTarget(requester: nil, clients: [phone, mac]) == 1)
+            var pending = PendingUIAlerts<Int>()
+            pending.record(requestId: "a", client: 1, buttons: ["Yes"])
+            pending.record(requestId: "b", client: 2, buttons: ["Yes"])
+            pending.record(requestId: "c", client: 1, buttons: [])
+            record("pending alerts: an answer from another client is refused and keeps the alert",
+                   pending.answer(requestId: "a", button: "Yes", from: 2) == .wrongClient)
+            record("pending alerts: the right client's answer is accepted once",
+                   pending.answer(requestId: "a", button: "Yes", from: 1) == .accept("Yes")
+                       && pending.answer(requestId: "a", button: "Yes", from: 1) == .unknown)
+            record("pending alerts: a button that was not offered is Dismiss",
+                   pending.answer(requestId: "b", button: "Delete everything", from: 2) == .accept(nil))
+            record("pending alerts: a detaching client is owed a Dismiss for its own alerts only",
+                   pending.detach(2) == [] && pending.detach(1) == ["c"] && pending.isEmpty)
+            let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            record("alert response: buttons, then Dismiss, then anything else is Dismiss",
+                   MirrorUIAlert.button(response: first, buttons: ["Yes", "No"]) == "Yes"
+                       && MirrorUIAlert.button(response: first + 1, buttons: ["Yes", "No"]) == "No"
+                       && MirrorUIAlert.button(response: first + 2, buttons: ["Yes", "No"]) == nil
+                       && MirrorUIAlert.button(response: NSApplication.ModalResponse.stop.rawValue, buttons: ["Yes"]) == nil)
             record("keep-alive (daemon): a session with no shim is not a target",
                    KeepAliveCoordinator.daemonTargets([OpenSession(origin: .local(URL(fileURLWithPath: "/tmp")), resumeId: "a", title: "", project: "")]).isEmpty)
+            record("keep-alive (daemon): a target has a client attached, a phone included",
+                   KeepAliveCoordinator.isDaemonTarget(mirrorCount: 1) && !KeepAliveCoordinator.isDaemonTarget(mirrorCount: 0)
+                       && !KeepAliveCoordinator.isDaemonTarget(mirrorCount: nil))
+            record("daemon config: the keep-alive toggle is read, on by default",
+                   DaemonConfig.defaults.keepAliveEnabled
+                       && DaemonConfig.parse(Data(#"{"canopy.keepAliveEnabled":false}"#.utf8))?.keepAliveEnabled == false)
             record("permission mode: set_permission_mode is read",
                    ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_permission_mode", "mode": "plan", "userInitiated": true]]) == .plan)
-            record("permission mode: another request is not",
-                   ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "list_sessions_request"]]) == nil)
+            record("permission mode: another request carrying a mode is not",
+                   ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_model", "mode": "plan"]]) == nil
+                       && ShimProcess.requestedPermissionMode(["type": "response", "request": ["type": "set_permission_mode", "mode": "plan"]]) == nil)
             record("permission mode: an unknown mode is not",
                    ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_permission_mode", "mode": "yolo"]]) == nil)
             // Canopy Server daemon hardening.

@@ -286,8 +286,11 @@ final class MirrorConnection: MirrorSink {
 
     var isLocalClient: Bool { trustsPeer }
 
+    /// Set from the attach's `ui: true`, like `filesRequested`.
+    private(set) var acceptsUI = false
+
     func deliverUI(_ frame: MirrorUIFrame) {
-        guard isMacClient else { return }
+        guard acceptsUI else { return }
         sendJSONObject(frame.wire)
     }
 
@@ -380,7 +383,7 @@ final class MirrorConnection: MirrorSink {
             return
         }
         if let answer = MirrorUIAnswer(wire: dict) {
-            shim?.receiveUIAnswer(answer)
+            shim?.receiveUIAnswer(answer, from: self)
             return
         }
         shim?.receiveFromMirror(dict, from: self)
@@ -501,6 +504,7 @@ final class MirrorConnection: MirrorSink {
         compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
         filesRequested = dict["files"] as? Bool == true
         fetchesImages = isMacClient && dict["images"] as? Bool == true
+        acceptsUI = isMacClient && dict["ui"] as? Bool == true
         // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
         let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
