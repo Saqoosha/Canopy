@@ -50,8 +50,6 @@ final class ControlClient {
     private var waiters: [String: CheckedContinuation<Result<[String: Any], Failure>, Never>] = [:]
     private var ready = false
     private var stopped = false
-    /// Set by `hello_error`: the daemon refused this client, and retrying every 2 s would only repeat that.
-    private var refused = false
 
     init(endpoint: MirrorEndpoint, token: String?) {
         self.endpoint = endpoint
@@ -128,7 +126,7 @@ final class ControlClient {
         ready = false
         connection = nil
         failPending()
-        guard !stopped, !refused else { return }
+        guard !stopped else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             MainActor.assumeIsolated { self?.connect() }
         }
@@ -174,9 +172,7 @@ final class ControlClient {
                 }
             }
         case "hello_error":
-            // Terminal: a version mismatch or a refused password does not heal by retrying.
-            logger.error("daemon refused hello, not retrying: \(dict["message"] as? String ?? "?", privacy: .public)")
-            refused = true
+            logger.error("daemon refused hello: \(dict["message"] as? String ?? "?", privacy: .public)")
             connection?.cancel()
         case "session_state":
             let raw = dict["sessions"] as? [[String: Any]] ?? []

@@ -1541,7 +1541,7 @@ final class SessionStore {
                 // selection-only update would show the Launcher while the
                 // sidebar highlights a live session.
                 let target = idx < openSessions.count ? idx : openSessions.count - 1
-                if session.isDaemonHosted {
+                if openSessions[target].isDaemonHosted {
                     // Not pulled into the pane on its own: that would attach a session nobody asked for.
                     if !keepingFailure { lastSessionFailure = nil }
                     selection = .launcher
