@@ -627,7 +627,7 @@ final class MirrorConnection: MirrorSink {
         }
         switch ControlProtocol.checkHello(dict, trustsPeer: trustsPeer, expectedToken: server?.token) {
         case .ok:
-            control = ControlSession(store: store, allowBypass: server?.bypassAllowed ?? { false }) { [weak self] payload in
+            control = ControlSession(store: store, isLocal: trustsPeer, allowBypass: server?.bypassAllowed ?? { false }) { [weak self] payload in
                 self?.sendJSONObject(payload)
             }
             didAttach = true

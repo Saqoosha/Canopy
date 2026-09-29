@@ -417,7 +417,8 @@ private struct SharingSettingsTab: View {
         RosterPublisher.current?.secretChanged()
         // The publisher is the daemon's while it holds this Mac's sessions; a
         // Keychain write does not touch settings.json, so tell it directly.
-        if let control = SessionStore.shared?.daemonControl {
+        // A blank submit (tabbing past the field) stores nothing, so there is nothing to reconnect for.
+        if !relaySecret.isEmpty, let control = SessionStore.shared?.daemonControl {
             Task {
                 if case .failure(let failure) = await control.request("roster_secret_changed") {
                     Logger(subsystem: "sh.saqoo.Canopy", category: "Settings").error("roster_secret_changed not delivered: \(String(describing: failure), privacy: .public)")

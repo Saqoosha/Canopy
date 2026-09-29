@@ -11,6 +11,8 @@ final class ControlSession {
     private let store: SessionStore
     private let send: ([String: Any]) -> Void
     private let allowBypass: () -> Bool
+    /// On this Mac's local socket (the GUI), not a TCP client with the mirror password.
+    private let isLocal: Bool
     private var subscribed = false
     private var lastPushed: [ControlProtocol.SessionRow]?
     private var recheck: Timer?
@@ -21,8 +23,10 @@ final class ControlSession {
     /// re-reads the rows on a timer and pushes only when they differ.
     static let recheckInterval: TimeInterval = 5
 
-    init(store: SessionStore, allowBypass: @escaping () -> Bool, send: @escaping ([String: Any]) -> Void) {
+    init(store: SessionStore, isLocal: Bool, allowBypass: @escaping () -> Bool,
+         send: @escaping ([String: Any]) -> Void) {
         self.store = store
+        self.isLocal = isLocal
         self.allowBypass = allowBypass
         self.send = send
     }
@@ -53,8 +57,11 @@ final class ControlSession {
         case "list_accounts": listAccounts(request)
         case "request_recap": requestRecap(request)
         case "roster_secret_changed":
-            // The GUI wrote a new relay secret to the Keychain; reconnect with it.
-            RosterPublisher.current?.secretChanged()
+            // The GUI wrote a new relay secret to the Keychain; reconnect with it. Only this
+            // Mac's GUI writes that Keychain item, so a TCP client has no business asking.
+            guard isLocal else { return fail(request, "local clients only") }
+            guard let publisher = RosterPublisher.current else { return fail(request, "no roster publisher in the daemon") }
+            publisher.secretChanged()
             reply(request, ["ok": true])
         default: fail(request, "unknown verb")
         }

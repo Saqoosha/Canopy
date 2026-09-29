@@ -108,7 +108,7 @@ enum RosterImageUploader {
     @MainActor
     private static func resolvedTarget() -> (machineId: String, base: URLComponents, secret: String)? {
         let settings = CanopySettings.shared
-        guard settings.rosterEnabled,
+        guard RosterNotifier.enabledInProcess, settings.rosterEnabled,
               let machineId = MachineIdentity.stableId(),
               var components = URLComponents(string: settings.rosterEndpoint)
         else { return nil }

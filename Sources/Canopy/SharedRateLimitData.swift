@@ -235,6 +235,11 @@ final class RateLimitAccount {
 
     /// Returns true if enough time has passed since the last update request.
     /// Call this before sending request_usage_update — only the first session to call wins.
+    /// Whether a request went out within `interval`, without starting the throttle.
+    func requestedWithin(_ interval: TimeInterval) -> Bool {
+        Date().timeIntervalSince(lastUsageUpdateTime) < interval
+    }
+
     func shouldRequestUpdate() -> Bool {
         guard Date().timeIntervalSince(lastUsageUpdateTime) >= Self.updateInterval else { return false }
         noteUsageRequested()

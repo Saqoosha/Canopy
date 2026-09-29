@@ -107,10 +107,16 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
             rosterPublisher = publisher
             publisher.start()
             RosterRouting.install(on: publisher, store: store)
-            // Usage on the roster before any shim fetches it, and kept current while none does.
+            // Usage on the roster before any shim fetches it, and kept current while none does:
+            // only with the roster on, and not when a shim asked within the last few minutes
+            // (the endpoint allows about one request a minute per account).
             Task { await ClaudeUsageDirect.refreshLocalAccount() }
             usageTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: true) { _ in
-                Task { @MainActor in await ClaudeUsageDirect.refreshLocalAccount() }
+                Task { @MainActor in
+                    guard CanopySettings.shared.rosterEnabled,
+                          !SharedRateLimitData.shared.local.requestedWithin(5 * 60) else { return }
+                    await ClaudeUsageDirect.refreshLocalAccount()
+                }
             }
         } else {
             logger.notice("roster: not published by a Debug daemon (set CANOPY_DAEMON_ROSTER=1 to allow)")
@@ -179,7 +185,7 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         configTimer?.invalidate()
         usageTimer?.invalidate()
         reaper?.stop()
-        // A clean close, so the relay marks this Mac gone rather than lost.
+        // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
         server?.stopTCP()
         server?.stopLocal()

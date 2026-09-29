@@ -3043,8 +3043,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // variable's presence therefore means "Canopy will push for this
         // session," not merely "Canopy is hosting it," and Pager's hook
         // depends on that stronger reading. `willPost` shares
-        // `RosterNotifier.post`'s own gate (roster enabled, a usable https
-        // endpoint, a resolvable machine id and Keychain secret) so this
+        // `RosterNotifier.post`'s own gate (this process allowed to push —
+        // not a GUI whose local sessions run in the daemon — roster enabled, a
+        // usable https endpoint, a resolvable machine id and Keychain secret) so this
         // check and the one that actually sends cannot drift apart.
         //
         // The value itself is otherwise informational; only its PRESENCE is
