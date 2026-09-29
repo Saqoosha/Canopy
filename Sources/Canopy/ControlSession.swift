@@ -63,6 +63,7 @@ final class ControlSession {
             guard let publisher = RosterPublisher.current else { return fail(request, "no roster publisher in the daemon") }
             publisher.secretChanged()
             reply(request, ["ok": true])
+        case "mirror_status": reply(request, ["status": MirrorServerStatus.shared.state.wire])
         default: fail(request, "unknown verb")
         }
     }

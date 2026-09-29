@@ -6,9 +6,11 @@ import Foundation
 struct DaemonConfig: Equatable {
     var mirrorEnabled: Bool
     var allowBypass: Bool
-    var daemonPort: Int
+    /// The Tailscale port: `canopy.mirrorPort`, the one the GUI used to listen on, so
+    /// every existing pairing (other Macs, the phone) reaches the daemon unchanged.
+    var port: Int
 
-    static let defaults = DaemonConfig(mirrorEnabled: false, allowBypass: false, daemonPort: 8767)
+    static let defaults = DaemonConfig(mirrorEnabled: false, allowBypass: false, port: 8770)
 
     /// Defaults for a missing file; nil for one that does not parse. The GUI
     /// writes it non-atomically, so a read can land mid-write, and treating that
@@ -19,7 +21,7 @@ struct DaemonConfig: Equatable {
         var config = defaults
         if let on = dict["canopy.mirrorEnabled"] as? Bool { config.mirrorEnabled = on }
         if let allow = dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool { config.allowBypass = allow }
-        if let port = dict["canopy.daemonPort"] as? Int, (1...65535).contains(port) { config.daemonPort = port }
+        if let port = dict["canopy.mirrorPort"] as? Int, (1...65535).contains(port) { config.port = port }
         return config
     }
 }

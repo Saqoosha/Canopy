@@ -151,18 +151,22 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     /// Opens, moves or closes the Tailscale listener to match `config`.
     private func applyTCP() {
         guard let server else { return }
-        var wanted = DaemonPaths.tcpPort(mirrorEnabled: config.mirrorEnabled, basePort: config.daemonPort,
+        var wanted = DaemonPaths.tcpPort(mirrorEnabled: config.mirrorEnabled, basePort: config.port,
                                          bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy")
         // No password means every TCP client would be refused; do not listen at all.
+        var noPassword = false
         if wanted != nil, MirrorAccess.token(createIfMissing: true) == nil {
             logger.error("no mirror password; Tailscale listener stays closed")
             wanted = nil
+            noPassword = true
         }
         guard wanted != tcpPort else { return }
         tcpPort = wanted
         guard let wanted else {
             logger.notice("Mirror is off; Tailscale listener closed")
             server.stopTCP()
+            // What the GUI's Settings shows, via `mirror_status`.
+            MirrorServerStatus.shared.state = noPassword ? .noPassword : .off
             return
         }
         startTCP(server, port: wanted)
@@ -173,6 +177,7 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         guard tcpPort == port else { return }
         guard let host = MirrorAccess.tailscaleIPv4() else {
             logger.notice("no Tailscale address yet; retrying in 30 s")
+            MirrorServerStatus.shared.state = .noTailscale
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
                 MainActor.assumeIsolated { self?.startTCP(server, port: port) }
             }

@@ -362,6 +362,14 @@ private struct SharingSettingsTab: View {
             } footer: {
                 SettingsFooter(text: "Paste it into the iPhone app's Settings, or into another Mac's Settings › Remote › Other Macs. It contains the password: anyone on your tailnet who has it can read and drive this Mac's sessions. Reset the password to disconnect every phone and refuse every copy made before.")
             }
+            // The listener is the daemon's: poll its status while this tab is up.
+            .task {
+                guard OpenSession.localSessionsRunInDaemon else { return }
+                while !Task.isCancelled {
+                    await mirrorStatus.refreshFromDaemon(SessionStore.shared?.daemonControl)
+                    try? await Task.sleep(for: .seconds(2))
+                }
+            }
         }
         .formStyle(.grouped)
     }

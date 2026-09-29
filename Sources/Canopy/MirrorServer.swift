@@ -14,10 +14,48 @@ final class MirrorServerStatus {
         case noPassword
         case listening(host: String, port: UInt16)
         case failed(String)
+
+        /// The daemon's listener, as `mirror_status` reports it to the GUI.
+        var wire: [String: Any] {
+            switch self {
+            case .off: ["state": "off"]
+            case .noTailscale: ["state": "noTailscale"]
+            case .noPassword: ["state": "noPassword"]
+            case .listening(let host, let port): ["state": "listening", "host": host, "port": Int(port)]
+            case .failed(let reason): ["state": "failed", "reason": reason]
+            }
+        }
+
+        init?(wire: [String: Any]) {
+            switch wire["state"] as? String {
+            case "off": self = .off
+            case "noTailscale": self = .noTailscale
+            case "noPassword": self = .noPassword
+            case "listening":
+                guard let host = wire["host"] as? String, let raw = wire["port"] as? Int,
+                      let port = UInt16(exactly: raw) else { return nil }
+                self = .listening(host: host, port: port)
+            case "failed": self = .failed(wire["reason"] as? String ?? "unknown")
+            default: return nil
+            }
+        }
     }
 
     static let shared = MirrorServerStatus()
     var state: State = .off
+
+    /// Shown while the GUI cannot reach the daemon that owns the listener.
+    static let daemonUnreachable = "Canopy's background service is not running"
+
+    /// In the GUI whose sessions run in the daemon: the listener is the daemon's, so ask it.
+    func refreshFromDaemon(_ control: ControlClient?) async {
+        guard let control, case .success(let result) = await control.request("mirror_status"),
+              let raw = result["status"] as? [String: Any], let reported = State(wire: raw) else {
+            state = .failed(Self.daemonUnreachable)
+            return
+        }
+        state = reported
+    }
 }
 
 /// Listens for remote Canopy attach clients and fans shim traffic over TCP NDJSON.

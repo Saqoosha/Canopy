@@ -1906,11 +1906,12 @@ enum SidebarLogicProbe {
                    DaemonConfig.parse(nil) == DaemonConfig.defaults)
             record("daemon config: a half-written file is unreadable, not defaults (the caller keeps what it had)",
                    DaemonConfig.parse(Data("{\"canopy.mirrorEnabled\": tr".utf8)) == nil)
-            record("daemon config: the three keys are read",
-                   DaemonConfig.parse(Data(#"{"canopy.mirrorEnabled":true,"claudeCode.allowDangerouslySkipPermissions":true,"canopy.daemonPort":9000}"#.utf8))
-                       == DaemonConfig(mirrorEnabled: true, allowBypass: true, daemonPort: 9000))
-            record("daemon config: an out-of-range port keeps the default",
-                   DaemonConfig.parse(Data(#"{"canopy.daemonPort":70000}"#.utf8))?.daemonPort == DaemonConfig.defaults.daemonPort)
+            record("daemon config: the three keys are read, the port from canopy.mirrorPort",
+                   DaemonConfig.parse(Data(#"{"canopy.mirrorEnabled":true,"claudeCode.allowDangerouslySkipPermissions":true,"canopy.mirrorPort":9000,"canopy.daemonPort":9100}"#.utf8))
+                       == DaemonConfig(mirrorEnabled: true, allowBypass: true, port: 9000))
+            record("daemon config: an out-of-range port keeps the default, which is the mirror port",
+                   DaemonConfig.parse(Data(#"{"canopy.mirrorPort":70000}"#.utf8))?.port == DaemonConfig.defaults.port
+                       && DaemonConfig.defaults.port == CanopySettings(filePath: URL(fileURLWithPath: "/nonexistent/settings.json")).mirrorPort)
             record("daemon config: Mirror and the bypass opt-in default to off",
                    !DaemonConfig.defaults.mirrorEnabled && !DaemonConfig.defaults.allowBypass)
             // Canopy Server session rows.
@@ -2253,6 +2254,18 @@ enum SidebarLogicProbe {
                    !RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: [:])
                        && !RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: ["CANOPY_DAEMON_ROSTER": "true"])
                        && RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: ["CANOPY_DAEMON_ROSTER": "1"]))
+            // Canopy Server B5: the GUI shows the daemon's listener.
+            for state in [MirrorServerStatus.State.off, .noTailscale, .noPassword,
+                          .listening(host: "100.64.0.1", port: 8770), .failed("in use")] {
+                record("mirror status: \(state) round-trips through JSON", {
+                    guard let data = try? JSONSerialization.data(withJSONObject: state.wire),
+                          let back = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
+                    return MirrorServerStatus.State(wire: back) == state
+                }())
+            }
+            record("mirror status: an unknown state or a bad port is not read",
+                   MirrorServerStatus.State(wire: ["state": "exploded"]) == nil
+                       && MirrorServerStatus.State(wire: ["state": "listening", "host": "h", "port": 70000]) == nil)
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)

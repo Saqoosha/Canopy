@@ -152,11 +152,6 @@ final class CanopySettings {
         didSet { save() }
     }
 
-    /// The `Canopy --daemon` TCP port on Tailscale (Release; see `DaemonPaths.tcpPort`).
-    /// Separate from `mirrorPort` while the GUI still runs its own mirror listener.
-    var daemonPort: Int = 8767 {
-        didSet { save() }
-    }
 
     /// Other Macs this one can attach to: machine id → `host:port`. The
     /// password for each lives in the Keychain (`MirrorAccess.peerToken`).
@@ -296,9 +291,6 @@ final class CanopySettings {
         if let port = dict["canopy.mirrorPort"] as? Int, (1...65535).contains(port) {
             mirrorPort = port
         }
-        if let port = dict["canopy.daemonPort"] as? Int, (1...65535).contains(port) {
-            daemonPort = port
-        }
         if let peers = dict["canopy.mirrorPeers"] as? [String: String] { mirrorPeers = peers }
         // Re-clamp on load: if a stale settings.json paired bypass with a
         // disabled opt-in (manual edit, downgrade, etc.) the launcher
@@ -338,7 +330,8 @@ final class CanopySettings {
         dict["canopy.rosterEndpoint"] = rosterEndpoint
         dict["canopy.mirrorEnabled"] = mirrorEnabled
         dict["canopy.mirrorPort"] = mirrorPort
-        dict["canopy.daemonPort"] = daemonPort
+        // Retired: the daemon listens on `mirrorPort` now.
+        dict["canopy.daemonPort"] = nil
         dict["canopy.mirrorPeers"] = mirrorPeers
         writeDict(dict)
     }

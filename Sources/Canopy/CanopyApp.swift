@@ -500,6 +500,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func syncMirrorServer(store: SessionStore) {
         let settings = CanopySettings.shared
+        // The daemon listens on this port now and holds the sessions a client would attach to;
+        // Settings reads its status over the control connection (`mirror_status`).
+        guard !OpenSession.localSessionsRunInDaemon else {
+            mirrorServer?.stop()
+            mirrorServer = nil
+            return
+        }
         guard settings.mirrorEnabled, let port = UInt16(exactly: settings.mirrorPort), port != 0 else {
             mirrorServer?.stop()
             mirrorServer = nil
