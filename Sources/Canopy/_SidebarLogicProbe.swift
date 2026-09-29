@@ -2207,9 +2207,6 @@ enum SidebarLogicProbe {
             record("keep-alive (daemon): a target has a client attached, a phone included",
                    KeepAliveCoordinator.isDaemonTarget(mirrorCount: 1) && !KeepAliveCoordinator.isDaemonTarget(mirrorCount: 0)
                        && !KeepAliveCoordinator.isDaemonTarget(mirrorCount: nil))
-            record("daemon config: the keep-alive toggle is read, on by default",
-                   DaemonConfig.defaults.keepAliveEnabled
-                       && DaemonConfig.parse(Data(#"{"canopy.keepAliveEnabled":false}"#.utf8))?.keepAliveEnabled == false)
             record("permission mode: set_permission_mode is read",
                    ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_permission_mode", "mode": "plan", "userInitiated": true]]) == .plan)
             record("permission mode: another request carrying a mode is not",
@@ -2237,11 +2234,15 @@ enum SidebarLogicProbe {
                        (try? Data(contentsOf: file)) == before)
                 write(#"{"canopy.rosterEnabled":false,"canopy.rosterEndpoint":"https://b.example","canopy.keepAliveEnabled":true,"canopy.machineDisplayName":"Studio"}"#)
                 let rewritten = try? Data(contentsOf: file)
-                settings.reload()
+                settings.reload(from: ((try? JSONSerialization.jsonObject(with: rewritten ?? Data())) as? [String: Any]) ?? [:])
                 record("settings (daemon): reload picks up the GUI's change",
                        !settings.rosterEnabled && settings.rosterEndpoint == "https://b.example"
                            && settings.keepAliveEnabled && settings.machineDisplayName == "Studio")
                 record("settings (daemon): reload writes nothing", (try? Data(contentsOf: file)) == rewritten)
+                settings.reload(from: ["claudeCode.allowDangerouslySkipPermissions": false,
+                                       "canopy.defaultPermissionMode": "bypassPermissions"])
+                record("settings (daemon): reload clamps bypass away when the opt-in is off",
+                       settings.defaultPermissionMode == .acceptEdits)
             }
             record("roster relay: the GUI may, Debug or not",
                    RosterPublisher.relayAllowed(isDaemon: false, isDebug: true, env: [:])

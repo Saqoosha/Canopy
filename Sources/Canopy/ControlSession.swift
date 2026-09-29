@@ -52,6 +52,10 @@ final class ControlSession {
         case "switch_account": switchAccount(request)
         case "list_accounts": listAccounts(request)
         case "request_recap": requestRecap(request)
+        case "roster_secret_changed":
+            // The GUI wrote a new relay secret to the Keychain; reconnect with it.
+            RosterPublisher.current?.secretChanged()
+            reply(request, ["ok": true])
         default: fail(request, "unknown verb")
         }
     }

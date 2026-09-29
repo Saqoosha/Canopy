@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 struct SettingsView: View {
     var body: some View {
@@ -414,6 +415,15 @@ private struct SharingSettingsTab: View {
         MachineIdentity.storeRelaySecret(relaySecret)
         hasStoredSecret = MachineIdentity.hasRelaySecret()
         RosterPublisher.current?.secretChanged()
+        // The publisher is the daemon's while it holds this Mac's sessions; a
+        // Keychain write does not touch settings.json, so tell it directly.
+        if let control = SessionStore.shared?.daemonControl {
+            Task {
+                if case .failure(let failure) = await control.request("roster_secret_changed") {
+                    Logger(subsystem: "sh.saqoo.Canopy", category: "Settings").error("roster_secret_changed not delivered: \(String(describing: failure), privacy: .public)")
+                }
+            }
+        }
     }
 }
 

@@ -54,6 +54,8 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     private var rosterPublisher: RosterPublisher?
     private var config = DaemonConfig.defaults
     private var configModified: Date?
+    private var unreadableModified: Date?
+    private var usageTimer: Timer?
     private var configTimer: Timer?
     /// The TCP port the listener is on, or being brought up on; nil when off.
     private var tcpPort: UInt16?
@@ -93,7 +95,6 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         KeepAliveCoordinator.shared.targets = { store in
             KeepAliveCoordinator.daemonTargets(store.openSessions).map { ("session \($0.resumeId.prefix(8))", $0) }
         }
-        KeepAliveCoordinator.shared.isEnabled = { [weak self] in self?.config.keepAliveEnabled ?? false }
         KeepAliveCoordinator.shared.start()
 
         let reaper = DaemonReaper(store: store)
@@ -106,9 +107,10 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
             rosterPublisher = publisher
             publisher.start()
             RosterRouting.install(on: publisher, store: store)
-            // Usage bars on the roster before any shim has fetched them.
-            Task {
-                await ClaudeUsageDirect.refreshLocalAccount()
+            // Usage on the roster before any shim fetches it, and kept current while none does.
+            Task { await ClaudeUsageDirect.refreshLocalAccount() }
+            usageTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: true) { _ in
+                Task { @MainActor in await ClaudeUsageDirect.refreshLocalAccount() }
             }
         } else {
             logger.notice("roster: not published by a Debug daemon (set CANOPY_DAEMON_ROSTER=1 to allow)")
@@ -120,11 +122,23 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         if tcpPort != nil { server?.refreshToken() }
         let modified = (try? FileManager.default.attributesOfItem(atPath: settingsFile.path))?[.modificationDate] as? Date
         guard server != nil, configModified == nil || modified != configModified else { return }
-        guard let parsed = DaemonConfig.parse(try? Data(contentsOf: settingsFile)) else { return }
+        // One read for both, so the two cannot see different writes.
+        let data = try? Data(contentsOf: settingsFile)
+        guard let parsed = DaemonConfig.parse(data) else {
+            // Usually a read that landed mid-write, which the next tick heals; logged once per
+            // version in case it is a hand edit that broke the file and freezes every setting.
+            if modified != unreadableModified {
+                unreadableModified = modified
+                logger.notice("settings.json is unreadable; keeping the settings the daemon had")
+            }
+            return
+        }
         configModified = modified ?? Date.distantPast
         config = parsed
         // Roster, keep-alive and recap toggles the GUI changed; read only, never written back.
-        CanopySettings.shared.reload()
+        if let data, let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            CanopySettings.shared.reload(from: dict)
+        }
         applyTCP()
     }
 
@@ -163,7 +177,10 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         configTimer?.invalidate()
+        usageTimer?.invalidate()
         reaper?.stop()
+        // A clean close, so the relay marks this Mac gone rather than lost.
+        rosterPublisher?.stop()
         server?.stopTCP()
         server?.stopLocal()
         for session in store.openSessions { session.shim?.stop() }

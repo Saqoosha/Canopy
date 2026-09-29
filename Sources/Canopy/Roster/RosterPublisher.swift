@@ -441,20 +441,10 @@ final class RosterPublisher {
         }
     }
 
-    /// The relay secret, from the Keychain.
-    ///
-    /// **Not from the process environment.** Canopy is launched with `open`,
-    /// which gives it no shell environment, so an env var would be empty in
-    /// every normal launch and present only when a developer runs the binary
-    /// from a terminal — working in exactly the case nobody ships. Not from
-    /// `settings.json` either: that file is plaintext on disk and is SHARED
-    /// with the installed Release build.
-    ///
-    /// `KeychainAuth` is the precedent for reading a secret in this app; this
-    /// item is written by the Settings field in Task 3 and read here.
     /// Whether this process may reach the relay (and the keychain item it
     /// needs). The daemon sets it from `relayAllowed` at launch.
     nonisolated(unsafe) static var relayAllowedInProcess = true
+    private nonisolated(unsafe) static var loggedRelayRefusal = false
 
     /// The GUI always may. A daemon may in Release; a Debug daemon only with
     /// `CANOPY_DAEMON_ROSTER=1`, because its signature does not match the
@@ -466,8 +456,25 @@ final class RosterPublisher {
         return env["CANOPY_DAEMON_ROSTER"] == "1"
     }
 
+    /// The relay secret, from the Keychain.
+    ///
+    /// **Not from the process environment.** Canopy is launched with `open`,
+    /// which gives it no shell environment, so an env var would be empty in
+    /// every normal launch and present only when a developer runs the binary
+    /// from a terminal — working in exactly the case nobody ships. Not from
+    /// `settings.json` either: that file is plaintext on disk and is SHARED
+    /// with the installed Release build.
+    ///
+    /// `KeychainAuth` is the precedent for reading a secret in this app; this
+    /// item is written by the Settings field in Task 3 and read here.
     static func sharedSecret() -> String? {
-        guard relayAllowedInProcess else { return nil }
+        guard relayAllowedInProcess else {
+            if !loggedRelayRefusal {
+                loggedRelayRefusal = true
+                Logger(subsystem: "sh.saqoo.Canopy", category: "Roster").notice("relay secret not read: this process is kept off the relay (a Debug daemon without CANOPY_DAEMON_ROSTER=1); no roster, pushes or image uploads")
+            }
+            return nil
+        }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "sh.saqoo.Canopy.roster",

@@ -147,10 +147,6 @@ final class KeepAliveCoordinator {
         }
     }
 
-    /// The Settings toggle. The daemon reads it from `DaemonConfig` instead:
-    /// its `CanopySettings` is loaded once and would miss a change made in the GUI.
-    var isEnabled: () -> Bool = { CanopySettings.shared.keepAliveEnabled }
-
     /// Begin the tick loop. Idempotent — a second call is ignored rather
     /// than starting a second self-rescheduling chain, which would double
     /// the tick rate permanently with no way to wind back down.
@@ -184,7 +180,7 @@ final class KeepAliveCoordinator {
 
     private func tick() {
         defer { scheduleTick() }
-        guard isEnabled() else { return }
+        guard CanopySettings.shared.keepAliveEnabled else { return }
         guard let store = SessionStore.shared else {
             logger.error("keep-alive tick: SessionStore.shared is nil — no panes examined")
             return

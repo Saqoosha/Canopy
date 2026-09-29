@@ -192,9 +192,7 @@ final class CanopySettings {
     /// Re-read the keys a daemon acts on, after the GUI changed the file.
     /// Assigns only what changed, so observers (the roster publisher) wake
     /// only for a real change, and never writes.
-    func reload() {
-        guard let data = try? Data(contentsOf: filePath),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+    func reload(from dict: [String: Any]) {
         isLoading = true
         defer { isLoading = false }
         func set<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<CanopySettings, T>, _ value: T?) {
@@ -209,6 +207,10 @@ final class CanopySettings {
         set(\.machineDisplayName, dict["canopy.machineDisplayName"] as? String)
         set(\.rosterEnabled, dict["canopy.rosterEnabled"] as? Bool)
         set(\.rosterEndpoint, dict["canopy.rosterEndpoint"] as? String)
+        // Same clamp as `load()`, for a hand edit that pairs bypass with the opt-in off.
+        if !allowDangerouslySkipPermissions, defaultPermissionMode == .bypassPermissions {
+            defaultPermissionMode = .acceptEdits
+        }
     }
 
     private func load() {
@@ -345,6 +347,8 @@ final class CanopySettings {
     /// Preserves wrappers set by the user or other tools (e.g. custom tracing
     /// wrappers) by only clearing values that point at our bundled script.
     func clearStaleSSHWrapper() {
+        // The daemon never writes this file; leave the scrub to the GUI.
+        guard Self.persistsChanges else { return }
         var dict = loadCurrentDict()
         guard let current = dict["claudeCode.claudeProcessWrapper"] as? String,
               (current as NSString).lastPathComponent == "ssh-claude-wrapper.sh"

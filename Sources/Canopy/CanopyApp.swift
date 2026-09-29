@@ -563,7 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The daemon holds this Mac's sessions and publishes them; a second
         // publisher under the same machine id would fight it over one roster.
         guard !OpenSession.localSessionsRunInDaemon else {
-            logger.notice("roster: published by the daemon, not this app")
+            logger.notice("roster: left to the daemon, which holds this Mac's sessions (its own log says whether it publishes)")
             return
         }
         let publisher = RosterPublisher(store: store, settings: CanopySettings.shared)

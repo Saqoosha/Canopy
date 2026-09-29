@@ -8,7 +8,6 @@ struct DaemonConfig: Equatable {
     var mirrorEnabled: Bool
     var allowBypass: Bool
     var daemonPort: Int
-    var keepAliveEnabled = true
 
     static let defaults = DaemonConfig(mirrorEnabled: false, allowBypass: false, daemonPort: 8767)
 
@@ -22,7 +21,7 @@ struct DaemonConfig: Equatable {
         if let on = dict["canopy.mirrorEnabled"] as? Bool { config.mirrorEnabled = on }
         if let allow = dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool { config.allowBypass = allow }
         if let port = dict["canopy.daemonPort"] as? Int, (1...65535).contains(port) { config.daemonPort = port }
-        if let keepAlive = dict["canopy.keepAliveEnabled"] as? Bool { config.keepAliveEnabled = keepAlive }
+
         return config
     }
 }
