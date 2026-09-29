@@ -17,8 +17,9 @@ enum MirrorUIFrame: Equatable {
     static let type = "canopy_ui"
 
     /// Largest `showContent` text sent inline. The client drops a connection on a
-    /// line over `NDJSONLineBuffer.maxLineBytes` (16 MiB), and JSON escaping grows the text.
-    static let maxInlineContentBytes = 4 << 20
+    /// line over `NDJSONLineBuffer.maxLineBytes` (16 MiB, counted after decompression),
+    /// and JSON escaping can grow text up to 6× (a control character becomes `\u00XX`).
+    static let maxInlineContentBytes = 2 << 20
 
     /// `content` cut to `maxInlineContentBytes` on a character boundary, with a note saying so.
     static func inlineContent(_ content: String) -> String {

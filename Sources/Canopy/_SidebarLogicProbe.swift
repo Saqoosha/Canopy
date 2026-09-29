@@ -2161,6 +2161,8 @@ enum SidebarLogicProbe {
                        && MirrorUIAnswer(wire: throughJSON(MirrorUIAnswer(requestId: "r1", button: nil).wire)) == MirrorUIAnswer(requestId: "r1", button: nil))
             let small = String(repeating: "a", count: 10)
             record("ui content: text under the cap is sent whole", MirrorUIFrame.inlineContent(small) == small)
+            record("ui content: the cap, escaped at worst 6×, still fits one client line",
+                   MirrorUIFrame.maxInlineContentBytes * 6 + (1 << 16) < NDJSONLineBuffer.maxLineBytes)
             let big = String(repeating: "あ", count: MirrorUIFrame.maxInlineContentBytes / 3 + 10)
             let cut = MirrorUIFrame.inlineContent(big)
             record("ui content: text over the cap is cut on a character boundary and says so",

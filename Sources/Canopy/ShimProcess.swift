@@ -209,6 +209,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// A stopped shim ends its mirrors' connections, so a Mac attached to it sees a drop instead of typing into nothing.
     private func disconnectMirrors() {
+        // Nothing to dismiss: the shim is stopping or gone, and a write now would hit a closed pipe.
+        pendingAlerts = PendingUIAlerts()
         for client in mirrors.values {
             (client.sink as? MirrorConnection)?.cancelFromServer()
         }
@@ -3319,9 +3321,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func stop() {
         isIntentionalStop = true
         disconnectMirrors()
-        // `disconnectMirrors` ends the connections but does not run their
-        // detach, so clear the destination here too. A crash still leaves the
-        // file; the key is per process, so a stale one is never read again.
+        // Clear the destination here too, whatever the connections' detaches
+        // did. A crash still leaves the file; the key is per process, so a
+        // stale one is never read again.
         OpenRedirect.clear(key: openRedirectKey)
         openRedirectOutbox?.stop()
         openRedirectOutbox = nil
@@ -4094,7 +4096,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if webView == nil {
             // Never a modal in the daemon: it would stop every session. No Mac to ask means Dismiss.
             guard let client = uiClient(for: nil) else {
-                logger.notice("alert dismissed, no Mac client to ask (\(severity, privacy: .public)): \(message, privacy: .public)")
+                logger.notice("alert dismissed, no Mac client to ask (\(severity, privacy: .public)): \(message, privacy: .private)")
                 sendNotificationResponse(requestId, button: nil)
                 return
             }
@@ -4204,6 +4206,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
                 if openExternal {
                     logger.info("handleOpenFile: opening externally (Cmd-click): \(resolved.path, privacy: .public)")
+                    if !NSWorkspace.shared.open(resolved) {
+                        logger.warning("handleOpenFile: NSWorkspace failed to open: \(resolved.path, privacy: .public)")
+                    }
+                } else if webView == nil {
+                    // The daemon, and no client took it above (a local Mac, or a file over the
+                    // inline cap): ContentViewer has nowhere to draw, so open it on this Mac.
+                    logger.notice("handleOpenFile: daemon opening on this Mac: \(resolved.lastPathComponent, privacy: .public)")
                     if !NSWorkspace.shared.open(resolved) {
                         logger.warning("handleOpenFile: NSWorkspace failed to open: \(resolved.path, privacy: .public)")
                     }
@@ -5227,17 +5236,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             return
         }
-        // Reports back rather than just running: the call sites are guarded by
-        // `window.__canopyRecap && …`, which short-circuits to false with NO JS
-        // error when the user script hasn't run yet (mid-navigation, webview
-        // recreated). Inspecting only `error` would read that as success and
-        // lose the recap silently.
         Self.injectRecap(text, into: webView)
     }
 
     /// Draws or clears the recap row in `webView`, and logs a drop. Also run by a
     /// Mac pane for a daemon session's `MirrorUIFrame.recap`.
     static func injectRecap(_ text: String?, into webView: WKWebView) {
+        // Reports back rather than just running: before the user script has run
+        // (mid-navigation, webview recreated) there is no `__canopyRecap`, and
+        // the ternary answers 'no-bridge' with NO JS error. Inspecting only
+        // `error` would read that as success and lose the recap silently.
         let call = text.map { RecapScript.setCall(text: $0) } ?? RecapScript.clearCall
         let js = "(window.__canopyRecap ? (\(call), 'ok') : 'no-bridge')"
         webView.evaluateJavaScript(js) { result, error in
