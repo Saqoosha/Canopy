@@ -2266,6 +2266,19 @@ enum SidebarLogicProbe {
             record("mirror status: an unknown state or a bad port is not read",
                    MirrorServerStatus.State(wire: ["state": "exploded"]) == nil
                        && MirrorServerStatus.State(wire: ["state": "listening", "host": "h", "port": 70000]) == nil)
+            let listenerStep = { (host: String?, bound: String?, binding: Bool, since: TimeInterval?) in
+                DaemonDelegate.listenerAction(tailscaleHost: host, boundHost: bound, binding: binding, secondsSinceAttempt: since)
+            }
+            record("daemon listener: waits for Tailscale, keeps a bound or binding listener",
+                   listenerStep(nil, nil, false, nil) == .waitForTailscale
+                       && listenerStep("100.1.1.1", "100.1.1.1", false, 1) == .keep
+                       && listenerStep("100.1.1.1", nil, true, 1) == .keep)
+            record("daemon listener: a moved Tailscale address rebinds at once",
+                   listenerStep("100.2.2.2", "100.1.1.1", false, 1) == .start(host: "100.2.2.2"))
+            record("daemon listener: a failed bind retries only after the interval",
+                   listenerStep("100.1.1.1", nil, false, DaemonDelegate.listenRetryInterval - 1) == .keep
+                       && listenerStep("100.1.1.1", nil, false, DaemonDelegate.listenRetryInterval) == .start(host: "100.1.1.1")
+                       && listenerStep("100.1.1.1", nil, false, nil) == .start(host: "100.1.1.1"))
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)
@@ -2288,10 +2301,10 @@ enum SidebarLogicProbe {
                        && SessionReaper.isBusy(working: false, permissionPending: true, asking: false, backgroundTasks: 0)
                        && SessionReaper.isBusy(working: false, permissionPending: false, asking: true, backgroundTasks: 0))
             record("daemon tcp: no listener while Mirror is off",
-                   DaemonPaths.tcpPort(mirrorEnabled: false, basePort: 8767, bundleId: "sh.saqoo.Canopy") == nil)
+                   DaemonPaths.tcpPort(mirrorEnabled: false, basePort: DaemonConfig.defaults.port, bundleId: "sh.saqoo.Canopy") == nil)
             record("daemon tcp: Release uses the base port, Debug the next one",
-                   DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 8767, bundleId: "sh.saqoo.Canopy") == 8767
-                       && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 8767, bundleId: "sh.saqoo.Canopy.debug") == 8768)
+                   DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 8770, bundleId: "sh.saqoo.Canopy") == 8770
+                       && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 8770, bundleId: "sh.saqoo.Canopy.debug") == 8771)
             record("daemon tcp: an out-of-range port yields no listener",
                    DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 0, bundleId: "sh.saqoo.Canopy") == nil
                        && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 65535, bundleId: "sh.saqoo.Canopy.debug") == nil)

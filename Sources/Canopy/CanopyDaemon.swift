@@ -126,6 +126,7 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     private func reloadConfig() {
         // A password reset in the GUI must also end connections that are already open.
         if tcpPort != nil { server?.refreshToken() }
+        superviseListener()
         let modified = (try? FileManager.default.attributesOfItem(atPath: settingsFile.path))?[.modificationDate] as? Date
         guard server != nil, configModified == nil || modified != configModified else { return }
         // One read for both, so the two cannot see different writes.
@@ -154,36 +155,69 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         var wanted = DaemonPaths.tcpPort(mirrorEnabled: config.mirrorEnabled, basePort: config.port,
                                          bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy")
         // No password means every TCP client would be refused; do not listen at all.
-        var noPassword = false
         if wanted != nil, MirrorAccess.token(createIfMissing: true) == nil {
             logger.error("no mirror password; Tailscale listener stays closed")
             wanted = nil
-            noPassword = true
+            // Before the guard: at launch `tcpPort` is already nil, and Settings must still say why.
+            MirrorServerStatus.shared.state = .noPassword
+        } else if wanted == nil {
+            MirrorServerStatus.shared.state = .off
         }
         guard wanted != tcpPort else { return }
         tcpPort = wanted
-        guard let wanted else {
-            logger.notice("Mirror is off; Tailscale listener closed")
+        guard wanted != nil else {
+            logger.notice("Mirror is off or has no password; Tailscale listener closed")
             server.stopTCP()
-            // What the GUI's Settings shows, via `mirror_status`.
-            MirrorServerStatus.shared.state = noPassword ? .noPassword : .off
             return
         }
-        startTCP(server, port: wanted)
+        lastListenAttempt = nil
+        superviseListener()
     }
 
-    /// Tailscale may come up after login; retry until it has an address.
-    private func startTCP(_ server: MirrorServer, port: UInt16) {
-        guard tcpPort == port else { return }
-        guard let host = MirrorAccess.tailscaleIPv4() else {
-            logger.notice("no Tailscale address yet; retrying in 30 s")
-            MirrorServerStatus.shared.state = .noTailscale
-            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
-                MainActor.assumeIsolated { self?.startTCP(server, port: port) }
+    /// When the listener last tried to bind; nil to try at once.
+    private var lastListenAttempt: Date?
+    private var loggedNoTailscale = false
+
+    /// Keeps the Tailscale listener up: binds once Tailscale has an address, rebinds when that
+    /// address changes, and retries a failed bind. Runs on every config tick; the daemon is the
+    /// only listener other Macs and the phone can reach.
+    private func superviseListener() {
+        guard let server, let port = tcpPort else { return }
+        let host = MirrorAccess.tailscaleIPv4()
+        let since = lastListenAttempt.map { Date().timeIntervalSince($0) }
+        switch Self.listenerAction(tailscaleHost: host, boundHost: server.boundAddress?.host,
+                                   binding: server.pendingAddress != nil, secondsSinceAttempt: since) {
+        case .keep:
+            break
+        case .waitForTailscale:
+            if !loggedNoTailscale {
+                loggedNoTailscale = true
+                logger.notice("no Tailscale address; the listener waits for one")
             }
-            return
+            if server.boundAddress != nil { server.stopTCP() }
+            MirrorServerStatus.shared.state = .noTailscale
+        case .start(let host):
+            loggedNoTailscale = false
+            lastListenAttempt = Date()
+            logger.notice("binding the Tailscale listener on \(host, privacy: .public):\(port)")
+            server.start(host: host, port: port)
         }
-        server.start(host: host, port: port)
+    }
+
+    nonisolated enum ListenerAction: Equatable { case keep, waitForTailscale, start(host: String) }
+
+    /// How often a failed bind is retried.
+    nonisolated static let listenRetryInterval: TimeInterval = 30
+
+    /// What to do with a wanted listener this tick. A moved address rebinds at once; a
+    /// listener that never bound, or failed, retries every `listenRetryInterval`.
+    nonisolated static func listenerAction(tailscaleHost: String?, boundHost: String?, binding: Bool,
+                                           secondsSinceAttempt: TimeInterval?) -> ListenerAction {
+        guard let tailscaleHost else { return .waitForTailscale }
+        if binding || boundHost == tailscaleHost { return .keep }
+        if boundHost != nil { return .start(host: tailscaleHost) }
+        if let since = secondsSinceAttempt, since < listenRetryInterval { return .keep }
+        return .start(host: tailscaleHost)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

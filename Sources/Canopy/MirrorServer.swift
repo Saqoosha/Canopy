@@ -49,13 +49,27 @@ final class MirrorServerStatus {
 
     /// In the GUI whose sessions run in the daemon: the listener is the daemon's, so ask it.
     func refreshFromDaemon(_ control: ControlClient?) async {
-        guard let control, case .success(let result) = await control.request("mirror_status"),
-              let raw = result["status"] as? [String: Any], let reported = State(wire: raw) else {
+        guard let control else {
             state = .failed(Self.daemonUnreachable)
             return
         }
-        state = reported
+        switch await control.request("mirror_status") {
+        case .success(let result):
+            guard let raw = result["status"] as? [String: Any], let reported = State(wire: raw) else {
+                state = .failed(Self.daemonOutOfDate)
+                return
+            }
+            state = reported
+        case .failure(.refused):
+            // An unknown verb: the daemon still runs a build from before this one.
+            state = .failed(Self.daemonOutOfDate)
+        case .failure:
+            state = .failed(Self.daemonUnreachable)
+        }
     }
+
+    static let daemonOutOfDate = "Canopy's background service is out of date; restart the Mac or log out and in"
+    static let checking = "Checking the background service…"
 }
 
 /// Listens for remote Canopy attach clients and fans shim traffic over TCP NDJSON.
@@ -63,7 +77,8 @@ final class MirrorServerStatus {
 final class MirrorServer {
     private let store: SessionStore
     private var listener: NWListener?
-    /// The running server, for Settings; `NSApp.delegate` is not the adaptor's instance (see memory).
+    /// The running server, for `resetPassword`; nil in a GUI whose sessions run in the
+    /// daemon, which picks up a new password on its next config tick.
     private(set) static weak var current: MirrorServer?
     private var connections: [MirrorConnection] = []
     /// The daemon's local Unix socket, alongside the TCP `listener`.
@@ -75,8 +90,8 @@ final class MirrorServer {
     private(set) var pendingAddress: (host: String, port: UInt16)?
     /// Read once per bind so an attach never touches the Keychain; `resetPassword` replaces it.
     fileprivate var token: String
-    /// Daemon only: a `hello` first line opens a control connection. The GUI's
-    /// mirror listener keeps refusing it, so its panes cannot be stopped from outside.
+    /// Daemon only: a `hello` first line opens a control connection. A GUI that still
+    /// runs its own listener (only when its sessions are not in the daemon) refuses it.
     var acceptsControl = false
     /// Daemon only: re-read the password from the Keychain on each TCP
     /// connection, because a reset happens in the GUI process.
