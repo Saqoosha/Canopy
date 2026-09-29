@@ -1060,6 +1060,14 @@ final class SessionStore {
         return shim
     }
 
+    /// The open session a control request names.
+    func openSession(for ref: ControlProtocol.SessionRef) -> OpenSession? {
+        switch ref {
+        case .key(let key): return openSessions.first { $0.id.uuidString == key }
+        case .resumeId(let id): return openSessions.first { $0.resumeId == id }
+        }
+    }
+
     /// Open a closed cloud row by running the teleport flow. Spawns a
     /// short-lived `RemoteSessionsBridge`, asks it to fetch the cloud
     /// session, saves the JSONL locally, and adds an OpenSession that

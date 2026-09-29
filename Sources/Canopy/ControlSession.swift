@@ -5,14 +5,14 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ControlSess
 
 /// One client's control connection to the daemon, after `hello`.
 /// Requests are answered one `response` per id; `subscribe` adds
-/// `session_state` pushes when a row's id, title, state, clients or running changes.
+/// `session_state` pushes when a row changes.
 @MainActor
 final class ControlSession {
     private let store: SessionStore
     private let send: ([String: Any]) -> Void
     private let allowBypass: () -> Bool
     private var subscribed = false
-    private var lastPushed: [[String: String]]?
+    private var lastPushed: [ControlProtocol.SessionRow]?
     private var recheck: Timer?
     private var stopped = false
 
@@ -47,6 +47,10 @@ final class ControlSession {
         case "open_session": openSession(request)
         case "stop_session": stopSession(request)
         case "subscribe": subscribe(request)
+        case "rename_session": renameSession(request)
+        case "restart_session": restartSession(request)
+        case "switch_account": switchAccount(request)
+        case "list_accounts": listAccounts(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -57,7 +61,7 @@ final class ControlSession {
         let limit = ControlProtocol.limit(request.params, default: 50)
         switch request.params["scope"] as? String ?? "open" {
         case "open":
-            reply(request, ["sessions": Array(openRows().prefix(limit))])
+            reply(request, ["sessions": openRows().prefix(limit).map(\.wire)])
         case "recent":
             Task { @MainActor in
                 await store.refreshRecents()
@@ -68,9 +72,11 @@ final class ControlSession {
                     .filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
                     .filter { query.isEmpty || $0.title.lowercased().contains(query) || $0.projectName.lowercased().contains(query) }
                     .prefix(limit)
-                    .map { ["id": $0.id, "title": $0.title, "project": $0.projectName,
-                            "cwd": $0.projectDirectory.path, "state": "closed", "running": false, "clients": 0,
-                            "lastActiveAt": $0.timestamp.timeIntervalSince1970] as [String: Any] }
+                    .map { ControlProtocol.SessionRow(
+                        key: nil, resumeId: $0.id, title: $0.title, project: $0.projectName,
+                        cwd: $0.projectDirectory.path, state: "closed", running: false, clients: 0,
+                        lastActiveAt: $0.timestamp.timeIntervalSince1970, model: "", messageCount: 0,
+                        permissionMode: "", accountId: nil).wire }
                 reply(request, ["sessions": Array(rows)])
             }
         default:
@@ -128,22 +134,78 @@ final class ControlSession {
         let options = SessionStore.HeadlessOptions(model: params.model, effort: params.effort,
                                                    permissionMode: params.permissionMode,
                                                    initialPrompt: params.initialPrompt)
-        guard store.startHeadlessSession(directory: directory, resumeId: sessionId, isExistingTranscript: false,
-                                         title: nil, options: options) != nil else {
+        guard let shim = store.startHeadlessSession(directory: directory, resumeId: sessionId, isExistingTranscript: false,
+                                                    title: nil, options: options),
+              let session = shim.boundSession else {
             fail(request, MirrorOpenRequest.startFailed)
             return
         }
-        reply(request, ["sessionId": sessionId, "cwd": directory.path])
+        reply(request, ["sessionId": sessionId, "key": session.id.uuidString, "cwd": directory.path])
     }
 
     private func stopSession(_ request: ControlProtocol.Request) {
-        guard let sessionId = request.params["sessionId"] as? String,
-              let session = store.openSessions.first(where: { $0.resumeId == sessionId }) else {
-            fail(request, "no such session")
-            return
-        }
+        guard let session = requestedSession(request) else { return }
         store.closeSession(session.id, keepingFailure: false)
         reply(request, ["ok": true])
+    }
+
+    /// The open session a request names, or nil after answering the request with the reason.
+    private func requestedSession(_ request: ControlProtocol.Request) -> OpenSession? {
+        guard let ref = ControlProtocol.sessionRef(request.params) else {
+            fail(request, "key or sessionId is required")
+            return nil
+        }
+        guard let session = store.openSession(for: ref) else {
+            fail(request, "no such session")
+            return nil
+        }
+        return session
+    }
+
+    private func renameSession(_ request: ControlProtocol.Request) {
+        guard let session = requestedSession(request) else { return }
+        guard let title = request.params["title"] as? String,
+              !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            fail(request, "title is required")
+            return
+        }
+        store.commitRename(SessionStore.RenameTarget(sessionId: session.resumeId, openSessionId: session.id,
+                                                     currentTitle: session.title), to: title)
+        reply(request, ["ok": true])
+    }
+
+    /// The daemon has no pane to remount, so after `restartSession` parks the
+    /// row it starts the shim again itself.
+    private func restartSession(_ request: ControlProtocol.Request) {
+        guard let session = requestedSession(request) else { return }
+        store.restartSession(session.id)
+        guard store.startHeadlessSession(resumeId: session.resumeId) != nil else {
+            fail(request, MirrorOpenRequest.startFailed)
+            return
+        }
+        reply(request, ["ok": true])
+    }
+
+    private func switchAccount(_ request: ControlProtocol.Request) {
+        guard let session = requestedSession(request) else { return }
+        let accountId = request.params["accountId"] as? String
+        let account = accountId.flatMap { ClaudeAccountStore.account(id: $0) }
+        if accountId != nil, account == nil {
+            fail(request, "no such account")
+            return
+        }
+        store.switchAccount(session.id, to: account)
+        // Same account: nothing was stopped. Another: `restartSession` parked the row.
+        if session.shim == nil, store.startHeadlessSession(resumeId: session.resumeId) == nil {
+            fail(request, MirrorOpenRequest.startFailed)
+            return
+        }
+        reply(request, ["ok": true])
+    }
+
+    private func listAccounts(_ request: ControlProtocol.Request) {
+        let accounts = ClaudeAccountStore.load().map { ["id": $0.id, "name": $0.name] }
+        reply(request, ["accounts": accounts, "defaultId": ClaudeAccountStore.defaultAccountId()])
     }
 
     // MARK: - subscribe
@@ -158,15 +220,16 @@ final class ControlSession {
         }
     }
 
-    private func openRows() -> [[String: Any]] {
+    private func openRows() -> [ControlProtocol.SessionRow] {
         store.openSessions.map { session in
             let activity = SessionActivity.of(session, isUnread: store.unreadSessionIds.contains(session.id))
-            return ["id": session.resumeId, "title": session.title, "project": session.project,
-                    "cwd": session.origin.workingDirectory.path,
-                    "state": RosterSnapshot.wireState(for: activity),
-                    "running": session.shim?.isLive == true,
-                    "clients": session.shim?.mirrorCount ?? 0,
-                    "lastActiveAt": session.lastActiveAt.timeIntervalSince1970]
+            return ControlProtocol.SessionRow(
+                key: session.id.uuidString, resumeId: session.resumeId, title: session.title,
+                project: session.project, cwd: session.origin.workingDirectory.path,
+                state: RosterSnapshot.wireState(for: activity), running: session.shim?.isLive == true,
+                clients: session.shim?.mirrorCount ?? 0, lastActiveAt: session.lastActiveAt.timeIntervalSince1970,
+                model: session.statusBar.model, messageCount: session.statusBar.messageCount,
+                permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id)
         }
     }
 
@@ -182,16 +245,10 @@ final class ControlSession {
         pushIfChanged(rows)
     }
 
-    private func pushIfChanged(_ rows: [[String: Any]]) {
-        guard !stopped else { return }
-        let signature = rows.map { row in
-            ["id": row["id"] as? String ?? "", "title": row["title"] as? String ?? "",
-             "state": row["state"] as? String ?? "", "clients": "\(row["clients"] as? Int ?? 0)",
-             "running": "\(row["running"] as? Bool ?? false)"]
-        }
-        guard signature != lastPushed else { return }
-        lastPushed = signature
-        send(["type": "session_state", "sessions": rows])
+    private func pushIfChanged(_ rows: [ControlProtocol.SessionRow]) {
+        guard !stopped, rows != lastPushed else { return }
+        lastPushed = rows
+        send(["type": "session_state", "sessions": rows.map(\.wire)])
     }
 
     // MARK: - Replies

@@ -449,7 +449,9 @@ final class MirrorConnection: MirrorSink {
             return
         }
         let open = store.openSessions.map { "\($0.resumeId)(shim=\($0.shim != nil))" }.joined(separator: ", ")
-        var existing = store.openSessions.first(where: { $0.resumeId == sessionId })?.shim.flatMap { $0.isLive ? $0 : nil }
+        // `key` (the daemon's `OpenSession.id`) outranks `sessionId`, which the CLI may have replaced.
+        let named = ControlProtocol.sessionRef(dict).flatMap { store.openSession(for: $0) }
+        var existing = named?.shim.flatMap { $0.isLive ? $0 : nil }
         if existing == nil, let request = MirrorOpenRequest(wire: dict["open"] as? [String: Any]) {
             switch startRequestedSession(request, sessionId: sessionId) {
             case .success(let shim): existing = shim
@@ -466,7 +468,9 @@ final class MirrorConnection: MirrorSink {
         didAttach = true
         isMacClient = !Self.appliesPhoneReplayRewrites(client: dict["client"] as? String)
         self.shim = shim
-        attachedSessionId = sessionId
+        // The session's current id, which differs from `sessionId` when it was found by key.
+        let resolvedId = shim.boundSession?.resumeId ?? sessionId
+        attachedSessionId = resolvedId
         compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
         filesRequested = dict["files"] as? Bool == true
         fetchesImages = isMacClient && dict["images"] as? Bool == true
@@ -475,12 +479,12 @@ final class MirrorConnection: MirrorSink {
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
         sendJSONObject([
             "type": "attach_ok",
-            "sessionId": sessionId,
+            "sessionId": resolvedId,
             // The id the roster publishes this session under. A new session's
             // `sessionId` above is a placeholder the CLI's id replaces, and
             // this is what lets the client follow it.
             "hostSessionId": shim.boundSession?.id.uuidString ?? "",
-            "html": WebViewContainer.entryHTML(resumeSessionId: sessionId, includeKeychainAuth: shim.claudeAccount == nil) {
+            "html": WebViewContainer.entryHTML(resumeSessionId: resolvedId, includeKeychainAuth: shim.claudeAccount == nil) {
                 "\(Self.assetScheme)://ext/\($0)"
             },
             "userScripts": WebViewContainer.sessionUserScripts.map { ["source": $0.source, "atDocumentStart": $0.atDocumentStart] },
@@ -494,7 +498,7 @@ final class MirrorConnection: MirrorSink {
         shim.attachMirror(self)
         if !prefetchId.isEmpty {
             // Starts the extension reading the transcript while the phone is still loading the page.
-            shim.receiveFromMirror(Self.prefetchRequest(sessionId: sessionId, requestId: prefetchId), from: self)
+            shim.receiveFromMirror(Self.prefetchRequest(sessionId: resolvedId, requestId: prefetchId), from: self)
         }
         // Opt-in: a client that does not know the frame would post it into its page as a webview message.
         if dict["status"] as? Bool == true, let data = shim.statusBarData {

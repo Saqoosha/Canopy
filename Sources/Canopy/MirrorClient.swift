@@ -61,32 +61,20 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorAttach")
     private weak var webView: WKWebView?
     private let sessionId: String
+    /// The daemon's `OpenSession.id`, when known; outranks `sessionId` at attach.
+    private let key: String?
     private let openRequest: MirrorOpenRequest?
     private var closed = false
 
-    init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView, fetchesImages: Bool = false,
-         open: MirrorOpenRequest? = nil) {
+    init(endpoint: MirrorEndpoint, sessionId: String, key: String? = nil, token: String, webView: WKWebView,
+         fetchesImages: Bool = false, open: MirrorOpenRequest? = nil) {
         self.fetchesImages = fetchesImages
         self.openRequest = open
         self.token = token
         self.sessionId = sessionId
+        self.key = key
         self.webView = webView
-        // Keepalive, because a server that dies without its FIN reaching us
-        // leaves this socket ESTABLISHED forever and no drop is ever reported
-        // (measured: studio's server SIGKILLed over Tailscale, the client
-        // stayed ESTABLISHED with no error). 15 s idle, 15 s between probes,
-        // 3 probes: ~45 s, the budget MacroPad's remote transport and SSH
-        // remote use. A dead peer then fails the connection, which is a drop.
-        let tcp = NWProtocolTCP.Options()
-        tcp.enableKeepalive = true
-        tcp.keepaliveIdle = 15
-        tcp.keepaliveInterval = 15
-        tcp.keepaliveCount = 3
-        self.connection = NWConnection(
-            host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(rawValue: port)!,
-            using: NWParameters(tls: nil, tcp: tcp)
-        )
+        self.connection = NWConnection(to: endpoint.nwEndpoint, using: endpoint.parameters)
         super.init()
         Self.instances.add(self)
         connection.stateUpdateHandler = { [weak self] state in
@@ -121,6 +109,12 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 self.deliverOutcome(.dropped)
             }
         }
+    }
+
+    convenience init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView,
+                     fetchesImages: Bool = false, open: MirrorOpenRequest? = nil) {
+        self.init(endpoint: .tcp(host: host, port: port), sessionId: sessionId, token: token, webView: webView,
+                  fetchesImages: fetchesImages, open: open)
     }
 
     func close() {
@@ -206,6 +200,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         var attach: [String: Any] = ["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
                                      "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages]
         // `open`: start this session over there if nothing is running it yet (a Recents or folder row).
+        if let key { attach["key"] = key }
         if let openRequest { attach["open"] = openRequest.wire }
         sendJSONObject(attach)
         scheduleReceive()

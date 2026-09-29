@@ -3,6 +3,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
+import Network
 import os.log
 import UniformTypeIdentifiers
 
@@ -1911,6 +1912,51 @@ enum SidebarLogicProbe {
                    DaemonConfig.parse(Data(#"{"canopy.daemonPort":70000}"#.utf8))?.daemonPort == DaemonConfig.defaults.daemonPort)
             record("daemon config: Mirror and the bypass opt-in default to off",
                    !DaemonConfig.defaults.mirrorEnabled && !DaemonConfig.defaults.allowBypass)
+            // Canopy Server session rows.
+            do {
+                let open = ControlProtocol.SessionRow(
+                    key: "K1", resumeId: "r1", title: "Fix it", project: "Canopy", cwd: "/tmp/p",
+                    state: "working", running: true, clients: 2, lastActiveAt: 1_000,
+                    model: "opus", messageCount: 12, permissionMode: "plan", accountId: "acct")
+                record("session row: an open row round-trips through the wire",
+                       ControlProtocol.SessionRow(wire: open.wire) == open)
+                let closed = ControlProtocol.SessionRow(
+                    key: nil, resumeId: "r2", title: "Old", project: "Canopy", cwd: "/tmp/p",
+                    state: "closed", running: false, clients: 0, lastActiveAt: 500,
+                    model: "", messageCount: 0, permissionMode: "", accountId: nil)
+                record("session row: a closed row carries no key and round-trips",
+                       closed.wire["key"] == nil && ControlProtocol.SessionRow(wire: closed.wire) == closed)
+                record("session row: a row without resumeId is rejected",
+                       ControlProtocol.SessionRow(wire: ["key": "K", "title": "t"]) == nil)
+                record("session row: missing optional fields read as empty, not as a rejection",
+                       ControlProtocol.SessionRow(wire: ["resumeId": "r3"])
+                           == ControlProtocol.SessionRow(key: nil, resumeId: "r3", title: "", project: "", cwd: "",
+                                                         state: "closed", running: false, clients: 0, lastActiveAt: 0,
+                                                         model: "", messageCount: 0, permissionMode: "", accountId: nil))
+                record("session row: an integral lastActiveAt from JSON still reads as a Double",
+                       (try? JSONSerialization.jsonObject(with: Data(#"{"resumeId":"r4","lastActiveAt":1000}"#.utf8)) as? [String: Any])
+                           .flatMap { ControlProtocol.SessionRow(wire: $0) }?.lastActiveAt == 1000)
+            }
+            record("session ref: key wins over sessionId",
+                   ControlProtocol.sessionRef(["key": "K", "sessionId": "r"]) == .key("K"))
+            record("session ref: sessionId alone is a resumeId",
+                   ControlProtocol.sessionRef(["sessionId": "r"]) == .resumeId("r"))
+            record("session ref: an empty key falls back to sessionId",
+                   ControlProtocol.sessionRef(["key": "", "sessionId": "r"]) == .resumeId("r"))
+            record("session ref: neither is nil",
+                   ControlProtocol.sessionRef([:]) == nil && ControlProtocol.sessionRef(["key": "", "sessionId": ""]) == nil)
+            record("mirror endpoint: only TCP needs the password",
+                   MirrorEndpoint.tcp(host: "100.1.2.3", port: 8767).needsToken
+                       && !MirrorEndpoint.unix(path: "/tmp/x.sock").needsToken)
+            record("mirror endpoint: a unix path becomes a unix NWEndpoint", {
+                if case .unix(let path) = MirrorEndpoint.unix(path: "/tmp/x.sock").nwEndpoint { return path == "/tmp/x.sock" }
+                return false
+            }())
+            record("mirror endpoint: TCP keeps the 15/15/3 keepalive", {
+                guard let tcp = MirrorEndpoint.tcp(host: "100.1.2.3", port: 8767).parameters
+                        .defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options else { return false }
+                return tcp.enableKeepalive && tcp.keepaliveIdle == 15 && tcp.keepaliveInterval == 15 && tcp.keepaliveCount == 3
+            }())
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)

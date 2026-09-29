@@ -143,4 +143,77 @@ enum ControlProtocol {
                                    permissionMode: mode, worktreeBranch: nonEmpty("worktreeBranch"),
                                    initialPrompt: nonEmpty("initialPrompt")))
     }
+
+    enum SessionRef: Equatable {
+        case key(String)
+        case resumeId(String)
+    }
+
+    /// `key` (the daemon's `OpenSession.id`) outranks `sessionId` (a `resumeId`,
+    /// which the CLI may already have replaced).
+    static func sessionRef(_ params: [String: Any]) -> SessionRef? {
+        if let key = params["key"] as? String, !key.isEmpty { return .key(key) }
+        if let id = params["sessionId"] as? String, !id.isEmpty { return .resumeId(id) }
+        return nil
+    }
+
+    /// One session as `list_sessions` and `session_state` send it. `key` is the
+    /// daemon's `OpenSession.id`: it survives the CLI replacing a placeholder
+    /// `resumeId`, and exists only while the session is open.
+    struct SessionRow: Equatable {
+        let key: String?
+        let resumeId: String
+        let title: String
+        let project: String
+        let cwd: String
+        let state: String
+        let running: Bool
+        let clients: Int
+        let lastActiveAt: Double
+        let model: String
+        let messageCount: Int
+        let permissionMode: String
+        let accountId: String?
+
+        var wire: [String: Any] {
+            var dict: [String: Any] = [
+                "resumeId": resumeId, "title": title, "project": project, "cwd": cwd, "state": state,
+                "running": running, "clients": clients, "lastActiveAt": lastActiveAt,
+                "model": model, "messageCount": messageCount, "permissionMode": permissionMode,
+            ]
+            if let key { dict["key"] = key }
+            if let accountId { dict["accountId"] = accountId }
+            return dict
+        }
+
+        init(key: String?, resumeId: String, title: String, project: String, cwd: String, state: String,
+             running: Bool, clients: Int, lastActiveAt: Double, model: String, messageCount: Int,
+             permissionMode: String, accountId: String?) {
+            self.key = key
+            self.resumeId = resumeId
+            self.title = title
+            self.project = project
+            self.cwd = cwd
+            self.state = state
+            self.running = running
+            self.clients = clients
+            self.lastActiveAt = lastActiveAt
+            self.model = model
+            self.messageCount = messageCount
+            self.permissionMode = permissionMode
+            self.accountId = accountId
+        }
+
+        init?(wire: [String: Any]) {
+            guard let resumeId = wire["resumeId"] as? String, !resumeId.isEmpty else { return nil }
+            self.init(key: wire["key"] as? String, resumeId: resumeId,
+                      title: wire["title"] as? String ?? "", project: wire["project"] as? String ?? "",
+                      cwd: wire["cwd"] as? String ?? "", state: wire["state"] as? String ?? "closed",
+                      running: wire["running"] as? Bool ?? false, clients: wire["clients"] as? Int ?? 0,
+                      lastActiveAt: (wire["lastActiveAt"] as? NSNumber)?.doubleValue ?? 0,
+                      model: wire["model"] as? String ?? "", messageCount: wire["messageCount"] as? Int ?? 0,
+                      permissionMode: wire["permissionMode"] as? String ?? "",
+                      accountId: wire["accountId"] as? String)
+        }
+    }
 }
