@@ -242,6 +242,27 @@ final class OpenSession: Identifiable, Hashable {
     /// new session's placeholder is replaced by the CLI's id over there.
     var mirrorHostSessionId: String?
 
+    /// This Mac's session, run by the local daemon (Canopy Server). The GUI
+    /// attaches to it and never holds its shim.
+    var isDaemonHosted: Bool {
+        if case .local = origin { return true }
+        return false
+    }
+
+    /// The daemon's `OpenSession.id` for this session, once known.
+    var daemonKey: String?
+
+    /// What an attach asks the daemon to start when it does not hold this session yet.
+    var daemonOpenRequest: MirrorOpenRequest? {
+        guard isDaemonHosted, daemonKey == nil else { return nil }
+        if resumeIdIsExistingTranscript { return .resume }
+        return .new(cwd: origin.workingDirectory.path, options: NewSessionOptions(
+            model: model, effort: effortLevel, permissionMode: permissionMode,
+            promptText: pendingInitialPrompt.flatMap { $0.text.isEmpty ? nil : $0.text },
+            promptImages: pendingInitialPrompt?.images.map(\.wire) ?? [],
+            settledTitle: pendingSettledTitle, providerId: customApi?.id, accountId: claudeAccount?.id))
+    }
+
     /// Bumped by `SessionStore.restartSession(_:)`, and read only through
     /// `mountIdentity`.
     ///

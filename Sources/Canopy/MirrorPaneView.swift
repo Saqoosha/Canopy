@@ -139,7 +139,7 @@ struct MirrorPaneView: NSViewRepresentable {
             ucc.removeScriptMessageHandler(forName: name)
         }
         let consoleHandler = ConsoleLogHandler()
-        let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory, opensLocalFiles: false)
+        let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory, opensLocalFiles: session.isDaemonHosted)
         let inputWidthHandler = InputWidthMessageHandler(statusBarData: session.statusBar)
         ucc.add(consoleHandler, name: "consoleLog")
         ucc.add(linkHandler, name: "canopyLink")
@@ -153,6 +153,16 @@ struct MirrorPaneView: NSViewRepresentable {
         webView.uiDelegate = coordinator
     }
 
+    /// Where this pane attaches: another Mac over Tailscale, or this Mac's daemon.
+    private func attachTarget() -> (endpoint: MirrorEndpoint, token: String, machine: String)? {
+        if let target = session.origin.mirrorTarget {
+            guard let token = MirrorAccess.peerToken(machineId: target.machineId) else { return nil }
+            return (.tcp(host: target.host, port: target.port), token, session.statusBar.mirrorMachine ?? target.machineId)
+        }
+        guard session.isDaemonHosted else { return nil }
+        return (.unix(path: DaemonPaths.current), "", "this Mac")
+    }
+
     /// The cached webview when the session already has one; otherwise a fresh
     /// webview and bridge, attached in the order the bridge requires:
     /// socket ready → `attach` → page load.
@@ -161,8 +171,9 @@ struct MirrorPaneView: NSViewRepresentable {
             registerHandlers(on: cached, bridge: bridge, coordinator: coordinator)
             return cached
         }
-        guard let target = session.origin.mirrorTarget,
-              let token = MirrorAccess.peerToken(machineId: target.machineId) else {
+        // Waiting for this Mac's daemon to come up; that wait attaches the bridge.
+        if let cached = session.webView, session.isDaemonHosted { return cached }
+        guard let target = attachTarget() else {
             logger.error("[mirror-pane] no pairing for \(session.origin.mirrorTarget?.machineId ?? "nil", privacy: .public)")
             if !coordinator.reportedMissingPairing {
                 coordinator.reportedMissingPairing = true
@@ -183,12 +194,32 @@ struct MirrorPaneView: NSViewRepresentable {
         config.setURLSchemeHandler(assetHandler, forURLScheme: MirrorConnection.assetScheme)
         let webView = SessionWKWebView(frame: .zero, configuration: config)
         webView.isInspectable = true
+        session.webView = webView
 
-        let bridge = RemoteMirrorBridge(host: target.host, port: target.port, sessionId: session.resumeId, token: token,
-                                        webView: webView, fetchesImages: true, open: session.pendingMirrorOpen)
+        if session.isDaemonHosted, !DaemonPaths.socketIsLive(path: DaemonPaths.current) {
+            Task { @MainActor [session, onFailure] in
+                guard await DaemonSupervisor.ensureRunning() else {
+                    onFailure("This Mac's session service is not running.")
+                    return
+                }
+                guard session.webView === webView else { return }
+                attachBridge(to: webView, target: target, assetHandler: assetHandler, coordinator: coordinator)
+            }
+            return webView
+        }
+        attachBridge(to: webView, target: target, assetHandler: assetHandler, coordinator: coordinator)
+        return webView
+    }
+
+    /// Opens the bridge, then wires its callbacks and the page's handlers to it.
+    private func attachBridge(to webView: WKWebView, target: (endpoint: MirrorEndpoint, token: String, machine: String),
+                              assetHandler: MirrorAssetSchemeHandler, coordinator: Coordinator) {
+        let bridge = RemoteMirrorBridge(endpoint: target.endpoint, sessionId: session.resumeId, key: session.daemonKey,
+                                        token: target.token, webView: webView, fetchesImages: true,
+                                        open: session.isDaemonHosted ? session.daemonOpenRequest : session.pendingMirrorOpen)
         assetHandler.bridge = bridge
         registerHandlers(on: webView, bridge: bridge, coordinator: coordinator)
-        let machineName = session.statusBar.mirrorMachine ?? target.machineId
+        let machineName = target.machine
         bridge.onStatus = { [weak session] frame in
             guard let session else { return }
             MirrorStatusFrame.apply(frame, to: session.statusBar)
@@ -203,13 +234,17 @@ struct MirrorPaneView: NSViewRepresentable {
         bridge.onFileFrame = { [weak session] frame in
             session?.fileTransfer.handle(frame)
         }
+        let isDaemon = session.isDaemonHosted
         bridge.onOutcome = { [weak session, weak bridge] outcome in
             guard let session else { return }
             switch outcome {
             case .attached:
                 session.status = .live
                 session.pendingMirrorOpen = nil
-                if let hostId = bridge?.hostSessionId { session.mirrorHostSessionId = hostId }
+                if let hostId = bridge?.hostSessionId {
+                    session.mirrorHostSessionId = hostId
+                    if isDaemon { session.daemonKey = hostId }
+                }
                 if let remote = bridge?.extensionVersion, let local = CCExtension.extensionVersion(), remote != local {
                     logger.notice("[mirror-pane] extension \(local, privacy: .public) here, \(remote, privacy: .public) on \(machineName, privacy: .public)")
                 }
@@ -218,7 +253,8 @@ struct MirrorPaneView: NSViewRepresentable {
             case .dropped:
                 session.fileTransfer.connectionDropped()
                 if case .spawning = session.status {
-                    onFailure("Could not reach \(machineName). Is its live mirror on?")
+                    onFailure(isDaemon ? "Could not reach this Mac's session service."
+                                       : "Could not reach \(machineName). Is its live mirror on?")
                 } else {
                     session.connection.status = .reconnectFailed
                     session.isThinking = false
@@ -231,8 +267,6 @@ struct MirrorPaneView: NSViewRepresentable {
             guard let session else { return }
             SessionStore.shared?.restartSession(session.id)
         }
-        session.webView = webView
         session.mirrorBridge = bridge
-        return webView
     }
 }

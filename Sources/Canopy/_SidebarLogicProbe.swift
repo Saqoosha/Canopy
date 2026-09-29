@@ -2039,6 +2039,24 @@ enum SidebarLogicProbe {
                 let third = correlator.begin()
                 record("control client: a drop fails every pending request", correlator.failAll() == [third])
             }
+            do {
+                let dir = URL(fileURLWithPath: "/tmp/p")
+                let fresh = OpenSession(origin: .local(dir), resumeId: "new-id", title: "T", project: "p",
+                                        permissionMode: .plan, model: "opus", effortLevel: "high")
+                fresh.pendingInitialPrompt = LaunchPrompt.make(text: "hi", images: [])
+                fresh.pendingSettledTitle = "Settled"
+                record("daemon open: a new local session asks for .new with what the launcher chose",
+                       fresh.daemonOpenRequest == .new(cwd: "/tmp/p", options: NewSessionOptions(
+                           model: "opus", effort: "high", permissionMode: .plan, promptText: "hi", settledTitle: "Settled")))
+                let resumed = OpenSession(origin: .local(dir), resumeId: "old-id", title: "T", project: "p",
+                                          resumeIdIsExistingTranscript: true)
+                record("daemon open: an existing transcript asks for .resume", resumed.daemonOpenRequest == .resume)
+                resumed.daemonKey = "K"
+                record("daemon open: a session the daemon already holds asks for nothing", resumed.daemonOpenRequest == nil)
+                record("daemon hosted: local is, remote is not",
+                       fresh.isDaemonHosted
+                           && !OpenSession(origin: .remote(host: "h", path: dir), resumeId: "r", title: "", project: "").isDaemonHosted)
+            }
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)
