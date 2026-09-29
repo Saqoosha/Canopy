@@ -986,7 +986,16 @@ final class SessionStore {
     ///
     /// If the shim dies, `ShimProcess.handleProcessExit` drops its mirrors and
     /// returns the row to `.dormant`.
-    func startHeadlessSession(directory: URL, resumeId: String, isExistingTranscript: Bool, title: String?) -> ShimProcess? {
+    /// What a control `open_session` can set on a new headless session.
+    struct HeadlessOptions {
+        var model: String? = nil
+        var effort: String? = nil
+        var permissionMode: PermissionMode? = nil
+        var initialPrompt: String? = nil
+    }
+
+    func startHeadlessSession(directory: URL, resumeId: String, isExistingTranscript: Bool, title: String?,
+                              options: HeadlessOptions = .init()) -> ShimProcess? {
         if openSessions.contains(where: { $0.resumeId == resumeId }) {
             return startHeadlessSession(resumeId: resumeId)
         }
@@ -998,11 +1007,16 @@ final class SessionStore {
             title: title ?? "Untitled",
             project: GitWorktree.projectDisplayName(for: directory),
             status: .dormant,
-            permissionMode: CanopySettings.shared.defaultPermissionMode,
+            permissionMode: options.permissionMode ?? CanopySettings.shared.defaultPermissionMode,
+            model: options.model,
+            effortLevel: options.effort,
             customApi: provider,
             claudeAccount: accountChoice.account,
             resumeIdIsExistingTranscript: isExistingTranscript
         )
+        // Sent by the launch_claude intercept, i.e. once the first client's
+        // webview attaches — a headless session has no webview of its own.
+        if let text = options.initialPrompt { session.pendingInitialPrompt = LaunchPrompt.make(text: text, images: []) }
         session.accountAutoSwitch = accountChoice.autoSwitch
         openSessions.append(session)
         guard let shim = startHeadlessSession(resumeId: resumeId) else {

@@ -64,6 +64,16 @@ targets:
         buildPhase: resources
       - path: Resources/canopy-overrides.css
         buildPhase: resources
+      - path: Resources/LaunchAgents/sh.saqoo.Canopy.daemon.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
+      - path: Resources/LaunchAgents/sh.saqoo.Canopy.debug.daemon.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
     resources:
       - path: Sources/Canopy/Resources/Assets.xcassets
       - path: Sources/Canopy/theme-light.css

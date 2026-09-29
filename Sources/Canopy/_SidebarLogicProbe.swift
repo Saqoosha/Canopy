@@ -1770,6 +1770,179 @@ enum SidebarLogicProbe {
             record("mirror recents: a relative folder and an id-less session are dropped",
                    MirrorRecents.parse(["type": MirrorRecents.replyType, "folders": ["relative", "/abs"],
                                         "sessions": [["title": "no id"]]]) == MirrorRecents(sessions: [], folders: ["/abs"]))
+            // Canopy Server control protocol (Plan A, Task 2).
+            record("control hello: a local peer needs no token",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version],
+                                              trustsPeer: true, expectedToken: nil) == .ok)
+            record("control hello: a TCP peer with the right token passes",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version, "token": "abc"],
+                                              trustsPeer: false, expectedToken: "abc") == .ok)
+            record("control hello: a TCP peer with a wrong token is refused",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version, "token": "abd"],
+                                              trustsPeer: false, expectedToken: "abc") == .unauthorized)
+            record("control hello: a TCP peer with no token is refused even when none is configured",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version],
+                                              trustsPeer: false, expectedToken: nil) == .unauthorized)
+            record("control hello: another protocol version is refused with both numbers",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version + 1],
+                                              trustsPeer: true, expectedToken: nil)
+                       == .versionMismatch(client: ControlProtocol.version + 1, server: ControlProtocol.version))
+            record("control hello: a missing version reads as 0, not as current",
+                   ControlProtocol.checkHello(["type": "hello"], trustsPeer: true, expectedToken: nil)
+                       == .versionMismatch(client: 0, server: ControlProtocol.version))
+            let controlReq = ControlProtocol.parseRequest(["type": "request", "id": "r1", "verb": "list_folders", "params": ["limit": 5]])
+            record("control request: id, verb and params parse",
+                   controlReq?.id == "r1" && controlReq?.verb == "list_folders" && controlReq?.params["limit"] as? Int == 5)
+            record("control request: a request without an id is rejected",
+                   ControlProtocol.parseRequest(["type": "request", "verb": "list_folders"]) == nil)
+            record("control request: absent params become empty",
+                   ControlProtocol.parseRequest(["type": "request", "id": "r2", "verb": "subscribe"])?.params.isEmpty == true)
+            record("control response: error carries id and message",
+                   ControlProtocol.errorResponse(id: "r1", message: "nope")["id"] as? String == "r1"
+                       && ControlProtocol.errorResponse(id: "r1", message: "nope")["error"] as? String == "nope")
+            do {
+                let controlDir = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-control-probe-\(UUID().uuidString)")
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("zeta"), withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("Alpha"), withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent(".hidden"), withIntermediateDirectories: true)
+                FileManager.default.createFile(atPath: controlDir.appendingPathComponent("b.txt").path, contents: Data())
+                defer { try? FileManager.default.removeItem(at: controlDir) }
+                let listed = try? ControlProtocol.listDirectory(path: controlDir.path, showHidden: false).get()
+                record("control browse: directories first, case-insensitive, hidden dropped",
+                       listed?.map(\.name) == ["Alpha", "zeta", "b.txt"], "\(listed?.map(\.name) ?? [])")
+                record("control browse: hidden shown on request",
+                       (try? ControlProtocol.listDirectory(path: controlDir.path, showHidden: true).get())?.map(\.name).contains(".hidden") == true)
+                record("control browse: a relative path is refused",
+                       ControlProtocol.listDirectory(path: "relative", showHidden: false) == .failure(ControlProtocol.ControlError("path must be absolute")))
+                record("control browse: a file is refused",
+                       ControlProtocol.listDirectory(path: controlDir.appendingPathComponent("b.txt").path, showHidden: false)
+                           == .failure(ControlProtocol.ControlError("not a folder")))
+                let made = ControlProtocol.mkdir(parent: controlDir.path, name: "  new one  ")
+                record("control mkdir: the trimmed name is created",
+                       (try? made.get()) == controlDir.appendingPathComponent("new one").path
+                           && FileManager.default.fileExists(atPath: controlDir.appendingPathComponent("new one").path))
+                record("control mkdir: an existing folder is reported, not entered",
+                       ControlProtocol.mkdir(parent: controlDir.path, name: "zeta") == .failure(ControlProtocol.ControlError("already exists")))
+                record("control mkdir: a slash in the name is refused by the shared rule",
+                       (try? ControlProtocol.mkdir(parent: controlDir.path, name: "a/b").get()) == nil)
+                let openOK = ControlProtocol.parseOpenParams(["cwd": controlDir.path, "model": "opus", "permissionMode": "plan",
+                                                              "initialPrompt": "hi", "worktreeBranch": "fix-x"], allowBypass: false)
+                record("control open: all fields parse",
+                       (try? openOK.get()) == ControlProtocol.OpenParams(cwd: controlDir.path, model: "opus", effort: nil,
+                                                                         permissionMode: .plan, worktreeBranch: "fix-x", initialPrompt: "hi"))
+                record("control open: a missing folder is refused before anything starts",
+                       ControlProtocol.parseOpenParams(["cwd": controlDir.appendingPathComponent("nope").path], allowBypass: false)
+                           == .failure(ControlProtocol.ControlError("not a folder")))
+                record("control open: an unknown permission mode is refused, not defaulted",
+                       ControlProtocol.parseOpenParams(["cwd": controlDir.path, "permissionMode": "yolo"], allowBypass: false)
+                           == .failure(ControlProtocol.ControlError("unknown permission mode")))
+            }
+            // Canopy Server reaper (Plan A, Task 3).
+            do {
+                let reapT0 = Date(timeIntervalSince1970: 2_000_000)
+                let reapLimit = SessionReaper.defaultIdleLimit
+                func reapInputs(clients: Int, busy: Bool, quietFor: TimeInterval) -> SessionReaper.Inputs {
+                    SessionReaper.Inputs(attachedClients: clients, isBusy: busy, quietSince: reapT0.addingTimeInterval(-quietFor))
+                }
+                record("reaper: the default limit is 15 minutes", reapLimit == 15 * 60)
+                record("reaper: quiet exactly the limit with no client is reaped",
+                       SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: reapLimit), now: reapT0, limit: reapLimit))
+                record("reaper: one second short of the limit is kept",
+                       !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: reapLimit - 1), now: reapT0, limit: reapLimit))
+                record("reaper: an attached client keeps it however long it is quiet",
+                       !SessionReaper.shouldReap(reapInputs(clients: 1, busy: false, quietFor: 24 * 3600), now: reapT0, limit: reapLimit))
+                record("reaper: a busy session is kept however long nobody watches",
+                       !SessionReaper.shouldReap(reapInputs(clients: 0, busy: true, quietFor: 24 * 3600), now: reapT0, limit: reapLimit))
+                record("reaper: a quietSince in the future (clock change) is kept",
+                       !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: -60), now: reapT0, limit: reapLimit))
+            }
+            // Canopy Server socket path (Plan A, Task 4).
+            do {
+                let probeHome = URL(fileURLWithPath: "/Users/someone")
+                let releaseSock = DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: probeHome)
+                let debugSock = DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy.debug", home: probeHome)
+                record("daemon socket: Debug and Release never share a path", releaseSock != debugSock)
+                record("daemon socket: lives under Application Support/Canopy",
+                       releaseSock.hasPrefix("/Users/someone/Library/Application Support/Canopy/"))
+                record("daemon socket: fits sun_path for an ordinary home",
+                       debugSock.utf8.count <= DaemonPaths.maxSocketPathBytes, "\(debugSock.utf8.count)")
+                let longHome = URL(fileURLWithPath: "/Users/" + String(repeating: "x", count: 80))
+                let longSock = DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy.debug", home: longHome)
+                record("daemon socket: an over-long home falls back to a short path",
+                       longSock.utf8.count <= DaemonPaths.maxSocketPathBytes && !longSock.hasPrefix(longHome.path), longSock)
+                record("daemon socket: the fallback still separates Debug from Release",
+                       DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: longHome) != longSock)
+            }
+            // Canopy Server LaunchAgent (Plan A, Task 8).
+            record("daemon agent: Debug and Release register different plists",
+                   DaemonRegistration.plistName(bundleId: "sh.saqoo.Canopy") == "sh.saqoo.Canopy.daemon.plist"
+                       && DaemonRegistration.plistName(bundleId: "sh.saqoo.Canopy.debug") == "sh.saqoo.Canopy.debug.daemon.plist")
+            do {
+                let agentPlist = Bundle.main.bundleURL
+                    .appendingPathComponent("Contents/Library/LaunchAgents")
+                    .appendingPathComponent(DaemonRegistration.plistName(bundleId: Bundle.main.bundleIdentifier ?? ""))
+                let agent = NSDictionary(contentsOf: agentPlist)
+                record("daemon agent: this build's plist is in the bundle", agent != nil, agentPlist.path)
+                record("daemon agent: its label matches this build's bundle id",
+                       agent?["Label"] as? String == "\(Bundle.main.bundleIdentifier ?? "").daemon")
+                record("daemon agent: it runs the bundle's own binary with --daemon",
+                       agent?["BundleProgram"] as? String == "Contents/MacOS/Canopy"
+                           && (agent?["ProgramArguments"] as? [String])?.last == "--daemon")
+                record("daemon agent: it is limited to the Aqua session (login keychain)",
+                       agent?["LimitLoadToSessionType"] as? String == "Aqua")
+            }
+            // Canopy Server final-review fixes (Plan A).
+            record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
+                   ControlProtocol.limit(["limit": -1], default: 50) == 0)
+            record("control limit: absent uses the default, a positive value passes through",
+                   ControlProtocol.limit([:], default: 50) == 50 && ControlProtocol.limit(["limit": 7], default: 50) == 7)
+            do {
+                let bypassDir = FileManager.default.temporaryDirectory.path
+                record("control open: bypassPermissions is refused while the opt-in is off",
+                       ControlProtocol.parseOpenParams(["cwd": bypassDir, "permissionMode": "bypassPermissions"], allowBypass: false)
+                           == .failure(ControlProtocol.ControlError("bypass permissions is off on this Mac")))
+                record("control open: bypassPermissions passes when the opt-in is on",
+                       (try? ControlProtocol.parseOpenParams(["cwd": bypassDir, "permissionMode": "bypassPermissions"], allowBypass: true).get())?.permissionMode == .bypassPermissions)
+            }
+            record("reaper busy: a running background task counts as busy",
+                   SessionReaper.isBusy(working: false, permissionPending: false, asking: false, backgroundTasks: 1))
+            record("reaper busy: nothing pending is not busy",
+                   !SessionReaper.isBusy(working: false, permissionPending: false, asking: false, backgroundTasks: 0))
+            record("reaper busy: each of working / permission / asking alone is busy",
+                   SessionReaper.isBusy(working: true, permissionPending: false, asking: false, backgroundTasks: 0)
+                       && SessionReaper.isBusy(working: false, permissionPending: true, asking: false, backgroundTasks: 0)
+                       && SessionReaper.isBusy(working: false, permissionPending: false, asking: true, backgroundTasks: 0))
+            record("daemon tcp: no listener while Mirror is off",
+                   DaemonPaths.tcpPort(mirrorEnabled: false, basePort: 8767, bundleId: "sh.saqoo.Canopy") == nil)
+            record("daemon tcp: Release uses the base port, Debug the next one",
+                   DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 8767, bundleId: "sh.saqoo.Canopy") == 8767
+                       && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 8767, bundleId: "sh.saqoo.Canopy.debug") == 8768)
+            record("daemon tcp: an out-of-range port yields no listener",
+                   DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 0, bundleId: "sh.saqoo.Canopy") == nil
+                       && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 65535, bundleId: "sh.saqoo.Canopy.debug") == nil)
+            record("daemon agent: Release always registers",
+                   DaemonRegistration.shouldRegister(isDebugBuild: false, environment: [:]))
+            record("daemon agent: Debug registers only when asked",
+                   !DaemonRegistration.shouldRegister(isDebugBuild: true, environment: [:])
+                       && DaemonRegistration.shouldRegister(isDebugBuild: true, environment: ["CANOPY_REGISTER_DAEMON": "1"]))
+            do {
+                let livePath = "/tmp/canopy-probe-\(getpid()).sock"
+                unlink(livePath)
+                let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                var addr = sockaddr_un()
+                addr.sun_family = sa_family_t(AF_UNIX)
+                withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+                    for (i, b) in livePath.utf8.enumerated() { buf[i] = b }
+                }
+                let bound = withUnsafePointer(to: &addr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+                } == 0 && listen(fd, 1) == 0
+                record("daemon socket: a listening socket reads as live", bound && DaemonPaths.socketIsLive(path: livePath))
+                close(fd)
+                record("daemon socket: a socket file nobody listens on reads as stale", !DaemonPaths.socketIsLive(path: livePath))
+                unlink(livePath)
+                record("daemon socket: a missing path reads as stale", !DaemonPaths.socketIsLive(path: livePath))
+            }
             // The launcher's Resume menu over another Mac's closed sessions.
             let t0 = Date(timeIntervalSince1970: 1_000_000)
             func peerSession(_ id: String, _ project: String, _ age: TimeInterval, title: String = "t") -> MirrorRecents.Session {

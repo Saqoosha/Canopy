@@ -6,7 +6,6 @@ import UserNotifications
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "App")
 
-@main
 struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
@@ -682,6 +681,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installKeyTypingMonitor()
         RecapCoordinator.shared.start()
         KeepAliveCoordinator.shared.start()
+        DaemonRegistration.ensureRegistered()
         // The sidebar's usage bars have no writer until a shim runs, so a
         // launch that opens on the launcher showed none (see
         // `ClaudeUsageDirect`). Here rather than in a `.task` on the

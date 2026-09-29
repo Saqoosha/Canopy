@@ -91,6 +91,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
     private var mirrors: [ObjectIdentifier: MirrorClient] = [:]
 
+    /// Clients attached besides the primary webview. The daemon has no
+    /// primary, so for it this is every client.
+    var mirrorCount: Int { mirrors.count }
+
+    /// When this session last became quiet: the last client detaching or the
+    /// last turn ending, whichever is later. Read by `DaemonReaper`.
+    private(set) var quietSince = Date()
+
+    var reaperInputs: SessionReaper.Inputs {
+        SessionReaper.Inputs(
+            attachedClients: mirrors.count + (webView == nil ? 0 : 1),
+            isBusy: SessionReaper.isBusy(working: isWorking, permissionPending: !pendingPermissionRequestIds.isEmpty,
+                                         asking: lastAssistantHadAskUserQuestion,
+                                         backgroundTasks: pendingBackgroundTaskIds.count),
+            quietSince: quietSince)
+    }
+
     /// Names this session in `~/.canopy/viewers`, where `canopy-remote-open.sh`
     /// looks up where to open things. Per process, so a file left behind by a
     /// crash can never be read as another session's.
@@ -177,7 +194,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if case .mirror(let owner) = $0.value { return owner != key }
             return true
         }
-        if mirrors.isEmpty { requestOwners.removeAll() }
+        if mirrors.isEmpty {
+            requestOwners.removeAll()
+            quietSince = Date()
+        }
         refreshOpenRedirect()
         logger.notice("[mirror] detached; \(self.mirrors.count) mirror(s) on this shim")
     }
@@ -410,6 +430,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var sessionTitle: String = ""
     private var isWorking = false {
         didSet {
+            if oldValue, !isWorking { quietSince = Date() }
             // When Claude starts a new round (user submitted), clear any
             // outstanding AskUserQuestion asking state — the user already
             // responded, we're back to thinking.

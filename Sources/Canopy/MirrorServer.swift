@@ -28,12 +28,15 @@ final class MirrorServer {
     /// The running server, for Settings; `NSApp.delegate` is not the adaptor's instance (see memory).
     private(set) static weak var current: MirrorServer?
     private var connections: [MirrorConnection] = []
+    /// The daemon's local Unix socket, alongside the TCP `listener`.
+    private var localListener: NWListener?
+    private var localSocketPath: String?
     /// The address the listener has actually reached `.ready` on; nil while binding or after a failure.
     private(set) var boundAddress: (host: String, port: UInt16)?
     /// The address a not-yet-ready listener is binding; a second start for it must not cancel the first.
     private(set) var pendingAddress: (host: String, port: UInt16)?
     /// Read once per bind so an attach never touches the Keychain; `resetPassword` replaces it.
-    fileprivate var token: String
+    private(set) var token: String
 
     init(store: SessionStore, token: String) {
         self.store = store
@@ -107,6 +110,58 @@ final class MirrorServer {
         pendingAddress = nil
     }
 
+    /// The daemon's own socket. Trusted by file permission (0600), so a
+    /// connection from it needs no password. False when another process is
+    /// already accepting on `socketPath`: its file is left alone, because
+    /// unlinking it would strand that daemon's sessions behind no socket.
+    @discardableResult
+    func startLocal(socketPath: String) -> Bool {
+        stopLocal()
+        if DaemonPaths.socketIsLive(path: socketPath) {
+            logger.error("[mirror-server] another daemon is already serving the local socket")
+            return false
+        }
+        // A crashed daemon leaves its socket file; binding over it fails with EADDRINUSE.
+        try? FileManager.default.removeItem(atPath: socketPath)
+        try? FileManager.default.createDirectory(
+            atPath: (socketPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        do {
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .unix(path: socketPath)
+            let listener = try NWListener(using: parameters)
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                MainActor.assumeIsolated {
+                    guard let self, let listener, self.localListener === listener else { return }
+                    switch state {
+                    case .ready:
+                        chmod(socketPath, 0o600)
+                        logger.notice("[mirror-server] local socket ready")
+                    case .waiting(let error), .failed(let error):
+                        logger.error("[mirror-server] local socket cannot bind: \(error.localizedDescription, privacy: .public)")
+                    default:
+                        break
+                    }
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                Task { @MainActor in self?.accept(connection, trustsPeer: true) }
+            }
+            listener.start(queue: .main)
+            localListener = listener
+            localSocketPath = socketPath
+        } catch {
+            logger.error("[mirror-server] local socket start failed: \(error.localizedDescription, privacy: .public)")
+        }
+        return true
+    }
+
+    func stopLocal() {
+        localListener?.cancel()
+        localListener = nil
+        if let path = localSocketPath { try? FileManager.default.removeItem(atPath: path) }
+        localSocketPath = nil
+    }
+
     /// Whether any connection is still mirroring this session, so its deferred images must stay.
     fileprivate func isMirroring(sessionId: String) -> Bool {
         connections.contains { $0.attachedSessionId == sessionId }
@@ -116,8 +171,8 @@ final class MirrorServer {
         connections.removeAll { $0 === connection }
     }
 
-    private func accept(_ connection: NWConnection) {
-        let mirror = MirrorConnection(connection: connection, store: store, server: self)
+    private func accept(_ connection: NWConnection, trustsPeer: Bool = false) {
+        let mirror = MirrorConnection(connection: connection, store: store, server: self, trustsPeer: trustsPeer)
         connections.append(mirror)
         mirror.start()
     }
@@ -176,16 +231,31 @@ final class MirrorConnection: MirrorSink {
     /// actor before the first send is enqueued; every send captures it by value on the way out.
     private var compressOutbound = false
     private var cleanedUp = false
+    /// Set once the first line was `hello`; every later line goes here instead of to a shim.
+    private var control: ControlSession?
 
     /// Whether a client identity is a phone. Absent `client` (older phones) is one; `"mac"` is not.
     nonisolated static func appliesPhoneReplayRewrites(client: String?) -> Bool {
         client != "mac"
     }
 
-    init(connection: NWConnection, store: SessionStore, server: MirrorServer) {
+    /// True for a connection from the daemon's local Unix socket, which the
+    /// file mode already restricts to this user. Every password check below
+    /// passes for it.
+    let trustsPeer: Bool
+
+    init(connection: NWConnection, store: SessionStore, server: MirrorServer, trustsPeer: Bool) {
         self.connection = connection
         self.store = store
         self.server = server
+        self.trustsPeer = trustsPeer
+    }
+
+    /// The mirror password check, which a local-socket peer skips.
+    private func isAuthorized(_ dict: [String: Any]) -> Bool {
+        if trustsPeer { return true }
+        guard let provided = dict["token"] as? String, let expected = server?.token else { return false }
+        return MirrorAccess.tokensMatch(provided, expected)
     }
 
     func start() {
@@ -257,6 +327,10 @@ final class MirrorConnection: MirrorSink {
             logger.error("[mirror-server] JSON root is not an object")
             return
         }
+        if let control {
+            control.handle(dict)
+            return
+        }
         if !didAttach {
             handleAttach(dict)
             return
@@ -271,10 +345,7 @@ final class MirrorConnection: MirrorSink {
     /// The one line a `list_recents` connection gets before it is closed.
     /// Same password as an attach: it names every project folder here.
     private func answerRecents(_ dict: [String: Any]) {
-        guard let provided = dict["token"] as? String,
-              let expected = server?.token,
-              MirrorAccess.tokensMatch(provided, expected)
-        else {
+        guard isAuthorized(dict) else {
             logger.error("[mirror-server] list_recents refused: wrong or missing password")
             failAttach("unauthorized")
             return
@@ -325,6 +396,10 @@ final class MirrorConnection: MirrorSink {
     }
 
     private func handleAttach(_ dict: [String: Any]) {
+        if dict["type"] as? String == ControlProtocol.helloType {
+            openControl(dict)
+            return
+        }
         if dict["type"] as? String == MirrorRecents.listType {
             answerRecents(dict)
             return
@@ -335,10 +410,7 @@ final class MirrorConnection: MirrorSink {
             failAttach("expected attach")
             return
         }
-        guard let provided = dict["token"] as? String,
-              let expected = server?.token,
-              MirrorAccess.tokensMatch(provided, expected)
-        else {
+        guard isAuthorized(dict) else {
             logger.error("[mirror-server] attach refused: wrong or missing password")
             failAttach("unauthorized")
             return
@@ -473,6 +545,33 @@ final class MirrorConnection: MirrorSink {
         }
     }
 
+    /// A `hello` first line makes this a control connection (`ControlSession`).
+    private func openControl(_ dict: [String: Any]) {
+        switch ControlProtocol.checkHello(dict, trustsPeer: trustsPeer, expectedToken: server?.token) {
+        case .ok:
+            control = ControlSession(store: store) { [weak self] payload in self?.sendJSONObject(payload) }
+            didAttach = true
+            compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
+            sendJSONObject(["type": "hello_ok", "protocolVersion": ControlProtocol.version,
+                            "machineId": MachineIdentity.stableId() ?? ""])
+            logger.notice("[mirror-server] control connection opened (local=\(self.trustsPeer))")
+        case .unauthorized:
+            logger.error("[mirror-server] hello refused: wrong or missing password")
+            failHello("unauthorized")
+        case .versionMismatch(let client, let server):
+            logger.error("[mirror-server] hello refused: protocol \(client) vs \(server)")
+            failHello("protocol version \(client) is not \(server)")
+        }
+    }
+
+    private func failHello(_ message: String) {
+        let data = (try? JSONSerialization.data(withJSONObject: ["type": "hello_error", "message": message])) ?? Data()
+        connection.send(content: data + Data([0x0A]), completion: .contentProcessed { [connection] _ in
+            connection.cancel()
+        })
+        cleanup()
+    }
+
     private func failAttach(_ message: String) {
         // Cancel only once the refusal has left the send queue; cancelling
         // right after `send` drops the line (measured: the client saw a
@@ -512,6 +611,8 @@ final class MirrorConnection: MirrorSink {
     private func cleanup() {
         guard !cleanedUp else { return }
         cleanedUp = true
+        control?.stop()
+        control = nil
         statusPublisher?.stop()
         statusPublisher = nil
         usagePublisher?.stop()
