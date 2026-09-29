@@ -295,7 +295,7 @@ final class SessionStore {
         guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return }
         let name = (path as NSString).lastPathComponent
         attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: UUID().uuidString,
-                         title: "Untitled", project: name, open: .new(cwd: path), target: target)
+                         title: "Untitled", project: name, open: .new(cwd: path, options: NewSessionOptions()), target: target)
     }
 
     /// True when the attach may go ahead; otherwise records why for the sidebar banner.

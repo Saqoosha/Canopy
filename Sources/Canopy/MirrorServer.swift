@@ -411,7 +411,7 @@ final class MirrorConnection: MirrorSink {
                 logger.error("[mirror-server] open refused: \(sessionId, privacy: .public) is not a session here")
                 return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
             }
-        case .new(let cwd):
+        case .new(let cwd, _):
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 logger.error("[mirror-server] open refused: no folder at \(cwd, privacy: .private)")

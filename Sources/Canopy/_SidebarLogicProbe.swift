@@ -1985,6 +1985,27 @@ enum SidebarLogicProbe {
                         .defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options else { return false }
                 return tcp.enableKeepalive && tcp.keepaliveIdle == 15 && tcp.keepaliveInterval == 15 && tcp.keepaliveCount == 3
             }())
+            // Canopy Server: new-session options ride the attach's `open`.
+            do {
+                let png = Data([0x89, 0x50, 0x4E, 0x47]).base64EncodedString()
+                let options = NewSessionOptions(model: "opus", effort: "high", permissionMode: .plan, promptText: "fix it",
+                                                promptImages: [WireImage(mediaType: "image/png", base64: png)],
+                                                settledTitle: "Fix it", providerId: "prov", accountId: "acct")
+                record("open request: a new session's options round-trip",
+                       MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/p", options: options).wire)
+                           == .new(cwd: "/tmp/p", options: options))
+                record("open request: a bare new session has empty options",
+                       MirrorOpenRequest(wire: ["kind": "new", "cwd": "/tmp/p"]) == .new(cwd: "/tmp/p", options: NewSessionOptions()))
+                record("open request: an unknown permission mode is dropped, not guessed",
+                       NewSessionOptions(wire: ["permissionMode": "yolo"]).permissionMode == nil)
+                record("open request: resume is unchanged",
+                       MirrorOpenRequest(wire: MirrorOpenRequest.resume.wire) == .resume)
+                record("launch image: an accepted type decodes", LaunchImage.fromWire(WireImage(mediaType: "image/png", base64: png)) != nil)
+                record("launch image: an unaccepted type is refused",
+                       LaunchImage.fromWire(WireImage(mediaType: "image/heic", base64: png)) == nil)
+                record("launch image: base64 that does not decode is refused",
+                       LaunchImage.fromWire(WireImage(mediaType: "image/png", base64: "%%%")) == nil)
+            }
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)
@@ -2070,7 +2091,7 @@ enum SidebarLogicProbe {
                    long == String(repeating: "a", count: 59) + "…  ·  1m")
             record("mirror open: both kinds round-trip the wire",
                    MirrorOpenRequest(wire: MirrorOpenRequest.resume.wire) == .resume
-                       && MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/x").wire) == .new(cwd: "/tmp/x"))
+                       && MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/x", options: NewSessionOptions()).wire) == .new(cwd: "/tmp/x", options: NewSessionOptions()))
             record("mirror open: an unknown kind, a missing or relative cwd, and no request at all are refused",
                    MirrorOpenRequest(wire: ["kind": "exec"]) == nil
                        && MirrorOpenRequest(wire: ["kind": "new"]) == nil

@@ -57,6 +57,16 @@ struct LaunchImage: Identifiable {
         self.data = data
     }
 
+    /// An image a client sent over the wire. The same limits as a local attach:
+    /// an accepted type, readable base64, within `maxBytes`.
+    static func fromWire(_ image: WireImage) -> LaunchImage? {
+        guard acceptedMediaTypes.contains(image.mediaType),
+              let data = Data(base64Encoded: image.base64), !data.isEmpty, data.count <= maxBytes else { return nil }
+        return LaunchImage(mediaType: image.mediaType, data: data)
+    }
+
+    var wire: WireImage { WireImage(mediaType: mediaType, base64: data.base64EncodedString()) }
+
     /// The four media types the API — and the CC webview's own attach path —
     /// accept for an image block.
     static let acceptedMediaTypes: Set<String> = ["image/jpeg", "image/png", "image/gif", "image/webp"]
