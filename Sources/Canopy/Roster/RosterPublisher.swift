@@ -452,7 +452,22 @@ final class RosterPublisher {
     ///
     /// `KeychainAuth` is the precedent for reading a secret in this app; this
     /// item is written by the Settings field in Task 3 and read here.
+    /// Whether this process may reach the relay (and the keychain item it
+    /// needs). The daemon sets it from `relayAllowed` at launch.
+    nonisolated(unsafe) static var relayAllowedInProcess = true
+
+    /// The GUI always may. A daemon may in Release; a Debug daemon only with
+    /// `CANOPY_DAEMON_ROSTER=1`, because its signature does not match the
+    /// keychain ACL the Release app owns (a prompt on every read, with nobody
+    /// at a windowless daemon to answer it) and it publishes under the same
+    /// machine id as the Release Canopy, so the two would fight over one roster.
+    nonisolated static func relayAllowed(isDaemon: Bool, isDebug: Bool, env: [String: String]) -> Bool {
+        guard isDaemon, isDebug else { return true }
+        return env["CANOPY_DAEMON_ROSTER"] == "1"
+    }
+
     static func sharedSecret() -> String? {
+        guard relayAllowedInProcess else { return nil }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "sh.saqoo.Canopy.roster",

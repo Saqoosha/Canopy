@@ -15,6 +15,15 @@ enum CanopyDaemon {
         // The probe belongs to the GUI entry; a daemon must never start under it.
         guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else { exit(0) }
         #endif
+        // Before anything touches `CanopySettings.shared`: the file is the GUI's.
+        CanopySettings.persistsChanges = false
+        #if DEBUG
+        let isDebug = true
+        #else
+        let isDebug = false
+        #endif
+        RosterPublisher.relayAllowedInProcess = RosterPublisher.relayAllowed(
+            isDaemon: true, isDebug: isDebug, env: ProcessInfo.processInfo.environment)
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         installTerminationHandler()
@@ -42,6 +51,7 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     private let store = SessionStore()
     private var server: MirrorServer?
     private var reaper: DaemonReaper?
+    private var rosterPublisher: RosterPublisher?
     private var config = DaemonConfig.defaults
     private var configModified: Date?
     private var configTimer: Timer?
@@ -89,6 +99,20 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         let reaper = DaemonReaper(store: store)
         self.reaper = reaper
         reaper.start()
+
+        // The phone's view of this Mac: the sessions live here now, so the roster does too.
+        if RosterPublisher.relayAllowedInProcess {
+            let publisher = RosterPublisher(store: store, settings: CanopySettings.shared)
+            rosterPublisher = publisher
+            publisher.start()
+            RosterRouting.install(on: publisher, store: store)
+            // Usage bars on the roster before any shim has fetched them.
+            Task {
+                await ClaudeUsageDirect.refreshLocalAccount()
+            }
+        } else {
+            logger.notice("roster: not published by a Debug daemon (set CANOPY_DAEMON_ROSTER=1 to allow)")
+        }
     }
 
     private func reloadConfig() {
@@ -99,6 +123,8 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         guard let parsed = DaemonConfig.parse(try? Data(contentsOf: settingsFile)) else { return }
         configModified = modified ?? Date.distantPast
         config = parsed
+        // Roster, keep-alive and recap toggles the GUI changed; read only, never written back.
+        CanopySettings.shared.reload()
         applyTCP()
     }
 

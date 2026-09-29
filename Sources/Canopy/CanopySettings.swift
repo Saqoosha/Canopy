@@ -7,6 +7,10 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "CanopySetti
 final class CanopySettings {
     nonisolated(unsafe) static let shared = CanopySettings()
 
+    /// False in the daemon, set before `shared` is first touched: it reads the
+    /// file the GUI owns and never writes it (`save()` becomes a no-op).
+    nonisolated(unsafe) static var persistsChanges = true
+
     var allowDangerouslySkipPermissions: Bool = false {
         didSet {
             // Toggling the opt-in off must also clamp the recents default
@@ -174,11 +178,37 @@ final class CanopySettings {
     /// on the first launch after a migration rather than on the next edit.
     private var isLoading = false
 
-    init() {
+    convenience init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let canopyDir = appSupport.appendingPathComponent("Canopy")
-        self.filePath = canopyDir.appendingPathComponent("settings.json")
+        self.init(filePath: appSupport.appendingPathComponent("Canopy").appendingPathComponent("settings.json"))
+    }
+
+    /// Internal so the probe can point one at a scratch file.
+    init(filePath: URL) {
+        self.filePath = filePath
         load()
+    }
+
+    /// Re-read the keys a daemon acts on, after the GUI changed the file.
+    /// Assigns only what changed, so observers (the roster publisher) wake
+    /// only for a real change, and never writes.
+    func reload() {
+        guard let data = try? Data(contentsOf: filePath),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        isLoading = true
+        defer { isLoading = false }
+        func set<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<CanopySettings, T>, _ value: T?) {
+            if let value, self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+        }
+        set(\.allowDangerouslySkipPermissions, dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool)
+        set(\.respectGitIgnore, dict["claudeCode.respectGitIgnore"] as? Bool)
+        set(\.recapEnabled, dict["canopy.recapEnabled"] as? Bool)
+        set(\.keepAliveEnabled, dict["canopy.keepAliveEnabled"] as? Bool)
+        set(\.seedWorktreeArtifacts, dict["canopy.seedWorktreeArtifacts"] as? Bool)
+        set(\.defaultPermissionMode, (dict["canopy.defaultPermissionMode"] as? String).flatMap(PermissionMode.init(rawValue:)))
+        set(\.machineDisplayName, dict["canopy.machineDisplayName"] as? String)
+        set(\.rosterEnabled, dict["canopy.rosterEnabled"] as? Bool)
+        set(\.rosterEndpoint, dict["canopy.rosterEndpoint"] as? String)
     }
 
     private func load() {
@@ -284,7 +314,7 @@ final class CanopySettings {
     }
 
     private func save() {
-        guard !isLoading else { return }
+        guard !isLoading, Self.persistsChanges else { return }
         var dict = loadCurrentDict()
         dict["claudeCode.allowDangerouslySkipPermissions"] = allowDangerouslySkipPermissions
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
@@ -332,6 +362,7 @@ final class CanopySettings {
     }
 
     private func writeDict(_ dict: [String: Any]) {
+        guard Self.persistsChanges else { return }
         do {
             let dir = filePath.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

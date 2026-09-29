@@ -2217,6 +2217,41 @@ enum SidebarLogicProbe {
                        && ShimProcess.requestedPermissionMode(["type": "response", "request": ["type": "set_permission_mode", "mode": "plan"]]) == nil)
             record("permission mode: an unknown mode is not",
                    ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_permission_mode", "mode": "yolo"]]) == nil)
+            // Canopy Server B4: the daemon reads settings.json and never writes it.
+            do {
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-settings-\(UUID().uuidString)")
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: dir) }
+                let file = dir.appendingPathComponent("settings.json")
+                func write(_ json: String) { try? Data(json.utf8).write(to: file) }
+                write(#"{"canopy.rosterEnabled":true,"canopy.rosterEndpoint":"https://a.example","canopy.keepAliveEnabled":false}"#)
+                let wasPersisting = CanopySettings.persistsChanges
+                CanopySettings.persistsChanges = false
+                defer { CanopySettings.persistsChanges = wasPersisting }
+                let before = try? Data(contentsOf: file)
+                let settings = CanopySettings(filePath: file)
+                record("settings (daemon): values are read from the file",
+                       settings.rosterEnabled && settings.rosterEndpoint == "https://a.example" && !settings.keepAliveEnabled)
+                settings.recapEnabled.toggle()
+                record("settings (daemon): loading and changing a value writes nothing",
+                       (try? Data(contentsOf: file)) == before)
+                write(#"{"canopy.rosterEnabled":false,"canopy.rosterEndpoint":"https://b.example","canopy.keepAliveEnabled":true,"canopy.machineDisplayName":"Studio"}"#)
+                let rewritten = try? Data(contentsOf: file)
+                settings.reload()
+                record("settings (daemon): reload picks up the GUI's change",
+                       !settings.rosterEnabled && settings.rosterEndpoint == "https://b.example"
+                           && settings.keepAliveEnabled && settings.machineDisplayName == "Studio")
+                record("settings (daemon): reload writes nothing", (try? Data(contentsOf: file)) == rewritten)
+            }
+            record("roster relay: the GUI may, Debug or not",
+                   RosterPublisher.relayAllowed(isDaemon: false, isDebug: true, env: [:])
+                       && RosterPublisher.relayAllowed(isDaemon: false, isDebug: false, env: [:]))
+            record("roster relay: a Release daemon may",
+                   RosterPublisher.relayAllowed(isDaemon: true, isDebug: false, env: [:]))
+            record("roster relay: a Debug daemon only with CANOPY_DAEMON_ROSTER=1",
+                   !RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: [:])
+                       && !RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: ["CANOPY_DAEMON_ROSTER": "true"])
+                       && RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: ["CANOPY_DAEMON_ROSTER": "1"]))
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)
