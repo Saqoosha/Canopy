@@ -3394,8 +3394,32 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         handleWebviewMessage(dict, sender: sink, isPrimary: false)
     }
 
+    /// The attached Mac that shows a UI request, when this shim has no webview of its own (the daemon).
+    private func uiClient(for requestId: String?) -> (any MirrorSink)? {
+        let entries = Array(mirrors)
+        var requester: Int?
+        if let requestId, case .mirror(let key)? = requestOwners[requestId] {
+            requester = entries.firstIndex { $0.key == key }
+        }
+        let sinks = entries.map(\.value.sink)
+        return Self.uiTarget(requester: requester, clients: sinks.map { $0?.isMacClient ?? false }).flatMap { sinks[$0] }
+    }
+
+    private var macClients: [any MirrorSink] { mirrors.values.compactMap(\.sink).filter(\.isMacClient) }
+
+    /// A Mac client's answer to an alert this shim forwarded.
+    func receiveUIAnswer(_ answer: MirrorUIAnswer) {
+        sendToShim(["type": "notification_response", "requestId": answer.requestId,
+                    "buttonValue": answer.button.map { $0 as Any } ?? NSNull()])
+    }
+
     private func handleWebviewMessage(_ incoming: [String: Any], sender: (any MirrorSink)?, isPrimary: Bool) {
         var dict = incoming
+        if let mode = Self.requestedPermissionMode(incoming) {
+            // Kept so a later attach's synthetic status and the daemon's session row show the live mode.
+            permissionMode = mode
+            boundSession?.permissionMode = mode
+        }
 
         // Multi-client fan-in. Every webview mints its own channel and its
         // own handshake; the extension must see exactly one of each.
@@ -3980,7 +4004,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "show_document":
             if let content = msg["content"] as? String {
                 let fileName = msg["fileName"] as? String ?? "output"
-                ContentViewer.show(content: content, title: fileName, in: webView)
+                if webView == nil {
+                    if let client = uiClient(for: nil) {
+                        client.deliverUI(.showContent(title: fileName, content: content, startLine: nil, endLine: nil))
+                    } else {
+                        logger.notice("show_document dropped: no webview and no Mac client")
+                    }
+                } else {
+                    ContentViewer.show(content: content, title: fileName, in: webView)
+                }
             }
 
         case "show_notification":
@@ -4026,6 +4058,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         let severity = msg["severity"] as? String ?? "info"
         let buttons = msg["buttons"] as? [String] ?? []
+
+        if webView == nil {
+            // Never a modal in the daemon: it would stop every session. No Mac to ask means Dismiss.
+            guard let client = uiClient(for: nil) else {
+                sendToShim(["type": "notification_response", "requestId": requestId, "buttonValue": NSNull()])
+                return
+            }
+            client.deliverUI(.alert(requestId: requestId, message: message, severity: severity, buttons: buttons))
+            return
+        }
 
         let alert = NSAlert()
         alert.messageText = message
@@ -4096,13 +4138,28 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return
             }
             if FileManager.default.fileExists(atPath: resolved.path) {
+                // The daemon has no ContentViewer of its own: a text file goes to the Mac that asked.
+                // Anything else opens the ordinary ways below (here for this Mac, shipped for another).
+                if webView == nil, !openExternal, let client = uiClient(for: requestId), client.isMacClient,
+                   let content = try? String(contentsOf: resolved, encoding: .utf8) {
+                    client.deliverUI(.showContent(title: resolved.lastPathComponent, content: content,
+                                                  startLine: location?["startLine"] as? Int, endLine: location?["endLine"] as? Int))
+                    if let requestId {
+                        sendToWebView([
+                            "type": "response",
+                            "requestId": requestId,
+                            "response": ["type": "open_file_response"] as [String: Any],
+                        ] as [String: Any])
+                    }
+                    return
+                }
                 // A mirror forwards its webview's `open_file` here verbatim,
                 // so without this the click lands on THIS screen — Preview on
                 // the host, ContentViewer in the host's own window. Ship it
                 // to the watcher instead; the script's own fallback is this
                 // branch's old behaviour.
                 if let requestId, case .mirror(let key)? = requestOwners[requestId],
-                   let sink = mirrors[key]?.sink, sink.acceptsFileTransfers
+                   let sink = mirrors[key]?.sink, sink.acceptsFileTransfers, !sink.isLocalClient
                 {
                     logger.notice("handleOpenFile: shipping to the watching Mac")
                     if !MirrorFileSender.send(path: resolved.path, to: sink) {
@@ -4155,7 +4212,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func handleOpenContent(_ request: [String: Any], requestId: String?) {
         let content = request["content"] as? String ?? ""
         let fileName = request["fileName"] as? String ?? "untitled"
-        ContentViewer.show(content: content, title: fileName, in: webView)
+        if webView == nil {
+            if let client = uiClient(for: requestId) {
+                client.deliverUI(.showContent(title: fileName, content: content, startLine: nil, endLine: nil))
+            } else {
+                logger.notice("open_content dropped: no webview and no Mac client")
+            }
+        } else {
+            ContentViewer.show(content: content, title: fileName, in: webView)
+        }
 
         if let requestId {
             sendToWebView([
@@ -5117,6 +5182,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// just the error.
     private func showRecapInWebView(_ text: String?) {
         guard let webView else {
+            // The daemon: the recap is drawn by every attached Mac's page instead.
+            let call = text.map { RecapScript.setCall(text: $0) } ?? RecapScript.clearCall
+            let clients = macClients
+            clients.forEach { $0.deliverUI(.evalJS("(window.__canopyRecap ? (\(call), 'ok') : 'no-bridge')")) }
+            if !clients.isEmpty { return }
             // Bare returns here cost a paid recap with no trace — the sibling
             // `sendToWebView` logs the identical condition for the same reason.
             if text != nil {
@@ -7906,15 +7976,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 eventId: eventIdForThisTurn)
         }
 
-        guard !NSApp.isActive else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "Canopy"
-        content.body = body
-        content.sound = .default
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error { logger.error("Notification error: \(error.localizedDescription, privacy: .public)") }
+        if webView == nil, !macClients.isEmpty {
+            // The daemon: the attached Mac decides whether it is frontmost; the daemon's `isActive` means nothing.
+            macClients.forEach { $0.deliverUI(.notify(title: "Canopy", body: body)) }
+            return
         }
+        guard !NSApp.isActive else { return }
+        SessionNotifier.post(title: "Canopy", body: body)
     }
 
     // MARK: - CLI Subprocess Exit Detection
@@ -8053,7 +8121,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             el.textContent = '\(escaped)';
         })()
         """
-        webView?.evaluateJavaScript(js, completionHandler: nil)
+        if let webView {
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        } else {
+            macClients.forEach { $0.deliverUI(.evalJS(js)) }
+        }
     }
 
     // MARK: - VCS Branch Detection

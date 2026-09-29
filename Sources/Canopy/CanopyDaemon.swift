@@ -79,6 +79,12 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.reloadConfig() }
         }
 
+        // No panes here: the sessions worth keeping warm are the ones a client is attached to.
+        KeepAliveCoordinator.shared.targets = { store in
+            KeepAliveCoordinator.daemonTargets(store.openSessions).map { ("session \($0.resumeId.prefix(8))", $0) }
+        }
+        KeepAliveCoordinator.shared.start()
+
         let reaper = DaemonReaper(store: store)
         self.reaper = reaper
         reaper.start()

@@ -15,6 +15,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     var onStatus: (([String: Any]) -> Void)?
     /// A `MirrorFileWire` frame: a file the host is shipping here, or a URL to open.
     var onFileFrame: (([String: Any]) -> Void)?
+    /// UI a daemon session asks this pane to show (`MirrorUIFrame`).
+    var onUIFrame: ((MirrorUIFrame) -> Void)?
     /// The origin session's account usage (`MirrorUsageFrame`), once it has any and on every
     /// change; never from a Mac that predates the frame.
     var onUsage: (([String: Any]) -> Void)?
@@ -309,7 +311,17 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             onFileFrame?(dict)
             return
         }
+        if let frame = MirrorUIFrame(wire: dict) {
+            // For the pane (ContentViewer, alert, notification), never posted into the page as is.
+            onUIFrame?(frame)
+            return
+        }
         webView?.deliver(dict)
+    }
+
+    /// Answers an alert the session forwarded.
+    func sendUIAnswer(_ answer: MirrorUIAnswer) {
+        sendJSONObject(answer.wire)
     }
 
     private func sendJSONObject(_ payload: [String: Any]) {

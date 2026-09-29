@@ -1146,6 +1146,9 @@ final class SessionStore {
             session.isAsking = activity == .asking
             session.isWaiting = activity == .background
             if !row.model.isEmpty { session.statusBar.model = row.model }
+            if let mode = PermissionMode(rawValue: row.permissionMode), mode != session.permissionMode {
+                session.permissionMode = mode
+            }
             session.statusBar.messageCount = row.messageCount
         }
         for row in plan.adds {

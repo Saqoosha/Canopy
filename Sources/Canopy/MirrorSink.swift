@@ -19,11 +19,23 @@ protocol MirrorSink: AnyObject {
     /// the phone has nowhere to put a file and would post the frames into its
     /// page.
     var acceptsFileTransfers: Bool { get }
+
+    /// A Mac's Canopy (not the phone): it can take UI frames.
+    var isMacClient: Bool { get }
+
+    /// On this Mac, over the daemon's local socket.
+    var isLocalClient: Bool { get }
+
+    /// UI the daemon cannot show itself (`MirrorUIFrame`).
+    func deliverUI(_ frame: MirrorUIFrame)
 }
 
 extension MirrorSink {
     var openRedirectHost: String? { nil }
     var acceptsFileTransfers: Bool { false }
+    var isMacClient: Bool { false }
+    var isLocalClient: Bool { false }
+    func deliverUI(_ frame: MirrorUIFrame) {}
 }
 
 extension WKWebView: MirrorSink {

@@ -134,9 +134,24 @@ final class RecapCoordinator {
                 logger.debug("pane \(index, privacy: .public): launcher, no session")
                 continue
             }
-            guard let session = store.openSessions.first(where: { $0.id == id }),
-                  let shim = session.shim
-            else {
+            guard let session = store.openSessions.first(where: { $0.id == id }) else { continue }
+            if session.shim == nil, session.isDaemonHosted, let control = store.daemonControl {
+                // The daemon holds the shim; it decides eligibility and the reply draws in this pane.
+                let params = SessionStore.daemonRefParams(session)
+                Task {
+                    switch await control.request("request_recap", params) {
+                    case .success(let result):
+                        if result["requested"] as? Bool != true {
+                            logger.info("pane \(index, privacy: .public): daemon skipped recap — \(result["reason"] as? String ?? "?", privacy: .public)")
+                        }
+                    case .failure(let failure):
+                        logger.error("pane \(index, privacy: .public): request_recap failed: \(String(describing: failure), privacy: .public)")
+                    }
+                }
+                requested += 1
+                continue
+            }
+            guard let shim = session.shim else {
                 logger.debug("pane \(index, privacy: .public): no live shim")
                 continue
             }

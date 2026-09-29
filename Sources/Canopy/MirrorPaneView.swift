@@ -236,6 +236,25 @@ struct MirrorPaneView: NSViewRepresentable {
         bridge.onFileFrame = { [weak session] frame in
             session?.fileTransfer.handle(frame)
         }
+        bridge.onUIFrame = { [weak bridge, weak webView] frame in
+            switch frame {
+            case .showContent(let title, let content, let startLine, let endLine):
+                ContentViewer.show(content: content, title: title, in: webView, startLine: startLine, endLine: endLine)
+            case .evalJS(let js):
+                webView?.evaluateJavaScript(js, completionHandler: nil)
+            case .alert(let requestId, let message, let severity, let buttons):
+                let alert = NSAlert()
+                alert.messageText = message
+                alert.alertStyle = severity == "error" ? .critical : severity == "warning" ? .warning : .informational
+                buttons.forEach { alert.addButton(withTitle: $0) }
+                alert.addButton(withTitle: "Dismiss")
+                let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+                bridge?.sendUIAnswer(MirrorUIAnswer(requestId: requestId, button: index < buttons.count ? buttons[index] : nil))
+            case .notify(let title, let body):
+                guard !NSApp.isActive else { return }
+                SessionNotifier.post(title: title, body: body)
+            }
+        }
         let isDaemon = session.isDaemonHosted
         bridge.onOutcome = { [weak session, weak bridge] outcome in
             guard let session else { return }

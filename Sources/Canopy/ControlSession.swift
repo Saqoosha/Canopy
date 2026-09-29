@@ -51,6 +51,7 @@ final class ControlSession {
         case "restart_session": restartSession(request)
         case "switch_account": switchAccount(request)
         case "list_accounts": listAccounts(request)
+        case "request_recap": requestRecap(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -202,6 +203,21 @@ final class ControlSession {
             return
         }
         reply(request, ["ok": true])
+    }
+
+    /// A client that came back after being away asks for the session's recap.
+    private func requestRecap(_ request: ControlProtocol.Request) {
+        guard let session = requestedSession(request) else { return }
+        guard let shim = session.shim else {
+            reply(request, ["requested": false, "reason": "not running"])
+            return
+        }
+        if let reason = shim.recapIneligibilityReason {
+            reply(request, ["requested": false, "reason": reason])
+            return
+        }
+        shim.requestRecap()
+        reply(request, ["requested": true])
     }
 
     private func listAccounts(_ request: ControlProtocol.Request) {

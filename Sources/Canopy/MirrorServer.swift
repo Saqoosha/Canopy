@@ -284,6 +284,13 @@ final class MirrorConnection: MirrorSink {
         self.trustsPeer = trustsPeer
     }
 
+    var isLocalClient: Bool { trustsPeer }
+
+    func deliverUI(_ frame: MirrorUIFrame) {
+        guard isMacClient else { return }
+        sendJSONObject(frame.wire)
+    }
+
     /// The mirror password check, which a local-socket peer skips.
     private func isAuthorized(_ dict: [String: Any]) -> Bool {
         if trustsPeer { return true }
@@ -370,6 +377,10 @@ final class MirrorConnection: MirrorSink {
         }
         if dict["type"] as? String == "asset_request" {
             serveAsset(dict)
+            return
+        }
+        if let answer = MirrorUIAnswer(wire: dict) {
+            shim?.receiveUIAnswer(answer)
             return
         }
         shim?.receiveFromMirror(dict, from: self)
