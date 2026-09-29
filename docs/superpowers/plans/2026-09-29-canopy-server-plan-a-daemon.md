@@ -34,7 +34,7 @@ cd /Users/hiko/.claude/worktrees/Canopy/canopy-server-architecture
 CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy
 ```
 
-probe は最後に `--- N passed, M failed` を出す。assertion は `_SidebarLogicProbe.swift` の `runAllTests()` の中で `record("name", condition)` を呼んで足す。assertion を足したら `.github/workflows/ci.yml` の `EXPECTED_ASSERTIONS`（現在 1559）を、probe が出した passed の数に上げる。
+probe は最後に `--- N passed, M failed` を出す。assertion は `_SidebarLogicProbe.swift` の `runAllTests()` の中で `record("name", condition)` を呼んで足す。assertion を足したら `.github/workflows/ci.yml` の `EXPECTED_ASSERTIONS`を、probe が出した passed の数に上げる。
 
 ## Review Focus
 
