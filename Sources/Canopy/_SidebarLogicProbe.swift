@@ -2256,7 +2256,7 @@ enum SidebarLogicProbe {
                        && RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: ["CANOPY_DAEMON_ROSTER": "1"]))
             // Canopy Server B5: the GUI shows the daemon's listener.
             for state in [MirrorServerStatus.State.off, .noTailscale, .noPassword,
-                          .listening(host: "100.64.0.1", port: 8770), .failed("in use")] {
+                          .listening(host: "100.64.0.1", port: 8770), .failed("in use"), .checking, .unavailable("x")] {
                 record("mirror status: \(state) round-trips through JSON", {
                     guard let data = try? JSONSerialization.data(withJSONObject: state.wire),
                           let back = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
@@ -2266,19 +2266,25 @@ enum SidebarLogicProbe {
             record("mirror status: an unknown state or a bad port is not read",
                    MirrorServerStatus.State(wire: ["state": "exploded"]) == nil
                        && MirrorServerStatus.State(wire: ["state": "listening", "host": "h", "port": 70000]) == nil)
-            let listenerStep = { (host: String?, bound: String?, binding: Bool, since: TimeInterval?) in
-                DaemonDelegate.listenerAction(tailscaleHost: host, boundHost: bound, binding: binding, secondsSinceAttempt: since)
+            let listenerStep = { (want: String?, bound: String?, pending: String?, since: TimeInterval?) in
+                DaemonDelegate.listenerAction(want: want, bound: bound, pending: pending,
+                                              secondsSinceAttempt: since, retryAfter: 30)
             }
-            record("daemon listener: waits for Tailscale, keeps a bound or binding listener",
-                   listenerStep(nil, nil, false, nil) == .waitForTailscale
-                       && listenerStep("100.1.1.1", "100.1.1.1", false, 1) == .keep
-                       && listenerStep("100.1.1.1", nil, true, 1) == .keep)
-            record("daemon listener: a moved Tailscale address rebinds at once",
-                   listenerStep("100.2.2.2", "100.1.1.1", false, 1) == .start(host: "100.2.2.2"))
-            record("daemon listener: a failed bind retries only after the interval",
-                   listenerStep("100.1.1.1", nil, false, DaemonDelegate.listenRetryInterval - 1) == .keep
-                       && listenerStep("100.1.1.1", nil, false, DaemonDelegate.listenRetryInterval) == .start(host: "100.1.1.1")
-                       && listenerStep("100.1.1.1", nil, false, nil) == .start(host: "100.1.1.1"))
+            record("daemon listener: waits for Tailscale, keeps a bound or binding listener on the wanted address",
+                   listenerStep(nil, nil, nil, nil) == .waitForTailscale
+                       && listenerStep("100.1.1.1:8770", "100.1.1.1:8770", nil, 1) == .keep
+                       && listenerStep("100.1.1.1:8770", nil, "100.1.1.1:8770", 1) == .keep)
+            record("daemon listener: a moved address or a changed port rebinds at once, even mid-bind",
+                   listenerStep("100.2.2.2:8770", "100.1.1.1:8770", nil, 1) == .start
+                       && listenerStep("100.1.1.1:9000", "100.1.1.1:8770", nil, 1) == .start
+                       && listenerStep("100.1.1.1:9000", nil, "100.1.1.1:8770", 1) == .start)
+            record("daemon listener: a failed bind retries only after the delay",
+                   listenerStep("100.1.1.1:8770", nil, nil, 29) == .keep
+                       && listenerStep("100.1.1.1:8770", nil, nil, 30) == .start
+                       && listenerStep("100.1.1.1:8770", nil, nil, nil) == .start)
+            record("daemon listener: the retry delay doubles from 30 s to a 10-minute cap",
+                   DaemonDelegate.retryDelay(failedBinds: 0) == 30 && DaemonDelegate.retryDelay(failedBinds: 1) == 30
+                       && DaemonDelegate.retryDelay(failedBinds: 2) == 60 && DaemonDelegate.retryDelay(failedBinds: 20) == 600)
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)

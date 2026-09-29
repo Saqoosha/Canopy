@@ -14,6 +14,10 @@ final class MirrorServerStatus {
         case noPassword
         case listening(host: String, port: UInt16)
         case failed(String)
+        /// GUI only: waiting for the daemon's first answer.
+        case checking
+        /// GUI only: the daemon could not be asked, and why.
+        case unavailable(String)
 
         /// The daemon's listener, as `mirror_status` reports it to the GUI.
         var wire: [String: Any] {
@@ -23,6 +27,8 @@ final class MirrorServerStatus {
             case .noPassword: ["state": "noPassword"]
             case .listening(let host, let port): ["state": "listening", "host": host, "port": Int(port)]
             case .failed(let reason): ["state": "failed", "reason": reason]
+            case .checking: ["state": "checking"]
+            case .unavailable(let reason): ["state": "unavailable", "reason": reason]
             }
         }
 
@@ -36,6 +42,8 @@ final class MirrorServerStatus {
                       let port = UInt16(exactly: raw) else { return nil }
                 self = .listening(host: host, port: port)
             case "failed": self = .failed(wire["reason"] as? String ?? "unknown")
+            case "checking": self = .checking
+            case "unavailable": self = .unavailable(wire["reason"] as? String ?? "unknown")
             default: return nil
             }
         }
@@ -50,26 +58,27 @@ final class MirrorServerStatus {
     /// In the GUI whose sessions run in the daemon: the listener is the daemon's, so ask it.
     func refreshFromDaemon(_ control: ControlClient?) async {
         guard let control else {
-            state = .failed(Self.daemonUnreachable)
+            state = .unavailable(Self.daemonUnreachable)
             return
         }
         switch await control.request("mirror_status") {
         case .success(let result):
             guard let raw = result["status"] as? [String: Any], let reported = State(wire: raw) else {
-                state = .failed(Self.daemonOutOfDate)
+                state = .unavailable("The background service reported a status this app does not know")
                 return
             }
             state = reported
-        case .failure(.refused):
-            // An unknown verb: the daemon still runs a build from before this one.
-            state = .failed(Self.daemonOutOfDate)
+        case .failure(.refused("unknown verb")):
+            // The daemon still runs a build from before this one.
+            state = .unavailable(Self.daemonOutOfDate)
+        case .failure(.refused(let message)):
+            state = .unavailable(message)
         case .failure:
-            state = .failed(Self.daemonUnreachable)
+            state = .unavailable(Self.daemonUnreachable)
         }
     }
 
     static let daemonOutOfDate = "Canopy's background service is out of date; restart the Mac or log out and in"
-    static let checking = "Checking the background service…"
 }
 
 /// Listens for remote Canopy attach clients and fans shim traffic over TCP NDJSON.
@@ -170,6 +179,8 @@ final class MirrorServer {
             self.listener = listener
         } catch {
             logger.error("[mirror-server] start failed: \(error.localizedDescription, privacy: .public)")
+            // No listener will report, so nothing else would clear it and the daemon would wait forever.
+            pendingAddress = nil
             MirrorServerStatus.shared.state = .failed(error.localizedDescription)
         }
     }

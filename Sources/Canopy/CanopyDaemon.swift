@@ -184,40 +184,61 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     private func superviseListener() {
         guard let server, let port = tcpPort else { return }
         let host = MirrorAccess.tailscaleIPv4()
+        missingTailscaleTicks = host == nil ? missingTailscaleTicks + 1 : 0
+        if server.boundAddress != nil { failedBinds = 0 }
         let since = lastListenAttempt.map { Date().timeIntervalSince($0) }
-        switch Self.listenerAction(tailscaleHost: host, boundHost: server.boundAddress?.host,
-                                   binding: server.pendingAddress != nil, secondsSinceAttempt: since) {
+        let bound = server.boundAddress.map { "\($0.host):\($0.port)" }
+        let pending = server.pendingAddress.map { "\($0.host):\($0.port)" }
+        switch Self.listenerAction(want: host.map { "\($0):\(port)" }, bound: bound, pending: pending,
+                                   secondsSinceAttempt: since, retryAfter: Self.retryDelay(failedBinds: failedBinds)) {
         case .keep:
             break
         case .waitForTailscale:
+            // A reconnect or wake can hide the address for a moment; only a gap that lasts
+            // `tailscaleGraceTicks` ticks ends the connections a bound listener holds.
+            guard missingTailscaleTicks >= Self.tailscaleGraceTicks else { break }
             if !loggedNoTailscale {
                 loggedNoTailscale = true
                 logger.notice("no Tailscale address; the listener waits for one")
             }
-            if server.boundAddress != nil { server.stopTCP() }
+            if server.boundAddress != nil || server.pendingAddress != nil { server.stopTCP() }
             MirrorServerStatus.shared.state = .noTailscale
-        case .start(let host):
+        case .start:
+            guard let host else { break }
             loggedNoTailscale = false
+            if lastListenAttempt != nil, server.boundAddress == nil { failedBinds += 1 }
             lastListenAttempt = Date()
-            logger.notice("binding the Tailscale listener on \(host, privacy: .public):\(port)")
+            // Once per failure streak: a busy port retries for as long as it stays busy.
+            if failedBinds <= 1 {
+                logger.notice("binding the Tailscale listener on \(host, privacy: .public):\(port)")
+            }
             server.start(host: host, port: port)
         }
     }
 
-    nonisolated enum ListenerAction: Equatable { case keep, waitForTailscale, start(host: String) }
+    private var missingTailscaleTicks = 0
+    private var failedBinds = 0
 
-    /// How often a failed bind is retried.
-    nonisolated static let listenRetryInterval: TimeInterval = 30
+    /// Ticks (5 s each) without a Tailscale address before the listener is torn down.
+    nonisolated static let tailscaleGraceTicks = 3
 
-    /// What to do with a wanted listener this tick. A moved address rebinds at once; a
-    /// listener that never bound, or failed, retries every `listenRetryInterval`.
-    nonisolated static func listenerAction(tailscaleHost: String?, boundHost: String?, binding: Bool,
-                                           secondsSinceAttempt: TimeInterval?) -> ListenerAction {
-        guard let tailscaleHost else { return .waitForTailscale }
-        if binding || boundHost == tailscaleHost { return .keep }
-        if boundHost != nil { return .start(host: tailscaleHost) }
-        if let since = secondsSinceAttempt, since < listenRetryInterval { return .keep }
-        return .start(host: tailscaleHost)
+    nonisolated enum ListenerAction: Equatable { case keep, waitForTailscale, start }
+
+    /// 30 s after the first failed bind, doubling to at most 10 minutes.
+    nonisolated static func retryDelay(failedBinds: Int) -> TimeInterval {
+        min(30 * pow(2, Double(max(0, failedBinds - 1))), 600)
+    }
+
+    /// What to do with a wanted listener this tick, by `host:port`. A listener on another
+    /// address or port (Tailscale moved, the mirror port changed) rebinds at once; one that
+    /// never bound, or failed, retries after `retryAfter`.
+    nonisolated static func listenerAction(want: String?, bound: String?, pending: String?,
+                                           secondsSinceAttempt: TimeInterval?, retryAfter: TimeInterval) -> ListenerAction {
+        guard let want else { return .waitForTailscale }
+        if bound == want || pending == want { return .keep }
+        if bound != nil || pending != nil { return .start }
+        if let since = secondsSinceAttempt, since < retryAfter { return .keep }
+        return .start
     }
 
     func applicationWillTerminate(_ notification: Notification) {

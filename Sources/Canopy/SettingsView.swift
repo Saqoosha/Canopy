@@ -367,7 +367,7 @@ private struct SharingSettingsTab: View {
         // The listener is the daemon's: poll its status while this tab is up.
         .task {
             guard OpenSession.localSessionsRunInDaemon else { return }
-            mirrorStatus.state = .failed(MirrorServerStatus.checking)
+            mirrorStatus.state = .checking
             while !Task.isCancelled {
                 await mirrorStatus.refreshFromDaemon(SessionStore.shared?.daemonControl)
                 try? await Task.sleep(for: .seconds(2))
@@ -390,6 +390,8 @@ private struct SharingSettingsTab: View {
         case .noPassword: "Cannot create the password in the Keychain"
         case .listening(let host, let port): "Listening on \(host):\(port)"
         case .failed(let reason): "Cannot listen: \(reason)"
+        case .checking: "Checking the background service…"
+        case .unavailable(let reason): reason
         }
     }
 
