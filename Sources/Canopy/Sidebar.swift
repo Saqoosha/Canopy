@@ -494,7 +494,11 @@ struct Sidebar: View {
                     }
                 }
             }
-            Button("Close session") { store.closeSession(s.id, keepingFailure: false) }
+            if s.isDaemonHosted {
+                Button("Stop session") { store.stopSession(s.id) }
+            } else {
+                Button("Close session") { store.closeSession(s.id, keepingFailure: false) }
+            }
         }
         if case .launcher = row {
             Button("Close pane") { handleClose(row) }
