@@ -13,6 +13,11 @@ enum CanopyMain {
             } else if CommandLine.arguments.contains("--daemon") {
                 CanopyDaemon.run()
             } else {
+                // This Mac's sessions run in the daemon. Not under the probe: its
+                // fixtures close `.local` sessions and expect them gone.
+                if ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" {
+                    OpenSession.localSessionsRunInDaemon = true
+                }
                 CanopyApp.main()
             }
         }

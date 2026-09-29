@@ -41,6 +41,7 @@ struct CanopyApp: App {
             // window, `startRosterPublisher` is idempotent.
             .task { appDelegate.startRosterPublisher(store: sidebarStore) }
             .task { appDelegate.startMirrorServer(store: sidebarStore) }
+            .task { await appDelegate.startDaemonControl(store: sidebarStore) }
             .task { appDelegate.startRemoteRosterWatcher(store: sidebarStore) }
             // Reads ~/.claude/sessions for the names other Claude sessions use
             // to message these ones. Idempotent, so a re-run of this .task is
@@ -434,6 +435,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var remoteRosterWatcher: RemoteRosterWatcher?
     private var mirrorServer: MirrorServer?
     private var mirrorActivationObserver: NSObjectProtocol?
+    private var daemonControl: ControlClient?
+
+    /// Connects to this Mac's daemon, starting it if needed, and keeps the Open
+    /// list in step with it. Same probe guard as the other `.task`s: it launches
+    /// a process and opens a socket.
+    @MainActor
+    func startDaemonControl(store: SessionStore) async {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else { return }
+        #endif
+        guard daemonControl == nil else { return }
+        let client = ControlClient(endpoint: .unix(path: DaemonPaths.current), token: nil)
+        client.onSessionState = { [weak store] rows in store?.applyDaemonSessions(rows) }
+        daemonControl = client
+        store.daemonControl = client
+        _ = await DaemonSupervisor.ensureRunning()
+        client.start()
+    }
 
     /// Same probe guard as `startRosterPublisher`, for the same reason: this
     /// `.task` runs before `applicationDidFinishLaunching` exits the probe,
@@ -1274,6 +1293,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.shouldSaveRestoreSnapshot = false
                 return .terminateCancel
             }
+        } else if let store = SessionStore.shared, store.panes.contains(where: { pane in
+            guard case .session(let id) = pane.content else { return false }
+            return store.openSessions.first { $0.id == id }?.isDaemonHosted == true
+        }) {
+            // Daemon sessions outlive this quit: nothing stops, and the layout is always worth keeping.
+            Self.shouldSaveRestoreSnapshot = true
         }
         // No active sessions → no alert, shouldSaveRestoreSnapshot stays false.
         // That used to mean "nothing to restore" and no longer quite does: a
