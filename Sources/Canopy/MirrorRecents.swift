@@ -106,6 +106,12 @@ struct NewSessionOptions: Equatable {
                   settledTitle: text("settledTitle"), providerId: text("providerId"), accountId: text("accountId"))
     }
 
+    /// Why this Mac refuses to start a session with these options, or nil. The
+    /// same rule the control API's `open_session` applies.
+    func refusal(allowBypass: Bool) -> String? {
+        permissionMode == .bypassPermissions && !allowBypass ? "bypass permissions is off on this Mac" : nil
+    }
+
     var wire: [String: Any] {
         var dict: [String: Any] = [:]
         if let model { dict["model"] = model }

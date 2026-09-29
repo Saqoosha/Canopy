@@ -8,7 +8,10 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ControlClie
 /// and `session_state` pushes after `subscribe`. Reconnects on its own.
 @MainActor
 final class ControlClient {
-    enum Failure: Error, Equatable { case refused(String), disconnected }
+    enum Failure: Error, Equatable { case refused(String), disconnected, timedOut }
+
+    /// How long a request waits for its response before failing.
+    static let requestTimeout: Duration = .seconds(15)
 
     /// Request ids and the one response each may receive.
     struct Correlator {
@@ -36,8 +39,8 @@ final class ControlClient {
         }
     }
 
-    var onSessionState: (([ControlProtocol.SessionRow]) -> Void)?
-    var onConnected: (() -> Void)?
+    /// The rows, and whether every row in the push could be read.
+    var onSessionState: (([ControlProtocol.SessionRow], Bool) -> Void)?
 
     private let endpoint: MirrorEndpoint
     private let token: String?
@@ -47,6 +50,8 @@ final class ControlClient {
     private var waiters: [String: CheckedContinuation<Result<[String: Any], Failure>, Never>] = [:]
     private var ready = false
     private var stopped = false
+    /// Set by `hello_error`: the daemon refused this client, and retrying every 2 s would only repeat that.
+    private var refused = false
 
     init(endpoint: MirrorEndpoint, token: String?) {
         self.endpoint = endpoint
@@ -69,10 +74,22 @@ final class ControlClient {
     func request(_ verb: String, _ params: [String: Any] = [:]) async -> Result<[String: Any], Failure> {
         guard ready else { return .failure(.disconnected) }
         let id = correlator.begin()
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(for: Self.requestTimeout)
+            guard !Task.isCancelled else { return }
+            self?.resolve(id, with: .failure(.timedOut))
+        }
+        defer { timeout.cancel() }
         return await withCheckedContinuation { continuation in
             waiters[id] = continuation
-            send(["type": "request", "id": id, "verb": verb, "params": params])
+            if !send(["type": "request", "id": id, "verb": verb, "params": params]) {
+                resolve(id, with: .failure(.disconnected))
+            }
         }
+    }
+
+    private func resolve(_ id: String, with result: sending Result<[String: Any], Failure>) {
+        waiters.removeValue(forKey: id)?.resume(returning: result)
     }
 
     private func connect() {
@@ -94,7 +111,9 @@ final class ControlClient {
             var hello: [String: Any] = ["type": "hello", "protocolVersion": ControlProtocol.version, "client": "mac"]
             if let token { hello["token"] = token }
             send(hello)
-        case .failed, .cancelled:
+        case .failed:
+            connection.cancel()
+        case .cancelled:
             dropped()
         case .waiting:
             // The socket is not there yet (daemon starting); a fresh attempt beats waiting on this one.
@@ -109,7 +128,7 @@ final class ControlClient {
         ready = false
         connection = nil
         failPending()
-        guard !stopped else { return }
+        guard !stopped, !refused else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             MainActor.assumeIsolated { self?.connect() }
         }
@@ -148,14 +167,22 @@ final class ControlClient {
         case "hello_ok":
             ready = true
             logger.notice("control connection ready")
-            send(["type": "request", "id": correlator.begin(), "verb": "subscribe"])
-            onConnected?()
+            Task { [weak self] in
+                guard let self else { return }
+                if case .failure(let failure) = await self.request("subscribe") {
+                    logger.error("subscribe failed: \(String(describing: failure), privacy: .public)")
+                }
+            }
         case "hello_error":
-            logger.error("daemon refused hello: \(dict["message"] as? String ?? "?", privacy: .public)")
+            // Terminal: a version mismatch or a refused password does not heal by retrying.
+            logger.error("daemon refused hello, not retrying: \(dict["message"] as? String ?? "?", privacy: .public)")
+            refused = true
             connection?.cancel()
         case "session_state":
-            let rows = (dict["sessions"] as? [[String: Any]] ?? []).compactMap(ControlProtocol.SessionRow.init(wire:))
-            onSessionState?(rows)
+            let raw = dict["sessions"] as? [[String: Any]] ?? []
+            let rows = raw.compactMap(ControlProtocol.SessionRow.init(wire:))
+            if rows.count != raw.count { logger.error("\(raw.count - rows.count) unreadable session row(s) from the daemon") }
+            onSessionState?(rows, rows.count == raw.count)
         case "response":
             if let (id, result) = correlator.finish(dict) { waiters.removeValue(forKey: id)?.resume(returning: result) }
         default:
@@ -163,10 +190,13 @@ final class ControlClient {
         }
     }
 
-    private func send(_ payload: [String: Any]) {
-        guard let connection, let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+    /// False when nothing could be sent (no connection, or the payload does not serialize).
+    @discardableResult
+    private func send(_ payload: [String: Any]) -> Bool {
+        guard let connection, let data = try? JSONSerialization.data(withJSONObject: payload) else { return false }
         connection.send(content: data + Data([0x0A]), completion: .contentProcessed { error in
             if let error { logger.error("send failed: \(error.localizedDescription, privacy: .public)") }
         })
+        return true
     }
 }

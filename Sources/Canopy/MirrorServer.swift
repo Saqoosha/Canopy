@@ -407,10 +407,12 @@ final class MirrorConnection: MirrorSink {
             } else if let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen {
                 shim = store.startHeadlessSession(directory: entry.projectDirectory, resumeId: sessionId,
                                                   isExistingTranscript: true, title: entry.title)
-            } else if let path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId),
-                      let cwd = ClaudeSessionHistory.cwd(atPath: path) {
-                // Recents is refreshed asynchronously and may not hold a session that was
-                // just created, teleported or restored; the transcript on disk is the authority.
+            } else if !store.recents.contains(where: { $0.id == sessionId }), Self.isSessionIdShaped(sessionId),
+                      let path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId),
+                      let cwd = ClaudeSessionHistory.cwd(atPath: path),
+                      FileManager.default.fileExists(atPath: cwd) {
+                // Recents is refreshed asynchronously and may not hold a session that was just
+                // created, teleported or restored. One Recents lists and refuses (`canOpen`) stays refused.
                 shim = store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
                                                   isExistingTranscript: true, title: nil)
             } else {
@@ -418,6 +420,10 @@ final class MirrorConnection: MirrorSink {
                 return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
             }
         case .new(let cwd, let options):
+            if let refusal = options.refusal(allowBypass: server?.bypassAllowed() ?? false) {
+                logger.error("[mirror-server] open refused: \(refusal, privacy: .public)")
+                return .failure(OpenFailure(refusal))
+            }
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 logger.error("[mirror-server] open refused: no folder at \(cwd, privacy: .private)")
@@ -522,6 +528,11 @@ final class MirrorConnection: MirrorSink {
             publisher.start()
         }
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")
+    }
+
+    /// A client's session id before it is joined into a path: the CLI's ids are UUIDs.
+    nonisolated static func isSessionIdShaped(_ id: String) -> Bool {
+        UUID(uuidString: id) != nil
     }
 
     /// The request a page sends for its transcript, as captured from the extension webview (2.1.270).

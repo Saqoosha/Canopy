@@ -16,9 +16,22 @@ enum DaemonSupervisor {
         return registration == .notRegistered || registration == .notFound ? .register : .launch
     }
 
+    /// One start at a time: every restored pane asks at launch, and each launch would
+    /// start another daemon racing for the same socket.
+    @MainActor private static var inFlight: Task<Bool, Never>?
+
     /// True once the socket answers; gives up after 10 s.
     @MainActor
     static func ensureRunning() async -> Bool {
+        if let inFlight { return await inFlight.value }
+        let task = Task { @MainActor in await start() }
+        inFlight = task
+        defer { inFlight = nil }
+        return await task.value
+    }
+
+    @MainActor
+    private static func start() async -> Bool {
         let path = DaemonPaths.current
         #if DEBUG
         let isDebug = true

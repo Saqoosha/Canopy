@@ -535,8 +535,14 @@ final class SessionStore {
         let session = target.openSessionId.flatMap { openId in
             openSessions.first(where: { $0.id == openId })
         }
-        if let session, session.isDaemonHosted, let control = daemonControl, let key = session.daemonKey {
-            Task { _ = await control.request("rename_session", ["key": key, "title": trimmed]) }
+        if let session, session.isDaemonHosted, let control = daemonControl {
+            var params = Self.daemonRefParams(session)
+            params["title"] = trimmed
+            Task {
+                if case .failure(let failure) = await control.request("rename_session", params) {
+                    logger.error("rename_session failed: \(String(describing: failure), privacy: .public)")
+                }
+            }
         }
         // The live session's id, not the one captured when the sheet opened.
         // `OpenSession.resumeId` is a `var`: a launcher-born session starts on
@@ -1028,6 +1034,7 @@ final class SessionStore {
             session.pendingInitialPrompt = LaunchPrompt.make(text: options.initialPrompt ?? "", images: options.promptImages)
         }
         session.pendingSettledTitle = options.settledTitle
+        session.runsShimHere = true
         if options.account == nil { session.accountAutoSwitch = accountChoice.autoSwitch }
         openSessions.append(session)
         guard let shim = startHeadlessSession(resumeId: resumeId) else {
@@ -1044,8 +1051,11 @@ final class SessionStore {
     /// could not start or the row's existing shim is dead.
     func startHeadlessSession(resumeId: String) -> ShimProcess? {
         guard let session = openSessions.first(where: { $0.resumeId == resumeId }),
-              session.origin.mirrorTarget == nil else { return nil }
+              session.origin.mirrorTarget == nil,
+              // The daemon runs it; a second CLI here would write the same transcript.
+              !session.isDaemonHosted else { return nil }
         if let shim = session.shim { return shim.isLive ? shim : nil }
+        session.runsShimHere = true
         let shim = ShimProcess(
             workingDirectory: session.origin.workingDirectory,
             resumeSessionId: session.resumeId,
@@ -1077,25 +1087,51 @@ final class SessionStore {
     /// Stops a daemon session for every client, then drops its row.
     func stopSession(_ id: OpenSession.ID) {
         guard let session = openSessions.first(where: { $0.id == id }) else { return }
-        if session.isDaemonHosted, let control = daemonControl {
-            var params: [String: Any] = ["sessionId": session.resumeId]
-            if let key = session.daemonKey { params["key"] = key }
-            Task { _ = await control.request("stop_session", params) }
+        guard session.isDaemonHosted else {
+            closeSession(id, keepingFailure: false, removeRow: true)
+            return
         }
-        closeSession(id, keepingFailure: false, removeRow: true)
+        guard let control = daemonControl else {
+            noteSessionFailure(title: session.title, message: "Could not stop the session: this Mac's session service is not connected.", status: -2)
+            return
+        }
+        Task { [weak self] in
+            // The row goes only once the daemon has stopped it; otherwise the next push would bring it back.
+            switch await control.request("stop_session", Self.daemonRefParams(session)) {
+            case .success:
+                self?.closeSession(id, keepingFailure: false, removeRow: true)
+            case .failure(let failure):
+                logger.error("stop_session failed: \(String(describing: failure), privacy: .public)")
+                self?.noteSessionFailure(title: session.title, message: "Could not stop the session (\(failure)).", status: -2)
+            }
+        }
+    }
+
+    /// How a control request names a daemon session: its key, and its resumeId for a daemon that restarted.
+    static func daemonRefParams(_ session: OpenSession) -> [String: Any] {
+        var params: [String: Any] = ["sessionId": session.resumeId]
+        if let key = session.daemonKey { params["key"] = key }
+        return params
+    }
+
+    /// Lets go of a daemon session's pane: the daemon keeps running it and the row stays in Open.
+    func detachDaemonSession(_ session: OpenSession) {
+        session.mirrorBridge?.close()
+        session.mirrorBridge = nil
+        session.webView = nil
+        session.status = .dormant
     }
 
     /// Brings the open local sessions in line with the daemon's list.
-    func applyDaemonSessions(_ rows: [ControlProtocol.SessionRow]) {
+    func applyDaemonSessions(_ rows: [ControlProtocol.SessionRow], complete: Bool = true) {
         let paned = Set(panes.compactMap { pane -> OpenSession.ID? in
             if case .session(let id) = pane.content { return id }
             return nil
         })
         let local = openSessions.filter(\.isDaemonHosted)
         let plan = DaemonSessionSync.plan(rows: rows, local: local.map {
-            .init(id: $0.id, key: $0.daemonKey, resumeId: $0.resumeId,
-                  awaitingAttach: $0.daemonKey == nil && paned.contains($0.id))
-        })
+            .init(id: $0.id, key: $0.daemonKey, resumeId: $0.resumeId, isPaned: paned.contains($0.id))
+        }, complete: complete)
         for update in plan.updates {
             guard let session = openSessions.first(where: { $0.id == update.id }) else { continue }
             let row = update.row
@@ -1109,14 +1145,18 @@ final class SessionStore {
             session.isThinking = activity == .working
             session.isAsking = activity == .asking
             session.isWaiting = activity == .background
-            session.statusBar.model = row.model
+            if !row.model.isEmpty { session.statusBar.model = row.model }
             session.statusBar.messageCount = row.messageCount
         }
         for row in plan.adds {
             guard let key = row.key else { continue }
             let session = OpenSession(origin: .local(URL(fileURLWithPath: row.cwd)), resumeId: row.resumeId,
                                       title: row.title.isEmpty ? "Untitled" : row.title, project: row.project,
-                                      status: .dormant, resumeIdIsExistingTranscript: true)
+                                      status: .dormant,
+                                      permissionMode: PermissionMode(rawValue: row.permissionMode) ?? CanopySettings.shared.defaultPermissionMode,
+                                      model: row.model.isEmpty ? nil : row.model,
+                                      claudeAccount: row.accountId.flatMap { ClaudeAccountStore.account(id: $0) },
+                                      resumeIdIsExistingTranscript: true)
             session.daemonKey = key
             openSessions.append(session)
         }
@@ -1460,10 +1500,7 @@ final class SessionStore {
         let session = openSessions[idx]
         logger.info("closeSession id=\(id.uuidString, privacy: .public) project=\(session.project, privacy: .public)")
         if session.isDaemonHosted, !removeRow {
-            session.mirrorBridge?.close()
-            session.mirrorBridge = nil
-            session.webView = nil
-            session.status = .dormant
+            detachDaemonSession(session)
             removePanesForClosedSession(id)
             if !panes.isEmpty {
                 switch panes[focusedPaneIndex].content {
@@ -1504,7 +1541,13 @@ final class SessionStore {
                 // selection-only update would show the Launcher while the
                 // sidebar highlights a live session.
                 let target = idx < openSessions.count ? idx : openSessions.count - 1
-                openInFocusedPane(openSessions[target].id)
+                if session.isDaemonHosted {
+                    // Not pulled into the pane on its own: that would attach a session nobody asked for.
+                    if !keepingFailure { lastSessionFailure = nil }
+                    selection = .launcher
+                } else {
+                    openInFocusedPane(openSessions[target].id)
+                }
             }
         }
 
@@ -1588,10 +1631,15 @@ final class SessionStore {
         guard let session = openSessions.first(where: { $0.id == id }) else { return }
         // The daemon restarts its shim first; re-attaching before it answers
         // would find the old shim stopping and be refused.
-        if notifyDaemon, session.isDaemonHosted, let control = daemonControl, let key = session.daemonKey {
+        if notifyDaemon, session.isDaemonHosted, let control = daemonControl, session.daemonKey != nil {
             Task { [weak self] in
-                _ = await control.request("restart_session", ["key": key, "sessionId": session.resumeId])
-                self?.restartSession(id, notifyDaemon: false)
+                switch await control.request("restart_session", Self.daemonRefParams(session)) {
+                case .success:
+                    self?.restartSession(id, notifyDaemon: false)
+                case .failure(let failure):
+                    logger.error("restart_session failed: \(String(describing: failure), privacy: .public)")
+                    self?.noteSessionFailure(title: session.title, message: "Could not restart the session (\(failure)).", status: -2)
+                }
             }
             return
         }
@@ -1701,17 +1749,26 @@ final class SessionStore {
     func switchAccount(_ id: UUID, to account: ClaudeAccount?) {
         guard let session = openSessions.first(where: { $0.id == id }) else { return }
         guard session.claudeAccount?.id != account?.id else { return }
-        session.claudeAccount = account
-        session.accountAutoSwitch = nil
         logger.notice("switchAccount id=\(id.uuidString, privacy: .public) account=\(account?.name ?? "default", privacy: .public)")
-        if session.isDaemonHosted, let control = daemonControl, let key = session.daemonKey {
-            // The daemon restarts the session on the new login; then re-attach.
+        if session.isDaemonHosted, let control = daemonControl, session.daemonKey != nil {
+            // The daemon restarts the session on the new login; the row shows it only once that happened.
+            var params = Self.daemonRefParams(session)
+            params["accountId"] = account?.id ?? ""
             Task { [weak self] in
-                _ = await control.request("switch_account", ["key": key, "accountId": account?.id ?? ""])
-                self?.restartSession(id, notifyDaemon: false)
+                switch await control.request("switch_account", params) {
+                case .success:
+                    session.claudeAccount = account
+                    session.accountAutoSwitch = nil
+                    self?.restartSession(id, notifyDaemon: false)
+                case .failure(let failure):
+                    logger.error("switch_account failed: \(String(describing: failure), privacy: .public)")
+                    self?.noteSessionFailure(title: session.title, message: "Could not switch the account (\(failure)).", status: -2)
+                }
             }
             return
         }
+        session.claudeAccount = account
+        session.accountAutoSwitch = nil
         restartSession(id)
     }
 
@@ -2515,7 +2572,13 @@ final class SessionStore {
         // (window would jump to the pre-resize widths otherwise).
         normalizePaneWeightsToVisualWidths()
         let wasFocused = index == focusedPaneIndex
-        panes.remove(at: index)
+        let removed = panes.remove(at: index)
+        // A daemon session left with no pane is detached, as Cmd+W on a single pane does.
+        if case .session(let id) = removed.content,
+           let session = openSessions.first(where: { $0.id == id }), session.isDaemonHosted,
+           !panes.contains(where: { if case .session(let other) = $0.content { return other == id }; return false }) {
+            detachDaemonSession(session)
+        }
         if panes.isEmpty {
             focusedPaneIndex = 0
             selection = .launcher

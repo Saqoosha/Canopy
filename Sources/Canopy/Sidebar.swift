@@ -744,7 +744,12 @@ struct Sidebar: View {
     private func handleClose(_ row: SidebarRow) {
         switch row {
         case .open(let s):
-            store.closeSession(s.id, keepingFailure: false)
+            // A detached daemon row has no pane left to close; closing the row means stopping it.
+            if s.isDaemonHosted, store.paneIndex(forSession: s.id) == nil {
+                store.stopSession(s.id)
+            } else {
+                store.closeSession(s.id, keepingFailure: false)
+            }
         case .launcher(let slot):
             // Closes the pane, not a session — there is no session behind it.
             if let idx = store.paneIndex(forSlot: slot) {

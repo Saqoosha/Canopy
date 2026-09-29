@@ -2053,8 +2053,6 @@ enum SidebarLogicProbe {
                 let resumed = OpenSession(origin: .local(dir), resumeId: "old-id", title: "T", project: "p",
                                           resumeIdIsExistingTranscript: true)
                 record("daemon open: an existing transcript asks for .resume", resumed.daemonOpenRequest == .resume)
-                resumed.daemonKey = "K"
-                record("daemon open: a session the daemon already holds asks for nothing", resumed.daemonOpenRequest == nil)
                 record("daemon hosted: local is, remote is not",
                        fresh.isDaemonHosted
                            && !OpenSession(origin: .remote(host: "h", path: dir), resumeId: "r", title: "", project: "").isDaemonHosted)
@@ -2083,9 +2081,9 @@ enum SidebarLogicProbe {
                 let a = UUID(), b = UUID(), c = UUID()
                 let plan = DaemonSessionSync.plan(
                     rows: [row("KA", "ra-new"), row("KB", "rb"), row("KX", "rx")],
-                    local: [.init(id: a, key: "KA", resumeId: "ra-placeholder", awaitingAttach: false),
-                            .init(id: b, key: nil, resumeId: "rb", awaitingAttach: true),
-                            .init(id: c, key: "KGONE", resumeId: "rc", awaitingAttach: false)])
+                    local: [.init(id: a, key: "KA", resumeId: "ra-placeholder", isPaned: false),
+                            .init(id: b, key: nil, resumeId: "rb", isPaned: true),
+                            .init(id: c, key: "KGONE", resumeId: "rc", isPaned: false)])
                 record("daemon sync: a key match updates even after the resumeId changed",
                        plan.updates.contains { $0.id == a && $0.row.resumeId == "ra-new" })
                 record("daemon sync: a keyless local session matches by resumeId",
@@ -2094,15 +2092,51 @@ enum SidebarLogicProbe {
                        plan.adds.map(\.key) == ["KX"])
                 record("daemon sync: a session the daemon no longer holds is removed", plan.removes == [c])
                 let waiting = DaemonSessionSync.plan(
-                    rows: [], local: [.init(id: a, key: nil, resumeId: "r", awaitingAttach: true)])
+                    rows: [], local: [.init(id: a, key: nil, resumeId: "r", isPaned: true)])
                 record("daemon sync: a pane still waiting for its attach is not removed", waiting.removes.isEmpty)
                 let twice = DaemonSessionSync.plan(
                     rows: [row("KA", "r1")],
-                    local: [.init(id: a, key: nil, resumeId: "r1", awaitingAttach: false),
-                            .init(id: b, key: nil, resumeId: "r1", awaitingAttach: false)])
+                    local: [.init(id: a, key: nil, resumeId: "r1", isPaned: false),
+                            .init(id: b, key: nil, resumeId: "r1", isPaned: false)])
                 record("daemon sync: one row matches at most one local session",
                        twice.updates.count == 1 && twice.removes.count == 1)
+                let restarted = DaemonSessionSync.plan(
+                    rows: [row("KNEW", "ra")],
+                    local: [.init(id: a, key: "KOLD", resumeId: "ra", isPaned: true)])
+                record("daemon sync: after a daemon restart a stale key still matches by resumeId",
+                       restarted.updates.map(\.id) == [a] && restarted.adds.isEmpty && restarted.removes.isEmpty)
+                let paneKept = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: "K", resumeId: "r", isPaned: true),
+                                      .init(id: b, key: "K2", resumeId: "r2", isPaned: false)])
+                record("daemon sync: a paned session is never removed, an unpaned one is",
+                       paneKept.removes == [b])
+                let partial = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: b, key: "K2", resumeId: "r2", isPaned: false)], complete: false)
+                record("daemon sync: a push with unreadable rows removes nothing", partial.removes.isEmpty)
             }
+            do {
+                OpenSession.localSessionsRunInDaemon = true
+                defer { OpenSession.localSessionsRunInDaemon = false }
+                let dir = URL(fileURLWithPath: "/tmp/p")
+                let known = OpenSession(origin: .local(dir), resumeId: "r", title: "T", project: "p", resumeIdIsExistingTranscript: true)
+                known.daemonKey = "K"
+                record("daemon open: a keyed session with a transcript still asks for .resume (a restarted daemon lost it)",
+                       known.daemonOpenRequest == .resume)
+                let placeholder = OpenSession(origin: .local(dir), resumeId: "p", title: "T", project: "p")
+                placeholder.daemonKey = "K"
+                record("daemon open: a keyed placeholder asks for nothing rather than a second .new",
+                       placeholder.daemonOpenRequest == nil)
+                let own = OpenSession(origin: .local(dir), resumeId: "h", title: "T", project: "p")
+                own.runsShimHere = true
+                record("daemon hosted: a session whose shim runs in this process is not the daemon's", !own.isDaemonHosted)
+            }
+            record("open gate: bypass is refused without this Mac's opt-in",
+                   NewSessionOptions(permissionMode: .bypassPermissions).refusal(allowBypass: false) == "bypass permissions is off on this Mac"
+                       && NewSessionOptions(permissionMode: .bypassPermissions).refusal(allowBypass: true) == nil
+                       && NewSessionOptions(permissionMode: .plan).refusal(allowBypass: false) == nil)
+            record("resume fallback: only a UUID-shaped id reaches the transcript scan",
+                   MirrorConnection.isSessionIdShaped("d249fc17-cfc3-4ab7-a2ab-976110f83c2f")
+                       && !MirrorConnection.isSessionIdShaped("../../etc/x") && !MirrorConnection.isSessionIdShaped(""))
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)

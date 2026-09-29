@@ -249,17 +249,24 @@ final class OpenSession: Identifiable, Hashable {
     /// This Mac's session, run by the local daemon (Canopy Server). The GUI
     /// attaches to it and never holds its shim.
     var isDaemonHosted: Bool {
-        guard Self.localSessionsRunInDaemon, case .local = origin else { return false }
+        guard Self.localSessionsRunInDaemon, !runsShimHere, case .local = origin else { return false }
         return true
     }
+
+    /// Set when this process started the session's shim itself (the GUI's own
+    /// mirror server does, for another Mac or the phone): not the daemon's.
+    var runsShimHere = false
 
     /// The daemon's `OpenSession.id` for this session, once known.
     var daemonKey: String?
 
     /// What an attach asks the daemon to start when it does not hold this session yet.
     var daemonOpenRequest: MirrorOpenRequest? {
-        guard isDaemonHosted, daemonKey == nil else { return nil }
+        guard isDaemonHosted else { return nil }
+        // Sent even with a key: a daemon that restarted no longer holds it, and
+        // the server ignores `open` when it does.
         if resumeIdIsExistingTranscript { return .resume }
+        guard daemonKey == nil else { return nil }
         return .new(cwd: origin.workingDirectory.path, options: NewSessionOptions(
             model: model, effort: effortLevel, permissionMode: permissionMode,
             promptText: pendingInitialPrompt.flatMap { $0.text.isEmpty ? nil : $0.text },

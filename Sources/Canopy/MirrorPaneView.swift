@@ -198,11 +198,13 @@ struct MirrorPaneView: NSViewRepresentable {
 
         if session.isDaemonHosted, !DaemonPaths.socketIsLive(path: DaemonPaths.current) {
             Task { @MainActor [session, onFailure] in
-                guard await DaemonSupervisor.ensureRunning() else {
-                    onFailure("This Mac's session service is not running.")
+                let running = await DaemonSupervisor.ensureRunning()
+                // The pane may have been closed or remounted during the wait; then this attempt is moot.
+                guard session.webView === webView else { return }
+                guard running else {
+                    onFailure("This Mac's session service did not start. Quit and reopen Canopy to try again.")
                     return
                 }
-                guard session.webView === webView else { return }
                 attachBridge(to: webView, target: target, assetHandler: assetHandler, coordinator: coordinator)
             }
             return webView
@@ -265,7 +267,8 @@ struct MirrorPaneView: NSViewRepresentable {
         }
         session.connection.onRetry = { [weak session] in
             guard let session else { return }
-            SessionStore.shared?.restartSession(session.id)
+            // Re-attach only: a dropped connection is not a reason to restart the daemon's CLI.
+            SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
         }
         session.mirrorBridge = bridge
     }

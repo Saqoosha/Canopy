@@ -447,7 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         guard daemonControl == nil else { return }
         let client = ControlClient(endpoint: .unix(path: DaemonPaths.current), token: nil)
-        client.onSessionState = { [weak store] rows in store?.applyDaemonSessions(rows) }
+        client.onSessionState = { [weak store] rows, complete in store?.applyDaemonSessions(rows, complete: complete) }
         daemonControl = client
         store.daemonControl = client
         _ = await DaemonSupervisor.ensureRunning()
