@@ -1900,13 +1900,15 @@ enum SidebarLogicProbe {
                        (agent?["KeepAlive"] as? [String: Any])?["SuccessfulExit"] as? Bool == false)
             }
             // The daemon re-reads these three keys from the shared settings.json on its own.
-            record("daemon config: no file or garbage reads as defaults",
-                   DaemonConfig.parse(nil) == DaemonConfig.defaults && DaemonConfig.parse(Data("{".utf8)) == DaemonConfig.defaults)
+            record("daemon config: no file reads as defaults",
+                   DaemonConfig.parse(nil) == DaemonConfig.defaults)
+            record("daemon config: a half-written file is unreadable, not defaults (the caller keeps what it had)",
+                   DaemonConfig.parse(Data("{\"canopy.mirrorEnabled\": tr".utf8)) == nil)
             record("daemon config: the three keys are read",
                    DaemonConfig.parse(Data(#"{"canopy.mirrorEnabled":true,"claudeCode.allowDangerouslySkipPermissions":true,"canopy.daemonPort":9000}"#.utf8))
                        == DaemonConfig(mirrorEnabled: true, allowBypass: true, daemonPort: 9000))
             record("daemon config: an out-of-range port keeps the default",
-                   DaemonConfig.parse(Data(#"{"canopy.daemonPort":70000}"#.utf8)).daemonPort == DaemonConfig.defaults.daemonPort)
+                   DaemonConfig.parse(Data(#"{"canopy.daemonPort":70000}"#.utf8))?.daemonPort == DaemonConfig.defaults.daemonPort)
             record("daemon config: Mirror and the bypass opt-in default to off",
                    !DaemonConfig.defaults.mirrorEnabled && !DaemonConfig.defaults.allowBypass)
             // Canopy Server daemon hardening.

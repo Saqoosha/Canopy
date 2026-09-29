@@ -61,10 +61,17 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         // Exiting non-zero lets launchd (KeepAlive SuccessfulExit=false) start a fresh daemon.
         server.onLocalFailure = { exit(1) }
         self.server = server
-        guard server.startLocal(socketPath: DaemonPaths.current) else {
-            logger.error("daemon cannot serve the local socket (another daemon, or a bind failure); exiting")
-            FileHandle.standardError.write(Data("canopy daemon: local socket unavailable, exiting\n".utf8))
+        // Exit 0 only for "another daemon serves it", which launchd must not restart;
+        // any other failure exits 1 so it gets another try.
+        if DaemonPaths.socketIsLive(path: DaemonPaths.current) {
+            logger.error("another daemon serves the local socket; exiting")
+            FileHandle.standardError.write(Data("canopy daemon: already running\n".utf8))
             exit(0)
+        }
+        guard server.startLocal(socketPath: DaemonPaths.current) else {
+            logger.error("daemon cannot open the local socket; exiting")
+            FileHandle.standardError.write(Data("canopy daemon: local socket unavailable\n".utf8))
+            exit(1)
         }
         reloadConfig()
         // The GUI changes these settings in another process; follow them.
@@ -78,10 +85,13 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func reloadConfig() {
+        // A password reset in the GUI must also end connections that are already open.
+        if tcpPort != nil { server?.refreshToken() }
         let modified = (try? FileManager.default.attributesOfItem(atPath: settingsFile.path))?[.modificationDate] as? Date
         guard server != nil, configModified == nil || modified != configModified else { return }
+        guard let parsed = DaemonConfig.parse(try? Data(contentsOf: settingsFile)) else { return }
         configModified = modified ?? Date.distantPast
-        config = DaemonConfig.parse(try? Data(contentsOf: settingsFile))
+        config = parsed
         applyTCP()
     }
 

@@ -11,8 +11,12 @@ struct DaemonConfig: Equatable {
 
     static let defaults = DaemonConfig(mirrorEnabled: false, allowBypass: false, daemonPort: 8767)
 
-    static func parse(_ data: Data?) -> DaemonConfig {
-        guard let data, let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return defaults }
+    /// Defaults for a missing file; nil for one that does not parse. The GUI
+    /// writes it non-atomically, so a read can land mid-write, and treating that
+    /// as "Mirror off" would drop every remote client.
+    static func parse(_ data: Data?) -> DaemonConfig? {
+        guard let data else { return defaults }
+        guard let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         var config = defaults
         if let on = dict["canopy.mirrorEnabled"] as? Bool { config.mirrorEnabled = on }
         if let allow = dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool { config.allowBypass = allow }

@@ -63,7 +63,7 @@ final class MirrorServer {
     }
 
     /// A reset in the GUI replaces the Keychain item; the old password must stop working here too.
-    private func refreshToken() {
+    func refreshToken() {
         let current = MirrorAccess.token(createIfMissing: false) ?? ""
         guard current != token else { return }
         logger.notice("[mirror-server] password changed; dropping TCP clients")
