@@ -1060,12 +1060,17 @@ final class SessionStore {
         return shim
     }
 
-    /// The open session a control request names.
-    func openSession(for ref: ControlProtocol.SessionRef) -> OpenSession? {
-        switch ref {
-        case .key(let key): return openSessions.first { $0.id.uuidString == key }
-        case .resumeId(let id): return openSessions.first { $0.resumeId == id }
+    /// The open session a control request names; the first ref that matches wins.
+    func openSession(for refs: [ControlProtocol.SessionRef]) -> OpenSession? {
+        for ref in refs {
+            let found: OpenSession?
+            switch ref {
+            case .key(let key): found = openSessions.first { $0.id.uuidString == key }
+            case .resumeId(let id): found = openSessions.first { $0.resumeId == id }
+            }
+            if let found { return found }
         }
+        return nil
     }
 
     /// Open a closed cloud row by running the teleport flow. Spawns a

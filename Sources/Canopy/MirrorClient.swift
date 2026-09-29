@@ -63,6 +63,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     private let sessionId: String
     /// The daemon's `OpenSession.id`, when known; outranks `sessionId` at attach.
     private let key: String?
+    /// False for the daemon's local socket, which is trusted without a password.
+    private let sendsToken: Bool
     private let openRequest: MirrorOpenRequest?
     private var closed = false
 
@@ -73,6 +75,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         self.token = token
         self.sessionId = sessionId
         self.key = key
+        self.sendsToken = endpoint.needsToken
         self.webView = webView
         self.connection = NWConnection(to: endpoint.nwEndpoint, using: endpoint.parameters)
         super.init()
@@ -199,8 +202,9 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         // `images` (`fetchesImages`): Read images arrive as `canopy-asset` URLs fetched on scroll, not as base64.
         var attach: [String: Any] = ["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
                                      "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages]
-        // `open`: start this session over there if nothing is running it yet (a Recents or folder row).
         if let key { attach["key"] = key }
+        if !sendsToken { attach["token"] = nil }
+        // `open`: start this session over there if nothing is running it yet (a Recents or folder row).
         if let openRequest { attach["open"] = openRequest.wire }
         sendJSONObject(attach)
         scheduleReceive()

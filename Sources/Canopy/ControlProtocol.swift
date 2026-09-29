@@ -149,12 +149,21 @@ enum ControlProtocol {
         case resumeId(String)
     }
 
-    /// `key` (the daemon's `OpenSession.id`) outranks `sessionId` (a `resumeId`,
-    /// which the CLI may already have replaced).
-    static func sessionRef(_ params: [String: Any]) -> SessionRef? {
-        if let key = params["key"] as? String, !key.isEmpty { return .key(key) }
-        if let id = params["sessionId"] as? String, !id.isEmpty { return .resumeId(id) }
-        return nil
+    /// The ways a request names a session, tried in order: `key` (the daemon's
+    /// `OpenSession.id`, which survives the CLI replacing a placeholder
+    /// `resumeId`) and then `sessionId`, which still finds a session when the
+    /// key is from a daemon that has since restarted.
+    static func sessionRefs(_ params: [String: Any]) -> [SessionRef] {
+        var refs: [SessionRef] = []
+        if let key = params["key"] as? String, !key.isEmpty { refs.append(.key(key)) }
+        if let id = params["sessionId"] as? String, !id.isEmpty { refs.append(.resumeId(id)) }
+        return refs
+    }
+
+    /// `switch_account`'s target; nil, absent or "" (what `list_accounts` reports
+    /// when no default is set) all mean the default login.
+    static func accountId(_ params: [String: Any]) -> String? {
+        (params["accountId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// One session as `list_sessions` and `session_state` send it. `key` is the

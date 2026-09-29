@@ -1937,14 +1937,42 @@ enum SidebarLogicProbe {
                        (try? JSONSerialization.jsonObject(with: Data(#"{"resumeId":"r4","lastActiveAt":1000}"#.utf8)) as? [String: Any])
                            .flatMap { ControlProtocol.SessionRow(wire: $0) }?.lastActiveAt == 1000)
             }
-            record("session ref: key wins over sessionId",
-                   ControlProtocol.sessionRef(["key": "K", "sessionId": "r"]) == .key("K"))
+            record("session ref: key first, then sessionId",
+                   ControlProtocol.sessionRefs(["key": "K", "sessionId": "r"]) == [.key("K"), .resumeId("r")])
             record("session ref: sessionId alone is a resumeId",
-                   ControlProtocol.sessionRef(["sessionId": "r"]) == .resumeId("r"))
-            record("session ref: an empty key falls back to sessionId",
-                   ControlProtocol.sessionRef(["key": "", "sessionId": "r"]) == .resumeId("r"))
-            record("session ref: neither is nil",
-                   ControlProtocol.sessionRef([:]) == nil && ControlProtocol.sessionRef(["key": "", "sessionId": ""]) == nil)
+                   ControlProtocol.sessionRefs(["sessionId": "r"]) == [.resumeId("r")])
+            record("session ref: empty strings are absent",
+                   ControlProtocol.sessionRefs(["key": "", "sessionId": "r"]) == [.resumeId("r")]
+                       && ControlProtocol.sessionRefs(["key": "", "sessionId": ""]).isEmpty)
+            do {
+                let refStore = SessionStore()
+                let tmp = URL(fileURLWithPath: "/tmp")
+                let first = OpenSession(origin: .local(tmp), resumeId: "placeholder", title: "A", project: "p", status: .live)
+                let second = OpenSession(origin: .local(tmp), resumeId: "r-b", title: "B", project: "p", status: .live)
+                refStore._probeSeedOpenSessions([first, second])
+                let key = first.id.uuidString
+                first.resumeId = "cli-real-id"
+                record("session lookup: the key still finds a session after its resumeId was replaced",
+                       refStore.openSession(for: [.key(key), .resumeId("placeholder")]) === first)
+                record("session lookup: the old resumeId no longer does",
+                       refStore.openSession(for: [.resumeId("placeholder")]) == nil)
+                record("session lookup: an unknown key falls back to the sessionId sent with it",
+                       refStore.openSession(for: ControlProtocol.sessionRefs(["key": UUID().uuidString, "sessionId": "r-b"])) === second)
+                record("session lookup: nothing matching is nil",
+                       refStore.openSession(for: [.key("nope"), .resumeId("nope")]) == nil)
+            }
+            record("session row: an in-memory Int lastActiveAt reads as a Double",
+                   ControlProtocol.SessionRow(wire: ["resumeId": "r", "lastActiveAt": 1000 as Int])?.lastActiveAt == 1000)
+            record("session row: the wire keys are the contract clients read",
+                   Set(ControlProtocol.SessionRow(
+                       key: "K", resumeId: "r", title: "t", project: "p", cwd: "/c", state: "idle", running: true,
+                       clients: 1, lastActiveAt: 1, model: "m", messageCount: 2, permissionMode: "plan", accountId: "a")
+                       .wire.keys)
+                       == ["key", "resumeId", "title", "project", "cwd", "state", "running", "clients", "lastActiveAt",
+                           "model", "messageCount", "permissionMode", "accountId"])
+            record("switch account: an empty accountId means the default login",
+                   ControlProtocol.accountId(["accountId": ""]) == nil && ControlProtocol.accountId([:]) == nil
+                       && ControlProtocol.accountId(["accountId": "A"]) == "A")
             record("mirror endpoint: only TCP needs the password",
                    MirrorEndpoint.tcp(host: "100.1.2.3", port: 8767).needsToken
                        && !MirrorEndpoint.unix(path: "/tmp/x.sock").needsToken)

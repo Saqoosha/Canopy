@@ -4,7 +4,7 @@
 
 **Goal:** Canopy.app が daemon の client になるために必要な、server 側の API と client 側の接続口をそろえる。UI はまだ変えない。
 
-**Architecture:** daemon 上の session を、プロセスをまたいで変わらない **key**（daemon の `OpenSession.id`）で指せるようにする。`session_state` の行を値型 `SessionRow` にして、サイドバーが要る情報（タイトル、状態、model、件数、permission mode、アカウント）を載せる。client の menu が呼ぶ verb（rename / restart / switch_account / list_accounts）を足す。`RemoteMirrorBridge` を Unix socket でも繋げるようにする。
+**Architecture:** daemon 上の session を、CLI が `resumeId` を差し替えても、daemon が動いている間は変わらない **key**（daemon の `OpenSession.id`）で指せるようにする。`session_state` の行を値型 `SessionRow` にして、サイドバーが要る情報（タイトル、状態、model、件数、permission mode、アカウント）を載せる。client の menu が呼ぶ verb（rename / restart / switch_account / list_accounts）を足す。`RemoteMirrorBridge` を Unix socket でも繋げるようにする。
 
 **Tech Stack:** Swift 6 / macOS 15、Network.framework。
 

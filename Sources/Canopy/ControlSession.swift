@@ -151,11 +151,12 @@ final class ControlSession {
 
     /// The open session a request names, or nil after answering the request with the reason.
     private func requestedSession(_ request: ControlProtocol.Request) -> OpenSession? {
-        guard let ref = ControlProtocol.sessionRef(request.params) else {
+        let refs = ControlProtocol.sessionRefs(request.params)
+        guard !refs.isEmpty else {
             fail(request, "key or sessionId is required")
             return nil
         }
-        guard let session = store.openSession(for: ref) else {
+        guard let session = store.openSession(for: refs) else {
             fail(request, "no such session")
             return nil
         }
@@ -188,7 +189,7 @@ final class ControlSession {
 
     private func switchAccount(_ request: ControlProtocol.Request) {
         guard let session = requestedSession(request) else { return }
-        let accountId = request.params["accountId"] as? String
+        let accountId = ControlProtocol.accountId(request.params)
         let account = accountId.flatMap { ClaudeAccountStore.account(id: $0) }
         if accountId != nil, account == nil {
             fail(request, "no such account")

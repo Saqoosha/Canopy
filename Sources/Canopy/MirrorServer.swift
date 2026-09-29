@@ -450,10 +450,13 @@ final class MirrorConnection: MirrorSink {
         }
         let open = store.openSessions.map { "\($0.resumeId)(shim=\($0.shim != nil))" }.joined(separator: ", ")
         // `key` (the daemon's `OpenSession.id`) outranks `sessionId`, which the CLI may have replaced.
-        let named = ControlProtocol.sessionRef(dict).flatMap { store.openSession(for: $0) }
+        let named = store.openSession(for: ControlProtocol.sessionRefs(dict))
         var existing = named?.shim.flatMap { $0.isLive ? $0 : nil }
-        if existing == nil, let request = MirrorOpenRequest(wire: dict["open"] as? [String: Any]) {
-            switch startRequestedSession(request, sessionId: sessionId) {
+        if existing == nil, var request = MirrorOpenRequest(wire: dict["open"] as? [String: Any]) {
+            // A session found but not running is restarted as itself, under its current id;
+            // opening under the client's id could start a duplicate or miss a replaced placeholder.
+            if named != nil { request = .resume }
+            switch startRequestedSession(request, sessionId: named?.resumeId ?? sessionId) {
             case .success(let shim): existing = shim
             case .failure(let failure):
                 failAttach(failure.message)

@@ -80,7 +80,7 @@ control 接続の最初の行は `hello {token, protocolVersion}`、session 接�
 
 | verb | 返すもの / 効果 | 置き換える今のもの |
 |---|---|---|
-| `list_sessions {scope: "open"\|"recent", query?, limit}` | session の配列（id、title、project、cwd、state、lastActiveAt、running） | `list_recents`、roster |
+| `list_sessions {scope: "open"\|"recent", query?, limit}` | `SessionRow` の配列（key、resumeId、title、project、cwd、state、running、clients、model、件数、permission mode、アカウント）。閉じた行に key は無い | `list_recents`、roster |
 | `list_folders {limit}` | 最近のフォルダ | `list_recents` |
 | `browse_dir {path}` | そのディレクトリのエントリ | `RemoteDirectoryBrowser` の SSH 版 |
 | `mkdir {parent, name}` | フォルダ作成 | `RemoteDirectoryBrowser` の New Folder |
