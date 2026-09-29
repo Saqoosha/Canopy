@@ -3374,6 +3374,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// A webview→host message from a `MirrorServer` connection.
+    /// Which attached client shows a UI request: the one that asked, when it is a
+    /// Mac; otherwise the first Mac. A phone never gets one (it would post the frame into its page).
+    nonisolated static func uiTarget(requester: Int?, clients: [Bool]) -> Int? {
+        if let requester, clients.indices.contains(requester), clients[requester] { return requester }
+        return clients.firstIndex(of: true)
+    }
+
+    /// The mode a webview asks for (extension 2.1.283's `set_permission_mode` request), or nil.
+    nonisolated static func requestedPermissionMode(_ message: [String: Any]) -> PermissionMode? {
+        guard message["type"] as? String == "request",
+              let request = message["request"] as? [String: Any],
+              request["type"] as? String == "set_permission_mode",
+              let raw = request["mode"] as? String else { return nil }
+        return PermissionMode(rawValue: raw)
+    }
+
     func receiveFromMirror(_ dict: [String: Any], from sink: any MirrorSink) {
         handleWebviewMessage(dict, sender: sink, isPrimary: false)
     }

@@ -2137,6 +2137,36 @@ enum SidebarLogicProbe {
             record("resume fallback: only a UUID-shaped id reaches the transcript scan",
                    MirrorConnection.isSessionIdShaped("d249fc17-cfc3-4ab7-a2ab-976110f83c2f")
                        && !MirrorConnection.isSessionIdShaped("../../etc/x") && !MirrorConnection.isSessionIdShaped(""))
+            // Canopy Server UI frames (daemon → Mac client).
+            for frame in [MirrorUIFrame.showContent(title: "a.swift", content: "let x = 1", startLine: 3, endLine: 5),
+                          .showContent(title: "out", content: "", startLine: nil, endLine: nil),
+                          .evalJS("window.x()"),
+                          .alert(requestId: "r1", message: "Sure?", severity: "warning", buttons: ["Yes", "No"]),
+                          .notify(title: "Canopy", body: "done")] {
+                record("ui frame: \(frame) round-trips", MirrorUIFrame(wire: frame.wire) == frame)
+            }
+            record("ui frame: another type is not a UI frame", MirrorUIFrame(wire: ["type": "status"]) == nil)
+            record("ui frame: an unknown action is ignored",
+                   MirrorUIFrame(wire: ["type": MirrorUIFrame.type, "action": "explode"]) == nil)
+            record("ui answer: a button and no button both round-trip",
+                   MirrorUIAnswer(wire: MirrorUIAnswer(requestId: "r1", button: "Yes").wire) == MirrorUIAnswer(requestId: "r1", button: "Yes")
+                       && MirrorUIAnswer(wire: MirrorUIAnswer(requestId: "r1", button: nil).wire) == MirrorUIAnswer(requestId: "r1", button: nil))
+            record("ui target: the Mac client that asked gets it",
+                   ShimProcess.uiTarget(requester: 1, clients: [true, true]) == 1)
+            record("ui target: a phone that asked hands it to the first Mac",
+                   ShimProcess.uiTarget(requester: 0, clients: [false, true]) == 1)
+            record("ui target: no Mac client, nobody gets it",
+                   ShimProcess.uiTarget(requester: 0, clients: [false, false]) == nil)
+            record("ui target: no requester, the first Mac client",
+                   ShimProcess.uiTarget(requester: nil, clients: [false, true, true]) == 1)
+            record("keep-alive (daemon): a session with no shim is not a target",
+                   KeepAliveCoordinator.daemonTargets([OpenSession(origin: .local(URL(fileURLWithPath: "/tmp")), resumeId: "a", title: "", project: "")]).isEmpty)
+            record("permission mode: set_permission_mode is read",
+                   ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_permission_mode", "mode": "plan", "userInitiated": true]]) == .plan)
+            record("permission mode: another request is not",
+                   ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "list_sessions_request"]]) == nil)
+            record("permission mode: an unknown mode is not",
+                   ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_permission_mode", "mode": "yolo"]]) == nil)
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)
