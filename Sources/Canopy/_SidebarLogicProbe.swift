@@ -2040,6 +2040,8 @@ enum SidebarLogicProbe {
                 record("control client: a drop fails every pending request", correlator.failAll() == [third])
             }
             do {
+                OpenSession.localSessionsRunInDaemon = true
+                defer { OpenSession.localSessionsRunInDaemon = false }
                 let dir = URL(fileURLWithPath: "/tmp/p")
                 let fresh = OpenSession(origin: .local(dir), resumeId: "new-id", title: "T", project: "p",
                                         permissionMode: .plan, model: "opus", effortLevel: "high")
@@ -2056,6 +2058,50 @@ enum SidebarLogicProbe {
                 record("daemon hosted: local is, remote is not",
                        fresh.isDaemonHosted
                            && !OpenSession(origin: .remote(host: "h", path: dir), resumeId: "r", title: "", project: "").isDaemonHosted)
+                // Detach vs remove.
+                let detachStore = SessionStore()
+                let kept = OpenSession(origin: .local(dir), resumeId: "k", title: "K", project: "p", status: .live)
+                let gone = OpenSession(origin: .local(dir), resumeId: "g", title: "G", project: "p", status: .live)
+                detachStore._probeSeedOpenSessions([kept, gone])
+                detachStore.openInFocusedPane(kept.id)
+                detachStore.closeSession(kept.id, keepingFailure: false)
+                record("daemon close: Cmd+W detaches — the pane goes, the row stays, the launcher shows",
+                       detachStore.openSessions.contains { $0 === kept } && detachStore.panes.isEmpty
+                           && detachStore.selection == .launcher && kept.status == .dormant)
+                detachStore.closeSession(gone.id, keepingFailure: false, removeRow: true)
+                record("daemon close: removeRow drops the row", !detachStore.openSessions.contains { $0 === gone })
+            }
+            OpenSession.localSessionsRunInDaemon = false
+            record("daemon hosted: off by default, so the daemon's own sessions close for real",
+                   !OpenSession(origin: .local(URL(fileURLWithPath: "/tmp")), resumeId: "r", title: "", project: "").isDaemonHosted)
+            do {
+                func row(_ key: String, _ resume: String) -> ControlProtocol.SessionRow {
+                    ControlProtocol.SessionRow(key: key, resumeId: resume, title: "t", project: "p", cwd: "/p", state: "idle",
+                                               running: true, clients: 0, lastActiveAt: 0, model: "", messageCount: 0,
+                                               permissionMode: "", accountId: nil)
+                }
+                let a = UUID(), b = UUID(), c = UUID()
+                let plan = DaemonSessionSync.plan(
+                    rows: [row("KA", "ra-new"), row("KB", "rb"), row("KX", "rx")],
+                    local: [.init(id: a, key: "KA", resumeId: "ra-placeholder", awaitingAttach: false),
+                            .init(id: b, key: nil, resumeId: "rb", awaitingAttach: true),
+                            .init(id: c, key: "KGONE", resumeId: "rc", awaitingAttach: false)])
+                record("daemon sync: a key match updates even after the resumeId changed",
+                       plan.updates.contains { $0.id == a && $0.row.resumeId == "ra-new" })
+                record("daemon sync: a keyless local session matches by resumeId",
+                       plan.updates.contains { $0.id == b && $0.row.key == "KB" })
+                record("daemon sync: a daemon session the GUI does not know is added",
+                       plan.adds.map(\.key) == ["KX"])
+                record("daemon sync: a session the daemon no longer holds is removed", plan.removes == [c])
+                let waiting = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: nil, resumeId: "r", awaitingAttach: true)])
+                record("daemon sync: a pane still waiting for its attach is not removed", waiting.removes.isEmpty)
+                let twice = DaemonSessionSync.plan(
+                    rows: [row("KA", "r1")],
+                    local: [.init(id: a, key: nil, resumeId: "r1", awaitingAttach: false),
+                            .init(id: b, key: nil, resumeId: "r1", awaitingAttach: false)])
+                record("daemon sync: one row matches at most one local session",
+                       twice.updates.count == 1 && twice.removes.count == 1)
             }
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",

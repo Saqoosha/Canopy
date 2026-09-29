@@ -1068,6 +1068,47 @@ final class SessionStore {
         return shim
     }
 
+    /// Brings the open local sessions in line with the daemon's list.
+    func applyDaemonSessions(_ rows: [ControlProtocol.SessionRow]) {
+        let paned = Set(panes.compactMap { pane -> OpenSession.ID? in
+            if case .session(let id) = pane.content { return id }
+            return nil
+        })
+        let local = openSessions.filter(\.isDaemonHosted)
+        let plan = DaemonSessionSync.plan(rows: rows, local: local.map {
+            .init(id: $0.id, key: $0.daemonKey, resumeId: $0.resumeId,
+                  awaitingAttach: $0.daemonKey == nil && paned.contains($0.id))
+        })
+        for update in plan.updates {
+            guard let session = openSessions.first(where: { $0.id == update.id }) else { continue }
+            let row = update.row
+            session.daemonKey = row.key
+            if row.resumeId != session.resumeId {
+                session.resumeId = row.resumeId
+                session.resumeIdIsExistingTranscript = true
+            }
+            if !row.title.isEmpty, row.title != session.title { session.title = row.title }
+            let activity = RosterSnapshot.activity(fromWireState: row.state)
+            session.isThinking = activity == .working
+            session.isAsking = activity == .asking
+            session.isWaiting = activity == .background
+            session.statusBar.model = row.model
+            session.statusBar.messageCount = row.messageCount
+        }
+        for row in plan.adds {
+            guard let key = row.key else { continue }
+            let session = OpenSession(origin: .local(URL(fileURLWithPath: row.cwd)), resumeId: row.resumeId,
+                                      title: row.title.isEmpty ? "Untitled" : row.title, project: row.project,
+                                      status: .dormant, resumeIdIsExistingTranscript: true)
+            session.daemonKey = key
+            openSessions.append(session)
+        }
+        for id in plan.removes {
+            // Stopped elsewhere (another client, the reaper): there is nothing left to attach to.
+            closeSession(id, keepingFailure: false, removeRow: true)
+        }
+    }
+
     /// The open session a control request names; the first ref that matches wins.
     func openSession(for refs: [ControlProtocol.SessionRef]) -> OpenSession? {
         for ref in refs {
@@ -1394,10 +1435,31 @@ final class SessionStore {
 
     /// `keepingFailure`: see `lastSessionFailure`. No default, so a caller that forgets it is a
     /// compile error rather than a banner that never shows.
-    func closeSession(_ id: UUID, keepingFailure: Bool) {
+    ///
+    /// A daemon session is only detached (its pane goes, the daemon keeps it,
+    /// the row stays in Open) unless `removeRow` says the row itself is gone.
+    func closeSession(_ id: UUID, keepingFailure: Bool, removeRow: Bool = false) {
         guard let idx = openSessions.firstIndex(where: { $0.id == id }) else { return }
         let session = openSessions[idx]
         logger.info("closeSession id=\(id.uuidString, privacy: .public) project=\(session.project, privacy: .public)")
+        if session.isDaemonHosted, !removeRow {
+            session.mirrorBridge?.close()
+            session.mirrorBridge = nil
+            session.webView = nil
+            session.status = .dormant
+            removePanesForClosedSession(id)
+            if !panes.isEmpty {
+                switch panes[focusedPaneIndex].content {
+                case .session(let sid): selection = .session(sid)
+                case .launcher: selection = .launcher
+                }
+            } else if case .session(let sel) = selection, sel == id {
+                // The row is still open, so the browser-tab fallback below would reopen it.
+                if !keepingFailure { lastSessionFailure = nil }
+                selection = .launcher
+            }
+            return
+        }
         session.shim?.stop()
         session.shim = nil
         session.webView = nil

@@ -242,11 +242,15 @@ final class OpenSession: Identifiable, Hashable {
     /// new session's placeholder is replaced by the CLI's id over there.
     var mirrorHostSessionId: String?
 
+    /// Set by the GUI at launch. The daemon leaves it off: there a `.local`
+    /// session is its own, and closing one must stop it.
+    nonisolated(unsafe) static var localSessionsRunInDaemon = false
+
     /// This Mac's session, run by the local daemon (Canopy Server). The GUI
     /// attaches to it and never holds its shim.
     var isDaemonHosted: Bool {
-        if case .local = origin { return true }
-        return false
+        guard Self.localSessionsRunInDaemon, case .local = origin else { return false }
+        return true
     }
 
     /// The daemon's `OpenSession.id` for this session, once known.
