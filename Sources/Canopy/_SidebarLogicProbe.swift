@@ -2017,6 +2017,28 @@ enum SidebarLogicProbe {
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .enabled) == .launch)
             record("daemon supervisor: Debug always launches its own",
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .notRegistered) == .launch)
+            do {
+                var correlator = ControlClient.Correlator()
+                let first = correlator.begin()
+                let second = correlator.begin()
+                record("control client: request ids are unique", first != second)
+                let ok = correlator.finish(["type": "response", "id": first, "result": ["ok": true]])
+                record("control client: a result resolves its own id", {
+                    guard let ok, ok.id == first, case .success(let result) = ok.result else { return false }
+                    return result["ok"] as? Bool == true
+                }())
+                record("control client: an error resolves as refused", {
+                    guard case .failure(let failure)? = correlator.finish(["type": "response", "id": second, "error": "nope"])?.result
+                    else { return false }
+                    return failure == .refused("nope")
+                }())
+                record("control client: an id resolves once",
+                       correlator.finish(["type": "response", "id": first, "result": [:]]) == nil)
+                record("control client: an unknown id is ignored",
+                       correlator.finish(["type": "response", "id": "zzz", "result": [:]]) == nil)
+                let third = correlator.begin()
+                record("control client: a drop fails every pending request", correlator.failAll() == [third])
+            }
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)
