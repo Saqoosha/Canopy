@@ -4,6 +4,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import Network
+import ServiceManagement
 import os.log
 import UniformTypeIdentifiers
 
@@ -2006,6 +2007,16 @@ enum SidebarLogicProbe {
                 record("launch image: base64 that does not decode is refused",
                        LaunchImage.fromWire(WireImage(mediaType: "image/png", base64: "%%%")) == nil)
             }
+            record("daemon supervisor: a live socket needs nothing",
+                   DaemonSupervisor.action(socketLive: true, isDebugBuild: false, registration: .notRegistered) == .none)
+            record("daemon supervisor: Release registers when not registered",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notRegistered) == .register)
+            record("daemon supervisor: Release launches it itself while approval is pending",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .requiresApproval) == .launch)
+            record("daemon supervisor: Release launches when registered but not running",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .enabled) == .launch)
+            record("daemon supervisor: Debug always launches its own",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .notRegistered) == .launch)
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)

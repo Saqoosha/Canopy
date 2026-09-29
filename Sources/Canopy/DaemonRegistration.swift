@@ -17,6 +17,8 @@ enum DaemonRegistration {
         !isDebugBuild || environment["CANOPY_REGISTER_DAEMON"] == "1"
     }
 
+    static func status() -> SMAppService.Status { service.status }
+
     private static var service: SMAppService {
         SMAppService.agent(plistName: plistName(bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy"))
     }
