@@ -697,7 +697,9 @@ final class MirrorConnection: MirrorSink {
             didAttach = true
             compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
             sendJSONObject(["type": "hello_ok", "protocolVersion": ControlProtocol.version,
-                            "machineId": MachineIdentity.stableId() ?? ""])
+                            "machineId": MachineIdentity.stableId() ?? "",
+                            // The build this process runs, which an app update does not change.
+                            "build": DaemonUpgrade.launchedBuild ?? ""])
             logger.notice("[mirror-server] control connection opened (local=\(self.trustsPeer))")
         case .unauthorized:
             logger.error("[mirror-server] hello refused: wrong or missing password")

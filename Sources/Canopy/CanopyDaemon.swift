@@ -56,6 +56,25 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     private var configModified: Date?
     private var unreadableModified: Date?
     private var usageTimer: Timer?
+    private var upgradeTimer: Timer?
+    private var loggedPendingUpgrade = false
+
+    /// An app update replaced the binary under this process: stop the sessions cleanly and
+    /// exit non-zero so launchd starts the new build. Panes re-attach and resume on their own.
+    private func restartIfUpgraded() {
+        let onDisk = DaemonUpgrade.onDiskBuild()
+        let anyBusy = store.openSessions.contains { $0.shim?.reaperInputs.isBusy == true }
+        guard DaemonUpgrade.shouldRestart(launchedBuild: DaemonUpgrade.launchedBuild, onDiskBuild: onDisk, anyBusy: anyBusy) else {
+            if onDisk != nil, onDisk != DaemonUpgrade.launchedBuild, !loggedPendingUpgrade {
+                loggedPendingUpgrade = true
+                logger.notice("build \(onDisk ?? "?", privacy: .public) is installed; restarting once no session is busy")
+            }
+            return
+        }
+        logger.notice("restarting for build \(onDisk ?? "?", privacy: .public) (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public))")
+        shutDown()
+        exit(1)
+    }
     private var configTimer: Timer?
     /// The TCP port the listener is on, or being brought up on; nil when off.
     private var tcpPort: UInt16?
@@ -100,6 +119,10 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         let reaper = DaemonReaper(store: store)
         self.reaper = reaper
         reaper.start()
+
+        upgradeTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restartIfUpgraded() }
+        }
 
         // The phone's view of this Mac: the sessions live here now, so the roster does too.
         if RosterPublisher.relayAllowedInProcess {
@@ -242,6 +265,11 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        shutDown()
+    }
+
+    private func shutDown() {
+        upgradeTimer?.invalidate()
         configTimer?.invalidate()
         usageTimer?.invalidate()
         reaper?.stop()

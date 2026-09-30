@@ -46,7 +46,7 @@
 - **登録は Release の GUI が起動するたびに確認する。** 未登録なら登録し、登録済みなら何もしない。Debug は `CANOPY_REGISTER_DAEMON=1` のときだけ登録し、`--unregister-daemon` で外す。macOS が初回に「ログイン項目に追加されました」を通知するので、ユーザは System Settings から外せる。承認待ち（`.requiresApproval`）を知らせる UI は Plan B
 - **Canopy.app は純粋な client になる。** local の pane も、今の `.mirror` pane（`MirrorPaneView` + `RemoteMirrorBridge`）と同じ経路で繋ぐ。違うのは transport（Unix socket か TCP か）だけ
 - **iPhone は同じプロトコルの client の 1 つ**
-- **SSH remote モードは消す。** remote マシンとは「`canopyd` が動いている Mac」のこと。remote の Mac に Canopy が入っている必要がある
+- **SSH remote モードは残す。** Mac 同士は `canopyd` で繋ぐ。SSH remote は、daemon が動かない Mac 以外のホスト（wsl4090、win4090）に繋ぐ経路として残す（2026-09-30 に決定。daemon は Mac 専用のため、消すとこの 2 台に繋げなくなる）
 
 ### WebKit と AppKit への依存
 
@@ -134,7 +134,7 @@ phase 1 が目標 (a)(b) そのもの。
 2. **control verb**：上の表。attach→resume と reaper を入れる
 3. **app を client にする**：サイドバーと launcher を、マシンごとの control 接続の上に組み直す。local の pane も `MirrorPaneView` 経由にする。daemon が動いていなければ app が登録して起動する
 4. **phone**：Canopy-Mobile 側。マシンを選ぶ → recents / フォルダ / `browse_dir` → 開く。別リポジトリなので別 PR
-5. **消す**：SSH remote（`ssh-claude-wrapper.sh`、`CANOPY_REMOTE_*` / `CANOPY_SSH_*`、`vscode-shim/index.js` の SSH パッチ、`RemoteSessionHistory`、`RemoteDirectoryBrowser` の SSH 実装）、app 内の in-process session 経路、`.dormant`、#266 の `MirrorRecents` 経路
+5. **消す**：app 内の in-process session 経路（SSH remote が使う部分は残す）、`.dormant`、#266 の `MirrorRecents` 経路。SSH remote は残す（上の「プロセスの境界」）
 
 1〜3 が (a)、2 と 4 が (b)。5 は 3 が動いてから。
 

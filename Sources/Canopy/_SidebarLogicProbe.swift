@@ -2285,6 +2285,25 @@ enum SidebarLogicProbe {
             record("daemon listener: the retry delay doubles from 30 s to a 10-minute cap",
                    DaemonDelegate.retryDelay(failedBinds: 0) == 30 && DaemonDelegate.retryDelay(failedBinds: 1) == 30
                        && DaemonDelegate.retryDelay(failedBinds: 2) == 60 && DaemonDelegate.retryDelay(failedBinds: 20) == 600)
+            // Canopy Server B6: the daemon restarts onto an updated build once idle.
+            record("daemon upgrade: a different installed build restarts an idle daemon",
+                   DaemonUpgrade.shouldRestart(launchedBuild: "100", onDiskBuild: "101", anyBusy: false))
+            record("daemon upgrade: never while a session is busy, nor for the same or an unreadable build",
+                   !DaemonUpgrade.shouldRestart(launchedBuild: "100", onDiskBuild: "101", anyBusy: true)
+                       && !DaemonUpgrade.shouldRestart(launchedBuild: "100", onDiskBuild: "100", anyBusy: false)
+                       && !DaemonUpgrade.shouldRestart(launchedBuild: "100", onDiskBuild: nil, anyBusy: false)
+                       && !DaemonUpgrade.shouldRestart(launchedBuild: nil, onDiskBuild: "101", anyBusy: false))
+            do {
+                let bundle = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-\(UUID().uuidString).app")
+                let contents = bundle.appendingPathComponent("Contents")
+                try? FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: bundle) }
+                let plist = try? PropertyListSerialization.data(fromPropertyList: ["CFBundleVersion": "4242"], format: .xml, options: 0)
+                try? plist?.write(to: contents.appendingPathComponent("Info.plist"))
+                record("daemon upgrade: the on-disk build is read fresh from the bundle's Info.plist",
+                       DaemonUpgrade.onDiskBuild(bundleURL: bundle) == "4242"
+                           && DaemonUpgrade.onDiskBuild(bundleURL: bundle.appendingPathComponent("missing")) == nil)
+            }
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)

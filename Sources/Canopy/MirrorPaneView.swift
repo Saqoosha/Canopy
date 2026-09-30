@@ -287,6 +287,16 @@ struct MirrorPaneView: NSViewRepresentable {
                     session.isThinking = false
                     session.isAsking = false
                     session.isWaiting = false
+                    // The daemon restarts itself after an app update, and launchd restarts it after
+                    // a crash: once it answers again, re-attach (and resume) without a click.
+                    if isDaemon {
+                        Task { @MainActor [weak session] in
+                            guard await DaemonSupervisor.ensureRunning(), let session,
+                                  session.connection.status == .reconnectFailed else { return }
+                            logger.notice("[mirror-pane] session service is back; re-attaching \(session.resumeId, privacy: .public)")
+                            SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
+                        }
+                    }
                 }
             }
         }

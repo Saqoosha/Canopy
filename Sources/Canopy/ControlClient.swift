@@ -164,7 +164,13 @@ final class ControlClient {
         switch dict["type"] as? String {
         case "hello_ok":
             ready = true
-            logger.notice("control connection ready")
+            let daemonBuild = dict["build"] as? String ?? "?"
+            if let own = DaemonUpgrade.launchedBuild, daemonBuild != own {
+                // The daemon restarts itself onto the installed build once its sessions are idle.
+                logger.notice("control connection ready; daemon runs build \(daemonBuild, privacy: .public), this app \(own, privacy: .public)")
+            } else {
+                logger.notice("control connection ready")
+            }
             Task { [weak self] in
                 guard let self else { return }
                 if case .failure(let failure) = await self.request("subscribe") {
