@@ -2313,6 +2313,8 @@ enum SidebarLogicProbe {
                        DaemonUpgrade.onDiskBuild(bundleURL: bundle) == "4242"
                            && DaemonUpgrade.onDiskBuild(bundleURL: bundle.appendingPathComponent("missing")) == nil)
             }
+            record("roster heartbeat: an idle Mac re-publishes well inside the 5-minute staleness line",
+                   RosterPublisher.heartbeatInterval * 2 < RemoteRosterWatcher.staleThreshold)
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)

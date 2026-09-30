@@ -70,6 +70,14 @@ final class RosterPublisher {
     /// believes they sent, so this errs short.
     private static let pingInterval: TimeInterval = 30
 
+    /// Re-publishes the unchanged snapshot. A snapshot goes out only on a
+    /// change, and the phone and other Macs judge a Mac offline once its
+    /// `publishedAt` is `RemoteRosterWatcher.staleThreshold` (5 min) old, so
+    /// an idle Mac — the daemon with nothing running — read as offline while
+    /// connected (measured on studio, 2026-10-01).
+    private var heartbeat: Timer?
+    static let heartbeatInterval: TimeInterval = 2 * 60
+
     /// When the last reconnect-after-loss ran, so failures cannot compound
     /// into a tight loop.
     private var lastReconnectAt: Date?
@@ -123,10 +131,18 @@ final class RosterPublisher {
         running = true
         RosterPublisher.current = self
         observe()
+        heartbeat = Timer.scheduledTimer(withTimeInterval: Self.heartbeatInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.running else { return }
+                self.publish()
+            }
+        }
     }
 
     func stop() {
         running = false
+        heartbeat?.invalidate()
+        heartbeat = nil
         if RosterPublisher.current === self { RosterPublisher.current = nil }
         connectedEndpoint = nil
         stopPinging()
