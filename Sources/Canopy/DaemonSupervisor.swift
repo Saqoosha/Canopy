@@ -20,18 +20,19 @@ enum DaemonSupervisor {
     /// start another daemon racing for the same socket.
     @MainActor private static var inFlight: Task<Bool, Never>?
 
-    /// True once the socket answers; gives up after 10 s.
+    /// True once the socket answers; gives up after 10 s. `awaitLaunchd`: the daemon announced
+    /// an upgrade restart, which launchd performs, so give it up to 15 s before starting one here.
     @MainActor
-    static func ensureRunning() async -> Bool {
+    static func ensureRunning(awaitLaunchd: Bool = false) async -> Bool {
         if let inFlight { return await inFlight.value }
-        let task = Task { @MainActor in await start() }
+        let task = Task { @MainActor in await start(awaitLaunchd: awaitLaunchd) }
         inFlight = task
         defer { inFlight = nil }
         return await task.value
     }
 
     @MainActor
-    private static func start() async -> Bool {
+    private static func start(awaitLaunchd: Bool) async -> Bool {
         let path = DaemonPaths.current
         #if DEBUG
         let isDebug = true
@@ -46,9 +47,11 @@ enum DaemonSupervisor {
         case .register:
             DaemonRegistration.ensureRegistered()
         case .launch:
-            // A loaded job is launchd's to restart (after a crash or an upgrade exit). Starting one
-            // here as well would leave a daemon launchd does not manage, or two racing for the socket.
-            if !isDebug, registration == .enabled {
+            // After an announced upgrade exit launchd starts the new build; starting one here as
+            // well would leave a daemon launchd does not manage, or two racing for the socket.
+            // Otherwise (a daemon quit with SIGTERM exits 0, which KeepAlive does not restart)
+            // waiting would only stall the launch.
+            if awaitLaunchd, !isDebug, registration == .enabled {
                 for _ in 0..<60 {
                     if DaemonPaths.socketIsLive(path: path) { return true }
                     try? await Task.sleep(for: .milliseconds(250))

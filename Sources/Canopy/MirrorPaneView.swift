@@ -292,7 +292,7 @@ struct MirrorPaneView: NSViewRepresentable {
                     // new build; `ensureRunning` waits for it before starting one itself.
                     if isDaemon, bridge?.expectsRestart == true {
                         Task { @MainActor [weak session] in
-                            guard await DaemonSupervisor.ensureRunning(), let session,
+                            guard await DaemonSupervisor.ensureRunning(awaitLaunchd: true), let session,
                                   session.connection.status == .reconnectFailed else { return }
                             logger.notice("[mirror-pane] session service restarted; re-attaching \(session.resumeId, privacy: .public)")
                             SessionStore.shared?.restartSession(session.id, notifyDaemon: false)

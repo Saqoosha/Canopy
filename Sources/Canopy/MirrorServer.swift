@@ -189,9 +189,22 @@ final class MirrorServer {
         stopTCP()
     }
 
-    /// Tells every attached client the daemon is about to restart for an upgrade.
+    /// Tells every attached client the daemon is about to restart for an upgrade, and stops
+    /// accepting: a pane that re-attaches must find the socket gone (so it waits for the new
+    /// daemon) rather than be accepted by this one and dropped again, and nothing new may
+    /// start in the moment before exit. Open connections stay until the shims stop.
     func announceRestart() {
-        for connection in connections { connection.deliver(["type": DaemonUpgrade.restartingFrameType]) }
+        for connection in connections where !connection.attachedSessionId.isEmpty {
+            connection.deliver(["type": DaemonUpgrade.restartingFrameType])
+        }
+        listener?.cancel()
+        listener = nil
+        boundAddress = nil
+        pendingAddress = nil
+        localListener?.cancel()
+        localListener = nil
+        if let path = localSocketPath { try? FileManager.default.removeItem(atPath: path) }
+        localSocketPath = nil
     }
 
     /// Stops the TCP listener and its connections; local-socket clients stay.

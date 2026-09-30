@@ -121,9 +121,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if mirrors.values.contains(where: { $0.sink.map { !$0.isLocalClient } ?? false }) {
             return "a phone or another Mac is attached"
         }
-        // A session with no transcript yet cannot be resumed after the restart.
-        if let id = boundSession?.resumeId, Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory) == nil {
-            return "no transcript yet"
+        // A session with no transcript yet cannot be resumed, which matters only while a pane
+        // shows it (one nobody watches the reaper would stop anyway). Local only: a remote
+        // session's transcript is on the other machine, and the lookup would scan the store.
+        if !mirrors.isEmpty, case .local = boundSession?.origin, let id = boundSession?.resumeId,
+           Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory) == nil {
+            return "a watched session has no transcript yet"
         }
         return nil
     }
