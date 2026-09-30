@@ -51,7 +51,10 @@ enum DaemonSupervisor {
             // well would leave a daemon launchd does not manage, or two racing for the socket.
             // Otherwise (a daemon quit with SIGTERM exits 0, which KeepAlive does not restart)
             // waiting would only stall the launch.
-            if awaitLaunchd, !isDebug, registration == .enabled {
+            // Registration, not build type, decides: a Debug build registered with
+            // CANOPY_REGISTER_DAEMON=1 is launchd's too (measured on studio: skipping the wait for
+            // Debug started an unmanaged daemon that won the socket, and launchd's exited 0).
+            if awaitLaunchd, registration == .enabled {
                 for _ in 0..<60 {
                     if DaemonPaths.socketIsLive(path: path) { return true }
                     try? await Task.sleep(for: .milliseconds(250))
