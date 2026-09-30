@@ -17,6 +17,8 @@ enum CanopyDaemon {
         #endif
         // Before anything touches `CanopySettings.shared`: the file is the GUI's.
         CanopySettings.persistsChanges = false
+        // Captured now, before an update can replace the bundle under this process.
+        _ = DaemonUpgrade.launchedBuild
         #if DEBUG
         let isDebug = true
         #else
@@ -57,23 +59,42 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
     private var unreadableModified: Date?
     private var usageTimer: Timer?
     private var upgradeTimer: Timer?
-    private var loggedPendingUpgrade = false
+    private var previousOnDiskBuild: String?
+    private var lastUpgradeHold: String?
 
-    /// An app update replaced the binary under this process: stop the sessions cleanly and
-    /// exit non-zero so launchd starts the new build. Panes re-attach and resume on their own.
+    /// An app update replaced the binary under this process: tell attached panes, stop the
+    /// sessions cleanly and exit non-zero so launchd starts the new build. Panes that got the
+    /// notice re-attach and resume; anything else sees an ordinary drop.
     private func restartIfUpgraded() {
         let onDisk = DaemonUpgrade.onDiskBuild()
-        let anyBusy = store.openSessions.contains { $0.shim?.reaperInputs.isBusy == true }
-        guard DaemonUpgrade.shouldRestart(launchedBuild: DaemonUpgrade.launchedBuild, onDiskBuild: onDisk, anyBusy: anyBusy) else {
-            if onDisk != nil, onDisk != DaemonUpgrade.launchedBuild, !loggedPendingUpgrade {
-                loggedPendingUpgrade = true
-                logger.notice("build \(onDisk ?? "?", privacy: .public) is installed; restarting once no session is busy")
+        defer { previousOnDiskBuild = onDisk }
+        guard let onDisk, onDisk != DaemonUpgrade.launchedBuild else { return }
+        let underLaunchd = DaemonUpgrade.isUnderLaunchd(env: ProcessInfo.processInfo.environment,
+                                                        bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy")
+        let blocker = store.openSessions.lazy.compactMap { session in
+            session.shim?.upgradeBlocker.map { "\(session.resumeId.prefix(8)): \($0)" }
+        }.first
+        guard DaemonUpgrade.shouldRestart(launchedBuild: DaemonUpgrade.launchedBuild, onDiskBuild: onDisk,
+                                          previousOnDiskBuild: previousOnDiskBuild,
+                                          underLaunchd: underLaunchd, blocked: blocker != nil) else {
+            let hold = !underLaunchd ? "not started by launchd, so nothing would start the new build"
+                : blocker ?? "confirming on the next check"
+            if hold != lastUpgradeHold {
+                lastUpgradeHold = hold
+                logger.notice("build \(onDisk, privacy: .public) is installed (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public)); waiting: \(hold, privacy: .public)")
             }
             return
         }
-        logger.notice("restarting for build \(onDisk ?? "?", privacy: .public) (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public))")
-        shutDown()
-        exit(1)
+        logger.notice("restarting for build \(onDisk, privacy: .public) (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public))")
+        upgradeTimer?.invalidate()
+        server?.announceRestart()
+        // Sends are asynchronous: give the notice a moment to leave before the process does.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.shutDown()
+                exit(1)
+            }
+        }
     }
     private var configTimer: Timer?
     /// The TCP port the listener is on, or being brought up on; nil when off.
@@ -275,8 +296,10 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         reaper?.stop()
         // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
+        // Shims first: a replacement daemon may take the socket the moment it is gone, and must
+        // not resume a transcript whose old CLI is still alive.
+        for session in store.openSessions { session.shim?.stop() }
         server?.stopTCP()
         server?.stopLocal()
-        for session in store.openSessions { session.shim?.stop() }
     }
 }

@@ -38,13 +38,23 @@ enum DaemonSupervisor {
         #else
         let isDebug = false
         #endif
+        let registration = DaemonRegistration.status()
         switch action(socketLive: DaemonPaths.socketIsLive(path: path), isDebugBuild: isDebug,
-                      registration: DaemonRegistration.status()) {
+                      registration: registration) {
         case .none:
             return true
         case .register:
             DaemonRegistration.ensureRegistered()
         case .launch:
+            // A loaded job is launchd's to restart (after a crash or an upgrade exit). Starting one
+            // here as well would leave a daemon launchd does not manage, or two racing for the socket.
+            if !isDebug, registration == .enabled {
+                for _ in 0..<60 {
+                    if DaemonPaths.socketIsLive(path: path) { return true }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                logger.notice("launchd did not bring the daemon back within 15 s; starting it directly")
+            }
             launch()
         }
         for _ in 0..<50 {

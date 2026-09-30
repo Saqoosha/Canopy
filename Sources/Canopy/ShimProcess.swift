@@ -108,6 +108,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             quietSince: quietSince)
     }
 
+    /// Why restarting the daemon now would lose something of this session's, or nil.
+    /// Wider than the reaper's busy: a restart also drops what is in flight between
+    /// turns, and a remote client that will not re-attach on its own. Checked only
+    /// while an upgrade waits, since the transcript lookup can scan the store.
+    var upgradeBlocker: String? {
+        if reaperInputs.isBusy { return "a turn, question or background task is running" }
+        if keepAliveInFlight { return "a keep-alive refresh is in flight" }
+        if recapRequestInFlight { return "a recap is in flight" }
+        if phoneReplyInFlight || !queuedPhoneReplies.isEmpty { return "a phone reply is waiting" }
+        if boundSession?.pendingInitialPrompt != nil { return "the first prompt has not been sent" }
+        if mirrors.values.contains(where: { $0.sink.map { !$0.isLocalClient } ?? false }) {
+            return "a phone or another Mac is attached"
+        }
+        // A session with no transcript yet cannot be resumed after the restart.
+        if let id = boundSession?.resumeId, Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory) == nil {
+            return "no transcript yet"
+        }
+        return nil
+    }
+
     /// Names this session in `~/.canopy/viewers`, where `canopy-remote-open.sh`
     /// looks up where to open things. Per process, so a file left behind by a
     /// crash can never be read as another session's.

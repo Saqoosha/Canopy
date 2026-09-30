@@ -189,6 +189,11 @@ final class MirrorServer {
         stopTCP()
     }
 
+    /// Tells every attached client the daemon is about to restart for an upgrade.
+    func announceRestart() {
+        for connection in connections { connection.deliver(["type": DaemonUpgrade.restartingFrameType]) }
+    }
+
     /// Stops the TCP listener and its connections; local-socket clients stay.
     func stopTCP() {
         for connection in connections where !connection.trustsPeer {

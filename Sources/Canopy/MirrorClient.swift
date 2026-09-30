@@ -17,6 +17,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     var onFileFrame: (([String: Any]) -> Void)?
     /// UI a daemon session asks this pane to show (`MirrorUIFrame`).
     var onUIFrame: ((MirrorUIFrame) -> Void)?
+    /// Set by the daemon's `daemon_restarting`: the next drop may re-attach on its own.
+    private(set) var expectsRestart = false
     /// The origin session's account usage (`MirrorUsageFrame`), once it has any and on every
     /// change; never from a Mac that predates the frame.
     var onUsage: (([String: Any]) -> Void)?
@@ -311,6 +313,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             // For the pane's receiver, never the page: a chunk is a third of
             // a megabyte of base64 the webview has no use for.
             onFileFrame?(dict)
+            return
+        }
+        if dict["type"] as? String == DaemonUpgrade.restartingFrameType {
+            // The drop that follows is a planned restart onto a new build, not a stop.
+            expectsRestart = true
             return
         }
         if let frame = MirrorUIFrame(wire: dict) {

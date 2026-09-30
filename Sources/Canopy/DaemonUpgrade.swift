@@ -16,10 +16,22 @@ enum DaemonUpgrade {
         return dict["CFBundleVersion"] as? String
     }
 
-    /// Restart only for a readable, different build, and never while a session is busy
-    /// (`SessionReaper.isBusy`): stopping then would lose a turn, a question or a task.
-    static func shouldRestart(launchedBuild: String?, onDiskBuild: String?, anyBusy: Bool) -> Bool {
-        guard let launchedBuild, let onDiskBuild, launchedBuild != onDiskBuild else { return false }
-        return !anyBusy
+    /// Restart only for a readable, different build that was already on disk at the previous
+    /// check (a non-atomic copy can land Info.plist before the executable), only under launchd
+    /// (nothing else would start the new build), and never while a session would lose
+    /// something (`ShimProcess.upgradeBlocker`).
+    static func shouldRestart(launchedBuild: String?, onDiskBuild: String?, previousOnDiskBuild: String?,
+                              underLaunchd: Bool, blocked: Bool) -> Bool {
+        guard let launchedBuild, let onDiskBuild, launchedBuild != onDiskBuild,
+              previousOnDiskBuild == onDiskBuild else { return false }
+        return underLaunchd && !blocked
     }
+
+    /// launchd names a job's process with its label in `XPC_SERVICE_NAME`.
+    static func isUnderLaunchd(env: [String: String], bundleId: String) -> Bool {
+        env["XPC_SERVICE_NAME"] == DaemonRegistration.plistName(bundleId: bundleId).replacingOccurrences(of: ".plist", with: "")
+    }
+
+    /// The frame a daemon sends each attached client just before it restarts for an upgrade.
+    static let restartingFrameType = "daemon_restarting"
 }

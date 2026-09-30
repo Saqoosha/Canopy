@@ -2286,13 +2286,22 @@ enum SidebarLogicProbe {
                    DaemonDelegate.retryDelay(failedBinds: 0) == 30 && DaemonDelegate.retryDelay(failedBinds: 1) == 30
                        && DaemonDelegate.retryDelay(failedBinds: 2) == 60 && DaemonDelegate.retryDelay(failedBinds: 20) == 600)
             // Canopy Server B6: the daemon restarts onto an updated build once idle.
-            record("daemon upgrade: a different installed build restarts an idle daemon",
-                   DaemonUpgrade.shouldRestart(launchedBuild: "100", onDiskBuild: "101", anyBusy: false))
-            record("daemon upgrade: never while a session is busy, nor for the same or an unreadable build",
-                   !DaemonUpgrade.shouldRestart(launchedBuild: "100", onDiskBuild: "101", anyBusy: true)
-                       && !DaemonUpgrade.shouldRestart(launchedBuild: "100", onDiskBuild: "100", anyBusy: false)
-                       && !DaemonUpgrade.shouldRestart(launchedBuild: "100", onDiskBuild: nil, anyBusy: false)
-                       && !DaemonUpgrade.shouldRestart(launchedBuild: nil, onDiskBuild: "101", anyBusy: false))
+            let upgrade = { (launched: String?, disk: String?, previous: String?, launchd: Bool, blocked: Bool) in
+                DaemonUpgrade.shouldRestart(launchedBuild: launched, onDiskBuild: disk, previousOnDiskBuild: previous,
+                                            underLaunchd: launchd, blocked: blocked)
+            }
+            record("daemon upgrade: a new build seen on two checks restarts an unblocked launchd daemon",
+                   upgrade("100", "101", "101", true, false))
+            record("daemon upgrade: not on the first sighting, not blocked, not outside launchd",
+                   !upgrade("100", "101", "100", true, false) && !upgrade("100", "101", nil, true, false)
+                       && !upgrade("100", "101", "101", true, true) && !upgrade("100", "101", "101", false, false))
+            record("daemon upgrade: never for the same or an unreadable build",
+                   !upgrade("100", "100", "100", true, false) && !upgrade("100", nil, nil, true, false)
+                       && !upgrade(nil, "101", "101", true, false))
+            record("daemon upgrade: launchd is recognised by the job label, Debug and Release apart",
+                   DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.daemon"], bundleId: "sh.saqoo.Canopy")
+                       && !DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.daemon"], bundleId: "sh.saqoo.Canopy.debug")
+                       && !DaemonUpgrade.isUnderLaunchd(env: [:], bundleId: "sh.saqoo.Canopy"))
             do {
                 let bundle = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-\(UUID().uuidString).app")
                 let contents = bundle.appendingPathComponent("Contents")

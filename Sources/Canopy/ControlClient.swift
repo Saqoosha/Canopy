@@ -164,9 +164,8 @@ final class ControlClient {
         switch dict["type"] as? String {
         case "hello_ok":
             ready = true
-            let daemonBuild = dict["build"] as? String ?? "?"
+            let daemonBuild = (dict["build"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "unknown (older daemon)"
             if let own = DaemonUpgrade.launchedBuild, daemonBuild != own {
-                // The daemon restarts itself onto the installed build once its sessions are idle.
                 logger.notice("control connection ready; daemon runs build \(daemonBuild, privacy: .public), this app \(own, privacy: .public)")
             } else {
                 logger.notice("control connection ready")
