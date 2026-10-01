@@ -289,10 +289,10 @@ struct MirrorPaneView: NSViewRepresentable {
                     session.isWaiting = false
                     // Only a restart the daemon announced re-attaches on its own: any other drop
                     // may be a stop made elsewhere, which must not be undone. launchd starts the
-                    // new build; `ensureRunning` waits for it before starting one itself.
+                    // new build; `ensureRunning` asks launchd before starting one itself.
                     if isDaemon, bridge?.expectsRestart == true {
                         Task { @MainActor [weak session] in
-                            guard await DaemonSupervisor.ensureRunning(awaitLaunchd: true), let session,
+                            guard await DaemonSupervisor.ensureRunning(), let session,
                                   session.connection.status == .reconnectFailed else { return }
                             logger.notice("[mirror-pane] session service restarted; re-attaching \(session.resumeId, privacy: .public)")
                             SessionStore.shared?.restartSession(session.id, notifyDaemon: false)

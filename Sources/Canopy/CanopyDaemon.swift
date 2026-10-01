@@ -3,7 +3,7 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "CanopyDaemon")
 
-/// `Canopy --daemon`: an accessory app with no windows that owns sessions and
+/// `Canopy --daemon`: a process with no NSApplication that owns sessions and
 /// serves them over its local socket and Tailscale. See
 /// docs/superpowers/specs/2026-09-29-canopy-server-design.md.
 @MainActor
@@ -26,30 +26,39 @@ enum CanopyDaemon {
         #endif
         RosterPublisher.relayAllowedInProcess = RosterPublisher.relayAllowed(
             isDaemon: true, isDebug: isDebug, env: ProcessInfo.processInfo.environment)
-        let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
-        installTerminationHandler()
+        // No NSApplication: one would register this process with LaunchServices as a second
+        // instance of the app, which the Dock, Sparkle and `open` then treat as Canopy itself (#279).
         let delegate = DaemonDelegate()
         self.delegate = delegate
-        app.delegate = delegate
-        app.run()
+        installTerminationHandler(delegate)
+        delegate.start()
+        // RunLoop, not dispatchMain(): the daemon's timers are scheduled on it. A pass ends after a
+        // source or main-queue block, not after a timer, so a timer's autoreleases wait for the next one.
+        while true {
+            autoreleasepool { _ = RunLoop.main.run(mode: .default, before: .distantFuture) }
+        }
     }
 }
 
 private nonisolated(unsafe) var terminationSource: DispatchSourceSignal?
 
-/// Routes launchd's SIGTERM to `NSApp.terminate`; left at its default it ends
-/// the process without `applicationWillTerminate`, leaving the socket file behind.
-private nonisolated func installTerminationHandler() {
+/// launchd's SIGTERM stops the sessions and removes the socket file; left at its default it ends
+/// the process with the socket file behind.
+private nonisolated func installTerminationHandler(_ delegate: DaemonDelegate) {
     signal(SIGTERM, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-    source.setEventHandler { MainActor.assumeIsolated { NSApp.terminate(nil) } }
+    source.setEventHandler { [weak delegate] in
+        MainActor.assumeIsolated {
+            delegate?.shutDown()
+            exit(0)
+        }
+    }
     source.resume()
     terminationSource = source
 }
 
 @MainActor
-final class DaemonDelegate: NSObject, NSApplicationDelegate {
+final class DaemonDelegate {
     private let store = SessionStore()
     private var server: MirrorServer?
     private var reaper: DaemonReaper?
@@ -103,7 +112,7 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
 
     private var settingsFile: URL { CanopySettings.shared.filePath }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    func start() {
         logger.notice("daemon starting pid=\(getpid())")
         Task { await store.refreshRecents() }
 
@@ -290,11 +299,7 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         return .start
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        shutDown()
-    }
-
-    private func shutDown() {
+    func shutDown() {
         upgradeTimer?.invalidate()
         configTimer?.invalidate()
         usageTimer?.invalidate()

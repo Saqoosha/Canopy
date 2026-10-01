@@ -2018,13 +2018,18 @@ enum SidebarLogicProbe {
             record("daemon supervisor: a live socket needs nothing",
                    DaemonSupervisor.action(socketLive: true, isDebugBuild: false, registration: .notRegistered) == .none)
             record("daemon supervisor: Release registers when not registered",
-                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notRegistered) == .register)
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notRegistered) == .register
+                       && DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notFound) == .register)
             record("daemon supervisor: Release launches it itself while approval is pending",
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .requiresApproval) == .launch)
-            record("daemon supervisor: Release launches when registered but not running",
-                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .enabled) == .launch)
-            record("daemon supervisor: Debug always launches its own",
+            record("daemon supervisor: a registered agent is started by launchd, not by the GUI",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .enabled) == .kickstart)
+            record("daemon supervisor: a Debug build registered with CANOPY_REGISTER_DAEMON=1 is launchd's too",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .enabled) == .kickstart)
+            record("daemon supervisor: an unregistered Debug build launches its own",
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .notRegistered) == .launch)
+            record("daemon agent: the launchd label is the plist name without .plist",
+                   DaemonRegistration.label(bundleId: "sh.saqoo.Canopy") == "sh.saqoo.Canopy.daemon")
             do {
                 var correlator = ControlClient.Correlator()
                 let first = correlator.begin()

@@ -29,7 +29,7 @@ enum DaemonUpgrade {
 
     /// launchd names a job's process with its label in `XPC_SERVICE_NAME`.
     static func isUnderLaunchd(env: [String: String], bundleId: String) -> Bool {
-        env["XPC_SERVICE_NAME"] == DaemonRegistration.plistName(bundleId: bundleId).replacingOccurrences(of: ".plist", with: "")
+        env["XPC_SERVICE_NAME"] == DaemonRegistration.label(bundleId: bundleId)
     }
 
     /// The frame a daemon sends each attached client just before it restarts for an upgrade.

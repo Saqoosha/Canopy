@@ -1,92 +1,118 @@
-import AppKit
+import Foundation
 import ServiceManagement
 import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "DaemonSupervisor")
 
 /// Makes sure this build's daemon is serving its socket before a pane attaches.
-/// Release relies on the LaunchAgent; a Debug build (not registered by default)
-/// and a Release whose registration waits on approval start one directly.
+/// A registered agent is started by launchd; the GUI starts one itself only when
+/// nothing is registered (Debug), approval is pending, or launchd did not bring it up.
+/// See docs/superpowers/specs/2026-10-01-headless-daemon-design.md.
 enum DaemonSupervisor {
-    enum Action: Equatable { case none, register, launch }
+    enum Action: Equatable { case none, register, kickstart, launch }
 
+    /// Registration decides, not build type: a Debug build registered with
+    /// CANOPY_REGISTER_DAEMON=1 is launchd's too.
     static func action(socketLive: Bool, isDebugBuild: Bool, registration: SMAppService.Status) -> Action {
         if socketLive { return .none }
-        if isDebugBuild { return .launch }
-        return registration == .notRegistered || registration == .notFound ? .register : .launch
+        switch registration {
+        case .enabled: return .kickstart
+        case .notRegistered, .notFound: return isDebugBuild ? .launch : .register
+        default: return .launch
+        }
     }
 
-    /// One start at a time: every restored pane asks at launch, and each launch would
-    /// start another daemon racing for the same socket.
+    /// One start at a time: every restored pane asks at launch.
     @MainActor private static var inFlight: Task<Bool, Never>?
-    /// Any pane's restart notice counts for every start within 30 s: one that missed it sees the same drop.
-    @MainActor private static var restartAnnouncedAt: Date?
 
-    /// True once the socket answers; gives up 10 s after starting it. `awaitLaunchd`: the daemon announced
-    /// an upgrade restart, which launchd performs, so give it up to 15 s before starting one here.
+    /// True once the socket answers.
     @MainActor
-    static func ensureRunning(awaitLaunchd: Bool = false) async -> Bool {
-        if awaitLaunchd { restartAnnouncedAt = Date() }
+    static func ensureRunning() async -> Bool {
         if let inFlight { return await inFlight.value }
-        let task = Task { @MainActor in
-            await start(awaitLaunchd: restartAnnouncedAt.map { Date().timeIntervalSince($0) < 30 } ?? false)
-        }
+        let task = Task { @MainActor in await start() }
         inFlight = task
         defer { inFlight = nil }
         return await task.value
     }
 
     @MainActor
-    private static func start(awaitLaunchd: Bool) async -> Bool {
+    private static func start() async -> Bool {
         let path = DaemonPaths.current
         #if DEBUG
         let isDebug = true
         #else
         let isDebug = false
         #endif
-        let registration = DaemonRegistration.status()
+        let bundleId = Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy"
         switch action(socketLive: DaemonPaths.socketIsLive(path: path), isDebugBuild: isDebug,
-                      registration: registration) {
+                      registration: DaemonRegistration.status()) {
         case .none:
             return true
         case .register:
+            // RunAtLoad starts it, so give launchd the first try; launching here at once would
+            // race launchd's for the socket. A direct launch is only the fallback.
             DaemonRegistration.ensureRegistered()
-        case .launch:
-            // After an announced upgrade exit launchd starts the new build; starting one here as
-            // well would leave a daemon launchd does not manage, or two racing for the socket.
-            // Otherwise (a daemon quit with SIGTERM exits 0, which KeepAlive does not restart)
-            // waiting would only stall the launch.
-            // Registration, not build type, decides: a Debug build registered with
-            // CANOPY_REGISTER_DAEMON=1 is launchd's too (measured on studio: skipping the wait for
-            // Debug started an unmanaged daemon that won the socket, and launchd's exited 0).
-            if awaitLaunchd, registration == .enabled {
-                for _ in 0..<60 {
-                    if DaemonPaths.socketIsLive(path: path) { return true }
-                    try? await Task.sleep(for: .milliseconds(250))
-                }
-                logger.notice("launchd did not bring the daemon back within 15 s; starting it directly")
+            if DaemonRegistration.status() == .enabled {
+                if await waitForSocket(path, seconds: 15) { return true }
+                logger.notice("launchd did not start the newly registered agent within 15 s; starting it directly")
             }
-            launch()
+        case .kickstart:
+            // A job that exited 0 (a quit, or losing the socket race) is not restarted by KeepAlive.
+            kickstart(label: DaemonRegistration.label(bundleId: bundleId))
+            if await waitForSocket(path, seconds: 15) { return true }
+            logger.notice("launchd did not bring the daemon up within 15 s; starting it directly")
+        case .launch:
+            break
         }
-        for _ in 0..<50 {
-            if DaemonPaths.socketIsLive(path: path) { return true }
-            try? await Task.sleep(for: .milliseconds(200))
-        }
+        launch()
+        if await waitForSocket(path, seconds: 10) { return true }
         logger.error("daemon socket did not come up within 10 s")
         return false
     }
 
-    /// A separate process, not a child: it must outlive this GUI.
     @MainActor
-    private static func launch() {
-        let config = NSWorkspace.OpenConfiguration()
-        config.createsNewApplicationInstance = true
-        config.activates = false
-        config.addsToRecentItems = false
-        config.arguments = ["--daemon"]
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, error in
-            if let error { logger.error("daemon launch failed: \(error.localizedDescription, privacy: .public)") }
+    private static func waitForSocket(_ path: String, seconds: Int) async -> Bool {
+        for _ in 0..<(seconds * 5) {
+            if DaemonPaths.socketIsLive(path: path) { return true }
+            try? await Task.sleep(for: .milliseconds(200))
         }
-        logger.notice("launching a daemon for this build")
+        return false
+    }
+
+    /// Without `-k`: a running job is left alone, a stopped one is started.
+    private static func kickstart(label: String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = ["kickstart", "gui/\(getuid())/\(label)"]
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            logger.notice("asked launchd to start \(label, privacy: .public)")
+        } catch {
+            logger.error("launchctl kickstart failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// A plain child process, not `NSWorkspace.openApplication`: that registers the daemon with
+    /// LaunchServices as a second instance of this app (issue #279). Not waited on; it outlives this GUI.
+    private static func launch() {
+        guard let executable = Bundle.main.executableURL else {
+            logger.error("daemon launch failed: no executable URL")
+            return
+        }
+        let proc = Process()
+        proc.executableURL = executable
+        proc.arguments = ["--daemon"]
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            logger.notice("launching a daemon for this build (pid \(proc.processIdentifier))")
+        } catch {
+            logger.error("daemon launch failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

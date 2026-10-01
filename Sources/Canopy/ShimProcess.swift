@@ -8048,11 +8048,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         if webView == nil, !uiClients.isEmpty {
-            // The daemon: the attached Mac decides whether it is frontmost; the daemon's `isActive` means nothing.
+            // The daemon: the attached Mac decides whether it is frontmost.
             uiClients.forEach { $0.deliverUI(.notify(title: "Canopy", body: body)) }
             return
         }
-        guard !NSApp.isActive else { return }
+        // `NSApp` is nil in the daemon (no NSApplication, #279), where no window can be frontmost.
+        if let app = NSApp, app.isActive { return }
         SessionNotifier.post(title: "Canopy", body: body)
     }
 

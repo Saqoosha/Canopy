@@ -8,6 +8,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "DaemonRegis
 /// id so a Debug build registers its own agent and never replaces Release's.
 enum DaemonRegistration {
     static func plistName(bundleId: String) -> String { "\(bundleId).daemon.plist" }
+    /// The launchd label: `Label` in the plist, which `plistName` names after.
+    static func label(bundleId: String) -> String { "\(bundleId).daemon" }
 
     /// Release registers at every launch. A Debug build registers only when
     /// asked: every Debug launch would otherwise install a login item pointing
