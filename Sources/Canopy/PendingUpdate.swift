@@ -1,6 +1,9 @@
 import AppKit
 import Observation
+import os
 import SwiftUI
+
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "PendingUpdate")
 
 /// The daemon's waiting updates as the GUI sees them (`upgrade_state`).
 @MainActor @Observable
@@ -15,6 +18,8 @@ final class PendingUpdate {
 
     nonisolated static func headline(_ state: UpgradeState, restarting: Bool) -> String? {
         if state.pendingBuild != nil {
+            // Outside launchd nothing would start the new build, so nothing here is "about to" happen.
+            if state.notUnderLaunchd { return "Update ready — the session service will not restart on its own" }
             guard !restarting, !state.heldBy.isEmpty else { return "Update ready — restarting…" }
             let n = state.heldBy.count
             return "Update ready — waiting for \(n) session\(n == 1 ? "" : "s")"
@@ -87,17 +92,22 @@ private struct PendingUpdateDetail: View {
         alert.informativeText = PendingUpdate.confirmation(state.heldBy)
         alert.addButton(withTitle: "Restart")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-        guard alert.runModal() == .alertFirstButtonReturn, let control = SessionStore.shared?.daemonControl else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let control = SessionStore.shared?.daemonControl else {
+            error = "Could not restart: not connected to the session service."
+            return
+        }
         PendingUpdate.shared.restarting = true
         Task { @MainActor in
-            switch await control.request("restart_now") {
-            case .success, .failure(.disconnected):
-                // The daemon exits a second after replying; a drop here is the restart itself.
-                break
-            case .failure(let failure):
-                PendingUpdate.shared.restarting = false
-                error = "Could not restart: \(failure)"
+            guard case .failure(let failure) = await control.request("restart_now") else { return }
+            PendingUpdate.shared.restarting = false
+            let reason = switch failure {
+            case .refused(let message): message
+            case .disconnected: "not connected to the session service"
+            case .timedOut: "the session service did not answer"
             }
+            logger.error("restart_now failed: \(reason, privacy: .public)")
+            error = "Could not restart: \(reason)."
         }
     }
 }

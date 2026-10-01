@@ -254,7 +254,7 @@ final class ControlSession {
         guard !subscribed else { return }
         subscribed = true
         trackOpenSessions()
-        trackUpgradeState()
+        if isLocal { trackUpgradeState() }  // only this Mac's GUI shows it
         recheck = Timer.scheduledTimer(withTimeInterval: Self.recheckInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.pushIfChanged(self?.openRows() ?? []) }
         }

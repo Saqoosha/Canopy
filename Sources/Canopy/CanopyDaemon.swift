@@ -79,9 +79,10 @@ final class DaemonDelegate {
         defer { previousOnDiskBuild = onDisk }
         let pending = onDisk.flatMap { $0 != DaemonUpgrade.launchedBuild ? $0 : nil }
         // `upgradeBlocker` can scan the transcript store, so holds are read only while a build waits.
-        let holds: [UpgradeHold] = pending == nil ? [] : store.openSessions.compactMap { session in
-            session.shim?.upgradeBlocker.map { UpgradeHold(key: session.id.uuidString, title: session.title, reason: $0) }
+        let blocked: [(session: OpenSession, reason: String)] = pending == nil ? [] : store.openSessions.compactMap { session in
+            session.shim?.upgradeBlocker.map { (session, $0) }
         }
+        let holds = blocked.map { UpgradeHold(key: $0.session.id.uuidString, title: $0.session.title, reason: $0.reason) }
         let underLaunchd = Self.underLaunchd
         publishUpgradeState(pending: pending, holds: holds, underLaunchd: underLaunchd)
         guard let onDisk = pending else { return }
@@ -89,7 +90,7 @@ final class DaemonDelegate {
                                           previousOnDiskBuild: previousOnDiskBuild,
                                           underLaunchd: underLaunchd, blocked: !holds.isEmpty) else {
             let hold = !underLaunchd ? "not started by launchd, so nothing would start the new build"
-                : holds.first.map { "\($0.key.prefix(8)): \($0.reason)" } ?? "confirming on the next check"
+                : blocked.first.map { "\($0.session.resumeId.prefix(8)): \($0.reason)" } ?? "confirming on the next check"
             if hold != lastUpgradeHold {
                 lastUpgradeHold = hold
                 logger.notice("build \(onDisk, privacy: .public) is installed (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public)); waiting: \(hold, privacy: .public)")
@@ -143,6 +144,11 @@ final class DaemonDelegate {
             if let refusal = DaemonUpgrade.restartNowRefusal(pendingBuild: state?.pendingBuild,
                                                              underLaunchd: Self.underLaunchd) { return refusal }
             guard let self, let pending = state?.pendingBuild else { return "the session service is shutting down" }
+            // Same guard as the automatic path: a copy can land Info.plist before the executable.
+            guard self.previousOnDiskBuild == pending, DaemonUpgrade.onDiskBuild() == pending else {
+                return "the new build is still being installed; try again in a minute"
+            }
+            DaemonUpgradeCenter.shared.restartNow = nil  // one restart per process
             logger.notice("restart now requested; interrupting \(state?.heldBy.count ?? 0) session(s)")
             self.performUpgradeRestart(to: pending)
             return nil
@@ -189,6 +195,9 @@ final class DaemonDelegate {
         upgradeTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.restartIfUpgraded() }
         }
+        // Publishes the state now rather than a minute in, so a GUI that saw the old daemon's
+        // pending build does not keep showing it.
+        restartIfUpgraded()
 
         // The phone's view of this Mac: the sessions live here now, so the roster does too.
         if RosterPublisher.relayAllowedInProcess {

@@ -12333,6 +12333,10 @@ enum SidebarLogicProbe {
             record("pending update: a held build counts its sessions",
                    PendingUpdate.headline(state("150", [hold, hold]), restarting: false) == "Update ready — waiting for 2 sessions"
                        && PendingUpdate.headline(state("150", [hold]), restarting: false) == "Update ready — waiting for 1 session")
+            record("pending update: outside launchd it never claims a restart is coming",
+                   PendingUpdate.headline(UpgradeState(runningBuild: "149", pendingBuild: "150", heldBy: [],
+                                                       notUnderLaunchd: true, extensionState: nil), restarting: false)
+                       == "Update ready — the session service will not restart on its own")
             record("pending update: restarting outranks the count",
                    PendingUpdate.headline(state("150", [hold]), restarting: true) == "Update ready — restarting…")
             let ext = ExtensionUpgradeState(installed: "2.1.290",
