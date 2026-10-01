@@ -2315,6 +2315,9 @@ enum SidebarLogicProbe {
             }
             record("roster heartbeat: an idle Mac re-publishes well inside the 5-minute staleness line",
                    RosterPublisher.heartbeatInterval * 2 < RemoteRosterWatcher.staleThreshold)
+            record("full disk access: only a permission refusal reads as missing",
+                   !FullDiskAccess.isGranted(openErrno: EPERM) && !FullDiskAccess.isGranted(openErrno: EACCES)
+                       && FullDiskAccess.isGranted(openErrno: ENOENT))
             // Canopy Server daemon hardening.
             record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
                    ControlProtocol.limit(["limit": -1], default: 50) == 0)
