@@ -5038,17 +5038,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// `payload` with this shim's own session added to a session list that lacks it (#282).
+    /// Not for a remote session: its transcript is on the other machine, and a local file under
+    /// the same id would describe the wrong one.
     private func addingBoundSessionIfMissing(_ payload: [String: Any]) -> [String: Any] {
-        guard let inner = payload["message"] as? [String: Any],
-              (inner["response"] as? [String: Any])?["type"] as? String == "list_sessions_response",
-              let session = boundSession, !session.resumeId.isEmpty,
-              let path = Self.jsonlPath(sessionId: session.resumeId, workingDirectory: workingDirectory),
-              let attributes = try? FileManager.default.attributesOfItem(atPath: path),
-              let modified = attributes[.modificationDate] as? Date
-        else { return payload }
-        let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
-        return Self.addingSessionIfMissing(
-            payload, entry: Self.sessionListEntry(id: session.resumeId, title: session.title, modified: modified, size: size))
+        guard remoteHost == nil, let session = boundSession, !session.resumeId.isEmpty else { return payload }
+        return Self.addingSessionIfMissing(payload, id: session.resumeId) { [workingDirectory] in
+            guard let path = Self.jsonlPath(sessionId: session.resumeId, workingDirectory: workingDirectory),
+                  let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+                  let modified = attributes[.modificationDate] as? Date
+            else { return nil }
+            let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+            return Self.sessionListEntry(id: session.resumeId, title: session.title, modified: modified, size: size)
+        }
     }
 
     /// One `list_sessions_response` row, in the fields the webview's session model reads.
@@ -5057,32 +5058,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
          "fileSize": size, "archived": false]
     }
 
-    /// Adds `entry` to a `list_sessions_response` that lacks its id; any other message is returned as is.
-    /// The extension lists only its spawn cwd's folder, so a session that moved into a worktree is
-    /// missing, and a mirror webview opening it starts a new conversation instead (#282).
-    static func addingSessionIfMissing(_ message: [String: Any], entry: [String: Any]) -> [String: Any] {
-        func add(_ container: [String: Any]) -> [String: Any]? {
-            guard var response = container["response"] as? [String: Any],
-                  response["type"] as? String == "list_sessions_response",
-                  let sessions = response["sessions"] as? [[String: Any]],
-                  let id = entry["id"] as? String,
-                  !sessions.contains(where: { $0["id"] as? String == id })
-            else { return nil }
-            response["sessions"] = sessions + [entry]
-            var updated = container
-            updated["response"] = response
-            return updated
-        }
-        if let added = add(message) { return added }
-        if message["type"] as? String == "from-extension",
-           let nested = message["message"] as? [String: Any],
-           let added = add(nested)
-        {
-            var updated = message
-            updated["message"] = added
-            return updated
-        }
-        return message
+    /// Appends `entry()` to a wrapped `list_sessions_response` that lacks `id`; any other message is
+    /// returned as is, and `entry` runs only on a miss. The extension lists only its spawn cwd's
+    /// folder, so a session that moved into a worktree is missing, and a mirror webview opening it
+    /// starts a new conversation instead (#282).
+    static func addingSessionIfMissing(_ message: [String: Any], id: String,
+                                       entry: () -> [String: Any]?) -> [String: Any] {
+        guard message["type"] as? String == "from-extension",
+              var inner = message["message"] as? [String: Any],
+              var response = inner["response"] as? [String: Any],
+              response["type"] as? String == "list_sessions_response",
+              let sessions = response["sessions"] as? [[String: Any]],
+              !sessions.contains(where: { $0["id"] as? String == id }),
+              let row = entry()
+        else { return message }
+        response["sessions"] = sessions + [row]
+        inner["response"] = response
+        var updated = message
+        updated["message"] = inner
+        return updated
     }
 
     /// Apply `strippingRecapArtifacts` and `strippingKeepAliveArtifacts` to

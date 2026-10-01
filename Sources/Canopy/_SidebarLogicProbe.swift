@@ -12239,23 +12239,34 @@ enum SidebarLogicProbe {
                     "response": ["type": "list_sessions_response", "folderKey": "k",
                                  "sessions": ids.map { ["id": $0, "lastModified": 1] }]]]
             }
-            func ids(_ payload: [String: Any]) -> [String]? {
-                (((payload["message"] as? [String: Any])?["response"] as? [String: Any])?["sessions"] as? [[String: Any]])?
-                    .compactMap { $0["id"] as? String }
-            }
+            func same(_ a: [String: Any], _ b: [String: Any]) -> Bool { NSDictionary(dictionary: a).isEqual(to: b) }
             let entry = ShimProcess.sessionListEntry(id: "moved", title: "Moved", modified: Date(timeIntervalSince1970: 2), size: 42)
             record("mirror session list: the entry carries what the webview reads",
                    entry["id"] as? String == "moved" && entry["summary"] as? String == "Moved"
                        && entry["lastModified"] as? Int == 2000 && entry["fileSize"] as? Int == 42
                        && entry["archived"] as? Bool == false)
-            record("mirror session list: a session missing from the list is added",
-                   ids(ShimProcess.addingSessionIfMissing(listResponse(["a"]), entry: entry)) == ["a", "moved"])
-            record("mirror session list: a session already listed is left alone",
-                   ids(ShimProcess.addingSessionIfMissing(listResponse(["moved", "a"]), entry: entry)) == ["moved", "a"])
-            let replay: [String: Any] = ["type": "from-extension", "message": ["type": "response", "requestId": "r2",
-                "response": ["type": "get_session_response", "messages": [] as [Any]]]]
-            record("mirror session list: any other response is untouched",
-                   NSDictionary(dictionary: ShimProcess.addingSessionIfMissing(replay, entry: entry)).isEqual(to: replay))
+            var expected = listResponse(["a"])
+            var expectedInner = expected["message"] as! [String: Any]
+            var expectedResponse = expectedInner["response"] as! [String: Any]
+            expectedResponse["sessions"] = [["id": "a", "lastModified": 1], entry]
+            expectedInner["response"] = expectedResponse
+            expected["message"] = expectedInner
+            record("mirror session list: a missing session is appended, everything else in the envelope kept",
+                   same(ShimProcess.addingSessionIfMissing(listResponse(["a"]), id: "moved") { entry }, expected))
+            var built = false
+            let listed = listResponse(["a", "moved"])
+            record("mirror session list: a session already listed is left alone, and its file is not looked up",
+                   same(ShimProcess.addingSessionIfMissing(listed, id: "moved") { built = true; return entry }, listed) && !built)
+            record("mirror session list: no transcript found adds nothing",
+                   same(ShimProcess.addingSessionIfMissing(listResponse(["a"]), id: "moved") { nil }, listResponse(["a"])))
+            var other = listResponse(["a"])
+            var otherInner = other["message"] as! [String: Any]
+            var otherResponse = otherInner["response"] as! [String: Any]
+            otherResponse["type"] = "get_session_response"
+            otherInner["response"] = otherResponse
+            other["message"] = otherInner
+            record("mirror session list: a response of any other type is untouched, even with a sessions array",
+                   same(ShimProcess.addingSessionIfMissing(other, id: "moved") { entry }, other))
         }
 
         // Summary
