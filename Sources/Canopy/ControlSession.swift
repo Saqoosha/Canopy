@@ -15,6 +15,7 @@ final class ControlSession {
     private let isLocal: Bool
     private var subscribed = false
     private var lastPushed: [ControlProtocol.SessionRow]?
+    private var lastUpgradeState: UpgradeState?
     private var recheck: Timer?
     private var stopped = false
 
@@ -62,6 +63,12 @@ final class ControlSession {
             guard isLocal else { return fail(request, "local clients only") }
             guard let publisher = RosterPublisher.current else { return fail(request, "no roster publisher in the daemon") }
             publisher.secretChanged()
+            reply(request, ["ok": true])
+        case "restart_now":
+            // Interrupts every running turn on this Mac; only this Mac's GUI may ask.
+            guard isLocal else { return fail(request, "local clients only") }
+            guard let restart = DaemonUpgradeCenter.shared.restartNow else { return fail(request, "not the session service") }
+            if let refusal = restart() { return fail(request, refusal) }
             reply(request, ["ok": true])
         case "mirror_status": reply(request, ["status": MirrorServerStatus.shared.state.wire])
         default: fail(request, "unknown verb")
@@ -247,6 +254,7 @@ final class ControlSession {
         guard !subscribed else { return }
         subscribed = true
         trackOpenSessions()
+        trackUpgradeState()
         recheck = Timer.scheduledTimer(withTimeInterval: Self.recheckInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.pushIfChanged(self?.openRows() ?? []) }
         }
@@ -275,6 +283,19 @@ final class ControlSession {
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.trackOpenSessions() } }
         }
         pushIfChanged(rows)
+    }
+
+    /// Re-armed from its own `onChange`, like `trackOpenSessions`.
+    private func trackUpgradeState() {
+        guard !stopped else { return }
+        let state = withObservationTracking {
+            DaemonUpgradeCenter.shared.state
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.trackUpgradeState() } }
+        }
+        guard let state, state != lastUpgradeState else { return }
+        lastUpgradeState = state
+        send(["type": DaemonUpgrade.stateFrameType, "state": state.wire])
     }
 
     private func pushIfChanged(_ rows: [ControlProtocol.SessionRow]) {
