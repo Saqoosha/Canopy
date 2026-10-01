@@ -12296,6 +12296,58 @@ enum SidebarLogicProbe {
                { let s = ConnectionState(); s.status = .awaitingRestart(machine: "studio")
                  return s.isOverlayVisible && s.statusMessage == "studio is restarting for an update. Reconnecting…" }())
 
+        // MARK: - Upgrade state for the GUI
+        do {
+            let hold = UpgradeHold(key: "k1", title: "Fix CI", reason: "a turn, question or background task is running")
+            let stale = StaleExtensionSession(key: "k2", title: "Docs", running: "2.1.286", blocker: nil)
+            let full = UpgradeState(runningBuild: "149", pendingBuild: "150", heldBy: [hold], notUnderLaunchd: false,
+                                    extensionState: ExtensionUpgradeState(installed: "2.1.290", stale: [stale]))
+            record("upgrade state: survives the wire unchanged", UpgradeState(wire: full.wire) == full)
+            let none = UpgradeState(runningBuild: "150", pendingBuild: nil, heldBy: [], notUnderLaunchd: false, extensionState: nil)
+            record("upgrade state: no pending build and no stale extension is empty",
+                   none.isEmpty && UpgradeState(wire: none.wire) == none)
+            record("upgrade state: an extension with no stale sessions is still empty",
+                   UpgradeState(runningBuild: "150", pendingBuild: nil, heldBy: [], notUnderLaunchd: false,
+                                extensionState: ExtensionUpgradeState(installed: "2.1.290", stale: [])).isEmpty)
+            record("upgrade state: a stale extension alone is not empty",
+                   !UpgradeState(runningBuild: "150", pendingBuild: nil, heldBy: [], notUnderLaunchd: false,
+                                 extensionState: ExtensionUpgradeState(installed: "2.1.290", stale: [stale])).isEmpty)
+            record("upgrade state: an unreadable wire value is nil, not an empty state",
+                   UpgradeState(wire: ["heldBy": []]) == nil)
+            record("restart now: refused with nothing pending",
+                   DaemonUpgrade.restartNowRefusal(pendingBuild: nil, underLaunchd: true) == "no update is waiting")
+            record("restart now: refused when launchd would not start the new build",
+                   DaemonUpgrade.restartNowRefusal(pendingBuild: "150", underLaunchd: false)
+                       == "the session service was not started by launchd, so nothing would start the new build")
+            record("restart now: allowed with a pending build under launchd",
+                   DaemonUpgrade.restartNowRefusal(pendingBuild: "150", underLaunchd: true) == nil)
+        }
+
+        // MARK: - Pending update footer
+        do {
+            let hold = UpgradeHold(key: "k", title: "Fix CI", reason: "a turn, question or background task is running")
+            func state(_ pending: String?, _ holds: [UpgradeHold], _ ext: ExtensionUpgradeState? = nil) -> UpgradeState {
+                UpgradeState(runningBuild: "149", pendingBuild: pending, heldBy: holds, notUnderLaunchd: false, extensionState: ext)
+            }
+            record("pending update: nothing pending shows nothing", PendingUpdate.headline(state(nil, []), restarting: false) == nil)
+            record("pending update: a held build counts its sessions",
+                   PendingUpdate.headline(state("150", [hold, hold]), restarting: false) == "Update ready — waiting for 2 sessions"
+                       && PendingUpdate.headline(state("150", [hold]), restarting: false) == "Update ready — waiting for 1 session")
+            record("pending update: outside launchd it never claims a restart is coming",
+                   PendingUpdate.headline(UpgradeState(runningBuild: "149", pendingBuild: "150", heldBy: [],
+                                                       notUnderLaunchd: true, extensionState: nil), restarting: false)
+                       == "Update ready — the session service will not restart on its own")
+            record("pending update: restarting outranks the count",
+                   PendingUpdate.headline(state("150", [hold]), restarting: true) == "Update ready — restarting…")
+            let ext = ExtensionUpgradeState(installed: "2.1.290",
+                                            stale: [StaleExtensionSession(key: "a", title: "A", running: "2.1.286", blocker: nil)])
+            record("pending update: a stale extension alone gets its own line",
+                   PendingUpdate.headline(state(nil, [], ext), restarting: false) == "Extension 2.1.290 — 1 session on an older version")
+            record("pending update: confirmation names what is interrupted",
+                   PendingUpdate.confirmation([hold])
+                       == "1 session is busy: Fix CI. Restarting stops its current work. Conversations are kept.")
+        }
+
         // MARK: - Mirror session list (#282)
         // A session that moved into a worktree is missing from the extension's list; the
         // webview then starts a new conversation instead of reading it.

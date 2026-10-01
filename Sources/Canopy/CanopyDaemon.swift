@@ -69,6 +69,8 @@ final class DaemonDelegate {
     private var usageTimer: Timer?
     private var upgradeTimer: Timer?
     private var previousOnDiskBuild: String?
+    /// A pending build seen on two consecutive checks, so its copy has finished.
+    private var confirmedBuild: String?
     private var lastUpgradeHold: String?
 
     /// An app update replaced the binary under this process: tell attached panes, stop the
@@ -77,24 +79,46 @@ final class DaemonDelegate {
     private func restartIfUpgraded() {
         let onDisk = DaemonUpgrade.onDiskBuild()
         defer { previousOnDiskBuild = onDisk }
-        guard let onDisk, onDisk != DaemonUpgrade.launchedBuild else { return }
-        let underLaunchd = DaemonUpgrade.isUnderLaunchd(env: ProcessInfo.processInfo.environment,
-                                                        bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy")
-        let blocker = store.openSessions.lazy.compactMap { session in
-            session.shim?.upgradeBlocker.map { "\(session.resumeId.prefix(8)): \($0)" }
-        }.first
+        let pending = onDisk.flatMap { $0 != DaemonUpgrade.launchedBuild ? $0 : nil }
+        // `upgradeBlocker` can scan the transcript store, so holds are read only while a build waits.
+        let blocked: [(session: OpenSession, reason: String)] = pending == nil ? [] : store.openSessions.compactMap { session in
+            session.shim?.upgradeBlocker.map { (session, $0) }
+        }
+        let holds = blocked.map { UpgradeHold(key: $0.session.id.uuidString, title: $0.session.title, reason: $0.reason) }
+        let underLaunchd = Self.underLaunchd
+        publishUpgradeState(pending: pending, holds: holds, underLaunchd: underLaunchd)
+        confirmedBuild = pending != nil && pending == previousOnDiskBuild ? pending : nil
+        guard let onDisk = pending else { return }
         guard DaemonUpgrade.shouldRestart(launchedBuild: DaemonUpgrade.launchedBuild, onDiskBuild: onDisk,
                                           previousOnDiskBuild: previousOnDiskBuild,
-                                          underLaunchd: underLaunchd, blocked: blocker != nil) else {
+                                          underLaunchd: underLaunchd, blocked: !holds.isEmpty) else {
             let hold = !underLaunchd ? "not started by launchd, so nothing would start the new build"
-                : blocker ?? "confirming on the next check"
+                : blocked.first.map { "\($0.session.resumeId.prefix(8)): \($0.reason)" } ?? "confirming on the next check"
             if hold != lastUpgradeHold {
                 lastUpgradeHold = hold
                 logger.notice("build \(onDisk, privacy: .public) is installed (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public)); waiting: \(hold, privacy: .public)")
             }
             return
         }
-        logger.notice("restarting for build \(onDisk, privacy: .public) (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public))")
+        performUpgradeRestart(to: onDisk)
+    }
+
+    private static var underLaunchd: Bool {
+        DaemonUpgrade.isUnderLaunchd(env: ProcessInfo.processInfo.environment,
+                                     bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy")
+    }
+
+    private func publishUpgradeState(pending: String?, holds: [UpgradeHold], underLaunchd: Bool) {
+        let state = UpgradeState(runningBuild: DaemonUpgrade.launchedBuild ?? "?", pendingBuild: pending, heldBy: holds,
+                                 notUnderLaunchd: !underLaunchd, extensionState: nil)
+        if DaemonUpgradeCenter.shared.state != state { DaemonUpgradeCenter.shared.state = state }
+    }
+
+    /// Announce, stop the shims, exit 1 so launchd starts the new build. Shared by the
+    /// upgrade check and by `restart_now`, which skips the hold check.
+    private func performUpgradeRestart(to build: String) {
+        DaemonUpgradeCenter.shared.restartNow = nil  // one restart per process, whichever path starts it
+        logger.notice("restarting for build \(build, privacy: .public) (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public))")
         upgradeTimer?.invalidate()
         configTimer?.invalidate()  // a reload in the next second would re-open the listeners
         server?.announceRestart()
@@ -118,6 +142,20 @@ final class DaemonDelegate {
         // Versions an install kept because a session was still running them; the old daemon's
         // shims are gone by now, and a version another process still runs is kept again.
         Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }
+
+        DaemonUpgradeCenter.shared.restartNow = { [weak self] in
+            let state = DaemonUpgradeCenter.shared.state
+            if let refusal = DaemonUpgrade.restartNowRefusal(pendingBuild: state?.pendingBuild,
+                                                             underLaunchd: Self.underLaunchd) { return refusal }
+            guard let self, let pending = state?.pendingBuild else { return "the session service is shutting down" }
+            // Same guard as the automatic path: a copy can land Info.plist before the executable.
+            guard self.confirmedBuild == pending, DaemonUpgrade.onDiskBuild() == pending else {
+                return "the new build is still being installed; try again in a minute"
+            }
+            logger.notice("restart now requested; interrupting \(state?.heldBy.count ?? 0) session(s)")
+            self.performUpgradeRestart(to: pending)
+            return nil
+        }
 
         let server = MirrorServer(store: store, token: MirrorAccess.token(createIfMissing: false) ?? "")
         server.acceptsControl = true
@@ -160,6 +198,9 @@ final class DaemonDelegate {
         upgradeTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.restartIfUpgraded() }
         }
+        // Publishes the state now rather than a minute in, so a GUI that saw the old daemon's
+        // pending build does not keep showing it.
+        restartIfUpgraded()
 
         // The phone's view of this Mac: the sessions live here now, so the roster does too.
         if RosterPublisher.relayAllowedInProcess {

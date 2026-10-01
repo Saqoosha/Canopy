@@ -41,6 +41,7 @@ final class ControlClient {
 
     /// The rows, and whether every row in the push could be read.
     var onSessionState: (([ControlProtocol.SessionRow], Bool) -> Void)?
+    var onUpgradeState: ((UpgradeState) -> Void)?
 
     private let endpoint: MirrorEndpoint
     private let token: String?
@@ -183,6 +184,12 @@ final class ControlClient {
             let (rows, complete) = Self.parseSessionState(dict)
             if !complete { logger.error("incomplete session_state from the daemon; keeping rows it did not list") }
             onSessionState?(rows, complete)
+        case DaemonUpgrade.stateFrameType:
+            guard let wire = dict["state"] as? [String: Any], let state = UpgradeState(wire: wire) else {
+                logger.error("unreadable upgrade_state from the daemon")
+                return
+            }
+            onUpgradeState?(state)
         case "response":
             if let (id, result) = correlator.finish(dict) { waiters.removeValue(forKey: id)?.resume(returning: result) }
         default:

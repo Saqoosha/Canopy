@@ -448,6 +448,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard daemonControl == nil else { return }
         let client = ControlClient(endpoint: .unix(path: DaemonPaths.current), token: nil)
         client.onSessionState = { [weak store] rows, complete in store?.applyDaemonSessions(rows, complete: complete) }
+        client.onUpgradeState = { state in
+            PendingUpdate.shared.state = state
+            // A daemon running the build it was waiting for means the restart landed.
+            if state.pendingBuild == nil { PendingUpdate.shared.restarting = false }
+        }
         daemonControl = client
         store.daemonControl = client
         _ = await DaemonSupervisor.ensureRunning()
