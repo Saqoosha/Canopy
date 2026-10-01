@@ -417,6 +417,7 @@ describe("RelativePattern", () => {
 // ===========================================================================
 const {
   createExtensionContext,
+  Memento,
   workspaceStateFile,
   MAX_LABEL_LENGTH,
 } = require("../Resources/vscode-shim/context.js");
@@ -581,6 +582,30 @@ describe("ExtensionContext", () => {
 
     ctx.workspaceState.update("panelSessionIds", undefined);
     assert.equal(ctx.workspaceState.get("panelSessionIds"), undefined);
+  });
+
+  // VSCode's `Memento.update` returns a Thenable. Extension 2.1.286 chains
+  // `.then` on `workspaceState.update(...)` during activation, so a void return
+  // threw `reading 'then'` and the shim exited 1. Both stores, since the class
+  // is shared and the extension is free to chain either.
+  it("update returns a thenable on both stores", async () => {
+    for (const store of [ctx.workspaceState, ctx.globalState]) {
+      const result = store.update("thenableProbe", 1);
+      assert.equal(typeof result?.then, "function");
+      await result;
+      store.update("thenableProbe", undefined);
+    }
+  });
+
+  // The extension's `.then(void 0, onError)` only catches a rejection; a
+  // synchronous throw from a failed write would still kill `activate`.
+  it("update rejects rather than throws when the write fails", async () => {
+    const blocker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "memento-")), "file");
+    fs.writeFileSync(blocker, "");
+    const m = new Memento(path.join(blocker, "sub", "state.json"));
+    let result;
+    assert.doesNotThrow(() => { result = m.update("k", 1); });
+    await assert.rejects(result);
   });
 
   // Establishes a different document from globalState's. The location is
