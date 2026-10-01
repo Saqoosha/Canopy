@@ -64,7 +64,6 @@ struct PendingUpdateRow: View {
 private struct PendingUpdateDetail: View {
     let state: UpgradeState
     @State private var error: String?
-    @State private var restarted: Set<String> = []
 
     /// Restarts one session's shim on the newest extension, keeping its conversation.
     private func restart(_ row: StaleExtensionSession) {
@@ -73,7 +72,9 @@ private struct PendingUpdateDetail: View {
             error = "\(row.title) is not open in this window."
             return
         }
-        if let blocker = row.blocker {
+        // The row's blocker is up to a minute old; this pane's own flags are current.
+        let liveBusy = session.isThinking || session.isAsking || session.isWaiting ? "it is working" : nil
+        if let blocker = row.blocker ?? liveBusy {
             let alert = NSAlert()
             alert.messageText = "Restart \(row.title)?"
             alert.informativeText = "It is busy: \(blocker). Restarting stops its current work. The conversation is kept."
@@ -81,7 +82,6 @@ private struct PendingUpdateDetail: View {
             alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
-        restarted.insert(row.key)
         store.restartSession(session.id)
     }
 
@@ -112,9 +112,7 @@ private struct PendingUpdateDetail: View {
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        // The row stays until the next check; the restart is already under way.
-                        Button(restarted.contains(row.key) ? "Restarting…" : "Restart") { restart(row) }
-                            .disabled(restarted.contains(row.key))
+                        Button("Restart") { restart(row) }
                     }
                 }
             }
