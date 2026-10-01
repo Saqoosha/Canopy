@@ -1272,6 +1272,14 @@ describe("env", () => {
 const { assembleVscodeModule } = require("../Resources/vscode-shim/stubs.js");
 
 describe("assembleVscodeModule", () => {
+  it("exposes ExtensionMode with VSCode's values (#277)", () => {
+    const vscode = assembleVscodeModule({ window: {}, workspace: {}, commands: {}, env: {} });
+    assert.deepEqual(
+      { Production: vscode.ExtensionMode?.Production, Development: vscode.ExtensionMode?.Development, Test: vscode.ExtensionMode?.Test },
+      { Production: 1, Development: 2, Test: 3 },
+    );
+  });
+
   it("contains all expected namespaces", () => {
     const mockWindow = { name: "window" };
     const mockWorkspace = { name: "workspace" };
