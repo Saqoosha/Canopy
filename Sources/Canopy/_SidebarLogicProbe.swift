@@ -12323,6 +12323,27 @@ enum SidebarLogicProbe {
                    DaemonUpgrade.restartNowRefusal(pendingBuild: "150", underLaunchd: true) == nil)
         }
 
+        // MARK: - Pending update footer
+        do {
+            let hold = UpgradeHold(key: "k", title: "Fix CI", reason: "a turn, question or background task is running")
+            func state(_ pending: String?, _ holds: [UpgradeHold], _ ext: ExtensionUpgradeState? = nil) -> UpgradeState {
+                UpgradeState(runningBuild: "149", pendingBuild: pending, heldBy: holds, notUnderLaunchd: false, extensionState: ext)
+            }
+            record("pending update: nothing pending shows nothing", PendingUpdate.headline(state(nil, []), restarting: false) == nil)
+            record("pending update: a held build counts its sessions",
+                   PendingUpdate.headline(state("150", [hold, hold]), restarting: false) == "Update ready — waiting for 2 sessions"
+                       && PendingUpdate.headline(state("150", [hold]), restarting: false) == "Update ready — waiting for 1 session")
+            record("pending update: restarting outranks the count",
+                   PendingUpdate.headline(state("150", [hold]), restarting: true) == "Update ready — restarting…")
+            let ext = ExtensionUpgradeState(installed: "2.1.290",
+                                            stale: [StaleExtensionSession(key: "a", title: "A", running: "2.1.286", blocker: nil)])
+            record("pending update: a stale extension alone gets its own line",
+                   PendingUpdate.headline(state(nil, [], ext), restarting: false) == "Extension 2.1.290 — 1 session on an older version")
+            record("pending update: confirmation names what is interrupted",
+                   PendingUpdate.confirmation([hold])
+                       == "1 session is busy: Fix CI. Restarting stops its current work. Conversations are kept.")
+        }
+
         // MARK: - Mirror session list (#282)
         // A session that moved into a worktree is missing from the extension's list; the
         // webview then starts a new conversation instead of reading it.

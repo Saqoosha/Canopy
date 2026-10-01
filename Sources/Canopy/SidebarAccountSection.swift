@@ -32,6 +32,9 @@ struct SidebarAccountSection: View {
             ForEach(data.others.filter { ShimProcess.isWriting(to: $0) || RemoteMirrorBridge.isWriting(to: $0) }, id: \.key) { account in
                 accountBlock(account, header: account.label, headerNeedsData: true, separated: true)
             }
+            if PendingUpdate.shared.line != nil {
+                PendingUpdateRow()
+            }
             versionFooter
         }
         .padding(.bottom, 8)
