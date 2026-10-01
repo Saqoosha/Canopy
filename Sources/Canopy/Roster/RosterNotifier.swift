@@ -13,8 +13,7 @@ enum RosterNotifier {
     enum Kind: String { case completed, asking }
 
     /// False in a GUI whose local sessions run in the daemon. The shims it
-    /// still runs (SSH remote, and headless sessions its own mirror server
-    /// starts) are not on the daemon's roster, so the phone's
+    /// still runs (SSH remote) are not on the daemon's roster, so the phone's
     /// Allow/Deny or reply to their push would be routed to the daemon and
     /// refused; with no push and no `CANOPY_PANE`, Pager covers them instead.
     nonisolated(unsafe) static var enabledInProcess = true

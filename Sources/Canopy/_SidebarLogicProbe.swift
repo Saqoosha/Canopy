@@ -1938,6 +1938,13 @@ enum SidebarLogicProbe {
                 record("session row: an integral lastActiveAt from JSON still reads as a Double",
                        (try? JSONSerialization.jsonObject(with: Data(#"{"resumeId":"r4","lastActiveAt":1000}"#.utf8)) as? [String: Any])
                            .flatMap { ControlProtocol.SessionRow(wire: $0) }?.lastActiveAt == 1000)
+                record("session state: a missing sessions key is incomplete, not an empty list",
+                       ControlClient.parseSessionState(["type": "session_state"]).complete == false)
+                let partial = ControlClient.parseSessionState(["sessions": [open.wire, ["title": "no id"]]])
+                record("session state: an unreadable row makes it incomplete and keeps the readable ones",
+                       partial.complete == false && partial.rows == [open])
+                record("session state: an empty list is complete",
+                       ControlClient.parseSessionState(["sessions": [[String: Any]]()]).complete)
             }
             record("session ref: key first, then sessionId",
                    ControlProtocol.sessionRefs(["key": "K", "sessionId": "r"]) == [.key("K"), .resumeId("r")])

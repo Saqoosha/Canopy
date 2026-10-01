@@ -51,7 +51,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeepAlive")
 /// available here — which is the actual reason this feature spends a real
 /// turn and a few output tokens, rather than a preference.
 ///
-/// **Scope is the open panes, and that is the whole stopping rule.**
+/// **Scope is the open panes (in the daemon, sessions with an attached
+/// client — `targets`), and that is the whole stopping rule.**
 /// There is deliberately no elapsed-time cap, because time is the wrong
 /// axis: a refresh only wastes money on a session the user never comes back
 /// to, and an hour count says nothing about that. A time cap would also

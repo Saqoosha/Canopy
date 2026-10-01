@@ -325,6 +325,10 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             onUIFrame?(frame)
             return
         }
+        if dict["type"] as? String == MirrorUIFrame.type {
+            logger.error("[mirror-client] unreadable \(MirrorUIFrame.type, privacy: .public) frame dropped")
+            return
+        }
         webView?.deliver(dict)
     }
 

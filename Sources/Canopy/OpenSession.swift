@@ -253,8 +253,7 @@ final class OpenSession: Identifiable, Hashable {
         return true
     }
 
-    /// Set when this process started the session's shim itself (the GUI's own
-    /// mirror server does, for another Mac or the phone): not the daemon's.
+    /// Set when this process started the session's shim itself, not the daemon.
     var runsShimHere = false
 
     /// The daemon's `OpenSession.id` for this session, once known.

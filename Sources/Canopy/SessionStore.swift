@@ -982,7 +982,7 @@ final class SessionStore {
         )
     }
 
-    /// What a control `open_session` can set on a new headless session.
+    /// Options for a new headless session (control `open_session`, or an attach's `open`).
     struct HeadlessOptions {
         var model: String? = nil
         var effort: String? = nil
@@ -1006,8 +1006,7 @@ final class SessionStore {
     /// from the cache while the mirror is attached, and forwarded (closing the
     /// channel) once it has left.
     ///
-    /// If the shim dies, `ShimProcess.handleProcessExit` drops its mirrors and
-    /// returns the row to `.dormant`.
+    /// If the shim or its CLI dies, its mirrors are dropped and the row returns to `.dormant`.
     func startHeadlessSession(directory: URL, resumeId: String, isExistingTranscript: Bool, title: String?,
                               options: HeadlessOptions = .init()) -> ShimProcess? {
         if openSessions.contains(where: { $0.resumeId == resumeId }) {
@@ -1098,7 +1097,7 @@ final class SessionStore {
         Task { [weak self] in
             // The row goes only once the daemon has stopped it; otherwise the next push would bring it back.
             switch await control.request("stop_session", Self.daemonRefParams(session)) {
-            case .success:
+            case .success, .failure(.refused("no such session")):  // already gone there
                 self?.closeSession(id, keepingFailure: false, removeRow: true)
             case .failure(let failure):
                 logger.error("stop_session failed: \(String(describing: failure), privacy: .public)")
@@ -1141,6 +1140,8 @@ final class SessionStore {
                 session.resumeIdIsExistingTranscript = true
             }
             if !row.title.isEmpty, row.title != session.title { session.title = row.title }
+            let account = row.accountId.flatMap { ClaudeAccountStore.account(id: $0) }
+            if account?.id != session.claudeAccount?.id { session.claudeAccount = account }
             let activity = RosterSnapshot.activity(fromWireState: row.state)
             session.isThinking = activity == .working
             session.isAsking = activity == .asking

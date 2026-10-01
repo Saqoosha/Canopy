@@ -14,8 +14,14 @@ enum DaemonPaths {
             .appendingPathComponent("Library/Application Support/Canopy", isDirectory: true)
             .appendingPathComponent("daemon-\(bundleId).sock").path
         if preferred.utf8.count <= maxSocketPathBytes { return preferred }
-        // Per-user so two accounts on one Mac do not collide; the uid keeps it short.
-        return "/tmp/canopy-\(getuid())-\(bundleId).sock"
+        // The per-user temp dir is 0700, so another account cannot plant a socket there first.
+        return (userTempDir() as NSString).appendingPathComponent("canopy-\(bundleId).sock")
+    }
+
+    private static func userTempDir() -> String {
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard confstr(_CS_DARWIN_USER_TEMP_DIR, &buf, buf.count) > 0 else { return NSTemporaryDirectory() }
+        return String(cString: buf)
     }
 
     /// The daemon's Tailscale port, or nil for no TCP listener. Off while

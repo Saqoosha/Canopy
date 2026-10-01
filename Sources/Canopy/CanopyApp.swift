@@ -1236,7 +1236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Daemon sessions outlive this quit: nothing stops, and the layout is always worth keeping.
             Self.shouldSaveRestoreSnapshot = true
         }
-        // No active sessions → no alert, shouldSaveRestoreSnapshot stays false.
+        // No active sessions and no paned daemon session → no alert, shouldSaveRestoreSnapshot stays false.
         // That used to mean "nothing to restore" and no longer quite does: a
         // `.dormant` session is an open row with no shim, so a store holding
         // only those reaches here with rows worth saving and gets none of them

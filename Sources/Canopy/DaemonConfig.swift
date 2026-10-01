@@ -1,7 +1,7 @@
 import Foundation
 
 /// The settings that shape the daemon's own server (the Tailscale listener
-/// and the bypass gate), parsed from the shared settings.json on each tick.
+/// and the bypass gate), parsed from the shared settings.json whenever it changes.
 /// `CanopySettings.reload(from:)` follows the rest from the same read.
 struct DaemonConfig: Equatable {
     var mirrorEnabled: Bool

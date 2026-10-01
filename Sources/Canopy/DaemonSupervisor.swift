@@ -20,7 +20,7 @@ enum DaemonSupervisor {
     /// start another daemon racing for the same socket.
     @MainActor private static var inFlight: Task<Bool, Never>?
 
-    /// True once the socket answers; gives up after 10 s. `awaitLaunchd`: the daemon announced
+    /// True once the socket answers; gives up 10 s after starting it. `awaitLaunchd`: the daemon announced
     /// an upgrade restart, which launchd performs, so give it up to 15 s before starting one here.
     @MainActor
     static func ensureRunning(awaitLaunchd: Bool = false) async -> Bool {

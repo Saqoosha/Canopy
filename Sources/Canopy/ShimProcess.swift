@@ -8073,6 +8073,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         logger.error("CLI subprocess died (code \(exitCode)), stopping shim")
         resetActivityState()
         stop()
+        // Headless: `stop()` makes `handleProcessExit` return early, so free the row here.
+        if delegate == nil, let session = boundSession, session.shim === self, session.webView == nil {
+            session.shim = nil
+            session.status = .dormant
+            return
+        }
         // `delegate` is a weak ref to the view Coordinator, which can be
         // deallocated while this shim (owned by `OpenSession`) lives on. A
         // dangling nil here makes the delegate calls below no-ops — the

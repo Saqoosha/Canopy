@@ -180,15 +180,21 @@ final class ControlClient {
             logger.error("daemon refused hello: \(dict["message"] as? String ?? "?", privacy: .public)")
             connection?.cancel()
         case "session_state":
-            let raw = dict["sessions"] as? [[String: Any]] ?? []
-            let rows = raw.compactMap(ControlProtocol.SessionRow.init(wire:))
-            if rows.count != raw.count { logger.error("\(raw.count - rows.count) unreadable session row(s) from the daemon") }
-            onSessionState?(rows, rows.count == raw.count)
+            let (rows, complete) = Self.parseSessionState(dict)
+            if !complete { logger.error("incomplete session_state from the daemon; keeping rows it did not list") }
+            onSessionState?(rows, complete)
         case "response":
             if let (id, result) = correlator.finish(dict) { waiters.removeValue(forKey: id)?.resume(returning: result) }
         default:
             break
         }
+    }
+
+    /// Incomplete when `sessions` is missing or a row is unreadable: absence then proves nothing.
+    nonisolated static func parseSessionState(_ dict: [String: Any]) -> (rows: [ControlProtocol.SessionRow], complete: Bool) {
+        guard let raw = dict["sessions"] as? [[String: Any]] else { return ([], false) }
+        let rows = raw.compactMap(ControlProtocol.SessionRow.init(wire:))
+        return (rows, rows.count == raw.count)
     }
 
     /// False when nothing could be sent (no connection, or the payload does not serialize).

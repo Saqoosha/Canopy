@@ -87,6 +87,7 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         }
         logger.notice("restarting for build \(onDisk, privacy: .public) (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public))")
         upgradeTimer?.invalidate()
+        configTimer?.invalidate()  // a reload in the next second would re-open the listeners
         server?.announceRestart()
         // Sends are asynchronous: give the notice a moment to leave before the process does.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
@@ -111,7 +112,10 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         server.refreshesToken = true
         server.bypassAllowed = { [weak self] in self?.config.allowBypass ?? false }
         // Exiting non-zero lets launchd (KeepAlive SuccessfulExit=false) start a fresh daemon.
-        server.onLocalFailure = { exit(1) }
+        server.onLocalFailure = { [weak self] in
+            self?.shutDown()
+            exit(1)
+        }
         self.server = server
         // Exit 0 only for "another daemon serves it", which launchd must not restart;
         // any other failure exits 1 so it gets another try.
@@ -175,7 +179,8 @@ final class DaemonDelegate: NSObject, NSApplicationDelegate {
         guard server != nil, configModified == nil || modified != configModified else { return }
         // One read for both, so the two cannot see different writes.
         let data = try? Data(contentsOf: settingsFile)
-        guard let parsed = DaemonConfig.parse(data) else {
+        // A file that exists but cannot be read is not a missing one (which means defaults).
+        guard modified == nil || data != nil, let parsed = DaemonConfig.parse(data) else {
             // Usually a read that landed mid-write, which the next tick heals; logged once per
             // version in case it is a hand edit that broke the file and freezes every setting.
             if modified != unreadableModified {

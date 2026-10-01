@@ -152,7 +152,6 @@ final class CanopySettings {
         didSet { save() }
     }
 
-
     /// Other Macs this one can attach to: machine id → `host:port`. The
     /// password for each lives in the Keychain (`MirrorAccess.peerToken`).
     var mirrorPeers: [String: String] = [:] {

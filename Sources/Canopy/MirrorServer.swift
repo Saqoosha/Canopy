@@ -97,7 +97,7 @@ final class MirrorServer {
     private(set) var boundAddress: (host: String, port: UInt16)?
     /// The address a not-yet-ready listener is binding; a second start for it must not cancel the first.
     private(set) var pendingAddress: (host: String, port: UInt16)?
-    /// Read once per bind so an attach never touches the Keychain; `resetPassword` replaces it.
+    /// `resetPassword` replaces it; with `refreshesToken` (the daemon) it is re-read from the Keychain.
     fileprivate var token: String
     /// Daemon only: a `hello` first line opens a control connection. A GUI that still
     /// runs its own listener (only when its sessions are not in the daemon) refuses it.
@@ -105,7 +105,7 @@ final class MirrorServer {
     /// Daemon only: re-read the password from the Keychain on each TCP
     /// connection, because a reset happens in the GUI process.
     var refreshesToken = false
-    /// This Mac's bypass-permissions opt-in, asked per `open_session`.
+    /// This Mac's bypass-permissions opt-in, asked per new session (control `open_session` or an attach's `open`).
     var bypassAllowed: () -> Bool = { false }
     /// Daemon only: the local socket stopped listening after it was up.
     var onLocalFailure: (() -> Void)?
@@ -126,8 +126,8 @@ final class MirrorServer {
 
     /// A reset in the GUI replaces the Keychain item; the old password must stop working here too.
     func refreshToken() {
-        let current = MirrorAccess.token(createIfMissing: false) ?? ""
-        guard current != token else { return }
+        // A failed read is not a change: dropping every client on it would end live sessions.
+        guard let current = MirrorAccess.token(createIfMissing: false), current != token else { return }
         logger.notice("[mirror-server] password changed; dropping TCP clients")
         token = current
         for connection in connections where !connection.trustsPeer {
