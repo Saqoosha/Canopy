@@ -14,10 +14,71 @@ final class MirrorServerStatus {
         case noPassword
         case listening(host: String, port: UInt16)
         case failed(String)
+        /// GUI only: waiting for the daemon's first answer.
+        case checking
+        /// GUI only: the daemon could not be asked, and why.
+        case unavailable(String)
+
+        /// The daemon's listener, as `mirror_status` reports it to the GUI.
+        var wire: [String: Any] {
+            switch self {
+            case .off: ["state": "off"]
+            case .noTailscale: ["state": "noTailscale"]
+            case .noPassword: ["state": "noPassword"]
+            case .listening(let host, let port): ["state": "listening", "host": host, "port": Int(port)]
+            case .failed(let reason): ["state": "failed", "reason": reason]
+            case .checking: ["state": "checking"]
+            case .unavailable(let reason): ["state": "unavailable", "reason": reason]
+            }
+        }
+
+        init?(wire: [String: Any]) {
+            switch wire["state"] as? String {
+            case "off": self = .off
+            case "noTailscale": self = .noTailscale
+            case "noPassword": self = .noPassword
+            case "listening":
+                guard let host = wire["host"] as? String, let raw = wire["port"] as? Int,
+                      let port = UInt16(exactly: raw) else { return nil }
+                self = .listening(host: host, port: port)
+            case "failed": self = .failed(wire["reason"] as? String ?? "unknown")
+            case "checking": self = .checking
+            case "unavailable": self = .unavailable(wire["reason"] as? String ?? "unknown")
+            default: return nil
+            }
+        }
     }
 
     static let shared = MirrorServerStatus()
     var state: State = .off
+
+    /// Shown while the GUI cannot reach the daemon that owns the listener.
+    static let daemonUnreachable = "Canopy's background service is not running"
+
+    /// In the GUI whose sessions run in the daemon: the listener is the daemon's, so ask it.
+    func refreshFromDaemon(_ control: ControlClient?) async {
+        guard let control else {
+            state = .unavailable(Self.daemonUnreachable)
+            return
+        }
+        switch await control.request("mirror_status") {
+        case .success(let result):
+            guard let raw = result["status"] as? [String: Any], let reported = State(wire: raw) else {
+                state = .unavailable("The background service reported a status this app does not know")
+                return
+            }
+            state = reported
+        case .failure(.refused("unknown verb")):
+            // The daemon still runs a build from before this one.
+            state = .unavailable(Self.daemonOutOfDate)
+        case .failure(.refused(let message)):
+            state = .unavailable(message)
+        case .failure:
+            state = .unavailable(Self.daemonUnreachable)
+        }
+    }
+
+    static let daemonOutOfDate = "Canopy's background service is out of date; restart the Mac or log out and in"
 }
 
 /// Listens for remote Canopy attach clients and fans shim traffic over TCP NDJSON.
@@ -25,15 +86,29 @@ final class MirrorServerStatus {
 final class MirrorServer {
     private let store: SessionStore
     private var listener: NWListener?
-    /// The running server, for Settings; `NSApp.delegate` is not the adaptor's instance (see memory).
+    /// The running server, for `resetPassword`; nil in a GUI whose sessions run in the
+    /// daemon, which picks up a new password on its next config tick.
     private(set) static weak var current: MirrorServer?
     private var connections: [MirrorConnection] = []
+    /// The daemon's local Unix socket, alongside the TCP `listener`.
+    private var localListener: NWListener?
+    private var localSocketPath: String?
     /// The address the listener has actually reached `.ready` on; nil while binding or after a failure.
     private(set) var boundAddress: (host: String, port: UInt16)?
     /// The address a not-yet-ready listener is binding; a second start for it must not cancel the first.
     private(set) var pendingAddress: (host: String, port: UInt16)?
-    /// Read once per bind so an attach never touches the Keychain; `resetPassword` replaces it.
+    /// `resetPassword` replaces it; with `refreshesToken` (the daemon) it is re-read from the Keychain.
     fileprivate var token: String
+    /// Daemon only: a `hello` first line opens a control connection. A GUI that still
+    /// runs its own listener (only when its sessions are not in the daemon) refuses it.
+    var acceptsControl = false
+    /// Daemon only: re-read the password from the Keychain on each TCP
+    /// connection, because a reset happens in the GUI process.
+    var refreshesToken = false
+    /// This Mac's bypass-permissions opt-in, asked per new session (control `open_session` or an attach's `open`).
+    var bypassAllowed: () -> Bool = { false }
+    /// Daemon only: the local socket stopped listening after it was up.
+    var onLocalFailure: (() -> Void)?
 
     init(store: SessionStore, token: String) {
         self.store = store
@@ -49,6 +124,18 @@ final class MirrorServer {
         return true
     }
 
+    /// A reset in the GUI replaces the Keychain item; the old password must stop working here too.
+    func refreshToken() {
+        // A failed read is not a change: dropping every client on it would end live sessions.
+        guard let current = MirrorAccess.token(createIfMissing: false), current != token else { return }
+        logger.notice("[mirror-server] password changed; dropping TCP clients")
+        token = current
+        for connection in connections where !connection.trustsPeer {
+            connection.cancelFromServer()
+        }
+        connections.removeAll { !$0.trustsPeer }
+    }
+
     private func dropAllConnections() {
         for connection in connections {
             connection.cancelFromServer()
@@ -57,7 +144,7 @@ final class MirrorServer {
     }
 
     func start(host: String, port: UInt16) {
-        stop()
+        stopTCP()
         pendingAddress = (host, port)
         do {
             let parameters = NWParameters.tcp
@@ -85,26 +172,108 @@ final class MirrorServer {
             }
             listener.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor in
-                    self?.accept(connection)
+                    self?.accept(connection, trustsPeer: false)
                 }
             }
             listener.start(queue: .main)
             self.listener = listener
         } catch {
             logger.error("[mirror-server] start failed: \(error.localizedDescription, privacy: .public)")
+            // No listener will report, so nothing else would clear it and the daemon would wait forever.
+            pendingAddress = nil
             MirrorServerStatus.shared.state = .failed(error.localizedDescription)
         }
     }
 
     func stop() {
-        for connection in connections {
-            connection.cancelFromServer()
+        stopTCP()
+    }
+
+    /// Tells every attached client the daemon is about to restart for an upgrade, and stops
+    /// accepting: a pane that re-attaches must find the socket gone (so it waits for the new
+    /// daemon) rather than be accepted by this one and dropped again, and nothing new may
+    /// start in the moment before exit. Open connections stay until the shims stop.
+    func announceRestart() {
+        for connection in connections where !connection.attachedSessionId.isEmpty {
+            connection.deliver(["type": DaemonUpgrade.restartingFrameType])
         }
-        connections.removeAll()
         listener?.cancel()
         listener = nil
         boundAddress = nil
         pendingAddress = nil
+        localListener?.cancel()
+        localListener = nil
+        if let path = localSocketPath { try? FileManager.default.removeItem(atPath: path) }
+        localSocketPath = nil
+    }
+
+    /// Stops the TCP listener and its connections; local-socket clients stay.
+    func stopTCP() {
+        for connection in connections where !connection.trustsPeer {
+            connection.cancelFromServer()
+        }
+        connections.removeAll { !$0.trustsPeer }
+        listener?.cancel()
+        listener = nil
+        boundAddress = nil
+        pendingAddress = nil
+    }
+
+    /// The daemon's own socket. Trusted by file permission (0600), so a
+    /// connection from it needs no password. False when it cannot listen,
+    /// including when another process already accepts on `socketPath`.
+    @discardableResult
+    func startLocal(socketPath: String) -> Bool {
+        stopLocal()
+        if DaemonPaths.socketIsLive(path: socketPath) {
+            logger.error("[mirror-server] another daemon is already serving the local socket")
+            return false
+        }
+        // A crashed daemon leaves its socket file; binding over it fails with EADDRINUSE.
+        try? FileManager.default.removeItem(atPath: socketPath)
+        try? FileManager.default.createDirectory(
+            atPath: (socketPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        do {
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .unix(path: socketPath)
+            let listener = try NWListener(using: parameters)
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                MainActor.assumeIsolated {
+                    guard let self, let listener, self.localListener === listener else { return }
+                    switch state {
+                    case .ready:
+                        chmod(socketPath, 0o600)
+                        logger.notice("[mirror-server] local socket ready")
+                    case .waiting(let error), .failed(let error):
+                        logger.error("[mirror-server] local socket cannot bind: \(error.localizedDescription, privacy: .public)")
+                        self.onLocalFailure?()
+                    default:
+                        break
+                    }
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                Task { @MainActor in self?.accept(connection, trustsPeer: true) }
+            }
+            listener.start(queue: .main)
+            localListener = listener
+            localSocketPath = socketPath
+        } catch {
+            logger.error("[mirror-server] local socket start failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+        return true
+    }
+
+    func stopLocal() {
+        for connection in connections where connection.trustsPeer {
+            connection.cancelFromServer()
+        }
+        connections.removeAll { $0.trustsPeer }
+        localListener?.cancel()
+        localListener = nil
+        if let path = localSocketPath { try? FileManager.default.removeItem(atPath: path) }
+        localSocketPath = nil
     }
 
     /// Whether any connection is still mirroring this session, so its deferred images must stay.
@@ -116,8 +285,9 @@ final class MirrorServer {
         connections.removeAll { $0 === connection }
     }
 
-    private func accept(_ connection: NWConnection) {
-        let mirror = MirrorConnection(connection: connection, store: store, server: self)
+    private func accept(_ connection: NWConnection, trustsPeer: Bool) {
+        if !trustsPeer, refreshesToken { refreshToken() }
+        let mirror = MirrorConnection(connection: connection, store: store, server: self, trustsPeer: trustsPeer)
         connections.append(mirror)
         mirror.start()
     }
@@ -176,16 +346,41 @@ final class MirrorConnection: MirrorSink {
     /// actor before the first send is enqueued; every send captures it by value on the way out.
     private var compressOutbound = false
     private var cleanedUp = false
+    /// Set once the first line was `hello`; every later line goes here instead of to a shim.
+    private var control: ControlSession?
 
     /// Whether a client identity is a phone. Absent `client` (older phones) is one; `"mac"` is not.
     nonisolated static func appliesPhoneReplayRewrites(client: String?) -> Bool {
         client != "mac"
     }
 
-    init(connection: NWConnection, store: SessionStore, server: MirrorServer) {
+    /// True for a connection from the daemon's local Unix socket, which the
+    /// file mode already restricts to this user. Every password check below
+    /// passes for it.
+    let trustsPeer: Bool
+
+    init(connection: NWConnection, store: SessionStore, server: MirrorServer, trustsPeer: Bool) {
         self.connection = connection
         self.store = store
         self.server = server
+        self.trustsPeer = trustsPeer
+    }
+
+    var isLocalClient: Bool { trustsPeer }
+
+    /// Set from the attach's `ui: true`, like `filesRequested`.
+    private(set) var acceptsUI = false
+
+    func deliverUI(_ frame: MirrorUIFrame) {
+        guard acceptsUI else { return }
+        sendJSONObject(frame.wire)
+    }
+
+    /// The mirror password check, which a local-socket peer skips.
+    private func isAuthorized(_ dict: [String: Any]) -> Bool {
+        if trustsPeer { return true }
+        guard let provided = dict["token"] as? String, let expected = server?.token else { return false }
+        return MirrorAccess.tokensMatch(provided, expected)
     }
 
     func start() {
@@ -257,6 +452,10 @@ final class MirrorConnection: MirrorSink {
             logger.error("[mirror-server] JSON root is not an object")
             return
         }
+        if let control {
+            control.handle(dict)
+            return
+        }
         if !didAttach {
             handleAttach(dict)
             return
@@ -265,16 +464,17 @@ final class MirrorConnection: MirrorSink {
             serveAsset(dict)
             return
         }
+        if let answer = MirrorUIAnswer(wire: dict) {
+            shim?.receiveUIAnswer(answer, from: self)
+            return
+        }
         shim?.receiveFromMirror(dict, from: self)
     }
 
     /// The one line a `list_recents` connection gets before it is closed.
     /// Same password as an attach: it names every project folder here.
     private func answerRecents(_ dict: [String: Any]) {
-        guard let provided = dict["token"] as? String,
-              let expected = server?.token,
-              MirrorAccess.tokensMatch(provided, expected)
-        else {
+        guard isAuthorized(dict) else {
             logger.error("[mirror-server] list_recents refused: wrong or missing password")
             failAttach("unauthorized")
             return
@@ -303,18 +503,31 @@ final class MirrorConnection: MirrorSink {
             } else if let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen {
                 shim = store.startHeadlessSession(directory: entry.projectDirectory, resumeId: sessionId,
                                                   isExistingTranscript: true, title: entry.title)
+            } else if !store.recents.contains(where: { $0.id == sessionId }), Self.isSessionIdShaped(sessionId),
+                      let path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId),
+                      let cwd = ClaudeSessionHistory.cwd(atPath: path),
+                      FileManager.default.fileExists(atPath: cwd) {
+                // Recents is refreshed asynchronously and may not hold a session that was just
+                // created, teleported or restored. One Recents lists and refuses (`canOpen`) stays refused.
+                shim = store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
+                                                  isExistingTranscript: true, title: nil)
             } else {
                 logger.error("[mirror-server] open refused: \(sessionId, privacy: .public) is not a session here")
                 return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
             }
-        case .new(let cwd):
+        case .new(let cwd, let options):
+            if let refusal = options.refusal(allowBypass: server?.bypassAllowed() ?? false) {
+                logger.error("[mirror-server] open refused: \(refusal, privacy: .public)")
+                return .failure(OpenFailure(refusal))
+            }
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 logger.error("[mirror-server] open refused: no folder at \(cwd, privacy: .private)")
                 return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
             }
             shim = store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
-                                              isExistingTranscript: false, title: nil)
+                                              isExistingTranscript: false, title: nil,
+                                              options: SessionStore.HeadlessOptions(options))
         }
         return shim.map { .success($0) } ?? .failure(OpenFailure(MirrorOpenRequest.startFailed))
     }
@@ -325,6 +538,10 @@ final class MirrorConnection: MirrorSink {
     }
 
     private func handleAttach(_ dict: [String: Any]) {
+        if dict["type"] as? String == ControlProtocol.helloType {
+            openControl(dict)
+            return
+        }
         if dict["type"] as? String == MirrorRecents.listType {
             answerRecents(dict)
             return
@@ -335,18 +552,20 @@ final class MirrorConnection: MirrorSink {
             failAttach("expected attach")
             return
         }
-        guard let provided = dict["token"] as? String,
-              let expected = server?.token,
-              MirrorAccess.tokensMatch(provided, expected)
-        else {
+        guard isAuthorized(dict) else {
             logger.error("[mirror-server] attach refused: wrong or missing password")
             failAttach("unauthorized")
             return
         }
         let open = store.openSessions.map { "\($0.resumeId)(shim=\($0.shim != nil))" }.joined(separator: ", ")
-        var existing = store.openSessions.first(where: { $0.resumeId == sessionId })?.shim.flatMap { $0.isLive ? $0 : nil }
-        if existing == nil, let request = MirrorOpenRequest(wire: dict["open"] as? [String: Any]) {
-            switch startRequestedSession(request, sessionId: sessionId) {
+        // `key` (the daemon's `OpenSession.id`) outranks `sessionId`, which the CLI may have replaced.
+        let named = store.openSession(for: ControlProtocol.sessionRefs(dict))
+        var existing = named?.shim.flatMap { $0.isLive ? $0 : nil }
+        if existing == nil, var request = MirrorOpenRequest(wire: dict["open"] as? [String: Any]) {
+            // A session found but not running is restarted as itself, under its current id;
+            // opening under the client's id could start a duplicate or miss a replaced placeholder.
+            if named != nil { request = .resume }
+            switch startRequestedSession(request, sessionId: named?.resumeId ?? sessionId) {
             case .success(let shim): existing = shim
             case .failure(let failure):
                 failAttach(failure.message)
@@ -361,21 +580,24 @@ final class MirrorConnection: MirrorSink {
         didAttach = true
         isMacClient = !Self.appliesPhoneReplayRewrites(client: dict["client"] as? String)
         self.shim = shim
-        attachedSessionId = sessionId
+        // The session's current id, which differs from `sessionId` when it was found by key.
+        let resolvedId = shim.boundSession?.resumeId ?? sessionId
+        attachedSessionId = resolvedId
         compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
         filesRequested = dict["files"] as? Bool == true
         fetchesImages = isMacClient && dict["images"] as? Bool == true
+        acceptsUI = isMacClient && dict["ui"] as? Bool == true
         // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
         let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
         sendJSONObject([
             "type": "attach_ok",
-            "sessionId": sessionId,
+            "sessionId": resolvedId,
             // The id the roster publishes this session under. A new session's
             // `sessionId` above is a placeholder the CLI's id replaces, and
             // this is what lets the client follow it.
             "hostSessionId": shim.boundSession?.id.uuidString ?? "",
-            "html": WebViewContainer.entryHTML(resumeSessionId: sessionId, includeKeychainAuth: shim.claudeAccount == nil) {
+            "html": WebViewContainer.entryHTML(resumeSessionId: resolvedId, includeKeychainAuth: shim.claudeAccount == nil) {
                 "\(Self.assetScheme)://ext/\($0)"
             },
             "userScripts": WebViewContainer.sessionUserScripts.map { ["source": $0.source, "atDocumentStart": $0.atDocumentStart] },
@@ -389,7 +611,7 @@ final class MirrorConnection: MirrorSink {
         shim.attachMirror(self)
         if !prefetchId.isEmpty {
             // Starts the extension reading the transcript while the phone is still loading the page.
-            shim.receiveFromMirror(Self.prefetchRequest(sessionId: sessionId, requestId: prefetchId), from: self)
+            shim.receiveFromMirror(Self.prefetchRequest(sessionId: resolvedId, requestId: prefetchId), from: self)
         }
         // Opt-in: a client that does not know the frame would post it into its page as a webview message.
         if dict["status"] as? Bool == true, let data = shim.statusBarData {
@@ -403,6 +625,11 @@ final class MirrorConnection: MirrorSink {
             publisher.start()
         }
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")
+    }
+
+    /// A client's session id before it is joined into a path: the CLI's ids are UUIDs.
+    nonisolated static func isSessionIdShaped(_ id: String) -> Bool {
+        UUID(uuidString: id) != nil
     }
 
     /// The request a page sends for its transcript, as captured from the extension webview (2.1.270).
@@ -473,6 +700,42 @@ final class MirrorConnection: MirrorSink {
         }
     }
 
+    /// A `hello` first line makes this a control connection (`ControlSession`).
+    private func openControl(_ dict: [String: Any]) {
+        guard server?.acceptsControl == true else {
+            logger.error("[mirror-server] hello refused: this listener has no control API")
+            failHello("no control API here")
+            return
+        }
+        switch ControlProtocol.checkHello(dict, trustsPeer: trustsPeer, expectedToken: server?.token) {
+        case .ok:
+            control = ControlSession(store: store, isLocal: trustsPeer, allowBypass: server?.bypassAllowed ?? { false }) { [weak self] payload in
+                self?.sendJSONObject(payload)
+            }
+            didAttach = true
+            compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
+            sendJSONObject(["type": "hello_ok", "protocolVersion": ControlProtocol.version,
+                            "machineId": MachineIdentity.stableId() ?? "",
+                            // The build this process runs, which an app update does not change.
+                            "build": DaemonUpgrade.launchedBuild ?? ""])
+            logger.notice("[mirror-server] control connection opened (local=\(self.trustsPeer))")
+        case .unauthorized:
+            logger.error("[mirror-server] hello refused: wrong or missing password")
+            failHello("unauthorized")
+        case .versionMismatch(let client, let server):
+            logger.error("[mirror-server] hello refused: protocol \(client) vs \(server)")
+            failHello("protocol version \(client) is not \(server)")
+        }
+    }
+
+    private func failHello(_ message: String) {
+        let data = (try? JSONSerialization.data(withJSONObject: ["type": "hello_error", "message": message])) ?? Data()
+        connection.send(content: data + Data([0x0A]), completion: .contentProcessed { [connection] _ in
+            connection.cancel()
+        })
+        cleanup()
+    }
+
     private func failAttach(_ message: String) {
         // Cancel only once the refusal has left the send queue; cancelling
         // right after `send` drops the line (measured: the client saw a
@@ -512,6 +775,8 @@ final class MirrorConnection: MirrorSink {
     private func cleanup() {
         guard !cleanedUp else { return }
         cleanedUp = true
+        control?.stop()
+        control = nil
         statusPublisher?.stop()
         statusPublisher = nil
         usagePublisher?.stop()

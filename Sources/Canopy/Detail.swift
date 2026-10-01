@@ -448,9 +448,50 @@ private struct SessionFailureBanner: View {
     }
 }
 
+/// Shown on the launcher while Canopy lacks Full Disk Access; see `FullDiskAccess`.
+private struct FullDiskAccessBanner: View {
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.shield")
+                .foregroundStyle(.orange)
+                .font(.system(size: 12))
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Give Canopy Full Disk Access")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Without it, macOS asks again every time Canopy's background service restarts, and sessions wait until someone clicks Allow. Add Canopy in Full Disk Access, then reopen it.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Open Privacy Settings") { NSWorkspace.shared.open(FullDiskAccess.settingsURL) }
+                    .controlSize(.small)
+            }
+            Spacer(minLength: 8)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss until Canopy restarts")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.orange.opacity(0.10))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.orange.opacity(0.25)).frame(height: 1)
+        }
+    }
+}
+
 private struct DetailLauncher: View {
     @Bindable var store: SessionStore
     @State private var localAppState = AppState()
+    /// Read when the launcher appears; a grant takes effect only after a relaunch anyway.
+    @State private var lacksFullDiskAccess = false
+    private static var fullDiskAccessDismissed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -459,7 +500,17 @@ private struct DetailLauncher: View {
                     store.lastSessionFailure = nil
                 }
             }
+            if lacksFullDiskAccess {
+                FullDiskAccessBanner {
+                    Self.fullDiskAccessDismissed = true
+                    lacksFullDiskAccess = false
+                }
+            }
             launcher
+        }
+        .onAppear {
+            lacksFullDiskAccess = OpenSession.localSessionsRunInDaemon && !Self.fullDiskAccessDismissed
+                && !FullDiskAccess.isGranted()
         }
     }
 

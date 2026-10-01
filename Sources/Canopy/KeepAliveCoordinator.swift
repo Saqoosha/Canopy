@@ -51,7 +51,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeepAlive")
 /// available here — which is the actual reason this feature spends a real
 /// turn and a few output tokens, rather than a preference.
 ///
-/// **Scope is the open panes, and that is the whole stopping rule.**
+/// **Scope is the open panes (in the daemon, sessions with an attached
+/// client — `targets`), and that is the whole stopping rule.**
 /// There is deliberately no elapsed-time cap, because time is the wrong
 /// axis: a refresh only wastes money on a session the user never comes back
 /// to, and an hour count says nothing about that. A time cap would also
@@ -127,6 +128,26 @@ final class KeepAliveCoordinator {
 
     private init() {}
 
+    /// The daemon's sessions worth keeping warm: running, with a client attached.
+    /// It has no panes; an attached client is its "someone is coming back".
+    static func daemonTargets(_ sessions: [OpenSession]) -> [OpenSession] {
+        sessions.filter { isDaemonTarget(mirrorCount: $0.shim?.mirrorCount) }
+    }
+
+    /// `mirrorCount` nil: no shim running.
+    nonisolated static func isDaemonTarget(mirrorCount: Int?) -> Bool {
+        (mirrorCount ?? 0) > 0
+    }
+
+    /// Where `tick` looks. The GUI keeps the pane scope; the daemon sets `daemonTargets`.
+    var targets: (SessionStore) -> [(label: String, session: OpenSession)] = { store in
+        store.panes.enumerated().compactMap { index, pane in
+            guard case .session(let id) = pane.content,
+                  let session = store.openSessions.first(where: { $0.id == id }) else { return nil }
+            return ("pane \(index)", session)
+        }
+    }
+
     /// Begin the tick loop. Idempotent — a second call is ignored rather
     /// than starting a second self-rescheduling chain, which would double
     /// the tick rate permanently with no way to wind back down.
@@ -182,13 +203,10 @@ final class KeepAliveCoordinator {
         // latch that otherwise cannot release at all. The read is inside
         // the loop, on the pane's own account.
         var sent = 0
-        var sessionPanes = 0
-        for (index, pane) in store.panes.enumerated() {
-            guard case .session(let id) = pane.content else { continue }
-            sessionPanes += 1
-            guard let session = store.openSessions.first(where: { $0.id == id }),
-                  let shim = session.shim
-            else { continue }
+        let candidates = targets(store)
+        let sessionPanes = candidates.count
+        for (label, session) in candidates {
+            guard let shim = session.shim else { continue }
             // The ceiling is the ACCOUNT's, so read the record this session
             // writes into. A remote session whose account has not resolved
             // yet reads this Mac's, which can permit wrongly (local 10 %,
@@ -205,7 +223,7 @@ final class KeepAliveCoordinator {
             // buffer. The decision that matters — an actual send — is
             // logged at info by `requestKeepAlive`.
             if let reason = shim.keepAliveIneligibilityReason(now: now, interval: interval, rateLimitPct: rateLimitPct) {
-                logger.debug("pane \(index, privacy: .public): keep-alive skipped — \(reason, privacy: .public)")
+                logger.debug("\(label, privacy: .public): keep-alive skipped — \(reason, privacy: .public)")
                 continue
             }
             shim.requestKeepAlive(at: now)

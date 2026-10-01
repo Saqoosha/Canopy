@@ -12,12 +12,18 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "Roster")
 enum RosterNotifier {
     enum Kind: String { case completed, asking }
 
+    /// False in a GUI whose local sessions run in the daemon. The shims it
+    /// still runs (SSH remote) are not on the daemon's roster, so the phone's
+    /// Allow/Deny or reply to their push would be routed to the daemon and
+    /// refused; with no push and no `CANOPY_PANE`, Pager covers them instead.
+    nonisolated(unsafe) static var enabledInProcess = true
+
     /// Every guard `post` needs before it can actually send, minus the
     /// network call itself — pulled out so `willPost` and `post` read from
     /// one place and can't drift apart. `nil` means "would not send."
     private static func resolvedTarget() -> (machineId: String, url: URL, secret: String)? {
         let settings = CanopySettings.shared
-        guard settings.rosterEnabled,
+        guard enabledInProcess, settings.rosterEnabled,
               let machineId = MachineIdentity.stableId(),
               var components = URLComponents(string: settings.rosterEndpoint)
         else { return nil }

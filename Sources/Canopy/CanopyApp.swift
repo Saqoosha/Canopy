@@ -6,7 +6,6 @@ import UserNotifications
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "App")
 
-@main
 struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
@@ -42,6 +41,7 @@ struct CanopyApp: App {
             // window, `startRosterPublisher` is idempotent.
             .task { appDelegate.startRosterPublisher(store: sidebarStore) }
             .task { appDelegate.startMirrorServer(store: sidebarStore) }
+            .task { await appDelegate.startDaemonControl(store: sidebarStore) }
             .task { appDelegate.startRemoteRosterWatcher(store: sidebarStore) }
             // Reads ~/.claude/sessions for the names other Claude sessions use
             // to message these ones. Idempotent, so a re-run of this .task is
@@ -435,6 +435,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var remoteRosterWatcher: RemoteRosterWatcher?
     private var mirrorServer: MirrorServer?
     private var mirrorActivationObserver: NSObjectProtocol?
+    private var daemonControl: ControlClient?
+
+    /// Connects to this Mac's daemon, starting it if needed, and keeps the Open
+    /// list in step with it. Same probe guard as the other `.task`s: it launches
+    /// a process and opens a socket.
+    @MainActor
+    func startDaemonControl(store: SessionStore) async {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else { return }
+        #endif
+        guard daemonControl == nil else { return }
+        let client = ControlClient(endpoint: .unix(path: DaemonPaths.current), token: nil)
+        client.onSessionState = { [weak store] rows, complete in store?.applyDaemonSessions(rows, complete: complete) }
+        daemonControl = client
+        store.daemonControl = client
+        _ = await DaemonSupervisor.ensureRunning()
+        client.start()
+    }
 
     /// Same probe guard as `startRosterPublisher`, for the same reason: this
     /// `.task` runs before `applicationDidFinishLaunching` exits the probe,
@@ -482,6 +500,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func syncMirrorServer(store: SessionStore) {
         let settings = CanopySettings.shared
+        // The daemon listens on this port now and holds the sessions a client would attach to;
+        // Settings reads its status over the control connection (`mirror_status`).
+        guard !OpenSession.localSessionsRunInDaemon else {
+            mirrorServer?.stop()
+            mirrorServer = nil
+            return
+        }
         guard settings.mirrorEnabled, let port = UInt16(exactly: settings.mirrorPort), port != 0 else {
             mirrorServer?.stop()
             mirrorServer = nil
@@ -542,87 +567,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         #endif
         guard rosterPublisher == nil else { return }
+        // The daemon holds this Mac's sessions and publishes them; a second
+        // publisher under the same machine id would fight it over one roster.
+        guard !OpenSession.localSessionsRunInDaemon else {
+            logger.notice("roster: left to the daemon, which holds this Mac's sessions (its own log says whether it publishes)")
+            return
+        }
         let publisher = RosterPublisher(store: store, settings: CanopySettings.shared)
         rosterPublisher = publisher
         publisher.start()
-        // The publisher owns the socket but not the sessions; this closure is
-        // the seam between the two, so a reply arriving from the phone can
-        // reach the shim it addresses. Every branch that reports a FAILURE
-        // from a live store logs why — the phone has no other way to learn
-        // its message never landed. (The shutting-down branch does not: there
-        // is no session to name and the subsystem is being torn down.) Since the
-        // queue landed, "did not inject" is no longer the same as "did not
-        // land": a queued prompt is held by this Mac and reported as a
-        // success, and it is the one branch here that deliberately logs
-        // nothing, because `submitPhoneReply` has already logged its depth
-        // and its gate — strictly more than this site knows.
-        //
-        // The refusals below are this closure's own three (no store, no
-        // session, no shim); `submitPhoneReply` adds the ones waiting cannot
-        // fix — blank text, a full queue, and a session waiting on a human.
-        // The session id is safe to log `.public`; the reply TEXT never is
-        // — it is user content and appears in none of these lines.
-        // Every branch returns an outcome now. Each of these used to be a
-        // bare `return` that logged locally and told the phone nothing, so a
-        // reply the Mac could not use still read as sent — the failure this
-        // whole ack path exists to end.
-        publisher.onReply = { [weak store] envelope in
-            guard let store else { return .refused("Canopy is shutting down") }
-            guard let session = RosterReply.target(for: envelope, in: store.openSessions) else {
-                logger.notice("roster reply: no open session matches \(envelope.sessionId, privacy: .public)")
-                return .refused("That session is not open on this Mac")
-            }
-            guard let shim = session.shim else {
-                logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) has no live shim")
-                return .refused("That session is not running — open it on the Mac first")
-            }
-            switch shim.submitPhoneReply(text: envelope.text, replyId: envelope.replyId) {
-            case .injected:
-                return .delivered
-            case .queued(let why):
-                // Deliberately unlogged — see the note above the closure.
-                return .queued(why)
-            case .refused(let why):
-                logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) refused — \(why, privacy: .public)")
-                return .refused(why)
-            }
-        }
-        // Same seam, for a permission decision instead of a typed reply.
-        // `RosterReply.decisionTarget` only answers "which session" — the
-        // narrower "is this exact requestId still outstanding" check lives
-        // in `applyPermissionDecision` itself, since only that shim's
-        // `pendingPermissionRequestIds` can answer it (routing on a session
-        // that has since moved on to a different request would otherwise
-        // silently do nothing, which `applyPermissionDecision`'s own log
-        // line covers).
-        publisher.onDecision = { [weak store] envelope in
-            guard let store else { return .refused("Canopy is shutting down") }
-            guard let session = RosterReply.decisionTarget(for: envelope, in: store.openSessions) else {
-                // Say which of the two it was. Reporting an envelope this
-                // router refused as "no open session matches" names the one
-                // thing that was fine, and it cost a full diagnosis round when
-                // `allowAlways` was added everywhere except that gate.
-                if !RosterReply.acceptedDecisions.contains(envelope.decision) {
-                    logger.notice("roster decision: refusing unrecognized decision \(envelope.decision, privacy: .public)")
-                    return .refused("Canopy does not understand that answer")
-                }
-                logger.notice("roster decision: no open session matches \(envelope.sessionId, privacy: .public)")
-                return .refused("That session is not open on this Mac")
-            }
-            guard let shim = session.shim else {
-                logger.notice("roster decision: session \(envelope.sessionId, privacy: .public) has no live shim")
-                return .refused("That session is not running — open it on the Mac first")
-            }
-            // The one refusal that was ALREADY reported honestly, by
-            // `decisionDelivered` on the phone — but only as "the relay took
-            // it". Now it can say which request went stale.
-            guard shim.applyPermissionDecision(requestId: envelope.requestId,
-                                               decision: envelope.decision,
-                                               answers: envelope.answers) else {
-                return .refused("That request is no longer waiting for an answer")
-            }
-            return .delivered
-        }
+        RosterRouting.install(on: publisher, store: store)
     }
 
     /// UserDefaults key holding the last main-window frame. We persist
@@ -682,6 +636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installKeyTypingMonitor()
         RecapCoordinator.shared.start()
         KeepAliveCoordinator.shared.start()
+        DaemonRegistration.ensureRegistered()
         // The sidebar's usage bars have no writer until a shim runs, so a
         // launch that opens on the launcher showed none (see
         // `ClaudeUsageDirect`). Here rather than in a `.task` on the
@@ -1274,8 +1229,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.shouldSaveRestoreSnapshot = false
                 return .terminateCancel
             }
+        } else if let store = SessionStore.shared, store.panes.contains(where: { pane in
+            guard case .session(let id) = pane.content else { return false }
+            return store.openSessions.first { $0.id == id }?.isDaemonHosted == true
+        }) {
+            // Daemon sessions outlive this quit: nothing stops, and the layout is always worth keeping.
+            Self.shouldSaveRestoreSnapshot = true
         }
-        // No active sessions → no alert, shouldSaveRestoreSnapshot stays false.
+        // No active sessions and no paned daemon session → no alert, shouldSaveRestoreSnapshot stays false.
         // That used to mean "nothing to restore" and no longer quite does: a
         // `.dormant` session is an open row with no shim, so a store holding
         // only those reaches here with rows worth saving and gets none of them

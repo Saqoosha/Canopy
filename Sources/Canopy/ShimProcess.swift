@@ -91,6 +91,46 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
     private var mirrors: [ObjectIdentifier: MirrorClient] = [:]
 
+    /// Clients attached besides the primary webview. The daemon has no
+    /// primary, so for it this is every client.
+    var mirrorCount: Int { mirrors.count }
+
+    /// When this session last became quiet: shim creation, the last mirror
+    /// detaching, or the last turn ending, whichever is latest. Read by `DaemonReaper`.
+    private(set) var quietSince = Date()
+
+    var reaperInputs: SessionReaper.Inputs {
+        SessionReaper.Inputs(
+            attachedClients: mirrors.count + (webView == nil ? 0 : 1),
+            isBusy: SessionReaper.isBusy(working: isWorking, permissionPending: !pendingPermissionRequestIds.isEmpty,
+                                         asking: lastAssistantHadAskUserQuestion,
+                                         backgroundTasks: pendingBackgroundTaskIds.count),
+            quietSince: quietSince)
+    }
+
+    /// Why restarting the daemon now would lose something of this session's, or nil.
+    /// Wider than the reaper's busy: a restart also drops what is in flight between
+    /// turns, and a remote client that will not re-attach on its own. Checked only
+    /// while an upgrade waits, since the transcript lookup can scan the store.
+    var upgradeBlocker: String? {
+        if reaperInputs.isBusy { return "a turn, question or background task is running" }
+        if keepAliveInFlight { return "a keep-alive refresh is in flight" }
+        if recapRequestInFlight { return "a recap is in flight" }
+        if phoneReplyInFlight || !queuedPhoneReplies.isEmpty { return "a phone reply is waiting" }
+        if boundSession?.pendingInitialPrompt != nil { return "the first prompt has not been sent" }
+        if mirrors.values.contains(where: { $0.sink.map { !$0.isLocalClient } ?? false }) {
+            return "a phone or another Mac is attached"
+        }
+        // A session with no transcript yet cannot be resumed, which matters only while a pane
+        // shows it (one nobody watches the reaper would stop anyway). Local only: a remote
+        // session's transcript is on the other machine, and the lookup would scan the store.
+        if !mirrors.isEmpty, case .local = boundSession?.origin, let id = boundSession?.resumeId,
+           Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory) == nil {
+            return "a watched session has no transcript yet"
+        }
+        return nil
+    }
+
     /// Names this session in `~/.canopy/viewers`, where `canopy-remote-open.sh`
     /// looks up where to open things. Per process, so a file left behind by a
     /// crash can never be read as another session's.
@@ -173,17 +213,27 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func detachMirror(_ mirror: any MirrorSink) {
         let key = ObjectIdentifier(mirror)
         mirrors[key] = nil
+        for requestId in pendingAlerts.detach(key) {
+            // The extension would wait out its own timeout for an answer that cannot come.
+            logger.notice("alert \(requestId, privacy: .public) dismissed: its client detached")
+            sendNotificationResponse(requestId, button: nil)
+        }
         requestOwners = requestOwners.filter {
             if case .mirror(let owner) = $0.value { return owner != key }
             return true
         }
-        if mirrors.isEmpty { requestOwners.removeAll() }
+        if mirrors.isEmpty {
+            requestOwners.removeAll()
+            quietSince = Date()
+        }
         refreshOpenRedirect()
         logger.notice("[mirror] detached; \(self.mirrors.count) mirror(s) on this shim")
     }
 
     /// A stopped shim ends its mirrors' connections, so a Mac attached to it sees a drop instead of typing into nothing.
     private func disconnectMirrors() {
+        // Nothing to dismiss: the shim is stopping or gone, and a write now would hit a closed pipe.
+        pendingAlerts = PendingUIAlerts()
         for client in mirrors.values {
             (client.sink as? MirrorConnection)?.cancelFromServer()
         }
@@ -410,6 +460,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var sessionTitle: String = ""
     private var isWorking = false {
         didSet {
+            if oldValue, !isWorking { quietSince = Date() }
             // When Claude starts a new round (user submitted), clear any
             // outstanding AskUserQuestion asking state — the user already
             // responded, we're back to thinking.
@@ -3015,8 +3066,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // variable's presence therefore means "Canopy will push for this
         // session," not merely "Canopy is hosting it," and Pager's hook
         // depends on that stronger reading. `willPost` shares
-        // `RosterNotifier.post`'s own gate (roster enabled, a usable https
-        // endpoint, a resolvable machine id and Keychain secret) so this
+        // `RosterNotifier.post`'s own gate (this process allowed to push —
+        // not a GUI whose local sessions run in the daemon — roster enabled, a
+        // usable https endpoint, a resolvable machine id and Keychain secret) so this
         // check and the one that actually sends cannot drift apart.
         //
         // The value itself is otherwise informational; only its PRESENCE is
@@ -3293,9 +3345,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func stop() {
         isIntentionalStop = true
         disconnectMirrors()
-        // `disconnectMirrors` ends the connections but does not run their
-        // detach, so clear the destination here too. A crash still leaves the
-        // file; the key is per process, so a stale one is never read again.
+        // Clear the destination here too, whatever the connections' detaches
+        // did. A crash still leaves the file; the key is per process, so a
+        // stale one is never read again.
         OpenRedirect.clear(key: openRedirectKey)
         openRedirectOutbox?.stop()
         openRedirectOutbox = nil
@@ -3352,13 +3404,79 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         handleWebviewMessage(dict, sender: sender, isPrimary: sender != nil && sender === webView)
     }
 
+    /// An attached client, as `uiTarget` sees it.
+    struct UIClient: Equatable {
+        /// Asked for UI frames at attach; a phone never does.
+        let acceptsUI: Bool
+        /// On this Mac, over the daemon's local socket.
+        let isLocal: Bool
+    }
+
+    /// Which attached client shows a UI request: the one that asked, when it takes
+    /// UI frames. Otherwise, with `fallback`, a local one (the desk the daemon is on),
+    /// then any; `mirrors` is a dictionary, so among remote Macs the pick is arbitrary.
+    nonisolated static func uiTarget(requester: Int?, clients: [UIClient], fallback: Bool = true) -> Int? {
+        if let requester, clients.indices.contains(requester), clients[requester].acceptsUI { return requester }
+        guard fallback else { return nil }
+        return clients.firstIndex { $0.acceptsUI && $0.isLocal } ?? clients.firstIndex(where: \.acceptsUI)
+    }
+
+    /// The mode a webview asks for (extension 2.1.283's `set_permission_mode` request), or nil.
+    nonisolated static func requestedPermissionMode(_ message: [String: Any]) -> PermissionMode? {
+        guard message["type"] as? String == "request",
+              let request = message["request"] as? [String: Any],
+              request["type"] as? String == "set_permission_mode",
+              let raw = request["mode"] as? String else { return nil }
+        return PermissionMode(rawValue: raw)
+    }
+
     /// A webview→host message from a `MirrorServer` connection.
     func receiveFromMirror(_ dict: [String: Any], from sink: any MirrorSink) {
         handleWebviewMessage(dict, sender: sink, isPrimary: false)
     }
 
+    /// The attached Mac that shows a UI request, when this shim has no webview of its own (the daemon).
+    /// With `fallback` false, only the client that sent `requestId`.
+    private func uiClient(for requestId: String?, fallback: Bool = true) -> (any MirrorSink)? {
+        let entries = Array(mirrors)
+        var requester: Int?
+        if let requestId, case .mirror(let key)? = requestOwners[requestId] {
+            requester = entries.firstIndex { $0.key == key }
+        }
+        let sinks = entries.map(\.value.sink)
+        let clients = sinks.map { UIClient(acceptsUI: $0?.acceptsUI ?? false, isLocal: $0?.isLocalClient ?? false) }
+        return Self.uiTarget(requester: requester, clients: clients, fallback: fallback).flatMap { sinks[$0] }
+    }
+
+    private var uiClients: [any MirrorSink] { mirrors.values.compactMap(\.sink).filter(\.acceptsUI) }
+
+    /// Alerts forwarded to a client and not answered yet.
+    private var pendingAlerts = PendingUIAlerts<ObjectIdentifier>()
+
+    private func sendNotificationResponse(_ requestId: String, button: String?) {
+        sendToShim(["type": "notification_response", "requestId": requestId,
+                    "buttonValue": button.map { $0 as Any } ?? NSNull()])
+    }
+
+    /// A Mac client's answer to an alert this shim forwarded to it.
+    func receiveUIAnswer(_ answer: MirrorUIAnswer, from sink: any MirrorSink) {
+        switch pendingAlerts.answer(requestId: answer.requestId, button: answer.button, from: ObjectIdentifier(sink)) {
+        case .accept(let button):
+            sendNotificationResponse(answer.requestId, button: button)
+        case .unknown:
+            logger.notice("alert answer for \(answer.requestId, privacy: .public) ignored: not pending")
+        case .wrongClient:
+            logger.error("alert answer for \(answer.requestId, privacy: .public) ignored: from a client it did not go to")
+        }
+    }
+
     private func handleWebviewMessage(_ incoming: [String: Any], sender: (any MirrorSink)?, isPrimary: Bool) {
         var dict = incoming
+        if let mode = Self.requestedPermissionMode(incoming) {
+            // Kept so a later attach's synthetic status and the daemon's session row show the live mode.
+            permissionMode = mode
+            boundSession?.permissionMode = mode
+        }
 
         // Multi-client fan-in. Every webview mints its own channel and its
         // own handshake; the extension must see exactly one of each.
@@ -3943,7 +4061,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "show_document":
             if let content = msg["content"] as? String {
                 let fileName = msg["fileName"] as? String ?? "output"
-                ContentViewer.show(content: content, title: fileName, in: webView)
+                if webView == nil {
+                    if let client = uiClient(for: nil) {
+                        client.deliverUI(.showContent(title: fileName, content: MirrorUIFrame.inlineContent(content),
+                                                      startLine: nil, endLine: nil))
+                    } else {
+                        logger.notice("show_document dropped: no webview and no Mac client")
+                    }
+                } else {
+                    ContentViewer.show(content: content, title: fileName, in: webView)
+                }
             }
 
         case "show_notification":
@@ -3990,6 +4117,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let severity = msg["severity"] as? String ?? "info"
         let buttons = msg["buttons"] as? [String] ?? []
 
+        if webView == nil {
+            // Never a modal in the daemon: it would stop every session. No Mac to ask means Dismiss.
+            guard let client = uiClient(for: nil) else {
+                logger.notice("alert dismissed, no Mac client to ask (\(severity, privacy: .public)): \(message, privacy: .private)")
+                sendNotificationResponse(requestId, button: nil)
+                return
+            }
+            pendingAlerts.record(requestId: requestId, client: ObjectIdentifier(client), buttons: buttons)
+            client.deliverUI(.alert(requestId: requestId, message: message, severity: severity, buttons: buttons))
+            return
+        }
+
         let alert = NSAlert()
         alert.messageText = message
         switch severity {
@@ -4002,14 +4141,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         alert.addButton(withTitle: "Dismiss")
 
-        let response = alert.runModal()
-        let buttonIndex = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-        let buttonValue: Any
-        if buttonIndex < buttons.count {
-            buttonValue = buttons[buttonIndex]
-        } else {
-            buttonValue = NSNull()
-        }
+        let buttonValue: Any = MirrorUIAlert.button(response: alert.runModal().rawValue, buttons: buttons) ?? NSNull()
 
         sendToShim([
             "type": "notification_response",
@@ -4059,13 +4191,31 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return
             }
             if FileManager.default.fileExists(atPath: resolved.path) {
+                // The daemon has no ContentViewer of its own: a text file goes to the Mac that asked.
+                // Anything else, a phone's click, or a file too big for one line opens the ordinary
+                // ways below (here for this Mac, shipped for another).
+                if webView == nil, !openExternal, let client = uiClient(for: requestId, fallback: false),
+                   let size = (try? resolved.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+                   size <= MirrorUIFrame.maxInlineContentBytes,
+                   let content = try? String(contentsOf: resolved, encoding: .utf8) {
+                    client.deliverUI(.showContent(title: resolved.lastPathComponent, content: content,
+                                                  startLine: location?["startLine"] as? Int, endLine: location?["endLine"] as? Int))
+                    if let requestId {
+                        sendToWebView([
+                            "type": "response",
+                            "requestId": requestId,
+                            "response": ["type": "open_file_response"] as [String: Any],
+                        ] as [String: Any])
+                    }
+                    return
+                }
                 // A mirror forwards its webview's `open_file` here verbatim,
                 // so without this the click lands on THIS screen — Preview on
                 // the host, ContentViewer in the host's own window. Ship it
                 // to the watcher instead; the script's own fallback is this
                 // branch's old behaviour.
                 if let requestId, case .mirror(let key)? = requestOwners[requestId],
-                   let sink = mirrors[key]?.sink, sink.acceptsFileTransfers
+                   let sink = mirrors[key]?.sink, sink.acceptsFileTransfers, !sink.isLocalClient
                 {
                     logger.notice("handleOpenFile: shipping to the watching Mac")
                     if !MirrorFileSender.send(path: resolved.path, to: sink) {
@@ -4080,6 +4230,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
                 if openExternal {
                     logger.info("handleOpenFile: opening externally (Cmd-click): \(resolved.path, privacy: .public)")
+                    if !NSWorkspace.shared.open(resolved) {
+                        logger.warning("handleOpenFile: NSWorkspace failed to open: \(resolved.path, privacy: .public)")
+                    }
+                } else if webView == nil {
+                    // The daemon, and no client took it above (a local Mac, or a file over the
+                    // inline cap): ContentViewer has nowhere to draw, so open it on this Mac.
+                    logger.notice("handleOpenFile: daemon opening on this Mac: \(resolved.lastPathComponent, privacy: .public)")
                     if !NSWorkspace.shared.open(resolved) {
                         logger.warning("handleOpenFile: NSWorkspace failed to open: \(resolved.path, privacy: .public)")
                     }
@@ -4118,7 +4275,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func handleOpenContent(_ request: [String: Any], requestId: String?) {
         let content = request["content"] as? String ?? ""
         let fileName = request["fileName"] as? String ?? "untitled"
-        ContentViewer.show(content: content, title: fileName, in: webView)
+        if webView == nil {
+            if let client = uiClient(for: requestId) {
+                client.deliverUI(.showContent(title: fileName, content: MirrorUIFrame.inlineContent(content),
+                                              startLine: nil, endLine: nil))
+            } else {
+                logger.notice("open_content dropped: no webview and no Mac client")
+            }
+        } else {
+            ContentViewer.show(content: content, title: fileName, in: webView)
+        }
 
         if let requestId {
             sendToWebView([
@@ -4482,10 +4648,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Because the request never passes through the webview, the webview
     /// has no matching user bubble for the reply; `consumeRecapTraffic`
     /// therefore swallows both the synthetic assistant and its `result`.
-    func requestRecap() {
+    /// False when it was skipped as ineligible.
+    @discardableResult
+    func requestRecap() -> Bool {
         guard canRequestRecap, let channelId else {
             logger.debug("requestRecap skipped: not eligible")
-            return
+            return false
         }
         recapRequestInFlight = true
 
@@ -4536,6 +4704,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         recapTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.recapTimeoutSeconds, execute: timeout)
+        return true
     }
 
     /// How much of a replayed conversation a phone receives: the last N turns the user typed.
@@ -5080,6 +5249,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// just the error.
     private func showRecapInWebView(_ text: String?) {
         guard let webView else {
+            // The daemon: every attached Mac's page draws it, and logs a missing bridge itself.
+            let clients = uiClients
+            clients.forEach { $0.deliverUI(.recap(text)) }
+            if !clients.isEmpty { return }
             // Bare returns here cost a paid recap with no trace — the sibling
             // `sendToWebView` logs the identical condition for the same reason.
             if text != nil {
@@ -5087,11 +5260,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             return
         }
-        // Reports back rather than just running: the call sites are guarded by
-        // `window.__canopyRecap && …`, which short-circuits to false with NO JS
-        // error when the user script hasn't run yet (mid-navigation, webview
-        // recreated). Inspecting only `error` would read that as success and
-        // lose the recap silently.
+        Self.injectRecap(text, into: webView)
+    }
+
+    /// Draws or clears the recap row in `webView`, and logs a drop. Also run by a
+    /// Mac pane for a daemon session's `MirrorUIFrame.recap`.
+    static func injectRecap(_ text: String?, into webView: WKWebView) {
+        // Reports back rather than just running: before the user script has run
+        // (mid-navigation, webview recreated) there is no `__canopyRecap`, and
+        // the ternary answers 'no-bridge' with NO JS error. Inspecting only
+        // `error` would read that as success and lose the recap silently.
         let call = text.map { RecapScript.setCall(text: $0) } ?? RecapScript.clearCall
         let js = "(window.__canopyRecap ? (\(call), 'ok') : 'no-bridge')"
         webView.evaluateJavaScript(js) { result, error in
@@ -7869,15 +8047,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 eventId: eventIdForThisTurn)
         }
 
-        guard !NSApp.isActive else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "Canopy"
-        content.body = body
-        content.sound = .default
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error { logger.error("Notification error: \(error.localizedDescription, privacy: .public)") }
+        if webView == nil, !uiClients.isEmpty {
+            // The daemon: the attached Mac decides whether it is frontmost; the daemon's `isActive` means nothing.
+            uiClients.forEach { $0.deliverUI(.notify(title: "Canopy", body: body)) }
+            return
         }
+        guard !NSApp.isActive else { return }
+        SessionNotifier.post(title: "Canopy", body: body)
     }
 
     // MARK: - CLI Subprocess Exit Detection
@@ -7897,6 +8073,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         logger.error("CLI subprocess died (code \(exitCode)), stopping shim")
         resetActivityState()
         stop()
+        // Headless: `stop()` makes `handleProcessExit` return early, so free the row here.
+        if delegate == nil, let session = boundSession, session.shim === self, session.webView == nil {
+            session.shim = nil
+            session.status = .dormant
+            return
+        }
         // `delegate` is a weak ref to the view Coordinator, which can be
         // deallocated while this shim (owned by `OpenSession`) lives on. A
         // dangling nil here makes the delegate calls below no-ops — the
@@ -8004,19 +8186,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // correct: that path retries rather than reporting.
         boundSession?.lastFatalError = message
 
-        // Escape backslash FIRST, then single quotes
-        let escaped = message
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
+        if let webView {
+            Self.injectErrorBanner(message, into: webView)
+        } else {
+            uiClients.forEach { $0.deliverUI(.errorBanner(message)) }
+        }
+    }
+
+    /// Also run by a Mac pane for a daemon session's `MirrorUIFrame.errorBanner`.
+    static func injectErrorBanner(_ message: String, into webView: WKWebView) {
         let js = """
         (function(){
             var el = document.getElementById('claude-error');
             if (!el) { el = document.createElement('pre'); el.id = 'claude-error'; document.body.prepend(el); }
             el.style.cssText = 'display:block;position:fixed;top:0;left:0;right:0;z-index:9999;margin:0;padding:12px 16px;background:#fee2e2;color:#991b1b;font-size:13px;white-space:pre-wrap;font-family:-apple-system,sans-serif;';
-            el.textContent = '\(escaped)';
+            el.textContent = \(RecapScript.jsStringLiteral(message));
         })()
         """
-        webView?.evaluateJavaScript(js, completionHandler: nil)
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     // MARK: - VCS Branch Detection

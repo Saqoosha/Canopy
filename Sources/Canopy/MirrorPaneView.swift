@@ -139,7 +139,7 @@ struct MirrorPaneView: NSViewRepresentable {
             ucc.removeScriptMessageHandler(forName: name)
         }
         let consoleHandler = ConsoleLogHandler()
-        let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory, opensLocalFiles: false)
+        let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory, opensLocalFiles: session.isDaemonHosted)
         let inputWidthHandler = InputWidthMessageHandler(statusBarData: session.statusBar)
         ucc.add(consoleHandler, name: "consoleLog")
         ucc.add(linkHandler, name: "canopyLink")
@@ -153,6 +153,16 @@ struct MirrorPaneView: NSViewRepresentable {
         webView.uiDelegate = coordinator
     }
 
+    /// Where this pane attaches: another Mac over Tailscale, or this Mac's daemon.
+    private func attachTarget() -> (endpoint: MirrorEndpoint, token: String, machine: String)? {
+        if let target = session.origin.mirrorTarget {
+            guard let token = MirrorAccess.peerToken(machineId: target.machineId) else { return nil }
+            return (.tcp(host: target.host, port: target.port), token, session.statusBar.mirrorMachine ?? target.machineId)
+        }
+        guard session.isDaemonHosted else { return nil }
+        return (.unix(path: DaemonPaths.current), "", "this Mac")
+    }
+
     /// The cached webview when the session already has one; otherwise a fresh
     /// webview and bridge, attached in the order the bridge requires:
     /// socket ready → `attach` → page load.
@@ -161,8 +171,9 @@ struct MirrorPaneView: NSViewRepresentable {
             registerHandlers(on: cached, bridge: bridge, coordinator: coordinator)
             return cached
         }
-        guard let target = session.origin.mirrorTarget,
-              let token = MirrorAccess.peerToken(machineId: target.machineId) else {
+        // Waiting for this Mac's daemon to come up; that wait attaches the bridge.
+        if let cached = session.webView, session.isDaemonHosted { return cached }
+        guard let target = attachTarget() else {
             logger.error("[mirror-pane] no pairing for \(session.origin.mirrorTarget?.machineId ?? "nil", privacy: .public)")
             if !coordinator.reportedMissingPairing {
                 coordinator.reportedMissingPairing = true
@@ -183,12 +194,34 @@ struct MirrorPaneView: NSViewRepresentable {
         config.setURLSchemeHandler(assetHandler, forURLScheme: MirrorConnection.assetScheme)
         let webView = SessionWKWebView(frame: .zero, configuration: config)
         webView.isInspectable = true
+        session.webView = webView
 
-        let bridge = RemoteMirrorBridge(host: target.host, port: target.port, sessionId: session.resumeId, token: token,
-                                        webView: webView, fetchesImages: true, open: session.pendingMirrorOpen)
+        if session.isDaemonHosted, !DaemonPaths.socketIsLive(path: DaemonPaths.current) {
+            Task { @MainActor [session, onFailure] in
+                let running = await DaemonSupervisor.ensureRunning()
+                // The pane may have been closed or remounted during the wait; then this attempt is moot.
+                guard session.webView === webView else { return }
+                guard running else {
+                    onFailure("This Mac's session service did not start. Quit and reopen Canopy to try again.")
+                    return
+                }
+                attachBridge(to: webView, target: target, assetHandler: assetHandler, coordinator: coordinator)
+            }
+            return webView
+        }
+        attachBridge(to: webView, target: target, assetHandler: assetHandler, coordinator: coordinator)
+        return webView
+    }
+
+    /// Opens the bridge, then wires its callbacks and the page's handlers to it.
+    private func attachBridge(to webView: WKWebView, target: (endpoint: MirrorEndpoint, token: String, machine: String),
+                              assetHandler: MirrorAssetSchemeHandler, coordinator: Coordinator) {
+        let bridge = RemoteMirrorBridge(endpoint: target.endpoint, sessionId: session.resumeId, key: session.daemonKey,
+                                        token: target.token, webView: webView, fetchesImages: true,
+                                        open: session.isDaemonHosted ? session.daemonOpenRequest : session.pendingMirrorOpen)
         assetHandler.bridge = bridge
         registerHandlers(on: webView, bridge: bridge, coordinator: coordinator)
-        let machineName = session.statusBar.mirrorMachine ?? target.machineId
+        let machineName = target.machine
         bridge.onStatus = { [weak session] frame in
             guard let session else { return }
             MirrorStatusFrame.apply(frame, to: session.statusBar)
@@ -203,13 +236,42 @@ struct MirrorPaneView: NSViewRepresentable {
         bridge.onFileFrame = { [weak session] frame in
             session?.fileTransfer.handle(frame)
         }
+        bridge.onUIFrame = { [weak bridge, weak webView] frame in
+            switch frame {
+            case .showContent(let title, let content, let startLine, let endLine):
+                ContentViewer.show(content: content, title: title, in: webView, startLine: startLine, endLine: endLine)
+            case .recap(let text):
+                if let webView { ShimProcess.injectRecap(text, into: webView) }
+            case .errorBanner(let message):
+                if let webView { ShimProcess.injectErrorBanner(message, into: webView) }
+            case .alert(let requestId, let message, let severity, let buttons):
+                let alert = NSAlert()
+                alert.messageText = message
+                alert.alertStyle = severity == "error" ? .critical : severity == "warning" ? .warning : .informational
+                buttons.forEach { alert.addButton(withTitle: $0) }
+                alert.addButton(withTitle: "Dismiss")
+                let button = MirrorUIAlert.button(response: alert.runModal().rawValue, buttons: buttons)
+                guard let bridge else {
+                    logger.notice("alert \(requestId, privacy: .public) answered after its pane closed; the session's client left, so it was dismissed there")
+                    return
+                }
+                bridge.sendUIAnswer(MirrorUIAnswer(requestId: requestId, button: button))
+            case .notify(let title, let body):
+                guard !NSApp.isActive else { return }
+                SessionNotifier.post(title: title, body: body)
+            }
+        }
+        let isDaemon = session.isDaemonHosted
         bridge.onOutcome = { [weak session, weak bridge] outcome in
             guard let session else { return }
             switch outcome {
             case .attached:
                 session.status = .live
                 session.pendingMirrorOpen = nil
-                if let hostId = bridge?.hostSessionId { session.mirrorHostSessionId = hostId }
+                if let hostId = bridge?.hostSessionId {
+                    session.mirrorHostSessionId = hostId
+                    if isDaemon { session.daemonKey = hostId }
+                }
                 if let remote = bridge?.extensionVersion, let local = CCExtension.extensionVersion(), remote != local {
                     logger.notice("[mirror-pane] extension \(local, privacy: .public) here, \(remote, privacy: .public) on \(machineName, privacy: .public)")
                 }
@@ -218,21 +280,32 @@ struct MirrorPaneView: NSViewRepresentable {
             case .dropped:
                 session.fileTransfer.connectionDropped()
                 if case .spawning = session.status {
-                    onFailure("Could not reach \(machineName). Is its live mirror on?")
+                    onFailure(isDaemon ? "Could not reach this Mac's session service."
+                                       : "Could not reach \(machineName). Is its live mirror on?")
                 } else {
                     session.connection.status = .reconnectFailed
                     session.isThinking = false
                     session.isAsking = false
                     session.isWaiting = false
+                    // Only a restart the daemon announced re-attaches on its own: any other drop
+                    // may be a stop made elsewhere, which must not be undone. launchd starts the
+                    // new build; `ensureRunning` waits for it before starting one itself.
+                    if isDaemon, bridge?.expectsRestart == true {
+                        Task { @MainActor [weak session] in
+                            guard await DaemonSupervisor.ensureRunning(awaitLaunchd: true), let session,
+                                  session.connection.status == .reconnectFailed else { return }
+                            logger.notice("[mirror-pane] session service restarted; re-attaching \(session.resumeId, privacy: .public)")
+                            SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
+                        }
+                    }
                 }
             }
         }
         session.connection.onRetry = { [weak session] in
             guard let session else { return }
-            SessionStore.shared?.restartSession(session.id)
+            // Re-attach only: a dropped connection is not a reason to restart the daemon's CLI.
+            SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
         }
-        session.webView = webView
         session.mirrorBridge = bridge
-        return webView
     }
 }

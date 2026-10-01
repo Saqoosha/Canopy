@@ -7,6 +7,10 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "CanopySetti
 final class CanopySettings {
     nonisolated(unsafe) static let shared = CanopySettings()
 
+    /// False in the daemon, set before `shared` is first touched: it reads the
+    /// file the GUI owns and never writes it (`save()` becomes a no-op).
+    nonisolated(unsafe) static var persistsChanges = true
+
     var allowDangerouslySkipPermissions: Bool = false {
         didSet {
             // Toggling the opt-in off must also clamp the recents default
@@ -168,11 +172,39 @@ final class CanopySettings {
     /// on the first launch after a migration rather than on the next edit.
     private var isLoading = false
 
-    init() {
+    convenience init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let canopyDir = appSupport.appendingPathComponent("Canopy")
-        self.filePath = canopyDir.appendingPathComponent("settings.json")
+        self.init(filePath: appSupport.appendingPathComponent("Canopy").appendingPathComponent("settings.json"))
+    }
+
+    /// Internal so the probe can point one at a scratch file.
+    init(filePath: URL) {
+        self.filePath = filePath
         load()
+    }
+
+    /// Re-read the keys a daemon acts on, after the GUI changed the file.
+    /// Assigns only what changed, so observers (the roster publisher) wake
+    /// only for a real change, and never writes.
+    func reload(from dict: [String: Any]) {
+        isLoading = true
+        defer { isLoading = false }
+        func set<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<CanopySettings, T>, _ value: T?) {
+            if let value, self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+        }
+        set(\.allowDangerouslySkipPermissions, dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool)
+        set(\.respectGitIgnore, dict["claudeCode.respectGitIgnore"] as? Bool)
+        set(\.recapEnabled, dict["canopy.recapEnabled"] as? Bool)
+        set(\.keepAliveEnabled, dict["canopy.keepAliveEnabled"] as? Bool)
+        set(\.seedWorktreeArtifacts, dict["canopy.seedWorktreeArtifacts"] as? Bool)
+        set(\.defaultPermissionMode, (dict["canopy.defaultPermissionMode"] as? String).flatMap(PermissionMode.init(rawValue:)))
+        set(\.machineDisplayName, dict["canopy.machineDisplayName"] as? String)
+        set(\.rosterEnabled, dict["canopy.rosterEnabled"] as? Bool)
+        set(\.rosterEndpoint, dict["canopy.rosterEndpoint"] as? String)
+        // Same clamp as `load()`, for a hand edit that pairs bypass with the opt-in off.
+        if !allowDangerouslySkipPermissions, defaultPermissionMode == .bypassPermissions {
+            defaultPermissionMode = .acceptEdits
+        }
     }
 
     private func load() {
@@ -275,7 +307,7 @@ final class CanopySettings {
     }
 
     private func save() {
-        guard !isLoading else { return }
+        guard !isLoading, Self.persistsChanges else { return }
         var dict = loadCurrentDict()
         dict["claudeCode.allowDangerouslySkipPermissions"] = allowDangerouslySkipPermissions
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
@@ -297,6 +329,8 @@ final class CanopySettings {
         dict["canopy.rosterEndpoint"] = rosterEndpoint
         dict["canopy.mirrorEnabled"] = mirrorEnabled
         dict["canopy.mirrorPort"] = mirrorPort
+        // Retired: the daemon listens on `mirrorPort` now.
+        dict["canopy.daemonPort"] = nil
         dict["canopy.mirrorPeers"] = mirrorPeers
         writeDict(dict)
     }
@@ -305,6 +339,8 @@ final class CanopySettings {
     /// Preserves wrappers set by the user or other tools (e.g. custom tracing
     /// wrappers) by only clearing values that point at our bundled script.
     func clearStaleSSHWrapper() {
+        // The daemon never writes this file; leave the scrub to the GUI.
+        guard Self.persistsChanges else { return }
         var dict = loadCurrentDict()
         guard let current = dict["claudeCode.claudeProcessWrapper"] as? String,
               (current as NSString).lastPathComponent == "ssh-claude-wrapper.sh"
@@ -322,6 +358,7 @@ final class CanopySettings {
     }
 
     private func writeDict(_ dict: [String: Any]) {
+        guard Self.persistsChanges else { return }
         do {
             let dir = filePath.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

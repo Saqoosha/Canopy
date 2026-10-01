@@ -15,6 +15,10 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     var onStatus: (([String: Any]) -> Void)?
     /// A `MirrorFileWire` frame: a file the host is shipping here, or a URL to open.
     var onFileFrame: (([String: Any]) -> Void)?
+    /// UI a daemon session asks this pane to show (`MirrorUIFrame`).
+    var onUIFrame: ((MirrorUIFrame) -> Void)?
+    /// Set by the daemon's `daemon_restarting`: the next drop may re-attach on its own.
+    private(set) var expectsRestart = false
     /// The origin session's account usage (`MirrorUsageFrame`), once it has any and on every
     /// change; never from a Mac that predates the frame.
     var onUsage: (([String: Any]) -> Void)?
@@ -61,32 +65,23 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorAttach")
     private weak var webView: WKWebView?
     private let sessionId: String
+    /// The daemon's `OpenSession.id`, when known; outranks `sessionId` at attach.
+    private let key: String?
+    /// False for the daemon's local socket, which is trusted without a password.
+    private let sendsToken: Bool
     private let openRequest: MirrorOpenRequest?
     private var closed = false
 
-    init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView, fetchesImages: Bool = false,
-         open: MirrorOpenRequest? = nil) {
+    init(endpoint: MirrorEndpoint, sessionId: String, key: String? = nil, token: String, webView: WKWebView,
+         fetchesImages: Bool = false, open: MirrorOpenRequest? = nil) {
         self.fetchesImages = fetchesImages
         self.openRequest = open
         self.token = token
         self.sessionId = sessionId
+        self.key = key
+        self.sendsToken = endpoint.needsToken
         self.webView = webView
-        // Keepalive, because a server that dies without its FIN reaching us
-        // leaves this socket ESTABLISHED forever and no drop is ever reported
-        // (measured: studio's server SIGKILLed over Tailscale, the client
-        // stayed ESTABLISHED with no error). 15 s idle, 15 s between probes,
-        // 3 probes: ~45 s, the budget MacroPad's remote transport and SSH
-        // remote use. A dead peer then fails the connection, which is a drop.
-        let tcp = NWProtocolTCP.Options()
-        tcp.enableKeepalive = true
-        tcp.keepaliveIdle = 15
-        tcp.keepaliveInterval = 15
-        tcp.keepaliveCount = 3
-        self.connection = NWConnection(
-            host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(rawValue: port)!,
-            using: NWParameters(tls: nil, tcp: tcp)
-        )
+        self.connection = NWConnection(to: endpoint.nwEndpoint, using: endpoint.parameters)
         super.init()
         Self.instances.add(self)
         connection.stateUpdateHandler = { [weak self] state in
@@ -121,6 +116,12 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 self.deliverOutcome(.dropped)
             }
         }
+    }
+
+    convenience init(host: String, port: UInt16, sessionId: String, token: String, webView: WKWebView,
+                     fetchesImages: Bool = false, open: MirrorOpenRequest? = nil) {
+        self.init(endpoint: .tcp(host: host, port: port), sessionId: sessionId, token: token, webView: webView,
+                  fetchesImages: fetchesImages, open: open)
     }
 
     func close() {
@@ -204,7 +205,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         // uplink spends its time on (see `MirrorWire`).
         // `images` (`fetchesImages`): Read images arrive as `canopy-asset` URLs fetched on scroll, not as base64.
         var attach: [String: Any] = ["type": "attach", "sessionId": sessionId, "token": token, "client": "mac", "status": true,
-                                     "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages]
+                                     "compress": MirrorWire.compressionName, "files": true, "usage": true, "images": fetchesImages,
+                                     // Only a pane that shows them; the DEBUG attach window would leave an alert unanswered.
+                                     "ui": onUIFrame != nil]
+        if let key { attach["key"] = key }
+        if !sendsToken { attach["token"] = nil }
         // `open`: start this session over there if nothing is running it yet (a Recents or folder row).
         if let openRequest { attach["open"] = openRequest.wire }
         sendJSONObject(attach)
@@ -310,7 +315,26 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             onFileFrame?(dict)
             return
         }
+        if dict["type"] as? String == DaemonUpgrade.restartingFrameType {
+            // The drop that follows is a planned restart onto a new build, not a stop.
+            expectsRestart = true
+            return
+        }
+        if let frame = MirrorUIFrame(wire: dict) {
+            // For the pane (ContentViewer, alert, notification), never posted into the page as is.
+            onUIFrame?(frame)
+            return
+        }
+        if dict["type"] as? String == MirrorUIFrame.type {
+            logger.error("[mirror-client] unreadable \(MirrorUIFrame.type, privacy: .public) frame dropped")
+            return
+        }
         webView?.deliver(dict)
+    }
+
+    /// Answers an alert the session forwarded.
+    func sendUIAnswer(_ answer: MirrorUIAnswer) {
+        sendJSONObject(answer.wire)
     }
 
     private func sendJSONObject(_ payload: [String: Any]) {

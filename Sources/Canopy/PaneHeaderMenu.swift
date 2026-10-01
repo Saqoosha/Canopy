@@ -77,9 +77,15 @@ enum PaneHeaderMenu {
                     menu.addItem(accountItem)
                 }
             }
-            menu.addItem(ClosureMenuItem(title: "Close session") { [weak store] in
-                store?.closeSession(openId, keepingFailure: false)
-            })
+            if session.isDaemonHosted {
+                menu.addItem(ClosureMenuItem(title: "Stop session") { [weak store] in
+                    store?.stopSession(openId)
+                })
+            } else {
+                menu.addItem(ClosureMenuItem(title: "Close session") { [weak store] in
+                    store?.closeSession(openId, keepingFailure: false)
+                })
+            }
             // Absent, not disabled, for a remote session: the directory is on
             // the other machine, so there is no local folder the item could
             // ever open. A greyed row would read as "not right now".

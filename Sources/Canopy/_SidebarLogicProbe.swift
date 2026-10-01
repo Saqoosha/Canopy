@@ -3,6 +3,8 @@ import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
+import Network
+import ServiceManagement
 import os.log
 import UniformTypeIdentifiers
 
@@ -1770,6 +1772,615 @@ enum SidebarLogicProbe {
             record("mirror recents: a relative folder and an id-less session are dropped",
                    MirrorRecents.parse(["type": MirrorRecents.replyType, "folders": ["relative", "/abs"],
                                         "sessions": [["title": "no id"]]]) == MirrorRecents(sessions: [], folders: ["/abs"]))
+            // Canopy Server control protocol.
+            record("control hello: a local peer needs no token",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version],
+                                              trustsPeer: true, expectedToken: nil) == .ok)
+            record("control hello: a TCP peer with the right token passes",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version, "token": "abc"],
+                                              trustsPeer: false, expectedToken: "abc") == .ok)
+            record("control hello: a TCP peer with a wrong token is refused",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version, "token": "abd"],
+                                              trustsPeer: false, expectedToken: "abc") == .unauthorized)
+            record("control hello: a TCP peer with no token is refused even when none is configured",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version],
+                                              trustsPeer: false, expectedToken: nil) == .unauthorized)
+            record("control hello: another protocol version is refused with both numbers",
+                   ControlProtocol.checkHello(["type": "hello", "protocolVersion": ControlProtocol.version + 1],
+                                              trustsPeer: true, expectedToken: nil)
+                       == .versionMismatch(client: ControlProtocol.version + 1, server: ControlProtocol.version))
+            record("control hello: a missing version reads as 0, not as current",
+                   ControlProtocol.checkHello(["type": "hello"], trustsPeer: true, expectedToken: nil)
+                       == .versionMismatch(client: 0, server: ControlProtocol.version))
+            let controlReq = ControlProtocol.parseRequest(["type": "request", "id": "r1", "verb": "list_folders", "params": ["limit": 5]])
+            record("control request: id, verb and params parse",
+                   controlReq?.id == "r1" && controlReq?.verb == "list_folders" && controlReq?.params["limit"] as? Int == 5)
+            record("control request: a request without an id is rejected",
+                   ControlProtocol.parseRequest(["type": "request", "verb": "list_folders"]) == nil)
+            record("control request: absent params become empty",
+                   ControlProtocol.parseRequest(["type": "request", "id": "r2", "verb": "subscribe"])?.params.isEmpty == true)
+            record("control response: error carries id and message",
+                   ControlProtocol.errorResponse(id: "r1", message: "nope")["id"] as? String == "r1"
+                       && ControlProtocol.errorResponse(id: "r1", message: "nope")["error"] as? String == "nope")
+            do {
+                let controlDir = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-control-probe-\(UUID().uuidString)")
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("zeta"), withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("alpha"), withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent("Beta"), withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(at: controlDir.appendingPathComponent(".hidden"), withIntermediateDirectories: true)
+                FileManager.default.createFile(atPath: controlDir.appendingPathComponent("b.txt").path, contents: Data())
+                defer { try? FileManager.default.removeItem(at: controlDir) }
+                let listed = try? ControlProtocol.listDirectory(path: controlDir.path, showHidden: false).get()
+                record("control browse: directories first, case-insensitive, hidden dropped",
+                       listed?.map(\.name) == ["alpha", "Beta", "zeta", "b.txt"], "\(listed?.map(\.name) ?? [])")
+                record("control browse: hidden shown on request",
+                       (try? ControlProtocol.listDirectory(path: controlDir.path, showHidden: true).get())?.map(\.name).contains(".hidden") == true)
+                record("control browse: a relative path is refused",
+                       ControlProtocol.listDirectory(path: "relative", showHidden: false) == .failure(ControlProtocol.ControlError("path must be absolute")))
+                record("control browse: a file is refused",
+                       ControlProtocol.listDirectory(path: controlDir.appendingPathComponent("b.txt").path, showHidden: false)
+                           == .failure(ControlProtocol.ControlError("not a folder")))
+                let made = ControlProtocol.mkdir(parent: controlDir.path, name: "  new one  ")
+                record("control mkdir: the trimmed name is created",
+                       (try? made.get()) == controlDir.appendingPathComponent("new one").path
+                           && FileManager.default.fileExists(atPath: controlDir.appendingPathComponent("new one").path))
+                record("control mkdir: an existing folder is reported, not entered",
+                       ControlProtocol.mkdir(parent: controlDir.path, name: "zeta") == .failure(ControlProtocol.ControlError("already exists")))
+                record("control mkdir: a slash in the name is refused by the shared rule",
+                       ControlProtocol.mkdir(parent: controlDir.path, name: "a/b")
+                           == .failure(ControlProtocol.ControlError("A folder name cannot contain a slash.")))
+                record("control mkdir: '..' is refused and nothing is created beside the parent",
+                       ControlProtocol.mkdir(parent: controlDir.appendingPathComponent("zeta").path, name: "..")
+                           == .failure(ControlProtocol.ControlError("That name is reserved.")))
+                let openOK = ControlProtocol.parseOpenParams(["cwd": controlDir.path, "model": "opus", "permissionMode": "plan",
+                                                              "initialPrompt": "hi", "worktreeBranch": "fix-x"], allowBypass: false)
+                record("control open: all fields parse",
+                       (try? openOK.get()) == ControlProtocol.OpenParams(cwd: controlDir.path, model: "opus", effort: nil,
+                                                                         permissionMode: .plan, worktreeBranch: "fix-x", initialPrompt: "hi"))
+                record("control open: a missing folder is refused before anything starts",
+                       ControlProtocol.parseOpenParams(["cwd": controlDir.appendingPathComponent("nope").path], allowBypass: false)
+                           == .failure(ControlProtocol.ControlError("not a folder")))
+                record("control open: an unknown permission mode is refused, not defaulted",
+                       ControlProtocol.parseOpenParams(["cwd": controlDir.path, "permissionMode": "yolo"], allowBypass: false)
+                           == .failure(ControlProtocol.ControlError("unknown permission mode")))
+            }
+            // Canopy Server reaper.
+            do {
+                let reapT0 = Date(timeIntervalSince1970: 2_000_000)
+                let reapLimit = SessionReaper.defaultIdleLimit
+                func reapInputs(clients: Int, busy: Bool, quietFor: TimeInterval) -> SessionReaper.Inputs {
+                    SessionReaper.Inputs(attachedClients: clients, isBusy: busy, quietSince: reapT0.addingTimeInterval(-quietFor))
+                }
+                record("reaper: the default limit is 15 minutes", reapLimit == 15 * 60)
+                record("reaper: quiet exactly the limit with no client is reaped",
+                       SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: reapLimit), now: reapT0, limit: reapLimit))
+                record("reaper: one second short of the limit is kept",
+                       !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: reapLimit - 1), now: reapT0, limit: reapLimit))
+                record("reaper: an attached client keeps it however long it is quiet",
+                       !SessionReaper.shouldReap(reapInputs(clients: 1, busy: false, quietFor: 24 * 3600), now: reapT0, limit: reapLimit))
+                record("reaper: a busy session is kept however long nobody watches",
+                       !SessionReaper.shouldReap(reapInputs(clients: 0, busy: true, quietFor: 24 * 3600), now: reapT0, limit: reapLimit))
+                record("reaper: a quietSince in the future (clock change) is kept",
+                       !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: -60), now: reapT0, limit: reapLimit))
+            }
+            // Canopy Server socket path.
+            do {
+                let probeHome = URL(fileURLWithPath: "/Users/someone")
+                let releaseSock = DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: probeHome)
+                let debugSock = DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy.debug", home: probeHome)
+                record("daemon socket: Debug and Release never share a path", releaseSock != debugSock)
+                record("daemon socket: lives under Application Support/Canopy",
+                       releaseSock.hasPrefix("/Users/someone/Library/Application Support/Canopy/"))
+                record("daemon socket: fits sun_path for an ordinary home",
+                       debugSock.utf8.count <= DaemonPaths.maxSocketPathBytes, "\(debugSock.utf8.count)")
+                let longHome = URL(fileURLWithPath: "/Users/" + String(repeating: "x", count: 80))
+                let longSock = DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy.debug", home: longHome)
+                record("daemon socket: an over-long home falls back to a short path",
+                       longSock.utf8.count <= DaemonPaths.maxSocketPathBytes && !longSock.hasPrefix(longHome.path), longSock)
+                record("daemon socket: the fallback still separates Debug from Release",
+                       DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: longHome) != longSock)
+            }
+            // Canopy Server LaunchAgent.
+            record("daemon agent: Debug and Release register different plists",
+                   DaemonRegistration.plistName(bundleId: "sh.saqoo.Canopy") == "sh.saqoo.Canopy.daemon.plist"
+                       && DaemonRegistration.plistName(bundleId: "sh.saqoo.Canopy.debug") == "sh.saqoo.Canopy.debug.daemon.plist")
+            // Both plists ship in every bundle, so the Release one users get is checked too.
+            for agentBundleId in ["sh.saqoo.Canopy", "sh.saqoo.Canopy.debug"] {
+                let agentPlist = Bundle.main.bundleURL
+                    .appendingPathComponent("Contents/Library/LaunchAgents")
+                    .appendingPathComponent(DaemonRegistration.plistName(bundleId: agentBundleId))
+                let agent = NSDictionary(contentsOf: agentPlist)
+                record("daemon agent (\(agentBundleId)): plist is in the bundle", agent != nil, agentPlist.path)
+                record("daemon agent (\(agentBundleId)): label matches the bundle id",
+                       agent?["Label"] as? String == "\(agentBundleId).daemon")
+                record("daemon agent (\(agentBundleId)): runs the bundle's own binary with --daemon",
+                       agent?["BundleProgram"] as? String == "Contents/MacOS/Canopy"
+                           && (agent?["ProgramArguments"] as? [String])?.last == "--daemon")
+                record("daemon agent (\(agentBundleId)): limited to the Aqua session (login keychain)",
+                       agent?["LimitLoadToSessionType"] as? String == "Aqua")
+                record("daemon agent (\(agentBundleId)): a clean exit is not restarted",
+                       (agent?["KeepAlive"] as? [String: Any])?["SuccessfulExit"] as? Bool == false)
+            }
+            // The daemon re-reads these three keys from the shared settings.json on its own.
+            record("daemon config: no file reads as defaults",
+                   DaemonConfig.parse(nil) == DaemonConfig.defaults)
+            record("daemon config: a half-written file is unreadable, not defaults (the caller keeps what it had)",
+                   DaemonConfig.parse(Data("{\"canopy.mirrorEnabled\": tr".utf8)) == nil)
+            record("daemon config: the three keys are read, the port from canopy.mirrorPort",
+                   DaemonConfig.parse(Data(#"{"canopy.mirrorEnabled":true,"claudeCode.allowDangerouslySkipPermissions":true,"canopy.mirrorPort":9000,"canopy.daemonPort":9100}"#.utf8))
+                       == DaemonConfig(mirrorEnabled: true, allowBypass: true, port: 9000))
+            record("daemon config: an out-of-range port keeps the default, which is the mirror port",
+                   DaemonConfig.parse(Data(#"{"canopy.mirrorPort":70000}"#.utf8))?.port == DaemonConfig.defaults.port
+                       && DaemonConfig.defaults.port == CanopySettings(filePath: URL(fileURLWithPath: "/nonexistent/settings.json")).mirrorPort)
+            record("daemon config: Mirror and the bypass opt-in default to off",
+                   !DaemonConfig.defaults.mirrorEnabled && !DaemonConfig.defaults.allowBypass)
+            // Canopy Server session rows.
+            do {
+                let open = ControlProtocol.SessionRow(
+                    key: "K1", resumeId: "r1", title: "Fix it", project: "Canopy", cwd: "/tmp/p",
+                    state: "working", running: true, clients: 2, lastActiveAt: 1_000,
+                    model: "opus", messageCount: 12, permissionMode: "plan", accountId: "acct")
+                record("session row: an open row round-trips through the wire",
+                       ControlProtocol.SessionRow(wire: open.wire) == open)
+                let closed = ControlProtocol.SessionRow(
+                    key: nil, resumeId: "r2", title: "Old", project: "Canopy", cwd: "/tmp/p",
+                    state: "closed", running: false, clients: 0, lastActiveAt: 500,
+                    model: "", messageCount: 0, permissionMode: "", accountId: nil)
+                record("session row: a closed row carries no key and round-trips",
+                       closed.wire["key"] == nil && ControlProtocol.SessionRow(wire: closed.wire) == closed)
+                record("session row: a row without resumeId is rejected",
+                       ControlProtocol.SessionRow(wire: ["key": "K", "title": "t"]) == nil)
+                record("session row: missing optional fields read as empty, not as a rejection",
+                       ControlProtocol.SessionRow(wire: ["resumeId": "r3"])
+                           == ControlProtocol.SessionRow(key: nil, resumeId: "r3", title: "", project: "", cwd: "",
+                                                         state: "closed", running: false, clients: 0, lastActiveAt: 0,
+                                                         model: "", messageCount: 0, permissionMode: "", accountId: nil))
+                record("session row: an integral lastActiveAt from JSON still reads as a Double",
+                       (try? JSONSerialization.jsonObject(with: Data(#"{"resumeId":"r4","lastActiveAt":1000}"#.utf8)) as? [String: Any])
+                           .flatMap { ControlProtocol.SessionRow(wire: $0) }?.lastActiveAt == 1000)
+                record("session state: a missing sessions key is incomplete, not an empty list",
+                       ControlClient.parseSessionState(["type": "session_state"]).complete == false)
+                let partial = ControlClient.parseSessionState(["sessions": [open.wire, ["title": "no id"]]])
+                record("session state: an unreadable row makes it incomplete and keeps the readable ones",
+                       partial.complete == false && partial.rows == [open])
+                record("session state: an empty list is complete",
+                       ControlClient.parseSessionState(["sessions": [[String: Any]]()]).complete)
+            }
+            record("session ref: key first, then sessionId",
+                   ControlProtocol.sessionRefs(["key": "K", "sessionId": "r"]) == [.key("K"), .resumeId("r")])
+            record("session ref: sessionId alone is a resumeId",
+                   ControlProtocol.sessionRefs(["sessionId": "r"]) == [.resumeId("r")])
+            record("session ref: empty strings are absent",
+                   ControlProtocol.sessionRefs(["key": "", "sessionId": "r"]) == [.resumeId("r")]
+                       && ControlProtocol.sessionRefs(["key": "", "sessionId": ""]).isEmpty)
+            do {
+                let refStore = SessionStore()
+                let tmp = URL(fileURLWithPath: "/tmp")
+                let first = OpenSession(origin: .local(tmp), resumeId: "placeholder", title: "A", project: "p", status: .live)
+                let second = OpenSession(origin: .local(tmp), resumeId: "r-b", title: "B", project: "p", status: .live)
+                refStore._probeSeedOpenSessions([first, second])
+                let key = first.id.uuidString
+                first.resumeId = "cli-real-id"
+                record("session lookup: the key still finds a session after its resumeId was replaced",
+                       refStore.openSession(for: [.key(key), .resumeId("placeholder")]) === first)
+                record("session lookup: the old resumeId no longer does",
+                       refStore.openSession(for: [.resumeId("placeholder")]) == nil)
+                record("session lookup: an unknown key falls back to the sessionId sent with it",
+                       refStore.openSession(for: ControlProtocol.sessionRefs(["key": UUID().uuidString, "sessionId": "r-b"])) === second)
+                record("session lookup: nothing matching is nil",
+                       refStore.openSession(for: [.key("nope"), .resumeId("nope")]) == nil)
+            }
+            record("session row: an in-memory Int lastActiveAt reads as a Double",
+                   ControlProtocol.SessionRow(wire: ["resumeId": "r", "lastActiveAt": 1000 as Int])?.lastActiveAt == 1000)
+            record("session row: the wire keys are the contract clients read",
+                   Set(ControlProtocol.SessionRow(
+                       key: "K", resumeId: "r", title: "t", project: "p", cwd: "/c", state: "idle", running: true,
+                       clients: 1, lastActiveAt: 1, model: "m", messageCount: 2, permissionMode: "plan", accountId: "a")
+                       .wire.keys)
+                       == ["key", "resumeId", "title", "project", "cwd", "state", "running", "clients", "lastActiveAt",
+                           "model", "messageCount", "permissionMode", "accountId"])
+            record("switch account: an empty accountId means the default login",
+                   ControlProtocol.accountId(["accountId": ""]) == nil && ControlProtocol.accountId([:]) == nil
+                       && ControlProtocol.accountId(["accountId": "A"]) == "A")
+            record("mirror endpoint: only TCP needs the password",
+                   MirrorEndpoint.tcp(host: "100.1.2.3", port: 8767).needsToken
+                       && !MirrorEndpoint.unix(path: "/tmp/x.sock").needsToken)
+            record("mirror endpoint: a unix path becomes a unix NWEndpoint", {
+                if case .unix(let path) = MirrorEndpoint.unix(path: "/tmp/x.sock").nwEndpoint { return path == "/tmp/x.sock" }
+                return false
+            }())
+            record("mirror endpoint: TCP keeps the 15/15/3 keepalive", {
+                guard let tcp = MirrorEndpoint.tcp(host: "100.1.2.3", port: 8767).parameters
+                        .defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options else { return false }
+                return tcp.enableKeepalive && tcp.keepaliveIdle == 15 && tcp.keepaliveInterval == 15 && tcp.keepaliveCount == 3
+            }())
+            // Canopy Server: new-session options ride the attach's `open`.
+            do {
+                let png = Data([0x89, 0x50, 0x4E, 0x47]).base64EncodedString()
+                let options = NewSessionOptions(model: "opus", effort: "high", permissionMode: .plan, promptText: "fix it",
+                                                promptImages: [WireImage(mediaType: "image/png", base64: png)],
+                                                settledTitle: "Fix it", providerId: "prov", accountId: "acct")
+                record("open request: a new session's options round-trip",
+                       MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/p", options: options).wire)
+                           == .new(cwd: "/tmp/p", options: options))
+                record("open request: a bare new session has empty options",
+                       MirrorOpenRequest(wire: ["kind": "new", "cwd": "/tmp/p"]) == .new(cwd: "/tmp/p", options: NewSessionOptions()))
+                record("open request: an unknown permission mode is dropped, not guessed",
+                       NewSessionOptions(wire: ["permissionMode": "yolo"]).permissionMode == nil)
+                record("open request: resume is unchanged",
+                       MirrorOpenRequest(wire: MirrorOpenRequest.resume.wire) == .resume)
+                record("launch image: an accepted type decodes", LaunchImage.fromWire(WireImage(mediaType: "image/png", base64: png)) != nil)
+                record("launch image: an unaccepted type is refused",
+                       LaunchImage.fromWire(WireImage(mediaType: "image/heic", base64: png)) == nil)
+                record("launch image: base64 that does not decode is refused",
+                       LaunchImage.fromWire(WireImage(mediaType: "image/png", base64: "%%%")) == nil)
+            }
+            record("daemon supervisor: a live socket needs nothing",
+                   DaemonSupervisor.action(socketLive: true, isDebugBuild: false, registration: .notRegistered) == .none)
+            record("daemon supervisor: Release registers when not registered",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notRegistered) == .register)
+            record("daemon supervisor: Release launches it itself while approval is pending",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .requiresApproval) == .launch)
+            record("daemon supervisor: Release launches when registered but not running",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .enabled) == .launch)
+            record("daemon supervisor: Debug always launches its own",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .notRegistered) == .launch)
+            do {
+                var correlator = ControlClient.Correlator()
+                let first = correlator.begin()
+                let second = correlator.begin()
+                record("control client: request ids are unique", first != second)
+                let ok = correlator.finish(["type": "response", "id": first, "result": ["ok": true]])
+                record("control client: a result resolves its own id", {
+                    guard let ok, ok.id == first, case .success(let result) = ok.result else { return false }
+                    return result["ok"] as? Bool == true
+                }())
+                record("control client: an error resolves as refused", {
+                    guard case .failure(let failure)? = correlator.finish(["type": "response", "id": second, "error": "nope"])?.result
+                    else { return false }
+                    return failure == .refused("nope")
+                }())
+                record("control client: an id resolves once",
+                       correlator.finish(["type": "response", "id": first, "result": [:]]) == nil)
+                record("control client: an unknown id is ignored",
+                       correlator.finish(["type": "response", "id": "zzz", "result": [:]]) == nil)
+                let third = correlator.begin()
+                record("control client: a drop fails every pending request", correlator.failAll() == [third])
+            }
+            do {
+                OpenSession.localSessionsRunInDaemon = true
+                defer { OpenSession.localSessionsRunInDaemon = false }
+                let dir = URL(fileURLWithPath: "/tmp/p")
+                let fresh = OpenSession(origin: .local(dir), resumeId: "new-id", title: "T", project: "p",
+                                        permissionMode: .plan, model: "opus", effortLevel: "high")
+                fresh.pendingInitialPrompt = LaunchPrompt.make(text: "hi", images: [])
+                fresh.pendingSettledTitle = "Settled"
+                record("daemon open: a new local session asks for .new with what the launcher chose",
+                       fresh.daemonOpenRequest == .new(cwd: "/tmp/p", options: NewSessionOptions(
+                           model: "opus", effort: "high", permissionMode: .plan, promptText: "hi", settledTitle: "Settled")))
+                let resumed = OpenSession(origin: .local(dir), resumeId: "old-id", title: "T", project: "p",
+                                          resumeIdIsExistingTranscript: true)
+                record("daemon open: an existing transcript asks for .resume", resumed.daemonOpenRequest == .resume)
+                record("daemon hosted: local is, remote is not",
+                       fresh.isDaemonHosted
+                           && !OpenSession(origin: .remote(host: "h", path: dir), resumeId: "r", title: "", project: "").isDaemonHosted)
+                let teleported = OpenSession(origin: .teleportedFrom(cloudSessionId: "c", localPath: dir), resumeId: "t",
+                                             title: "", project: "", resumeIdIsExistingTranscript: true)
+                record("daemon hosted: a teleported session is, and resumes its transcript",
+                       teleported.isDaemonHosted && teleported.daemonOpenRequest == .resume)
+                // Detach vs remove.
+                let detachStore = SessionStore()
+                let kept = OpenSession(origin: .local(dir), resumeId: "k", title: "K", project: "p", status: .live)
+                let gone = OpenSession(origin: .local(dir), resumeId: "g", title: "G", project: "p", status: .live)
+                detachStore._probeSeedOpenSessions([kept, gone])
+                detachStore.openInFocusedPane(kept.id)
+                detachStore.closeSession(kept.id, keepingFailure: false)
+                record("daemon close: Cmd+W detaches — the pane goes, the row stays, the launcher shows",
+                       detachStore.openSessions.contains { $0 === kept } && detachStore.panes.isEmpty
+                           && detachStore.selection == .launcher && kept.status == .dormant)
+                detachStore.closeSession(gone.id, keepingFailure: false, removeRow: true)
+                record("daemon close: removeRow drops the row", !detachStore.openSessions.contains { $0 === gone })
+            }
+            OpenSession.localSessionsRunInDaemon = false
+            record("daemon hosted: off by default, so the daemon's own sessions close for real",
+                   !OpenSession(origin: .local(URL(fileURLWithPath: "/tmp")), resumeId: "r", title: "", project: "").isDaemonHosted)
+            do {
+                func row(_ key: String, _ resume: String) -> ControlProtocol.SessionRow {
+                    ControlProtocol.SessionRow(key: key, resumeId: resume, title: "t", project: "p", cwd: "/p", state: "idle",
+                                               running: true, clients: 0, lastActiveAt: 0, model: "", messageCount: 0,
+                                               permissionMode: "", accountId: nil)
+                }
+                let a = UUID(), b = UUID(), c = UUID()
+                let plan = DaemonSessionSync.plan(
+                    rows: [row("KA", "ra-new"), row("KB", "rb"), row("KX", "rx")],
+                    local: [.init(id: a, key: "KA", resumeId: "ra-placeholder", isPaned: false),
+                            .init(id: b, key: nil, resumeId: "rb", isPaned: true),
+                            .init(id: c, key: "KGONE", resumeId: "rc", isPaned: false)])
+                record("daemon sync: a key match updates even after the resumeId changed",
+                       plan.updates.contains { $0.id == a && $0.row.resumeId == "ra-new" })
+                record("daemon sync: a keyless local session matches by resumeId",
+                       plan.updates.contains { $0.id == b && $0.row.key == "KB" })
+                record("daemon sync: a daemon session the GUI does not know is added",
+                       plan.adds.map(\.key) == ["KX"])
+                record("daemon sync: a session the daemon no longer holds is removed", plan.removes == [c])
+                let waiting = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: nil, resumeId: "r", isPaned: true)])
+                record("daemon sync: a pane still waiting for its attach is not removed", waiting.removes.isEmpty)
+                let twice = DaemonSessionSync.plan(
+                    rows: [row("KA", "r1")],
+                    local: [.init(id: a, key: nil, resumeId: "r1", isPaned: false),
+                            .init(id: b, key: nil, resumeId: "r1", isPaned: false)])
+                record("daemon sync: one row matches at most one local session",
+                       twice.updates.count == 1 && twice.removes.count == 1)
+                let restarted = DaemonSessionSync.plan(
+                    rows: [row("KNEW", "ra")],
+                    local: [.init(id: a, key: "KOLD", resumeId: "ra", isPaned: true)])
+                record("daemon sync: after a daemon restart a stale key still matches by resumeId",
+                       restarted.updates.map(\.id) == [a] && restarted.adds.isEmpty && restarted.removes.isEmpty)
+                let paneKept = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: "K", resumeId: "r", isPaned: true),
+                                      .init(id: b, key: "K2", resumeId: "r2", isPaned: false)])
+                record("daemon sync: a paned session is never removed, an unpaned one is",
+                       paneKept.removes == [b])
+                let partial = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: b, key: "K2", resumeId: "r2", isPaned: false)], complete: false)
+                record("daemon sync: a push with unreadable rows removes nothing", partial.removes.isEmpty)
+            }
+            do {
+                OpenSession.localSessionsRunInDaemon = true
+                defer { OpenSession.localSessionsRunInDaemon = false }
+                let dir = URL(fileURLWithPath: "/tmp/p")
+                let known = OpenSession(origin: .local(dir), resumeId: "r", title: "T", project: "p", resumeIdIsExistingTranscript: true)
+                known.daemonKey = "K"
+                record("daemon open: a keyed session with a transcript still asks for .resume (a restarted daemon lost it)",
+                       known.daemonOpenRequest == .resume)
+                let placeholder = OpenSession(origin: .local(dir), resumeId: "p", title: "T", project: "p")
+                placeholder.daemonKey = "K"
+                record("daemon open: a keyed placeholder asks for nothing rather than a second .new",
+                       placeholder.daemonOpenRequest == nil)
+                let own = OpenSession(origin: .local(dir), resumeId: "h", title: "T", project: "p")
+                own.runsShimHere = true
+                record("daemon hosted: a session whose shim runs in this process is not the daemon's", !own.isDaemonHosted)
+            }
+            record("open gate: bypass is refused without this Mac's opt-in",
+                   NewSessionOptions(permissionMode: .bypassPermissions).refusal(allowBypass: false) == "bypass permissions is off on this Mac"
+                       && NewSessionOptions(permissionMode: .bypassPermissions).refusal(allowBypass: true) == nil
+                       && NewSessionOptions(permissionMode: .plan).refusal(allowBypass: false) == nil)
+            record("resume fallback: only a UUID-shaped id reaches the transcript scan",
+                   MirrorConnection.isSessionIdShaped("d249fc17-cfc3-4ab7-a2ab-976110f83c2f")
+                       && !MirrorConnection.isSessionIdShaped("../../etc/x") && !MirrorConnection.isSessionIdShaped(""))
+            // Canopy Server UI frames (daemon → Mac client).
+            func throughJSON(_ wire: [String: Any]) -> [String: Any] {
+                guard let data = try? JSONSerialization.data(withJSONObject: wire),
+                      let back = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [:] }
+                return back
+            }
+            for frame in [MirrorUIFrame.showContent(title: "a.swift", content: "let x = 1", startLine: 3, endLine: 5),
+                          .showContent(title: "out", content: "", startLine: nil, endLine: nil),
+                          .recap("Where we were"), .recap(nil), .errorBanner("it's\nbroken"),
+                          .alert(requestId: "r1", message: "Sure?", severity: "warning", buttons: ["Yes", "No"]),
+                          .notify(title: "Canopy", body: "done")] {
+                record("ui frame: \(frame) round-trips through JSON", MirrorUIFrame(wire: throughJSON(frame.wire)) == frame)
+            }
+            record("ui frame: another type is not a UI frame", MirrorUIFrame(wire: ["type": "status"]) == nil)
+            record("ui frame: an unknown action (the retired eval_js too) is ignored",
+                   MirrorUIFrame(wire: ["type": MirrorUIFrame.type, "action": "explode"]) == nil
+                       && MirrorUIFrame(wire: ["type": MirrorUIFrame.type, "action": "eval_js", "js": "x()"]) == nil)
+            record("ui frame: an alert with no requestId cannot be answered, so it is dropped",
+                   MirrorUIFrame(wire: ["type": MirrorUIFrame.type, "action": "alert", "message": "?"]) == nil)
+            record("ui answer: a button and no button both round-trip",
+                   MirrorUIAnswer(wire: throughJSON(MirrorUIAnswer(requestId: "r1", button: "Yes").wire)) == MirrorUIAnswer(requestId: "r1", button: "Yes")
+                       && MirrorUIAnswer(wire: throughJSON(MirrorUIAnswer(requestId: "r1", button: nil).wire)) == MirrorUIAnswer(requestId: "r1", button: nil))
+            let small = String(repeating: "a", count: 10)
+            record("ui content: text under the cap is sent whole", MirrorUIFrame.inlineContent(small) == small)
+            record("ui content: the cap, escaped at worst 6×, still fits one client line",
+                   MirrorUIFrame.maxInlineContentBytes * 6 + (1 << 16) < NDJSONLineBuffer.maxLineBytes)
+            let big = String(repeating: "あ", count: MirrorUIFrame.maxInlineContentBytes / 3 + 10)
+            let cut = MirrorUIFrame.inlineContent(big)
+            record("ui content: text over the cap is cut on a character boundary and says so",
+                   cut.utf8.count < big.utf8.count && cut.hasSuffix("MB in all)") && cut.hasPrefix("あああ")
+                       && cut.utf8.count <= MirrorUIFrame.maxInlineContentBytes + 64)
+            let mac = ShimProcess.UIClient(acceptsUI: true, isLocal: false)
+            let local = ShimProcess.UIClient(acceptsUI: true, isLocal: true)
+            let phone = ShimProcess.UIClient(acceptsUI: false, isLocal: false)
+            record("ui target: the Mac client that asked gets it",
+                   ShimProcess.uiTarget(requester: 1, clients: [local, mac]) == 1)
+            record("ui target: a phone that asked hands it to a Mac, the local one first",
+                   ShimProcess.uiTarget(requester: 0, clients: [phone, mac, local]) == 2)
+            record("ui target: without fallback, a phone's request goes to nobody",
+                   ShimProcess.uiTarget(requester: 0, clients: [phone, local], fallback: false) == nil
+                       && ShimProcess.uiTarget(requester: 1, clients: [phone, local], fallback: false) == 1)
+            record("ui target: no Mac client, nobody gets it",
+                   ShimProcess.uiTarget(requester: 0, clients: [phone, phone]) == nil)
+            record("ui target: no requester, the local Mac, else any Mac",
+                   ShimProcess.uiTarget(requester: nil, clients: [phone, mac, local]) == 2
+                       && ShimProcess.uiTarget(requester: nil, clients: [phone, mac]) == 1)
+            var pending = PendingUIAlerts<Int>()
+            pending.record(requestId: "a", client: 1, buttons: ["Yes"])
+            pending.record(requestId: "b", client: 2, buttons: ["Yes"])
+            pending.record(requestId: "c", client: 1, buttons: [])
+            record("pending alerts: an answer from another client is refused and keeps the alert",
+                   pending.answer(requestId: "a", button: "Yes", from: 2) == .wrongClient)
+            record("pending alerts: the right client's answer is accepted once",
+                   pending.answer(requestId: "a", button: "Yes", from: 1) == .accept("Yes")
+                       && pending.answer(requestId: "a", button: "Yes", from: 1) == .unknown)
+            record("pending alerts: a button that was not offered is Dismiss",
+                   pending.answer(requestId: "b", button: "Delete everything", from: 2) == .accept(nil))
+            record("pending alerts: a detaching client is owed a Dismiss for its own alerts only",
+                   pending.detach(2) == [] && pending.detach(1) == ["c"] && pending.isEmpty)
+            let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            record("alert response: buttons, then Dismiss, then anything else is Dismiss",
+                   MirrorUIAlert.button(response: first, buttons: ["Yes", "No"]) == "Yes"
+                       && MirrorUIAlert.button(response: first + 1, buttons: ["Yes", "No"]) == "No"
+                       && MirrorUIAlert.button(response: first + 2, buttons: ["Yes", "No"]) == nil
+                       && MirrorUIAlert.button(response: NSApplication.ModalResponse.stop.rawValue, buttons: ["Yes"]) == nil)
+            record("keep-alive (daemon): a session with no shim is not a target",
+                   KeepAliveCoordinator.daemonTargets([OpenSession(origin: .local(URL(fileURLWithPath: "/tmp")), resumeId: "a", title: "", project: "")]).isEmpty)
+            record("keep-alive (daemon): a target has a client attached, a phone included",
+                   KeepAliveCoordinator.isDaemonTarget(mirrorCount: 1) && !KeepAliveCoordinator.isDaemonTarget(mirrorCount: 0)
+                       && !KeepAliveCoordinator.isDaemonTarget(mirrorCount: nil))
+            record("permission mode: set_permission_mode is read",
+                   ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_permission_mode", "mode": "plan", "userInitiated": true]]) == .plan)
+            record("permission mode: another request carrying a mode is not",
+                   ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_model", "mode": "plan"]]) == nil
+                       && ShimProcess.requestedPermissionMode(["type": "response", "request": ["type": "set_permission_mode", "mode": "plan"]]) == nil)
+            record("permission mode: an unknown mode is not",
+                   ShimProcess.requestedPermissionMode(["type": "request", "request": ["type": "set_permission_mode", "mode": "yolo"]]) == nil)
+            // Canopy Server B4: the daemon reads settings.json and never writes it.
+            do {
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-settings-\(UUID().uuidString)")
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: dir) }
+                let file = dir.appendingPathComponent("settings.json")
+                func write(_ json: String) { try? Data(json.utf8).write(to: file) }
+                write(#"{"canopy.rosterEnabled":true,"canopy.rosterEndpoint":"https://a.example","canopy.keepAliveEnabled":false}"#)
+                let wasPersisting = CanopySettings.persistsChanges
+                CanopySettings.persistsChanges = false
+                defer { CanopySettings.persistsChanges = wasPersisting }
+                let before = try? Data(contentsOf: file)
+                let settings = CanopySettings(filePath: file)
+                record("settings (daemon): values are read from the file",
+                       settings.rosterEnabled && settings.rosterEndpoint == "https://a.example" && !settings.keepAliveEnabled)
+                settings.recapEnabled.toggle()
+                record("settings (daemon): loading and changing a value writes nothing",
+                       (try? Data(contentsOf: file)) == before)
+                write(#"{"canopy.rosterEnabled":false,"canopy.rosterEndpoint":"https://b.example","canopy.keepAliveEnabled":true,"canopy.machineDisplayName":"Studio"}"#)
+                let rewritten = try? Data(contentsOf: file)
+                settings.reload(from: ((try? JSONSerialization.jsonObject(with: rewritten ?? Data())) as? [String: Any]) ?? [:])
+                record("settings (daemon): reload picks up the GUI's change",
+                       !settings.rosterEnabled && settings.rosterEndpoint == "https://b.example"
+                           && settings.keepAliveEnabled && settings.machineDisplayName == "Studio")
+                record("settings (daemon): reload writes nothing", (try? Data(contentsOf: file)) == rewritten)
+                settings.reload(from: ["claudeCode.allowDangerouslySkipPermissions": false,
+                                       "canopy.defaultPermissionMode": "bypassPermissions"])
+                record("settings (daemon): reload clamps bypass away when the opt-in is off",
+                       settings.defaultPermissionMode == .acceptEdits)
+            }
+            record("roster relay: the GUI may, Debug or not",
+                   RosterPublisher.relayAllowed(isDaemon: false, isDebug: true, env: [:])
+                       && RosterPublisher.relayAllowed(isDaemon: false, isDebug: false, env: [:]))
+            record("roster relay: a Release daemon may",
+                   RosterPublisher.relayAllowed(isDaemon: true, isDebug: false, env: [:]))
+            record("roster relay: a Debug daemon only with CANOPY_DAEMON_ROSTER=1",
+                   !RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: [:])
+                       && !RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: ["CANOPY_DAEMON_ROSTER": "true"])
+                       && RosterPublisher.relayAllowed(isDaemon: true, isDebug: true, env: ["CANOPY_DAEMON_ROSTER": "1"]))
+            // Canopy Server B5: the GUI shows the daemon's listener.
+            for state in [MirrorServerStatus.State.off, .noTailscale, .noPassword,
+                          .listening(host: "100.64.0.1", port: 8770), .failed("in use"), .checking, .unavailable("x")] {
+                record("mirror status: \(state) round-trips through JSON", {
+                    guard let data = try? JSONSerialization.data(withJSONObject: state.wire),
+                          let back = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
+                    return MirrorServerStatus.State(wire: back) == state
+                }())
+            }
+            record("mirror status: an unknown state or a bad port is not read",
+                   MirrorServerStatus.State(wire: ["state": "exploded"]) == nil
+                       && MirrorServerStatus.State(wire: ["state": "listening", "host": "h", "port": 70000]) == nil)
+            let listenerStep = { (want: String?, bound: String?, pending: String?, since: TimeInterval?) in
+                DaemonDelegate.listenerAction(want: want, bound: bound, pending: pending,
+                                              secondsSinceAttempt: since, retryAfter: 30)
+            }
+            record("daemon listener: waits for Tailscale, keeps a bound or binding listener on the wanted address",
+                   listenerStep(nil, nil, nil, nil) == .waitForTailscale
+                       && listenerStep("100.1.1.1:8770", "100.1.1.1:8770", nil, 1) == .keep
+                       && listenerStep("100.1.1.1:8770", nil, "100.1.1.1:8770", 1) == .keep)
+            record("daemon listener: a moved address or a changed port rebinds at once, even mid-bind",
+                   listenerStep("100.2.2.2:8770", "100.1.1.1:8770", nil, 1) == .start
+                       && listenerStep("100.1.1.1:9000", "100.1.1.1:8770", nil, 1) == .start
+                       && listenerStep("100.1.1.1:9000", nil, "100.1.1.1:8770", 1) == .start)
+            record("daemon listener: a failed bind retries only after the delay",
+                   listenerStep("100.1.1.1:8770", nil, nil, 29) == .keep
+                       && listenerStep("100.1.1.1:8770", nil, nil, 30) == .start
+                       && listenerStep("100.1.1.1:8770", nil, nil, nil) == .start)
+            record("daemon listener: the retry delay doubles from 30 s to a 10-minute cap",
+                   DaemonDelegate.retryDelay(failedBinds: 0) == 30 && DaemonDelegate.retryDelay(failedBinds: 1) == 30
+                       && DaemonDelegate.retryDelay(failedBinds: 2) == 60 && DaemonDelegate.retryDelay(failedBinds: 20) == 600)
+            // Canopy Server B6: the daemon restarts onto an updated build once idle.
+            let upgrade = { (launched: String?, disk: String?, previous: String?, launchd: Bool, blocked: Bool) in
+                DaemonUpgrade.shouldRestart(launchedBuild: launched, onDiskBuild: disk, previousOnDiskBuild: previous,
+                                            underLaunchd: launchd, blocked: blocked)
+            }
+            record("daemon upgrade: a new build seen on two checks restarts an unblocked launchd daemon",
+                   upgrade("100", "101", "101", true, false))
+            record("daemon upgrade: not on the first sighting, not blocked, not outside launchd",
+                   !upgrade("100", "101", "100", true, false) && !upgrade("100", "101", nil, true, false)
+                       && !upgrade("100", "101", "101", true, true) && !upgrade("100", "101", "101", false, false))
+            record("daemon upgrade: never for the same or an unreadable build",
+                   !upgrade("100", "100", "100", true, false) && !upgrade("100", nil, nil, true, false)
+                       && !upgrade(nil, "101", "101", true, false))
+            record("daemon upgrade: launchd is recognised by the job label, Debug and Release apart",
+                   DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.daemon"], bundleId: "sh.saqoo.Canopy")
+                       && !DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.daemon"], bundleId: "sh.saqoo.Canopy.debug")
+                       && !DaemonUpgrade.isUnderLaunchd(env: [:], bundleId: "sh.saqoo.Canopy"))
+            do {
+                let bundle = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-\(UUID().uuidString).app")
+                let contents = bundle.appendingPathComponent("Contents")
+                try? FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: bundle) }
+                let plist = try? PropertyListSerialization.data(fromPropertyList: ["CFBundleVersion": "4242"], format: .xml, options: 0)
+                try? plist?.write(to: contents.appendingPathComponent("Info.plist"))
+                record("daemon upgrade: the on-disk build is read fresh from the bundle's Info.plist",
+                       DaemonUpgrade.onDiskBuild(bundleURL: bundle) == "4242"
+                           && DaemonUpgrade.onDiskBuild(bundleURL: bundle.appendingPathComponent("missing")) == nil)
+            }
+            record("roster heartbeat: an idle Mac re-publishes well inside the 5-minute staleness line",
+                   RosterPublisher.heartbeatInterval * 2 < RemoteRosterWatcher.staleThreshold)
+            record("full disk access: only a permission refusal reads as missing",
+                   !FullDiskAccess.isGranted(openErrno: EPERM) && !FullDiskAccess.isGranted(openErrno: EACCES)
+                       && FullDiskAccess.isGranted(openErrno: ENOENT))
+            // Canopy Server daemon hardening.
+            record("control limit: a negative limit clamps to 0 instead of trapping prefix()",
+                   ControlProtocol.limit(["limit": -1], default: 50) == 0)
+            record("control limit: absent uses the default, a positive value passes through",
+                   ControlProtocol.limit([:], default: 50) == 50 && ControlProtocol.limit(["limit": 7], default: 50) == 7)
+            do {
+                let bypassDir = FileManager.default.temporaryDirectory.path
+                record("control open: bypassPermissions is refused while the opt-in is off",
+                       ControlProtocol.parseOpenParams(["cwd": bypassDir, "permissionMode": "bypassPermissions"], allowBypass: false)
+                           == .failure(ControlProtocol.ControlError("bypass permissions is off on this Mac")))
+                record("control open: bypassPermissions passes when the opt-in is on",
+                       (try? ControlProtocol.parseOpenParams(["cwd": bypassDir, "permissionMode": "bypassPermissions"], allowBypass: true).get())?.permissionMode == .bypassPermissions)
+            }
+            record("reaper busy: a running background task counts as busy",
+                   SessionReaper.isBusy(working: false, permissionPending: false, asking: false, backgroundTasks: 1))
+            record("reaper busy: nothing pending is not busy",
+                   !SessionReaper.isBusy(working: false, permissionPending: false, asking: false, backgroundTasks: 0))
+            record("reaper busy: each of working / permission / asking alone is busy",
+                   SessionReaper.isBusy(working: true, permissionPending: false, asking: false, backgroundTasks: 0)
+                       && SessionReaper.isBusy(working: false, permissionPending: true, asking: false, backgroundTasks: 0)
+                       && SessionReaper.isBusy(working: false, permissionPending: false, asking: true, backgroundTasks: 0))
+            record("daemon tcp: no listener while Mirror is off",
+                   DaemonPaths.tcpPort(mirrorEnabled: false, basePort: DaemonConfig.defaults.port, bundleId: "sh.saqoo.Canopy") == nil)
+            record("daemon tcp: Release uses the base port, Debug the next one",
+                   DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 8770, bundleId: "sh.saqoo.Canopy") == 8770
+                       && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 8770, bundleId: "sh.saqoo.Canopy.debug") == 8771)
+            record("daemon tcp: an out-of-range port yields no listener",
+                   DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 0, bundleId: "sh.saqoo.Canopy") == nil
+                       && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 65535, bundleId: "sh.saqoo.Canopy.debug") == nil)
+            record("daemon agent: Release always registers",
+                   DaemonRegistration.shouldRegister(isDebugBuild: false, environment: [:]))
+            record("daemon agent: Debug registers only when asked",
+                   !DaemonRegistration.shouldRegister(isDebugBuild: true, environment: [:])
+                       && DaemonRegistration.shouldRegister(isDebugBuild: true, environment: ["CANOPY_REGISTER_DAEMON": "1"]))
+            do {
+                let livePath = "/tmp/canopy-probe-\(getpid()).sock"
+                unlink(livePath)
+                let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                var addr = sockaddr_un()
+                addr.sun_family = sa_family_t(AF_UNIX)
+                withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+                    for (i, b) in livePath.utf8.enumerated() { buf[i] = b }
+                }
+                let bound = withUnsafePointer(to: &addr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+                } == 0 && listen(fd, 1) == 0
+                record("daemon socket: a listening socket reads as live", bound && DaemonPaths.socketIsLive(path: livePath))
+                close(fd)
+                record("daemon socket: a socket file nobody listens on reads as stale", !DaemonPaths.socketIsLive(path: livePath))
+                unlink(livePath)
+                record("daemon socket: a missing path reads as stale", !DaemonPaths.socketIsLive(path: livePath))
+            }
             // The launcher's Resume menu over another Mac's closed sessions.
             let t0 = Date(timeIntervalSince1970: 1_000_000)
             func peerSession(_ id: String, _ project: String, _ age: TimeInterval, title: String = "t") -> MirrorRecents.Session {
@@ -1803,7 +2414,7 @@ enum SidebarLogicProbe {
                    long == String(repeating: "a", count: 59) + "…  ·  1m")
             record("mirror open: both kinds round-trip the wire",
                    MirrorOpenRequest(wire: MirrorOpenRequest.resume.wire) == .resume
-                       && MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/x").wire) == .new(cwd: "/tmp/x"))
+                       && MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/x", options: NewSessionOptions()).wire) == .new(cwd: "/tmp/x", options: NewSessionOptions()))
             record("mirror open: an unknown kind, a missing or relative cwd, and no request at all are refused",
                    MirrorOpenRequest(wire: ["kind": "exec"]) == nil
                        && MirrorOpenRequest(wire: ["kind": "new"]) == nil

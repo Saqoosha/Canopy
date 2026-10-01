@@ -70,6 +70,14 @@ final class RosterPublisher {
     /// believes they sent, so this errs short.
     private static let pingInterval: TimeInterval = 30
 
+    /// Re-publishes the unchanged snapshot. A snapshot goes out only on a
+    /// change, and the phone and other Macs judge a Mac offline once its
+    /// `publishedAt` is `RemoteRosterWatcher.staleThreshold` (5 min) old, so
+    /// an idle Mac — the daemon with nothing running — read as offline while
+    /// connected (measured on studio, 2026-10-01).
+    private var heartbeat: Timer?
+    static let heartbeatInterval: TimeInterval = 2 * 60
+
     /// When the last reconnect-after-loss ran, so failures cannot compound
     /// into a tight loop.
     private var lastReconnectAt: Date?
@@ -123,10 +131,18 @@ final class RosterPublisher {
         running = true
         RosterPublisher.current = self
         observe()
+        heartbeat = Timer.scheduledTimer(withTimeInterval: Self.heartbeatInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.running else { return }
+                self.publish()
+            }
+        }
     }
 
     func stop() {
         running = false
+        heartbeat?.invalidate()
+        heartbeat = nil
         if RosterPublisher.current === self { RosterPublisher.current = nil }
         connectedEndpoint = nil
         stopPinging()
@@ -441,6 +457,21 @@ final class RosterPublisher {
         }
     }
 
+    /// Whether this process may reach the relay (and the keychain item it
+    /// needs). The daemon sets it from `relayAllowed` at launch.
+    nonisolated(unsafe) static var relayAllowedInProcess = true
+    private nonisolated(unsafe) static var loggedRelayRefusal = false
+
+    /// The GUI always may. A daemon may in Release; a Debug daemon only with
+    /// `CANOPY_DAEMON_ROSTER=1`, because its signature does not match the
+    /// keychain ACL the Release app owns (a prompt on every read, with nobody
+    /// at a windowless daemon to answer it) and it publishes under the same
+    /// machine id as the Release Canopy, so the two would fight over one roster.
+    nonisolated static func relayAllowed(isDaemon: Bool, isDebug: Bool, env: [String: String]) -> Bool {
+        guard isDaemon, isDebug else { return true }
+        return env["CANOPY_DAEMON_ROSTER"] == "1"
+    }
+
     /// The relay secret, from the Keychain.
     ///
     /// **Not from the process environment.** Canopy is launched with `open`,
@@ -453,6 +484,13 @@ final class RosterPublisher {
     /// `KeychainAuth` is the precedent for reading a secret in this app; this
     /// item is written by the Settings field in Task 3 and read here.
     static func sharedSecret() -> String? {
+        guard relayAllowedInProcess else {
+            if !loggedRelayRefusal {
+                loggedRelayRefusal = true
+                Logger(subsystem: "sh.saqoo.Canopy", category: "Roster").notice("relay secret not read: this process is kept off the relay (a Debug daemon without CANOPY_DAEMON_ROSTER=1); no roster, pushes or image uploads")
+            }
+            return nil
+        }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "sh.saqoo.Canopy.roster",

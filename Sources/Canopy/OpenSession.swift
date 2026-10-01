@@ -242,6 +242,40 @@ final class OpenSession: Identifiable, Hashable {
     /// new session's placeholder is replaced by the CLI's id over there.
     var mirrorHostSessionId: String?
 
+    /// Set by the GUI at launch. The daemon leaves it off: there a `.local`
+    /// session is its own, and closing one must stop it.
+    nonisolated(unsafe) static var localSessionsRunInDaemon = false
+
+    /// This Mac's session, run by the local daemon (Canopy Server). The GUI
+    /// attaches to it and never holds its shim.
+    var isDaemonHosted: Bool {
+        guard Self.localSessionsRunInDaemon, !runsShimHere else { return false }
+        switch origin {
+        case .local, .teleportedFrom: return true  // a teleport leaves a local transcript
+        case .remote, .mirror: return false
+        }
+    }
+
+    /// Set when this process started the session's shim itself, not the daemon.
+    var runsShimHere = false
+
+    /// The daemon's `OpenSession.id` for this session, once known.
+    var daemonKey: String?
+
+    /// What an attach asks the daemon to start when it does not hold this session yet.
+    var daemonOpenRequest: MirrorOpenRequest? {
+        guard isDaemonHosted else { return nil }
+        // Sent even with a key: a daemon that restarted no longer holds it, and
+        // the server ignores `open` when it does.
+        if resumeIdIsExistingTranscript { return .resume }
+        guard daemonKey == nil else { return nil }
+        return .new(cwd: origin.workingDirectory.path, options: NewSessionOptions(
+            model: model, effort: effortLevel, permissionMode: permissionMode,
+            promptText: pendingInitialPrompt.flatMap { $0.text.isEmpty ? nil : $0.text },
+            promptImages: pendingInitialPrompt?.images.map(\.wire) ?? [],
+            settledTitle: pendingSettledTitle, providerId: customApi?.id, accountId: claudeAccount?.id))
+    }
+
     /// Bumped by `SessionStore.restartSession(_:)`, and read only through
     /// `mountIdentity`.
     ///

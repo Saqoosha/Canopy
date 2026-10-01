@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 struct SettingsView: View {
     var body: some View {
@@ -363,6 +364,15 @@ private struct SharingSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        // The listener is the daemon's: poll its status while this tab is up.
+        .task {
+            guard OpenSession.localSessionsRunInDaemon else { return }
+            mirrorStatus.state = .checking
+            while !Task.isCancelled {
+                await mirrorStatus.refreshFromDaemon(SessionStore.shared?.daemonControl)
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
     }
 
     @State private var mirrorStatus = MirrorServerStatus.shared
@@ -380,6 +390,8 @@ private struct SharingSettingsTab: View {
         case .noPassword: "Cannot create the password in the Keychain"
         case .listening(let host, let port): "Listening on \(host):\(port)"
         case .failed(let reason): "Cannot listen: \(reason)"
+        case .checking: "Checking the background service…"
+        case .unavailable(let reason): reason
         }
     }
 
@@ -414,6 +426,16 @@ private struct SharingSettingsTab: View {
         MachineIdentity.storeRelaySecret(relaySecret)
         hasStoredSecret = MachineIdentity.hasRelaySecret()
         RosterPublisher.current?.secretChanged()
+        // The publisher is the daemon's while it holds this Mac's sessions; a
+        // Keychain write does not touch settings.json, so tell it directly.
+        // A blank submit (tabbing past the field) stores nothing, so there is nothing to reconnect for.
+        if !relaySecret.isEmpty, let control = SessionStore.shared?.daemonControl {
+            Task {
+                if case .failure(let failure) = await control.request("roster_secret_changed") {
+                    Logger(subsystem: "sh.saqoo.Canopy", category: "Settings").error("roster_secret_changed not delivered: \(String(describing: failure), privacy: .public)")
+                }
+            }
+        }
     }
 }
 

@@ -62,6 +62,70 @@ struct MirrorRecents: Equatable {
     }
 }
 
+/// An image in a new session's first prompt, as the wire carries it.
+struct WireImage: Equatable {
+    let mediaType: String
+    let base64: String
+}
+
+/// What a new session is started with. Rides `MirrorOpenRequest.new`, so the
+/// pane that opens a session carries everything the launcher chose.
+struct NewSessionOptions: Equatable {
+    var model: String? = nil
+    var effort: String? = nil
+    var permissionMode: PermissionMode? = nil
+    var promptText: String? = nil
+    var promptImages: [WireImage] = []
+    var settledTitle: String? = nil
+    var providerId: String? = nil
+    var accountId: String? = nil
+
+    init(model: String? = nil, effort: String? = nil, permissionMode: PermissionMode? = nil, promptText: String? = nil,
+         promptImages: [WireImage] = [], settledTitle: String? = nil, providerId: String? = nil, accountId: String? = nil) {
+        self.model = model
+        self.effort = effort
+        self.permissionMode = permissionMode
+        self.promptText = promptText
+        self.promptImages = promptImages
+        self.settledTitle = settledTitle
+        self.providerId = providerId
+        self.accountId = accountId
+    }
+
+    /// Missing or empty keys read as unset; an unknown permission mode is dropped, not guessed.
+    init(wire: [String: Any]?) {
+        let wire = wire ?? [:]
+        func text(_ key: String) -> String? { (wire[key] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        self.init(model: text("model"), effort: text("effort"),
+                  permissionMode: text("permissionMode").flatMap(PermissionMode.init(rawValue:)),
+                  promptText: text("promptText"),
+                  promptImages: (wire["promptImages"] as? [[String: Any]] ?? []).compactMap {
+                      guard let type = $0["mediaType"] as? String, let data = $0["base64"] as? String else { return nil }
+                      return WireImage(mediaType: type, base64: data)
+                  },
+                  settledTitle: text("settledTitle"), providerId: text("providerId"), accountId: text("accountId"))
+    }
+
+    /// Why this Mac refuses to start a session with these options, or nil. The
+    /// same rule the control API's `open_session` applies.
+    func refusal(allowBypass: Bool) -> String? {
+        permissionMode == .bypassPermissions && !allowBypass ? "bypass permissions is off on this Mac" : nil
+    }
+
+    var wire: [String: Any] {
+        var dict: [String: Any] = [:]
+        if let model { dict["model"] = model }
+        if let effort { dict["effort"] = effort }
+        if let permissionMode { dict["permissionMode"] = permissionMode.rawValue }
+        if let promptText { dict["promptText"] = promptText }
+        if !promptImages.isEmpty { dict["promptImages"] = promptImages.map { ["mediaType": $0.mediaType, "base64": $0.base64] } }
+        if let settledTitle { dict["settledTitle"] = settledTitle }
+        if let providerId { dict["providerId"] = providerId }
+        if let accountId { dict["accountId"] = accountId }
+        return dict
+    }
+}
+
 /// What an `attach` asks the server to start when no shim is running for its
 /// session id. Sent until an attach succeeds (`OpenSession.pendingMirrorOpen`).
 enum MirrorOpenRequest: Equatable {
@@ -69,7 +133,7 @@ enum MirrorOpenRequest: Equatable {
     case resume
     /// A new session in `cwd` on the other Mac, under the attach's session id
     /// as a placeholder the CLI's own id later replaces.
-    case new(cwd: String)
+    case new(cwd: String, options: NewSessionOptions)
 
     /// `attach_error` messages for an open the server refused or could not start.
     static let notOpenable = "cannot open"
@@ -78,7 +142,7 @@ enum MirrorOpenRequest: Equatable {
     var wire: [String: Any] {
         switch self {
         case .resume: ["kind": "resume"]
-        case .new(let cwd): ["kind": "new", "cwd": cwd]
+        case .new(let cwd, let options): ["kind": "new", "cwd": cwd, "options": options.wire]
         }
     }
 
@@ -87,7 +151,7 @@ enum MirrorOpenRequest: Equatable {
         case "resume": self = .resume
         case "new":
             guard let cwd = wire?["cwd"] as? String, cwd.hasPrefix("/") else { return nil }
-            self = .new(cwd: cwd)
+            self = .new(cwd: cwd, options: NewSessionOptions(wire: wire?["options"] as? [String: Any]))
         default: return nil
         }
     }

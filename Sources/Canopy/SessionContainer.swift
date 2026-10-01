@@ -17,16 +17,19 @@ struct SessionContainer: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                if session.origin.mirrorTarget != nil {
+                if session.origin.mirrorTarget != nil || session.isDaemonHosted {
                     MirrorPaneView(session: session) { message in
                         session.lastFatalError = message
-                        SessionStore.shared?.remoteAttachError = message
+                        // The other-Mac banner; a local daemon failure takes the shim-crash path alone.
+                        if !session.isDaemonHosted { SessionStore.shared?.remoteAttachError = message }
                         onCrash?(-2)
                     }
                     .overlay {
                         ConnectionOverlayView(
                             connectionState: session.connection,
-                            title: "Connection to \(session.statusBar.mirrorMachine ?? "the other Mac") Lost",
+                            title: session.isDaemonHosted
+                                ? "Connection to This Mac's Session Lost"
+                                : "Connection to \(session.statusBar.mirrorMachine ?? "the other Mac") Lost",
                             onBackToLauncher: {
                                 SessionStore.shared?.replaceSessionWithLauncher(session.id)
                             }
@@ -99,7 +102,7 @@ struct SessionContainer: View {
             // load — long enough to mask the first paint, short enough that
             // the user perceives the click as instant. A mirror session's
             // bridge flips it on `attach_ok`; do not race that.
-            guard session.origin.mirrorTarget == nil else { return }
+            guard session.origin.mirrorTarget == nil, !session.isDaemonHosted else { return }
             try? await Task.sleep(for: .seconds(1.2))
             await MainActor.run {
                 if case .spawning = session.status {
