@@ -276,7 +276,11 @@ struct MirrorPaneView: NSViewRepresentable {
                     logger.notice("[mirror-pane] extension \(local, privacy: .public) here, \(remote, privacy: .public) on \(machineName, privacy: .public)")
                 }
             case .refused(let reason):
-                onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName))
+                if case .spawning = session.status {
+                    onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName))
+                } else {
+                    onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName))
+                }
             case .dropped:
                 session.fileTransfer.connectionDropped()
                 if case .spawning = session.status {
