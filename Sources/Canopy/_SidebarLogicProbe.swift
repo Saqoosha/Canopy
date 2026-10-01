@@ -12348,6 +12348,20 @@ enum SidebarLogicProbe {
                        == "1 session is busy: Fix CI. Restarting stops its current work. Conversations are kept.")
         }
 
+        // MARK: - Sessions on an older extension
+        do {
+            let rows: [(key: String, title: String, running: String?, blocker: String?)] = [
+                ("a", "A", "2.1.290", nil), ("b", "B", "2.1.286", "a turn, question or background task is running"),
+                ("c", "C", nil, nil),
+            ]
+            let state = ExtensionUpgradeState.assemble(installed: "2.1.290", sessions: rows)
+            record("stale extension: only a known, different version is listed, with its blocker",
+                   state?.stale == [StaleExtensionSession(key: "b", title: "B", running: "2.1.286",
+                                                          blocker: "a turn, question or background task is running")])
+            record("stale extension: an unreadable installed version yields no state",
+                   ExtensionUpgradeState.assemble(installed: nil, sessions: rows) == nil)
+        }
+
         // MARK: - Mirror session list (#282)
         // A session that moved into a worktree is missing from the extension's list; the
         // webview then starts a new conversation instead of reading it.
