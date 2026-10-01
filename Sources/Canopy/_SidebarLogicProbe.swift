@@ -12233,6 +12233,36 @@ enum SidebarLogicProbe {
                        && messages(of: ShimProcess.fittingReplay(prefixedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.count == 2)
         }
 
+        // MARK: - Extension update safety: canary and in-use cleanup
+        do {
+            let ready = #"{"type":"log","message":"x"}"# + "\n" + #"{"type":"ready"}"# + "\n"
+            let broken = #"{"type":"error","message":"Extension activation failed: boom","stack":"s"}"# + "\n"
+            record("extension canary: a ready shim passes",
+                   ExtensionCanary.outcome(stdout: ready, exitStatus: nil) == .passed)
+            record("extension canary: an activation error fails with the shim's own message",
+                   ExtensionCanary.outcome(stdout: broken, exitStatus: 1) == .failed("Extension activation failed: boom"))
+            record("extension canary: exiting before ready fails, naming the status",
+                   ExtensionCanary.outcome(stdout: #"{"type":"log"}"# + "\n", exitStatus: 3)
+                       == .failed("the extension host exited with status 3 before it was ready"))
+            record("extension canary: still starting is undecided, and a partial or garbled line is ignored",
+                   ExtensionCanary.outcome(stdout: "not json\n" + #"{"type":"rea"#, exitStatus: nil) == .undecided)
+
+            let ps = """
+              101 /opt/homebrew/bin/node /App/Contents/Resources/vscode-shim/index.js --extension-path /Users/u/Library/Application Support/Canopy/extensions/anthropic.claude-code-2.1.283-darwin-arm64 --cwd /tmp/a --settings-path /s
+              102 /usr/bin/node other.js --cwd /x
+            """
+            record("extension cleanup: the extension paths running shims use are read from ps, spaces included",
+                   ExtensionCleanup.extensionPathsInUse(psOutput: ps)
+                       == ["/Users/u/Library/Application Support/Canopy/extensions/anthropic.claude-code-2.1.283-darwin-arm64"])
+            let dir = "/Users/u/Library/Application Support/Canopy/extensions"
+            let installed = ["anthropic.claude-code-2.1.283-darwin-arm64", "anthropic.claude-code-2.1.286-darwin-arm64",
+                             "anthropic.claude-code-2.1.250-darwin-arm64", ".DS_Store"]
+            record("extension cleanup: removes only versions that are neither kept nor in use",
+                   ExtensionCleanup.removable(installed: installed, in: dir, keepingVersion: "2.1.286",
+                                              inUse: ["\(dir)/anthropic.claude-code-2.1.283-darwin-arm64"])
+                       == ["anthropic.claude-code-2.1.250-darwin-arm64"])
+        }
+
         // MARK: - Why a daemon session ended, for its clients (#278)
         record("session ended: the shim's own fatal error is what the client is told",
                ShimProcess.sessionEndedReason(fatalError: "Extension activation failed: boom", status: 1, signaled: false)

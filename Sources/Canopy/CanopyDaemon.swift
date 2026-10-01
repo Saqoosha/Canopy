@@ -115,6 +115,11 @@ final class DaemonDelegate {
     func start() {
         logger.notice("daemon starting pid=\(getpid())")
         Task { await store.refreshRecents() }
+        // Versions an install kept because a session was still running them; the old daemon's
+        // shims are gone by now, and a version another process still runs is kept again.
+        if let current = CCExtension.extensionVersion() {
+            Task.detached(priority: .utility) { ExtensionCleanup.removeUnused(keepingVersion: current) }
+        }
 
         let server = MirrorServer(store: store, token: MirrorAccess.token(createIfMissing: false) ?? "")
         server.acceptsControl = true
