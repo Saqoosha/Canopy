@@ -31,7 +31,9 @@ class Memento {
     return defaultValue;
   }
 
-  update(key, value) {
+  // `async` because VSCode's signature is `Thenable<void>`: the extension chains
+  // `.then(void 0, onError)` during activation, so a write failure must reject.
+  async update(key, value) {
     if (value === undefined) {
       delete this._data[key];
     } else {
