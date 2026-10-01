@@ -225,6 +225,7 @@ class RelativePattern {
 // ---------------------------------------------------------------------------
 const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3, Four: 4, Five: 5, Six: 6, Seven: 7, Eight: 8, Nine: 9 };
 const StatusBarAlignment = { Left: 1, Right: 2 };
+const ExtensionMode = { Production: 1, Development: 2, Test: 3 };
 const ConfigurationTarget = { Global: 1, Workspace: 2, WorkspaceFolder: 3 };
 const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };
 const UIKind = { Desktop: 1, Web: 2 };
@@ -365,6 +366,7 @@ module.exports = {
   RelativePattern,
   ViewColumn,
   StatusBarAlignment,
+  ExtensionMode,
   ConfigurationTarget,
   ProgressLocation,
   UIKind,
