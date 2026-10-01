@@ -209,6 +209,11 @@ struct Sidebar: View {
         .animation(.easeInOut(duration: 0.2), value: store.teleportError)
         .animation(.easeInOut(duration: 0.2), value: store.remoteAttachError)
         .task {
+            // SwiftUI runs this before the probe; its background recents load reads the title
+            // store and raced the probe's corruption fixtures (2 of 30 runs).
+            #if DEBUG
+            guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else { return }
+            #endif
             store.isSidebarVisible = true
             await store.refreshRecents()
             await store.refreshCloud()
