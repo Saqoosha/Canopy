@@ -12230,6 +12230,34 @@ enum SidebarLogicProbe {
                        && messages(of: ShimProcess.fittingReplay(prefixedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.count == 2)
         }
 
+        // MARK: - Mirror session list (#282)
+        // A session that moved into a worktree is missing from the extension's list; the
+        // webview then starts a new conversation instead of reading it.
+        do {
+            func listResponse(_ ids: [String]) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "response", "requestId": "r1",
+                    "response": ["type": "list_sessions_response", "folderKey": "k",
+                                 "sessions": ids.map { ["id": $0, "lastModified": 1] }]]]
+            }
+            func ids(_ payload: [String: Any]) -> [String]? {
+                (((payload["message"] as? [String: Any])?["response"] as? [String: Any])?["sessions"] as? [[String: Any]])?
+                    .compactMap { $0["id"] as? String }
+            }
+            let entry = ShimProcess.sessionListEntry(id: "moved", title: "Moved", modified: Date(timeIntervalSince1970: 2), size: 42)
+            record("mirror session list: the entry carries what the webview reads",
+                   entry["id"] as? String == "moved" && entry["summary"] as? String == "Moved"
+                       && entry["lastModified"] as? Int == 2000 && entry["fileSize"] as? Int == 42
+                       && entry["archived"] as? Bool == false)
+            record("mirror session list: a session missing from the list is added",
+                   ids(ShimProcess.addingSessionIfMissing(listResponse(["a"]), entry: entry)) == ["a", "moved"])
+            record("mirror session list: a session already listed is left alone",
+                   ids(ShimProcess.addingSessionIfMissing(listResponse(["moved", "a"]), entry: entry)) == ["moved", "a"])
+            let replay: [String: Any] = ["type": "from-extension", "message": ["type": "response", "requestId": "r2",
+                "response": ["type": "get_session_response", "messages": [] as [Any]]]]
+            record("mirror session list: any other response is untouched",
+                   NSDictionary(dictionary: ShimProcess.addingSessionIfMissing(replay, entry: entry)).isEqual(to: replay))
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

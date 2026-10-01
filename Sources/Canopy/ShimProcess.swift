@@ -4565,6 +4565,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
+                    let payload = addingBoundSessionIfMissing(payload)
                     let shaped: [String: Any]
                     if let connection = target as? MirrorConnection {
                         let session = boundSession?.resumeId ?? ""
@@ -5031,6 +5032,54 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         {
             var updated = message
             updated["message"] = trimmed
+            return updated
+        }
+        return message
+    }
+
+    /// `payload` with this shim's own session added to a session list that lacks it (#282).
+    private func addingBoundSessionIfMissing(_ payload: [String: Any]) -> [String: Any] {
+        guard let inner = payload["message"] as? [String: Any],
+              (inner["response"] as? [String: Any])?["type"] as? String == "list_sessions_response",
+              let session = boundSession, !session.resumeId.isEmpty,
+              let path = Self.jsonlPath(sessionId: session.resumeId, workingDirectory: workingDirectory),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let modified = attributes[.modificationDate] as? Date
+        else { return payload }
+        let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        return Self.addingSessionIfMissing(
+            payload, entry: Self.sessionListEntry(id: session.resumeId, title: session.title, modified: modified, size: size))
+    }
+
+    /// One `list_sessions_response` row, in the fields the webview's session model reads.
+    static func sessionListEntry(id: String, title: String, modified: Date, size: Int) -> [String: Any] {
+        ["id": id, "summary": title, "lastModified": Int(modified.timeIntervalSince1970 * 1000),
+         "fileSize": size, "archived": false]
+    }
+
+    /// Adds `entry` to a `list_sessions_response` that lacks its id; any other message is returned as is.
+    /// The extension lists only its spawn cwd's folder, so a session that moved into a worktree is
+    /// missing, and a mirror webview opening it starts a new conversation instead (#282).
+    static func addingSessionIfMissing(_ message: [String: Any], entry: [String: Any]) -> [String: Any] {
+        func add(_ container: [String: Any]) -> [String: Any]? {
+            guard var response = container["response"] as? [String: Any],
+                  response["type"] as? String == "list_sessions_response",
+                  let sessions = response["sessions"] as? [[String: Any]],
+                  let id = entry["id"] as? String,
+                  !sessions.contains(where: { $0["id"] as? String == id })
+            else { return nil }
+            response["sessions"] = sessions + [entry]
+            var updated = container
+            updated["response"] = response
+            return updated
+        }
+        if let added = add(message) { return added }
+        if message["type"] as? String == "from-extension",
+           let nested = message["message"] as? [String: Any],
+           let added = add(nested)
+        {
+            var updated = message
+            updated["message"] = added
             return updated
         }
         return message
