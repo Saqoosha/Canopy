@@ -219,6 +219,10 @@ if [[ ! -f "${APPCAST_DIR}/appcast.xml" ]]; then
   exit 1
 fi
 
+# The prefix above is applied to every item regenerated from a local DMG, not
+# just this version's, so older full-DMG URLs would 404 (issue #274).
+python3 "${SCRIPT_DIR}/fix_appcast_dmg_urls.py" "$APPCAST_DIR/appcast.xml"
+
 # Normalize channel metadata: generate_appcast always appends <title>AppName</title>,
 # so we replace the entire block between <channel> and first <item> with canonical metadata.
 python3 - "$APPCAST_DIR/appcast.xml" <<'PYEOF'

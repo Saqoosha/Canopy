@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Re-sign every DMG enclosure in the published appcast against the file that is
-# actually attached to its GitHub Release, and push the corrections to gh-pages.
+# Point every DMG enclosure in the published appcast at its own GitHub Release,
+# re-sign it against the file actually attached there, and push the corrections
+# to gh-pages.
 #
 # Why this exists: for as long as update_appcast.sh rebuilt DMGs before signing
 # them (issue #188), every item it wrote described bytes nobody could download.
@@ -57,6 +58,11 @@ echo "=== Fetching published appcast from gh-pages ==="
 git fetch origin gh-pages --quiet
 git show origin/gh-pages:appcast.xml > "${WORK}/appcast.xml"
 
+echo "=== Pointing each DMG at its own release (issue #274) ==="
+URL_FIXES=$(python3 "${SCRIPT_DIR}/fix_appcast_dmg_urls.py" "${WORK}/appcast.xml")
+[[ -n "$URL_FIXES" ]] && echo "$URL_FIXES"
+URL_CHANGED=$(grep -c . <<<"$URL_FIXES" || true)
+
 # Every DMG the feed references, in feed order. Read with a while loop rather
 # than `mapfile`: that builtin arrived in bash 4 and macOS still ships 3.2 at
 # /bin/bash, where it would fail before checking a single entry.
@@ -72,7 +78,7 @@ if (( ${#DMGS[@]} == 0 )); then
 fi
 
 echo "=== Checking ${#DMGS[@]} entries against their published assets ==="
-CHANGED=0
+CHANGED=$URL_CHANGED
 UNVERIFIABLE=0
 
 for DMG_NAME in "${DMGS[@]}"; do
@@ -154,11 +160,10 @@ git worktree add "$WORKTREE_DIR" origin/gh-pages --detach --quiet
   if git diff --cached --quiet; then
     echo "appcast.xml unchanged on gh-pages, skipping push"
   else
-    git commit --quiet -m "Re-sign appcast entries against the published DMGs
+    git commit --quiet -m "Repair appcast DMG entries against their own releases
 
-Every item written before issue #188 was fixed described a rebuilt DMG
-rather than the file attached to the release, so Sparkle failed the
-signature check and silently discarded it."
+Each full-DMG enclosure now points at the release that holds its file
+(issue #274) and is signed against that published file (issue #188)."
     git push origin gh-pages
     echo "Pushed appcast.xml to gh-pages"
   fi
