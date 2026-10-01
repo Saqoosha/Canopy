@@ -6,6 +6,10 @@ import Network
 /// `restartSession` puts it back in `.spawning`, where a failed connection closes it.
 enum RestartReattach {
     static let interval: TimeInterval = 2
+    /// Far above the gap it waits out. Measured 2026-10-01 with `launchctl kickstart -k` on
+    /// the daemon: the old process's last connection closed at 47.733 and the new one was
+    /// listening at 47.838. An upgrade adds `restartIfUpgraded`'s 1 s before exit; the
+    /// slack covers a slow shutdown, not a slow start.
     static let budget: TimeInterval = 60
 
     nonisolated static func attempts(interval: TimeInterval, budget: TimeInterval) -> Int {
