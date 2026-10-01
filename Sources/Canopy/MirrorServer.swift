@@ -312,6 +312,12 @@ final class MirrorConnection: MirrorSink {
     /// True when a Mac client's attach said it serves `canopy-asset` image URLs (`"images": true`),
     /// so its replay can carry them in place of base64 the way a phone's does.
     private(set) var fetchesImages = false
+    /// Set from the attach's `"restart": true`; see `MirrorSink.reattachesAfterRestart`.
+    private(set) var reattachesAfterRestart = false
+
+    nonisolated static func reattachesAfterRestart(attach dict: [String: Any]) -> Bool {
+        dict["restart"] as? Bool == true
+    }
     /// The session this connection attached to; images are only served under it.
     fileprivate private(set) var attachedSessionId = ""
 
@@ -596,6 +602,7 @@ final class MirrorConnection: MirrorSink {
         compressOutbound = dict["compress"] as? String == MirrorWire.compressionName
         filesRequested = dict["files"] as? Bool == true
         fetchesImages = isMacClient && dict["images"] as? Bool == true
+        reattachesAfterRestart = Self.reattachesAfterRestart(attach: dict)
         acceptsUI = isMacClient && dict["ui"] as? Bool == true
         // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
         let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""

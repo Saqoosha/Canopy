@@ -5,6 +5,8 @@ enum ConnectionStatus: Equatable {
     case connected
     case reconnecting(attempt: Int)
     case reconnectFailed
+    /// The machine announced a restart for an update; the pane re-attaches when it is back.
+    case awaitingRestart(machine: String)
 }
 
 @Observable
@@ -25,6 +27,8 @@ final class ConnectionState {
             return "Reconnecting... (\(attempt)/3)"
         case .reconnectFailed:
             return "Could not reconnect"
+        case .awaitingRestart(let machine):
+            return "\(machine) is restarting for an update. Reconnecting…"
         }
     }
 }

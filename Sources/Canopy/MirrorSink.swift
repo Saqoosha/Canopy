@@ -26,6 +26,10 @@ protocol MirrorSink: AnyObject {
     /// On this Mac, over the daemon's local socket.
     var isLocalClient: Bool { get }
 
+    /// Whether this client said at attach (`"restart": true`) that it re-attaches by
+    /// itself after a `daemon_restarting` notice, so a daemon upgrade need not wait for it.
+    var reattachesAfterRestart: Bool { get }
+
     /// UI the daemon cannot show itself (`MirrorUIFrame`).
     func deliverUI(_ frame: MirrorUIFrame)
 }
@@ -35,6 +39,7 @@ extension MirrorSink {
     var acceptsFileTransfers: Bool { false }
     var acceptsUI: Bool { false }
     var isLocalClient: Bool { false }
+    var reattachesAfterRestart: Bool { false }
     func deliverUI(_ frame: MirrorUIFrame) {}
 }
 

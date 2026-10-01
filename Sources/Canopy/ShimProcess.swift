@@ -108,6 +108,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             quietSince: quietSince)
     }
 
+    /// A remote client holds an upgrade only when it will not re-attach by itself;
+    /// a local pane always re-attaches (`MirrorPaneView`'s `isDaemon` branch).
+    nonisolated static func remoteClientBlocksUpgrade(isLocal: Bool, reattaches: Bool) -> Bool {
+        !isLocal && !reattaches
+    }
+
     /// Why restarting the daemon now would lose something of this session's, or nil.
     /// Wider than the reaper's busy: a restart also drops what is in flight between
     /// turns, and a remote client that will not re-attach on its own. Checked only
@@ -118,8 +124,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if recapRequestInFlight { return "a recap is in flight" }
         if phoneReplyInFlight || !queuedPhoneReplies.isEmpty { return "a phone reply is waiting" }
         if boundSession?.pendingInitialPrompt != nil { return "the first prompt has not been sent" }
-        if mirrors.values.contains(where: { $0.sink.map { !$0.isLocalClient } ?? false }) {
-            return "a phone or another Mac is attached"
+        if mirrors.values.contains(where: { client in
+            client.sink.map { Self.remoteClientBlocksUpgrade(isLocal: $0.isLocalClient, reattaches: $0.reattachesAfterRestart) } ?? false
+        }) {
+            return "a phone or another Mac without automatic reconnect is attached"
         }
         // A session with no transcript yet cannot be resumed, which matters only while a pane
         // shows it (one nobody watches the reaper would stop anyway). Local only: a remote

@@ -12279,6 +12279,23 @@ enum SidebarLogicProbe {
         record("session ended: a signal death names the signal, not an exit status",
                ShimProcess.sessionEndedReason(fatalError: nil, status: 9, signaled: true) == "the session process was killed by signal 9")
 
+        // MARK: - Remote clients that re-attach do not hold an upgrade
+        record("upgrade blocker: a local pane never holds an upgrade",
+               !ShimProcess.remoteClientBlocksUpgrade(isLocal: true, reattaches: false))
+        record("upgrade blocker: a remote client that re-attaches by itself does not hold it",
+               !ShimProcess.remoteClientBlocksUpgrade(isLocal: false, reattaches: true))
+        record("upgrade blocker: an older remote client still holds it",
+               ShimProcess.remoteClientBlocksUpgrade(isLocal: false, reattaches: false))
+        record("attach: restart capability is read only from a literal true",
+               MirrorConnection.reattachesAfterRestart(attach: ["restart": true])
+                   && !MirrorConnection.reattachesAfterRestart(attach: ["restart": "true"])
+                   && !MirrorConnection.reattachesAfterRestart(attach: [:]))
+
+        // MARK: - Remote pane re-attach after a daemon restart
+        record("restart re-attach: the overlay names the machine",
+               { let s = ConnectionState(); s.status = .awaitingRestart(machine: "studio")
+                 return s.isOverlayVisible && s.statusMessage == "studio is restarting for an update. Reconnecting…" }())
+
         // MARK: - Mirror session list (#282)
         // A session that moved into a worktree is missing from the extension's list; the
         // webview then starts a new conversation instead of reading it.

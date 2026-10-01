@@ -47,7 +47,7 @@ struct ConnectionOverlayView: View {
         switch connectionState.status {
         case .connected:
             EmptyView()
-        case .reconnecting:
+        case .reconnecting, .awaitingRestart:
             ProgressView()
                 .controlSize(.large)
                 .tint(.white)

@@ -294,12 +294,38 @@ struct MirrorPaneView: NSViewRepresentable {
                     // Only a restart the daemon announced re-attaches on its own: any other drop
                     // may be a stop made elsewhere, which must not be undone. launchd starts the
                     // new build; `ensureRunning` asks launchd before starting one itself.
-                    if isDaemon, bridge?.expectsRestart == true {
-                        Task { @MainActor [weak session] in
-                            guard await DaemonSupervisor.ensureRunning(), let session,
-                                  session.connection.status == .reconnectFailed else { return }
-                            logger.notice("[mirror-pane] session service restarted; re-attaching \(session.resumeId, privacy: .public)")
-                            SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
+                    if bridge?.expectsRestart == true {
+                        if isDaemon {
+                            Task { @MainActor [weak session] in
+                                guard await DaemonSupervisor.ensureRunning(), let session,
+                                      session.connection.status == .reconnectFailed else { return }
+                                logger.notice("[mirror-pane] session service restarted; re-attaching \(session.resumeId, privacy: .public)")
+                                SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
+                            }
+                        } else if let target = session.origin.mirrorTarget {
+                            // Another Mac's daemon: wait for its listener, since re-attaching puts the
+                            // pane back in `.spawning`, where a refused connection closes it.
+                            let waiting = ConnectionStatus.awaitingRestart(machine: machineName)
+                            session.connection.status = waiting
+                            Task { @MainActor [weak session] in
+                                let deadline = Date().addingTimeInterval(RestartReattach.budget)
+                                while Date() < deadline {
+                                    guard session?.connection.status == waiting else { return }
+                                    if await RestartReattach.listenerIsUp(host: target.host, port: target.port,
+                                                                          timeout: RestartReattach.interval) {
+                                        guard let current = session, current.connection.status == waiting else { return }
+                                        logger.notice("[mirror-pane] \(machineName, privacy: .public) is back; re-attaching \(current.resumeId, privacy: .public)")
+                                        // The new daemon starts with no sessions; one that still holds it ignores `open`.
+                                        current.pendingMirrorOpen = .resume
+                                        SessionStore.shared?.restartSession(current.id, notifyDaemon: false)
+                                        return
+                                    }
+                                    try? await Task.sleep(for: .seconds(RestartReattach.interval))
+                                }
+                                guard let current = session, current.connection.status == waiting else { return }
+                                logger.notice("[mirror-pane] \(machineName, privacy: .public) did not come back within \(Int(RestartReattach.budget))s")
+                                current.connection.status = .reconnectFailed
+                            }
                         }
                     }
                 }
@@ -308,6 +334,8 @@ struct MirrorPaneView: NSViewRepresentable {
         session.connection.onRetry = { [weak session] in
             guard let session else { return }
             // Re-attach only: a dropped connection is not a reason to restart the daemon's CLI.
+            // After an announced restart the other Mac holds no sessions, so ask it to resume.
+            if !isDaemon, session.mirrorBridge?.expectsRestart == true { session.pendingMirrorOpen = .resume }
             SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
         }
         session.mirrorBridge = bridge
