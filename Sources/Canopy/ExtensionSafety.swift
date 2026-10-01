@@ -132,8 +132,9 @@ enum ExtensionCanary {
 }
 
 /// Removes old extension versions from Canopy's folder, but never the newest one there and never
-/// one a running process names: a daemon's shims outlive the GUI that installed an update, and
-/// each one later spawns its CLI from `resources/native-binary` inside its own version's folder.
+/// one a running process names on its command line, which covers shims (each later spawns its CLI
+/// from `resources/native-binary` inside its own version's folder). A webview that loaded its
+/// assets from an older folder is not covered: that path is on no command line.
 enum ExtensionCleanup {
     /// Entries of `dir` to delete. The newest version by version order stays (it is what new
     /// sessions use, and an install just made it), and so does any folder whose full path appears
