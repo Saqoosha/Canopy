@@ -37,13 +37,14 @@ enum CCExtension {
 
     /// Read extension version from package.json (e.g., "2.1.87").
     static func extensionVersion() -> String? {
-        guard let extPath = extensionPath() else { return nil }
-        let packageJSON = extPath.appendingPathComponent("package.json")
-        guard let data = try? Data(contentsOf: packageJSON),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let version = json["version"] as? String
-        else { return nil }
-        return version
+        extensionPath().flatMap(version(at:))
+    }
+
+    /// The `version` in an extension folder's package.json.
+    static func version(at extPath: URL) -> String? {
+        guard let data = try? Data(contentsOf: extPath.appendingPathComponent("package.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return json["version"] as? String
     }
 
     /// Get the actual CLI binary version by running `claude --version`.

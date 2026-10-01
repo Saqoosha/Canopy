@@ -65,6 +65,18 @@ struct StaleExtensionSession: Equatable {
 struct ExtensionUpgradeState: Equatable {
     let installed: String
     let stale: [StaleExtensionSession]
+
+    /// Sessions whose shim started on a version other than the one installed. A shim whose
+    /// version could not be read is left out: listing it would offer a restart that may change nothing.
+    static func assemble(installed: String?,
+                         sessions: [(key: String, title: String, running: String?, blocker: String?)]) -> ExtensionUpgradeState? {
+        guard let installed else { return nil }
+        let stale = sessions.compactMap { row -> StaleExtensionSession? in
+            guard let running = row.running, running != installed else { return nil }
+            return StaleExtensionSession(key: row.key, title: row.title, running: running, blocker: row.blocker)
+        }
+        return ExtensionUpgradeState(installed: installed, stale: stale)
+    }
 }
 
 /// What the daemon tells the GUI about updates it has not applied yet.

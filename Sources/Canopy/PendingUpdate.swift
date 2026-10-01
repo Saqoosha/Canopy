@@ -65,6 +65,26 @@ private struct PendingUpdateDetail: View {
     let state: UpgradeState
     @State private var error: String?
 
+    /// Restarts one session's shim on the newest extension, keeping its conversation.
+    private func restart(_ row: StaleExtensionSession) {
+        guard let store = SessionStore.shared,
+              let session = store.openSessions.first(where: { $0.daemonKey == row.key }) else {
+            error = "\(row.title) is not open in this window."
+            return
+        }
+        // The row's blocker is up to a minute old; this pane's own flags are current.
+        let liveBusy = session.isThinking || session.isAsking || session.isWaiting ? "it is working" : nil
+        if let blocker = row.blocker ?? liveBusy {
+            let alert = NSAlert()
+            alert.messageText = "Restart \(row.title)?"
+            alert.informativeText = "It is busy: \(blocker). Restarting stops its current work. The conversation is kept."
+            alert.addButton(withTitle: "Restart")
+            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        store.restartSession(session.id)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let pending = state.pendingBuild {
@@ -78,6 +98,22 @@ private struct PendingUpdateDetail: View {
                 }
                 if !state.heldBy.isEmpty, !state.notUnderLaunchd, !PendingUpdate.shared.restarting {
                     Button("Restart now") { confirmAndRestart() }
+                }
+            }
+            if let ext = state.extensionState, !ext.stale.isEmpty {
+                if state.pendingBuild != nil { Divider() }
+                Text("Extension \(ext.installed) is installed; these sessions still run an older one.")
+                    .font(.headline)
+                ForEach(ext.stale, id: \.key) { row in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(row.title).font(.system(size: 12, weight: .medium))
+                            Text(row.blocker.map { "\(row.running) · \($0)" } ?? row.running)
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Restart") { restart(row) }
+                    }
                 }
             }
             if let error { Text(error).font(.system(size: 11)).foregroundStyle(.red) }

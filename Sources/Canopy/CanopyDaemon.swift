@@ -108,9 +108,20 @@ final class DaemonDelegate {
                                      bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy")
     }
 
+    /// Live shims on an extension other than the newest installed one. Runs every check, so it
+    /// reads the reaper's busy flag rather than `upgradeBlocker`, which can scan the transcript store.
+    private func extensionState() -> ExtensionUpgradeState? {
+        let installed = CCExtension.extensionVersion()
+        return ExtensionUpgradeState.assemble(installed: installed, sessions: store.openSessions.compactMap { session in
+            guard let shim = session.shim, shim.isLive else { return nil }
+            let busy = shim.reaperInputs.isBusy ? "a turn, question or background task is running" : nil
+            return (session.id.uuidString, session.title, shim.extensionVersion, busy)
+        })
+    }
+
     private func publishUpgradeState(pending: String?, holds: [UpgradeHold], underLaunchd: Bool) {
         let state = UpgradeState(runningBuild: DaemonUpgrade.launchedBuild ?? "?", pendingBuild: pending, heldBy: holds,
-                                 notUnderLaunchd: !underLaunchd, extensionState: nil)
+                                 notUnderLaunchd: !underLaunchd, extensionState: extensionState())
         if DaemonUpgradeCenter.shared.state != state { DaemonUpgradeCenter.shared.state = state }
     }
 
