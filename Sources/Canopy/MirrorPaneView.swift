@@ -304,18 +304,19 @@ struct MirrorPaneView: NSViewRepresentable {
                             }
                         } else if let target = session.origin.mirrorTarget {
                             // Another Mac's daemon: wait for its listener, since re-attaching puts the
-                            // pane back in `.spawning`, where a refused connection closes it. Retry or
-                            // closing the pane changes the status, which ends the loop.
+                            // pane back in `.spawning`, where a refused connection closes it.
                             let waiting = ConnectionStatus.awaitingRestart(machine: machineName)
                             session.connection.status = waiting
                             Task { @MainActor [weak session] in
-                                let tries = RestartReattach.attempts(interval: RestartReattach.interval, budget: RestartReattach.budget)
-                                for _ in 0..<tries {
+                                let deadline = Date().addingTimeInterval(RestartReattach.budget)
+                                while Date() < deadline {
                                     guard session?.connection.status == waiting else { return }
                                     if await RestartReattach.listenerIsUp(host: target.host, port: target.port,
                                                                           timeout: RestartReattach.interval) {
                                         guard let current = session, current.connection.status == waiting else { return }
                                         logger.notice("[mirror-pane] \(machineName, privacy: .public) is back; re-attaching \(current.resumeId, privacy: .public)")
+                                        // The new daemon starts with no sessions; one that still holds it ignores `open`.
+                                        current.pendingMirrorOpen = .resume
                                         SessionStore.shared?.restartSession(current.id, notifyDaemon: false)
                                         return
                                     }

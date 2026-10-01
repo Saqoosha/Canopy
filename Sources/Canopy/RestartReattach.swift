@@ -12,10 +12,6 @@ enum RestartReattach {
     /// slack covers a slow shutdown, not a slow start.
     static let budget: TimeInterval = 60
 
-    nonisolated static func attempts(interval: TimeInterval, budget: TimeInterval) -> Int {
-        max(1, Int(budget / interval))
-    }
-
     /// True when a TCP connection to the listener becomes ready within `timeout`.
     /// `.waiting` counts as down: a refused connection lands there rather than in `.failed`.
     nonisolated static func listenerIsUp(host: String, port: UInt16, timeout: TimeInterval) async -> Bool {
