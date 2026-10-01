@@ -244,7 +244,9 @@ final class ExtensionUpdater {
                 }
                 logger.notice("Extension v\(version, privacy: .public) passed its start check")
             } else {
-                logger.error("Extension v\(version, privacy: .public): start check skipped, node or the shim was not found")
+                // Installing unchecked would also let cleanup remove the known-good version.
+                logger.error("Extension v\(version, privacy: .public): not installed, node or the shim was not found for the start check")
+                throw UpdateError.canaryFailed(version: version, reason: "Node.js or Canopy's shim was not found, so it could not be checked")
             }
 
             try FileManager.default.createDirectory(at: extensionsDir, withIntermediateDirectories: true)
