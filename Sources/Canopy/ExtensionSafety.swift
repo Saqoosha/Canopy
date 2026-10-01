@@ -4,8 +4,8 @@ import os.log
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ExtensionUpdater")
 
 /// Starts a freshly downloaded Claude Code extension in a throwaway shim before Canopy adopts it.
-/// Extension updates have broken activation in the shim more than once (#193, #276, #277); each
-/// would have been caught here, before any session ran on the new version.
+/// It checks activation only: no CLI is spawned and no message is exchanged. Extension updates
+/// that threw during `activate` (#193, #276) would have been stopped here.
 enum ExtensionCanary {
     enum Outcome: Equatable {
         case passed
@@ -51,8 +51,10 @@ enum ExtensionCanary {
         process.executableURL = URL(fileURLWithPath: nodePath)
         process.arguments = [shimPath, "--extension-path", extensionDir.path, "--cwd", cwd.path,
                              "--settings-path", settings.path]
-        var environment = ProcessInfo.processInfo.environment
+        // As a real shim gets it, and pointed away from the user's own Claude config.
+        var environment = ShimProcess.scrubbingCanopyAssignedKeys(ProcessInfo.processInfo.environment)
         environment["HOME"] = home.path
+        environment.removeValue(forKey: "CLAUDE_CONFIG_DIR")
         process.environment = environment
         let stdin = Pipe()
         let stdout = Pipe()
@@ -69,10 +71,18 @@ enum ExtensionCanary {
         } catch {
             return .failed("could not start the extension host: \(error.localizedDescription)")
         }
+        // Declared after the scratch folder's defer, so it runs first: the shim is gone before its HOME is.
         defer {
             stdout.fileHandleForReading.readabilityHandler = nil
-            if process.isRunning { process.terminate() }
             try? stdin.fileHandleForWriting.close()
+            if process.isRunning {
+                process.terminate()
+                let killAt = Date().addingTimeInterval(2)
+                while process.isRunning, Date() < killAt { Thread.sleep(forTimeInterval: 0.05) }
+                // SIGTERM is handled in JS, so a shim stuck in synchronous code never sees it.
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+            process.waitUntilExit()
         }
 
         let deadline = Date().addingTimeInterval(timeout)
@@ -82,13 +92,27 @@ enum ExtensionCanary {
                 // before `exit(1)` decides the verdict rather than the bare status.
                 stdout.fileHandleForReading.readabilityHandler = nil
                 buffer.append(stdout.fileHandleForReading.readDataToEndOfFile())
-                return outcome(stdout: buffer.text, exitStatus: process.terminationStatus)
+                return logged(outcome(stdout: buffer.text, exitStatus: process.terminationStatus), stdout: buffer.text)
             }
             let verdict = outcome(stdout: buffer.text, exitStatus: nil)
-            if verdict != .undecided { return verdict }
+            if verdict != .undecided { return logged(verdict, stdout: buffer.text) }
             Thread.sleep(forTimeInterval: 0.1)
         }
         return .failed("the extension host did not become ready within \(Int(timeout)) s")
+    }
+
+    /// The error frame's `stack` names the extension's file:line, which is what identifies the
+    /// API the shim lacks; the user-facing message does not carry it.
+    private static func logged(_ verdict: Outcome, stdout: String) -> Outcome {
+        guard case .failed = verdict else { return verdict }
+        for line in stdout.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let frame = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  frame["type"] as? String == "error", let stack = frame["stack"] as? String else { continue }
+            logger.error("Extension start check stack: \(stack, privacy: .public)")
+            break
+        }
+        return verdict
     }
 
     private final class OutputBuffer: @unchecked Sendable {
@@ -107,37 +131,36 @@ enum ExtensionCanary {
     }
 }
 
-/// Removes old extension versions, but never one a running shim was started from: a daemon's
-/// shims outlive the GUI that installed an update, and each one later spawns its CLI from
-/// `resources/native-binary` inside its own version's folder.
+/// Removes old extension versions from Canopy's folder, but never the newest one there and never
+/// one a running process names: a daemon's shims outlive the GUI that installed an update, and
+/// each one later spawns its CLI from `resources/native-binary` inside its own version's folder.
 enum ExtensionCleanup {
-    /// The `--extension-path` of every running shim in `ps -axo command=` output. The path runs to
-    /// the next ` --cwd`, since it contains spaces ("Application Support").
-    static func extensionPathsInUse(psOutput: String) -> Set<String> {
-        var paths = Set<String>()
-        for line in psOutput.split(separator: "\n") {
-            guard let start = line.range(of: "--extension-path ") else { continue }
-            let rest = line[start.upperBound...]
-            let path = rest.range(of: " --cwd ").map { rest[..<$0.lowerBound] } ?? rest
-            paths.insert(String(path).trimmingCharacters(in: .whitespaces))
-        }
-        return paths
-    }
-
-    /// Entries of `dir` to delete: extension folders other than `keepingVersion` that no running shim uses.
-    static func removable(installed: [String], in dir: String, keepingVersion: String, inUse: Set<String>) -> [String] {
-        let keepPrefix = "anthropic.claude-code-\(keepingVersion)-"
-        return installed.filter {
-            $0.hasPrefix("anthropic.claude-code-") && !$0.hasPrefix(keepPrefix) && !inUse.contains("\(dir)/\($0)")
-        }
+    /// Entries of `dir` to delete. The newest version by version order stays (it is what new
+    /// sessions use, and an install just made it), and so does any folder whose full path appears
+    /// in `psOutput`, whatever arguments surround it. A nil or empty `psOutput` means the process
+    /// list could not be read, which is not the same as nothing running: nothing is removed.
+    static func removable(installed: [String], in dir: String, psOutput: String?) -> [String] {
+        guard let psOutput, !psOutput.isEmpty else { return [] }
+        let folders = installed.filter { $0.hasPrefix("anthropic.claude-code-") }
+        let newest = folders.max { $0.compare($1, options: .numeric) == .orderedAscending }
+        return folders.filter { $0 != newest && !psOutput.contains("\(dir)/\($0)") }
     }
 
     /// Deletes what `removable` names in Canopy's extensions folder. Blocks on `ps`.
-    static func removeUnused(keepingVersion: String) {
+    static func removeUnused() {
         let dir = CCExtension.canopyExtensionsDir
-        guard let installed = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
-        let inUse = extensionPathsInUse(psOutput: runningCommands())
-        for name in removable(installed: installed, in: dir.path, keepingVersion: keepingVersion, inUse: inUse) {
+        let installed: [String]
+        do {
+            installed = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        } catch {
+            logger.warning("Extension cleanup skipped: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        guard let commands = runningCommands() else {
+            logger.error("Extension cleanup skipped: the process list could not be read, so versions in use are unknown")
+            return
+        }
+        for name in removable(installed: installed, in: dir.path, psOutput: commands) {
             do {
                 try FileManager.default.removeItem(at: dir.appendingPathComponent(name))
                 logger.notice("Cleaned up old extension: \(name, privacy: .public)")
@@ -145,22 +168,20 @@ enum ExtensionCleanup {
                 logger.warning("Failed to clean up \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
-        let kept = installed.filter { inUse.contains("\(dir.path)/\($0)") && !$0.hasPrefix("anthropic.claude-code-\(keepingVersion)-") }
-        if !kept.isEmpty {
-            logger.notice("Kept \(kept.joined(separator: ", "), privacy: .public): a running session still uses it")
-        }
     }
 
-    private static func runningCommands() -> String {
+    /// `ps -axo command=`, or nil when it did not run cleanly.
+    private static func runningCommands() -> String? {
         let ps = Process()
         ps.executableURL = URL(fileURLWithPath: "/bin/ps")
         ps.arguments = ["-axo", "command="]
         let out = Pipe()
         ps.standardOutput = out
         ps.standardError = FileHandle.nullDevice
-        do { try ps.run() } catch { return "" }
+        do { try ps.run() } catch { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         ps.waitUntilExit()
+        guard ps.terminationStatus == 0, !data.isEmpty else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
 }

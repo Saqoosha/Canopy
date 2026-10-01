@@ -117,7 +117,7 @@ final class ExtensionUpdater {
             let vsixURL = try await downloadVSIX(version: version)
             state = .installing
             try await installVSIX(at: vsixURL, version: version)
-            await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused(keepingVersion: version) }.value
+            await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }.value
             state = .done(version: version)
         } catch {
             state = .failed(message: error.localizedDescription)

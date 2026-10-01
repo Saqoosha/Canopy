@@ -12246,21 +12246,27 @@ enum SidebarLogicProbe {
                        == .failed("the extension host exited with status 3 before it was ready"))
             record("extension canary: still starting is undecided, and a partial or garbled line is ignored",
                    ExtensionCanary.outcome(stdout: "not json\n" + #"{"type":"rea"#, exitStatus: nil) == .undecided)
+            record("extension canary: a shim that was ready and then exited still passed",
+                   ExtensionCanary.outcome(stdout: ready, exitStatus: 0) == .passed)
 
-            let ps = """
-              101 /opt/homebrew/bin/node /App/Contents/Resources/vscode-shim/index.js --extension-path /Users/u/Library/Application Support/Canopy/extensions/anthropic.claude-code-2.1.283-darwin-arm64 --cwd /tmp/a --settings-path /s
-              102 /usr/bin/node other.js --cwd /x
-            """
-            record("extension cleanup: the extension paths running shims use are read from ps, spaces included",
-                   ExtensionCleanup.extensionPathsInUse(psOutput: ps)
-                       == ["/Users/u/Library/Application Support/Canopy/extensions/anthropic.claude-code-2.1.283-darwin-arm64"])
             let dir = "/Users/u/Library/Application Support/Canopy/extensions"
-            let installed = ["anthropic.claude-code-2.1.283-darwin-arm64", "anthropic.claude-code-2.1.286-darwin-arm64",
-                             "anthropic.claude-code-2.1.250-darwin-arm64", ".DS_Store"]
-            record("extension cleanup: removes only versions that are neither kept nor in use",
-                   ExtensionCleanup.removable(installed: installed, in: dir, keepingVersion: "2.1.286",
-                                              inUse: ["\(dir)/anthropic.claude-code-2.1.283-darwin-arm64"])
-                       == ["anthropic.claude-code-2.1.250-darwin-arm64"])
+            func folder(_ version: String) -> String { "anthropic.claude-code-\(version)-darwin-arm64" }
+            // Two shims on two old versions, one with a flag between --extension-path and --cwd.
+            let ps = """
+              101 /opt/homebrew/bin/node /App/Contents/Resources/vscode-shim/index.js --extension-path \(dir)/\(folder("2.1.283")) --cwd /tmp/a --settings-path /s
+              102 /opt/homebrew/bin/node /App/Contents/Resources/vscode-shim/index.js --extension-path \(dir)/\(folder("2.1.270")) --resume abc --cwd /tmp/b
+              103 /usr/bin/node other.js --cwd /x
+            """
+            let installed = [folder("2.1.250"), folder("2.1.270"), folder("2.1.283"), folder("2.1.286"), folder("2.1.28"), ".DS_Store"]
+            record("extension cleanup: removes only versions that are neither the newest nor named by a running process",
+                   ExtensionCleanup.removable(installed: installed, in: dir, psOutput: ps)
+                       == [folder("2.1.250"), folder("2.1.28")])
+            record("extension cleanup: the newest folder is kept by version order, not by string order",
+                   ExtensionCleanup.removable(installed: [folder("2.1.99"), folder("2.1.100")], in: dir, psOutput: "x")
+                       == [folder("2.1.99")])
+            record("extension cleanup: when the process list could not be read, nothing is removed",
+                   ExtensionCleanup.removable(installed: installed, in: dir, psOutput: nil).isEmpty
+                       && ExtensionCleanup.removable(installed: installed, in: dir, psOutput: "").isEmpty)
         }
 
         // MARK: - Why a daemon session ended, for its clients (#278)
