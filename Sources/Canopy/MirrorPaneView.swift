@@ -334,6 +334,8 @@ struct MirrorPaneView: NSViewRepresentable {
         session.connection.onRetry = { [weak session] in
             guard let session else { return }
             // Re-attach only: a dropped connection is not a reason to restart the daemon's CLI.
+            // After an announced restart the other Mac holds no sessions, so ask it to resume.
+            if !isDaemon, session.mirrorBridge?.expectsRestart == true { session.pendingMirrorOpen = .resume }
             SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
         }
         session.mirrorBridge = bridge
