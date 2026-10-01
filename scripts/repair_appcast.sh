@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Re-sign every DMG enclosure in the published appcast against the file that is
-# actually attached to its GitHub Release, and push the corrections to gh-pages.
+# Point every DMG enclosure in the published appcast at its own GitHub Release,
+# re-sign it against the file actually attached there, and push the corrections
+# to gh-pages.
 #
 # Why this exists: for as long as update_appcast.sh rebuilt DMGs before signing
 # them (issue #188), every item it wrote described bytes nobody could download.
@@ -92,10 +93,10 @@ for DMG_NAME in "${DMGS[@]}"; do
   REAL_SIG=$(sed -E 's/.*edSignature="([^"]*)".*/\1/' <<<"$SIGNED")
   REAL_LEN=$(sed -E 's/.*length="([^"]*)".*/\1/' <<<"$SIGNED")
 
-  RESULT=$(python3 - "${WORK}/appcast.xml" "$DMG_NAME" "$REAL_LEN" "$REAL_SIG" <<'PYEOF'
+  RESULT=$(python3 - "${WORK}/appcast.xml" "$DMG_NAME" "$REAL_LEN" "$REAL_SIG" "$VERSION" <<'PYEOF'
 import re, sys
 
-path, name, real_len, real_sig = sys.argv[1:5]
+path, name, real_len, real_sig, version = sys.argv[1:6]
 xml = open(path).read()
 
 def fix(match):
@@ -103,12 +104,18 @@ def fix(match):
     url = re.search(r'url="([^"]*)"', tag)
     if not url or not url.group(1).endswith('/' + name):
         return tag
+    # Reached only after the asset downloaded from v<version>, so pointing the
+    # URL there names a file known to exist (issue #274).
+    new_url = re.sub(r'/releases/download/[^/]+/', '/releases/download/v%s/' % version, url.group(1))
     old_len = re.search(r'length="(\d+)"', tag)
     old_sig = re.search(r'sparkle:edSignature="([^"]*)"', tag)
-    if old_len and old_sig and old_len.group(1) == real_len and old_sig.group(1) == real_sig:
+    if (new_url == url.group(1) and old_len and old_sig
+            and old_len.group(1) == real_len and old_sig.group(1) == real_sig):
         print("OK")
         return tag
-    print("FIXED %s -> %s" % (old_len.group(1) if old_len else "?", real_len))
+    print("FIXED %s -> %s, url %s" % (old_len.group(1) if old_len else "?", real_len,
+                                      new_url.split("/download/")[-1]))
+    tag = tag.replace(url.group(0), 'url="%s"' % new_url)
     tag = re.sub(r'length="\d+"', 'length="%s"' % real_len, tag)
     tag = re.sub(r'sparkle:edSignature="[^"]*"',
                  'sparkle:edSignature="%s"' % real_sig, tag)
@@ -154,11 +161,10 @@ git worktree add "$WORKTREE_DIR" origin/gh-pages --detach --quiet
   if git diff --cached --quiet; then
     echo "appcast.xml unchanged on gh-pages, skipping push"
   else
-    git commit --quiet -m "Re-sign appcast entries against the published DMGs
+    git commit --quiet -m "Repair appcast DMG entries against their own releases
 
-Every item written before issue #188 was fixed described a rebuilt DMG
-rather than the file attached to the release, so Sparkle failed the
-signature check and silently discarded it."
+Each full-DMG enclosure now points at the release that holds its file
+(issue #274) and is signed against that published file (issue #188)."
     git push origin gh-pages
     echo "Pushed appcast.xml to gh-pages"
   fi
