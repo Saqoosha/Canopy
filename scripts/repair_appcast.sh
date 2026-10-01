@@ -58,11 +58,6 @@ echo "=== Fetching published appcast from gh-pages ==="
 git fetch origin gh-pages --quiet
 git show origin/gh-pages:appcast.xml > "${WORK}/appcast.xml"
 
-echo "=== Pointing each DMG at its own release (issue #274) ==="
-URL_FIXES=$(python3 "${SCRIPT_DIR}/fix_appcast_dmg_urls.py" "${WORK}/appcast.xml")
-[[ -n "$URL_FIXES" ]] && echo "$URL_FIXES"
-URL_CHANGED=$(grep -c . <<<"$URL_FIXES" || true)
-
 # Every DMG the feed references, in feed order. Read with a while loop rather
 # than `mapfile`: that builtin arrived in bash 4 and macOS still ships 3.2 at
 # /bin/bash, where it would fail before checking a single entry.
@@ -78,7 +73,7 @@ if (( ${#DMGS[@]} == 0 )); then
 fi
 
 echo "=== Checking ${#DMGS[@]} entries against their published assets ==="
-CHANGED=$URL_CHANGED
+CHANGED=0
 UNVERIFIABLE=0
 
 for DMG_NAME in "${DMGS[@]}"; do
@@ -98,10 +93,10 @@ for DMG_NAME in "${DMGS[@]}"; do
   REAL_SIG=$(sed -E 's/.*edSignature="([^"]*)".*/\1/' <<<"$SIGNED")
   REAL_LEN=$(sed -E 's/.*length="([^"]*)".*/\1/' <<<"$SIGNED")
 
-  RESULT=$(python3 - "${WORK}/appcast.xml" "$DMG_NAME" "$REAL_LEN" "$REAL_SIG" <<'PYEOF'
+  RESULT=$(python3 - "${WORK}/appcast.xml" "$DMG_NAME" "$REAL_LEN" "$REAL_SIG" "$VERSION" <<'PYEOF'
 import re, sys
 
-path, name, real_len, real_sig = sys.argv[1:5]
+path, name, real_len, real_sig, version = sys.argv[1:6]
 xml = open(path).read()
 
 def fix(match):
@@ -109,12 +104,18 @@ def fix(match):
     url = re.search(r'url="([^"]*)"', tag)
     if not url or not url.group(1).endswith('/' + name):
         return tag
+    # Reached only after the asset downloaded from v<version>, so pointing the
+    # URL there names a file known to exist (issue #274).
+    new_url = re.sub(r'/releases/download/[^/]+/', '/releases/download/v%s/' % version, url.group(1))
     old_len = re.search(r'length="(\d+)"', tag)
     old_sig = re.search(r'sparkle:edSignature="([^"]*)"', tag)
-    if old_len and old_sig and old_len.group(1) == real_len and old_sig.group(1) == real_sig:
+    if (new_url == url.group(1) and old_len and old_sig
+            and old_len.group(1) == real_len and old_sig.group(1) == real_sig):
         print("OK")
         return tag
-    print("FIXED %s -> %s" % (old_len.group(1) if old_len else "?", real_len))
+    print("FIXED %s -> %s, url %s" % (old_len.group(1) if old_len else "?", real_len,
+                                      new_url.split("/download/")[-1]))
+    tag = tag.replace(url.group(0), 'url="%s"' % new_url)
     tag = re.sub(r'length="\d+"', 'length="%s"' % real_len, tag)
     tag = re.sub(r'sparkle:edSignature="[^"]*"',
                  'sparkle:edSignature="%s"' % real_sig, tag)
