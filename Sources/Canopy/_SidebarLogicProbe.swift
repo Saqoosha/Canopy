@@ -2035,6 +2035,17 @@ enum SidebarLogicProbe {
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .enabled) == .kickstart)
             record("daemon supervisor: an unregistered Debug build launches its own",
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .notRegistered) == .launch)
+            do {
+                let running = "gui/501/x = {\n\tactive count = 1\n\tstate = running\n\tpid = 22943\n\tendpoints = {\n\t\tpid = 7\n\t}\n}\n"
+                let exited = "gui/501/x = {\n\tstate = not running\n\tlast exit code = 0\n\tspawn = {\n\t\tpid = 7\n\t}\n}\n"
+                record("daemon supervisor: launchd's pid is read from the job's own line, not a nested one",
+                       DaemonSupervisor.launchdPid(fromPrint: running) == 22943
+                           && DaemonSupervisor.launchdPid(fromPrint: exited) == nil
+                           && DaemonSupervisor.launchdPid(fromPrint: "") == nil)
+                record("daemon supervisor: while launchd has the daemon running, a slow socket is waited on, not raced",
+                       DaemonSupervisor.afterLaunchdTimeout(launchdPid: 22943) == .keepWaiting
+                           && DaemonSupervisor.afterLaunchdTimeout(launchdPid: nil) == .launchDirectly)
+            }
             record("daemon agent: the launchd label is the plist name without .plist",
                    DaemonRegistration.label(bundleId: "sh.saqoo.Canopy") == "sh.saqoo.Canopy.daemon")
             do {

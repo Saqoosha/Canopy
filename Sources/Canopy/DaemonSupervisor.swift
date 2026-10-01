@@ -43,7 +43,7 @@ enum DaemonSupervisor {
         #else
         let isDebug = false
         #endif
-        let bundleId = Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy"
+        let target = "gui/\(getuid())/\(DaemonRegistration.label(bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy"))"
         switch action(socketLive: DaemonPaths.socketIsLive(path: path), isDebugBuild: isDebug,
                       registration: DaemonRegistration.status()) {
         case .none:
@@ -53,14 +53,19 @@ enum DaemonSupervisor {
             // race launchd's for the socket. A direct launch is only the fallback.
             DaemonRegistration.ensureRegistered()
             if DaemonRegistration.status() == .enabled {
-                if await waitForSocket(path, seconds: 15) { return true }
-                logger.notice("launchd did not start the newly registered agent within 15 s; starting it directly")
+                guard let live = await waitForLaunchd(target: target, path: path) else { return false }
+                if live { return true }
             }
         case .kickstart:
             // A job that exited 0 (a quit, or losing the socket race) is not restarted by KeepAlive.
-            kickstart(label: DaemonRegistration.label(bundleId: bundleId))
-            if await waitForSocket(path, seconds: 15) { return true }
-            logger.notice("launchd did not bring the daemon up within 15 s; starting it directly")
+            // Without `-k`: a running job is left alone, a stopped one is started.
+            if let result = await launchctl(["kickstart", target]), result.status == 0 {
+                logger.notice("asked launchd to start \(target, privacy: .public)")
+                guard let live = await waitForLaunchd(target: target, path: path) else { return false }
+                if live { return true }
+            } else {
+                logger.error("launchctl kickstart \(target, privacy: .public) failed; starting the daemon directly")
+            }
         case .launch:
             break
         }
@@ -68,6 +73,38 @@ enum DaemonSupervisor {
         if await waitForSocket(path, seconds: 10) { return true }
         logger.error("daemon socket did not come up within 10 s")
         return false
+    }
+
+    enum AfterLaunchdTimeout: Equatable { case keepWaiting, launchDirectly }
+
+    /// A daemon launchd is still running only binds late; starting a second one would race it for
+    /// the socket, and the loser launchd's (exit 0) is never restarted.
+    static func afterLaunchdTimeout(launchdPid: Int?) -> AfterLaunchdTimeout {
+        launchdPid == nil ? .launchDirectly : .keepWaiting
+    }
+
+    /// The job's own `pid = N` line in `launchctl print`: one tab deep; nested blocks are deeper.
+    static func launchdPid(fromPrint output: String) -> Int? {
+        output.split(separator: "\n").lazy.compactMap { line in
+            line.hasPrefix("\tpid = ") ? Int(line.dropFirst("\tpid = ".count)) : nil
+        }.first
+    }
+
+    /// After launchd was asked to start the daemon: true once the socket answers, false when the
+    /// caller should start one itself, nil when launchd holds a daemon that never answered.
+    @MainActor
+    private static func waitForLaunchd(target: String, path: String) async -> Bool? {
+        if await waitForSocket(path, seconds: 15) { return true }
+        let pid = await launchctl(["print", target]).flatMap { launchdPid(fromPrint: $0.output) }
+        switch afterLaunchdTimeout(launchdPid: pid) {
+        case .launchDirectly:
+            logger.error("launchd is not running \(target, privacy: .public) after 15 s; starting the daemon directly")
+            return false
+        case .keepWaiting:
+            if await waitForSocket(path, seconds: 15) { return true }
+            logger.error("launchd's daemon (pid \(pid ?? -1)) has not opened its socket after 30 s; not starting a second one")
+            return nil
+        }
     }
 
     @MainActor
@@ -79,20 +116,33 @@ enum DaemonSupervisor {
         return false
     }
 
-    /// Without `-k`: a running job is left alone, a stopped one is started.
-    private static func kickstart(label: String) {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        proc.arguments = ["kickstart", "gui/\(getuid())/\(label)"]
-        proc.standardInput = FileHandle.nullDevice
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            logger.notice("asked launchd to start \(label, privacy: .public)")
-        } catch {
-            logger.error("launchctl kickstart failed: \(error.localizedDescription, privacy: .public)")
-        }
+    private struct LaunchctlResult { let status: Int32; let output: String }
+
+    /// Runs `/bin/launchctl` off the main thread; a non-zero status logs launchctl's own stderr.
+    private nonisolated static func launchctl(_ args: [String]) async -> LaunchctlResult? {
+        await Task.detached {
+            let proc = Process()
+            let out = Pipe()
+            let err = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            proc.arguments = args
+            proc.standardInput = FileHandle.nullDevice
+            proc.standardOutput = out
+            proc.standardError = err
+            do {
+                try proc.run()
+            } catch {
+                logger.error("launchctl \(args.first ?? "", privacy: .public) could not run: \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+            let output = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            let errorText = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            proc.waitUntilExit()
+            if proc.terminationStatus != 0 {
+                logger.error("launchctl \(args.joined(separator: " "), privacy: .public) exited \(proc.terminationStatus): \(errorText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+            }
+            return LaunchctlResult(status: proc.terminationStatus, output: output)
+        }.value
     }
 
     /// A plain child process, not `NSWorkspace.openApplication`: that registers the daemon with
