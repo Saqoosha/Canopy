@@ -408,6 +408,12 @@ final class MirrorConnection: MirrorSink {
         cleanup()
     }
 
+    /// Ends the connection with `reason` as an `attach_error`, which the client treats as a refusal
+    /// at any point in the connection, not only during attach.
+    func endFromServer(reason: String) {
+        failAttach(reason)
+    }
+
     func deliver(_ payload: [String: Any]) {
         sendJSONObject(payload)
     }

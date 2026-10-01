@@ -250,6 +250,11 @@ final class SessionStore {
         }
     }
 
+    /// A reason that arrives after the attach succeeded: the session ended, nothing was refused (#278).
+    static func mirrorEndedMessage(reason: String, machineName: String) -> String {
+        "The session on \(machineName) stopped: \(reason)"
+    }
+
     /// The most recent attach refusal, for the sidebar banner: no pairing, or a pane whose attach failed.
     var remoteAttachError: String?
 
