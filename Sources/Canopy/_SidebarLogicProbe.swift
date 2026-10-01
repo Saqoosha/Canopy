@@ -12235,11 +12235,13 @@ enum SidebarLogicProbe {
 
         // MARK: - Why a daemon session ended, for its clients (#278)
         record("session ended: the shim's own fatal error is what the client is told",
-               ShimProcess.sessionEndedReason(fatalError: "Extension activation failed: boom", status: 1)
+               ShimProcess.sessionEndedReason(fatalError: "Extension activation failed: boom", status: 1, signaled: false)
                    == "Extension activation failed: boom")
         record("session ended: with no fatal error the exit status is named",
-               ShimProcess.sessionEndedReason(fatalError: nil, status: 1) == "the session process exited with status 1"
-                   && ShimProcess.sessionEndedReason(fatalError: "  ", status: 9) == "the session process exited with status 9")
+               ShimProcess.sessionEndedReason(fatalError: nil, status: 1, signaled: false) == "the session process exited with status 1"
+                   && ShimProcess.sessionEndedReason(fatalError: "  ", status: 2, signaled: false) == "the session process exited with status 2")
+        record("session ended: a signal death names the signal, not an exit status",
+               ShimProcess.sessionEndedReason(fatalError: nil, status: 9, signaled: true) == "the session process was killed by signal 9")
 
         // MARK: - Mirror session list (#282)
         // A session that moved into a worktree is missing from the extension's list; the

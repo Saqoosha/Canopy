@@ -231,8 +231,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// A stopped shim ends its mirrors' connections, so a Mac attached to it sees a drop instead of typing into nothing.
-    /// With `reason`, each client is told why first (#278): its pane then closes with that message
-    /// instead of reading as a network drop.
+    /// With `reason`, each client is told why first (#278) instead of seeing a bare network drop.
     private func disconnectMirrors(reason: String? = nil) {
         // Nothing to dismiss: the shim is stopping or gone, and a write now would hit a closed pipe.
         pendingAlerts = PendingUIAlerts()
@@ -249,10 +248,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// What a client is told when this daemon session's shim dies: the shim's own fatal error when
-    /// it reported one, otherwise the exit status.
-    static func sessionEndedReason(fatalError: String?, status: Int32) -> String {
+    /// it reported one, otherwise how the process ended.
+    static func sessionEndedReason(fatalError: String?, status: Int32, signaled: Bool) -> String {
         if let fatalError, !fatalError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return fatalError }
-        return "the session process exited with status \(status)"
+        return signaled ? "the session process was killed by signal \(status)"
+                        : "the session process exited with status \(status)"
     }
 
     /// The synthetic `system/status` Canopy injects at `launch_claude` so the
@@ -3329,7 +3329,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 Self.killProcessTree(orphans)
             }
             DispatchQueue.main.async {
-                self?.handleProcessExit(status: process.terminationStatus, pid: pid)
+                self?.handleProcessExit(status: process.terminationStatus, pid: pid,
+                                        signaled: process.terminationReason == .uncaughtSignal)
             }
         }
 
@@ -8171,7 +8172,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Process Exit
 
-    private func handleProcessExit(status: Int32, pid: pid_t) {
+    private func handleProcessExit(status: Int32, pid: pid_t, signaled: Bool = false) {
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
 
@@ -8192,7 +8193,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // row so the next attach or pane starts a fresh shim.
         if delegate == nil, let session = boundSession, session.shim === self, session.webView == nil {
             logger.error("Headless shim exited (status \(status)); dropping its mirrors")
-            disconnectMirrors(reason: Self.sessionEndedReason(fatalError: session.lastFatalError, status: status))
+            disconnectMirrors(reason: Self.sessionEndedReason(
+                fatalError: session.lastFatalError ?? recordedBrokenPipeReason(), status: status, signaled: signaled))
             session.lastFatalError = nil
             session.shim = nil
             session.status = .dormant

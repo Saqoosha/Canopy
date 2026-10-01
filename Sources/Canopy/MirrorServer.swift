@@ -408,10 +408,14 @@ final class MirrorConnection: MirrorSink {
         cleanup()
     }
 
-    /// Ends the connection with `reason` as an `attach_error`, which the client treats as a refusal
-    /// at any point in the connection, not only during attach.
+    /// Ends the connection with `reason` as an `attach_error`, which the Mac client and the phone
+    /// treat as a refusal at any point in the connection. A peer that stops reading would hold
+    /// `failAttach`'s deferred cancel off indefinitely mid-session, so it is also cancelled after 3 s.
     func endFromServer(reason: String) {
         failAttach(reason)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [connection] in
+            connection.cancel()
+        }
     }
 
     func deliver(_ payload: [String: Any]) {

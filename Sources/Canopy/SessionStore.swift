@@ -1077,6 +1077,8 @@ final class SessionStore {
         )
         session.shim = shim
         shim.boundSession = session
+        // A reason left by an earlier start or run must not be reported for this one.
+        session.lastFatalError = nil
         guard shim.start() else {
             logger.error("startHeadlessSession: shim start failed for \(resumeId, privacy: .public): \(session.lastFatalError ?? "no reason", privacy: .public)")
             session.shim = nil
