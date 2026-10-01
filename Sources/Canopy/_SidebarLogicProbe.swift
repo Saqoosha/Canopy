@@ -1891,8 +1891,9 @@ enum SidebarLogicProbe {
                     .appendingPathComponent(DaemonRegistration.plistName(bundleId: agentBundleId))
                 let agent = NSDictionary(contentsOf: agentPlist)
                 record("daemon agent (\(agentBundleId)): plist is in the bundle", agent != nil, agentPlist.path)
-                record("daemon agent (\(agentBundleId)): label matches the bundle id",
-                       agent?["Label"] as? String == "\(agentBundleId).daemon")
+                record("daemon agent (\(agentBundleId)): label is the one kickstart targets",
+                       agent?["Label"] as? String == DaemonRegistration.label(bundleId: agentBundleId)
+                           && agent?["Label"] as? String == "\(agentBundleId).daemon")
                 record("daemon agent (\(agentBundleId)): runs the bundle's own binary with --daemon",
                        agent?["BundleProgram"] as? String == "Contents/MacOS/Canopy"
                            && (agent?["ProgramArguments"] as? [String])?.last == "--daemon")
@@ -2017,6 +2018,12 @@ enum SidebarLogicProbe {
             }
             record("daemon supervisor: a live socket needs nothing",
                    DaemonSupervisor.action(socketLive: true, isDebugBuild: false, registration: .notRegistered) == .none)
+            record("daemon supervisor: a live socket needs nothing for any build or registration (no second daemon)",
+                   [false, true].allSatisfy { debug in
+                       [SMAppService.Status.notRegistered, .enabled, .requiresApproval, .notFound].allSatisfy {
+                           DaemonSupervisor.action(socketLive: true, isDebugBuild: debug, registration: $0) == .none
+                       }
+                   })
             record("daemon supervisor: Release registers when not registered",
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notRegistered) == .register
                        && DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notFound) == .register)
@@ -2318,6 +2325,9 @@ enum SidebarLogicProbe {
                    DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.daemon"], bundleId: "sh.saqoo.Canopy")
                        && !DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.daemon"], bundleId: "sh.saqoo.Canopy.debug")
                        && !DaemonUpgrade.isUnderLaunchd(env: [:], bundleId: "sh.saqoo.Canopy"))
+            record("daemon upgrade: a registered Debug daemon knows it is launchd's",
+                   DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.debug.daemon"],
+                                                bundleId: "sh.saqoo.Canopy.debug"))
             do {
                 let bundle = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-\(UUID().uuidString).app")
                 let contents = bundle.appendingPathComponent("Contents")

@@ -8052,7 +8052,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             uiClients.forEach { $0.deliverUI(.notify(title: "Canopy", body: body)) }
             return
         }
-        // `NSApp` is nil in the daemon (no NSApplication, #279), where no window can be frontmost.
+        // `NSApp` is nil in the daemon (no NSApplication, #279).
         if let app = NSApp, app.isActive { return }
         SessionNotifier.post(title: "Canopy", body: body)
     }
