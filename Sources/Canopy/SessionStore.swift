@@ -538,9 +538,11 @@ final class SessionStore {
         if let session, session.isDaemonHosted, let control = daemonControl {
             var params = Self.daemonRefParams(session)
             params["title"] = trimmed
-            Task {
+            Task { [weak self] in
                 if case .failure(let failure) = await control.request("rename_session", params) {
                     logger.error("rename_session failed: \(String(describing: failure), privacy: .public)")
+                    // The daemon's next session list puts its title back, so say why.
+                    self?.noteSessionFailure(title: trimmed, message: "Could not rename the session (\(failure)).", status: -2)
                 }
             }
         }

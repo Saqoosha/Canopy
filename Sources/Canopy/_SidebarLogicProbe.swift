@@ -2064,6 +2064,10 @@ enum SidebarLogicProbe {
                 record("daemon hosted: local is, remote is not",
                        fresh.isDaemonHosted
                            && !OpenSession(origin: .remote(host: "h", path: dir), resumeId: "r", title: "", project: "").isDaemonHosted)
+                let teleported = OpenSession(origin: .teleportedFrom(cloudSessionId: "c", localPath: dir), resumeId: "t",
+                                             title: "", project: "", resumeIdIsExistingTranscript: true)
+                record("daemon hosted: a teleported session is, and resumes its transcript",
+                       teleported.isDaemonHosted && teleported.daemonOpenRequest == .resume)
                 // Detach vs remove.
                 let detachStore = SessionStore()
                 let kept = OpenSession(origin: .local(dir), resumeId: "k", title: "K", project: "p", status: .live)

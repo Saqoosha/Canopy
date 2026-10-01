@@ -249,8 +249,11 @@ final class OpenSession: Identifiable, Hashable {
     /// This Mac's session, run by the local daemon (Canopy Server). The GUI
     /// attaches to it and never holds its shim.
     var isDaemonHosted: Bool {
-        guard Self.localSessionsRunInDaemon, !runsShimHere, case .local = origin else { return false }
-        return true
+        guard Self.localSessionsRunInDaemon, !runsShimHere else { return false }
+        switch origin {
+        case .local, .teleportedFrom: return true  // a teleport leaves a local transcript
+        case .remote, .mirror: return false
+        }
     }
 
     /// Set when this process started the session's shim itself, not the daemon.

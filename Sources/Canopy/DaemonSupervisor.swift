@@ -19,13 +19,18 @@ enum DaemonSupervisor {
     /// One start at a time: every restored pane asks at launch, and each launch would
     /// start another daemon racing for the same socket.
     @MainActor private static var inFlight: Task<Bool, Never>?
+    /// Any pane's restart notice counts for every start within 30 s: one that missed it sees the same drop.
+    @MainActor private static var restartAnnouncedAt: Date?
 
     /// True once the socket answers; gives up 10 s after starting it. `awaitLaunchd`: the daemon announced
     /// an upgrade restart, which launchd performs, so give it up to 15 s before starting one here.
     @MainActor
     static func ensureRunning(awaitLaunchd: Bool = false) async -> Bool {
+        if awaitLaunchd { restartAnnouncedAt = Date() }
         if let inFlight { return await inFlight.value }
-        let task = Task { @MainActor in await start(awaitLaunchd: awaitLaunchd) }
+        let task = Task { @MainActor in
+            await start(awaitLaunchd: restartAnnouncedAt.map { Date().timeIntervalSince($0) < 30 } ?? false)
+        }
         inFlight = task
         defer { inFlight = nil }
         return await task.value
