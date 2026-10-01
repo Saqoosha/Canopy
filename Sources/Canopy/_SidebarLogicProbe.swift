@@ -12291,6 +12291,16 @@ enum SidebarLogicProbe {
                    && !MirrorConnection.reattachesAfterRestart(attach: ["restart": "true"])
                    && !MirrorConnection.reattachesAfterRestart(attach: [:]))
 
+        // MARK: - Remote pane re-attach after a daemon restart
+        record("restart re-attach: the budget is spent in whole intervals",
+               RestartReattach.attempts(interval: 2, budget: 60) == 30
+                   && RestartReattach.attempts(interval: 2, budget: 61) == 30)
+        record("restart re-attach: a budget shorter than one interval still tries once",
+               RestartReattach.attempts(interval: 2, budget: 1) == 1)
+        record("restart re-attach: the overlay names the machine",
+               { let s = ConnectionState(); s.status = .awaitingRestart(machine: "studio")
+                 return s.isOverlayVisible && s.statusMessage == "studio is restarting for an update. Reconnecting…" }())
+
         // MARK: - Mirror session list (#282)
         // A session that moved into a worktree is missing from the extension's list; the
         // webview then starts a new conversation instead of reading it.
