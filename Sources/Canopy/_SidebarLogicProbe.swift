@@ -1891,8 +1891,9 @@ enum SidebarLogicProbe {
                     .appendingPathComponent(DaemonRegistration.plistName(bundleId: agentBundleId))
                 let agent = NSDictionary(contentsOf: agentPlist)
                 record("daemon agent (\(agentBundleId)): plist is in the bundle", agent != nil, agentPlist.path)
-                record("daemon agent (\(agentBundleId)): label matches the bundle id",
-                       agent?["Label"] as? String == "\(agentBundleId).daemon")
+                record("daemon agent (\(agentBundleId)): label is the one kickstart targets",
+                       agent?["Label"] as? String == DaemonRegistration.label(bundleId: agentBundleId)
+                           && agent?["Label"] as? String == "\(agentBundleId).daemon")
                 record("daemon agent (\(agentBundleId)): runs the bundle's own binary with --daemon",
                        agent?["BundleProgram"] as? String == "Contents/MacOS/Canopy"
                            && (agent?["ProgramArguments"] as? [String])?.last == "--daemon")
@@ -2017,14 +2018,36 @@ enum SidebarLogicProbe {
             }
             record("daemon supervisor: a live socket needs nothing",
                    DaemonSupervisor.action(socketLive: true, isDebugBuild: false, registration: .notRegistered) == .none)
+            record("daemon supervisor: a live socket needs nothing for any build or registration (no second daemon)",
+                   [false, true].allSatisfy { debug in
+                       [SMAppService.Status.notRegistered, .enabled, .requiresApproval, .notFound].allSatisfy {
+                           DaemonSupervisor.action(socketLive: true, isDebugBuild: debug, registration: $0) == .none
+                       }
+                   })
             record("daemon supervisor: Release registers when not registered",
-                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notRegistered) == .register)
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notRegistered) == .register
+                       && DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .notFound) == .register)
             record("daemon supervisor: Release launches it itself while approval is pending",
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .requiresApproval) == .launch)
-            record("daemon supervisor: Release launches when registered but not running",
-                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .enabled) == .launch)
-            record("daemon supervisor: Debug always launches its own",
+            record("daemon supervisor: a registered agent is started by launchd, not by the GUI",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: false, registration: .enabled) == .kickstart)
+            record("daemon supervisor: a Debug build registered with CANOPY_REGISTER_DAEMON=1 is launchd's too",
+                   DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .enabled) == .kickstart)
+            record("daemon supervisor: an unregistered Debug build launches its own",
                    DaemonSupervisor.action(socketLive: false, isDebugBuild: true, registration: .notRegistered) == .launch)
+            do {
+                let running = "gui/501/x = {\n\tactive count = 1\n\tstate = running\n\tpid = 22943\n\tendpoints = {\n\t\tpid = 7\n\t}\n}\n"
+                let exited = "gui/501/x = {\n\tstate = not running\n\tlast exit code = 0\n\tspawn = {\n\t\tpid = 7\n\t}\n}\n"
+                record("daemon supervisor: launchd's pid is read from the job's own line, not a nested one",
+                       DaemonSupervisor.launchdPid(fromPrint: running) == 22943
+                           && DaemonSupervisor.launchdPid(fromPrint: exited) == nil
+                           && DaemonSupervisor.launchdPid(fromPrint: "") == nil)
+                record("daemon supervisor: while launchd has the daemon running, a slow socket is waited on, not raced",
+                       DaemonSupervisor.afterLaunchdTimeout(launchdPid: 22943) == .keepWaiting
+                           && DaemonSupervisor.afterLaunchdTimeout(launchdPid: nil) == .launchDirectly)
+            }
+            record("daemon agent: the launchd label is the plist name without .plist",
+                   DaemonRegistration.label(bundleId: "sh.saqoo.Canopy") == "sh.saqoo.Canopy.daemon")
             do {
                 var correlator = ControlClient.Correlator()
                 let first = correlator.begin()
@@ -2313,6 +2336,9 @@ enum SidebarLogicProbe {
                    DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.daemon"], bundleId: "sh.saqoo.Canopy")
                        && !DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.daemon"], bundleId: "sh.saqoo.Canopy.debug")
                        && !DaemonUpgrade.isUnderLaunchd(env: [:], bundleId: "sh.saqoo.Canopy"))
+            record("daemon upgrade: a registered Debug daemon knows it is launchd's",
+                   DaemonUpgrade.isUnderLaunchd(env: ["XPC_SERVICE_NAME": "sh.saqoo.Canopy.debug.daemon"],
+                                                bundleId: "sh.saqoo.Canopy.debug"))
             do {
                 let bundle = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-\(UUID().uuidString).app")
                 let contents = bundle.appendingPathComponent("Contents")

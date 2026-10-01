@@ -41,7 +41,7 @@
 └────────────────────────────────────────────────────────────┘
 ```
 
-- **daemon は同じ binary の別モード。** `Canopy.app/Contents/MacOS/Canopy --daemon` を、window を出さない accessory アプリとして起動する。登録は `SMAppService.agent` で、plist はバンドル内に置く。別 target にすると、`ShimProcess` を WebKit から切り離す作業が phase 1 の前提になってしまう。同じ binary なら、それを後回しにできる。daemon のプロセスに WebKit がリンクされていても害はない
+- **daemon は同じ binary の別モード。** `Canopy.app/Contents/MacOS/Canopy --daemon` を、NSApplication を作らないプロセスとして起動する（2026-10-01 の [headless daemon](2026-10-01-headless-daemon-design.md) で accessory アプリから変更）。登録は `SMAppService.agent` で、plist はバンドル内に置く。別 target にすると、`ShimProcess` を WebKit から切り離す作業が phase 1 の前提になってしまう。同じ binary なら、それを後回しにできる。daemon のプロセスに WebKit がリンクされていても害はない
 - **LaunchAgent であって LaunchDaemon ではない。** CLI の OAuth は login keychain にある。2026-09-09 の実測で、Aqua セッションの外（SSH セッション）からは login keychain を解錠できなかった（`security find … -w` が exit 36）。LaunchAgent なら Aqua セッションの中で動く。その代わり、ユーザがログインしていないマシンでは動かない
 - **登録は Release の GUI が起動するたびに確認する。** 未登録なら登録し、登録済みなら何もしない。Debug は `CANOPY_REGISTER_DAEMON=1` のときだけ登録し、`--unregister-daemon` で外す。macOS が初回に「ログイン項目に追加されました」を通知するので、ユーザは System Settings から外せる。承認待ち（`.requiresApproval`）を知らせる UI は Plan B
 - **Canopy.app は純粋な client になる。** local の pane も、今の `.mirror` pane（`MirrorPaneView` + `RemoteMirrorBridge`）と同じ経路で繋ぐ。違うのは transport（Unix socket か TCP か）だけ
