@@ -12233,6 +12233,42 @@ enum SidebarLogicProbe {
                        && messages(of: ShimProcess.fittingReplay(prefixedEnv, maxBytes: macBudget, maxTurns: 10, client: "probe"))?.count == 2)
         }
 
+        // MARK: - Extension update safety: canary and in-use cleanup
+        do {
+            let ready = #"{"type":"log","message":"x"}"# + "\n" + #"{"type":"ready"}"# + "\n"
+            let broken = #"{"type":"error","message":"Extension activation failed: boom","stack":"s"}"# + "\n"
+            record("extension canary: a ready shim passes",
+                   ExtensionCanary.outcome(stdout: ready, exitStatus: nil) == .passed)
+            record("extension canary: an activation error fails with the shim's own message",
+                   ExtensionCanary.outcome(stdout: broken, exitStatus: 1) == .failed("Extension activation failed: boom"))
+            record("extension canary: exiting before ready fails, naming the status",
+                   ExtensionCanary.outcome(stdout: #"{"type":"log"}"# + "\n", exitStatus: 3)
+                       == .failed("the extension host exited with status 3 before it was ready"))
+            record("extension canary: still starting is undecided, and a partial or garbled line is ignored",
+                   ExtensionCanary.outcome(stdout: "not json\n" + #"{"type":"rea"#, exitStatus: nil) == .undecided)
+            record("extension canary: a shim that was ready and then exited still passed",
+                   ExtensionCanary.outcome(stdout: ready, exitStatus: 0) == .passed)
+
+            let dir = "/Users/u/Library/Application Support/Canopy/extensions"
+            func folder(_ version: String) -> String { "anthropic.claude-code-\(version)-darwin-arm64" }
+            // Two shims on two old versions, one with a flag between --extension-path and --cwd.
+            let ps = """
+              101 /opt/homebrew/bin/node /App/Contents/Resources/vscode-shim/index.js --extension-path \(dir)/\(folder("2.1.283")) --cwd /tmp/a --settings-path /s
+              102 /opt/homebrew/bin/node /App/Contents/Resources/vscode-shim/index.js --extension-path \(dir)/\(folder("2.1.270")) --resume abc --cwd /tmp/b
+              103 /usr/bin/node other.js --cwd /x
+            """
+            let installed = [folder("2.1.250"), folder("2.1.270"), folder("2.1.283"), folder("2.1.286"), folder("2.1.28"), ".DS_Store"]
+            record("extension cleanup: removes only versions that are neither the newest nor named by a running process",
+                   ExtensionCleanup.removable(installed: installed, in: dir, psOutput: ps)
+                       == [folder("2.1.250"), folder("2.1.28")])
+            record("extension cleanup: the newest folder is kept by version order, not by string order",
+                   ExtensionCleanup.removable(installed: [folder("2.1.99"), folder("2.1.100")], in: dir, psOutput: "x")
+                       == [folder("2.1.99")])
+            record("extension cleanup: when the process list could not be read, nothing is removed",
+                   ExtensionCleanup.removable(installed: installed, in: dir, psOutput: nil).isEmpty
+                       && ExtensionCleanup.removable(installed: installed, in: dir, psOutput: "").isEmpty)
+        }
+
         // MARK: - Why a daemon session ended, for its clients (#278)
         record("session ended: the shim's own fatal error is what the client is told",
                ShimProcess.sessionEndedReason(fatalError: "Extension activation failed: boom", status: 1, signaled: false)

@@ -117,7 +117,7 @@ final class ExtensionUpdater {
             let vsixURL = try await downloadVSIX(version: version)
             state = .installing
             try await installVSIX(at: vsixURL, version: version)
-            cleanupOldVersions(keeping: version)
+            await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }.value
             state = .done(version: version)
         } catch {
             state = .failed(message: error.localizedDescription)
@@ -201,6 +201,8 @@ final class ExtensionUpdater {
 
     private func installVSIX(at vsixURL: URL, version: String) async throws {
         let canopyExtensionsDir = CCExtension.canopyExtensionsDir
+        let nodePath = NodeDiscovery.find()?.path
+        let shimPath = ShimProcess.findShimPath()
         let task = Task.detached(priority: .userInitiated) {
             let platform = Self.detectPlatform()
             let extensionsDir = canopyExtensionsDir
@@ -232,6 +234,21 @@ final class ExtensionUpdater {
                 throw UpdateError.extractionFailed
             }
 
+            // Before it can become the version new sessions pick: a failure leaves nothing installed.
+            if let nodePath, let shimPath {
+                let verdict = ExtensionCanary.run(extensionDir: extractedExt, nodePath: nodePath, shimPath: shimPath)
+                guard verdict == .passed else {
+                    let reason = if case .failed(let message) = verdict { message } else { "no verdict" }
+                    logger.error("Extension v\(version, privacy: .public) failed its start check: \(reason, privacy: .public)")
+                    throw UpdateError.canaryFailed(version: version, reason: reason)
+                }
+                logger.notice("Extension v\(version, privacy: .public) passed its start check")
+            } else {
+                // Installing unchecked would also let cleanup remove the known-good version.
+                logger.error("Extension v\(version, privacy: .public): not installed, node or the shim was not found for the start check")
+                throw UpdateError.canaryFailed(version: version, reason: "Node.js or Canopy's shim was not found, so it could not be checked")
+            }
+
             try FileManager.default.createDirectory(at: extensionsDir, withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: targetDir.path) {
                 do {
@@ -246,23 +263,6 @@ final class ExtensionUpdater {
             logger.info("Extension v\(version, privacy: .public) installed at: \(targetDir.path, privacy: .public)")
         }
         try await task.value
-    }
-
-    // MARK: - Cleanup
-
-    private func cleanupOldVersions(keeping currentVersion: String) {
-        let extensionsDir = CCExtension.canopyExtensionsDir
-        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: extensionsDir.path) else { return }
-        let keepPrefix = "anthropic.claude-code-\(currentVersion)-"
-        for name in contents where name.hasPrefix("anthropic.claude-code-") && !name.hasPrefix(keepPrefix) {
-            let fullPath = extensionsDir.appendingPathComponent(name)
-            do {
-                try FileManager.default.removeItem(at: fullPath)
-                logger.info("Cleaned up old extension: \(name, privacy: .public)")
-            } catch {
-                logger.warning("Failed to clean up \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-        }
     }
 
     // MARK: - Platform Detection
@@ -316,12 +316,15 @@ final class ExtensionUpdater {
         case invalidURL
         case downloadFailed(statusCode: Int)
         case extractionFailed
+        case canaryFailed(version: String, reason: String)
 
         var errorDescription: String? {
             switch self {
             case .invalidURL: return "Invalid marketplace URL"
             case .downloadFailed(let code): return "Download failed (HTTP \(code))"
             case .extractionFailed: return "Failed to extract extension package"
+            case .canaryFailed(let version, let reason):
+                return "v\(version) did not start in Canopy, so it was not installed: \(reason)"
             }
         }
     }
