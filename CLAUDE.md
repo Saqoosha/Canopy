@@ -16,7 +16,9 @@ Full chat with Claude works via vscode-shim. **Single-window sidebar shell** (Ar
 
 **Sparkle auto-update** — SPM dependency, EdDSA-signed appcast on GitHub Pages, delta updates, embedded release notes from GitHub Releases.
 
-**SSH remote** — Run Claude CLI on remote machines via SSH. Uses CC extension's `claudeProcessWrapper` setting with a bundled wrapper script. Remote directory browser via SSH.
+**SSH remote** — Run Claude CLI on remote machines via SSH. Uses CC extension's `claudeProcessWrapper` setting with a bundled wrapper script. Remote directory browser via SSH. Since Canopy Server this is the route for hosts that cannot run the daemon (Linux, WSL, Windows); Mac-to-Mac goes through the other Mac's daemon instead.
+
+**Canopy Server (3.0, PR #273; headless since 3.0.2, PR #280)** — this Mac's sessions live in **canopyd**, the same binary run as `Canopy --daemon` with no `NSApplication`, registered as a LaunchAgent (`SMAppService.agent`). The GUI is a client: a `.local` session is `OpenSession.isDaemonHosted` and its pane is a `MirrorPaneView` attached over the daemon's Unix socket, the same path a pane on another Mac's session takes over Tailscale. Cmd+W detaches; the daemon stops a session on Stop Session or after `SessionReaper.defaultIdleLimit` (15 min) unwatched and idle. An app update restarts the daemon only once nothing would be lost, or on **Restart now** in the sidebar footer (PR #290), which also lists sessions on an older extension (PR #291). The design records are `docs/superpowers/specs/2026-09-29-canopy-server-design.md`, `2026-10-01-headless-daemon-design.md` and `2026-10-01-update-without-waiting-design.md`; `docs/architecture.html` is the walkthrough, published at https://saqoosha.github.io/Canopy/architecture.html from the `gh-pages` branch.
 
 ## Tech Stack
 - macOS 15.0+, Swift 6
@@ -40,15 +42,24 @@ open build/Build/Products/Debug/Canopy.app
 ## Architecture
 
 ```
-WKWebView ─── postMessage ──→ ShimProcess.swift (~600 lines)
-                                  │ stdin/stdout NDJSON
-                                  ▼
-                              Node.js subprocess
-                                  ├─ vscode-shim/ (10 JS modules, ~800 lines)
-                                  │    └─ intercepts require("vscode")
-                                  └─ extension.js (CC extension, unmodified)
-                                       └─ spawns Claude CLI via child_process
+Canopy.app (GUI)  ── Unix socket ──┐
+another Mac's GUI ── TCP/Tailscale ┤
+Canopy Mobile     ── TCP/Tailscale ┤
+                                   ▼
+canopyd  (Canopy --daemon, LaunchAgent, no NSApplication)
+  ├─ ControlSession   one control connection per client: list/open/stop/subscribe/restart_now
+  ├─ MirrorServer     one session connection per attached pane: attach, replay, assets
+  ├─ RosterPublisher  → Cloudflare relay (roster, phone-bound session events and notification bodies; never the webview stream)
+  └─ ShimProcess × N
+        │ stdin/stdout NDJSON
+        ▼
+     Node.js subprocess
+        ├─ vscode-shim/ (intercepts require("vscode"))
+        └─ extension.js (CC extension, unmodified)
+             └─ spawns Claude CLI via child_process
 ```
+
+`CanopyMain` picks the role before anything touches `NSApplication`: `--daemon` → `CanopyDaemon.run()`, `--unregister-daemon` → remove the agent, otherwise the SwiftUI app with `OpenSession.localSessionsRunInDaemon = true` (not under the logic probe, whose fixtures expect `.local` sessions to run in-process). `ShimProcess` and `SessionStore` are the same types in both roles; the daemon is where they hold shims.
 
 SSH remote mode adds one layer: a wrapper script replaces the CLI spawn:
 
@@ -138,6 +149,23 @@ Runs extension.js as-is — no protocol reimplementation needed. Extension updat
 - `_SidebarLogicProbe.swift` — DEBUG-only probe (`CANOPY_RUN_LOGIC_PROBE=1`): unit tests for sort / dedup / filter / scheduled-task / automated-session (`claude -p` / SDK `entrypoint: "sdk-*"` — sdk-cli, sdk-py) detection / session-metadata scanning (a record straddling the head chunk, the escalation ceiling's degradation, a scheduled-task enqueue found only after escalating and the later line it must leave unread, an unterminated final record, the escalation gate itself, a `relocated` straddling the scan's stop offset, an exact chunk-multiple file, array-shaped user content) / background-task launch detection (`run_in_background` tool_use blocks) / JSONL `<task-notification>` completion-marker matching plus the whole-line advance rule and the wake-only bulk-clear asymmetry (the reconcile contract, both triggers) / title-generation helpers (prompt extraction, pinned trimming; plus the out-of-session generator's pure surface, the `TitleGenerationGate` decision ladder, `SessionTitleStore`'s user-owned record, and the rename entry points) / MacroPad key flip (`paneIndex`: identity, ends, involution, the interior mirror that determines the arithmetic, and the pass-throughs — plus what the block cannot pin) / prompt-cache keep-alive (`KeepAliveGate`'s interval and rate-limit boundaries asserted on both sides, the custom-provider carve-out, the wire-measured window — `observedTTL(inUsage:)`'s precedence, a measured 5m refusing ahead of freshness, a measured 1h outranking the carve-out, nil keeping the last reading — `ShimProcess.cacheWindowReading`'s frame selection, `keepAliveFrameForWebView`'s reshaping, the window restarting from a sent refresh, `isKeepAliveEcho`'s whole-text match including the quoting trap, the whole swallow decision via the pure `ShimProcess.keepAliveDisposition`, and the replay filter) / git worktree helpers (sanitize, isGitRepo, projectDisplayName) / context meter (issue #106: reserve cap, fallback branch, main-vs-subagent predicate; issue #110: level boundaries asserted on both sides, the refusal threshold's offset from compact, `.unknown` degradation, `barFillWidth` clamp; issue #108: main-model lookup by name, a subagent's wider window rejected, a miss yielding nil rather than the widest entry, both directions of the default-config `[1m]`-vs-bare match, empty model, missing/zero `contextWindow`, `maxOutputTokens` degradation, `.v2` cache keys) / phone reply queue (`PhoneReplyQueue`'s ordering, the cap on both sides, trimming, and the two "waiting cannot fix this" refusals in the order they are consulted; plus the routing predicate `ShimProcess.phoneReplyMayInjectNow`, the refusal rule `ShimProcess.phoneReplyBlockingReason` with liveness asserted ahead of both human gates, and `DeliveryOutcome.queued`'s `ok: true` — every one of them a surface an earlier revision left measurably unpinned) / 画像 Read（`imageResults` が画像を持たない `tool_result` の id も返すこと、1 フレーム複数ブロック、失敗した Read の文字列 content、サムネイルの長辺と非拡大、pending の上限と `at` の持ち回り、`events(from:)` の envelope 経路） / remote browser rules (`RemoteDirectoryRules`: every refusal pinned by message, the trim-before-reserved order, the untrimmed join, the hidden filter's order) / launch-restore snapshot (JSON round-trip, every `sanitized` drop rule, the capture half plus the seam property that a captured snapshot already survives sanitize unchanged, `startIfDormant` on all three pane-assignment routes with the non-dormant negative, and `applyRestoreSnapshot`'s paned-`.spawning`/unpaned-`.dormant` split. That last one was long recorded here as un-probe-able because `resumableOnDisk` hits the real filesystem and would drop every synthetic fixture; that is true only of LOCAL sessions — a remote one is accepted unchecked, so a remote-origin fixture drives the whole apply path with no filesystem setup. The claim stood for as long as it did because nothing had needed to pin a line inside that function)
 - `_ProbeWebViewRetention.swift` — DEBUG-only probe kept as historical reference: validates the early ZStack/opacity-based retention pattern that was superseded by the in-place subview swap shipped in `WebViewContainer`
 - `theme-light.css` — 456 CSS variables exported from VSCode Default Light+ theme
+
+### Daemon & control (Sources/Canopy/)
+- `CanopyMain.swift` — `@main`; chooses GUI, daemon or unregister from argv
+- `CanopyDaemon.swift` — `Canopy --daemon`: no `NSApplication`, runs `RunLoop.main` with an autorelease pool per pass, SIGTERM → `shutDown(); exit(0)`. Why no `NSApplication`: LaunchServices registered the accessory-app daemon as a second instance of `sh.saqoo.Canopy`, which broke Dock relaunch and let Sparkle quit it (headless-daemon spec)
+- `DaemonRegistration.swift` — `SMAppService.agent` registration, keyed by bundle id so Debug and Release each own an agent. Release registers on every GUI launch; Debug only with `CANOPY_REGISTER_DAEMON=1`
+- `DaemonSupervisor.swift` — before a pane attaches: socket live → done; registered but silent → `launchctl kickstart` and wait for the socket; spawn only if launchd cannot bring it up, or when nothing is registered (Debug) or approval is pending `--daemon` as a plain `Process` (never `NSWorkspace.openApplication`, which registers it with LaunchServices)
+- `DaemonPaths.swift` — socket path `~/Library/Application Support/Canopy/daemon-<bundle id>.sock` (per-user temp dir past 103 bytes); TCP port only while Mirror is on, Debug on base+1
+- `DaemonConfig.swift` — the daemon's own server settings (Tailscale listener, bypass gate), re-read from the shared settings.json on change
+- `ControlProtocol.swift` / `ControlSession.swift` / `ControlClient.swift` — the control connection: `hello {token, protocolVersion}` (version 1), one `response` per request id, `session_state` and `upgrade_state` pushes after `subscribe`. Local socket is 0600 and needs no token
+- `MirrorServer.swift` / `MirrorClient.swift` / `MirrorWire.swift` / `MirrorSink.swift` — session connections (see the Mirror line in Protocol Quick Reference); the daemon serves this Mac's own panes through them too
+- `MirrorPaneView.swift` — every pane that attaches: a daemon-hosted local session (`.unix(DaemonPaths.current)`) or another Mac's (`.mirror`). An `attach` carrying `open` resumes a session the daemon is not running, which is why restore only stores placement
+- `DaemonSessionSync.swift` — pure reconcile of the GUI's open local sessions against the daemon's `session_state`; probe-driven
+- `SessionReaper.swift` / `DaemonReaper.swift` — the stop rule (15 min, no client, not working/asking, nothing pending) and its daemon-only timer
+- `DaemonUpgrade.swift` / `DaemonUpgradeCenter.swift` / `PendingUpdate.swift` — new build on disk → wait for `ShimProcess.upgradeBlocker` to clear → announce `daemon_restarting`, stop shims, `exit(1)` so launchd starts the new build. `restart_now` overrides the blockers (local clients only, refused when not under launchd). A remote client that sent `restart: true` on attach no longer blocks
+- `RestartReattach.swift` — how another Mac's mirror pane gets back after `daemon_restarting`: wait for the listener, then re-attach (2 s / 60 s budget)
+- `ExtensionSafety.swift` — activates a freshly downloaded CC extension in a throwaway shim before adopting it; the guard against the #193 / #276 class of activation crashes
+- `FullDiskAccess.swift` — without FDA every new daemon process triggers the AppData prompt and a resumed CLI waits on it, so an unattended upgrade restart fails sessions until someone clicks Allow
 
 ### Custom Styles (Resources/)
 - `canopy-overrides.css` — Custom CSS overrides: typography, code blocks, --app-* bridge vars, WKWebView fixes, timeline fix
@@ -553,7 +581,7 @@ SSH death kills the CLI subprocess but Node.js shim stays alive → `termination
 
 ## Next Steps
 1. SSH remote Phase 3.1 — detect CLI exit via shim to trigger reconnect overlay
-2. SSH remote Phase 2 — remote file operations via SSH for @-mention support
+2. SSH remote Phase 2 — remote file operations via SSH for @-mention support. Mac hosts no longer need it (they run canopyd); it matters only for non-Mac hosts
 
 ## Design & Plan Docs
 - `docs/superpowers/specs/2026-03-29-vscode-shim-design.md` — Full design spec (500 lines)
@@ -565,6 +593,10 @@ SSH death kills the CLI subprocess but Node.js shim stays alive → `termination
 - `docs/superpowers/specs/2026-04-29-single-window-sidebar.md` — Single-window sidebar shell design spec
 - `docs/superpowers/plans/2026-04-29-single-window-sidebar.md` — Single-window sidebar implementation plan
 - `docs/superpowers/specs/2026-09-09-ssh-remote-boundary.md` — Where to put the SSH-remote boundary. Argues that the "Remaining Limitations" above are one boundary in the wrong place rather than separate defects, and records a working spike (`CANOPY_SPIKE_REMOTE_SHIM=1`) that runs the whole vscode-shim on the remote. **Read it before touching SSH remote**, for two reasons beyond the design: the host `mbp` resolves through Tailscale to THIS machine, so every "remote" test against it is localhost with a shared `~/.claude` (use `studio`, and verify with `IOPlatformUUID`); and the memo records three wrong turns in full, including two where a measurement was read as proving something it could not
+- `docs/architecture.html` — the architecture walkthrough as one page (processes, message flow, connections, lifecycle, ownership, source map). Update it when the process picture changes, and copy it to the `gh-pages` branch too — README links the Pages copy, which does not follow `main` on its own
+- `docs/superpowers/specs/2026-09-29-canopy-server-design.md` — Canopy Server: sessions in a per-Mac daemon, the control verbs, attach-is-resume, the reaper, state ownership
+- `docs/superpowers/specs/2026-10-01-headless-daemon-design.md` — why the daemon runs without `NSApplication`, and why the supervisor kickstarts launchd before spawning
+- `docs/superpowers/specs/2026-10-01-update-without-waiting-design.md` — `upgrade_state`, Restart now, the `restart` attach capability, sessions on an older extension
 - `docs/superpowers/specs/2026-09-15-remote-sessions-sidebar-design.md` — Other Macs' live sessions in the sidebar: relay-fed list, TCP attach into a pane, the roster's `live` flag. Its two findings lists are the open findings.
 
 ## Running Tests

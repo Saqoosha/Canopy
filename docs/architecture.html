@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Canopy アーキテクチャ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700&family=Zen+Kaku+Gothic+New:wght@700&family=IBM+Plex+Sans+JP:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: 読む列 1 本 + 幅広の図の帯。プロセス境界を繰り返しの視覚単位にする。ライトのみ。 */
+:root {
+  --paper: #F4F7F5;
+  --surface: #FFFFFF;
+  --ink: #14221C;
+  --muted: #55655D;
+  --line: #D3DDD7;
+  --pine: #1D5A42;
+  --leaf: #3C9660;
+  --leaf-wash: #E5F2EA;
+  --amber: #A86B12;
+  --amber-wash: #FBF1DF;
+  --sky: #2B6895;
+  --sky-wash: #E4EFF7;
+  --font-display: "Bricolage Grotesque", "Zen Kaku Gothic New", "Hiragino Sans", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans JP", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --measure: 40em;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.85 var(--font-body);
+  padding-inline: 20px;
+  padding-block: 0 80px;
+  overflow-wrap: anywhere;
+  line-break: strict;
+}
+.wrap { max-width: 1040px; margin: 0 auto; }
+.col { max-width: var(--measure); }
+a { color: var(--pine); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--leaf); outline-offset: 2px; border-radius: 3px; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+code { background: var(--leaf-wash); color: var(--pine); padding: 0.06em 0.34em; border-radius: 4px; overflow-wrap: anywhere; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; line-height: 1.3; margin: 0; }
+h2 { font-size: clamp(1.45rem, 1.15rem + 1.3vw, 2rem); font-weight: 700; }
+h3 { font-size: 1.06rem; font-weight: 700; }
+p { margin: 0; }
+b { font-weight: 600; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+
+/* header */
+header.top { padding-block: 52px 32px; border-bottom: 1px solid var(--line); display: grid; gap: 18px; }
+.eyebrow { font: 500 0.74rem/1 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber); }
+h1 { font-size: clamp(2.1rem, 1.4rem + 3.4vw, 3.7rem); font-weight: 700; letter-spacing: -0.01em; line-height: 1.2; }
+h1 span { color: var(--leaf); }
+.lede { font-size: 1.1rem; color: var(--muted); max-width: var(--measure); }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 22px; font: 0.82rem var(--font-mono); color: var(--muted); }
+.meta b { color: var(--ink); font-weight: 500; }
+
+/* toc */
+nav.toc { padding-block: 20px; border-bottom: 1px solid var(--line); }
+nav.toc ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a {
+  display: inline-block; text-decoration: none; font-size: 0.86rem; color: var(--ink); line-height: 1.4;
+  padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface);
+}
+nav.toc a:hover { border-color: var(--leaf); color: var(--pine); }
+
+section { padding-block: 48px 4px; display: grid; gap: 20px; scroll-margin-top: 16px; }
+section > * { min-width: 0; }
+.kicker { font: 500 0.74rem/1 var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+
+/* figure */
+figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+figure svg { display: block; width: 100%; height: auto; }
+figcaption { font-size: 0.86rem; color: var(--muted); margin-top: 12px; max-width: var(--measure); }
+svg text { font-family: var(--font-body); fill: var(--ink); }
+svg .t-title { font-family: var(--font-display); font-weight: 700; font-size: 15px; }
+svg .t-sub { font-size: 12px; fill: var(--muted); }
+svg .t-mono { font-family: var(--font-mono); font-size: 11px; fill: var(--muted); }
+svg .t-edge { font-family: var(--font-mono); font-size: 11px; fill: var(--sky); }
+svg .t-proc { font-family: var(--font-mono); font-size: 10.5px; fill: var(--amber); letter-spacing: 0.06em; }
+
+/* mobile diagram: 縦積みの HTML 版。狭い画面でだけ出す */
+.dm { display: none; flex-direction: column; gap: 0; }
+.dm .row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.dm .node { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 9px 10px; min-width: 0; }
+.dm .node.main { border-color: var(--pine); border-width: 1.5px; }
+.dm .node.proc { background: var(--amber-wash); border-color: var(--amber); }
+.dm .node.relay { background: var(--amber-wash); border: 1px dashed var(--amber); }
+.dm .tag { display: block; font: 500 0.62rem/1.3 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--amber); }
+.dm .name { display: block; font: 700 0.92rem/1.35 var(--font-display); overflow-wrap: normal; }
+.dm .row .name { font-size: 0.8rem; }
+.dm .row .node { padding: 8px; }
+.dm .desc { display: block; font-size: 0.78rem; line-height: 1.55; color: var(--muted); }
+.dm .daemon { border: 1.5px solid var(--pine); background: var(--leaf-wash); border-radius: 14px; padding: 12px; display: grid; gap: 8px; }
+.dm .daemon > .head .name { font-size: 1.05rem; }
+.dm .daemon > .head code { font-size: 0.72rem; }
+.dm .inner { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.dm .edge { display: flex; align-items: center; gap: 8px; padding: 6px 0 6px 14px; font: 0.74rem var(--font-mono); color: var(--sky); }
+.dm .edge::before { content: "↓"; font-size: 1rem; color: var(--sky); }
+.dm .chain { display: grid; gap: 4px; }
+.dm .chain .arrow { text-align: center; color: var(--muted); font-size: 0.9rem; line-height: 1; }
+
+/* tables */
+.table-wrap { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th, td { text-align: left; vertical-align: top; padding: 11px 14px; border-bottom: 1px solid var(--line); line-height: 1.7; }
+tr:last-child td { border-bottom: 0; }
+th { font: 500 0.72rem/1.2 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); background: var(--paper); }
+td:first-child { font-weight: 600; }
+
+/* process cards */
+.procs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 14px; }
+.proc { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.proc .pid { font: 500 0.7rem/1.3 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--amber); }
+.proc p { font-size: 0.93rem; color: var(--muted); }
+
+/* sequence */
+ol.seq { list-style: none; counter-reset: step; margin: 0; padding: 0; display: grid; }
+ol.seq li { counter-increment: step; position: relative; padding: 0 0 18px 48px; min-width: 0; }
+ol.seq li::before {
+  content: counter(step); position: absolute; left: 0; top: 0; width: 32px; height: 32px; border-radius: 50%;
+  display: grid; place-items: center; font: 500 0.82rem var(--font-mono);
+  background: var(--leaf-wash); color: var(--pine); border: 1px solid #BFDDCB;
+}
+ol.seq li::after { content: ""; position: absolute; left: 15.5px; top: 34px; bottom: 2px; width: 1px; background: var(--line); }
+ol.seq li:last-child::after { display: none; }
+ol.seq .where { font: 500 0.72rem/1.4 var(--font-mono); letter-spacing: 0.04em; color: var(--amber); display: block; padding-top: 5px; margin-bottom: 2px; }
+ol.seq.back li::before { background: var(--sky-wash); color: var(--sky); border-color: #C3D8EA; }
+
+.note { border-left: 3px solid var(--amber); background: var(--amber-wash); padding: 12px 16px; border-radius: 0 10px 10px 0; max-width: var(--measure); font-size: 0.94rem; }
+.note b { color: var(--amber); }
+ul.plain { margin: 0; padding-left: 1.2em; display: grid; gap: 8px; max-width: var(--measure); }
+
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 28px; }
+.two > * { min-width: 0; }
+
+.lifecycle { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 12px; }
+.state { border: 1px solid var(--line); background: var(--surface); border-radius: 12px; padding: 14px 16px; display: grid; gap: 6px; align-content: start; }
+.state .chip { justify-self: start; font: 500 0.74rem/1.5 var(--font-body); padding: 2px 10px; border-radius: 999px; }
+.chip.run { background: var(--leaf-wash); color: var(--pine); }
+.chip.det { background: var(--sky-wash); color: var(--sky); }
+.chip.stop { background: #ECEFED; color: var(--muted); }
+.chip.up { background: var(--amber-wash); color: var(--amber); }
+.state p { font-size: 0.9rem; color: var(--muted); }
+
+.files { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 14px; }
+.files div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+.files h3 { font-size: 0.98rem; margin-bottom: 8px; }
+.files ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; font-size: 0.88rem; color: var(--muted); }
+.files li code { background: none; padding: 0; color: var(--ink); }
+
+footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line); font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; }
+
+@media (max-width: 720px) {
+  body { font-size: 15px; padding-inline: 16px; }
+  figure { padding: 12px; }
+  figure svg { display: none; }
+  .dm { display: flex; }
+  /* 表はカードに積む。見出しは data-label から出す */
+  table, thead, tbody, tr, td { display: block; }
+  thead { display: none; }
+  tr { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  tr:last-child { border-bottom: 0; }
+  td { padding: 2px 0; border: 0; }
+  td:first-child { font-size: 1rem; margin-bottom: 4px; }
+  td:not(:first-child)::before {
+    content: attr(data-label); display: block; font: 500 0.66rem/1.4 var(--font-mono);
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-top: 6px;
+  }
+  section { padding-block: 40px 4px; }
+}
+@media (max-width: 380px) {
+  .dm .row { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  nav.toc a { transition: border-color .15s, color .15s; }
+}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">sh.saqoo.Canopy · architecture</div>
+    <h1><span>Canopy</span> のしくみ</h1>
+    <p class="lede">Canopy は Claude Code の VS Code 拡張機能を、手を加えずに、VS Code なしで動かす。3.0 からは、Mac 上のセッションはすべてバックグラウンドのデーモンが持つ。Mac のアプリも、別の Mac も、iPhone も、そこに attach するクライアントになった。</p>
+    <div class="meta"><span>バージョン <b>3.1.0</b></span><span>更新 <b>2026-10-02</b></span><span>macOS <b>15+</b> · Swift 6 · Node <b>18+</b></span></div>
+  </header>
+
+  <nav class="toc" aria-label="目次">
+    <ol>
+      <li><a href="#picture">全体像</a></li>
+      <li><a href="#processes">プロセス</a></li>
+      <li><a href="#message">メッセージの流れ</a></li>
+      <li><a href="#wire">接続</a></li>
+      <li><a href="#lifecycle">ライフサイクル</a></li>
+      <li><a href="#state">状態の持ち主</a></li>
+      <li><a href="#daemon">デーモンの運用</a></li>
+      <li><a href="#gui">Mac クライアント</a></li>
+      <li><a href="#remote">ほかの経路</a></li>
+      <li><a href="#files">ソースマップ</a></li>
+    </ol>
+  </nav>
+
+  <section id="picture">
+    <div class="kicker">Overview</div>
+    <h2>全体像</h2>
+    <div class="col stack">
+      <p>押さえる考えは 2 つ。1 つ目、Canopy は Claude Code のプロトコルを再実装しない。拡張機能の <code>extension.js</code> をそのまま Node で読み込み、<code>vscode</code> モジュールだけを小さな偽物に差し替える。画面は拡張機能自身の React webview を <code>WKWebView</code> で表示する。</p>
+      <p>2 つ目、セッションを持つプロセスと、見ているウィンドウは別物。shim を動かし続けるのは <code>canopyd</code> で、どのマシンのどのウィンドウもクライアントにすぎない。</p>
+    </div>
+    <figure>
+      <svg viewBox="0 0 1000 640" role="img" aria-labelledby="fig1t fig1d">
+        <title id="fig1t">Canopy のプロセス構成図</title>
+        <desc id="fig1d">3 つのクライアント（この Mac のアプリ、別の Mac のアプリ、iPhone）が canopyd に接続する。canopyd はセッションごとに ShimProcess を持ち、それが Node の vscode-shim を動かし、shim が extension.js を読み込み、extension.js が claude CLI を起動する。canopyd は Cloudflare の relay に roster を送る。</desc>
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2B6895"/></marker>
+          <marker id="arrg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#55655D"/></marker>
+        </defs>
+
+        <rect x="20" y="20" width="230" height="92" rx="12" fill="#FFFFFF" stroke="#1D5A42" stroke-width="1.5"/>
+        <text x="36" y="40" class="t-proc">CLIENT · この MAC</text>
+        <text x="36" y="64" class="t-title">Canopy.app</text>
+        <text x="36" y="84" class="t-sub">サイドバー、ペイン、MacroPad</text>
+        <text x="36" y="101" class="t-sub">ペインごとに WKWebView</text>
+
+        <rect x="270" y="20" width="230" height="92" rx="12" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="286" y="40" class="t-proc">CLIENT · 別の MAC</text>
+        <text x="286" y="64" class="t-title">Canopy.app</text>
+        <text x="286" y="84" class="t-sub">この Mac のセッションを</text>
+        <text x="286" y="101" class="t-sub">mirror ペインで開く</text>
+
+        <rect x="520" y="20" width="230" height="92" rx="12" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="536" y="40" class="t-proc">CLIENT · IPHONE</text>
+        <text x="536" y="64" class="t-title">Canopy Mobile</text>
+        <text x="536" y="84" class="t-sub">同じ webview、同じ</text>
+        <text x="536" y="101" class="t-sub">プロトコル（別リポジトリ）</text>
+
+        <rect x="770" y="20" width="210" height="92" rx="12" fill="#FBF1DF" stroke="#A86B12" stroke-dasharray="5 4"/>
+        <text x="786" y="40" class="t-proc">CLOUDFLARE</text>
+        <text x="786" y="64" class="t-title">Relay</text>
+        <text x="786" y="84" class="t-sub">マシン一覧、roster、</text>
+        <text x="786" y="101" class="t-sub">イベント、push</text>
+
+        <line x1="135" y1="112" x2="135" y2="180" stroke="#2B6895" stroke-width="1.6" marker-end="url(#arr)"/>
+        <text x="143" y="150" class="t-edge">Unix socket</text>
+        <line x1="385" y1="112" x2="385" y2="180" stroke="#2B6895" stroke-width="1.6" marker-end="url(#arr)"/>
+        <text x="393" y="150" class="t-edge">TCP · Tailscale</text>
+        <line x1="635" y1="112" x2="635" y2="180" stroke="#2B6895" stroke-width="1.6" marker-end="url(#arr)"/>
+        <text x="643" y="150" class="t-edge">TCP · Tailscale</text>
+        <line x1="875" y1="180" x2="875" y2="116" stroke="#55655D" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrg)"/>
+        <text x="883" y="150" class="t-mono">roster WS</text>
+
+        <rect x="20" y="182" width="960" height="262" rx="16" fill="#E5F2EA" stroke="#1D5A42" stroke-width="1.5"/>
+        <text x="40" y="208" class="t-proc">LAUNCHAGENT · MAC ごとに 1 つ · NSAPPLICATION なし</text>
+        <text x="40" y="232" class="t-title" style="font-size:18px">canopyd</text>
+        <text x="118" y="232" class="t-mono">Canopy.app/Contents/MacOS/Canopy --daemon</text>
+
+        <rect x="40" y="250" width="290" height="70" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="56" y="276" class="t-title">MirrorServer</text>
+        <text x="56" y="296" class="t-sub">session 接続：attach、replay、</text>
+        <text x="56" y="311" class="t-sub">asset、ファイル転送</text>
+
+        <rect x="350" y="250" width="290" height="70" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="366" y="276" class="t-title">ControlSession</text>
+        <text x="366" y="296" class="t-sub">一覧、起動、停止、改名、subscribe、</text>
+        <text x="366" y="311" class="t-sub">restart_now</text>
+
+        <rect x="660" y="250" width="300" height="70" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="676" y="276" class="t-title">RosterPublisher</text>
+        <text x="676" y="296" class="t-sub">roster とセッションのイベントを</text>
+        <text x="676" y="311" class="t-sub">relay に送る</text>
+
+        <rect x="40" y="336" width="290" height="92" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="56" y="362" class="t-title">SessionStore</text>
+        <text x="56" y="382" class="t-sub">セッションの registry：開いている</text>
+        <text x="56" y="397" class="t-sub">セッション、Recents、タイトル、</text>
+        <text x="56" y="412" class="t-sub">アカウント、レート制限</text>
+
+        <rect x="350" y="336" width="290" height="92" rx="10" fill="#FFFFFF" stroke="#1D5A42" stroke-width="1.5"/>
+        <text x="366" y="362" class="t-title">ShimProcess × N</text>
+        <text x="366" y="382" class="t-sub">走っているセッションごとに 1 つ。</text>
+        <text x="366" y="397" class="t-sub">Node の子プロセスを持ち、出力を</text>
+        <text x="366" y="412" class="t-sub">attach 中の全クライアントへ配る</text>
+
+        <rect x="660" y="336" width="300" height="92" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="676" y="362" class="t-title">コーディネータ群</text>
+        <text x="676" y="382" class="t-sub">keep-alive、recap、タイトル生成、</text>
+        <text x="676" y="397" class="t-sub">背景タスクの照合、reaper、</text>
+        <text x="676" y="412" class="t-sub">アップグレード確認</text>
+
+        <line x1="495" y1="428" x2="495" y2="490" stroke="#2B6895" stroke-width="1.6" marker-end="url(#arr)"/>
+        <text x="503" y="465" class="t-edge">stdin / stdout NDJSON</text>
+
+        <rect x="20" y="492" width="960" height="128" rx="16" fill="#FFFFFF" stroke="#D3DDD7" stroke-dasharray="5 4"/>
+        <text x="40" y="516" class="t-proc">各 SHIM の子プロセス</text>
+
+        <rect x="40" y="530" width="270" height="74" rx="10" fill="#FBF1DF" stroke="#A86B12"/>
+        <text x="56" y="556" class="t-title">node vscode-shim</text>
+        <text x="56" y="576" class="t-sub">require("vscode") を偽装：</text>
+        <text x="56" y="591" class="t-sub">webview、workspace、secrets</text>
+
+        <line x1="310" y1="567" x2="358" y2="567" stroke="#55655D" stroke-width="1.4" marker-end="url(#arrg)"/>
+        <rect x="360" y="530" width="270" height="74" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="376" y="556" class="t-title">extension.js</text>
+        <text x="376" y="576" class="t-sub">Claude Code 拡張機能を</text>
+        <text x="376" y="591" class="t-sub">配布されたまま読み込む</text>
+
+        <line x1="630" y1="567" x2="678" y2="567" stroke="#55655D" stroke-width="1.4" marker-end="url(#arrg)"/>
+        <text x="634" y="558" class="t-mono">spawn</text>
+        <rect x="680" y="530" width="280" height="74" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
+        <text x="696" y="556" class="t-title">claude CLI</text>
+        <text x="696" y="576" class="t-sub">stream-json の入出力。</text>
+        <text x="696" y="591" class="t-sub">SSH 経由のときはラッパー越し</text>
+      </svg>
+
+      <div class="dm">
+        <div class="row">
+          <div class="node main"><span class="tag">この Mac</span><span class="name">Canopy.app</span><span class="desc">ペインごとに WKWebView</span></div>
+          <div class="node"><span class="tag">別の Mac</span><span class="name">Canopy.app</span><span class="desc">mirror ペイン</span></div>
+          <div class="node"><span class="tag">iPhone</span><span class="name">Canopy Mobile</span><span class="desc">同じ接続</span></div>
+        </div>
+        <div class="edge">Unix socket ／ TCP · Tailscale</div>
+        <div class="daemon">
+          <div class="head"><span class="tag">LaunchAgent · Mac ごとに 1 つ</span><span class="name">canopyd</span><code>Canopy --daemon</code></div>
+          <div class="inner">
+            <div class="node"><span class="name">MirrorServer</span><span class="desc">attach、replay、asset</span></div>
+            <div class="node"><span class="name">ControlSession</span><span class="desc">一覧、起動、停止</span></div>
+            <div class="node"><span class="name">SessionStore</span><span class="desc">セッションの registry</span></div>
+            <div class="node main"><span class="name">ShimProcess&nbsp;×&nbsp;N</span><span class="desc">全クライアントへ配る</span></div>
+          </div>
+          <div class="node relay"><span class="name">RosterPublisher → Relay</span><span class="desc">roster、イベント、通知。webview のストリームは通らない</span></div>
+        </div>
+        <div class="edge">stdin / stdout NDJSON</div>
+        <div class="chain">
+          <div class="node proc"><span class="name">node vscode-shim</span><span class="desc">require("vscode") を偽装</span></div>
+          <div class="arrow">↓</div>
+          <div class="node"><span class="name">extension.js</span><span class="desc">配布されたまま読み込む</span></div>
+          <div class="arrow">↓ spawn</div>
+          <div class="node"><span class="name">claude CLI</span><span class="desc">stream-json の入出力</span></div>
+        </div>
+      </div>
+      <figcaption>青い矢印は Canopy 自身の NDJSON。琥珀色はプロセスの境界。relay が運ぶのは、マシンとセッションの一覧、スマホ向けのイベント（発言やツール行の文面を含む）、通知。webview のストリームと transcript の replay は relay を通らず、クライアントとデーモンの間を Unix socket か Tailscale で直接流れる。</figcaption>
+    </figure>
+  </section>
+
+  <section id="processes">
+    <div class="kicker">Runtime</div>
+    <h2>プロセス</h2>
+    <p class="col">1 つのバイナリが 2 役をこなす。<code>CanopyMain</code> は <code>NSApplication</code> に触る前に引数を見る。<code>--daemon</code> ならデーモン、<code>--unregister-daemon</code> なら LaunchAgent の登録解除、それ以外は SwiftUI アプリを起動する。</p>
+    <div class="procs">
+      <div class="proc">
+        <span class="pid">GUI · Canopy.app</span>
+        <h3>ウィンドウ</h3>
+        <p>サイドバー、最大 6 ペインの分割表示、ランチャー、設定、MacroPad。この Mac のセッションの shim は持たない。<code>OpenSession.isDaemonHosted</code> なペインは <code>MirrorPaneView</code> で attach する。別の Mac のセッションを開くペインと同じ経路。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">デーモン · canopyd</span>
+        <h3>セッションの持ち主</h3>
+        <p>launchd が LaunchAgent として起動する。ログインセッションの中で動くので、CLI の OAuth トークンを login keychain から読める。<code>NSApplication</code> を作らず <code>RunLoop.main</code> で回るので、LaunchServices からはアプリの 2 つ目のインスタンスに見えない。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">子プロセス · node</span>
+        <h3>vscode-shim</h3>
+        <p><code>Resources/vscode-shim/index.js</code> が <code>require("vscode")</code> を横取りし、<code>extension.js</code> を activate する。拡張機能が使う API を 10 個ほどの小さなモジュールで用意する。未実装のメンバーへのアクセスは Proxy がログに残すので、黙って失敗しない。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">孫プロセス · claude</span>
+        <h3>CLI</h3>
+        <p>拡張機能が <code>-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages</code> で起動する。SSH remote では、代わりに <code>ssh-claude-wrapper.sh</code> を経由する。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="message">
+    <div class="kicker">Data flow</div>
+    <h2>メッセージの流れ</h2>
+    <p class="col">この Mac のペインで入力して Return を押したときに起きること。別の Mac やスマホのペインも同じ道を通る。違うのは Unix socket が Tailscale 上の TCP になることだけ。</p>
+    <div class="two">
+      <div class="stack">
+        <h3>行き：プロンプト</h3>
+        <ol class="seq">
+          <li><span class="where">WKWebView</span>拡張機能の React UI が <code>acquireVsCodeApi().postMessage</code> を呼ぶ。Canopy のスタブがそれを <code>webkit.messageHandlers</code> への post に変える。</li>
+          <li><span class="where">GUI · RemoteMirrorBridge</span>ペインの session 接続で、1 行の NDJSON としてデーモンの socket に送る。</li>
+          <li><span class="where">canopyd · MirrorServer</span>接続は 1 つのセッションに attach 済み。行はそのセッションの <code>ShimProcess</code> に渡る。</li>
+          <li><span class="where">ShimProcess → node</span>shim の stdin に書く。<code>window.js</code> が webview メッセージとして拡張機能に届ける。</li>
+          <li><span class="where">extension.js → CLI</span>拡張機能が stream-json のユーザーターンを CLI の stdin に書く。</li>
+        </ol>
+      </div>
+      <div class="stack">
+        <h3>帰り：応答</h3>
+        <ol class="seq back">
+          <li><span class="where">CLI</span>Anthropic の SSE イベントを <code>stream_event</code> 行として出し、続けて <code>assistant</code> と <code>result</code> を出す。</li>
+          <li><span class="where">extension.js</span>それぞれを <code>io_message</code> に包んで自分の webview に post する。</li>
+          <li><span class="where">node shim</span>stdout に書く。日本語の太字の修復（CJK emphasis repair）はここで、Node を出る前にかかる。</li>
+          <li><span class="where">ShimProcess</span>自分のトラッカー（ステータスバー、活動状態、背景タスク、レート制限）のために 1 回読み、attach 中の全クライアントへ送る。</li>
+          <li><span class="where">WKWebView</span>webview が描く。途中の変換は CJK の太字の修復だけ。拡張機能の UI が自分のメッセージを自分で描く。</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section id="wire">
+    <div class="kicker">Protocol</div>
+    <h2>接続</h2>
+    <p class="col">クライアントはデーモンに 2 種類の接続を張る。どちらも改行区切りの JSON。</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>接続</th><th>本数</th><th>最初の行</th><th>運ぶもの</th></tr></thead>
+        <tbody>
+          <tr><td>control</td><td data-label="本数">クライアントごと、デーモンごとに 1 本</td><td data-label="最初の行"><code>hello {token, protocolVersion}</code></td><td data-label="運ぶもの">id 付きのリクエストと、それぞれ 1 つの <code>response</code>：<code>list_sessions</code>、<code>list_folders</code>、<code>browse_dir</code>、<code>mkdir</code>、<code>open_session</code>、<code>stop_session</code>、<code>rename_session</code>、<code>restart_session</code>、<code>switch_account</code>、<code>list_accounts</code>、<code>request_recap</code>、<code>mirror_status</code>、<code>restart_now</code> など。<code>subscribe</code> の後は <code>session_state</code> と <code>upgrade_state</code> の push。</td></tr>
+          <tr><td>session</td><td data-label="本数">attach 中のペインごとに 1 本</td><td data-label="最初の行"><code>attach</code></td><td data-label="運ぶもの">webview 自身の NDJSON を双方向に。attach 時の transcript の replay、要求に応じた webview の asset、ファイル転送、<code>open_url</code> や <code>notify</code> などサーバからクライアントへの指示。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul class="plain">
+      <li><b>認証</b>：local の socket はファイル権限（0600）で守る。TCP は Mirror のパスワードトークンが要り、設定で Mirror が On のときだけ開く。</li>
+      <li><b>バージョン</b>：<code>ControlProtocol.version</code> は 1。合わなければ理由付きの <code>hello_error</code> を返して切る。</li>
+      <li><b>attach の capability</b>：クライアントは <code>attach</code> 行のフラグで追加機能を選ぶ。<code>status</code>、<code>usage</code>、<code>images</code>、<code>restart</code>、<code>compress: "br"</code>（4 KB 以上の行を Brotli で <code>Z &lt;n&gt; &lt;m&gt;</code> フレームにする）。</li>
+      <li><b>socket のパス</b>：<code>~/Library/Application Support/Canopy/daemon-&lt;bundle id&gt;.sock</code>。Debug のデーモン（<code>sh.saqoo.Canopy.debug</code>）が Release の socket を奪わないため。103 バイトを超えたらユーザーごとの一時ディレクトリに置く。</li>
+    </ul>
+  </section>
+
+  <section id="lifecycle">
+    <div class="kicker">Lifecycle</div>
+    <h2>セッションのライフサイクル</h2>
+    <p class="col">ペインを閉じることと、セッションを止めることは別の操作。古いセッションを開く、止まったセッションに戻る、再起動後にペインを復元する。この 3 つは 1 本の attach 経路でまかなう。</p>
+    <div class="lifecycle">
+      <div class="state"><span class="chip run">実行中・attach あり</span><p>shim が動いていて、少なくとも 1 つのクライアントが見ている。keep-alive がプロンプトキャッシュを温めるのはこの状態のセッションだけ。</p></div>
+      <div class="state"><span class="chip det">実行中・attach なし</span><p>Cmd+W で閉じるのはペインで、セッションではない。デーモンの中で走り続け、全クライアントの Open 一覧に残る。</p></div>
+      <div class="state"><span class="chip stop">停止</span><p>Stop Session か reaper で止まる。reaper の条件は、クライアントなし、作業中でも質問中でもなく、許可待ちも背景タスクもない状態が 15 分。行は Recents に戻る。</p></div>
+      <div class="state"><span class="chip up">デーモン再起動</span><p>新しいビルドがディスクに来ても、失う作業がなくなるか、Restart now が押されるまで待つ。クライアントは attach し直し、セッションは transcript から再開する。</p></div>
+    </div>
+    <div class="note"><b>attach は resume を兼ねる。</b>デーモンが動かしていないセッションに <code>open</code> 付きの <code>attach</code> が来たら、デーモンはその場で resume する。だから「保存して終了」は shim の状態を持ち越さない。保存したセッションに attach し直せば resume される。</div>
+  </section>
+
+  <section id="state">
+    <div class="kicker">Ownership</div>
+    <h2>状態の持ち主</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>状態</th><th>持ち主</th><th>補足</th></tr></thead>
+        <tbody>
+          <tr><td>走っているセッション、shim、活動状態</td><td data-label="持ち主">デーモン</td><td data-label="補足">canopyd の中の <code>SessionStore.openSessions</code></td></tr>
+          <tr><td>Recents、フォルダ、タイトル</td><td data-label="持ち主">デーモン（Mac ごと）</td><td data-label="補足">クライアントが <code>list_sessions</code> / <code>list_folders</code> で聞く。relay には載せない</td></tr>
+          <tr><td>セッションに効く設定</td><td data-label="持ち主">デーモン</td><td data-label="補足">既定の permission mode、keep-alive、recap、worktree の seed、アカウント、モデルプロバイダ</td></tr>
+          <tr><td>レート制限</td><td data-label="持ち主">デーモン</td><td data-label="補足">アカウントごとに集めてクライアントに push</td></tr>
+          <tr><td>ペインの並びと幅、ウィンドウ、フィルタ、MacroPad</td><td data-label="持ち主">クライアント</td><td data-label="補足">各 Mac の GUI が自分のレイアウトを持つ</td></tr>
+          <tr><td>マシン一覧、presence、開いているセッションの roster</td><td data-label="持ち主">relay</td><td data-label="補足">スマホ向けのイベント（発言の文面を含む）と通知の本文も relay を通る。webview のストリームと transcript の replay は通らない</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="daemon">
+    <div class="kicker">Operations</div>
+    <h2>デーモンの運用</h2>
+    <div class="two">
+      <div class="stack">
+        <h3>登録と起動</h3>
+        <ul class="plain">
+          <li>Release の GUI は起動のたびに LaunchAgent（<code>SMAppService.agent</code>、plist はバンドル内）を確かめ、なければ登録する。Debug は <code>CANOPY_REGISTER_DAEMON=1</code> のときだけ登録する。</li>
+          <li>ペインが attach する前に <code>DaemonSupervisor</code> が socket を確かめる。登録済みなのに応答がなければ <code>launchctl kickstart</code> して socket が開くのを待つ。未登録（Debug）や承認待ちのとき、または launchd が起こせなかったときは、GUI が <code>--daemon</code> を普通の <code>Process</code> として自分で起動する。</li>
+          <li>デーモンはアプリと同じ identity なので、フルディスクアクセスの許可は両方に効く。</li>
+        </ul>
+      </div>
+      <div class="stack">
+        <h3>アップデート</h3>
+        <ul class="plain">
+          <li>Sparkle がアプリを差し替える。デーモンはディスク上の新しいビルドに気づき、再起動を止めているものを数える。たとえば走っているターン、答え待ちの質問、背景タスク、未送信のプロンプト、自分で attach し直せないクライアント。</li>
+          <li>止めるものがなくなったら、デーモンは <code>daemon_restarting</code> を送り、shim を止めて exit 1 する。launchd が新しいビルドを起動する。</li>
+          <li>サイドバーの下端に、待っている更新と、それを止めているセッションと、Restart now ボタンが出る。古い Claude Code 拡張機能のまま動いているセッションも並び、個別に Restart できる。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="gui">
+    <div class="kicker">Client</div>
+    <h2>Mac クライアント</h2>
+    <div class="col stack">
+      <p><code>SessionStore</code> は GUI のモデルでもある。開いている行、Recents、ペイン、フォーカス中のペインを持つ。各ペインは <code>PaneSlot</code> で、幅は重みとして持つ。<code>WeightedPaneLayout</code>（SwiftUI の独自 <code>Layout</code>）が詳細カラムを重みで分け、親から提案された幅をそのまま返す。これがウィンドウが勝手に広がり続けるのを止めている。</p>
+      <p>サイドバーの Open ブロックはペインの並びの地図になっている。強調された行を上から読むと、ペインを左から読んだ順になる。サイドバーのドットと MacroPad の LED は、どちらも <code>SessionActivity</code> という 1 つの分類を読む。</p>
+      <p>各ペインの webview はセッションごとの entry ファイルを読み込み、Canopy の注入スクリプトを受け取る。<code>acquireVsCodeApi</code> のスタブ、テーマ CSS、画像プレビュー、スクロール位置の保持、入力欄へのフォーカス、recap の行。</p>
+    </div>
+  </section>
+
+  <section id="remote">
+    <div class="kicker">Reach</div>
+    <h2>ほかの経路</h2>
+    <div class="procs">
+      <div class="proc">
+        <span class="pid">Mac から Mac</span>
+        <h3>別の Mac のデーモン</h3>
+        <p>サイドバーは relay から他の Mac のセッションを並べる。開くと、その Mac の canopyd に Tailscale 経由で <code>.mirror</code> ペインが attach する。transcript もファイルも CLI もその Mac に残る。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">スマホ</span>
+        <h3>Canopy Mobile</h3>
+        <p>relay で Mac を見つけ、Tailscale 越しに同じ control / session プロトコルを話す。通知は relay の push で届く。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">Mac 以外のホスト</span>
+        <h3>SSH remote</h3>
+        <p>デーモンが動かない Linux、WSL、Windows 向け。shim はこの Mac で動き、拡張機能の <code>claudeProcessWrapper</code> が <code>ssh-claude-wrapper.sh</code> を指して、ホスト上の <code>claude</code> を実行する。transcript は描かれず、<code>@</code> メンションはローカルのファイルを読む。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">クラウド</span>
+        <h3>Claude Code on the Web</h3>
+        <p>クラウドのセッションは Keychain の OAuth トークンで <code>/v1/sessions</code> から一覧し、短命の shim（<code>RemoteSessionsBridge</code>）でローカルのセッションにテレポートする。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="files">
+    <div class="kicker">Code</div>
+    <h2>ソースマップ</h2>
+    <p class="col">注記がなければ <code>Sources/Canopy/</code> の下。全体像のどの部分に属するかで分けた。</p>
+    <div class="files">
+      <div><h3>入口とデーモン</h3><ul>
+        <li><code>CanopyMain</code> GUI かデーモンかを選ぶ</li>
+        <li><code>CanopyDaemon</code> run loop と終了処理</li>
+        <li><code>DaemonSupervisor</code>、<code>DaemonRegistration</code></li>
+        <li><code>DaemonPaths</code>、<code>DaemonConfig</code></li>
+        <li><code>DaemonUpgrade</code>、<code>DaemonUpgradeCenter</code></li>
+        <li><code>SessionReaper</code>、<code>DaemonReaper</code></li>
+      </ul></div>
+      <div><h3>プロトコル</h3><ul>
+        <li><code>ControlProtocol</code>、<code>ControlSession</code>、<code>ControlClient</code></li>
+        <li><code>MirrorServer</code>、<code>MirrorClient</code>、<code>MirrorWire</code></li>
+        <li><code>MirrorSink</code>、<code>MirrorAccess</code>、<code>MirrorEndpoint</code></li>
+        <li><code>MirrorStatusFrame</code>、<code>MirrorFileTransfer</code></li>
+        <li><code>NDJSONLineAssembler</code></li>
+      </ul></div>
+      <div><h3>セッション</h3><ul>
+        <li><code>ShimProcess</code> shim とトラッカー</li>
+        <li><code>SessionStore</code>、<code>OpenSession</code></li>
+        <li><code>KeepAlive*</code>、<code>Recap*</code>、<code>SessionTitle*</code></li>
+        <li><code>ClaudeSessionHistory</code> JSONL の読み取り</li>
+        <li><code>SharedRateLimitData</code>、<code>ClaudeAccount</code></li>
+      </ul></div>
+      <div><h3>Mac クライアントの UI</h3><ul>
+        <li><code>CanopyApp</code>、<code>Sidebar</code>、<code>Detail</code></li>
+        <li><code>WeightedPaneLayout</code>、<code>PaneSlot</code>、<code>PaneDivider</code></li>
+        <li><code>MirrorPaneView</code> attach するすべてのペイン</li>
+        <li><code>LauncherView</code>、<code>StatusBarView</code></li>
+        <li><code>MacroPad/</code> USB キーパッド</li>
+      </ul></div>
+      <div><h3>relay とスマホ</h3><ul>
+        <li><code>Roster/RosterPublisher</code></li>
+        <li><code>Roster/RemoteRosterWatcher</code></li>
+        <li><code>Roster/RosterNotifier</code>、<code>RosterReply</code></li>
+        <li><code>PhoneReplyQueue</code></li>
+      </ul></div>
+      <div><h3>Node 側</h3><ul>
+        <li><code>Resources/vscode-shim/index.js</code> 入口</li>
+        <li><code>window.js</code> webview のブリッジ</li>
+        <li><code>workspace.js</code>、<code>context.js</code></li>
+        <li><code>cjk-emphasis*.js</code> ストリームの修復</li>
+        <li><code>Resources/ssh-claude-wrapper.sh</code></li>
+      </ul></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>設計記録：<code>docs/superpowers/specs/2026-09-29-canopy-server-design.md</code>、<code>2026-10-01-headless-daemon-design.md</code>、<code>2026-10-01-update-without-waiting-design.md</code></span>
+    <span>実測や落とし穴の記録は <code>CLAUDE.md</code> にある。</span>
+  </footer>
+</div>

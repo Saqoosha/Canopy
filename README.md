@@ -19,12 +19,14 @@ English | [日本語](README.ja.md)
 - **Sidebar shell** — sessions live in a persistent left sidebar; the detail pane swaps the active webview in place
 - **Split view** — up to 6 panes side by side, Cmd+1–9 to focus one, drag the dividers to resize
 - **Session resume** — pick up where you left off with instant history replay
-- **Save and Quit** — the pane layout and every open session come back at the next launch
+- **Sessions outlive the window** — sessions run in a background service, so quitting the app does not stop them; reopen and the panes attach again. An app update restarts the service, and sessions resume from their transcripts
+- **Other Macs' sessions** — open, resume and watch a session running on another Mac over Tailscale, transcript included
+- **Save and Quit** — the pane layout comes back at the next launch
 - **Named sessions** — titles generated outside the session's own context, renamable from the sidebar row or by double-clicking the pane header
 - **Git aware** — the real branch in the sidebar and pane header, and a session that moves into a worktree is followed there
 - **Peer names** — the name other Claude Code sessions use to message this one, shown on its row
 - **Phone companion** — [Canopy Mobile](https://github.com/Saqoosha/Canopy-Mobile) shows every pane across every Mac and lets you answer a notification — free text or an AskUserQuestion option — as a real user turn
-- **SSH remote** — run Claude CLI on remote machines via SSH
+- **SSH remote** — run Claude CLI on a Linux, WSL or Windows host via SSH
 - **Claude Code on the Web** — teleport a cloud session down into a local one
 - **Custom model providers** — point a session at any Anthropic-compatible endpoint, with per-tier model mapping
 - **Session recap** — come back after being away and a summary of what happened sits above the composer
@@ -50,19 +52,29 @@ English | [日本語](README.ja.md)
 ### Architecture
 
 ```
-WKWebView ─── postMessage ──→ ShimProcess.swift
-                                  │ stdin/stdout NDJSON
-                                  ▼
-                              Node.js subprocess
-                                  ├─ vscode-shim/ (10 JS modules)
-                                  │    └─ intercepts require("vscode")
-                                  └─ extension.js (CC extension, unmodified)
-                                       └─ spawns Claude CLI via child_process
+Canopy.app (this Mac)    Canopy.app (another Mac)    Canopy Mobile (iPhone)
+        │ Unix socket              │ TCP over Tailscale         │
+        └──────────────┬───────────┴────────────────────────────┘
+                       ▼
+canopyd  (Canopy.app --daemon, one LaunchAgent per Mac)
+  ├─ ControlSession   list / open / stop / subscribe
+  ├─ MirrorServer     attach, transcript replay, assets
+  ├─ RosterPublisher  roster, session events, notifications → Cloudflare relay
+  └─ ShimProcess × N
+        │ stdin/stdout NDJSON
+        ▼
+     Node.js vscode-shim  ── intercepts require("vscode")
+        └─ extension.js (Claude Code extension, unmodified)
+             └─ claude CLI (stream-json)
 ```
 
-Canopy runs the CC extension's `extension.js` unmodified in a Node.js subprocess. A vscode-shim intercepts `require("vscode")` calls and bridges the webview via NDJSON over stdin/stdout. The extension spawns the Claude CLI in streaming JSON mode — SSE events flow through the shim directly to the webview.
+Canopy runs the Claude Code extension's `extension.js` unmodified in a Node.js subprocess. A vscode-shim intercepts `require("vscode")` and bridges the extension's webview over NDJSON; the extension spawns the Claude CLI in streaming JSON mode, and its SSE events reach the webview unconverted apart from a repair of CJK bold markup in the shim.
 
-For SSH remote, a wrapper script replaces the CLI spawn to run `claude` on the remote machine via SSH.
+Since 3.0 the sessions live in **canopyd**, a background daemon started by launchd. It is the same binary run with `--daemon`, without `NSApplication`. The Mac app is a client: each pane attaches to the daemon over a Unix socket, the same way a pane on another Mac or the phone attaches over Tailscale. Closing a pane detaches; the session keeps running until it is stopped or sits idle and unwatched for 15 minutes.
+
+For hosts with no daemon (Linux, WSL, Windows), SSH remote still works: a wrapper script replaces the CLI spawn and runs `claude` on the host over SSH.
+
+The full walkthrough, with diagrams (in Japanese), is at [saqoosha.github.io/Canopy/architecture.html](https://saqoosha.github.io/Canopy/architecture.html); its source is [docs/architecture.html](docs/architecture.html).
 
 ### Requirements
 
@@ -85,17 +97,25 @@ xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
 
 ```
 Sources/Canopy/
+  CanopyMain.swift             Entry point: starts the GUI or, with --daemon, the daemon
+  CanopyDaemon.swift           The daemon's run loop, startup and shutdown
+  DaemonSupervisor.swift       Makes sure the daemon is serving before a pane attaches
+  DaemonUpgrade*.swift         Restarts the daemon onto a new build when nothing would be lost
+  ControlProtocol.swift        Control connection: hello, verbs, session_state pushes
+  ControlSession.swift         Daemon side of a control connection
+  MirrorServer.swift           Session connections: attach, replay, assets, file transfer
+  MirrorPaneView.swift         A pane attached to a daemon session (this Mac's or another's)
   CanopyApp.swift              SwiftUI app entry, panes, menu commands, Sparkle updater
   AppState.swift               Observable state, PermissionMode enum, screen transitions
   SessionActivity.swift        One activity classification shared by the sidebar dot and the MacroPad LED
   MacroPad/                    USB key pad: wire protocol, serial/TCP device, session-state controller
   Roster/                      Phone companion: pane roster publisher, push notifier, replies
-  SessionStore.swift           Sidebar + pane state, open/close, focus, pane ordering
+  SessionStore.swift           Session registry (in the daemon) and sidebar + pane state (in the GUI)
   SessionRestoreSnapshot.swift Save-and-Quit snapshot and its restore rules
   KeepAliveCoordinator.swift   Prompt-cache keep-alive clock and fan-out
   RecapCoordinator.swift       Buys a session recap after you've been away
   SessionTitleGenerator.swift  Generates a title outside the session's own context
-  ShimProcess.swift            Node.js subprocess manager, NDJSON bridge, auth/permission patching
+  ShimProcess.swift            One session's Node.js subprocess, NDJSON bridge, trackers, client fan-out
   NodeDiscovery.swift          Finds Node.js >= 18 (Homebrew, mise, nvm, login shell)
   LauncherView.swift           Launcher: directory picker, recent dirs, session history
   WebViewContainer.swift       WKWebView setup, CC webview loading, CSS injection
