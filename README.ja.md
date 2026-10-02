@@ -19,12 +19,14 @@
 - **サイドバーシェル** — セッションは左サイドバーに常駐し、詳細ペインがその場で webview を差し替える
 - **分割ビュー** — 最大 6 ペインを横に並べ、Cmd+1–9 でフォーカス、ディバイダのドラッグでリサイズ
 - **セッション再開** — 過去のセッションを履歴の即時リプレイで再開
-- **保存して終了** — ペインのレイアウトと開いていたセッションが次回起動時にそのまま戻る
+- **ウィンドウを閉じてもセッションが続く** — セッションはバックグラウンドのサービスで動くので、アプリを終了・更新しても止まらない。開き直すとペインが再び attach する
+- **他の Mac のセッション** — 別の Mac で動くセッションを Tailscale 経由で開き、再開し、transcript ごと見られる
+- **保存して終了** — ペインのレイアウトが次回起動時にそのまま戻る
 - **セッション名** — そのセッション自身のコンテキストの外でタイトルを生成。サイドバー行から、またはペインヘッダーのダブルクリックでリネーム
 - **Git 対応** — サイドバーとペインヘッダーに実際のブランチを表示。worktree へ移動したセッションも追従する
 - **ピア名** — 他の Claude Code セッションがこのセッションを呼ぶときの名前を行に表示
 - **スマホ連携** — [Canopy Mobile](https://github.com/Saqoosha/Canopy-Mobile) が複数 Mac の全ペインを一覧表示。通知への返信（自由入力、または AskUserQuestion の選択肢）が実際のユーザーターンとして入る
-- **SSH リモート** — リモートマシン上の Claude CLI を SSH 経由で実行
+- **SSH リモート** — Linux、WSL、Windows のホスト上の Claude CLI を SSH 経由で実行
 - **Claude Code on the Web** — クラウドのセッションをローカルにテレポート
 - **カスタムモデルプロバイダ** — Anthropic 互換のエンドポイントを指定し、ティアごとにモデルをマッピング
 - **セッションリキャップ** — 離席から戻ると、その間に何が起きたかの要約が入力欄の上に出る
@@ -67,35 +69,53 @@ xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
 ### アーキテクチャ
 
 ```
-WKWebView ─── postMessage ──→ ShimProcess.swift
-                                  │ stdin/stdout NDJSON
-                                  ▼
-                              Node.js subprocess
-                                  ├─ vscode-shim/ (10 JS modules)
-                                  │    └─ intercepts require("vscode")
-                                  └─ extension.js (CC extension, unmodified)
-                                       └─ spawns Claude CLI via child_process
+Canopy.app (この Mac)    Canopy.app (別の Mac)    Canopy Mobile (iPhone)
+        │ Unix socket            │ TCP over Tailscale        │
+        └──────────────┬─────────┴───────────────────────────┘
+                       ▼
+canopyd  (Canopy.app --daemon、Mac ごとに 1 つの LaunchAgent)
+  ├─ ControlSession   一覧 / 起動 / 停止 / subscribe
+  ├─ MirrorServer     attach、transcript の replay、asset
+  ├─ RosterPublisher  マシンとセッションの roster → Cloudflare relay
+  └─ ShimProcess × N
+        │ stdin/stdout NDJSON
+        ▼
+     Node.js vscode-shim  ── require("vscode") を横取り
+        └─ extension.js (Claude Code 拡張機能、未改変)
+             └─ claude CLI (stream-json)
 ```
 
-CC 拡張機能の `extension.js` を未改変のまま Node.js サブプロセスで実行。vscode-shim が `require("vscode")` を横取りし、NDJSON（stdin/stdout）経由で webview とブリッジ。拡張機能が Claude CLI をストリーミング JSON モードで起動し、SSE イベントがそのまま webview に流れる。
+Claude Code 拡張機能の `extension.js` を未改変のまま Node.js サブプロセスで実行。vscode-shim が `require("vscode")` を横取りし、拡張機能の webview と NDJSON でブリッジ。拡張機能が Claude CLI をストリーミング JSON モードで起動し、SSE イベントは変換されずに webview に届く。
 
-SSH リモートでは、ラッパースクリプトが CLI の起動を置き換え、SSH 経由でリモートマシン上の `claude` を実行。
+3.0 から、セッションは **canopyd** が持つ。launchd が起動するバックグラウンドのデーモンで、同じバイナリを `--daemon` 付き・`NSApplication` なしで動かしたもの。Mac アプリはクライアントで、各ペインは Unix socket でデーモンに attach する。別の Mac のペインやスマホが Tailscale 経由で attach するのと同じ経路。ペインを閉じても detach するだけで、セッションは停止されるか、誰も見ていない idle 状態が 15 分続くまで走り続ける。
+
+デーモンが動かないホスト（Linux、WSL、Windows）には SSH リモートを使う。ラッパースクリプトが CLI の起動を置き換え、SSH 経由でホスト上の `claude` を実行。
+
+図つきの詳しい説明は [saqoosha.github.io/Canopy/architecture.html](https://saqoosha.github.io/Canopy/architecture.html)。ソースは [docs/architecture.html](docs/architecture.html)。
 
 ### プロジェクト構成
 
 ```
 Sources/Canopy/
+  CanopyMain.swift             エントリポイント: GUI か、--daemon ならデーモンを起動
+  CanopyDaemon.swift           デーモンの run loop、起動と終了
+  DaemonSupervisor.swift       ペインが attach する前にデーモンが応答することを確かめる
+  DaemonUpgrade*.swift         失うものがなくなったら新しいビルドでデーモンを再起動
+  ControlProtocol.swift        control 接続: hello、verb、session_state の push
+  ControlSession.swift         control 接続のデーモン側
+  MirrorServer.swift           session 接続: attach、replay、asset、ファイル転送
+  MirrorPaneView.swift         デーモンのセッション（この Mac・別の Mac）に attach するペイン
   CanopyApp.swift              SwiftUI アプリエントリ、ペイン、メニュー、Sparkle アップデーター
   SessionActivity.swift        サイドバーのドットと MacroPad の LED が共有する状態分類
   MacroPad/                    USB キーパッド: ワイヤプロトコル、シリアル/TCP デバイス、状態コントローラ
   Roster/                      スマホ連携: ペイン一覧の発行、プッシュ通知、返信
-  SessionStore.swift           サイドバーとペインの状態、開閉、フォーカス、並び順
+  SessionStore.swift           セッションの registry（デーモン側）とサイドバー・ペインの状態（GUI 側）
   SessionRestoreSnapshot.swift 「保存して終了」のスナップショットと復元ルール
   KeepAliveCoordinator.swift   プロンプトキャッシュ保温のクロックと配信
   RecapCoordinator.swift       離席から戻ったときのリキャップ生成
   SessionTitleGenerator.swift  セッション外でのタイトル生成
   AppState.swift               状態管理、PermissionMode enum、画面遷移
-  ShimProcess.swift            Node.js サブプロセス管理、NDJSON ブリッジ、認証パッチ
+  ShimProcess.swift            セッション 1 つ分の Node.js サブプロセス、NDJSON ブリッジ、トラッカー、クライアントへの配信
   NodeDiscovery.swift          Node.js >= 18 の検出 (Homebrew, mise, nvm, login shell)
   LauncherView.swift           ランチャー: ディレクトリ選択、履歴
   WebViewContainer.swift       WKWebView セットアップ、CSS インジェクション
