@@ -1,3 +1,5 @@
+<!doctype html>
+<html lang="ja">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Canopy アーキテクチャ</title>
@@ -239,8 +241,8 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <rect x="770" y="20" width="210" height="92" rx="12" fill="#FBF1DF" stroke="#A86B12" stroke-dasharray="5 4"/>
         <text x="786" y="40" class="t-proc">CLOUDFLARE</text>
         <text x="786" y="64" class="t-title">Relay</text>
-        <text x="786" y="84" class="t-sub">マシン一覧、roster、push</text>
-        <text x="786" y="101" class="t-sub">会話の中身は通らない</text>
+        <text x="786" y="84" class="t-sub">マシン一覧、roster、</text>
+        <text x="786" y="101" class="t-sub">イベント、push</text>
 
         <line x1="135" y1="112" x2="135" y2="180" stroke="#2B6895" stroke-width="1.6" marker-end="url(#arr)"/>
         <text x="143" y="150" class="t-edge">Unix socket</text>
@@ -268,7 +270,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
 
         <rect x="660" y="250" width="300" height="70" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
         <text x="676" y="276" class="t-title">RosterPublisher</text>
-        <text x="676" y="296" class="t-sub">開いているセッションと状態を</text>
+        <text x="676" y="296" class="t-sub">roster とセッションのイベントを</text>
         <text x="676" y="311" class="t-sub">relay に送る</text>
 
         <rect x="40" y="336" width="290" height="92" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
@@ -314,7 +316,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <text x="696" y="591" class="t-sub">SSH 経由のときはラッパー越し</text>
       </svg>
 
-      <div class="dm" aria-hidden="true">
+      <div class="dm">
         <div class="row">
           <div class="node main"><span class="tag">この Mac</span><span class="name">Canopy.app</span><span class="desc">ペインごとに WKWebView</span></div>
           <div class="node"><span class="tag">別の Mac</span><span class="name">Canopy.app</span><span class="desc">mirror ペイン</span></div>
@@ -329,7 +331,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
             <div class="node"><span class="name">SessionStore</span><span class="desc">セッションの registry</span></div>
             <div class="node main"><span class="name">ShimProcess&nbsp;×&nbsp;N</span><span class="desc">全クライアントへ配る</span></div>
           </div>
-          <div class="node relay"><span class="name">RosterPublisher → Relay</span><span class="desc">マシン一覧と roster だけ。会話は通らない</span></div>
+          <div class="node relay"><span class="name">RosterPublisher → Relay</span><span class="desc">roster、イベント、通知。webview のストリームは通らない</span></div>
         </div>
         <div class="edge">stdin / stdout NDJSON</div>
         <div class="chain">
@@ -340,7 +342,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
           <div class="node"><span class="name">claude CLI</span><span class="desc">stream-json の入出力</span></div>
         </div>
       </div>
-      <figcaption>青い矢印は Canopy 自身の NDJSON。琥珀色はプロセスの境界。relay はどのマシンとセッションがあるかを知らせるだけで、会話のバイト列はクライアントとデーモンの間を Unix socket か Tailscale で直接流れる。</figcaption>
+      <figcaption>青い矢印は Canopy 自身の NDJSON。琥珀色はプロセスの境界。relay が運ぶのは、マシンとセッションの一覧、スマホ向けのイベント（発言やツール行の文面を含む）、通知。webview のストリームと transcript の replay は relay を通らず、クライアントとデーモンの間を Unix socket か Tailscale で直接流れる。</figcaption>
     </figure>
   </section>
 
@@ -394,7 +396,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
           <li><span class="where">extension.js</span>それぞれを <code>io_message</code> に包んで自分の webview に post する。</li>
           <li><span class="where">node shim</span>stdout に書く。日本語の太字の修復（CJK emphasis repair）はここで、Node を出る前にかかる。</li>
           <li><span class="where">ShimProcess</span>自分のトラッカー（ステータスバー、活動状態、背景タスク、レート制限）のために 1 回読み、attach 中の全クライアントへ送る。</li>
-          <li><span class="where">WKWebView</span>webview が描く。途中で変換は一切ない。拡張機能の UI が自分のメッセージを自分で描く。</li>
+          <li><span class="where">WKWebView</span>webview が描く。途中の変換は CJK の太字の修復だけ。拡張機能の UI が自分のメッセージを自分で描く。</li>
         </ol>
       </div>
     </div>
@@ -431,7 +433,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <div class="state"><span class="chip stop">停止</span><p>Stop Session か reaper で止まる。reaper の条件は、クライアントなし、作業中でも質問中でもなく、許可待ちも背景タスクもない状態が 15 分。行は Recents に戻る。</p></div>
       <div class="state"><span class="chip up">デーモン再起動</span><p>新しいビルドがディスクに来ても、失う作業がなくなるか、Restart now が押されるまで待つ。クライアントは attach し直し、セッションは transcript から再開する。</p></div>
     </div>
-    <div class="note"><b>attach は resume を兼ねる。</b>デーモンが動かしていないセッションに <code>open</code> 付きの <code>attach</code> が来たら、デーモンはその場で resume する。だから「保存して終了」はペインの配置しか保存しない。</div>
+    <div class="note"><b>attach は resume を兼ねる。</b>デーモンが動かしていないセッションに <code>open</code> 付きの <code>attach</code> が来たら、デーモンはその場で resume する。だから「保存して終了」は shim の状態を持ち越さない。保存したセッションに attach し直せば resume される。</div>
   </section>
 
   <section id="state">
@@ -446,7 +448,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
           <tr><td>セッションに効く設定</td><td data-label="持ち主">デーモン</td><td data-label="補足">既定の permission mode、keep-alive、recap、worktree の seed、アカウント、モデルプロバイダ</td></tr>
           <tr><td>レート制限</td><td data-label="持ち主">デーモン</td><td data-label="補足">アカウントごとに集めてクライアントに push</td></tr>
           <tr><td>ペインの並びと幅、ウィンドウ、フィルタ、MacroPad</td><td data-label="持ち主">クライアント</td><td data-label="補足">各 Mac の GUI が自分のレイアウトを持つ</td></tr>
-          <tr><td>マシン一覧、presence、開いているセッションの roster</td><td data-label="持ち主">relay</td><td data-label="補足">発見のためだけ。会話は通らない</td></tr>
+          <tr><td>マシン一覧、presence、開いているセッションの roster</td><td data-label="持ち主">relay</td><td data-label="補足">スマホ向けのイベント（発言の文面を含む）と通知の本文も relay を通る。webview のストリームと transcript の replay は通らない</td></tr>
         </tbody>
       </table>
     </div>
@@ -480,7 +482,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
     <h2>Mac クライアント</h2>
     <div class="col stack">
       <p><code>SessionStore</code> は GUI のモデルでもある。開いている行、Recents、ペイン、フォーカス中のペインを持つ。各ペインは <code>PaneSlot</code> で、幅は重みとして持つ。<code>WeightedPaneLayout</code>（SwiftUI の独自 <code>Layout</code>）が詳細カラムを重みで分け、親から提案された幅をそのまま返す。これがウィンドウが勝手に広がり続けるのを止めている。</p>
-      <p>サイドバーの Open ブロックはペインの並びの地図になっている。強調された行を上から読むと、ペインを左から読んだ順になる。ステータスバー、サイドバーのドット、MacroPad の LED は、どれも <code>SessionActivity</code> という 1 つの分類を読む。</p>
+      <p>サイドバーの Open ブロックはペインの並びの地図になっている。強調された行を上から読むと、ペインを左から読んだ順になる。サイドバーのドットと MacroPad の LED は、どちらも <code>SessionActivity</code> という 1 つの分類を読む。</p>
       <p>各ペインの webview はセッションごとの entry ファイルを読み込み、Canopy の注入スクリプトを受け取る。<code>acquireVsCodeApi</code> のスタブ、テーマ CSS、画像プレビュー、スクロール位置の保持、入力欄へのフォーカス、recap の行。</p>
     </div>
   </section>
