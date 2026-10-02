@@ -52,6 +52,9 @@ targets:
       - path: Resources/vscode-shim
         type: folder
         buildPhase: resources
+      - path: Resources/canopy-bridge
+        type: folder
+        buildPhase: resources
       - path: Resources/ssh-claude-wrapper.sh
         buildPhase: resources
       # Read by ssh-claude-wrapper.sh from its own directory - both land in

@@ -1,0 +1,5 @@
+{
+  "name": "canopy-bridge",
+  "version": "1.0.0",
+  "description": "Reports the CLI's context measurements to Canopy as ui_log lines"
+}
