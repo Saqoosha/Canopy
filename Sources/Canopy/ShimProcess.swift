@@ -2361,10 +2361,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// model rather than only the launch one.
     private var cliResolvedModel: String = ""
 
-    /// True once a `canopy-bridge` `ui_log` has delivered context numbers for
-    /// this shim. While set, `extractStatusData` skips its own writes to
-    /// `contextUsed` / `contextMax` so the two paths cannot fight.
-    private var contextFromBridge = false
+    /// True once a canopy-bridge frame supplied the context window; the
+    /// `result` branch then leaves `contextMax` to it.
+    private var contextMaxFromBridge = false
 
     @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, claudeAccount: ClaudeAccount? = nil, resumeIdIsExistingTranscript: Bool) {
@@ -2881,15 +2880,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         var env = Self.scrubbingCanopyAssignedKeys(ProcessInfo.processInfo.environment)
         env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
 
-        // Bridge mod: CLI loads plugins from CLAUDE_CODE_PLUGIN_DIRS. Not in
-        // `canopyAssignedEnvKeys` — an inherited value is legitimate and must
-        // survive scrubbing so we can prepend our path onto it.
+        // Not in `canopyAssignedEnvKeys`: a user's own mod dirs must survive.
         if let bridgeMod = Self.installBridgeMod() {
-            if let inherited = env["CLAUDE_CODE_PLUGIN_DIRS"], !inherited.isEmpty {
-                env["CLAUDE_CODE_PLUGIN_DIRS"] = bridgeMod + ":" + inherited
-            } else {
-                env["CLAUDE_CODE_PLUGIN_DIRS"] = bridgeMod
-            }
+            env["CLAUDE_CODE_PLUGIN_DIRS"] = Self.pluginDirs(prepending: bridgeMod, to: env["CLAUDE_CODE_PLUGIN_DIRS"])
         }
 
         // Ensure PATH includes directories where tools like rg (ripgrep) live.
@@ -3972,7 +3965,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return nil
         }
         let destRoot = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Canopy/mods/canopy-bridge", isDirectory: true)
+            .appendingPathComponent("Library/Application Support/Canopy/mods/\(Bundle.main.bundleIdentifier ?? "Canopy")/canopy-bridge", isDirectory: true)
         let relativeFiles = [
             ".claude-plugin/plugin.json",
             "hooks/hooks.json",
@@ -4001,6 +3994,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// `bridge` first, then the inherited dirs without another copy of it.
+    nonisolated static func pluginDirs(prepending bridge: String, to inherited: String?) -> String {
+        let rest = (inherited ?? "").split(separator: ":").map(String.init).filter { !$0.isEmpty && $0 != bridge }
+        return ([bridge] + rest).joined(separator: ":")
+    }
+
     nonisolated private static func bridgeModSourceURL() -> URL? {
         guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("canopy-bridge", isDirectory: true),
               FileManager.default.fileExists(atPath: bundled.appendingPathComponent("hooks/register.ts").path)
@@ -4022,7 +4021,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         func positiveInt(_ value: Any?) -> Int? {
             let n: Int?
             if let i = value as? Int { n = i }
-            else if let d = value as? Double { n = Int(d) }
+            else if let d = value as? Double { n = Int(exactly: d) }
             else { n = nil }
             guard let n, n > 0 else { return nil }
             return n
@@ -4124,10 +4123,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             let innerType = (innerMessage["type"] as? String) ?? "?"
             logger.debug("[stdout→webview] type=\(innerType, privacy: .public)")
-            // Bridge frames never reach the webview or any tracker — apply
-            // context numbers (when the text parses) and drop either way.
-            // Ahead of `consumeRecapTraffic` so a bridge line cannot be
-            // mistaken for recap traffic or forwarded by a later path.
+            // First, so no later path forwards a bridge line to the webview.
             do {
                 let nested: [String: Any]
                 if innerMessage["type"] as? String == "from-extension",
@@ -4142,16 +4138,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                    Self.isBridgeFrame(frame)
                 {
                     if let measure = Self.bridgeContextMeasure(frame) {
-                        if !contextFromBridge {
-                            contextFromBridge = true
-                            logger.notice("[bridge] context measurements active")
-                        }
                         if let window = measure.window {
+                            if !contextMaxFromBridge {
+                                contextMaxFromBridge = true
+                                logger.notice("[bridge] context window from the CLI")
+                            }
                             statusBarData?.contextMax = window
                             UserDefaults.standard.set(window, forKey: Self.contextMaxKey(workingDirectory))
-                        }
-                        if let tokens = measure.tokens {
-                            statusBarData?.contextUsed = tokens
                         }
                     } else {
                         logger.warning("[bridge] ui_log text failed to parse")
@@ -6215,10 +6208,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // longer has anything for it to unlatch.
         endPhoneReplyFlight()
         discardQueuedPhoneReplies()
-        // A reconnected shim must re-learn the bridge from a fresh ui_log;
-        // leaving this set would keep skipping stream-json context writes
-        // until one arrived, leaving the meter frozen on the old numbers.
-        contextFromBridge = false
         // The id of an event streamed by the shim that just died. The
         // reconnected session's first completion would otherwise carry it,
         // and the phone would drop that push against an event from before
@@ -7732,9 +7721,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     data.model = model
                 }
                 // Context usage from message_start (current context at API call time)
-                if !contextFromBridge,
-                   let usage = msg["usage"] as? [String: Any]
-                {
+                if let usage = msg["usage"] as? [String: Any] {
                     let input = usage["input_tokens"] as? Int ?? 0
                     let cacheCreate = usage["cache_creation_input_tokens"] as? Int ?? 0
                     let cacheRead = usage["cache_read_input_tokens"] as? Int ?? 0
@@ -7745,9 +7732,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "result":
             if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
                 if let usage = Self.mainModelUsage(modelUsage: modelUsage, mainModel: cliResolvedModel) {
-                    // Bridge owns contextMax when active; maxOutputTokens still
-                    // comes from modelUsage (the mod never reports it).
-                    if !contextFromBridge {
+                    // maxOutputTokens still comes from here: the mod has no such field.
+                    if !contextMaxFromBridge {
                         data.contextMax = usage.contextWindow
                         UserDefaults.standard.set(usage.contextWindow, forKey: Self.contextMaxKey(workingDirectory))
                     }
@@ -7816,8 +7802,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             data.messageCount += 1
             requestUsageUpdate()
             // Update contextUsed to include output_tokens (matches CC popup: input + cache_creation + cache_read + output)
-            if !contextFromBridge,
-               Self.isMainConversationMessage(ioMsg),
+            if Self.isMainConversationMessage(ioMsg),
                let msg = ioMsg["message"] as? [String: Any],
                let usage = msg["usage"] as? [String: Any]
             {
