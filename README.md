@@ -19,7 +19,7 @@ English | [日本語](README.ja.md)
 - **Sidebar shell** — sessions live in a persistent left sidebar; the detail pane swaps the active webview in place
 - **Split view** — up to 6 panes side by side, Cmd+1–9 to focus one, drag the dividers to resize
 - **Session resume** — pick up where you left off with instant history replay
-- **Sessions outlive the window** — sessions run in a background service, so quitting or updating the app does not stop them; reopen and the panes attach again
+- **Sessions outlive the window** — sessions run in a background service, so quitting the app does not stop them; reopen and the panes attach again. An app update restarts the service, and sessions resume from their transcripts
 - **Other Macs' sessions** — open, resume and watch a session running on another Mac over Tailscale, transcript included
 - **Save and Quit** — the pane layout comes back at the next launch
 - **Named sessions** — titles generated outside the session's own context, renamable from the sidebar row or by double-clicking the pane header
@@ -59,7 +59,7 @@ Canopy.app (this Mac)    Canopy.app (another Mac)    Canopy Mobile (iPhone)
 canopyd  (Canopy.app --daemon, one LaunchAgent per Mac)
   ├─ ControlSession   list / open / stop / subscribe
   ├─ MirrorServer     attach, transcript replay, assets
-  ├─ RosterPublisher  machine + session roster → Cloudflare relay
+  ├─ RosterPublisher  roster, session events, notifications → Cloudflare relay
   └─ ShimProcess × N
         │ stdin/stdout NDJSON
         ▼
@@ -68,7 +68,7 @@ canopyd  (Canopy.app --daemon, one LaunchAgent per Mac)
              └─ claude CLI (stream-json)
 ```
 
-Canopy runs the Claude Code extension's `extension.js` unmodified in a Node.js subprocess. A vscode-shim intercepts `require("vscode")` and bridges the extension's webview over NDJSON; the extension spawns the Claude CLI in streaming JSON mode, and its SSE events reach the webview unconverted.
+Canopy runs the Claude Code extension's `extension.js` unmodified in a Node.js subprocess. A vscode-shim intercepts `require("vscode")` and bridges the extension's webview over NDJSON; the extension spawns the Claude CLI in streaming JSON mode, and its SSE events reach the webview unconverted apart from a repair of CJK bold markup in the shim.
 
 Since 3.0 the sessions live in **canopyd**, a background daemon started by launchd. It is the same binary run with `--daemon`, without `NSApplication`. The Mac app is a client: each pane attaches to the daemon over a Unix socket, the same way a pane on another Mac or the phone attaches over Tailscale. Closing a pane detaches; the session keeps running until it is stopped or sits idle and unwatched for 15 minutes.
 

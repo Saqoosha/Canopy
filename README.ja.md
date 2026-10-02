@@ -19,7 +19,7 @@
 - **サイドバーシェル** — セッションは左サイドバーに常駐し、詳細ペインがその場で webview を差し替える
 - **分割ビュー** — 最大 6 ペインを横に並べ、Cmd+1–9 でフォーカス、ディバイダのドラッグでリサイズ
 - **セッション再開** — 過去のセッションを履歴の即時リプレイで再開
-- **ウィンドウを閉じてもセッションが続く** — セッションはバックグラウンドのサービスで動くので、アプリを終了・更新しても止まらない。開き直すとペインが再び attach する
+- **ウィンドウを閉じてもセッションが続く** — セッションはバックグラウンドのサービスで動くので、アプリを終了しても止まらない。開き直すとペインが再び attach する。アプリの更新ではサービスが再起動し、セッションは transcript から再開する
 - **他の Mac のセッション** — 別の Mac で動くセッションを Tailscale 経由で開き、再開し、transcript ごと見られる
 - **保存して終了** — ペインのレイアウトが次回起動時にそのまま戻る
 - **セッション名** — そのセッション自身のコンテキストの外でタイトルを生成。サイドバー行から、またはペインヘッダーのダブルクリックでリネーム
@@ -76,7 +76,7 @@ Canopy.app (この Mac)    Canopy.app (別の Mac)    Canopy Mobile (iPhone)
 canopyd  (Canopy.app --daemon、Mac ごとに 1 つの LaunchAgent)
   ├─ ControlSession   一覧 / 起動 / 停止 / subscribe
   ├─ MirrorServer     attach、transcript の replay、asset
-  ├─ RosterPublisher  マシンとセッションの roster → Cloudflare relay
+  ├─ RosterPublisher  roster、セッションのイベント、通知 → Cloudflare relay
   └─ ShimProcess × N
         │ stdin/stdout NDJSON
         ▼
@@ -85,7 +85,7 @@ canopyd  (Canopy.app --daemon、Mac ごとに 1 つの LaunchAgent)
              └─ claude CLI (stream-json)
 ```
 
-Claude Code 拡張機能の `extension.js` を未改変のまま Node.js サブプロセスで実行。vscode-shim が `require("vscode")` を横取りし、拡張機能の webview と NDJSON でブリッジ。拡張機能が Claude CLI をストリーミング JSON モードで起動し、SSE イベントは変換されずに webview に届く。
+Claude Code 拡張機能の `extension.js` を未改変のまま Node.js サブプロセスで実行。vscode-shim が `require("vscode")` を横取りし、拡張機能の webview と NDJSON でブリッジ。拡張機能が Claude CLI をストリーミング JSON モードで起動し、SSE イベントは shim での CJK の太字の修復を除いて、変換されずに webview に届く。
 
 3.0 から、セッションは **canopyd** が持つ。launchd が起動するバックグラウンドのデーモンで、同じバイナリを `--daemon` 付き・`NSApplication` なしで動かしたもの。Mac アプリはクライアントで、各ペインは Unix socket でデーモンに attach する。別の Mac のペインやスマホが Tailscale 経由で attach するのと同じ経路。ペインを閉じても detach するだけで、セッションは停止されるか、誰も見ていない idle 状態が 15 分続くまで走り続ける。
 

@@ -49,7 +49,7 @@ Canopy Mobile     ── TCP/Tailscale ┤
 canopyd  (Canopy --daemon, LaunchAgent, no NSApplication)
   ├─ ControlSession   one control connection per client: list/open/stop/subscribe/restart_now
   ├─ MirrorServer     one session connection per attached pane: attach, replay, assets
-  ├─ RosterPublisher  → Cloudflare relay (machines + open-session roster only)
+  ├─ RosterPublisher  → Cloudflare relay (roster, phone-bound session events and notification bodies; never the webview stream)
   └─ ShimProcess × N
         │ stdin/stdout NDJSON
         ▼
