@@ -408,7 +408,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <table>
         <thead><tr><th>接続</th><th>本数</th><th>最初の行</th><th>運ぶもの</th></tr></thead>
         <tbody>
-          <tr><td>control</td><td data-label="本数">クライアントごと、デーモンごとに 1 本</td><td data-label="最初の行"><code>hello {token, protocolVersion}</code></td><td data-label="運ぶもの">id 付きのリクエストと、それぞれ 1 つの <code>response</code>：<code>list_sessions</code>、<code>list_folders</code>、<code>browse_dir</code>、<code>mkdir</code>、<code>open_session</code>、<code>stop_session</code>、<code>rename_session</code>、<code>restart_session</code>、<code>switch_account</code>、<code>request_recap</code>、<code>restart_now</code>。<code>subscribe</code> の後は <code>session_state</code> と <code>upgrade_state</code> の push。</td></tr>
+          <tr><td>control</td><td data-label="本数">クライアントごと、デーモンごとに 1 本</td><td data-label="最初の行"><code>hello {token, protocolVersion}</code></td><td data-label="運ぶもの">id 付きのリクエストと、それぞれ 1 つの <code>response</code>：<code>list_sessions</code>、<code>list_folders</code>、<code>browse_dir</code>、<code>mkdir</code>、<code>open_session</code>、<code>stop_session</code>、<code>rename_session</code>、<code>restart_session</code>、<code>switch_account</code>、<code>list_accounts</code>、<code>request_recap</code>、<code>mirror_status</code>、<code>restart_now</code> など。<code>subscribe</code> の後は <code>session_state</code> と <code>upgrade_state</code> の push。</td></tr>
           <tr><td>session</td><td data-label="本数">attach 中のペインごとに 1 本</td><td data-label="最初の行"><code>attach</code></td><td data-label="運ぶもの">webview 自身の NDJSON を双方向に。attach 時の transcript の replay、要求に応じた webview の asset、ファイル転送、<code>open_url</code> や <code>notify</code> などサーバからクライアントへの指示。</td></tr>
         </tbody>
       </table>
@@ -460,14 +460,14 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <h3>登録と起動</h3>
         <ul class="plain">
           <li>Release の GUI は起動のたびに LaunchAgent（<code>SMAppService.agent</code>、plist はバンドル内）を確かめ、なければ登録する。Debug は <code>CANOPY_REGISTER_DAEMON=1</code> のときだけ登録する。</li>
-          <li>ペインが attach する前に <code>DaemonSupervisor</code> が socket を確かめる。登録済みなのに応答がなければ <code>launchctl kickstart</code> して最大 15 秒待つ。launchd が起こせなかったときだけ、GUI が <code>--daemon</code> を普通の <code>Process</code> として自分で起動する。</li>
+          <li>ペインが attach する前に <code>DaemonSupervisor</code> が socket を確かめる。登録済みなのに応答がなければ <code>launchctl kickstart</code> して socket が開くのを待つ。未登録（Debug）や承認待ちのとき、または launchd が起こせなかったときは、GUI が <code>--daemon</code> を普通の <code>Process</code> として自分で起動する。</li>
           <li>デーモンはアプリと同じ identity なので、フルディスクアクセスの許可は両方に効く。</li>
         </ul>
       </div>
       <div class="stack">
         <h3>アップデート</h3>
         <ul class="plain">
-          <li>Sparkle がアプリを差し替える。デーモンはディスク上の新しいビルドに気づき、再起動を止めているものを数える。走っているターン、答え待ちの質問、背景タスク、未送信のプロンプト、自分で attach し直せないクライアント。</li>
+          <li>Sparkle がアプリを差し替える。デーモンはディスク上の新しいビルドに気づき、再起動を止めているものを数える。たとえば走っているターン、答え待ちの質問、背景タスク、未送信のプロンプト、自分で attach し直せないクライアント。</li>
           <li>止めるものがなくなったら、デーモンは <code>daemon_restarting</code> を送り、shim を止めて exit 1 する。launchd が新しいビルドを起動する。</li>
           <li>サイドバーの下端に、待っている更新と、それを止めているセッションと、Restart now ボタンが出る。古い Claude Code 拡張機能のまま動いているセッションも並び、個別に Restart できる。</li>
         </ul>
@@ -497,7 +497,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <div class="proc">
         <span class="pid">スマホ</span>
         <h3>Canopy Mobile</h3>
-        <p>relay で Mac を見つけ、Tailscale 越しに同じ control / session プロトコルを話す。どのクライアントも attach していないときの通知は relay の push で届く。</p>
+        <p>relay で Mac を見つけ、Tailscale 越しに同じ control / session プロトコルを話す。通知は relay の push で届く。</p>
       </div>
       <div class="proc">
         <span class="pid">Mac 以外のホスト</span>
