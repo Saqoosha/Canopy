@@ -1862,6 +1862,41 @@ enum SidebarLogicProbe {
                        !SessionReaper.shouldReap(reapInputs(clients: 1, busy: false, quietFor: 24 * 3600), now: reapT0, limit: reapLimit))
                 record("reaper: a busy session is kept however long nobody watches",
                        !SessionReaper.shouldReap(reapInputs(clients: 0, busy: true, quietFor: 24 * 3600), now: reapT0, limit: reapLimit))
+                var held = reapInputs(clients: 0, busy: false, quietFor: 24 * 3600)
+                held.heldOpen = true
+                record("reaper: a session the phone opened is kept however long nobody watches",
+                       !SessionReaper.shouldReap(held, now: reapT0, limit: reapLimit))
+                // Held sessions across an upgrade restart: only held, local, resumable ones.
+                let heldDir = URL(fileURLWithPath: "/tmp/probe/held")
+                let heldA = OpenSession(origin: .local(heldDir), resumeId: "held-A", title: "A", project: "P",
+                                        permissionMode: .plan, model: "opus", effortLevel: "high")
+                heldA.heldOpenByPhone = true
+                let notHeld = OpenSession(origin: .local(heldDir), resumeId: "free", title: "F", project: "P")
+                let noTranscript = OpenSession(origin: .local(heldDir), resumeId: "fresh", title: "N", project: "P")
+                noTranscript.heldOpenByPhone = true
+                let heldNow = Date()
+                let captured = DaemonHeldSessions.capture([heldA, notHeld, noTranscript], now: heldNow) { session, _ in
+                    session.resumeId != "fresh"
+                }
+                record("held restore: only held sessions with a transcript are captured",
+                       captured.entries == [.init(key: heldA.id.uuidString, resumeId: "held-A",
+                                                  directory: "/tmp/probe/held", title: "A", model: "opus",
+                                                  effort: "high", permissionMode: .plan, providerId: nil,
+                                                  accountId: nil)])
+                let heldFile = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("canopy-probe-held-\(UUID().uuidString).json")
+                captured.save(to: heldFile)
+                record("held restore: consume returns what was saved and deletes the file",
+                       DaemonHeldSessions.consume(from: heldFile, now: heldNow) == captured
+                           && !FileManager.default.fileExists(atPath: heldFile.path))
+                captured.save(to: heldFile)
+                record("held restore: a file older than maxAge is dropped, and still deleted",
+                       DaemonHeldSessions.consume(from: heldFile,
+                                                  now: heldNow + DaemonHeldSessions.maxAge + 1) == nil
+                           && !FileManager.default.fileExists(atPath: heldFile.path))
+                DaemonHeldSessions(entries: [], savedAt: heldNow).save(to: heldFile)
+                record("held restore: nothing held writes no file",
+                       !FileManager.default.fileExists(atPath: heldFile.path))
                 record("reaper: a quietSince in the future (clock change) is kept",
                        !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: -60), now: reapT0, limit: reapLimit))
             }

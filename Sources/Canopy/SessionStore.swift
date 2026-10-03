@@ -1000,6 +1000,8 @@ final class SessionStore {
         /// Nil: this Mac's own choice (`ModelProviderStore.selectedProvider`, `launchAccountChoice`).
         var provider: ModelProvider? = nil
         var account: ClaudeAccount? = nil
+        /// The row's `OpenSession.id`; nil mints one.
+        var id: UUID? = nil
     }
 
     /// Start a session for a client that is not a pane on this Mac: an open
@@ -1022,6 +1024,7 @@ final class SessionStore {
         let provider = options.provider ?? ModelProviderStore.selectedProvider()
         let accountChoice = launchAccountChoice(customApi: provider)
         let session = OpenSession(
+            id: options.id ?? UUID(),
             origin: .local(directory),
             resumeId: resumeId,
             title: title ?? options.settledTitle ?? "Untitled",
