@@ -582,7 +582,12 @@ final class MirrorConnection: MirrorSink {
             // opening under the client's id could start a duplicate or miss a replaced placeholder.
             if named != nil { request = .resume }
             switch startRequestedSession(request, sessionId: named?.resumeId ?? sessionId) {
-            case .success(let shim): existing = shim
+            case .success(let shim):
+                existing = shim
+                // A Mac pane holds its session; the phone has no pane, and no way to stop one.
+                if Self.appliesPhoneReplayRewrites(client: dict["client"] as? String) {
+                    shim.boundSession?.heldOpenByPhone = true
+                }
             case .failure(let failure):
                 failAttach(failure.message)
                 return

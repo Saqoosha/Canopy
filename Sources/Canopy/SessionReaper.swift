@@ -13,6 +13,10 @@ enum SessionReaper {
         let isBusy: Bool
         /// The later of: the last client detaching, the last turn ending.
         let quietSince: Date
+        /// The phone opened it. The phone's list is its Open
+        /// block and has no pane to hold the session, so this stands in for one:
+        /// it runs until someone stops it, as a Mac pane's session does.
+        var heldOpen = false
     }
 
     /// Busy means stopping would lose something: a turn, a question, or a
@@ -22,7 +26,7 @@ enum SessionReaper {
     }
 
     static func shouldReap(_ inputs: Inputs, now: Date, limit: TimeInterval) -> Bool {
-        guard inputs.attachedClients == 0, !inputs.isBusy else { return false }
+        guard inputs.attachedClients == 0, !inputs.isBusy, !inputs.heldOpen else { return false }
         return now.timeIntervalSince(inputs.quietSince) >= limit
     }
 }

@@ -259,6 +259,10 @@ final class OpenSession: Identifiable, Hashable {
     /// Set when this process started the session's shim itself, not the daemon.
     var runsShimHere = false
 
+    /// The phone opened this session, so the daemon's reaper leaves it
+    /// running with no client attached (`SessionReaper.Inputs.heldOpen`).
+    var heldOpenByPhone = false
+
     /// The daemon's `OpenSession.id` for this session, once known.
     var daemonKey: String?
 

@@ -105,7 +105,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             isBusy: SessionReaper.isBusy(working: isWorking, permissionPending: !pendingPermissionRequestIds.isEmpty,
                                          asking: lastAssistantHadAskUserQuestion,
                                          backgroundTasks: pendingBackgroundTaskIds.count),
-            quietSince: quietSince)
+            quietSince: quietSince,
+            heldOpen: boundSession?.heldOpenByPhone ?? false)
     }
 
     /// A remote client holds an upgrade only when it will not re-attach by itself;

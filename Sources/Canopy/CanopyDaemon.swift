@@ -132,6 +132,9 @@ final class DaemonDelegate {
         logger.notice("restarting for build \(build, privacy: .public) (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public))")
         upgradeTimer?.invalidate()
         configTimer?.invalidate()  // a reload in the next second would re-open the listeners
+        DaemonHeldSessions.capture(store.openSessions) { session, dir in
+            ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
+        }.save()
         server?.announceRestart()
         // Sends are asynchronous: give the notice a moment to leave before the process does.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
@@ -191,6 +194,7 @@ final class DaemonDelegate {
             exit(1)
         }
         reloadConfig()
+        restoreHeldSessions()
         // The GUI changes these settings in another process; follow them.
         configTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.reloadConfig() }
@@ -352,6 +356,29 @@ final class DaemonDelegate {
         if bound != nil || pending != nil { return .start }
         if let since = secondsSinceAttempt, since < retryAfter { return .keep }
         return .start
+    }
+
+    /// The sessions the phone opened before an upgrade restart, resumed with no client attached.
+    private func restoreHeldSessions() {
+        guard let held = DaemonHeldSessions.consume() else { return }
+        for entry in held.entries {
+            // The setting may have been turned off since the session started.
+            let mode = entry.permissionMode == .bypassPermissions && !config.allowBypass
+                ? CanopySettings.shared.defaultPermissionMode : entry.permissionMode
+            var options = SessionStore.HeadlessOptions(
+                model: entry.model, effort: entry.effort, permissionMode: mode,
+                provider: entry.providerId.flatMap { id in ModelProviderStore.load().first { $0.id == id } },
+                account: ClaudeAccountStore.account(id: entry.accountId))
+            options.id = UUID(uuidString: entry.key)
+            guard let shim = store.startHeadlessSession(directory: URL(fileURLWithPath: entry.directory),
+                                                        resumeId: entry.resumeId, isExistingTranscript: true,
+                                                        title: entry.title, options: options) else {
+                logger.error("held session \(entry.resumeId.prefix(8), privacy: .public) did not restart")
+                continue
+            }
+            shim.boundSession?.heldOpenByPhone = true
+        }
+        logger.notice("restored \(held.entries.count, privacy: .public) held session(s)")
     }
 
     func shutDown() {
