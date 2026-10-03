@@ -66,7 +66,7 @@ enum ExtensionCanary {
         let stderr = Pipe()
         process.standardError = stderr
         let buffer = OutputBuffer()
-        let errBuffer = OutputBuffer()
+        let errBuffer = OutputBuffer(keepingLast: 4096)
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if !data.isEmpty { errBuffer.append(data) }
@@ -166,10 +166,16 @@ enum ExtensionCanary {
     private final class OutputBuffer: @unchecked Sendable {
         private let lock = NSLock()
         private var data = Data()
+        /// Bytes to keep from the end; nil keeps everything. A host that floods stderr is the
+        /// kind of update the check exists to refuse, and only the tail is logged.
+        private let limit: Int?
+
+        init(keepingLast limit: Int? = nil) { self.limit = limit }
 
         func append(_ chunk: Data) {
             lock.lock(); defer { lock.unlock() }
             data.append(chunk)
+            if let limit, data.count > limit { data = Data(data.suffix(limit)) }
         }
 
         var text: String {
