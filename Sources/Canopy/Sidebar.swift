@@ -20,6 +20,8 @@ import SwiftUI
 struct Sidebar: View {
     @Bindable var store: SessionStore
     @State private var hoveredRowId: String?
+    /// The open block's row ids as of the last render, for `openRowAnimation`.
+    @State private var lastOpenRowIdentity: [String] = []
     @State private var showFilterPopover = false
     @FocusState private var searchFocused: Bool
     /// Machine ids whose remote section is folded, newline-joined. Per-viewer
@@ -127,7 +129,10 @@ struct Sidebar: View {
             // NOT animated: animating pane geometry drifts the embedded
             // WKWebView's scroll position, which is why PaneWindowSizer
             // resizes the window in one synchronous frame instead.
-            .animation(.easeInOut(duration: 0.2), value: openRowIdentity)
+            //
+            // Only a pure reorder animates; see `openRowAnimation`.
+            .animation(openRowAnimation, value: openRowIdentity)
+            .onChange(of: openRowIdentity, initial: true) { _, ids in lastOpenRowIdentity = ids }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             // Compensate for `.listStyle(.sidebar)`'s built-in side padding.
@@ -643,6 +648,20 @@ struct Sidebar: View {
     /// filter edit, a hide) while neither of those did.
     private var openRowIdentity: [String] {
         store.visibleRows.filter(\.isOpen).map(\.id)
+    }
+
+    /// Animates the open block only when its rows are the same set in a new
+    /// order. A row arriving or leaving — a session opened from the phone, a
+    /// close — is applied without animation, because that change usually
+    /// removes a closed row elsewhere too, and in Project mode can reorder the
+    /// closed sections. NSOutlineView animating all of that at once leaves the
+    /// removed row's fade-out drawn in place for the life of the List, over
+    /// whatever rows later scroll under it (no AX element, no hit target).
+    /// Seen intermittently (2 of 15 synthetic runs, 0 of 15 with this gate),
+    /// and only with an open block that was already non-empty: an empty one
+    /// inserts the whole Open section instead.
+    private var openRowAnimation: Animation? {
+        Set(openRowIdentity) == Set(lastOpenRowIdentity) ? .easeInOut(duration: 0.2) : nil
     }
 
     private func isActive(_ row: SidebarRow) -> Bool {
