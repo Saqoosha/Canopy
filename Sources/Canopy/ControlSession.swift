@@ -85,14 +85,9 @@ final class ControlSession {
         case "recent":
             Task { @MainActor in
                 let query = (request.params["query"] as? String ?? "").lowercased()
-                // A rescan reads every transcript on the Mac, so answer from the list the
-                // daemon already holds and rescan behind the answer, for the next ask.
-                // Searches filter that list without rescanning: one per keystroke otherwise.
-                if store.recents.isEmpty {
-                    await store.refreshRecents()
-                } else if query.isEmpty {
-                    Self.refreshRecentsInBackground(store)
-                }
+                // Answer from the list the daemon holds; the rescan it starts serves the next ask.
+                let refresh = Self.refreshRecents(store)
+                if store.recents.isEmpty { await refresh.value }
                 guard !stopped else { return }
                 let open = Set(store.openSessions.map(\.resumeId))
                 let rows = store.recents
@@ -111,15 +106,18 @@ final class ControlSession {
         }
     }
 
-    /// One rescan at a time across every control connection; asks during one ride it.
+    /// One rescan at a time across every control connection; asks during one share it.
     private static var recentsRefresh: Task<Void, Never>?
 
-    private static func refreshRecentsInBackground(_ store: SessionStore) {
-        guard recentsRefresh == nil else { return }
-        recentsRefresh = Task { @MainActor in
-            await store.refreshRecents()
+    private static func refreshRecents(_ store: SessionStore) -> Task<Void, Never> {
+        if let running = recentsRefresh { return running }
+        let task = Task { @MainActor in
+            // Nothing in the daemon reads the search index, and it is every transcript on the Mac.
+            await store.refreshRecents(warmSearchIndex: false)
             recentsRefresh = nil
         }
+        recentsRefresh = task
+        return task
     }
 
     private func listFolders(_ request: ControlProtocol.Request) {
