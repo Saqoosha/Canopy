@@ -2361,6 +2361,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// model rather than only the launch one.
     private var cliResolvedModel: String = ""
 
+    /// True once a canopy-bridge frame supplied the context window; the
+    /// `result` branch then leaves `contextMax` to it.
+    private var contextMaxFromBridge = false
+
     @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, claudeAccount: ClaudeAccount? = nil, resumeIdIsExistingTranscript: Bool) {
         self.workingDirectory = workingDirectory
@@ -2875,6 +2879,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         var env = Self.scrubbingCanopyAssignedKeys(ProcessInfo.processInfo.environment)
         env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+
+        // Not in `canopyAssignedEnvKeys`: a user's own mod dirs must survive.
+        if let bridgeMod = Self.installBridgeMod() {
+            env["CLAUDE_CODE_PLUGIN_DIRS"] = Self.pluginDirs(prepending: bridgeMod, to: env["CLAUDE_CODE_PLUGIN_DIRS"])
+        }
 
         // Ensure PATH includes directories where tools like rg (ripgrep) live.
         // macOS GUI apps inherit a minimal PATH (/usr/bin:/bin:...). We prepend the
@@ -3946,6 +3955,87 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Shim Path Discovery
 
+    /// Copies the bundled canopy-bridge mod into Application Support. The CLI
+    /// writes type files into a plugin folder; doing that inside the signed
+    /// bundle would break the signature, so the live copy lives outside it.
+    nonisolated static func installBridgeMod() -> String? {
+        let fm = FileManager.default
+        guard let sourceRoot = Self.bridgeModSourceURL() else {
+            logger.error("[bridge] canopy-bridge missing from the app bundle")
+            return nil
+        }
+        let destRoot = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Canopy/mods/\(Bundle.main.bundleIdentifier ?? "Canopy")/canopy-bridge", isDirectory: true)
+        let relativeFiles = [
+            ".claude-plugin/plugin.json",
+            "hooks/hooks.json",
+            "hooks/register.ts",
+        ]
+        do {
+            try fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
+            for relative in relativeFiles {
+                let src = sourceRoot.appendingPathComponent(relative)
+                let dst = destRoot.appendingPathComponent(relative)
+                guard fm.fileExists(atPath: src.path) else {
+                    logger.error("[bridge] missing source file \(relative, privacy: .public)")
+                    return nil
+                }
+                let body = try Data(contentsOf: src)
+                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if let existing = try? Data(contentsOf: dst), existing == body {
+                    continue
+                }
+                try body.write(to: dst, options: .atomic)
+            }
+            return destRoot.path
+        } catch {
+            logger.error("[bridge] install failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// `bridge` first, then the inherited dirs without another copy of it.
+    nonisolated static func pluginDirs(prepending bridge: String, to inherited: String?) -> String {
+        let rest = (inherited ?? "").split(separator: ":").map(String.init).filter { !$0.isEmpty && $0 != bridge }
+        return ([bridge] + rest).joined(separator: ":")
+    }
+
+    nonisolated private static func bridgeModSourceURL() -> URL? {
+        guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("canopy-bridge", isDirectory: true),
+              FileManager.default.fileExists(atPath: bundled.appendingPathComponent("hooks/register.ts").path)
+        else { return nil }
+        return bundled
+    }
+
+    /// Parses a canopy-bridge `system`/`ui_log` frame into context numbers.
+    /// Returns non-nil only for `v: 1` payloads; tokens/window are kept only
+    /// when present and strictly positive.
+    nonisolated static func bridgeContextMeasure(_ ioMsg: [String: Any]) -> (tokens: Int?, window: Int?)? {
+        guard isBridgeFrame(ioMsg),
+              let text = ioMsg["text"] as? String,
+              let data = text.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["v"] as? Int == 1,
+              let context = obj["context"] as? [String: Any]
+        else { return nil }
+        func positiveInt(_ value: Any?) -> Int? {
+            let n: Int?
+            if let i = value as? Int { n = i }
+            else if let d = value as? Double { n = Int(exactly: d) }
+            else { n = nil }
+            guard let n, n > 0 else { return nil }
+            return n
+        }
+        return (tokens: positiveInt(context["tokens"]), window: positiveInt(context["window"]))
+    }
+
+    /// True for any canopy-bridge `ui_log`, including ones whose text is garbage.
+    nonisolated static func isBridgeFrame(_ ioMsg: [String: Any]) -> Bool {
+        ioMsg["type"] as? String == "system"
+            && ioMsg["subtype"] as? String == "ui_log"
+            && ioMsg["plugin"] as? String == "canopy-bridge"
+    }
+
     nonisolated static func findShimPath() -> String? {
         // 1. Bundle resources (production — after Task 13 bundles vscode-shim)
         if let bundled = Bundle.main.path(forResource: "index", ofType: "js", inDirectory: "vscode-shim") {
@@ -4033,6 +4123,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             let innerType = (innerMessage["type"] as? String) ?? "?"
             logger.debug("[stdout→webview] type=\(innerType, privacy: .public)")
+            // First, so no later path forwards a bridge line to the webview.
+            do {
+                let nested: [String: Any]
+                if innerMessage["type"] as? String == "from-extension",
+                   let inner = innerMessage["message"] as? [String: Any]
+                {
+                    nested = inner
+                } else {
+                    nested = innerMessage
+                }
+                if nested["type"] as? String == "io_message",
+                   let frame = nested["message"] as? [String: Any],
+                   Self.isBridgeFrame(frame)
+                {
+                    if let measure = Self.bridgeContextMeasure(frame) {
+                        if let window = measure.window {
+                            if !contextMaxFromBridge {
+                                contextMaxFromBridge = true
+                                logger.notice("[bridge] context window from the CLI")
+                            }
+                            statusBarData?.contextMax = window
+                            UserDefaults.standard.set(window, forKey: Self.contextMaxKey(workingDirectory))
+                        }
+                    } else {
+                        logger.warning("[bridge] ui_log text failed to parse")
+                    }
+                    return
+                }
+            }
             // Must run ahead of every tracker below: the recap turn reports
             // zeroed usage and an untagged `result`, which would otherwise
             // blank the context bar and freeze the subagent list.
@@ -7613,9 +7732,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "result":
             if let modelUsage = ioMsg["modelUsage"] as? [String: Any] {
                 if let usage = Self.mainModelUsage(modelUsage: modelUsage, mainModel: cliResolvedModel) {
-                    data.contextMax = usage.contextWindow
+                    // maxOutputTokens still comes from here: the mod has no such field.
+                    if !contextMaxFromBridge {
+                        data.contextMax = usage.contextWindow
+                        UserDefaults.standard.set(usage.contextWindow, forKey: Self.contextMaxKey(workingDirectory))
+                    }
                     data.maxOutputTokens = usage.maxOutputTokens
-                    UserDefaults.standard.set(usage.contextWindow, forKey: Self.contextMaxKey(workingDirectory))
                     UserDefaults.standard.set(usage.maxOutputTokens, forKey: Self.maxOutputTokensKey(workingDirectory))
                 } else {
                     // Leaving the previous values in place is the deliberate

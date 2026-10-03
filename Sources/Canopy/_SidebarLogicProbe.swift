@@ -5009,6 +5009,90 @@ enum SidebarLogicProbe {
                    "ctx=\(ShimProcess.contextMaxKey(probeDir)) out=\(ShimProcess.maxOutputTokensKey(probeDir))")
         }
 
+        // MARK: - canopy-bridge context measure
+        do {
+            func frame(plugin: String, text: String, subtype: String = "ui_log") -> [String: Any] {
+                ["type": "system", "subtype": subtype, "plugin": plugin, "text": text]
+            }
+            let valid = frame(
+                plugin: "canopy-bridge",
+                text: #"{"v":1,"context":{"tokens":39785,"window":200000}}"#
+            )
+            let measure = ShimProcess.bridgeContextMeasure(valid)
+            record("bridge: valid frame → tokens 39785, window 200000",
+                   measure?.tokens == 39785 && measure?.window == 200_000,
+                   "got=\(String(describing: measure))")
+
+            let windowOnly = frame(
+                plugin: "canopy-bridge",
+                text: #"{"v":1,"context":{"tokens":null,"window":1000000}}"#
+            )
+            let windowOnlyMeasure = ShimProcess.bridgeContextMeasure(windowOnly)
+            record("bridge: window only → (nil, 1_000_000)",
+                   windowOnlyMeasure?.tokens == nil && windowOnlyMeasure?.window == 1_000_000,
+                   "got=\(String(describing: windowOnlyMeasure))")
+
+            let wrongPlugin = frame(
+                plugin: "other-plugin",
+                text: #"{"v":1,"context":{"tokens":1,"window":2}}"#
+            )
+            record("bridge: wrong plugin → nil and isBridgeFrame false",
+                   ShimProcess.bridgeContextMeasure(wrongPlugin) == nil
+                       && ShimProcess.isBridgeFrame(wrongPlugin) == false)
+
+            let garbage = frame(plugin: "canopy-bridge", text: "not-json")
+            record("bridge: garbage text → measure nil but isBridgeFrame true",
+                   ShimProcess.bridgeContextMeasure(garbage) == nil
+                       && ShimProcess.isBridgeFrame(garbage) == true)
+
+            let badVersion = frame(
+                plugin: "canopy-bridge",
+                text: #"{"v":2,"context":{"tokens":1,"window":2}}"#
+            )
+            record("bridge: v != 1 → nil",
+                   ShimProcess.bridgeContextMeasure(badVersion) == nil)
+
+            let notUiLog = frame(
+                plugin: "canopy-bridge",
+                text: #"{"v":1,"context":{"tokens":1,"window":2}}"#,
+                subtype: "status"
+            )
+            record("bridge: non-ui_log system frame → nil",
+                   ShimProcess.bridgeContextMeasure(notUiLog) == nil
+                       && ShimProcess.isBridgeFrame(notUiLog) == false)
+
+            var notSystem = valid
+            notSystem["type"] = "assistant"
+            record("bridge: a non-system frame is not a bridge frame",
+                   ShimProcess.isBridgeFrame(notSystem) == false)
+
+            let zeroWindow = ShimProcess.bridgeContextMeasure(frame(
+                plugin: "canopy-bridge", text: #"{"v":1,"context":{"tokens":5,"window":0}}"#))
+            record("bridge: a zero window is dropped, not written",
+                   zeroWindow?.window == nil && zeroWindow?.tokens == 5,
+                   "got=\(String(describing: zeroWindow))")
+
+            let fractional = ShimProcess.bridgeContextMeasure(frame(
+                plugin: "canopy-bridge", text: #"{"v":1,"context":{"window":2.5}}"#))
+            record("bridge: a fractional window is rejected, not truncated",
+                   fractional != nil && fractional?.window == nil,
+                   "got=\(String(describing: fractional))")
+
+            // The swallow, the result-branch gate and the install are not
+            // probe-reachable (live shim / real bundle); measured on device only.
+            let bridge = "/m/canopy-bridge"
+            record("bridge dirs: absent inherited value → bridge alone",
+                   ShimProcess.pluginDirs(prepending: bridge, to: nil) == bridge)
+            record("bridge dirs: empty inherited value → bridge alone",
+                   ShimProcess.pluginDirs(prepending: bridge, to: "") == bridge)
+            record("bridge dirs: user dirs kept, after the bridge",
+                   ShimProcess.pluginDirs(prepending: bridge, to: "/a:/b") == "\(bridge):/a:/b")
+            record("bridge dirs: an inherited copy of the bridge is not repeated",
+                   ShimProcess.pluginDirs(prepending: bridge, to: "/a:\(bridge)") == "\(bridge):/a")
+            record("bridge dirs: the scrub keeps an inherited value",
+                   ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
+        }
+
         // MARK: - Panes
         do {
             // Brief names openA / openB / recentAsOpen; only openA/openB are
