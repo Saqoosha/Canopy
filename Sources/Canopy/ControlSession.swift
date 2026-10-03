@@ -85,9 +85,13 @@ final class ControlSession {
         case "recent":
             Task { @MainActor in
                 let query = (request.params["query"] as? String ?? "").lowercased()
-                // Answer from the list the daemon holds; the rescan it starts serves the next ask.
-                let refresh = Self.refreshRecents(store)
-                if store.recents.isEmpty { await refresh.value }
+                // Answer from the list the daemon holds; the rescan an unfiltered ask starts
+                // serves the next one. A search never starts one: that would be one per keystroke.
+                if store.recents.isEmpty {
+                    await Self.refreshRecents(store).value
+                } else if query.isEmpty {
+                    _ = Self.refreshRecents(store)
+                }
                 guard !stopped else { return }
                 let open = Set(store.openSessions.map(\.resumeId))
                 let rows = store.recents
