@@ -84,10 +84,16 @@ final class ControlSession {
             reply(request, ["sessions": openRows().prefix(limit).map(\.wire)])
         case "recent":
             Task { @MainActor in
-                await store.refreshRecents()
+                let query = (request.params["query"] as? String ?? "").lowercased()
+                // Answer from the list the daemon holds; the rescan an unfiltered ask starts
+                // serves the next one. A search never starts one: that would be one per keystroke.
+                if store.recents.isEmpty {
+                    await Self.refreshRecents(store).value
+                } else if query.isEmpty {
+                    _ = Self.refreshRecents(store)
+                }
                 guard !stopped else { return }
                 let open = Set(store.openSessions.map(\.resumeId))
-                let query = (request.params["query"] as? String ?? "").lowercased()
                 let rows = store.recents
                     .filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
                     .filter { query.isEmpty || $0.title.lowercased().contains(query) || $0.projectName.lowercased().contains(query) }
@@ -102,6 +108,20 @@ final class ControlSession {
         default:
             fail(request, "unknown scope")
         }
+    }
+
+    /// One rescan at a time across every control connection; asks during one share it.
+    private static var recentsRefresh: Task<Void, Never>?
+
+    private static func refreshRecents(_ store: SessionStore) -> Task<Void, Never> {
+        if let running = recentsRefresh { return running }
+        let task = Task { @MainActor in
+            // Nothing in the daemon reads the search index, and it is every transcript on the Mac.
+            await store.refreshRecents(warmSearchIndex: false)
+            recentsRefresh = nil
+        }
+        recentsRefresh = task
+        return task
     }
 
     private func listFolders(_ request: ControlProtocol.Request) {

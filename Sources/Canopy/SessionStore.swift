@@ -1790,13 +1790,13 @@ final class SessionStore {
     /// Reload the local JSONL list. Cheap (parses headers only). The
     /// teleported-from map is loaded separately so the recents list isn't
     /// blocked behind it on slow disks.
-    func refreshRecents() async {
+    func refreshRecents(warmSearchIndex: Bool = true) async {
         // 1. Sessions list — render the sidebar as soon as this returns.
         let all = await Task.detached { ClaudeSessionHistory.loadAllSessions() }.value
         await MainActor.run { self.recents = all }
         // Warm the search index at launch so the first search does not wait
         // on a full header scan, and keep it current after that.
-        refreshSearchIndex()
+        if warmSearchIndex { refreshSearchIndex() }
 
         // 2. Teleport-from map — used only for cloud-row dedup. If it's
         //    slow, the user just sees the cloud row briefly until it
