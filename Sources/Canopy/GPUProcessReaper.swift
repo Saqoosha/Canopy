@@ -19,10 +19,13 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "GPUReaper")
 @MainActor
 enum GPUProcessReaper {
     static let interval: TimeInterval = 1
-    /// Spares a GPU process WebKit may still be switching to.
+    /// How long a pid must go unreported before it counts as abandoned, so a
+    /// moment where every webview reads 0 does not cost the live process.
     static let grace: TimeInterval = 10
     private static var timer: Timer?
-    private static var seen: Set<pid_t> = []
+    /// Start time pins the pid against reuse; `lastInUse` is the last sweep
+    /// that saw a webview report it.
+    private static var seen: [pid_t: (startedAt: Date, lastInUse: Date)] = [:]
     private static let gpuSelector = NSSelectorFromString("_gpuProcessIdentifier")
 
     static func start() {
@@ -31,9 +34,11 @@ enum GPUProcessReaper {
             logger.notice("[gpu-reaper] disabled: _gpuProcessIdentifier unavailable")
             return
         }
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in
             MainActor.assumeIsolated { sweep() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     private static func sweep() {
@@ -42,13 +47,22 @@ enum GPUProcessReaper {
         let reported = webViews.map { ($0.value(forKey: "_gpuProcessIdentifier") as? NSNumber)?.int32Value }
         guard !reported.isEmpty, !reported.contains(nil) else { return }
         let current = Set(reported.compactMap { $0 }.filter { $0 > 0 })
-        seen.formUnion(current)
-        var alive: [(pid: pid_t, startedAt: Date)] = []
-        for pid in seen {
-            if let started = gpuProcessStart(pid) { alive.append((pid, started)) } else { seen.remove(pid) }
+        let now = Date()
+        for pid in current {
+            if seen[pid] != nil {
+                seen[pid]?.lastInUse = now
+            } else if let started = gpuProcessStart(pid) {
+                seen[pid] = (started, now)
+            }
         }
-        for pid in orphans(owned: alive, current: current, now: Date(), grace: grace) {
-            seen.remove(pid)
+        var tracked: [(pid: pid_t, lastInUse: Date)] = []
+        for (pid, entry) in seen where !current.contains(pid) {
+            // Exited, or the pid now names a different process.
+            guard gpuProcessStart(pid) == entry.startedAt else { seen[pid] = nil; continue }
+            tracked.append((pid, entry.lastInUse))
+        }
+        for pid in orphans(tracked: tracked, current: current, now: now, grace: grace) {
+            seen[pid] = nil
             if kill(pid, SIGKILL) == 0 {
                 logger.notice("[gpu-reaper] killed abandoned GPU process \(pid, privacy: .public) (in use: \(current.sorted(), privacy: .public))")
             } else {
@@ -58,9 +72,9 @@ enum GPUProcessReaper {
         }
     }
 
-    nonisolated static func orphans(owned: [(pid: pid_t, startedAt: Date)], current: Set<pid_t>,
+    nonisolated static func orphans(tracked: [(pid: pid_t, lastInUse: Date)], current: Set<pid_t>,
                                     now: Date, grace: TimeInterval) -> [pid_t] {
-        owned.filter { !current.contains($0.pid) && now.timeIntervalSince($0.startedAt) >= grace }.map(\.pid)
+        tracked.filter { !current.contains($0.pid) && now.timeIntervalSince($0.lastInUse) >= grace }.map(\.pid)
     }
 
     /// Start time of `pid` if it is still a WebKit GPU process; nil once it
