@@ -7827,6 +7827,21 @@ enum SidebarLogicProbe {
                    MacroPadController.paneIndex(forKey: 2, keyCount: 5, reversed: true) == 2)
         }
 
+        // --- GPU reaper: which owned GPU processes count as abandoned.
+        do {
+            let now = Date(timeIntervalSinceReferenceDate: 1000)
+            let grace = GPUProcessReaper.grace
+            let old = now.addingTimeInterval(-grace)
+            let young = now.addingTimeInterval(-grace + 1)
+            let owned: [(pid: pid_t, startedAt: Date)] = [(10, old), (20, old), (30, young)]
+            record("gpu reaper: spares WebKit's current, kills the other old one",
+                   GPUProcessReaper.orphans(owned: owned, current: 20, now: now, grace: grace) == [10])
+            record("gpu reaper: current 0 (WebKit has none) makes every old one an orphan",
+                   GPUProcessReaper.orphans(owned: owned, current: 0, now: now, grace: grace) == [10, 20])
+            record("gpu reaper: spares a process younger than the grace period",
+                   !GPUProcessReaper.orphans(owned: owned, current: 0, now: now, grace: grace).contains(30))
+        }
+
         // --- Reset-loop detection. This never fired at its original window,
         // and nothing noticed for a whole review round.
         do {
