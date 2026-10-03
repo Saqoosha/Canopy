@@ -336,13 +336,9 @@ enum RemoteSessionHistory {
     /// Neutralise the characters that survive inside a double-quoted shell
     /// string.
     ///
-    /// Encoded folder names carry no shell metacharacter, but they are NOT
-    /// `[A-Za-z0-9_-]` as this said before: `ClaudeSessionHistory.encodePath`
-    /// keeps anything Swift calls a letter or a number, so non-ASCII survives
-    /// it (`-Users-hiko-repos-Work-s支払いチェック` exists on this machine),
-    /// and the legacy encoding additionally keeps `.` and spaces. The escape
-    /// costs nothing and stops the guarantee resting on a second file's
-    /// implementation details.
+    /// Encoded folder names carry no shell metacharacter, but the legacy
+    /// encoding keeps `.` and spaces. The escape costs nothing and stops the
+    /// guarantee resting on a second file's implementation details.
     private static func shellEscapeForDoubleQuotes(_ s: String) -> String {
         var out = ""
         for ch in s {
