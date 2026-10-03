@@ -84,10 +84,17 @@ final class ControlSession {
             reply(request, ["sessions": openRows().prefix(limit).map(\.wire)])
         case "recent":
             Task { @MainActor in
-                await store.refreshRecents()
+                let query = (request.params["query"] as? String ?? "").lowercased()
+                // A rescan reads every transcript on the Mac, so answer from the list the
+                // daemon already holds and rescan behind the answer, for the next ask.
+                // Searches filter that list without rescanning: one per keystroke otherwise.
+                if store.recents.isEmpty {
+                    await store.refreshRecents()
+                } else if query.isEmpty {
+                    Self.refreshRecentsInBackground(store)
+                }
                 guard !stopped else { return }
                 let open = Set(store.openSessions.map(\.resumeId))
-                let query = (request.params["query"] as? String ?? "").lowercased()
                 let rows = store.recents
                     .filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
                     .filter { query.isEmpty || $0.title.lowercased().contains(query) || $0.projectName.lowercased().contains(query) }
@@ -101,6 +108,17 @@ final class ControlSession {
             }
         default:
             fail(request, "unknown scope")
+        }
+    }
+
+    /// One rescan at a time across every control connection; asks during one ride it.
+    private static var recentsRefresh: Task<Void, Never>?
+
+    private static func refreshRecentsInBackground(_ store: SessionStore) {
+        guard recentsRefresh == nil else { return }
+        recentsRefresh = Task { @MainActor in
+            await store.refreshRecents()
+            recentsRefresh = nil
         }
     }
 
