@@ -641,6 +641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installKeyTypingMonitor()
         RecapCoordinator.shared.start()
         KeepAliveCoordinator.shared.start()
+        GPUProcessReaper.start()
         DaemonRegistration.ensureRegistered()
         // The sidebar's usage bars have no writer until a shim runs, so a
         // launch that opens on the launcher showed none (see
