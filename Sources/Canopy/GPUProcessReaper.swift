@@ -37,10 +37,12 @@ enum GPUProcessReaper {
     }
 
     private static func sweep() {
-        guard let webView = SessionStore.shared?.openSessions.lazy.compactMap(\.webView).first,
-              let current = (webView.value(forKey: "_gpuProcessIdentifier") as? NSNumber)?.int32Value
-        else { return }
-        if current > 0 { seen.insert(current) }
+        // A webview whose WebContent process died reports 0, so ask them all.
+        let webViews = SessionStore.shared?.openSessions.compactMap(\.webView) ?? []
+        let reported = webViews.map { ($0.value(forKey: "_gpuProcessIdentifier") as? NSNumber)?.int32Value }
+        guard !reported.isEmpty, !reported.contains(nil) else { return }
+        let current = Set(reported.compactMap { $0 }.filter { $0 > 0 })
+        seen.formUnion(current)
         var alive: [(pid: pid_t, startedAt: Date)] = []
         for pid in seen {
             if let started = gpuProcessStart(pid) { alive.append((pid, started)) } else { seen.remove(pid) }
@@ -48,7 +50,7 @@ enum GPUProcessReaper {
         for pid in orphans(owned: alive, current: current, now: Date(), grace: grace) {
             seen.remove(pid)
             if kill(pid, SIGKILL) == 0 {
-                logger.notice("[gpu-reaper] killed abandoned GPU process \(pid, privacy: .public) (WebKit's current: \(current, privacy: .public))")
+                logger.notice("[gpu-reaper] killed abandoned GPU process \(pid, privacy: .public) (in use: \(current.sorted(), privacy: .public))")
             } else {
                 let err = errno
                 logger.error("[gpu-reaper] could not kill GPU process \(pid, privacy: .public): \(String(cString: strerror(err)), privacy: .public)")
@@ -56,9 +58,9 @@ enum GPUProcessReaper {
         }
     }
 
-    nonisolated static func orphans(owned: [(pid: pid_t, startedAt: Date)], current: pid_t,
+    nonisolated static func orphans(owned: [(pid: pid_t, startedAt: Date)], current: Set<pid_t>,
                                     now: Date, grace: TimeInterval) -> [pid_t] {
-        owned.filter { $0.pid != current && now.timeIntervalSince($0.startedAt) >= grace }.map(\.pid)
+        owned.filter { !current.contains($0.pid) && now.timeIntervalSince($0.startedAt) >= grace }.map(\.pid)
     }
 
     /// Start time of `pid` if it is still a WebKit GPU process; nil once it
