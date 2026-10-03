@@ -337,7 +337,7 @@ enum RemoteSessionHistory {
     /// string.
     ///
     /// Encoded folder names carry no shell metacharacter, but the legacy
-    /// encoding keeps `.` and spaces. The escape costs nothing and stops the
+    /// encoding keeps `.`, spaces and `_`. The escape costs nothing and stops the
     /// guarantee resting on a second file's implementation details.
     private static func shellEscapeForDoubleQuotes(_ s: String) -> String {
         var out = ""
