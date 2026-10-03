@@ -82,9 +82,12 @@ enum ClaudeSessionHistory {
     /// how much margin is enough is the survival ratio measured above.
     static let maxSessionsToScan = 400
 
-    /// Mirrors the current Claude CLI encoding: every character that is not a letter,
-    /// digit, or `_` collapses to `-`. Examples: `/.config` → `--config`,
-    /// `/Canopy Companion` → `-Canopy-Companion`.
+    /// Mirrors the current Claude CLI encoding: the path in NFC, then every
+    /// UTF-16 code unit that is not an ASCII letter or digit becomes `-`.
+    /// Measured on CLI 2.1.286: `u_v` → `u-v`, `大梁川渓谷` → `-----`, `p𠮷q`
+    /// → `p--q` (one character, two code units), and an NFD `ジ` → one `-`.
+    /// Testing `Character.isLetter` kept kanji and `_`, so those directories
+    /// never matched their own transcript folder.
     static func encodePath(_ path: String) -> String {
         encodePath(path, legacyDotAndSpace: false)
     }
@@ -97,10 +100,16 @@ enum ClaudeSessionHistory {
     }
 
     private static func encodePath(_ path: String, legacyDotAndSpace: Bool) -> String {
-        func mapChar(_ ch: Character) -> Character {
-            if ch.isLetter || ch.isNumber || ch == "_" { return ch }
-            if legacyDotAndSpace, ch == "." || ch == " " { return ch }
-            return "-"
+        let path = path.precomposedStringWithCanonicalMapping
+        func mapUnits<S: StringProtocol>(_ s: S) -> String {
+            String(decoding: s.utf16.map { u -> UInt16 in
+                switch u {
+                case 0x30...0x39, 0x41...0x5A, 0x61...0x7A: return u
+                // `_` too: older CLIs kept it, and this form only adds a candidate.
+                case 0x2E, 0x20, 0x5F: return legacyDotAndSpace ? u : 0x2D
+                default: return 0x2D
+                }
+            }, as: UTF16.self)
         }
         // The Windows CLI encodes its cwd character-for-character — every
         // separator and the drive colon included — so `C:\Users\x` and Git
@@ -110,10 +119,10 @@ enum ClaudeSessionHistory {
         // real POSIX path but drops the root's trailing separator here and
         // turns `C:/` into `C-`, a folder the CLI never writes.
         if isWindowsDrivePath(path) {
-            return String(path.map(mapChar))
+            return mapUnits(path)
         }
         let components = path.split(separator: "/", omittingEmptySubsequences: true)
-        return "-" + components.map { String($0.map(mapChar)) }.joined(separator: "-")
+        return "-" + components.map { mapUnits($0) }.joined(separator: "-")
     }
 
     /// `C:\…` or `C:/…` — a drive letter, a colon, and a separator.

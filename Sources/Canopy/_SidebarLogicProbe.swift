@@ -783,7 +783,9 @@ enum SidebarLogicProbe {
         // would fail to round-trip and poison the middle-gap case.
         let fm = FileManager.default
         let stamp = String(UUID().uuidString.filter(\.isHexDigit))
-        let resolveBase = fm.temporaryDirectory
+        // Not `temporaryDirectory`: its `/var/folders/…` path can hold `_`, which the CLI
+        // encodes as `-` and `decodePath` cannot rejoin.
+        let resolveBase = URL(fileURLWithPath: "/private/tmp")
             .appendingPathComponent("canopyproberesolve\(stamp)", isDirectory: true)
         let agreeDir = resolveBase.appendingPathComponent("agreecwd", isDirectory: true)
         let staleDir = resolveBase.appendingPathComponent("stalelaunch", isDirectory: true)
@@ -1201,7 +1203,7 @@ enum SidebarLogicProbe {
         // roughly one turn in ten on real transcripts. The folder must name a
         // directory that EXISTS, since that is the condition on which
         // `resolveProjectPath` prefers it.
-        let gapReal = FileManager.default.temporaryDirectory
+        let gapReal = URL(fileURLWithPath: "/private/tmp")  // see `resolveBase`
             .appendingPathComponent("CanopyProbeGap-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: gapReal, withIntermediateDirectories: true)
         let gapFolder = ClaudeSessionHistory.encodedFolderCandidates(for: gapReal.path)[0]
@@ -10975,6 +10977,22 @@ enum SidebarLogicProbe {
                    ClaudeSessionHistory.encodePath("C:/Users//x")
                        == ClaudeSessionHistory.encodePath(#"C:\Users\\x"#)
                        && ClaudeSessionHistory.encodePath("C:/Users//x") == "C--Users--x")
+            // The CLI keeps ASCII letters only, so each kanji is one dash —
+            // measured: `/Users/hiko/repos/Personal/大梁川渓谷` is stored
+            // under `-Users-hiko-repos-Personal------`. `Character.isLetter`
+            // is Unicode-aware and kept them.
+            record("encodePath: non-ASCII letters collapse to dashes",
+                   ClaudeSessionHistory.encodePath("/Users/hiko/repos/Personal/大梁川渓谷")
+                       == "-Users-hiko-repos-Personal------")
+            record("encodePath: `_` collapses, and a non-BMP character is two dashes",
+                   ClaudeSessionHistory.encodePath("/x/u_v/p\u{20BB7}q") == "-x-u-v-p--q")
+            record("encodePath: an NFD path encodes as its NFC form",
+                   ClaudeSessionHistory.encodePath("/r\u{30B7}\u{3099}s") == "-r-s")
+            record("resolveProjectPath: a Japanese cwd matches its own folder",
+                   ClaudeSessionHistory.resolveProjectPath(
+                       extractedCwd: "/Users/hiko/repos/Personal/大梁川渓谷",
+                       projectEncoded: "-Users-hiko-repos-Personal------"
+                   ) == "/Users/hiko/repos/Personal/大梁川渓谷")
 
             record("remote script: a quote in the path cannot break out",
                    RemoteSessionHistory.remoteScript(
