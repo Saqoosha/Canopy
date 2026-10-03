@@ -55,6 +55,9 @@ enum ExtensionCanary {
         var environment = ShimProcess.scrubbingCanopyAssignedKeys(ProcessInfo.processInfo.environment)
         environment["HOME"] = home.path
         environment.removeValue(forKey: "CLAUDE_CONFIG_DIR")
+        // The check makes no API call, and its stderr is logged in public.
+        environment.removeValue(forKey: "ANTHROPIC_API_KEY")
+        environment.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
         process.environment = environment
         let stdin = Pipe()
         let stdout = Pipe()
@@ -111,8 +114,6 @@ enum ExtensionCanary {
         return .failed("the extension host did not become ready within \(Int(timeout)) s")
     }
 
-    /// The error frame's `stack` names the extension's file:line, which is what identifies the
-    /// API the shim lacks; the user-facing message does not carry it.
     /// The node a version manager's shim (mise, asdf, nvm, Volta) stands for. The shim picks it
     /// from HOME, which the check replaces, so ask under the user's own environment first.
     /// Measured: mise's shim under a scratch HOME exits 1 with "node is not a valid shim".
@@ -124,16 +125,29 @@ enum ExtensionCanary {
         probe.standardOutput = out
         probe.standardError = FileHandle.nullDevice
         probe.standardInput = FileHandle.nullDevice
-        do { try probe.run() } catch { return nodePath }
+        func fallBack(_ why: String) -> String {
+            logger.notice("Extension start check: using \(nodePath, privacy: .public) as given (\(why, privacy: .public))")
+            return nodePath
+        }
+        do { try probe.run() } catch { return fallBack("could not run it: \(error.localizedDescription)") }
         let deadline = Date().addingTimeInterval(10)
         while probe.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-        if probe.isRunning { probe.terminate(); return nodePath }
+        if probe.isRunning {
+            probe.terminate()
+            Thread.sleep(forTimeInterval: 0.5)
+            if probe.isRunning { kill(probe.processIdentifier, SIGKILL) }
+            return fallBack("it did not report its node within 10 s")
+        }
         let path = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         guard probe.terminationStatus == 0, path.hasPrefix("/"),
-              FileManager.default.isExecutableFile(atPath: path) else { return nodePath }
+              FileManager.default.isExecutableFile(atPath: path) else {
+            return fallBack("it exited \(probe.terminationStatus) without reporting an executable")
+        }
         return path
     }
 
+    /// The error frame's `stack` names the extension's file:line, which is what identifies the
+    /// API the shim lacks; the user-facing message does not carry it.
     private static func logged(_ verdict: Outcome, stdout: String, stderr: String) -> Outcome {
         guard case .failed = verdict else { return verdict }
         // "exited with status 1" alone does not say why; the host's last words usually do.

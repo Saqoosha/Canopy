@@ -12408,15 +12408,15 @@ enum SidebarLogicProbe {
             try? FileManager.default.createDirectory(at: shimDir, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: shimDir) }
             let answering = shimDir.appendingPathComponent("answering").path
-            let silentShim = shimDir.appendingPathComponent("broken").path
-            try? "#!/bin/sh\nprintf /bin/sh\n".write(toFile: answering, atomically: true, encoding: .utf8)
-            try? "#!/bin/sh\necho 'node is not a valid shim' >&2\nexit 1\n".write(toFile: silentShim, atomically: true, encoding: .utf8)
+            let failingShim = shimDir.appendingPathComponent("failing").path
+            let fakesWritten = (try? "#!/bin/sh\nprintf /bin/sh\n".write(toFile: answering, atomically: true, encoding: .utf8)) != nil
+                && (try? "#!/bin/sh\necho 'node is not a valid shim' >&2\nexit 1\n".write(toFile: failingShim, atomically: true, encoding: .utf8)) != nil
             chmod(answering, 0o755)
-            chmod(silentShim, 0o755)
+            chmod(failingShim, 0o755)
             record("extension canary: a shim is replaced by the node it reports",
                    ExtensionCanary.resolvedNodePath(answering) == "/bin/sh")
             record("extension canary: a shim that cannot answer is used as given",
-                   ExtensionCanary.resolvedNodePath(silentShim) == silentShim)
+                   fakesWritten && ExtensionCanary.resolvedNodePath(failingShim) == failingShim)
 
             let dir = "/Users/u/Library/Application Support/Canopy/extensions"
             func folder(_ version: String) -> String { "anthropic.claude-code-\(version)-darwin-arm64" }
