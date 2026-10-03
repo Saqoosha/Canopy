@@ -10975,6 +10975,18 @@ enum SidebarLogicProbe {
                    ClaudeSessionHistory.encodePath("C:/Users//x")
                        == ClaudeSessionHistory.encodePath(#"C:\Users\\x"#)
                        && ClaudeSessionHistory.encodePath("C:/Users//x") == "C--Users--x")
+            // The CLI keeps ASCII letters only, so each kanji is one dash —
+            // measured: `/Users/hiko/repos/Personal/大梁川渓谷` is stored
+            // under `-Users-hiko-repos-Personal------`. `Character.isLetter`
+            // is Unicode-aware and kept them.
+            record("encodePath: non-ASCII letters collapse to dashes",
+                   ClaudeSessionHistory.encodePath("/Users/hiko/repos/Personal/大梁川渓谷")
+                       == "-Users-hiko-repos-Personal------")
+            record("resolveProjectPath: a Japanese cwd matches its own folder",
+                   ClaudeSessionHistory.resolveProjectPath(
+                       extractedCwd: "/Users/hiko/repos/Personal/大梁川渓谷",
+                       projectEncoded: "-Users-hiko-repos-Personal------"
+                   ) == "/Users/hiko/repos/Personal/大梁川渓谷")
 
             record("remote script: a quote in the path cannot break out",
                    RemoteSessionHistory.remoteScript(

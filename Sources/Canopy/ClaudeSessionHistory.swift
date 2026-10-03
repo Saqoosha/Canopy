@@ -82,9 +82,14 @@ enum ClaudeSessionHistory {
     /// how much margin is enough is the survival ratio measured above.
     static let maxSessionsToScan = 400
 
-    /// Mirrors the current Claude CLI encoding: every character that is not a letter,
-    /// digit, or `_` collapses to `-`. Examples: `/.config` → `--config`,
-    /// `/Canopy Companion` → `-Canopy-Companion`.
+    /// Mirrors the current Claude CLI encoding: every character that is not an
+    /// ASCII letter, digit, or `_` collapses to `-`. Examples: `/.config` →
+    /// `--config`, `/Canopy Companion` → `-Canopy-Companion`, `/大梁川渓谷` →
+    /// `------`. ASCII, not Unicode: `Character.isLetter` is true for kanji, and
+    /// testing it kept them, so a Japanese-named directory never matched its
+    /// own transcript folder and `resolveProjectPath` fell back to the decoded
+    /// parent (measured: `/Users/hiko/repos/Personal/大梁川渓谷` is stored under
+    /// `-Users-hiko-repos-Personal------`).
     static func encodePath(_ path: String) -> String {
         encodePath(path, legacyDotAndSpace: false)
     }
@@ -98,7 +103,7 @@ enum ClaudeSessionHistory {
 
     private static func encodePath(_ path: String, legacyDotAndSpace: Bool) -> String {
         func mapChar(_ ch: Character) -> Character {
-            if ch.isLetter || ch.isNumber || ch == "_" { return ch }
+            if ch.isASCII, ch.isLetter || ch.isNumber || ch == "_" { return ch }
             if legacyDotAndSpace, ch == "." || ch == " " { return ch }
             return "-"
         }
