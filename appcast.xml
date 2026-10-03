@@ -6,6 +6,26 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>3.1.3</title>
+            <pubDate>Sun, 04 Oct 2026 01:06:28 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>154</sparkle:version>
+            <sparkle:shortVersionString>3.1.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Bug Fixes
+- Claude Code extension updates install again on Macs whose Node.js comes from a version manager (mise, asdf, nvm, Volta). The start check that guards each update ran the version manager's shim in a scratch home folder, where it could not find Node, so every update was refused with "the extension host exited with status 1".
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.3/Canopy-3.1.3.dmg" length="6009447" type="application/octet-stream" sparkle:edSignature="F2fcowVulD9omS3LmCHqIHytY99McRjkSgQZG4Br+gE7b+zPiGFeYSIuKbRsNsgPdDvAZMN93GTTCGYkb1pPCg=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.3/Canopy154-153.delta" sparkle:deltaFrom="153" length="309274" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="sQ8dtYAlB+3JygYB50p3dqQhgGyZeUGRTtsJJKxUHYJKMTEDz36DVC0/FMa1X7y5LjlEhU7ZvXSgGc/6bsmABQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.3/Canopy154-152.delta" sparkle:deltaFrom="152" length="423654" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="0w/HCQSFS+2zlzDVDmFF2Rbo6eYokK2bh/xsY3HxZXggDrbJldQvdWmN0WOm/pNaCbo+jKXFxFE41MC/GKSlDQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.3/Canopy154-151.delta" sparkle:deltaFrom="151" length="542942" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="chGJW10vJ+uTnRJ14pg9z+VtKnoSjSZTja8M8ccn+fgW0l+zTsNrrlx4ez6mT0wbCVivgNWKEpE8/CH5F+9nAQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.3/Canopy154-150.delta" sparkle:deltaFrom="150" length="646454" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="kBj5bV7sr7k00RtIP143YmmoBv5osmg4IXnDVsJLDh/5H8qMxTP9AUhiNT5DIiiaAOUknTprrZFRIWuxJBhHAA=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.3/Canopy154-149.delta" sparkle:deltaFrom="149" length="1031422" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="XS/6eXrY3YMSKObE14Du6ClMaGDFI+81MeS0rwaHpwDCn3Hx9Us33/9z893JiIVmdD1Ibr/E+aKSteItHKE8DA=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>3.1.2</title>
             <pubDate>Sun, 04 Oct 2026 00:13:09 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -49,34 +69,6 @@
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.1/Canopy152-149.delta" sparkle:deltaFrom="149" length="1002778" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="WqMekf+vjmeYfYXKqoeLxdceRnYnk60BhzlHapN6cdYrB0OMoArN3VJzuqh0zBgNuCS8TYc4e0diScKYTjqTBg=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.1/Canopy152-148.delta" sparkle:deltaFrom="148" length="1014354" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="pDP/WVF/j5kqMahcoruDbPrx8NHgLmqEDJwJ8Jy6oaxigmMvyBVIhgVBOLziiF37AFHu+4ncUwtKcpW5xS5BDw=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.1/Canopy152-147.delta" sparkle:deltaFrom="147" length="1025826" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="0x4rFvcn0/4LGqsD7z9r2N1OQoc7ZBh6Ifdv4IjTqMW5L57x3Mn83DAjJB9o/ukUH8ObmIkudr9ibptPX0+DDQ=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>3.1.0</title>
-            <pubDate>Thu, 01 Oct 2026 22:34:07 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>151</sparkle:version>
-            <sparkle:shortVersionString>3.1.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Features
-- **Pending update in the sidebar.** When an app update is installed but the session service is still running the old build, the sidebar footer says so and names the sessions holding it, with the reason for each. **Restart now** applies the update right away after confirming which sessions' current work it will stop; their conversations are kept.
-- **Sessions on an older Claude Code extension.** After an extension update, the same panel lists sessions still running the previous version. Each row has a **Restart** button that moves that session to the new version and keeps its conversation.
-
-### Changes
-- A pane viewing a session on another Mac now reconnects on its own when that Mac restarts for an update, so it no longer holds the update back. Older Canopy versions and the iOS app still hold it until they are updated.
-- A downloaded Claude Code extension is started once before Canopy switches to it. If it fails to start, it is not installed, and the update card shows why.
-
-### Bug Fixes
-- Installing a Claude Code extension update no longer deletes the version that running sessions are still using.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.0/Canopy-3.1.0.dmg" length="5949973" type="application/octet-stream" sparkle:edSignature="FSOY5v8H2RQn5OYv0V+R5XbR3IfD2y+6SBP8mdBIGF9RMxCgquX6oVrblwWFge7kloh2kNbUVqI3PKnJfa38DA=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.0/Canopy151-150.delta" sparkle:deltaFrom="150" length="548058" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="vZvwTlXE52dJJi2bzZI5IQTXZ7phKp/ScEpZ0+cdeAQABQ9KrOd/g5M9FNCSJsN4kW9393dgxtQTkXaHGLwJCQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.0/Canopy151-149.delta" sparkle:deltaFrom="149" length="933430" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="j6tQX0l5fyFxiPN/zi0BicO/94XgpBynv+hMKSJjaC0hcjxqwG45B+k7Ba3EyIUtTiFamfUOi8C7p/eb0PINBQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.0/Canopy151-148.delta" sparkle:deltaFrom="148" length="931594" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="uDgpIygqya/n04iuUxL6MqcZpWCRitf7d8kaDX0971GSxEJXY/XmTUYPp+D/Znv/TAJ4LCrz9DdTLcl6PnY2BQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.0/Canopy151-147.delta" sparkle:deltaFrom="147" length="968346" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="SljLK/0tFsI4k3DuUmYZPLzinAoEVzpoOq/uIDHW5z7w3KBXYMJrEBVi94oAdQU+/83slkXXd/oP6BBtuLAjCA=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.1.0/Canopy151-146.delta" sparkle:deltaFrom="146" length="969922" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="dkSasTjvu9f4ZjT/2sCaOdqn2AG7HVwzJBXq+c+3eV5f6mcMZy0Ns3jI1nnfAeADXA2A9T0Jy2YCikwE9F1aBA=="/>
             </sparkle:deltas>
         </item>
         <item>
