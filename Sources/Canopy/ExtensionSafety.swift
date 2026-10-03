@@ -48,7 +48,7 @@ enum ExtensionCanary {
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: nodePath)
+        process.executableURL = URL(fileURLWithPath: resolvedNodePath(nodePath))
         process.arguments = [shimPath, "--extension-path", extensionDir.path, "--cwd", cwd.path,
                              "--settings-path", settings.path]
         // As a real shim gets it, and pointed away from the user's own Claude config.
@@ -60,8 +60,14 @@ enum ExtensionCanary {
         let stdout = Pipe()
         process.standardInput = stdin
         process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
+        let stderr = Pipe()
+        process.standardError = stderr
         let buffer = OutputBuffer()
+        let errBuffer = OutputBuffer()
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty { errBuffer.append(data) }
+        }
         stdout.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if !data.isEmpty { buffer.append(data) }
@@ -74,6 +80,7 @@ enum ExtensionCanary {
         // Declared after the scratch folder's defer, so it runs first: the shim is gone before its HOME is.
         defer {
             stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
             try? stdin.fileHandleForWriting.close()
             if process.isRunning {
                 process.terminate()
@@ -92,10 +99,13 @@ enum ExtensionCanary {
                 // before `exit(1)` decides the verdict rather than the bare status.
                 stdout.fileHandleForReading.readabilityHandler = nil
                 buffer.append(stdout.fileHandleForReading.readDataToEndOfFile())
-                return logged(outcome(stdout: buffer.text, exitStatus: process.terminationStatus), stdout: buffer.text)
+                stderr.fileHandleForReading.readabilityHandler = nil
+                errBuffer.append(stderr.fileHandleForReading.readDataToEndOfFile())
+                return logged(outcome(stdout: buffer.text, exitStatus: process.terminationStatus),
+                              stdout: buffer.text, stderr: errBuffer.text)
             }
             let verdict = outcome(stdout: buffer.text, exitStatus: nil)
-            if verdict != .undecided { return logged(verdict, stdout: buffer.text) }
+            if verdict != .undecided { return logged(verdict, stdout: buffer.text, stderr: errBuffer.text) }
             Thread.sleep(forTimeInterval: 0.1)
         }
         return .failed("the extension host did not become ready within \(Int(timeout)) s")
@@ -103,8 +113,32 @@ enum ExtensionCanary {
 
     /// The error frame's `stack` names the extension's file:line, which is what identifies the
     /// API the shim lacks; the user-facing message does not carry it.
-    private static func logged(_ verdict: Outcome, stdout: String) -> Outcome {
+    /// The node a version manager's shim (mise, asdf, nvm, Volta) stands for. The shim picks it
+    /// from HOME, which the check replaces, so ask under the user's own environment first.
+    /// Measured: mise's shim under a scratch HOME exits 1 with "node is not a valid shim".
+    static func resolvedNodePath(_ nodePath: String) -> String {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: nodePath)
+        probe.arguments = ["-e", "process.stdout.write(process.execPath)"]
+        let out = Pipe()
+        probe.standardOutput = out
+        probe.standardError = FileHandle.nullDevice
+        probe.standardInput = FileHandle.nullDevice
+        do { try probe.run() } catch { return nodePath }
+        let deadline = Date().addingTimeInterval(10)
+        while probe.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        if probe.isRunning { probe.terminate(); return nodePath }
+        let path = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        guard probe.terminationStatus == 0, path.hasPrefix("/"),
+              FileManager.default.isExecutableFile(atPath: path) else { return nodePath }
+        return path
+    }
+
+    private static func logged(_ verdict: Outcome, stdout: String, stderr: String) -> Outcome {
         guard case .failed = verdict else { return verdict }
+        // "exited with status 1" alone does not say why; the host's last words usually do.
+        let tail = stderr.suffix(800)
+        if !tail.isEmpty { logger.error("Extension start check stderr: \(String(tail), privacy: .public)") }
         for line in stdout.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
                   let frame = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
