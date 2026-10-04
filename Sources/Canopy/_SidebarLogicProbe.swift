@@ -1560,26 +1560,34 @@ enum SidebarLogicProbe {
             record("mirror origin: projectLabel is the roster's project verbatim",
                    session.projectLabel == "studio · repo")
 
-            // Save-and-Quit skips a mirror's session and its pane.
+            // Save-and-Quit keeps a mirror's session and pane, with its machine and address.
             let store = SessionStore()
+            session.statusBar.mirrorMachine = "Studio"
             store._probeSeedOpenSessions([session])
             store.openInFocusedPane(session.id)
             let captured = store.captureRestoreSnapshot()
-            record("restore: a mirror session is not captured",
-                   captured.sessions.isEmpty)
-            record("restore: a mirror pane is not captured",
-                   captured.panes.isEmpty)
-            let localSameId = OpenSession(origin: .local(cwd), resumeId: "r-m", title: "Local", project: "x", status: .live)
-            store._probeSeedOpenSessions([session, localSameId])
-            let captured2 = store.captureRestoreSnapshot()
-            record("restore: a mirror does not shadow a local session with the same resumeId",
-                   captured2.sessions.count == 1 && captured2.sessions.first?.resumeId == "r-m"
-                       && {
-                           if case .local(let path) = captured2.sessions.first?.origin {
-                               return path == cwd.path
-                           }
-                           return false
-                       }())
+            record("restore: a mirror session is captured with its machine and address",
+                   captured.sessions.map(\.origin)
+                       == [.mirror(machineId: "M1", machineName: "Studio", host: "100.64.0.2", port: 8770)],
+                   "got \(captured.sessions.map(\.origin))")
+            record("restore: a mirror pane is captured",
+                   captured.panes.map(\.content) == [.session(resumeId: "r-m")])
+            record("restore: resumableOnDisk keeps a mirror without filesystem access",
+                   captured.sessions.allSatisfy(SessionRestoreSnapshot.resumableOnDisk))
+
+            // Apply: the pane comes back attaching, and asks the other Mac to resume
+            // in case it stopped the session while this one was quit.
+            let applied = SessionStore()
+            applied.applyRestoreSnapshot(captured)
+            let back = applied.openSessions.first
+            record("restore: an applied mirror keeps its origin, machine name and pane",
+                   back?.origin.mirrorTarget?.machineId == "M1" && back?.origin.mirrorTarget?.host == "100.64.0.2"
+                       && back?.statusBar.mirrorMachine == "Studio" && back?.status == .spawning
+                       && applied.panes.count == 1,
+                   "origin=\(String(describing: back?.origin)) status=\(String(describing: back?.status))")
+            record("restore: an applied mirror asks its Mac to resume",
+                   back?.pendingMirrorOpen == .resume,
+                   "got \(String(describing: back?.pendingMirrorOpen))")
         }
 
         // Roster wire encoding. The six activity states are a contract with the
@@ -8615,6 +8623,17 @@ enum SidebarLogicProbe {
             let localGhost = snapSession("local-ghost", origin: .local(path: ghostPath))
             record("restore: resumableOnDisk rejects a local session on a nonexistent path",
                    !SessionRestoreSnapshot.resumableOnDisk(localGhost))
+            // Under the daemon a restore attaches, so a missing folder no longer decides it —
+            // the transcript still does. In-process it still needs both.
+            record("restore: under the daemon a missing folder with a transcript is resumable",
+                   SessionRestoreSnapshot.localIsResumable(directoryExists: false, sessionsRunInDaemon: true,
+                                                           transcriptExists: { true }))
+            record("restore: under the daemon a missing transcript is still not resumable",
+                   !SessionRestoreSnapshot.localIsResumable(directoryExists: false, sessionsRunInDaemon: true,
+                                                            transcriptExists: { false }))
+            record("restore: in-process a missing folder is not resumable even with a transcript",
+                   !SessionRestoreSnapshot.localIsResumable(directoryExists: false, sessionsRunInDaemon: false,
+                                                            transcriptExists: { true }))
 
             // The directory guard short-circuits the two assertions above, so
             // on their own they never reach the transcript lookup — replacing
