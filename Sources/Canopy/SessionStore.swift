@@ -1106,12 +1106,14 @@ final class SessionStore {
             noteSessionFailure(title: session.title, message: "Could not stop the session: this Mac's session service is not connected.", status: -2)
             return
         }
+        session.isStopping = true
         Task { [weak self] in
             // The row goes only once the daemon has stopped it; otherwise the next push would bring it back.
             switch await control.request("stop_session", Self.daemonRefParams(session)) {
             case .success, .failure(.refused("no such session")):  // already gone there
                 self?.closeSession(id, keepingFailure: false, removeRow: true)
             case .failure(let failure):
+                session.isStopping = false
                 logger.error("stop_session failed: \(String(describing: failure), privacy: .public)")
                 self?.noteSessionFailure(title: session.title, message: "Could not stop the session (\(failure)).", status: -2)
             }

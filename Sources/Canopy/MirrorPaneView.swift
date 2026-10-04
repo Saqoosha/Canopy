@@ -283,6 +283,8 @@ struct MirrorPaneView: NSViewRepresentable {
                 }
             case .dropped:
                 session.fileTransfer.connectionDropped()
+                // Our own Stop Session: `stopSession` closes the pane once the reply lands.
+                if session.isStopping { return }
                 if case .spawning = session.status {
                     onFailure(isDaemon ? "Could not reach this Mac's session service."
                                        : "Could not reach \(machineName). Is its live mirror on?")
