@@ -333,7 +333,7 @@ struct MirrorPaneView: NSViewRepresentable {
                     }
                 }
                 // Our own Stop Session: `stopSession` replays this only if the stop fails.
-                if session.isStopping, bridge?.expectsRestart != true {
+                if session.isStopping {
                     session.dropHeldByStop = showDrop
                 } else {
                     showDrop()

@@ -1111,6 +1111,7 @@ final class SessionStore {
             // The row goes only once the daemon has stopped it; otherwise the next push would bring it back.
             switch await control.request("stop_session", Self.daemonRefParams(session)) {
             case .success, .failure(.refused("no such session")):  // already gone there
+                session.dropHeldByStop = nil  // it captures the session
                 self?.closeSession(id, keepingFailure: false, removeRow: true)
             case .failure(let failure):
                 session.isStopping = false
