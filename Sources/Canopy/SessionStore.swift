@@ -1114,6 +1114,8 @@ final class SessionStore {
                 self?.closeSession(id, keepingFailure: false, removeRow: true)
             case .failure(let failure):
                 session.isStopping = false
+                session.dropHeldByStop?()
+                session.dropHeldByStop = nil
                 logger.error("stop_session failed: \(String(describing: failure), privacy: .public)")
                 self?.noteSessionFailure(title: session.title, message: "Could not stop the session (\(failure)).", status: -2)
             }
