@@ -1235,11 +1235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.shouldSaveRestoreSnapshot = false
                 return .terminateCancel
             }
-        } else if let store = SessionStore.shared, store.panes.contains(where: { pane in
-            guard case .session(let id) = pane.content else { return false }
-            guard let open = store.openSessions.first(where: { $0.id == id }) else { return false }
-            return open.isDaemonHosted || open.origin.mirrorTarget != nil
-        }) {
+        } else if SessionStore.shared?.hasPanedSessionOutlivingQuit == true {
             // Daemon and mirror sessions outlive this quit: nothing stops, and the layout is always worth keeping.
             Self.shouldSaveRestoreSnapshot = true
         }

@@ -2689,6 +2689,16 @@ final class SessionStore {
 
     // MARK: - Launch restore
 
+    /// True when a session pane survives this quit on its own — a daemon or mirror session —
+    /// so the layout is worth saving even with no shim running here.
+    var hasPanedSessionOutlivingQuit: Bool {
+        panes.contains { pane in
+            guard case .session(let id) = pane.content,
+                  let open = openSessions.first(where: { $0.id == id }) else { return false }
+            return open.isDaemonHosted || open.origin.mirrorTarget != nil
+        }
+    }
+
     /// The origin a snapshot records for `open`.
     private static func restoreOrigin(for open: OpenSession) -> SessionRestoreSnapshot.Session.Origin {
         switch open.origin {
@@ -2721,8 +2731,10 @@ final class SessionStore {
         var seenResumeIds = Set<String>()
         // Dedupe by resumeId: `SessionRestoreSnapshot.sanitized`'s doc asserts
         // "capture cannot emit a duplicate", and this clause is the whole
-        // reason that holds.
-        for open in openSessions {
+        // reason that holds. A mirror never shadows a local session with the same id.
+        let localIds = Set(openSessions.filter { $0.origin.mirrorTarget == nil }.map(\.resumeId))
+        func shadowed(_ open: OpenSession) -> Bool { open.origin.mirrorTarget != nil && localIds.contains(open.resumeId) }
+        for open in openSessions where !shadowed(open) {
             let origin = Self.restoreOrigin(for: open)
             guard seenResumeIds.insert(open.resumeId).inserted else { continue }
             sessions.append(SessionRestoreSnapshot.Session(
@@ -2749,7 +2761,7 @@ final class SessionStore {
             case .launcher:
                 panesOut.append(.init(content: .launcher, width: slot.preferredWidth))
             case .session(let id):
-                guard let open = openSessions.first(where: { $0.id == id }) else {
+                guard let open = openSessions.first(where: { $0.id == id }), !shadowed(open) else {
                     if index < focusedPaneIndex { droppedBeforeFocus += 1 }
                     continue
                 }

@@ -1573,7 +1573,18 @@ enum SidebarLogicProbe {
             record("restore: a mirror pane is captured",
                    captured.panes.map(\.content) == [.session(resumeId: "r-m")])
             record("restore: resumableOnDisk keeps a mirror without filesystem access",
-                   captured.sessions.allSatisfy(SessionRestoreSnapshot.resumableOnDisk))
+                   captured.sessions.count == 1 && captured.sessions.allSatisfy(SessionRestoreSnapshot.resumableOnDisk))
+            record("quit gate: a paned mirror outlives the quit",
+                   store.hasPanedSessionOutlivingQuit)
+            record("quit gate: a launcher-only strip does not",
+                   { let s = SessionStore(); s._probeSeedOpenSessions([session]); s.openLauncherInFocusedPane()
+                     return !s.hasPanedSessionOutlivingQuit }())
+            let localSameId = OpenSession(origin: .local(cwd), resumeId: "r-m", title: "Local", project: "x", status: .live)
+            store._probeSeedOpenSessions([session, localSameId])
+            let captured2 = store.captureRestoreSnapshot()
+            record("restore: a mirror does not shadow a local session with the same resumeId",
+                   captured2.sessions.map(\.origin) == [.local(path: cwd.path)] && captured2.panes.isEmpty,
+                   "sessions=\(captured2.sessions.map(\.origin)) panes=\(captured2.panes.map(\.content))")
 
             // Apply: the pane comes back attaching, and asks the other Mac to resume
             // in case it stopped the session while this one was quit.
@@ -1582,6 +1593,7 @@ enum SidebarLogicProbe {
             let back = applied.openSessions.first
             record("restore: an applied mirror keeps its origin, machine name and pane",
                    back?.origin.mirrorTarget?.machineId == "M1" && back?.origin.mirrorTarget?.host == "100.64.0.2"
+                       && back?.origin.mirrorTarget?.port == 8770
                        && back?.statusBar.mirrorMachine == "Studio" && back?.status == .spawning
                        && applied.panes.count == 1,
                    "origin=\(String(describing: back?.origin)) status=\(String(describing: back?.status))")
@@ -8634,6 +8646,25 @@ enum SidebarLogicProbe {
             record("restore: in-process a missing folder is not resumable even with a transcript",
                    !SessionRestoreSnapshot.localIsResumable(directoryExists: false, sessionsRunInDaemon: false,
                                                             transcriptExists: { true }))
+            // The same through `resumableOnDisk`, so the daemon flag's wiring is pinned too:
+            // a removed worktree's transcript is found by id under some other project folder.
+            do {
+                OpenSession.localSessionsRunInDaemon = true
+                defer { OpenSession.localSessionsRunInDaemon = false }
+                let goneId = UUID().uuidString
+                let goneDir = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".claude/projects/-canopy-probe-gone-\(goneId)")
+                try? FileManager.default.createDirectory(at: goneDir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: goneDir) }
+                let goneTranscript = goneDir.appendingPathComponent("\(goneId).jsonl")
+                try? Data("{}\n".utf8).write(to: goneTranscript)
+                let gone = snapSession(goneId, origin: .local(path: ghostPath))
+                record("restore: under the daemon a session whose folder is gone comes back",
+                       SessionRestoreSnapshot.resumableOnDisk(gone))
+                try? FileManager.default.removeItem(at: goneTranscript)
+                record("restore: under the daemon it still needs its transcript",
+                       !SessionRestoreSnapshot.resumableOnDisk(gone))
+            }
 
             // The directory guard short-circuits the two assertions above, so
             // on their own they never reach the transcript lookup — replacing
