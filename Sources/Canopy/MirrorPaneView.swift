@@ -29,6 +29,32 @@ struct MirrorPaneView: NSViewRepresentable {
             logger.notice("Host re-pointed mirror webview delegates at its own coordinator (ui was \(SessionWebViewHost.delegateState(webView.uiDelegate, owner: self), privacy: .public), navigation was \(SessionWebViewHost.delegateState(webView.navigationDelegate, owner: self), privacy: .public))")
             webView.navigationDelegate = self
             webView.uiDelegate = self
+            // When the other host was dismantled while holding this webview, `dismantleNSView` took
+            // the script handlers too. Without `vscodeHost` the page's `init` never reaches the
+            // bridge and the pane stays white (seen on a remote Mac after a daemon restart).
+            if let session, session.webView === webView, let bridge = RemoteMirrorBridge.bridge(for: webView) {
+                registerHandlers(on: webView, bridge: bridge, session: session)
+            }
+        }
+
+        func registerHandlers(on webView: WKWebView, bridge: RemoteMirrorBridge, session: OpenSession) {
+            let ucc = webView.configuration.userContentController
+            for name in ["vscodeHost", "consoleLog", "canopyLink", InputWidthProbe.messageHandlerName] {
+                ucc.removeScriptMessageHandler(forName: name)
+            }
+            let consoleHandler = ConsoleLogHandler()
+            let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory, opensLocalFiles: session.isDaemonHosted)
+            let inputWidthHandler = InputWidthMessageHandler(statusBarData: session.statusBar)
+            ucc.add(consoleHandler, name: "consoleLog")
+            ucc.add(linkHandler, name: "canopyLink")
+            ucc.add(inputWidthHandler, name: InputWidthProbe.messageHandlerName)
+            ucc.add(bridge, name: "vscodeHost")
+            self.consoleHandler = consoleHandler
+            self.linkHandler = linkHandler
+            self.inputWidthHandler = inputWidthHandler
+            self.session = session
+            webView.navigationDelegate = self
+            webView.uiDelegate = self
         }
 
         /// Retry restarts the session, which rebuilds the webview and re-attaches.
@@ -92,6 +118,7 @@ struct MirrorPaneView: NSViewRepresentable {
         host.translatesAutoresizingMaskIntoConstraints = true
         host.autoresizingMask = [.width, .height]
         host.owner = context.coordinator
+        context.coordinator.session = session
         SessionWebViewHost.install(webView(coordinator: context.coordinator), in: host)
         context.coordinator.lastBoundSessionId = session.id
         let target = session.webView
@@ -134,23 +161,7 @@ struct MirrorPaneView: NSViewRepresentable {
     /// Registers this pane's script message handlers on `webView`, replacing
     /// any left from an earlier mount — `dismantleNSView` removes them.
     private func registerHandlers(on webView: WKWebView, bridge: RemoteMirrorBridge, coordinator: Coordinator) {
-        let ucc = webView.configuration.userContentController
-        for name in ["vscodeHost", "consoleLog", "canopyLink", InputWidthProbe.messageHandlerName] {
-            ucc.removeScriptMessageHandler(forName: name)
-        }
-        let consoleHandler = ConsoleLogHandler()
-        let linkHandler = LinkClickHandler(workingDirectory: session.origin.workingDirectory, opensLocalFiles: session.isDaemonHosted)
-        let inputWidthHandler = InputWidthMessageHandler(statusBarData: session.statusBar)
-        ucc.add(consoleHandler, name: "consoleLog")
-        ucc.add(linkHandler, name: "canopyLink")
-        ucc.add(inputWidthHandler, name: InputWidthProbe.messageHandlerName)
-        ucc.add(bridge, name: "vscodeHost")
-        coordinator.consoleHandler = consoleHandler
-        coordinator.linkHandler = linkHandler
-        coordinator.inputWidthHandler = inputWidthHandler
-        coordinator.session = session
-        webView.navigationDelegate = coordinator
-        webView.uiDelegate = coordinator
+        coordinator.registerHandlers(on: webView, bridge: bridge, session: session)
     }
 
     /// Where this pane attaches: another Mac over Tailscale, or this Mac's daemon.
