@@ -32,7 +32,7 @@ struct MirrorPaneView: NSViewRepresentable {
             // When the other host was dismantled while holding this webview, `dismantleNSView` took
             // the script handlers too. Without `vscodeHost` the page's `init` never reaches the
             // bridge and the pane stays white (seen on a remote Mac after a daemon restart).
-            if let session, let bridge = RemoteMirrorBridge.bridge(for: webView) {
+            if let session, session.webView === webView, let bridge = RemoteMirrorBridge.bridge(for: webView) {
                 registerHandlers(on: webView, bridge: bridge, session: session)
             }
         }
@@ -118,6 +118,7 @@ struct MirrorPaneView: NSViewRepresentable {
         host.translatesAutoresizingMaskIntoConstraints = true
         host.autoresizingMask = [.width, .height]
         host.owner = context.coordinator
+        context.coordinator.session = session
         SessionWebViewHost.install(webView(coordinator: context.coordinator), in: host)
         context.coordinator.lastBoundSessionId = session.id
         let target = session.webView
