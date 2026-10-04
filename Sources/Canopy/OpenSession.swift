@@ -263,6 +263,14 @@ final class OpenSession: Identifiable, Hashable {
     /// running with no client attached (`SessionReaper.Inputs.heldOpen`).
     var heldOpenByPhone = false
 
+    /// A `stop_session` for this session is in flight. The daemon drops the
+    /// mirror connection before it replies, so the pane must read that drop
+    /// as the stop it asked for rather than as a lost connection.
+    var isStopping = false
+
+    /// The pane's drop handling, held back while `isStopping`; run if the stop fails.
+    @ObservationIgnored var dropHeldByStop: (() -> Void)?
+
     /// The daemon's `OpenSession.id` for this session, once known.
     var daemonKey: String?
 
