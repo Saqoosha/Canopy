@@ -2689,22 +2689,32 @@ final class SessionStore {
 
     // MARK: - Launch restore
 
-    /// The origin a snapshot records, or nil for a mirror, which is never captured (its pane is skipped too).
-    private static func restoreOrigin(for origin: OpenSession.Origin) -> SessionRestoreSnapshot.Session.Origin? {
-        switch origin {
+    /// True when a session pane survives this quit on its own — a daemon or mirror session —
+    /// so the layout is worth saving even with no shim running here.
+    var hasPanedSessionOutlivingQuit: Bool {
+        panes.contains { pane in
+            guard case .session(let id) = pane.content,
+                  let open = openSessions.first(where: { $0.id == id }) else { return false }
+            return open.isDaemonHosted || open.origin.mirrorTarget != nil
+        }
+    }
+
+    /// The origin a snapshot records for `open`.
+    private static func restoreOrigin(for open: OpenSession) -> SessionRestoreSnapshot.Session.Origin {
+        switch open.origin {
         case .local(let url):
             return .local(path: url.path)
         case .remote(let host, let path):
             return .remote(host: host, path: path.path)
         case .teleportedFrom(let cloudId, let path):
             return .teleported(cloudSessionId: cloudId, path: path.path)
-        case .mirror:
-            return nil
+        case .mirror(let machineId, let host, let port):
+            return .mirror(machineId: machineId, machineName: open.statusBar.mirrorMachine, host: host, port: port)
         }
     }
 
     /// Snapshot the sidebar's open block and the pane strip for quit-time
-    /// persistence. **Every** open session except `.mirror` is captured, in `openSessions`
+    /// persistence. **Every** open session is captured, in `openSessions`
     /// order — that is the order the open block's SESSION rows are drawn in,
     /// top to bottom, and restoring it is the reason sessions are emitted
     /// from `openSessions` rather than walked out of `panes`. Two things that
@@ -2721,10 +2731,11 @@ final class SessionStore {
         var seenResumeIds = Set<String>()
         // Dedupe by resumeId: `SessionRestoreSnapshot.sanitized`'s doc asserts
         // "capture cannot emit a duplicate", and this clause is the whole
-        // reason that holds. Origin is checked first so a mirror's resumeId
-        // never enters the set and cannot shadow a later local session.
-        for open in openSessions {
-            guard let origin = Self.restoreOrigin(for: open.origin) else { continue }
+        // reason that holds. A mirror never shadows a local session with the same id.
+        let localIds = Set(openSessions.filter { $0.origin.mirrorTarget == nil }.map(\.resumeId))
+        func shadowed(_ open: OpenSession) -> Bool { open.origin.mirrorTarget != nil && localIds.contains(open.resumeId) }
+        for open in openSessions where !shadowed(open) {
+            let origin = Self.restoreOrigin(for: open)
             guard seenResumeIds.insert(open.resumeId).inserted else { continue }
             sessions.append(SessionRestoreSnapshot.Session(
                 resumeId: open.resumeId,
@@ -2750,8 +2761,7 @@ final class SessionStore {
             case .launcher:
                 panesOut.append(.init(content: .launcher, width: slot.preferredWidth))
             case .session(let id):
-                guard let open = openSessions.first(where: { $0.id == id }),
-                      open.origin.mirrorTarget == nil else {
+                guard let open = openSessions.first(where: { $0.id == id }), !shadowed(open) else {
                     if index < focusedPaneIndex { droppedBeforeFocus += 1 }
                     continue
                 }
@@ -2811,6 +2821,10 @@ final class SessionStore {
                 origin = .remote(host: host, path: URL(fileURLWithPath: path))
             case .teleported(let cloudId, let path):
                 origin = .teleportedFrom(cloudSessionId: cloudId, localPath: URL(fileURLWithPath: path))
+            case .mirror(let machineId, _, let host, let port):
+                // The pairing's current address outranks the stored one, as `attachMirrorPane` reads it.
+                let paired = CanopySettings.shared.mirrorPeers[machineId].flatMap(MirrorAccess.parseHostPort)
+                origin = .mirror(machineId: machineId, host: paired?.host ?? host, port: paired?.port ?? port)
             }
             let provider = s.providerId.flatMap { id in providers.first { $0.id == id } }
             let account = ClaudeAccountStore.account(id: s.accountId)
@@ -2849,6 +2863,11 @@ final class SessionStore {
                 // not settle the question by itself.
                 resumeIdIsExistingTranscript: s.resumeIdIsExistingTranscript ?? false
             )
+            if case .mirror(let machineId, let machineName, _, _) = s.origin {
+                open.statusBar.mirrorMachine = machineName ?? machineId
+                // The other Mac may have stopped it while this one was quit; one that still runs it ignores this.
+                open.pendingMirrorOpen = .resume
+            }
             byResumeId[s.resumeId] = open
             restored.append(open)
         }

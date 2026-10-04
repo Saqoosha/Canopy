@@ -65,12 +65,16 @@ struct SessionRestoreSnapshot: Codable, Equatable {
             case local(path: String)
             case remote(host: String, path: String)
             case teleported(cloudSessionId: String, path: String)
+            /// A pane on another Mac's session. Restore re-attaches; the session lives over there.
+            case mirror(machineId: String, machineName: String?, host: String, port: UInt16)
 
+            /// Empty for a mirror, which has no folder on this Mac.
             var path: String {
                 switch self {
                 case .local(let p): p
                 case .remote(_, let p): p
                 case .teleported(_, let p): p
+                case .mirror: ""
                 }
             }
 
@@ -269,14 +273,28 @@ extension SessionRestoreSnapshot {
 
     /// The real-disk predicate `sanitized` takes in production.
     ///
-    /// An SSH session is accepted unchecked: both its working directory and
-    /// its JSONL live on the other machine, so there is nothing here to
-    /// look at, and "can't verify" must not be reported as "gone" — the same
+    /// An SSH session and a mirror are accepted unchecked: their working
+    /// directory and JSONL live on the other machine, so there is nothing here
+    /// to look at, and "can't verify" must not be reported as "gone" — the same
     /// asymmetry the background-task reconcile draws for remote sessions.
     static func resumableOnDisk(_ session: Session) -> Bool {
-        if session.origin.remoteHost != nil { return true }
+        switch session.origin {
+        case .remote, .mirror: return true
+        case .local, .teleported: break
+        }
         let directory = URL(fileURLWithPath: session.origin.path)
-        guard FileManager.default.fileExists(atPath: directory.path) else { return false }
-        return ClaudeSessionHistory.sessionFileExists(id: session.resumeId, directory: directory)
+        return localIsResumable(
+            directoryExists: FileManager.default.fileExists(atPath: directory.path),
+            sessionsRunInDaemon: OpenSession.localSessionsRunInDaemon,
+            transcriptExists: { ClaudeSessionHistory.sessionFileExists(id: session.resumeId, directory: directory) })
+    }
+
+    /// A local session needs its transcript. It needs its directory only when the CLI is
+    /// spawned here: under the daemon a restore attaches, and the daemon may still be running
+    /// the session after its folder is gone (a worktree removed after its PR merged).
+    static func localIsResumable(directoryExists: Bool, sessionsRunInDaemon: Bool,
+                                 transcriptExists: () -> Bool) -> Bool {
+        guard directoryExists || sessionsRunInDaemon else { return false }
+        return transcriptExists()
     }
 }

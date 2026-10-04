@@ -1235,14 +1235,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.shouldSaveRestoreSnapshot = false
                 return .terminateCancel
             }
-        } else if let store = SessionStore.shared, store.panes.contains(where: { pane in
-            guard case .session(let id) = pane.content else { return false }
-            return store.openSessions.first { $0.id == id }?.isDaemonHosted == true
-        }) {
-            // Daemon sessions outlive this quit: nothing stops, and the layout is always worth keeping.
+        } else if SessionStore.shared?.hasPanedSessionOutlivingQuit == true {
+            // Daemon and mirror sessions outlive this quit: nothing stops, and the layout is always worth keeping.
             Self.shouldSaveRestoreSnapshot = true
         }
-        // No active sessions and no paned daemon session → no alert, shouldSaveRestoreSnapshot stays false.
+        // No active sessions and no paned daemon or mirror session → no alert, shouldSaveRestoreSnapshot stays false.
         // That used to mean "nothing to restore" and no longer quite does: a
         // `.dormant` session is an open row with no shim, so a store holding
         // only those reaches here with rows worth saving and gets none of them
