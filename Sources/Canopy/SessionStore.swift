@@ -2724,9 +2724,10 @@ final class SessionStore {
         normalizePaneWeightsToVisualWidths()
         let wasFocused = index == focusedPaneIndex
         let removed = panes.remove(at: index)
-        // A daemon session left with no pane is detached, as Cmd+W on a single pane does.
+        // A daemon or mirror session left with no pane is detached, so its daemon can reap it.
         if case .session(let id) = removed.content,
-           let session = openSessions.first(where: { $0.id == id }), session.isDaemonHosted,
+           let session = openSessions.first(where: { $0.id == id }),
+           session.isDaemonHosted || session.origin.mirrorTarget != nil,
            !panes.contains(where: { if case .session(let other) = $0.content { return other == id }; return false }) {
             detachDaemonSession(session)
         }
