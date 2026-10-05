@@ -241,8 +241,15 @@ struct MirrorPaneView: NSViewRepresentable {
             guard let bridge else { return }
             // Assigned even when nil, so an origin that moved to this Mac's account drops its block.
             bridge.usageKey = MirrorUsageFrame.key(forFrame: frame, localEmail: ClaudeAccountInfo.current()?.email)
-            guard let key = bridge.usageKey, let rateLimits = frame["rate_limits"] as? [String: Any] else { return }
-            SharedRateLimitData.shared.account(for: key).updateFromRawUsage(rateLimits)
+            guard let rateLimits = frame["rate_limits"] as? [String: Any] else { return }
+            if let key = bridge.usageKey {
+                SharedRateLimitData.shared.account(for: key).updateFromRawUsage(rateLimits)
+            } else if MirrorUsageFrame.isUsageFrame(frame) {
+                // This Mac's own account. The GUI fetches it only once at launch — the shims,
+                // and the daemon's 10-minute refresh, live in canopyd — so without this the
+                // sidebar froze at launch-time numbers and a model row vanished at its reset.
+                SharedRateLimitData.shared.local.updateFromRawUsage(rateLimits)
+            }
         }
         bridge.onFileFrame = { [weak session] frame in
             session?.fileTransfer.handle(frame)

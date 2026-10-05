@@ -131,13 +131,18 @@ enum MirrorUsageFrame {
     }
 
     /// The record a received line is filed under on this Mac: nil when the origin runs as this
-    /// Mac's own account, whose numbers this Mac already fetches itself.
+    /// Mac's own account (the caller files that into `SharedRateLimitData.local`) or the line is
+    /// malformed — `isUsageFrame` tells the two apart.
     static func key(forFrame frame: [String: Any], localEmail: String?) -> RateLimitAccount.Key? {
-        guard frame["type"] as? String == "usage",
-              let email = frame["email"] as? String, !email.isEmpty,
-              frame["rate_limits"] is [String: Any]
-        else { return nil }
+        guard isUsageFrame(frame), let email = frame["email"] as? String else { return nil }
         return ShimProcess.rateLimitKey(remoteEmail: email, localEmail: localEmail, host: "")
+    }
+
+    static func isUsageFrame(_ frame: [String: Any]) -> Bool {
+        guard frame["type"] as? String == "usage",
+              let email = frame["email"] as? String, !email.isEmpty
+        else { return false }
+        return frame["rate_limits"] is [String: Any]
     }
 }
 
