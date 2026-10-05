@@ -51,7 +51,7 @@ final class ControlClient {
     private var waiters: [String: CheckedContinuation<Result<[String: Any], Failure>, Never>] = [:]
     private var ready = false
     private var stopped = false
-    private var readyWaiters: [CheckedContinuation<Bool, Never>] = []
+    private var readyWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
     /// What the server said when it last refused `hello` (a wrong password, say).
     private(set) var lastRefusal: String?
 
@@ -78,17 +78,18 @@ final class ControlClient {
     func waitUntilReady(timeout: Duration = requestTimeout) async -> Bool {
         if ready { return true }
         if stopped { return false }
+        let id = UUID()
         let timer = Task { [weak self] in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled else { return }
-            self?.resumeReadyWaiters(false)
+            self?.readyWaiters.removeValue(forKey: id)?.resume(returning: false)
         }
         defer { timer.cancel() }
-        return await withCheckedContinuation { readyWaiters.append($0) }
+        return await withCheckedContinuation { readyWaiters[id] = $0 }
     }
 
     private func resumeReadyWaiters(_ value: Bool) {
-        let waiters = readyWaiters
+        let waiters = readyWaiters.values
         readyWaiters.removeAll()
         waiters.forEach { $0.resume(returning: value) }
     }
@@ -117,6 +118,7 @@ final class ControlClient {
     private func connect() {
         guard !stopped else { return }
         buffer = NDJSONLineBuffer(acceptsCompressed: true)
+        lastRefusal = nil
         let connection = NWConnection(to: endpoint.nwEndpoint, using: endpoint.parameters)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in

@@ -8327,6 +8327,11 @@ enum SidebarLogicProbe {
         record("remote rules: join keeps the entry name verbatim",
                RemoteDirectoryRules.childPath(of: "/Users/x", name: " p ") == "/Users/x/ p ",
                "got \(RemoteDirectoryRules.childPath(of: "/Users/x", name: " p "))")
+        for (input, expected) in [("/Users/x/", "/Users/x"), ("/Users/x/../y/./z", "/Users/y/z"),
+                                  ("/..", "/"), ("//a//b", "/a/b"), ("/", "/"), ("~/x", "~/x"), (" p", " p")] {
+            let got = RemoteDirectoryRules.normalizedAbsolute(input)
+            record("remote rules: normalize \(input)", got == expected, "got \(got)")
+        }
 
         // Hidden-file filter: client side, on the name only.
         do {

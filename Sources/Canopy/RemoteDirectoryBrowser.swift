@@ -183,8 +183,9 @@ struct RemoteDirectoryBrowser: View {
                         dismiss()
                     }
                     .keyboardShortcut(.defaultAction)
-                    // `currentPath` is still the previous folder until a listing lands.
-                    .disabled(isLoading)
+                    // `currentPath` is still the previous folder until a listing lands;
+                    // a peer refuses a session in "~", which only ssh expands.
+                    .disabled(isLoading || (isPeer && !currentPath.hasPrefix("/")))
                 }
             }
             .padding()
@@ -204,10 +205,12 @@ struct RemoteDirectoryBrowser: View {
         }
     }
 
-    private var sourceIcon: String {
-        if case .peer = source { return "desktopcomputer" }
-        return "network"
+    private var isPeer: Bool {
+        if case .peer = source { return true }
+        return false
     }
+
+    private var sourceIcon: String { isPeer ? "desktopcomputer" : "network" }
 
     private func navigateTo(_ path: String) {
         isLoading = true
@@ -254,20 +257,20 @@ struct RemoteDirectoryBrowser: View {
         errorMessage = nil
         Task {
             do {
+                var created = target
                 switch source {
                 case .ssh(let host):
                     // `--`: a name starting with "-" is a folder, not an option.
                     _ = try await runSSH(args: ["-T", "-o", "ConnectTimeout=10", host,
                                                 "mkdir", "--", shellEscape(target)])
                 case .peer:
-                    // The server joins and validates the name itself, with the same rules.
-                    _ = try await peerConnection.mkdir(parent: currentPath, name: name).get()
+                    created = try await peerConnection.mkdir(parent: currentPath, name: name).get()
                 }
                 logger.notice("created remote folder \(target, privacy: .private) on \(sourceName, privacy: .public)")
                 guard creationID == folderCreationID else { return }
                 mkdirInFlight = false
                 cancelCreatingFolder()
-                navigateTo(target)
+                navigateTo(created)
             } catch {
                 logger.error("mkdir failed on \(sourceName, privacy: .public): \(error.localizedDescription, privacy: .private)")
                 guard creationID == folderCreationID else { return }
@@ -404,6 +407,23 @@ enum RemoteDirectoryRules {
         directory.hasSuffix("/") ? "\(directory)\(name)" : "\(directory)/\(name)"
     }
 
+    /// Drops ".", "..", empty components and trailing slashes from an absolute
+    /// path, since a peer echoes back the path it was asked for (ssh answers
+    /// with `pwd`). Symlinks are left alone. Anything not absolute is returned
+    /// unchanged for the server to refuse.
+    static func normalizedAbsolute(_ path: String) -> String {
+        guard path.hasPrefix("/") else { return path }
+        var parts: [Substring] = []
+        for part in path.split(separator: "/") {
+            switch part {
+            case ".": continue
+            case "..": _ = parts.popLast()
+            default: parts.append(part)
+            }
+        }
+        return "/" + parts.joined(separator: "/")
+    }
+
     /// Client side, on the name only, so toggling never re-runs ssh.
     static func visibleEntries(_ entries: [RemoteDirectoryBrowser.DirEntry],
                                showHidden: Bool) -> [RemoteDirectoryBrowser.DirEntry] {
@@ -442,12 +462,15 @@ final class PeerDirectoryConnection {
 
     func list(path: String) async -> Result<(String, [RemoteDirectoryBrowser.DirEntry]), any Error> {
         var params: [String: Any] = ["showHidden": true]  // the sheet filters hidden names itself
+        if path.hasPrefix("~/"), home == nil, case .failure(let error) = await list(path: "~") {
+            return .failure(error)
+        }
         if path == "~" {
             // No path: the server lists its own home.
         } else if path.hasPrefix("~/"), let home {
-            params["path"] = RemoteDirectoryRules.childPath(of: home, name: String(path.dropFirst(2)))
+            params["path"] = RemoteDirectoryRules.normalizedAbsolute(home + "/" + path.dropFirst(2))
         } else {
-            params["path"] = path
+            params["path"] = RemoteDirectoryRules.normalizedAbsolute(path)
         }
         return await request("browse_dir", params).flatMap { result in
             guard let resolved = result["path"] as? String, let raw = result["entries"] as? [[String: Any]] else {
@@ -472,6 +495,8 @@ final class PeerDirectoryConnection {
     private func request(_ verb: String, _ params: [String: Any]) async -> Result<[String: Any], any Error> {
         guard let client else { return .failure(Self.error(connectError ?? "Not connected")) }
         guard await client.waitUntilReady() else {
+            // A refusal repeats on every reconnect with the same password; stop retrying.
+            if client.lastRefusal != nil { client.stop() }
             let message = switch client.lastRefusal {
             case "unauthorized"?: "Password rejected"
             case let refusal?: refusal
