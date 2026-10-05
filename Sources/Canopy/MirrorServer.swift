@@ -220,7 +220,7 @@ final class MirrorServer {
         pendingAddress = nil
     }
 
-    /// Opens the relay socket. Untrusted like TCP, so every password check applies; 0600 besides.
+    /// Opens the relay socket. Untrusted like TCP, so every password check applies.
     @discardableResult
     func startRelaySocket(path: String) -> Bool {
         if relayListener != nil, relaySocketPath == path { return true }
@@ -259,7 +259,7 @@ final class MirrorServer {
 
     var relaySocketIsOpen: Bool { relayListener != nil }
 
-    /// Closes the relay socket; clients that came through it stay until the relay ends them.
+    /// Closes the relay socket; clients that came through it stay.
     func stopRelaySocket() {
         relayListener?.cancel()
         relayListener = nil
@@ -267,7 +267,7 @@ final class MirrorServer {
         relaySocketPath = nil
     }
 
-    /// Stops the TCP listener and its connections; local-socket clients stay.
+    /// Stops the TCP listener and every untrusted connection (TCP and relay); local-socket clients stay.
     func stopTCP() {
         for connection in connections where !connection.trustsPeer {
             connection.cancelFromServer()

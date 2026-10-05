@@ -10,14 +10,15 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorRelay
 ///
 /// Why it exists: an update replaces the bundle under the running daemon, and from then on
 /// macOS's Application Firewall cannot resolve that process's path (`proc_pidpath` fails with
-/// ENOENT; socketfilterfw logs "processPath is still nil … Performing default drop action").
-/// With stealth mode on, every inbound SYN is dropped silently, so the phone and other Macs
-/// cannot connect until the daemon restarts — which it defers for as long as a turn runs.
+/// ENOENT; socketfilterfw logs "processPath is still nil … Performing default drop action"), and
+/// every inbound flow is dropped (with stealth mode on, the client sees only SYN retransmits)
+/// until the daemon restarts, which it defers while anything would be lost.
 /// This process is started from the binary now on disk, whose path resolves, so its flows match
 /// the app's firewall rule. Measured 2026-10-05 against build 157 → 158.
 ///
 /// It holds no state and checks nothing: the daemon serves the relay socket as an untrusted
-/// peer, so passwords and the bypass gate apply exactly as they do on TCP.
+/// peer, so passwords and the bypass gate apply as they do on TCP. A Mac client loses
+/// `openRedirectHost`, since its peer is a Unix socket.
 enum MirrorRelay {
     static let flag = "--mirror-relay"
 
@@ -37,9 +38,16 @@ enum MirrorRelay {
         guard let index = argv.firstIndex(of: flag), argv.count >= index + 4,
               let port = UInt16(argv[index + 2]), port > 0,
               !argv[index + 1].isEmpty, !argv[index + 3].isEmpty,
-              // Network traps on a longer `.unix` path (measured: 153 bytes, exit 133).
+              // Past `sun_path` Network traps (153 bytes measured: exit 133).
               argv[index + 3].utf8.count <= DaemonPaths.maxSocketPathBytes else { return nil }
         return Arguments(host: argv[index + 1], port: port, socketPath: argv[index + 3])
+    }
+
+    /// Whether `onDisk` can be trusted to know `flag`: builds from before the relay would start
+    /// the whole app instead, so a downgrade gets no relay.
+    static func installedBuildKnowsRelay(onDisk: String, launched: String?) -> Bool {
+        guard let onDisk = Int(onDisk), let launched = launched.flatMap(Int.init) else { return false }
+        return onDisk >= launched
     }
 
     /// Bind attempts before giving up; the daemon's listener may still be closing.
@@ -47,18 +55,19 @@ enum MirrorRelay {
 
     static func run(argv: [String]) -> Never {
         guard let args = parse(argv) else {
-            FileHandle.standardError.write(Data("canopy mirror relay: bad arguments\n".utf8))
+            logger.error("relay refused its arguments: \(argv.dropFirst().joined(separator: " "), privacy: .public)")
             exit(2)
         }
-        // The daemon holds the write end of stdin; EOF means it is gone, and so is the socket.
+        // The daemon holds the write end of stdin; EOF means it is gone or stopped this relay.
         Thread.detachNewThread {
             _ = FileHandle.standardInput.readDataToEndOfFile()
-            logger.notice("daemon gone; relay exiting")
+            logger.notice("stdin closed; relay exiting")
             exit(0)
         }
         let relay = Relay(args: args)
         relay.listen(attempt: 1)
-        dispatchMain()
+        // Its handlers hold it weakly; an optimised build would otherwise free it here.
+        withExtendedLifetime(relay) { dispatchMain() }
     }
 }
 
@@ -109,7 +118,7 @@ private final class Relay: @unchecked Sendable {
     }
 }
 
-/// One client: bytes in each direction until either side ends. Each receive waits for the
+/// One client: bytes in each direction. Each receive waits for the
 /// previous send to be processed, so a slow side holds the other back instead of buffering.
 /// An EOF is passed on as one (a half-close), and the pair closes once both directions ended.
 private final class RelayPair: @unchecked Sendable {
@@ -186,11 +195,13 @@ final class MirrorRelayProcess {
     private var process: Process?
     private var stdin: Pipe?
     private(set) var address: (host: String, port: UInt16)?
+    /// The build on disk when this relay was started; a later update replaces its binary too.
+    private(set) var build: String?
 
     var isRunning: Bool { process?.isRunning == true }
 
     /// Starts `executable` as a relay; false when it could not be launched.
-    func start(executable: URL, args: MirrorRelay.Arguments) -> Bool {
+    func start(executable: URL, args: MirrorRelay.Arguments, build: String) -> Bool {
         stop()
         let proc = Process()
         proc.executableURL = executable
@@ -210,6 +221,7 @@ final class MirrorRelayProcess {
         process = proc
         stdin = pipe
         address = (args.host, args.port)
+        self.build = build
         return true
     }
 
@@ -218,11 +230,12 @@ final class MirrorRelayProcess {
         logger.notice("relay pid \(proc.processIdentifier) exited \(proc.terminationStatus)")
     }
 
-    /// Ends the relay and waits briefly, so a restarted daemon finds the port free.
+    /// Ends the relay and waits briefly, so whatever binds next finds the port free.
     func stop() {
         guard let proc = process else { return }
         process = nil
         address = nil
+        build = nil
         try? stdin?.fileHandleForWriting.close()
         stdin = nil
         if proc.isRunning { proc.terminate() }

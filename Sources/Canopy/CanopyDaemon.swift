@@ -72,7 +72,7 @@ final class DaemonDelegate {
     /// A pending build seen on two consecutive checks, so its copy has finished.
     private var confirmedBuild: String?
     private var lastUpgradeHold: String?
-    /// A build on disk this process is waiting to restart into. While set, Tailscale clients come
+    /// A build that replaced this process's binary on disk. While set, Tailscale clients come
     /// in through `relay`: the firewall drops this process's inbound flows (see `MirrorRelay`).
     private var waitingForBuild: String?
     private let relay = MirrorRelayProcess()
@@ -358,8 +358,10 @@ final class DaemonDelegate {
     }
 
     /// `superviseListener` while an update waits: the relay holds the port, started from the
-    /// binary now on disk, and this process only serves the relay socket.
+    /// binary now on disk, and new Tailscale clients arrive only through the relay socket.
     private func superviseRelay(server: MirrorServer, host: String?, port: UInt16) {
+        guard let build = waitingForBuild,
+              MirrorRelay.installedBuildKnowsRelay(onDisk: build, launched: DaemonUpgrade.launchedBuild) else { return }
         guard let host else {
             guard missingTailscaleTicks >= Self.tailscaleGraceTicks else { return }
             stopRelay()
@@ -371,7 +373,7 @@ final class DaemonDelegate {
         guard server.startRelaySocket(path: DaemonPaths.relay) else { return }
         if relay.isRunning {
             failedRelayStarts = 0
-            if let address = relay.address, address.host == host, address.port == port { return }
+            if let address = relay.address, address.host == host, address.port == port, relay.build == build { return }
         } else if let since = lastRelayAttempt.map({ Date().timeIntervalSince($0) }),
                   since < Self.retryDelay(failedBinds: failedRelayStarts) {
             return
@@ -379,7 +381,7 @@ final class DaemonDelegate {
         guard let executable = Bundle.main.executableURL else { return }
         if lastRelayAttempt != nil, !relay.isRunning { failedRelayStarts += 1 }
         lastRelayAttempt = Date()
-        if relay.start(executable: executable, args: .init(host: host, port: port, socketPath: DaemonPaths.relay)) {
+        if relay.start(executable: executable, args: .init(host: host, port: port, socketPath: DaemonPaths.relay), build: build) {
             MirrorServerStatus.shared.state = .listening(host: host, port: port)
         }
     }
