@@ -306,7 +306,7 @@ final class MirrorConnection: MirrorSink {
     private let queue = DispatchQueue(label: "sh.saqoo.Canopy.MirrorConnection")
     private var didAttach = false
     /// True when the attach came from another Mac's Canopy (not the phone).
-    /// A Mac client gets files, usage and `open` redirects a phone does not;
+    /// A Mac client gets usage and `open` redirects a phone does not;
     /// see `fetchesImages` for the image rewrite.
     private(set) var isMacClient = false
     /// True when a Mac client's attach said it serves `canopy-asset` image URLs (`"images": true`),
