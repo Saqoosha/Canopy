@@ -101,7 +101,7 @@ struct CanopyApp: App {
                     sidebarStore.stopFocusedPaneSession()
                 }
                 .keyboardShortcut("w", modifiers: [.command, .option])
-                .disabled(sidebarStore.focusedPaneSessionId == nil)
+                .disabled(sidebarStore.focusedPaneStoppableSession == nil)
                 Button("Close Window") {
                     if let key = NSApp.keyWindow, isCanopyWindow(key) {
                         windowCloseOnly(key)

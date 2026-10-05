@@ -123,10 +123,18 @@ final class SessionStore {
         return nil
     }
 
+    /// The focused pane's session when the X pull-down would offer Stop for it.
+    var focusedPaneStoppableSession: OpenSession? {
+        guard let id = focusedPaneSessionId,
+              let session = openSessions.first(where: { $0.id == id }),
+              Self.canStop(session), !session.isStopping else { return nil }
+        return session
+    }
+
     /// File > Stop Session (Cmd+Opt+W): the X pull-down's Stop, for the focused pane.
     func stopFocusedPaneSession() {
-        guard let id = focusedPaneSessionId else { return }
-        stopSession(id)
+        guard let session = focusedPaneStoppableSession else { return }
+        stopSession(session.id)
     }
 
     func paneIndex(forSession id: OpenSession.ID) -> Int? {
