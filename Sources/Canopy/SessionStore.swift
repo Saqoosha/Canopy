@@ -1099,11 +1099,12 @@ final class SessionStore {
     var daemonControl: ControlClient?
 
     /// Whether `stopSession` ends the session for every client, rather than only closing it here.
+    /// A mirror only once attached: before that its id over there is unknown, and a stop would miss it.
     static func canStop(_ session: OpenSession) -> Bool {
-        session.isDaemonHosted || session.origin.mirrorTarget != nil
+        session.isDaemonHosted || (session.origin.mirrorTarget != nil && session.mirrorHostSessionId != nil)
     }
 
-    /// Stops a daemon session for every client, then drops its row.
+    /// Stops a daemon session, or a mirror on its own Mac, for every client, then drops its row.
     func stopSession(_ id: OpenSession.ID) {
         guard let session = openSessions.first(where: { $0.id == id }) else { return }
         if let target = session.origin.mirrorTarget {
@@ -1154,9 +1155,8 @@ final class SessionStore {
                 session.dropHeldByStop?()
                 session.dropHeldByStop = nil
                 logger.error("stopMirrorSession failed: \(String(describing: failure), privacy: .public)")
-                self?.noteSessionFailure(title: session.title,
-                                         message: "Could not stop the session. \(failure.message(machineName: machineName))",
-                                         status: -2)
+                // The sidebar banner, not the launcher's: the pane is still up, so no launcher shows.
+                self?.remoteAttachError = "Could not stop \(session.title). \(failure.message(machineName: machineName))"
             }
         }
     }

@@ -52,8 +52,7 @@ struct PaneHeaderStrip: View {
     private static let buttonSide: CGFloat = 16
     /// Slop around the drawn box, to give the monitor a comfortable target.
     /// Must stay at or below `(height - buttonSide) / 2` (16) to keep the rect
-    /// inside the strip vertically, and below `trailingPadding` (12) to keep it
-    /// inside the pane horizontally. Neither bound is enforced.
+    /// inside the strip vertically. Not enforced.
     private static let hitSlop: CGFloat = 8
 
     let title: String
@@ -101,9 +100,9 @@ struct PaneHeaderStrip: View {
     ///   `SessionStore.paneDividerWidth`; the last pane reaches the same place
     ///   by having no divider at all. Move the divider inside `paneCell` and
     ///   this rect is 8pt off.
-    /// - **The header's `HStack` does not overflow.** The X is fixed-size and
-    ///   everything left of it compresses down to a floor, so its trailing
-    ///   edge sits at `paneWidth - trailingPadding` only while the
+    /// - **The header's `HStack` does not overflow.** The X and chevron are
+    ///   fixed-size and everything left of them compresses down to a floor, so
+    ///   the chevron's trailing edge sits at `paneWidth - trailingPadding` only while the
     ///   incompressible chrome fits. On the LEFTMOST pane with the sidebar
     ///   collapsed, `leadingChromeAvoidance` reaches ~134pt, so the header
     ///   needs ~190pt against a `paneMinDragWidth` of 100 — a narrow pane 0
@@ -132,7 +131,7 @@ struct PaneHeaderStrip: View {
     /// Where the close-options pull-down beside the X accepts a click, in the
     /// same space and under the same preconditions as `closeButtonHitRect`.
     /// It overlaps the X's right slop, so the monitor must test this one
-    /// first; its left edge starts at the X's drawn box, so the X glyph itself
+    /// first; its left edge is the right edge of the X's drawn box, so the X glyph itself
     /// still closes. The right slop is half `hitSlop` to stay inside
     /// `trailingPadding`, i.e. inside the pane.
     static func closeMenuHitRect(paneWidth: CGFloat) -> CGRect {

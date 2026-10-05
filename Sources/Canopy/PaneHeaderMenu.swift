@@ -13,9 +13,8 @@ import AppKit
 /// The rows deliberately mirror `Sidebar`'s `rowMenu(for:)` — the header and
 /// the row stand for the same session, so offering different verbs depending
 /// on which one you right-click is the kind of difference nobody can predict.
-/// The one row that does not carry over is "Hide from sidebar": it is disabled
-/// for every open row anyway, and a pane header only ever stands for something
-/// live.
+/// The session verbs match; the header adds Close pane and lacks the row's
+/// "Hide from sidebar" and "Copy Session Log Path".
 enum PaneHeaderMenu {
     /// Pop the menu for the pane at `index`, anchored at `screenPoint`.
     ///
@@ -121,7 +120,7 @@ extension PaneHeaderMenu {
     ///
     /// - Close pane: the pane only. A daemon session with no other pane is
     ///   detached and keeps running; any other session stays in Open.
-    /// - Close session: drops the row here. A mirror keeps running on its Mac.
+    /// - Close session: ends it if this Mac runs it; a mirror keeps running on its Mac.
     ///   Absent for a daemon session, where closing the row means stopping it.
     /// - Stop session: ends it for every client, on whichever Mac runs it.
     @MainActor

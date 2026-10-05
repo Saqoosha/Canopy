@@ -793,7 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let localPoint = hit.local
             let clickYFromTop = localPoint.y
 
-            // Close X first: it lives in the pane header, which macOS 26
+            // Close controls first (chevron, then X): they live in the pane header, which macOS 26
             // covers with the detail column's scroll-edge BackdropView
             // (see PaneHeaderStrip's doc for what that band was and was
             // not measured to do). Hit-test it here instead and consume
