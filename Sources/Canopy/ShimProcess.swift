@@ -4296,6 +4296,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ])
     }
 
+    /// The folders `handleOpenFile` may open from: the working directory, plus its main
+    /// checkout when that differs. Resolved once — the git call is per shim, not per click.
+    private lazy var openFileRoots: [URL] = {
+        let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        guard remoteHost == nil,
+              let main = GitWorktree.mainCheckoutRoot(for: wd)?.standardizedFileURL.resolvingSymlinksInPath(),
+              main != wd
+        else { return [wd] }
+        return [wd, main]
+    }()
+
     /// Handle open_file request from webview. By default shows the file in ContentViewer
     /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
     /// When `openExternal` is true (set by Cmd-click), opens in the macOS default app.
@@ -4322,10 +4333,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             } else {
                 url = workingDirectory.appendingPathComponent(filePath)
             }
-            // Resolve symlinks and ensure the file is under the working directory (prevent path traversal)
+            // Resolve symlinks and ensure the file is under the working directory — or, for a
+            // session in a worktree, under the main checkout it came from, where gitignored
+            // outputs like `build/` live (prevent path traversal)
             let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
-            let wdResolved = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
-            guard resolved.path.hasPrefix(wdResolved.path + "/") || resolved.path == wdResolved.path else {
+            let contained = openFileRoots.contains { root in
+                resolved.path.hasPrefix(root.path + "/") || resolved.path == root.path
+            }
+            guard contained else {
                 logger.warning("handleOpenFile: path traversal blocked: \(resolved.path, privacy: .public)")
                 if let requestId {
                     sendToWebView([
