@@ -84,7 +84,7 @@ Run it in the background (it can take ~15 min) and wait for the exit notificatio
 ./scripts/wait_for_appcast.sh <new_version>
 ```
 
-It watches the Pages deployment for the gh-pages commit, requests one rebuild if that run failed or never started, then polls the feed URL until its first item is `<new_version>`. A non-zero exit means Sparkle is still offering the previous release — report it with the script's last line; do not call the release done.
+It watches the Pages deployment for the gh-pages commit, requests one rebuild if that run failed or never started, then polls the feed URL until its first item is `<new_version>`. A non-zero exit means the feed this Mac sees is not offering the new version — report it with the script's last line; do not call the release done. Exit 0 proves only the CDN edge nearest this Mac; others can lag up to its 10-minute max-age.
 
 ### 8. Show result
 
