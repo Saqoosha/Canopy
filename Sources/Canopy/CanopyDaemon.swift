@@ -108,7 +108,7 @@ final class DaemonDelegate {
                 logger.notice("build \(onDisk, privacy: .public) is installed (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public)); waiting: \(hold, privacy: .public)")
             }
             // Confirmed only: a first sighting may still have the old executable at that path.
-            setWaitingForBuild(confirmedBuild)
+            setWaitingForBuild(confirmedBuild ?? waitingForBuild)
             return
         }
         performUpgradeRestart(to: onDisk)
@@ -326,8 +326,9 @@ final class DaemonDelegate {
         let since = lastListenAttempt.map { Date().timeIntervalSince($0) }
         let bound = server.boundAddress.map { "\($0.host):\($0.port)" }
         let pending = server.pendingAddress.map { "\($0.host):\($0.port)" }
-        if waitingForBuild != nil {
-            superviseRelay(server: server, host: host, port: port)
+        if let build = waitingForBuild,
+           MirrorRelay.installedBuildKnowsRelay(onDisk: build, launched: DaemonUpgrade.launchedBuild) {
+            superviseRelay(server: server, build: build, host: host, port: port)
             return
         }
         if relay.address != nil || server.relaySocketIsOpen { stopRelay() }
@@ -360,9 +361,7 @@ final class DaemonDelegate {
 
     /// `superviseListener` while an update waits: the relay holds the port, started from the
     /// binary now on disk, and new Tailscale clients arrive only through the relay socket.
-    private func superviseRelay(server: MirrorServer, host: String?, port: UInt16) {
-        guard let build = waitingForBuild,
-              MirrorRelay.installedBuildKnowsRelay(onDisk: build, launched: DaemonUpgrade.launchedBuild) else { return }
+    private func superviseRelay(server: MirrorServer, build: String, host: String?, port: UInt16) {
         guard let host else {
             guard missingTailscaleTicks >= Self.tailscaleGraceTicks else { return }
             stopRelay()
