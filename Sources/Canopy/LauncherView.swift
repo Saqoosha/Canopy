@@ -162,6 +162,8 @@ struct LauncherView: View {
     @State private var isResolvingRemoteSession = false
     @State private var remoteDirectory: String = "~"
     @State private var showRemoteBrowser = false
+    /// The other-Mac folder browser, separate from the SSH one's flag.
+    @State private var showPeerBrowser = false
     @State private var showCloneSheet = false
     @State private var updater = ExtensionUpdater()
 
@@ -928,6 +930,8 @@ struct LauncherView: View {
             } else {
                 Text(recents == nil ? "Loading…" : "No recent folders")
             }
+            Divider()
+            Button("Choose folder…") { showPeerBrowser = true }
         } label: {
             ChipLabel(
                 icon: "folder",
@@ -939,6 +943,11 @@ struct LauncherView: View {
         .fixedSize()
         .chipStyle()
         .help(peerFolder ?? "No folder chosen")
+        .sheet(isPresented: $showPeerBrowser) {
+            RemoteDirectoryBrowser(source: .peer(machineId: peer.machineId, title: peer.title)) { path in
+                peerFolder = path
+            }
+        }
     }
 
     /// That Mac's closed sessions, one section per project — the selected
