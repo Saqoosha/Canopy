@@ -1153,7 +1153,10 @@ final class SessionStore {
             return
         }
         session.isStopping = false
-        if session.connection.status == .stopping { session.connection.status = restore }
+        // A restart wait ended when `.stopping` replaced it, so that one comes back with Retry.
+        if session.connection.status == .stopping {
+            if case .awaitingRestart = restore { session.connection.status = .reconnectFailed } else { session.connection.status = restore }
+        }
         session.dropHeldByStop?()
         session.dropHeldByStop = nil
     }
@@ -1189,9 +1192,10 @@ final class SessionStore {
         Task { [weak self] in
             let failure = await Self.stopOnPeer(machineId: remote.machineId, machineName: remote.machineName,
                                                 key: remote.row.sessionId, resumeId: remote.sessionId)
-            // On success the row goes when that Mac's roster stops listing it.
+            // On success the id stays: the row goes when that Mac's roster stops listing it.
+            guard let failure else { return }
             self?.stoppingRemoteIds.remove(remote.sessionId)
-            if let failure { self?.remoteAttachError = "Could not stop the session. \(failure)" }
+            self?.remoteAttachError = "Could not stop the session. \(failure)"
         }
     }
 
