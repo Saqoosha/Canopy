@@ -35,7 +35,7 @@ English | [日本語](README.ja.md)
 - **Real-time streaming** — thinking, text, and tool use streamed live, with inline image previews for file reads and a live subagent activity list
 - **MacroPad** — optional USB key pad whose LEDs show each pane's activity and whose keys jump to it, so a session waiting on you is visible without looking at the screen. Drives over USB or over TCP from another Mac (firmware and printed case: [Canopy-MacroPad](https://github.com/Saqoosha/Canopy-MacroPad))
 - **Auto-update** — Sparkle with delta updates
-- **Keyboard shortcuts** — Cmd+N (new session), Cmd+O (open folder), Cmd+1–9 (focus pane), Cmd+Ctrl+1–9 (load the N-th session into the focused pane), Cmd+Shift+[ / ] (cycle the focused pane's session), Cmd+Opt+←/→ (move focus)
+- **Keyboard shortcuts** — Cmd+N (new session), Cmd+O (open folder), Cmd+1–9 (focus pane), Cmd+Ctrl+1–9 (load the N-th session into the focused pane), Cmd+Shift+[ / ] (cycle the focused pane's session), Cmd+Opt+←/→ (move focus), Cmd+W (close the focused pane; closing the last one returns to the launcher), Cmd+Opt+W (stop the focused pane's session), Cmd+Shift+W (close the window)
 - **Custom styles** — refined typography, code block styling, and syntax highlighting that polish the extension's UI for a native macOS feel
 
 ## Requirements

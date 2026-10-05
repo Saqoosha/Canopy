@@ -117,6 +117,18 @@ final class SessionStore {
         return panes[focusedPaneIndex]
     }
 
+    /// The session in the focused pane, nil for a launcher or no pane.
+    var focusedPaneSessionId: OpenSession.ID? {
+        if case .session(let id) = focusedPane?.content { return id }
+        return nil
+    }
+
+    /// File > Stop Session (Cmd+Opt+W): the X pull-down's Stop, for the focused pane.
+    func stopFocusedPaneSession() {
+        guard let id = focusedPaneSessionId else { return }
+        stopSession(id)
+    }
+
     func paneIndex(forSession id: OpenSession.ID) -> Int? {
         panes.firstIndex { if case .session(let sid) = $0.content { return sid == id } else { return false } }
     }
@@ -2679,6 +2691,17 @@ final class SessionStore {
         selection = .launcher
         schedulePaneResize()
         return true
+    }
+
+    /// Whether the pane at `index` offers a close X. A lone session pane
+    /// does: closing it empties the strip, which `Detail` renders as the
+    /// launcher. A lone launcher pane does not — closing it would land on
+    /// the same launcher.
+    func paneShowsCloseButton(at index: Int) -> Bool {
+        guard panes.indices.contains(index) else { return false }
+        if panes.count > 1 { return true }
+        if case .session = panes[index].content { return true }
+        return false
     }
 
     /// Close the pane at `index`. Focus shifts to the left neighbor (or 0

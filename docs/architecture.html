@@ -430,7 +430,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
     <div class="lifecycle">
       <div class="state"><span class="chip run">実行中・attach あり</span><p>shim が動いていて、少なくとも 1 つのクライアントが見ている。keep-alive がプロンプトキャッシュを温めるのはこの状態のセッションだけ。</p></div>
       <div class="state"><span class="chip det">実行中・attach なし</span><p>Cmd+W で閉じるのはペインで、セッションではない。デーモンの中で走り続け、全クライアントの Open 一覧に残る。</p></div>
-      <div class="state"><span class="chip stop">停止</span><p>Stop Session か reaper で止まる。reaper の条件は、クライアントなし、作業中でも質問中でもなく、許可待ちも背景タスクもない状態が 15 分。行は Recents に戻る。</p></div>
+      <div class="state"><span class="chip stop">停止</span><p>Stop Session（Cmd+Opt+W、またはペインの X 横のメニュー）か reaper で止まる。reaper の条件は、クライアントなし、作業中でも質問中でもなく、許可待ちも背景タスクもない状態が 15 分。行は Recents に戻る。</p></div>
       <div class="state"><span class="chip up">デーモン再起動</span><p>新しいビルドがディスクに来ても、失う作業がなくなるか、Restart now が押されるまで待つ。クライアントは attach し直し、セッションは transcript から再開する。</p></div>
     </div>
     <div class="note"><b>attach は resume を兼ねる。</b>デーモンが動かしていないセッションに <code>open</code> 付きの <code>attach</code> が来たら、デーモンはその場で resume する。だから「保存して終了」は shim の状態を持ち越さない。保存したセッションに attach し直せば resume される。</div>
