@@ -4297,15 +4297,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// The folders `handleOpenFile` may open from: the working directory, plus its main
-    /// checkout when that differs. Resolved once — the git call is per shim, not per click.
-    private lazy var openFileRoots: [URL] = {
+    /// checkout when the working directory is a linked worktree.
+    private var openFileRoots: [URL] {
         let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
         guard remoteHost == nil,
               let main = GitWorktree.mainCheckoutRoot(for: wd)?.standardizedFileURL.resolvingSymlinksInPath(),
               main != wd
         else { return [wd] }
         return [wd, main]
-    }()
+    }
 
     /// Handle open_file request from webview. By default shows the file in ContentViewer
     /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
