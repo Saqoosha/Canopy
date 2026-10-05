@@ -2441,6 +2441,39 @@ enum SidebarLogicProbe {
             record("daemon tcp: an out-of-range port yields no listener",
                    DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 0, bundleId: "sh.saqoo.Canopy") == nil
                        && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 65535, bundleId: "sh.saqoo.Canopy.debug") == nil)
+            do {
+                let args = MirrorRelay.Arguments(host: "100.64.0.1", port: 8770, socketPath: "/tmp/r.sock")
+                record("mirror relay: arguments parse back from a full argv",
+                       MirrorRelay.parse(["/x/Canopy"] + MirrorRelay.arguments(args)) == args)
+                record("mirror relay: a missing or zero port is refused",
+                       MirrorRelay.parse(["/x/Canopy", MirrorRelay.flag, "100.64.0.1", "0", "/tmp/r.sock"]) == nil
+                           && MirrorRelay.parse(["/x/Canopy", MirrorRelay.flag, "100.64.0.1", "8770"]) == nil)
+                let longPath = "/" + String(repeating: "a", count: DaemonPaths.maxSocketPathBytes)
+                record("mirror relay: a socket path Network would trap on is refused",
+                       MirrorRelay.parse(["/x/Canopy", MirrorRelay.flag, "100.64.0.1", "8770", longPath]) == nil
+                           && MirrorRelay.parse(["/x/Canopy", MirrorRelay.flag, "100.64.0.1", "8770",
+                                                 String(longPath.dropLast())]) != nil)
+                let home = URL(fileURLWithPath: "/Users/u")
+                record("daemon paths: the relay socket is never the same file as the local one",
+                       DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: home, suffix: ".relay")
+                           == "/Users/u/Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.relay.sock"
+                           && DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: home)
+                           == "/Users/u/Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.sock")
+                let longHome = URL(fileURLWithPath: "/Users/" + String(repeating: "x", count: 80))
+                let longRelay = DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: longHome, suffix: ".relay")
+                record("daemon paths: the temp-dir fallback keeps the relay suffix",
+                       longRelay.hasSuffix("canopy-sh.saqoo.Canopy.relay.sock")
+                           && longRelay != DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: longHome))
+                // Literal, not a round trip: an old daemon spawns a newer binary, so the order is a wire contract.
+                record("mirror relay: argv is flag, host, port, socket",
+                       MirrorRelay.arguments(args) == ["--mirror-relay", "100.64.0.1", "8770", "/tmp/r.sock"])
+                record("mirror relay: only a build at least as new as this one is trusted to know the flag",
+                       MirrorRelay.installedBuildKnowsRelay(onDisk: "159", launched: "158")
+                           && MirrorRelay.installedBuildKnowsRelay(onDisk: "158", launched: "158")
+                           && !MirrorRelay.installedBuildKnowsRelay(onDisk: "157", launched: "158")
+                           && !MirrorRelay.installedBuildKnowsRelay(onDisk: "1.2", launched: "158")
+                           && !MirrorRelay.installedBuildKnowsRelay(onDisk: "159", launched: nil))
+            }
             record("daemon agent: Release always registers",
                    DaemonRegistration.shouldRegister(isDebugBuild: false, environment: [:]))
             record("daemon agent: Debug registers only when asked",

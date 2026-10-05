@@ -72,6 +72,12 @@ final class DaemonDelegate {
     /// A pending build seen on two consecutive checks, so its copy has finished.
     private var confirmedBuild: String?
     private var lastUpgradeHold: String?
+    /// A build that replaced this process's binary on disk. While set, Tailscale clients come
+    /// in through `relay`: the firewall drops this process's inbound flows (see `MirrorRelay`).
+    private var waitingForBuild: String?
+    private let relay = MirrorRelayProcess()
+    private var lastRelayAttempt: Date?
+    private var failedRelayStarts = 0
 
     /// An app update replaced the binary under this process: tell attached panes, stop the
     /// sessions cleanly and exit non-zero so launchd starts the new build. Panes that got the
@@ -88,7 +94,10 @@ final class DaemonDelegate {
         let underLaunchd = Self.underLaunchd
         publishUpgradeState(pending: pending, holds: holds, underLaunchd: underLaunchd)
         confirmedBuild = pending != nil && pending == previousOnDiskBuild ? pending : nil
-        guard let onDisk = pending else { return }
+        guard let onDisk = pending else {
+            setWaitingForBuild(nil)
+            return
+        }
         guard DaemonUpgrade.shouldRestart(launchedBuild: DaemonUpgrade.launchedBuild, onDiskBuild: onDisk,
                                           previousOnDiskBuild: previousOnDiskBuild,
                                           underLaunchd: underLaunchd, blocked: !holds.isEmpty) else {
@@ -98,9 +107,19 @@ final class DaemonDelegate {
                 lastUpgradeHold = hold
                 logger.notice("build \(onDisk, privacy: .public) is installed (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public)); waiting: \(hold, privacy: .public)")
             }
+            // Confirmed only: a first sighting may still have the old executable at that path.
+            setWaitingForBuild(confirmedBuild ?? waitingForBuild)
             return
         }
         performUpgradeRestart(to: onDisk)
+    }
+
+    private func setWaitingForBuild(_ build: String?) {
+        guard build != waitingForBuild else { return }
+        waitingForBuild = build
+        lastRelayAttempt = nil
+        failedRelayStarts = 0
+        superviseListener()
     }
 
     private static var underLaunchd: Bool {
@@ -284,6 +303,7 @@ final class DaemonDelegate {
         tcpPort = wanted
         guard wanted != nil else {
             logger.notice("Mirror is off or has no password; Tailscale listener closed")
+            stopRelay()
             server.stopTCP()
             return
         }
@@ -306,6 +326,12 @@ final class DaemonDelegate {
         let since = lastListenAttempt.map { Date().timeIntervalSince($0) }
         let bound = server.boundAddress.map { "\($0.host):\($0.port)" }
         let pending = server.pendingAddress.map { "\($0.host):\($0.port)" }
+        if let build = waitingForBuild,
+           MirrorRelay.installedBuildKnowsRelay(onDisk: build, launched: DaemonUpgrade.launchedBuild) {
+            superviseRelay(server: server, build: build, host: host, port: port)
+            return
+        }
+        if relay.address != nil || server.relaySocketIsOpen { stopRelay() }
         switch Self.listenerAction(want: host.map { "\($0):\(port)" }, bound: bound, pending: pending,
                                    secondsSinceAttempt: since, retryAfter: Self.retryDelay(failedBinds: failedBinds)) {
         case .keep:
@@ -331,6 +357,38 @@ final class DaemonDelegate {
             }
             server.start(host: host, port: port)
         }
+    }
+
+    /// `superviseListener` while an update waits: the relay holds the port, started from the
+    /// binary now on disk, and new Tailscale clients arrive only through the relay socket.
+    private func superviseRelay(server: MirrorServer, build: String, host: String?, port: UInt16) {
+        guard let host else {
+            guard missingTailscaleTicks >= Self.tailscaleGraceTicks else { return }
+            stopRelay()
+            server.stopTCP()
+            MirrorServerStatus.shared.state = .noTailscale
+            return
+        }
+        if server.boundAddress != nil || server.pendingAddress != nil { server.closeTCPListener() }
+        guard server.startRelaySocket(path: DaemonPaths.relay) else { return }
+        if relay.isRunning {
+            failedRelayStarts = 0
+            if let address = relay.address, address.host == host, address.port == port, relay.build == build { return }
+        } else if let since = lastRelayAttempt.map({ Date().timeIntervalSince($0) }),
+                  since < Self.retryDelay(failedBinds: failedRelayStarts) {
+            return
+        }
+        guard let executable = Bundle.main.executableURL else { return }
+        if lastRelayAttempt != nil, !relay.isRunning { failedRelayStarts += 1 }
+        lastRelayAttempt = Date()
+        if relay.start(executable: executable, args: .init(host: host, port: port, socketPath: DaemonPaths.relay), build: build) {
+            MirrorServerStatus.shared.state = .listening(host: host, port: port)
+        }
+    }
+
+    private func stopRelay() {
+        relay.stop()
+        server?.stopRelaySocket()
     }
 
     private var missingTailscaleTicks = 0
@@ -391,6 +449,7 @@ final class DaemonDelegate {
         // Shims first: a replacement daemon may take the socket the moment it is gone, and must
         // not resume a transcript whose old CLI is still alive.
         for session in store.openSessions { session.shim?.stop() }
+        stopRelay()
         server?.stopTCP()
         server?.stopLocal()
     }

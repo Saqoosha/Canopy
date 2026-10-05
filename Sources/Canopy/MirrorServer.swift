@@ -93,6 +93,9 @@ final class MirrorServer {
     /// The daemon's local Unix socket, alongside the TCP `listener`.
     private var localListener: NWListener?
     private var localSocketPath: String?
+    /// Daemon only: where `MirrorRelay` hands over Tailscale clients while an update waits.
+    private var relayListener: NWListener?
+    private var relaySocketPath: String?
     /// The address the listener has actually reached `.ready` on; nil while binding or after a failure.
     private(set) var boundAddress: (host: String, port: UInt16)?
     /// The address a not-yet-ready listener is binding; a second start for it must not cancel the first.
@@ -205,9 +208,66 @@ final class MirrorServer {
         localListener = nil
         if let path = localSocketPath { try? FileManager.default.removeItem(atPath: path) }
         localSocketPath = nil
+        stopRelaySocket()
     }
 
-    /// Stops the TCP listener and its connections; local-socket clients stay.
+    /// Stops accepting on TCP but keeps the clients already connected: their flows were admitted
+    /// before an update replaced this binary, and new ones arrive through the relay instead.
+    func closeTCPListener() {
+        listener?.cancel()
+        listener = nil
+        boundAddress = nil
+        pendingAddress = nil
+    }
+
+    /// Opens the relay socket. Untrusted like TCP, so every password check applies.
+    @discardableResult
+    func startRelaySocket(path: String) -> Bool {
+        if relayListener != nil, relaySocketPath == path { return true }
+        stopRelaySocket()
+        try? FileManager.default.removeItem(atPath: path)
+        do {
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .unix(path: path)
+            let listener = try NWListener(using: parameters)
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                MainActor.assumeIsolated {
+                    guard let self, let listener, self.relayListener === listener else { return }
+                    switch state {
+                    case .ready:
+                        chmod(path, 0o600)
+                    case .waiting(let error), .failed(let error):
+                        logger.error("[mirror-server] relay socket cannot bind: \(error.localizedDescription, privacy: .public)")
+                        self.stopRelaySocket()
+                    default:
+                        break
+                    }
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                Task { @MainActor in self?.accept(connection, trustsPeer: false) }
+            }
+            listener.start(queue: .main)
+            relayListener = listener
+            relaySocketPath = path
+        } catch {
+            logger.error("[mirror-server] relay socket start failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+        return true
+    }
+
+    var relaySocketIsOpen: Bool { relayListener != nil }
+
+    /// Closes the relay socket; clients that came through it stay.
+    func stopRelaySocket() {
+        relayListener?.cancel()
+        relayListener = nil
+        if let path = relaySocketPath { try? FileManager.default.removeItem(atPath: path) }
+        relaySocketPath = nil
+    }
+
+    /// Stops the TCP listener and every untrusted connection (TCP and relay); local-socket clients stay.
     func stopTCP() {
         for connection in connections where !connection.trustsPeer {
             connection.cancelFromServer()

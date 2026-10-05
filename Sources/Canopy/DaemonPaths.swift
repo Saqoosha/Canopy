@@ -9,13 +9,13 @@ enum DaemonPaths {
     /// cap has to be enforced here rather than discovered at bind.
     static let maxSocketPathBytes = 103
 
-    static func socketPath(bundleId: String, home: URL) -> String {
+    static func socketPath(bundleId: String, home: URL, suffix: String = "") -> String {
         let preferred = home
             .appendingPathComponent("Library/Application Support/Canopy", isDirectory: true)
-            .appendingPathComponent("daemon-\(bundleId).sock").path
+            .appendingPathComponent("daemon-\(bundleId)\(suffix).sock").path
         if preferred.utf8.count <= maxSocketPathBytes { return preferred }
         // The per-user temp dir is 0700, so another account cannot plant a socket there first.
-        return (userTempDir() as NSString).appendingPathComponent("canopy-\(bundleId).sock")
+        return (userTempDir() as NSString).appendingPathComponent("canopy-\(bundleId)\(suffix).sock")
     }
 
     private static func userTempDir() -> String {
@@ -56,6 +56,12 @@ enum DaemonPaths {
             }
         }
         return result == 0 || (errno != ENOENT && errno != ECONNREFUSED)
+    }
+
+    /// Where `MirrorRelay` delivers Tailscale clients while an update waits. Untrusted, unlike `current`.
+    static var relay: String {
+        socketPath(bundleId: Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy",
+                   home: FileManager.default.homeDirectoryForCurrentUser, suffix: ".relay")
     }
 
     static var current: String {
