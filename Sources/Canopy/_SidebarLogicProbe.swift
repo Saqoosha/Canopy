@@ -2609,6 +2609,39 @@ enum SidebarLogicProbe {
                    { if case .remoteLive(let r) = sections[0].rows[0] { return r.activity == .idle } else { return false } }())
         }
 
+        // Stopping a session on another Mac, and the pane header's close controls. The
+        // round trip is measured on device; these are the pure decisions around it.
+        do {
+            let pending = OpenSession(origin: .mirror(machineId: "M", host: "100.64.0.9", port: 8770),
+                                      resumeId: "placeholder", title: "P", project: "x", status: .spawning)
+            let attached = OpenSession(origin: .mirror(machineId: "M", host: "100.64.0.9", port: 8770),
+                                       resumeId: "ra", title: "A", project: "x", status: .live)
+            attached.mirrorHostSessionId = "HOST-KEY"
+            let ssh = OpenSession(origin: .remote(host: "studio", path: URL(fileURLWithPath: "/tmp")),
+                                  resumeId: "rs", title: "S", project: "x", status: .live)
+            record("stop: an attached mirror can be stopped on its Mac", SessionStore.canStop(attached))
+            record("stop: a mirror not yet attached cannot, its id over there is unknown", !SessionStore.canStop(pending))
+            record("stop: an SSH remote session only closes", !SessionStore.canStop(ssh))
+            record("stop: a wrong password reads like the attach's",
+                   PeerControl.Failure.unreachable(refusal: "unauthorized").message(machineName: "studio")
+                       == SessionStore.mirrorFailureMessage(reason: "unauthorized", machineName: "studio"))
+            record("stop: another refusal is passed through",
+                   PeerControl.Failure.unreachable(refusal: "boom").message(machineName: "studio")
+                       == "studio refused the connection: boom")
+
+            for width: CGFloat in [SessionStore.paneMinDragWidth, 400, 1200] {
+                let close = PaneHeaderStrip.closeButtonHitRect(paneWidth: width)
+                let menu = PaneHeaderStrip.closeMenuHitRect(paneWidth: width)
+                let chevron = CGPoint(x: (menu.minX + width - PaneHeaderStrip.trailingPadding) / 2,
+                                      y: PaneHeaderStrip.height / 2)
+                record("close menu @\(Int(width)): the X glyph's centre still closes",
+                       !menu.contains(CGPoint(x: close.midX, y: close.midY)))
+                record("close menu @\(Int(width)): the chevron's centre opens the menu", menu.contains(chevron))
+                record("close menu @\(Int(width)): stays inside the pane and the strip",
+                       menu.maxX <= width && menu.minY >= 0 && menu.maxY <= PaneHeaderStrip.height)
+            }
+        }
+
         // Attaching to a remote session. Pure decisions only; the socket is
         // measured on device.
         do {

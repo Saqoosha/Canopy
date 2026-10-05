@@ -45,6 +45,8 @@ final class ControlClient {
 
     private let endpoint: MirrorEndpoint
     private let token: String?
+    /// Off for a one-shot request, which disconnects before any push could matter.
+    private let subscribes: Bool
     private var connection: NWConnection?
     private var buffer = NDJSONLineBuffer(acceptsCompressed: true)
     private var correlator = Correlator()
@@ -55,9 +57,10 @@ final class ControlClient {
     /// What the server said when it last refused `hello` (a wrong password, say).
     private(set) var lastRefusal: String?
 
-    init(endpoint: MirrorEndpoint, token: String?) {
+    init(endpoint: MirrorEndpoint, token: String?, subscribes: Bool = true) {
         self.endpoint = endpoint
         self.token = token
+        self.subscribes = subscribes
     }
 
     func start() {
@@ -198,6 +201,7 @@ final class ControlClient {
             } else {
                 logger.notice("control connection ready")
             }
+            guard subscribes else { return }
             Task { [weak self] in
                 guard let self else { return }
                 if case .failure(let failure) = await self.request("subscribe") {

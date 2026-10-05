@@ -14,7 +14,7 @@ struct ConnectionOverlayView: View {
 
                 VStack(spacing: 16) {
                     statusIcon
-                    Text(title)
+                    Text(connectionState.status == .stopping ? "Stopping Session" : title)
                         .font(.headline)
                         .foregroundStyle(.white)
                     Text(connectionState.statusMessage)
@@ -47,7 +47,7 @@ struct ConnectionOverlayView: View {
         switch connectionState.status {
         case .connected:
             EmptyView()
-        case .reconnecting, .awaitingRestart:
+        case .reconnecting, .awaitingRestart, .stopping:
             ProgressView()
                 .controlSize(.large)
                 .tint(.white)

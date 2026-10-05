@@ -793,7 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let localPoint = hit.local
             let clickYFromTop = localPoint.y
 
-            // Close X first: it lives in the pane header, which macOS 26
+            // Close controls first (chevron, then X): they live in the pane header, which macOS 26
             // covers with the detail column's scroll-edge BackdropView
             // (see PaneHeaderStrip's doc for what that band was and was
             // not measured to do). Hit-test it here instead and consume
@@ -831,6 +831,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `panes.count > 1` mirrors `PaneHeaderStrip`'s
             // `showCloseButton`: hit-testing an X that is not drawn
             // would close the only pane from blank header space.
+            // The close-options chevron overlaps the X's right slop, so it is
+            // tested first. Anchored under the chevron's own rect, in screen
+            // coordinates for `popUp(... in: nil)`.
+            let menuRect = PaneHeaderStrip.closeMenuHitRect(paneWidth: paneW)
+            if store.panes.count > 1, menuRect.contains(localPoint), let window = event.window {
+                let contentHeight = window.contentView?.bounds.height ?? window.frame.height
+                let anchorInWindow = CGPoint(x: event.locationInWindow.x - localPoint.x + menuRect.minX,
+                                             y: contentHeight - menuRect.maxY)
+                if index != store.focusedPaneIndex {
+                    store.setFocusedPaneIndex(index)
+                }
+                if PaneHeaderMenu.showCloseOptions(store: store, paneIndex: index,
+                                                   at: window.convertPoint(toScreen: anchorInWindow)) {
+                    return nil
+                }
+            }
             if store.panes.count > 1,
                PaneHeaderStrip.closeButtonHitRect(paneWidth: paneW).contains(localPoint) {
                 // notice, not debug: this is the only record that the
