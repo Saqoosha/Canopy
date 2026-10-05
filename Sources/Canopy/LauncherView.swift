@@ -1828,9 +1828,10 @@ struct LauncherView: View {
                 permissionMode: resolvedPermission,
                 promptText: prompt.flatMap { $0.text.isEmpty ? nil : $0.text },
                 promptImages: prompt?.images.map(\.wire) ?? [])
-            store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder, options: options,
-                                   target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused)
-            clearPendingPrompt()
+            if store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder, options: options,
+                                      target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused) {
+                clearPendingPrompt()
+            }
             return
         }
         let selectedModel = model.isEmpty ? nil : model

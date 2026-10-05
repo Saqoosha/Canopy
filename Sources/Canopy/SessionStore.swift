@@ -296,11 +296,14 @@ final class SessionStore {
     }
 
     /// A new session in one of another Mac's recent folders, attached here.
-    func openRemoteFolder(machineId: String, machineName: String, path: String, options: NewSessionOptions, target: PaneTarget) {
-        guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return }
+    /// False when refused before attaching, so the caller keeps the prompt.
+    @discardableResult
+    func openRemoteFolder(machineId: String, machineName: String, path: String, options: NewSessionOptions, target: PaneTarget) -> Bool {
+        guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return false }
         let name = (path as NSString).lastPathComponent
         attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: UUID().uuidString,
                          title: "Untitled", project: name, open: .new(cwd: path, options: options), target: target)
+        return true
     }
 
     /// True when the attach may go ahead; otherwise records why for the sidebar banner.
@@ -338,7 +341,7 @@ final class SessionStore {
         session.pendingMirrorOpen = open
         openSessions.append(session)
         focusOrPane(session.id, target: target)
-        logger.notice("attachMirrorPane: attaching \(resumeId, privacy: .public) on \(machineId, privacy: .public) open=\(String(describing: open), privacy: .public)")
+        logger.notice("attachMirrorPane: attaching \(resumeId, privacy: .public) on \(machineId, privacy: .public) open=\(open.map { $0.wire["kind"] as? String ?? "?" } ?? "nil", privacy: .public)")
     }
 
     /// Other Macs' closed sessions and recent folders, by machine id, as their
