@@ -107,7 +107,8 @@ final class DaemonDelegate {
                 lastUpgradeHold = hold
                 logger.notice("build \(onDisk, privacy: .public) is installed (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public)); waiting: \(hold, privacy: .public)")
             }
-            setWaitingForBuild(onDisk)
+            // Confirmed only: a first sighting may still have the old executable at that path.
+            setWaitingForBuild(confirmedBuild)
             return
         }
         performUpgradeRestart(to: onDisk)
