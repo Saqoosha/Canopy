@@ -67,7 +67,7 @@ RUN_ID=$(await_run 0) && rc=0 || rc=$?
 if [[ $rc -eq 1 ]]; then
   echo "No Pages build started for ${SHA:0:7}"
   request_build
-  RUN_ID=$(await_run 0) || die "no Pages build started after requesting one"
+  RUN_ID=$(await_run 0) || { [[ $? -eq 2 ]] && exit 2; die "no Pages build started after requesting one"; }
 fi
 
 echo "Watching Pages run ${RUN_ID}"
@@ -76,7 +76,7 @@ if [[ "$CONCLUSION" != "success" ]]; then
   echo "Pages run ${RUN_ID} ended ${CONCLUSION}: https://github.com/${REPO}/actions/runs/${RUN_ID}"
   request_build
   FIRST="$RUN_ID"
-  RUN_ID=$(await_run "$FIRST") || die "no new Pages build started after requesting one"
+  RUN_ID=$(await_run "$FIRST") || { [[ $? -eq 2 ]] && exit 2; die "no new Pages build started after requesting one"; }
   echo "Watching Pages run ${RUN_ID}"
   CONCLUSION=$(await_conclusion "$RUN_ID")
   [[ "$CONCLUSION" == "success" ]] \
