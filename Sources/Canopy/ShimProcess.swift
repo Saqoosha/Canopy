@@ -4296,15 +4296,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ])
     }
 
-    /// The folders `handleOpenFile` may open from: the working directory, plus its main
-    /// checkout when the working directory is a linked worktree.
-    private var openFileRoots: [URL] {
+    /// Whether `handleOpenFile` may open `resolved`: under the working directory, or under
+    /// its main checkout when the working directory is a linked worktree (git only on a miss).
+    private func isOpenFileAllowed(_ resolved: URL) -> Bool {
+        func isUnder(_ root: URL) -> Bool {
+            resolved.path.hasPrefix(root.path + "/") || resolved.path == root.path
+        }
         let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        if isUnder(wd) { return true }
         guard remoteHost == nil,
-              let main = GitWorktree.mainCheckoutRoot(for: wd)?.standardizedFileURL.resolvingSymlinksInPath(),
-              main != wd
-        else { return [wd] }
-        return [wd, main]
+              let main = GitWorktree.mainCheckoutRoot(for: wd)?.standardizedFileURL.resolvingSymlinksInPath()
+        else { return false }
+        return isUnder(main)
     }
 
     /// Handle open_file request from webview. By default shows the file in ContentViewer
@@ -4337,10 +4340,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // session in a worktree, under the main checkout it came from, where gitignored
             // outputs like `build/` live (prevent path traversal)
             let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
-            let contained = openFileRoots.contains { root in
-                resolved.path.hasPrefix(root.path + "/") || resolved.path == root.path
-            }
-            guard contained else {
+            guard isOpenFileAllowed(resolved) else {
                 logger.warning("handleOpenFile: path traversal blocked: \(resolved.path, privacy: .public)")
                 if let requestId {
                     sendToWebView([
