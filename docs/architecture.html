@@ -471,6 +471,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <ul class="plain">
           <li>Sparkle がアプリを差し替える。デーモンはディスク上の新しいビルドに気づき、再起動を止めているものを数える。たとえば走っているターン、答え待ちの質問、背景タスク、未送信のプロンプト、自分で attach し直せないクライアント。</li>
           <li>止めるものがなくなったら、デーモンは <code>daemon_restarting</code> を送り、shim を止めて exit 1 する。launchd が新しいビルドを起動する。</li>
+          <li>待っている間、Tailscale のポートは新しいビルドから起動した <code>Canopy --mirror-relay</code> が持ち、デーモンの relay ソケットへバイト列を中継する。差し替えられた古いデーモンには macOS のファイアウォールがパスを引けず、受信をすべて捨てるため。relay ソケットは TCP と同じくパスワードを要求する。</li>
           <li>サイドバーの下端に、待っている更新と、それを止めているセッションと、Restart now ボタンが出る。古い Claude Code 拡張機能のまま動いているセッションも並び、個別に Restart できる。</li>
         </ul>
       </div>
@@ -524,7 +525,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <li><code>CanopyDaemon</code> run loop と終了処理</li>
         <li><code>DaemonSupervisor</code>、<code>DaemonRegistration</code></li>
         <li><code>DaemonPaths</code>、<code>DaemonConfig</code></li>
-        <li><code>DaemonUpgrade</code>、<code>DaemonUpgradeCenter</code></li>
+        <li><code>DaemonUpgrade</code>、<code>DaemonUpgradeCenter</code>、<code>MirrorRelay</code></li>
         <li><code>SessionReaper</code>、<code>DaemonReaper</code></li>
       </ul></div>
       <div><h3>プロトコル</h3><ul>

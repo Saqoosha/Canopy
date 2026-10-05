@@ -10,6 +10,8 @@ enum CanopyMain {
         MainActor.assumeIsolated {
             if CommandLine.arguments.contains("--unregister-daemon") {
                 DaemonRegistration.unregisterAndExit()
+            } else if CommandLine.arguments.contains(MirrorRelay.flag) {
+                MirrorRelay.run(argv: CommandLine.arguments)
             } else if CommandLine.arguments.contains("--daemon") {
                 CanopyDaemon.run()
             } else {

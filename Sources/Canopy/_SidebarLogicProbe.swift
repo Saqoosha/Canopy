@@ -2441,6 +2441,25 @@ enum SidebarLogicProbe {
             record("daemon tcp: an out-of-range port yields no listener",
                    DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 0, bundleId: "sh.saqoo.Canopy") == nil
                        && DaemonPaths.tcpPort(mirrorEnabled: true, basePort: 65535, bundleId: "sh.saqoo.Canopy.debug") == nil)
+            do {
+                let args = MirrorRelay.Arguments(host: "100.64.0.1", port: 8770, socketPath: "/tmp/r.sock")
+                record("mirror relay: arguments parse back from a full argv",
+                       MirrorRelay.parse(["/x/Canopy"] + MirrorRelay.arguments(args)) == args)
+                record("mirror relay: a missing or zero port is refused",
+                       MirrorRelay.parse(["/x/Canopy", MirrorRelay.flag, "100.64.0.1", "0", "/tmp/r.sock"]) == nil
+                           && MirrorRelay.parse(["/x/Canopy", MirrorRelay.flag, "100.64.0.1", "8770"]) == nil)
+                let longPath = "/" + String(repeating: "a", count: DaemonPaths.maxSocketPathBytes)
+                record("mirror relay: a socket path Network would trap on is refused",
+                       MirrorRelay.parse(["/x/Canopy", MirrorRelay.flag, "100.64.0.1", "8770", longPath]) == nil
+                           && MirrorRelay.parse(["/x/Canopy", MirrorRelay.flag, "100.64.0.1", "8770",
+                                                 String(longPath.dropLast())]) != nil)
+                let home = URL(fileURLWithPath: "/Users/u")
+                record("daemon paths: the relay socket is beside the local one, never the same file",
+                       DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: home, suffix: ".relay")
+                           == "/Users/u/Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.relay.sock"
+                           && DaemonPaths.socketPath(bundleId: "sh.saqoo.Canopy", home: home)
+                           == "/Users/u/Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.sock")
+            }
             record("daemon agent: Release always registers",
                    DaemonRegistration.shouldRegister(isDebugBuild: false, environment: [:]))
             record("daemon agent: Debug registers only when asked",
