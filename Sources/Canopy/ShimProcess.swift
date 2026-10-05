@@ -4296,6 +4296,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ])
     }
 
+    /// Whether `handleOpenFile` may open `resolved`: under the working directory, or under
+    /// its main checkout when the working directory is a linked worktree (git only on a miss).
+    private func isOpenFileAllowed(_ resolved: URL) -> Bool {
+        func isUnder(_ root: URL) -> Bool {
+            resolved.path.hasPrefix(root.path + "/") || resolved.path == root.path
+        }
+        let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        if isUnder(wd) { return true }
+        guard remoteHost == nil,
+              let main = GitWorktree.mainCheckoutRoot(for: wd)?.standardizedFileURL.resolvingSymlinksInPath()
+        else { return false }
+        return isUnder(main)
+    }
+
     /// Handle open_file request from webview. By default shows the file in ContentViewer
     /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
     /// When `openExternal` is true (set by Cmd-click), opens in the macOS default app.
@@ -4322,10 +4336,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             } else {
                 url = workingDirectory.appendingPathComponent(filePath)
             }
-            // Resolve symlinks and ensure the file is under the working directory (prevent path traversal)
+            // Resolve symlinks and ensure the file is under the working directory — or, for a
+            // session in a worktree, under the main checkout it came from, where gitignored
+            // outputs like `build/` live (prevent path traversal)
             let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
-            let wdResolved = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
-            guard resolved.path.hasPrefix(wdResolved.path + "/") || resolved.path == wdResolved.path else {
+            guard isOpenFileAllowed(resolved) else {
                 logger.warning("handleOpenFile: path traversal blocked: \(resolved.path, privacy: .public)")
                 if let requestId {
                     sendToWebView([

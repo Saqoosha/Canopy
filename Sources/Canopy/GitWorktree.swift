@@ -670,6 +670,28 @@ enum GitWorktree {
         return name
     }
 
+    /// The main checkout a directory's repository lives in — for a linked
+    /// worktree, the checkout it was added from, wherever the worktree sits.
+    /// Read off `--git-common-dir` rather than the path shape, so it holds for
+    /// every layout `worktreeParts` knows and for ones it does not. Nil when
+    /// `dir` is not in a linked worktree (a main checkout or a subfolder of one
+    /// has its own git dir as the common dir), or when the common dir is not a
+    /// `.git` folder (a bare repository has no checkout to name).
+    static func mainCheckoutRoot(for dir: URL, timeout: TimeInterval = 5) -> URL? {
+        guard let result = try? runCommand(
+            "/usr/bin/git",
+            ["-C", dir.path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+            timeout: timeout,
+            wantsStdout: true
+        ), result.status == 0 else { return nil }
+        let lines = String(decoding: result.stdout, as: UTF8.self)
+            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard lines.count == 2, !lines[1].isEmpty, lines[0] != lines[1] else { return nil }
+        let common = URL(fileURLWithPath: lines[1])
+        guard common.lastPathComponent == ".git" else { return nil }
+        return common.deletingLastPathComponent()
+    }
+
     // MARK: - Seeding a fresh worktree (probe-reachable helpers)
 
     /// A fresh worktree contains only tracked files, so **it usually cannot
