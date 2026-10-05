@@ -4376,9 +4376,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // to the watcher instead; the script's own fallback is this
                 // branch's old behaviour.
                 if let requestId, case .mirror(let key)? = requestOwners[requestId],
-                   let sink = mirrors[key]?.sink, sink.acceptsFileTransfers, !sink.isLocalClient
+                   let sink = mirrors[key]?.sink, sink.acceptsClickedFiles, !sink.isLocalClient
                 {
-                    logger.notice("handleOpenFile: shipping to the watching Mac")
+                    logger.notice("handleOpenFile: shipping to the client that clicked")
                     if !MirrorFileSender.send(path: resolved.path, to: sink) {
                         NSWorkspace.shared.open(resolved)
                     }

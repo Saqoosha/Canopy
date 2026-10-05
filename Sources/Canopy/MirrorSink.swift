@@ -15,10 +15,15 @@ protocol MirrorSink: AnyObject {
     /// phone cannot run `open`, and the session's own webview is already here.
     var openRedirectHost: String? { get }
 
-    /// Whether `MirrorFileWire` frames may be sent to this client. Only a Mac:
-    /// the phone has nowhere to put a file and would post the frames into its
-    /// page.
+    /// Whether this client takes the session's `open` redirect as
+    /// `MirrorFileWire` frames. Only a Mac: the phone has no `open` to stand in for.
     var acceptsFileTransfers: Bool { get }
+
+    /// Whether a file this client itself clicked may come back to it as
+    /// `MirrorFileWire` frames: any client that asked (`"files": true`), the
+    /// phone included. Narrower than `acceptsFileTransfers`, which also takes
+    /// the session's `open` redirect.
+    var acceptsClickedFiles: Bool { get }
 
     /// A Mac's Canopy that asked for UI frames at attach (`"ui": true`).
     var acceptsUI: Bool { get }
@@ -37,6 +42,7 @@ protocol MirrorSink: AnyObject {
 extension MirrorSink {
     var openRedirectHost: String? { nil }
     var acceptsFileTransfers: Bool { false }
+    var acceptsClickedFiles: Bool { false }
     var acceptsUI: Bool { false }
     var isLocalClient: Bool { false }
     var reattachesAfterRestart: Bool { false }

@@ -335,6 +335,7 @@ final class MirrorConnection: MirrorSink {
     /// they did before 2.43.
     private var filesRequested = false
     var acceptsFileTransfers: Bool { isMacClient && filesRequested }
+    var acceptsClickedFiles: Bool { filesRequested }
 
     var openRedirectHost: String? {
         guard isMacClient, case .hostPort(let host, _) = connection.endpoint else { return nil }
