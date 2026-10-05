@@ -237,6 +237,7 @@ struct MirrorPaneView: NSViewRepresentable {
             guard let session else { return }
             MirrorStatusFrame.apply(frame, to: session.statusBar)
         }
+        let ownAccountFromThisMac = session.isDaemonHosted
         bridge.onUsage = { [weak bridge] frame in
             guard let bridge else { return }
             // Assigned even when nil, so an origin that moved to this Mac's account drops its block.
@@ -244,10 +245,9 @@ struct MirrorPaneView: NSViewRepresentable {
             guard let rateLimits = frame["rate_limits"] as? [String: Any] else { return }
             if let key = bridge.usageKey {
                 SharedRateLimitData.shared.account(for: key).updateFromRawUsage(rateLimits)
-            } else if MirrorUsageFrame.isUsageFrame(frame) {
-                // This Mac's own account. The GUI fetches it only once at launch — the shims,
-                // and the daemon's 10-minute refresh, live in canopyd — so without this the
-                // sidebar froze at launch-time numbers and a model row vanished at its reset.
+            } else if ownAccountFromThisMac, MirrorUsageFrame.isUsageFrame(frame) {
+                // This Mac's own account, from this Mac's daemon only (another Mac's cache can be older).
+                // The GUI fetches it just once at launch; the shims and the 10-minute refresh live in canopyd.
                 SharedRateLimitData.shared.local.updateFromRawUsage(rateLimits)
             }
         }
