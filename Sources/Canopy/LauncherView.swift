@@ -950,6 +950,13 @@ struct LauncherView: View {
         let sessions = (store.remoteRecents[peer.machineId]?.sessions ?? []).filter { !attached.contains($0.id) }
         let groups = Self.peerSessionGroups(sessions, preferring: peerFolder.map { ($0 as NSString).lastPathComponent })
         return Menu {
+            // The launch default, spelled out the way `continueChip` spells
+            // it: without this row the chip offered only Resume, and a new
+            // session on the other Mac read as impossible — it is the send
+            // button, which this row only names.
+            Section {
+                Label("New session — start with the send button", systemImage: "checkmark")
+            }
             if sessions.isEmpty {
                 Text(store.remoteRecentsError[peer.machineId]
                      ?? (store.remoteRecents[peer.machineId] == nil ? "Loading…" : "No closed sessions"))
@@ -967,7 +974,7 @@ struct LauncherView: View {
                 }
             }
         } label: {
-            ChipLabel(icon: "arrow.uturn.backward", text: "Resume…", muted: true)
+            ChipLabel(icon: "plus.bubble", text: "New session", muted: true)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
