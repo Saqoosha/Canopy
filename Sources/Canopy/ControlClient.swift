@@ -51,6 +51,9 @@ final class ControlClient {
     private var waiters: [String: CheckedContinuation<Result<[String: Any], Failure>, Never>] = [:]
     private var ready = false
     private var stopped = false
+    private var readyWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
+    /// What the server said when it last refused `hello` (a wrong password, say).
+    private(set) var lastRefusal: String?
 
     init(endpoint: MirrorEndpoint, token: String?) {
         self.endpoint = endpoint
@@ -68,6 +71,27 @@ final class ControlClient {
         connection = nil
         ready = false
         failPending()
+        resumeReadyWaiters(false)
+    }
+
+    /// True once `hello` is accepted; false on a refusal, `stop()`, or `timeout`.
+    func waitUntilReady(timeout: Duration = requestTimeout) async -> Bool {
+        if ready { return true }
+        if stopped { return false }
+        let id = UUID()
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            self?.readyWaiters.removeValue(forKey: id)?.resume(returning: false)
+        }
+        defer { timer.cancel() }
+        return await withCheckedContinuation { readyWaiters[id] = $0 }
+    }
+
+    private func resumeReadyWaiters(_ value: Bool) {
+        let waiters = readyWaiters.values
+        readyWaiters.removeAll()
+        waiters.forEach { $0.resume(returning: value) }
     }
 
     func request(_ verb: String, _ params: [String: Any] = [:]) async -> Result<[String: Any], Failure> {
@@ -94,6 +118,7 @@ final class ControlClient {
     private func connect() {
         guard !stopped else { return }
         buffer = NDJSONLineBuffer(acceptsCompressed: true)
+        lastRefusal = nil
         let connection = NWConnection(to: endpoint.nwEndpoint, using: endpoint.parameters)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in
@@ -165,6 +190,8 @@ final class ControlClient {
         switch dict["type"] as? String {
         case "hello_ok":
             ready = true
+            lastRefusal = nil
+            resumeReadyWaiters(true)
             let daemonBuild = (dict["build"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "unknown (older daemon)"
             if let own = DaemonUpgrade.launchedBuild, daemonBuild != own {
                 logger.notice("control connection ready; daemon runs build \(daemonBuild, privacy: .public), this app \(own, privacy: .public)")
@@ -178,7 +205,9 @@ final class ControlClient {
                 }
             }
         case "hello_error":
+            lastRefusal = dict["message"] as? String ?? "refused"
             logger.error("daemon refused hello: \(dict["message"] as? String ?? "?", privacy: .public)")
+            resumeReadyWaiters(false)
             connection?.cancel()
         case "session_state":
             let (rows, complete) = Self.parseSessionState(dict)

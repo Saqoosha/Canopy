@@ -3,10 +3,25 @@ import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "RemoteDirectoryBrowser")
 
-/// SSH-backed remote directory browser, presented as a sheet.
+/// A folder browser for another machine, presented as a sheet: over SSH, or
+/// through a paired Mac's server (`browse_dir` / `mkdir`, the verbs the phone uses).
 struct RemoteDirectoryBrowser: View {
-    let sshHost: String
+    enum Source {
+        case ssh(host: String)
+        case peer(machineId: String, title: String)
+    }
+
+    let source: Source
     var onSelect: (String) -> Void
+
+    init(sshHost: String, onSelect: @escaping (String) -> Void) {
+        self.init(source: .ssh(host: sshHost), onSelect: onSelect)
+    }
+
+    init(source: Source, onSelect: @escaping (String) -> Void) {
+        self.source = source
+        self.onSelect = onSelect
+    }
 
     @Environment(\.dismiss) private var dismiss
 
@@ -24,6 +39,7 @@ struct RemoteDirectoryBrowser: View {
     // Off by default, like Finder and `NSOpenPanel`. Remembered across
     // sheets because a person who wants dotfiles wants them every time.
     @AppStorage("canopy.remoteBrowserShowHidden") private var showHidden = false
+    @State private var peerConnection = PeerDirectoryConnection()
 
     struct DirEntry: Identifiable, Hashable {
         let id = UUID()
@@ -35,9 +51,9 @@ struct RemoteDirectoryBrowser: View {
         VStack(spacing: 0) {
             // Title
             HStack {
-                Image(systemName: "network")
+                Image(systemName: sourceIcon)
                     .foregroundStyle(.secondary)
-                Text("Browse \(sshHost)")
+                Text("Browse \(sourceName)")
                     .font(.headline)
                 Spacer()
             }
@@ -167,15 +183,34 @@ struct RemoteDirectoryBrowser: View {
                         dismiss()
                     }
                     .keyboardShortcut(.defaultAction)
-                    // `currentPath` is still the previous folder until a listing lands.
-                    .disabled(isLoading)
+                    // `currentPath` is still the previous folder until a listing lands;
+                    // a peer refuses a session in "~", which only ssh expands.
+                    .disabled(isLoading || (isPeer && !currentPath.hasPrefix("/")))
                 }
             }
             .padding()
         }
         .frame(width: 500, height: 450)
-        .onAppear { navigateTo("~") }
+        .onAppear {
+            if case .peer(let machineId, _) = source { peerConnection.connect(machineId: machineId) }
+            navigateTo("~")
+        }
+        .onDisappear { peerConnection.close() }
     }
+
+    private var sourceName: String {
+        switch source {
+        case .ssh(let host): host
+        case .peer(_, let title): title
+        }
+    }
+
+    private var isPeer: Bool {
+        if case .peer = source { return true }
+        return false
+    }
+
+    private var sourceIcon: String { isPeer ? "desktopcomputer" : "network" }
 
     private func navigateTo(_ path: String) {
         isLoading = true
@@ -222,16 +257,22 @@ struct RemoteDirectoryBrowser: View {
         errorMessage = nil
         Task {
             do {
-                // `--`: a name starting with "-" is a folder, not an option.
-                _ = try await runSSH(args: ["-T", "-o", "ConnectTimeout=10", sshHost,
-                                            "mkdir", "--", shellEscape(target)])
-                logger.notice("created remote folder \(target, privacy: .private) on \(sshHost, privacy: .public)")
+                var created = target
+                switch source {
+                case .ssh(let host):
+                    // `--`: a name starting with "-" is a folder, not an option.
+                    _ = try await runSSH(args: ["-T", "-o", "ConnectTimeout=10", host,
+                                                "mkdir", "--", shellEscape(target)])
+                case .peer:
+                    created = try await peerConnection.mkdir(parent: currentPath, name: name).get()
+                }
+                logger.notice("created remote folder \(target, privacy: .private) on \(sourceName, privacy: .public)")
                 guard creationID == folderCreationID else { return }
                 mkdirInFlight = false
                 cancelCreatingFolder()
-                navigateTo(target)
+                navigateTo(created)
             } catch {
-                logger.error("mkdir failed on \(sshHost, privacy: .public): \(error.localizedDescription, privacy: .private)")
+                logger.error("mkdir failed on \(sourceName, privacy: .public): \(error.localizedDescription, privacy: .private)")
                 guard creationID == folderCreationID else { return }
                 mkdirInFlight = false
                 errorMessage = error.localizedDescription
@@ -250,6 +291,7 @@ struct RemoteDirectoryBrowser: View {
     }
 
     private func listRemoteDirectory(path: String) async -> Result<(String, [DirEntry]), any Error> {
+        guard case .ssh(let sshHost) = source else { return await peerConnection.list(path: path) }
         let safePath: String
         if path == "~" {
             safePath = "~"
@@ -365,9 +407,112 @@ enum RemoteDirectoryRules {
         directory.hasSuffix("/") ? "\(directory)\(name)" : "\(directory)/\(name)"
     }
 
+    /// Drops ".", "..", empty components and trailing slashes from an absolute
+    /// path, since a peer echoes back the path it was asked for (ssh answers
+    /// with `pwd`). Symlinks are left alone. Anything not absolute is returned
+    /// unchanged for the server to refuse.
+    static func normalizedAbsolute(_ path: String) -> String {
+        guard path.hasPrefix("/") else { return path }
+        var parts: [Substring] = []
+        for part in path.split(separator: "/") {
+            switch part {
+            case ".": continue
+            case "..": _ = parts.popLast()
+            default: parts.append(part)
+            }
+        }
+        return "/" + parts.joined(separator: "/")
+    }
+
     /// Client side, on the name only, so toggling never re-runs ssh.
     static func visibleEntries(_ entries: [RemoteDirectoryBrowser.DirEntry],
                                showHidden: Bool) -> [RemoteDirectoryBrowser.DirEntry] {
         showHidden ? entries : entries.filter { !$0.name.hasPrefix(".") }
+    }
+}
+
+/// The control connection a peer browser lists and creates folders through.
+/// TCP with the pairing password, like `refreshRemoteRecents`; opened with the
+/// sheet and closed with it.
+@MainActor
+final class PeerDirectoryConnection {
+    private var client: ControlClient?
+    private var connectError: String?
+    /// That Mac's home folder, learned from the first listing, so "~/x" can be
+    /// sent as the absolute path the server requires.
+    private var home: String?
+
+    func connect(machineId: String) {
+        guard client == nil else { return }
+        guard let address = CanopySettings.shared.mirrorPeers[machineId],
+              let hostPort = MirrorAccess.parseHostPort(address),
+              let token = MirrorAccess.peerToken(machineId: machineId) else {
+            connectError = "Paste its connection in Settings › Remote first"
+            return
+        }
+        let client = ControlClient(endpoint: .tcp(host: hostPort.host, port: hostPort.port), token: token)
+        self.client = client
+        client.start()
+    }
+
+    func close() {
+        client?.stop()
+        client = nil
+    }
+
+    func list(path: String) async -> Result<(String, [RemoteDirectoryBrowser.DirEntry]), any Error> {
+        var params: [String: Any] = ["showHidden": true]  // the sheet filters hidden names itself
+        if path.hasPrefix("~/"), home == nil, case .failure(let error) = await list(path: "~") {
+            return .failure(error)
+        }
+        if path == "~" {
+            // No path: the server lists its own home.
+        } else if path.hasPrefix("~/"), let home {
+            params["path"] = RemoteDirectoryRules.normalizedAbsolute(home + "/" + path.dropFirst(2))
+        } else {
+            params["path"] = RemoteDirectoryRules.normalizedAbsolute(path)
+        }
+        return await request("browse_dir", params).flatMap { result in
+            guard let resolved = result["path"] as? String, let raw = result["entries"] as? [[String: Any]] else {
+                return .failure(Self.error("Unexpected reply from that Mac"))
+            }
+            if path == "~" { home = resolved }
+            let entries = raw.compactMap { entry -> RemoteDirectoryBrowser.DirEntry? in
+                guard let name = entry["name"] as? String else { return nil }
+                return RemoteDirectoryBrowser.DirEntry(name: name, isDirectory: entry["isDirectory"] as? Bool == true)
+            }
+            return .success((resolved, entries))
+        }
+    }
+
+    func mkdir(parent: String, name: String) async -> Result<String, any Error> {
+        await request("mkdir", ["parent": parent, "name": name]).flatMap { result in
+            guard let path = result["path"] as? String else { return .failure(Self.error("Unexpected reply from that Mac")) }
+            return .success(path)
+        }
+    }
+
+    private func request(_ verb: String, _ params: [String: Any]) async -> Result<[String: Any], any Error> {
+        guard let client else { return .failure(Self.error(connectError ?? "Not connected")) }
+        guard await client.waitUntilReady() else {
+            // A refusal repeats on every reconnect with the same password; stop retrying.
+            if client.lastRefusal != nil { client.stop() }
+            let message = switch client.lastRefusal {
+            case "unauthorized"?: "Password rejected"
+            case let refusal?: refusal
+            case nil: "Not reachable (is its live mirror on?)"
+            }
+            return .failure(Self.error(message))
+        }
+        switch await client.request(verb, params) {
+        case .success(let result): return .success(result)
+        case .failure(.refused(let message)): return .failure(Self.error(message))
+        case .failure(.timedOut): return .failure(Self.error("That Mac did not answer"))
+        case .failure(.disconnected): return .failure(Self.error("Not reachable (is its live mirror on?)"))
+        }
+    }
+
+    private static func error(_ message: String) -> NSError {
+        NSError(domain: "PeerBrowse", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }
