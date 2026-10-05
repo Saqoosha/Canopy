@@ -88,15 +88,20 @@ struct CanopyApp: App {
                 }
                 .keyboardShortcut("f")
                 Divider()
-                // Browser-style: label is always "Close Session" regardless
-                // of selection state. The actual handler is the keyDown monitor
-                // (handleCloseShortcut here is only reached on mouse click);
-                // both fall back to closing the window when no session is open.
-                // Multi-pane: Cmd+W / this button closes the focused pane.
-                Button("Close Session") {
+                // The actual handler is the keyDown monitor (handleCloseShortcut
+                // here is only reached on mouse click). It closes the focused
+                // pane, or the window from a lone launcher.
+                Button("Close Pane") {
                     handleCloseShortcut()
                 }
                 .keyboardShortcut("w")
+                // Cmd+W keeps the session; this is the key that ends it. Not
+                // consumed by the Cmd+W monitor, which matches plain Command only.
+                Button("Stop Session") {
+                    sidebarStore.stopFocusedPaneSession()
+                }
+                .keyboardShortcut("w", modifiers: [.command, .option])
+                .disabled(sidebarStore.focusedPaneStoppableSession == nil)
                 Button("Close Window") {
                     if let key = NSApp.keyWindow, isCanopyWindow(key) {
                         windowCloseOnly(key)
@@ -301,7 +306,10 @@ func handleCloseShortcut() {
         }
         return
     }
-    if store.panes.count > 1 {
+    // Same rule as the header's close X, so Cmd+W never means "close the
+    // session" on one pane and "close the pane" on two. A lone session pane
+    // closes to the launcher; "Close session" stays in the X's pull-down.
+    if store.paneShowsCloseButton(at: store.focusedPaneIndex) {
         logger.debug("Cmd+W: closing focused pane at \(store.focusedPaneIndex)")
         store.closePane(at: store.focusedPaneIndex)
     } else {
@@ -309,9 +317,10 @@ func handleCloseShortcut() {
     }
 }
 
-/// Single-pane / no-pane Cmd+W: close the focused non-main window
-/// first (Settings, Sparkle alert), otherwise close the active session,
-/// otherwise close the main window itself.
+/// Cmd+W with nothing closable in the strip (a lone launcher, or no pane):
+/// close the focused non-main window first (Settings, Sparkle alert),
+/// otherwise the active session if one is somehow selected, otherwise the
+/// main window itself.
 @MainActor
 func legacyCloseAction() {
     if let key = NSApp.keyWindow, !isCanopyWindow(key) {
@@ -828,14 +837,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // precedes, so logging it here for a click that raises a
             // background window would say whether it discriminates.
             //
-            // `panes.count > 1` mirrors `PaneHeaderStrip`'s
-            // `showCloseButton`: hit-testing an X that is not drawn
-            // would close the only pane from blank header space.
+            // `paneShowsCloseButton` is what `PaneHeaderStrip`'s
+            // `showCloseButton` reads: hit-testing an X that is not drawn
+            // would close a pane from blank header space.
             // The close-options chevron overlaps the X's right slop, so it is
             // tested first. Anchored under the chevron's own rect, in screen
             // coordinates for `popUp(... in: nil)`.
             let menuRect = PaneHeaderStrip.closeMenuHitRect(paneWidth: paneW)
-            if store.panes.count > 1, menuRect.contains(localPoint), let window = event.window {
+            if store.paneShowsCloseButton(at: index), menuRect.contains(localPoint), let window = event.window {
                 let contentHeight = window.contentView?.bounds.height ?? window.frame.height
                 let anchorInWindow = CGPoint(x: event.locationInWindow.x - localPoint.x + menuRect.minX,
                                              y: contentHeight - menuRect.maxY)
@@ -847,7 +856,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return nil
                 }
             }
-            if store.panes.count > 1,
+            if store.paneShowsCloseButton(at: index),
                PaneHeaderStrip.closeButtonHitRect(paneWidth: paneW).contains(localPoint) {
                 // notice, not debug: this is the only record that the
                 // geometry-derived branch removed a pane, and debug

@@ -104,7 +104,7 @@ struct Detail: View {
                             title: session.title.isEmpty ? "Untitled" : session.title,
                             project: session.projectLabel,
                             peerName: PeerNameStore.shared.name(forResumeId: session.resumeId),
-                            showCloseButton: store.panes.count > 1,
+                            showCloseButton: store.paneShowsCloseButton(at: index),
                             leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,
                             onClose: { store.closePane(at: index) }
                         )
@@ -132,7 +132,7 @@ struct Detail: View {
                     PaneHeaderStrip(
                         title: "New Session",
                         project: "",
-                        showCloseButton: store.panes.count > 1,
+                        showCloseButton: store.paneShowsCloseButton(at: index),
                         leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,
                         onClose: { store.closePane(at: index) }
                     )

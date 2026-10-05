@@ -118,8 +118,8 @@ extension PaneHeaderMenu {
     /// The ways to close the pane at `index`, shared by the context menu and
     /// the X's pull-down so the two cannot offer different verbs.
     ///
-    /// - Close pane: the pane only. A daemon session with no other pane is
-    ///   detached and keeps running; any other session stays in Open.
+    /// - Close pane: the pane only. A daemon or mirror session with no other
+    ///   pane is detached and keeps running; any other session stays in Open.
     /// - Close session: ends it if this Mac runs it; a mirror keeps running on its Mac.
     ///   Absent for a daemon session, where closing the row means stopping it.
     /// - Stop session: ends it for every client, on whichever Mac runs it.

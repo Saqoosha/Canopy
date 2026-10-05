@@ -6,8 +6,8 @@ import SwiftUI
 /// `.hiddenTitleBar`.
 /// The window's navigationTitle can only hold one string; with N panes
 /// visible we need per-pane title display. Also carries the pane's
-/// close X (hidden when showCloseButton is false — i.e. when
-/// panes.count == 1).
+/// close X (hidden when showCloseButton is false — see
+/// `SessionStore.paneShowsCloseButton(at:)`).
 ///
 /// **No mouse click is known to reach what this view draws, where
 /// `Detail.swift` places it** — flush to the window top in the detail column.

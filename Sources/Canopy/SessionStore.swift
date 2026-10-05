@@ -117,6 +117,26 @@ final class SessionStore {
         return panes[focusedPaneIndex]
     }
 
+    /// The session in the focused pane, nil for a launcher or no pane.
+    var focusedPaneSessionId: OpenSession.ID? {
+        if case .session(let id) = focusedPane?.content { return id }
+        return nil
+    }
+
+    /// The focused pane's session when the X pull-down would offer Stop for it.
+    var focusedPaneStoppableSession: OpenSession? {
+        guard let id = focusedPaneSessionId,
+              let session = openSessions.first(where: { $0.id == id }),
+              Self.canStop(session), !session.isStopping else { return nil }
+        return session
+    }
+
+    /// File > Stop Session (Cmd+Opt+W): the X pull-down's Stop, for the focused pane.
+    func stopFocusedPaneSession() {
+        guard let session = focusedPaneStoppableSession else { return }
+        stopSession(session.id)
+    }
+
     func paneIndex(forSession id: OpenSession.ID) -> Int? {
         panes.firstIndex { if case .session(let sid) = $0.content { return sid == id } else { return false } }
     }
@@ -2681,6 +2701,17 @@ final class SessionStore {
         return true
     }
 
+    /// Whether the pane at `index` offers a close X. A lone session pane
+    /// does: closing it empties the strip, which `Detail` renders as the
+    /// launcher. A lone launcher pane does not — closing it would land on
+    /// the same launcher.
+    func paneShowsCloseButton(at index: Int) -> Bool {
+        guard panes.indices.contains(index) else { return false }
+        if panes.count > 1 { return true }
+        if case .session = panes[index].content { return true }
+        return false
+    }
+
     /// Close the pane at `index`. Focus shifts to the left neighbor (or 0
     /// if the closed pane was leftmost). The underlying OpenSession stays
     /// in openSessions — closing a pane does not close the session.
@@ -2693,9 +2724,10 @@ final class SessionStore {
         normalizePaneWeightsToVisualWidths()
         let wasFocused = index == focusedPaneIndex
         let removed = panes.remove(at: index)
-        // A daemon session left with no pane is detached, as Cmd+W on a single pane does.
+        // A daemon or mirror session left with no pane is detached, so its daemon can reap it.
         if case .session(let id) = removed.content,
-           let session = openSessions.first(where: { $0.id == id }), session.isDaemonHosted,
+           let session = openSessions.first(where: { $0.id == id }),
+           session.isDaemonHosted || session.origin.mirrorTarget != nil,
            !panes.contains(where: { if case .session(let other) = $0.content { return other == id }; return false }) {
             detachDaemonSession(session)
         }
