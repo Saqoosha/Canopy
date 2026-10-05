@@ -76,11 +76,22 @@ After release notes are finalized, update the appcast so Sparkle shows the corre
 ./scripts/update_appcast.sh <new_version>
 ```
 
-### 7. Show result
+### 7. Wait for the public appcast
+
+Run it in the background (it can take ~15 min) and wait for the exit notification:
+
+```bash
+./scripts/wait_for_appcast.sh <new_version>
+```
+
+It watches the Pages deployment for the gh-pages commit, requests one rebuild if that run failed or never started, then polls the feed URL until its first item is `<new_version>`. A non-zero exit means the feed this Mac sees is not offering the new version — report it with the script's last line; do not call the release done. Exit 0 proves only the CDN edge nearest this Mac; others can lag up to its 10-minute max-age.
+
+### 8. Show result
 
 Display:
 - New version number
 - Release URL: `https://github.com/Saqoosha/Canopy/releases/tag/v<new_version>`
+- Appcast: live, or the failure from step 7
 
 ## Notes
 
