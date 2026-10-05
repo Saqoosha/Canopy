@@ -118,12 +118,31 @@ struct PaneHeaderStrip: View {
     ///   agree geometrically.
     static func closeButtonHitRect(paneWidth: CGFloat) -> CGRect {
         CGRect(
-            x: paneWidth - trailingPadding - buttonSide,
+            x: paneWidth - trailingPadding - menuButtonWidth - buttonSide,
             y: (height - buttonSide) / 2,
             width: buttonSide,
             height: buttonSide
         )
         .insetBy(dx: -hitSlop, dy: -hitSlop)
+    }
+
+    /// Width of the close-options chevron's drawn box, flush right of the X.
+    private static let menuButtonWidth: CGFloat = 12
+
+    /// Where the close-options pull-down beside the X accepts a click, in the
+    /// same space and under the same preconditions as `closeButtonHitRect`.
+    /// It overlaps the X's right slop, so the monitor must test this one
+    /// first; its left edge starts at the X's drawn box, so the X glyph itself
+    /// still closes. The right slop is half `hitSlop` to stay inside
+    /// `trailingPadding`, i.e. inside the pane.
+    static func closeMenuHitRect(paneWidth: CGFloat) -> CGRect {
+        let minX = paneWidth - trailingPadding - menuButtonWidth
+        return CGRect(
+            x: minX,
+            y: (height - buttonSide) / 2 - hitSlop,
+            width: menuButtonWidth + hitSlop / 2,
+            height: buttonSide + hitSlop * 2
+        )
     }
 
     var body: some View {
@@ -165,15 +184,24 @@ struct PaneHeaderStrip: View {
                 // activation — VoiceOver's AXPress invokes it directly rather
                 // than by hit-testing. So this has to stay correct, not
                 // merely present.
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: Self.buttonSide, height: Self.buttonSide)
-                        .contentShape(Rectangle())
+                HStack(spacing: 0) {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: Self.buttonSide, height: Self.buttonSide)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close pane (⌘W)")
+                    // Drawn only, like the X: the click monitor hit-tests
+                    // `closeMenuHitRect` and pops `PaneHeaderMenu.showCloseOptions`.
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: Self.menuButtonWidth, height: Self.buttonSide)
+                        .accessibilityHidden(true)
                 }
-                .buttonStyle(.plain)
-                .help("Close pane (⌘W)")
             }
         }
         .padding(.leading, Self.baseLeadingPadding + leadingChromeAvoidance)

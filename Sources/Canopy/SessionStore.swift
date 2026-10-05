@@ -1098,9 +1098,18 @@ final class SessionStore {
     /// This Mac's daemon, once `CanopyApp` has connected to it.
     var daemonControl: ControlClient?
 
+    /// Whether `stopSession` ends the session for every client, rather than only closing it here.
+    static func canStop(_ session: OpenSession) -> Bool {
+        session.isDaemonHosted || session.origin.mirrorTarget != nil
+    }
+
     /// Stops a daemon session for every client, then drops its row.
     func stopSession(_ id: OpenSession.ID) {
         guard let session = openSessions.first(where: { $0.id == id }) else { return }
+        if let target = session.origin.mirrorTarget {
+            stopMirrorSession(session, machineId: target.machineId)
+            return
+        }
         guard session.isDaemonHosted else {
             closeSession(id, keepingFailure: false, removeRow: true)
             return
@@ -1122,6 +1131,56 @@ final class SessionStore {
                 session.dropHeldByStop = nil
                 logger.error("stop_session failed: \(String(describing: failure), privacy: .public)")
                 self?.noteSessionFailure(title: session.title, message: "Could not stop the session (\(failure)).", status: -2)
+            }
+        }
+    }
+
+    /// Stops another Mac's session on that Mac, for every client, then drops the row here.
+    /// Same shape as the daemon branch: the pane's drop is held until the stop answers.
+    private func stopMirrorSession(_ session: OpenSession, machineId: String) {
+        let id = session.id
+        let machineName = session.statusBar.mirrorMachine ?? remoteRosters[machineId]?.displayName ?? machineId
+        var params: [String: Any] = ["sessionId": session.resumeId]
+        if let key = session.mirrorHostSessionId { params["key"] = key }
+        session.isStopping = true
+        logger.notice("stopMirrorSession: \(session.resumeId, privacy: .public) on \(machineId, privacy: .public)")
+        Task { [weak self] in
+            switch await PeerControl.request(machineId: machineId, "stop_session", params) {
+            case .success, .failure(.refused("no such session")):  // already gone there
+                session.dropHeldByStop = nil
+                self?.closeSession(id, keepingFailure: false, removeRow: true)
+            case .failure(let failure):
+                session.isStopping = false
+                session.dropHeldByStop?()
+                session.dropHeldByStop = nil
+                logger.error("stopMirrorSession failed: \(String(describing: failure), privacy: .public)")
+                self?.noteSessionFailure(title: session.title,
+                                         message: "Could not stop the session. \(failure.message(machineName: machineName))",
+                                         status: -2)
+            }
+        }
+    }
+
+    /// Stops a session listed under another Mac in the sidebar. One attached here goes
+    /// through `stopSession`, so its pane reads the drop as the stop it asked for.
+    func stopRemoteLive(_ remote: RemoteLiveSession) {
+        if let attached = openSessions.first(where: {
+            $0.origin.mirrorTarget?.machineId == remote.machineId
+                && ($0.resumeId == remote.sessionId || $0.mirrorHostSessionId == remote.row.sessionId)
+        }) {
+            stopSession(attached.id)
+            return
+        }
+        let params: [String: Any] = ["key": remote.row.sessionId, "sessionId": remote.sessionId]
+        logger.notice("stopRemoteLive: \(remote.sessionId, privacy: .public) on \(remote.machineId, privacy: .public)")
+        Task { [weak self] in
+            // The row goes when that Mac's roster stops listing it.
+            switch await PeerControl.request(machineId: remote.machineId, "stop_session", params) {
+            case .success, .failure(.refused("no such session")):
+                break
+            case .failure(let failure):
+                logger.error("stopRemoteLive failed: \(String(describing: failure), privacy: .public)")
+                self?.remoteAttachError = "Could not stop the session. \(failure.message(machineName: remote.machineName))"
             }
         }
     }

@@ -77,15 +77,6 @@ enum PaneHeaderMenu {
                     menu.addItem(accountItem)
                 }
             }
-            if session.isDaemonHosted {
-                menu.addItem(ClosureMenuItem(title: "Stop session") { [weak store] in
-                    store?.stopSession(openId)
-                })
-            } else {
-                menu.addItem(ClosureMenuItem(title: "Close session") { [weak store] in
-                    store?.closeSession(openId, keepingFailure: false)
-                })
-            }
             // Absent, not disabled, for a remote session: the directory is on
             // the other machine, so there is no local folder the item could
             // ever open. A greyed row would read as "not right now".
@@ -96,14 +87,11 @@ enum PaneHeaderMenu {
                 })
             }
         case .launcher:
-            // `PaneContent.launcher` carries nothing, so the stable id is the
-            // slot's own — the same handle `SidebarRow.launcher` uses.
-            let slot = store.panes[index].id
-            menu.addItem(ClosureMenuItem(title: "Close pane") { [weak store] in
-                guard let store, let idx = store.paneIndex(forSlot: slot) else { return }
-                store.closePane(at: idx)
-            })
+            break
         }
+        // Last, as in a window's own menu: the destructive verbs sit at the bottom.
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        addCloseItems(to: menu, store: store, paneIndex: index)
         // `popUp(positioning:at:in:)` with a nil view takes SCREEN coordinates,
         // which is what the caller already has: an NSEvent's
         // `locationInWindow` converted through the window. Routing it through
@@ -111,6 +99,53 @@ enum PaneHeaderMenu {
         // for nothing.
         menu.popUp(positioning: nil, at: screenPoint, in: nil)
         return true
+    }
+}
+
+extension PaneHeaderMenu {
+    /// Pop just the close choices for the pane at `index` — the pull-down
+    /// beside the header's X. False when the pane has gone away.
+    @MainActor
+    @discardableResult
+    static func showCloseOptions(store: SessionStore, paneIndex index: Int, at screenPoint: CGPoint) -> Bool {
+        guard store.panes.indices.contains(index) else { return false }
+        let menu = NSMenu()
+        addCloseItems(to: menu, store: store, paneIndex: index)
+        guard !menu.items.isEmpty else { return false }
+        menu.popUp(positioning: nil, at: screenPoint, in: nil)
+        return true
+    }
+
+    /// The ways to close the pane at `index`, shared by the context menu and
+    /// the X's pull-down so the two cannot offer different verbs.
+    ///
+    /// - Close pane: the pane only. A daemon session with no other pane is
+    ///   detached and keeps running; any other session stays in Open.
+    /// - Close session: drops the row here. A mirror keeps running on its Mac.
+    ///   Absent for a daemon session, where closing the row means stopping it.
+    /// - Stop session: ends it for every client, on whichever Mac runs it.
+    @MainActor
+    static func addCloseItems(to menu: NSMenu, store: SessionStore, paneIndex index: Int) {
+        guard store.panes.indices.contains(index) else { return }
+        // Stable handles, re-resolved when the item fires; see `show`.
+        let slot = store.panes[index].id
+        menu.addItem(ClosureMenuItem(title: "Close pane") { [weak store] in
+            guard let store, let idx = store.paneIndex(forSlot: slot) else { return }
+            store.closePane(at: idx)
+        })
+        guard case .session(let openId) = store.panes[index].content,
+              let session = store.openSessions.first(where: { $0.id == openId }) else { return }
+        if !session.isDaemonHosted {
+            menu.addItem(ClosureMenuItem(title: "Close session") { [weak store] in
+                store?.closeSession(openId, keepingFailure: false)
+            })
+        }
+        if SessionStore.canStop(session) {
+            let title = session.statusBar.mirrorMachine.map { "Stop session on \($0)" } ?? "Stop session"
+            menu.addItem(ClosureMenuItem(title: title) { [weak store] in
+                store?.stopSession(openId)
+            })
+        }
     }
 }
 
