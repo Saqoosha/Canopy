@@ -296,11 +296,11 @@ final class SessionStore {
     }
 
     /// A new session in one of another Mac's recent folders, attached here.
-    func openRemoteFolder(machineId: String, machineName: String, path: String, target: PaneTarget) {
+    func openRemoteFolder(machineId: String, machineName: String, path: String, options: NewSessionOptions, target: PaneTarget) {
         guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return }
         let name = (path as NSString).lastPathComponent
         attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: UUID().uuidString,
-                         title: "Untitled", project: name, open: .new(cwd: path, options: NewSessionOptions()), target: target)
+                         title: "Untitled", project: name, open: .new(cwd: path, options: options), target: target)
     }
 
     /// True when the attach may go ahead; otherwise records why for the sidebar banner.

@@ -950,12 +950,9 @@ struct LauncherView: View {
         let sessions = (store.remoteRecents[peer.machineId]?.sessions ?? []).filter { !attached.contains($0.id) }
         let groups = Self.peerSessionGroups(sessions, preferring: peerFolder.map { ($0 as NSString).lastPathComponent })
         return Menu {
-            // The launch default, spelled out the way `continueChip` spells
-            // it: without this row the chip offered only Resume, and a new
-            // session on the other Mac read as impossible — it is the send
-            // button, which this row only names.
+            // Without this row the chip offered only Resume, and a new session read as impossible.
             Section {
-                Label("New session — start with the send button", systemImage: "checkmark")
+                Label("New session", systemImage: "checkmark")
             }
             if sessions.isEmpty {
                 Text(store.remoteRecentsError[peer.machineId]
@@ -1109,8 +1106,6 @@ struct LauncherView: View {
         // Each mode says what this box will actually do with the text, because
         // the three outcomes genuinely differ: a fresh turn, a turn appended to
         // an existing conversation, or a turn that also names a branch.
-        // A peer launch sends only the folder (`MirrorOpenRequest.new`).
-        if selectedPeer != nil { return "Start the session, then type in its pane" }
         if willContinueSession { return "Pick up where you left off" }
         if willCreateWorktree { return "Describe a task — it names the branch too" }
         return "Describe a task or ask a question"
@@ -1163,7 +1158,7 @@ struct LauncherView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
                 .padding(.bottom, 6)
-                .disabled(isCreatingWorktree || isResolvingRemoteSession || selectedPeer != nil)
+                .disabled(isCreatingWorktree || isResolvingRemoteSession)
                 .focused($isPromptFocused)
                 .onChange(of: isPromptFocused) { _, focused in
                     if focused { installPasteMonitor() } else { removePasteMonitor() }
@@ -1171,14 +1166,11 @@ struct LauncherView: View {
                 .onDisappear { removePasteMonitor() }
 
             HStack(spacing: 5) {
-                Group {
-                    moreMenu
-                    modelChip
-                    if isAnthropicProvider { effortChip }
-                    permissionChip
-                }
-                // The other Mac starts the CLI with its own settings.
-                .disabled(selectedPeer != nil)
+                // Provider and account are this Mac's; the other Mac uses its own.
+                moreMenu.disabled(selectedPeer != nil)
+                modelChip
+                if isAnthropicProvider { effortChip }
+                permissionChip
                 Spacer(minLength: 8)
                 sendButton
             }
@@ -1829,8 +1821,16 @@ struct LauncherView: View {
         guard !isResolvingRemoteSession else { return }
         if let peer = selectedPeer {
             guard let peerFolder else { return }
-            store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder,
+            let prompt = pendingPromptForLaunch
+            // Provider and account are this Mac's ids, meaningless over there.
+            let options = NewSessionOptions(
+                model: model.isEmpty ? nil : model, effort: effortLevel.isEmpty ? nil : effortLevel,
+                permissionMode: resolvedPermission,
+                promptText: prompt.flatMap { $0.text.isEmpty ? nil : $0.text },
+                promptImages: prompt?.images.map(\.wire) ?? [])
+            store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder, options: options,
                                    target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused)
+            clearPendingPrompt()
             return
         }
         let selectedModel = model.isEmpty ? nil : model
