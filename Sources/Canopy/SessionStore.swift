@@ -1104,9 +1104,13 @@ final class SessionStore {
         session.isDaemonHosted || (session.origin.mirrorTarget != nil && session.mirrorHostSessionId != nil)
     }
 
+    /// Sidebar rows under another Mac with a stop in flight, by `RemoteLiveSession.sessionId`.
+    var stoppingRemoteIds: Set<String> = []
+
     /// Stops a daemon session, or a mirror on its own Mac, for every client, then drops its row.
+    /// While it waits the pane shows `.stopping`; a second Stop meanwhile is ignored.
     func stopSession(_ id: OpenSession.ID) {
-        guard let session = openSessions.first(where: { $0.id == id }) else { return }
+        guard let session = openSessions.first(where: { $0.id == id }), !session.isStopping else { return }
         if let target = session.origin.mirrorTarget {
             stopMirrorSession(session, machineId: target.machineId)
             return
@@ -1119,45 +1123,54 @@ final class SessionStore {
             noteSessionFailure(title: session.title, message: "Could not stop the session: this Mac's session service is not connected.", status: -2)
             return
         }
-        session.isStopping = true
+        let restore = beginStopping(session)
         Task { [weak self] in
             // The row goes only once the daemon has stopped it; otherwise the next push would bring it back.
             switch await control.request("stop_session", Self.daemonRefParams(session)) {
             case .success, .failure(.refused("no such session")):  // already gone there
-                session.dropHeldByStop = nil  // it captures the session
-                self?.closeSession(id, keepingFailure: false, removeRow: true)
+                self?.finishStop(session, stopped: true, restore: restore)
             case .failure(let failure):
-                session.isStopping = false
-                session.dropHeldByStop?()
-                session.dropHeldByStop = nil
                 logger.error("stop_session failed: \(String(describing: failure), privacy: .public)")
+                self?.finishStop(session, stopped: false, restore: restore)
                 self?.noteSessionFailure(title: session.title, message: "Could not stop the session (\(failure)).", status: -2)
             }
         }
     }
 
+    /// Marks a stop in flight and returns the connection status to put back if it fails.
+    private func beginStopping(_ session: OpenSession) -> ConnectionStatus {
+        let before = session.connection.status
+        session.isStopping = true
+        session.connection.status = .stopping
+        return before
+    }
+
+    /// Drops the row on a stop, or puts the pane back as it was and replays any drop held meanwhile.
+    private func finishStop(_ session: OpenSession, stopped: Bool, restore: ConnectionStatus) {
+        if stopped {
+            session.dropHeldByStop = nil  // it captures the session
+            closeSession(session.id, keepingFailure: false, removeRow: true)
+            return
+        }
+        session.isStopping = false
+        if session.connection.status == .stopping { session.connection.status = restore }
+        session.dropHeldByStop?()
+        session.dropHeldByStop = nil
+    }
+
     /// Stops another Mac's session on that Mac, for every client, then drops the row here.
     /// Same shape as the daemon branch: the pane's drop is held until the stop answers.
     private func stopMirrorSession(_ session: OpenSession, machineId: String) {
-        let id = session.id
         let machineName = session.statusBar.mirrorMachine ?? remoteRosters[machineId]?.displayName ?? machineId
-        var params: [String: Any] = ["sessionId": session.resumeId]
-        if let key = session.mirrorHostSessionId { params["key"] = key }
-        session.isStopping = true
-        logger.notice("stopMirrorSession: \(session.resumeId, privacy: .public) on \(machineId, privacy: .public)")
+        let key = session.mirrorHostSessionId
+        let resumeId = session.resumeId
+        let restore = beginStopping(session)
+        logger.notice("stopMirrorSession: \(resumeId, privacy: .public) on \(machineId, privacy: .public)")
         Task { [weak self] in
-            switch await PeerControl.request(machineId: machineId, "stop_session", params) {
-            case .success, .failure(.refused("no such session")):  // already gone there
-                session.dropHeldByStop = nil
-                self?.closeSession(id, keepingFailure: false, removeRow: true)
-            case .failure(let failure):
-                session.isStopping = false
-                session.dropHeldByStop?()
-                session.dropHeldByStop = nil
-                logger.error("stopMirrorSession failed: \(String(describing: failure), privacy: .public)")
-                // The sidebar banner, not the launcher's: the pane is still up, so no launcher shows.
-                self?.remoteAttachError = "Could not stop \(session.title). \(failure.message(machineName: machineName))"
-            }
+            let failure = await Self.stopOnPeer(machineId: machineId, machineName: machineName, key: key, resumeId: resumeId)
+            self?.finishStop(session, stopped: failure == nil, restore: restore)
+            // The sidebar banner, not the launcher's: the pane is still up, so no launcher shows.
+            if let failure { self?.remoteAttachError = "Could not stop \(session.title). \(failure)" }
         }
     }
 
@@ -1171,17 +1184,37 @@ final class SessionStore {
             stopSession(attached.id)
             return
         }
-        let params: [String: Any] = ["key": remote.row.sessionId, "sessionId": remote.sessionId]
+        guard stoppingRemoteIds.insert(remote.sessionId).inserted else { return }
         logger.notice("stopRemoteLive: \(remote.sessionId, privacy: .public) on \(remote.machineId, privacy: .public)")
         Task { [weak self] in
-            // The row goes when that Mac's roster stops listing it.
-            switch await PeerControl.request(machineId: remote.machineId, "stop_session", params) {
-            case .success, .failure(.refused("no such session")):
-                break
-            case .failure(let failure):
-                logger.error("stopRemoteLive failed: \(String(describing: failure), privacy: .public)")
-                self?.remoteAttachError = "Could not stop the session. \(failure.message(machineName: remote.machineName))"
-            }
+            let failure = await Self.stopOnPeer(machineId: remote.machineId, machineName: remote.machineName,
+                                                key: remote.row.sessionId, resumeId: remote.sessionId)
+            // On success the row goes when that Mac's roster stops listing it.
+            self?.stoppingRemoteIds.remove(remote.sessionId)
+            if let failure { self?.remoteAttachError = "Could not stop the session. \(failure)" }
+        }
+    }
+
+    /// Sends `stop_session` to another Mac. Nil when it stopped, else why not, for the banner.
+    /// A lost answer is not a failure: that Mac is asked whether the session is still open.
+    private static func stopOnPeer(machineId: String, machineName: String, key: String?, resumeId: String) async -> String? {
+        var params: [String: Any] = ["sessionId": resumeId]
+        if let key { params["key"] = key }
+        let failure: PeerControl.Failure
+        switch await PeerControl.request(machineId: machineId, "stop_session", params) {
+        case .success, .failure(.refused("no such session")): return nil  // already gone there
+        case .failure(let f): failure = f
+        }
+        logger.error("stop_session on \(machineId, privacy: .public) failed: \(String(describing: failure), privacy: .public)")
+        guard failure == .timedOut || failure == .disconnected else { return failure.message(machineName: machineName) }
+        switch await PeerControl.request(machineId: machineId, "list_sessions", ["scope": "open", "limit": 1000]) {
+        case .success(let result):
+            let rows = (result["sessions"] as? [[String: Any]] ?? []).compactMap(ControlProtocol.SessionRow.init(wire:))
+            let stillOpen = rows.contains { ($0.key != nil && $0.key == key) || $0.resumeId == resumeId }
+            logger.notice("stop_session on \(machineId, privacy: .public): answer lost, session \(stillOpen ? "still open" : "gone", privacy: .public)")
+            return stillOpen ? "It is still running on \(machineName)." : nil
+        case .failure:
+            return "\(machineName) did not confirm the stop, so it may still be running."
         }
     }
 

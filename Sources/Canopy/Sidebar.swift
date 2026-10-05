@@ -508,9 +508,10 @@ struct Sidebar: View {
                 Button("Close session") { store.closeSession(s.id, keepingFailure: false) }
             }
             if SessionStore.canStop(s) {
-                Button(s.statusBar.mirrorMachine.map { "Stop session on \($0)" } ?? "Stop session") {
+                Button(s.isStopping ? "Stopping…" : s.statusBar.mirrorMachine.map { "Stop session on \($0)" } ?? "Stop session") {
                     store.stopSession(s.id)
                 }
+                .disabled(s.isStopping)
             }
         }
         if case .launcher = row {
@@ -518,8 +519,9 @@ struct Sidebar: View {
         }
         if case .remoteLive(let r) = row {
             Button("Copy Session ID") { store.copyToPasteboard(r.sessionId) }
-            Button("Stop session on \(r.machineName)") { store.stopRemoteLive(r) }
-                .disabled(r.stale)
+            let stopping = store.stoppingRemoteIds.contains(r.sessionId)
+            Button(stopping ? "Stopping…" : "Stop session on \(r.machineName)") { store.stopRemoteLive(r) }
+                .disabled(r.stale || stopping)
         }
         // Only where a local folder exists to open: a remote session's
         // directory is on the other machine, a cloud row has none until it is

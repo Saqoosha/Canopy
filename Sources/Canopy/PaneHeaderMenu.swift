@@ -126,6 +126,7 @@ extension PaneHeaderMenu {
     @MainActor
     static func addCloseItems(to menu: NSMenu, store: SessionStore, paneIndex index: Int) {
         guard store.panes.indices.contains(index) else { return }
+        menu.autoenablesItems = false  // so a stop in flight can grey its item
         // Stable handles, re-resolved when the item fires; see `show`.
         let slot = store.panes[index].id
         menu.addItem(ClosureMenuItem(title: "Close pane") { [weak store] in
@@ -141,9 +142,11 @@ extension PaneHeaderMenu {
         }
         if SessionStore.canStop(session) {
             let title = session.statusBar.mirrorMachine.map { "Stop session on \($0)" } ?? "Stop session"
-            menu.addItem(ClosureMenuItem(title: title) { [weak store] in
+            let item = ClosureMenuItem(title: session.isStopping ? "Stopping…" : title) { [weak store] in
                 store?.stopSession(openId)
-            })
+            }
+            item.isEnabled = !session.isStopping
+            menu.addItem(item)
         }
     }
 }
