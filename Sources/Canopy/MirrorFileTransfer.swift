@@ -12,8 +12,9 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorFile"
 /// path; and only a receiver can draw progress, which is what turned a
 /// working transfer into "did that do anything?".
 ///
-/// Only a Mac client is sent these (`MirrorSink.acceptsFileTransfers`); the
-/// phone never sees the frames. The SSH-remote arrangement has no host Canopy
+/// A client gets these only if it asked at attach (`"files": true`): a Mac for
+/// the `open` redirect and its own clicks, the phone for its own clicks (#306).
+/// The SSH-remote arrangement has no host Canopy
 /// in the path and keeps the script's ssh route.
 enum MirrorFileWire {
     static let begin = "file_begin"

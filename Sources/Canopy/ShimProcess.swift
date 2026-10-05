@@ -4353,8 +4353,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             if FileManager.default.fileExists(atPath: resolved.path) {
                 // The daemon has no ContentViewer of its own: a text file goes to the Mac that asked.
-                // Anything else, a phone's click, or a file too big for one line opens the ordinary
-                // ways below (here for this Mac, shipped for another).
+                // Anything else, a phone's click, or a file too big for one line takes the ways below.
                 if webView == nil, !openExternal, let client = uiClient(for: requestId, fallback: false),
                    let size = (try? resolved.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
                    size <= MirrorUIFrame.maxInlineContentBytes,
@@ -4376,9 +4375,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // to the watcher instead; the script's own fallback is this
                 // branch's old behaviour.
                 if let requestId, case .mirror(let key)? = requestOwners[requestId],
-                   let sink = mirrors[key]?.sink, sink.acceptsFileTransfers, !sink.isLocalClient
+                   let sink = mirrors[key]?.sink, sink.acceptsClickedFiles, !sink.isLocalClient
                 {
-                    logger.notice("handleOpenFile: shipping to the watching Mac")
+                    logger.notice("handleOpenFile: shipping to the client that clicked")
                     if !MirrorFileSender.send(path: resolved.path, to: sink) {
                         NSWorkspace.shared.open(resolved)
                     }
