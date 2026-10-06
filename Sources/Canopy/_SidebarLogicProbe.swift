@@ -5407,6 +5407,57 @@ enum SidebarLogicProbe {
                    && storeLaunchOk.panes[1].content == .launcher
                    && storeLaunchOk.focusedPaneIndex == 1)
 
+            // A launcher's Start awaits naming + checkout before `openNew`, and
+            // focus can move to a second launcher meanwhile. The session must
+            // land in the launcher that started it. Remote host keeps
+            // `openNew` off the real recent-directories list.
+            do {
+                let store = SessionStore()
+                _ = store.openLauncherInNewPane()
+                let first = store.panes[0].id
+                _ = store.openLauncherInNewPane()
+                let s = store.openNew(directory: cwd, remoteHost: "studio", fromLauncherPane: first)
+                record("launcher start: lands in its own pane, not the focused one",
+                       store.panes.count == 2
+                       && store.panes[0].content == .session(s.id)
+                       && store.panes[1].content == .launcher
+                       && store.focusedPaneIndex == 1,
+                       "panes=\(store.panes.map(\.content)) focus=\(store.focusedPaneIndex)")
+
+                let gone = SessionStore()
+                _ = gone.openLauncherInNewPane()
+                let closed = gone.panes[0].id
+                _ = gone.openLauncherInNewPane()
+                gone.closePane(at: 0)
+                let g = gone.openNew(directory: cwd, remoteHost: "studio", fromLauncherPane: closed)
+                record("launcher start: a closed launcher pane does not take the focused one",
+                       gone.panes.count == 2
+                       && gone.panes.contains { $0.content == .launcher }
+                       && gone.panes.contains { $0.content == .session(g.id) },
+                       "panes=\(gone.panes.map(\.content))")
+
+                // The launcher pane is given a session while Start awaits, so
+                // its view is gone. The launch still has to open, beside it.
+                let swapped = SessionStore()
+                let other = OpenSession(origin: .local(cwd), resumeId: "launch-swap", title: "O", project: "p", status: .live)
+                swapped._probeSeedOpenSessions([other])
+                _ = swapped.openLauncherInNewPane()
+                let launcherId = swapped.panes[0].id
+                let launch = AppState()
+                launch.onLaunch = { [swapped] in swapped.openLaunched($0, fromLauncherPane: launcherId) }
+                swapped.openInFocusedPane(other.id)
+                launch.launchSession(directory: cwd, remoteHost: "studio", openInNewPane: false,
+                                     initialPrompt: .make(text: "go", images: []))
+                let opened = swapped.openSessions.first { $0.id != other.id }
+                record("launcher start: opens after its launcher was replaced, beside it",
+                       swapped.panes.count == 2
+                       && swapped.panes[0].content == .session(other.id)
+                       && opened.map { swapped.panes[1].content == .session($0.id) } == true
+                       && opened?.pendingInitialPrompt?.text == "go"
+                       && launch.initialPrompt == nil,
+                       "panes=\(swapped.panes.map(\.content)) opened=\(opened != nil)")
+            }
+
             // MARK: Pane follows sidebar drag
             //
             // A drag moves panes by sorting the session panes into their rows'

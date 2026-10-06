@@ -136,7 +136,7 @@ struct Detail: View {
                         leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,
                         onClose: { store.closePane(at: index) }
                     )
-                    DetailLauncher(store: store)
+                    DetailLauncher(store: store, paneId: pane.id)
                 }
             }
         }
@@ -488,6 +488,8 @@ private struct FullDiskAccessBanner: View {
 
 private struct DetailLauncher: View {
     @Bindable var store: SessionStore
+    /// The pane this launcher sits in; nil when the strip is empty.
+    var paneId: PaneSlot.ID? = nil
     @State private var localAppState = AppState()
     /// Read when the launcher appears; a grant takes effect only after a relaunch anyway.
     @State private var lacksFullDiskAccess = false
@@ -516,34 +518,11 @@ private struct DetailLauncher: View {
 
     private var launcher: some View {
         LauncherView(appState: localAppState, store: store)
-            .onChange(of: localAppState.screen) {
-                // The Launcher uses an AppState-based screen transition. When
-                // it flips to .session we hand off to the SessionStore, which
-                // creates a fresh OpenSession with the same params.
-                if localAppState.screen == .session {
-                    // Read off the state the launcher stamped at the press.
-                    // Sampling `NSEvent.modifierFlags` here was correct while
-                    // this observer fired in the same instant as the click; the
-                    // remote resume lookup put an SSH round trip in between.
-                    let target: SessionStore.PaneTarget =
-                        localAppState.openInNewPane ? .newPane : .focused
-                    store.openNew(
-                        directory: localAppState.workingDirectory,
-                        resumeId: localAppState.resumeSessionId,
-                        sessionTitle: localAppState.resumeSessionTitle,
-                        model: localAppState.model,
-                        effortLevel: localAppState.effortLevel,
-                        permissionMode: localAppState.permissionMode,
-                        remoteHost: localAppState.remoteHost,
-                        customApi: localAppState.customApi,
-                        target: target,
-                        initialPrompt: localAppState.initialPrompt,
-                        settledTitle: localAppState.settledTitle
-                    )
-                    // A session started, so the previous failure is answered.
-                    store.lastSessionFailure = nil
-                    // Reset the local appState so the next Start works again
-                    localAppState.backToLauncher()
+            .onAppear {
+                // Captures the store and this pane's id, never the view, so a
+                // launch that lands after this launcher is gone still opens.
+                localAppState.onLaunch = { [store, paneId] in
+                    store.openLaunched($0, fromLauncherPane: paneId)
                 }
             }
     }
