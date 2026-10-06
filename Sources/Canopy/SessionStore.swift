@@ -972,8 +972,7 @@ final class SessionStore {
         // before it gets here, and focus may have moved in the meantime — to a
         // second launcher opened while the first was still working. `.focused`
         // would then fill that one and strand the original. If that launcher
-        // was closed or given other content meanwhile, the session gets a pane
-        // of its own, never the one the user is on now.
+        // was closed or given other content meanwhile, it opens like a Cmd+Start.
         let remaining: PaneTarget?
         if target == .focused, let launcherPane {
             remaining = openInLauncherPane(session.id, paneId: launcherPane) ? nil : .newPane
@@ -1008,7 +1007,9 @@ final class SessionStore {
             permissionMode: launch.permissionMode,
             remoteHost: launch.remoteHost,
             customApi: launch.customApi,
-            target: launch.openInNewPane ? .newPane : .focused,
+            // nil is the empty strip's launcher; a pane that appeared during
+            // the wait is the user's, so it must not be filled.
+            target: launch.openInNewPane || (paneId == nil && !panes.isEmpty) ? .newPane : .focused,
             initialPrompt: launch.initialPrompt,
             settledTitle: launch.settledTitle,
             fromLauncherPane: paneId
@@ -2562,8 +2563,8 @@ final class SessionStore {
     ///
     /// Called from every route that puts a session into a pane, which is only
     /// ever `openInFocusedPane` (its seed and content-swap branches; the
-    /// already-paned branch is a focus change and touches no content) and
-    /// `openInNewPane`. `applyRestoreSnapshot` builds its paned sessions as
+    /// already-paned branch is a focus change and touches no content),
+    /// `openInLauncherPane` and `openInNewPane`. `applyRestoreSnapshot` builds its paned sessions as
     /// `.spawning` directly instead of routing through here.
     private func startIfDormant(_ sessionId: OpenSession.ID) {
         guard let session = openSessions.first(where: { $0.id == sessionId }),
@@ -2606,11 +2607,15 @@ final class SessionStore {
             makeFocusedPaneKeyResponder()
             return
         }
-        panes[focusedPaneIndex].content = .session(sessionId)
-        startIfDormant(sessionId)
-        moveRowFollowingPaneAssignment(sessionId)
+        assignSession(sessionId, toPane: focusedPaneIndex)
         syncSelectionToFocusedPane()
         makeFocusedPaneKeyResponder()
+    }
+
+    private func assignSession(_ sessionId: OpenSession.ID, toPane idx: Int) {
+        panes[idx].content = .session(sessionId)
+        startIfDormant(sessionId)
+        moveRowFollowingPaneAssignment(sessionId)
     }
 
     /// Put a session into the launcher pane that started it, leaving focus
@@ -2623,9 +2628,7 @@ final class SessionStore {
             openInFocusedPane(sessionId)
             return true
         }
-        panes[idx].content = .session(sessionId)
-        startIfDormant(sessionId)
-        moveRowFollowingPaneAssignment(sessionId)
+        assignSession(sessionId, toPane: idx)
         return true
     }
 

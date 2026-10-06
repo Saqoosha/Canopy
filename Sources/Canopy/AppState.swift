@@ -34,19 +34,15 @@ final class AppState {
     /// gone by then — the pane given other content meanwhile. A view-side
     /// `onChange` died with it and the session never opened; the task awaiting
     /// the launch holds this object, so this closure still runs.
-    var onLaunch: ((AppState) -> Void)?
+    @ObservationIgnored var onLaunch: ((AppState) -> Void)?
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     var permissionMode: PermissionMode = .acceptEdits
     var model: String?
     var effortLevel: String?
     /// Whether Cmd was held when the launch was asked for.
     ///
-    /// `Detail` used to read `NSEvent.modifierFlags` in its `screen` observer,
-    /// which for a synchronous launch was the click instant. The remote branch
-    /// of `LauncherView.launchLocal` awaits an SSH round trip first, so that
-    /// observer can now fire a minute later and would sample whatever is held
-    /// then — a Cmd+click that opens no new pane, or a plain click that opens
-    /// one.
+    /// Stamped rather than read at hand-off: a launch can land after an SSH
+    /// round trip or a worktree checkout, long after Cmd was released.
     ///
     /// Written only by `launchSession`, from its `openInNewPane` parameter, so
     /// no route can be added that forgets to stamp it. Stamping at each call

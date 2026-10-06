@@ -5432,8 +5432,8 @@ enum SidebarLogicProbe {
                 let g = gone.openNew(directory: cwd, remoteHost: "studio", fromLauncherPane: closed)
                 record("launcher start: a closed launcher pane does not take the focused one",
                        gone.panes.count == 2
-                       && gone.panes.contains { $0.content == .launcher }
-                       && gone.panes.contains { $0.content == .session(g.id) },
+                       && gone.panes[0].content == .launcher
+                       && gone.panes[1].content == .session(g.id),
                        "panes=\(gone.panes.map(\.content))")
 
                 // The launcher pane is given a session while Start awaits, so
@@ -5446,16 +5446,69 @@ enum SidebarLogicProbe {
                 let launch = AppState()
                 launch.onLaunch = { [swapped] in swapped.openLaunched($0, fromLauncherPane: launcherId) }
                 swapped.openInFocusedPane(other.id)
+                swapped.noteSessionFailure(title: "T", message: "boom", status: 1)
                 launch.launchSession(directory: cwd, remoteHost: "studio", openInNewPane: false,
-                                     initialPrompt: .make(text: "go", images: []))
+                                     initialPrompt: .make(text: "go", images: []), settledTitle: "named")
                 let opened = swapped.openSessions.first { $0.id != other.id }
                 record("launcher start: opens after its launcher was replaced, beside it",
                        swapped.panes.count == 2
                        && swapped.panes[0].content == .session(other.id)
                        && opened.map { swapped.panes[1].content == .session($0.id) } == true
                        && opened?.pendingInitialPrompt?.text == "go"
-                       && launch.initialPrompt == nil,
+                       && launch.initialPrompt == nil
+                       && launch.settledTitle == nil
+                       && swapped.lastSessionFailure == nil,
                        "panes=\(swapped.panes.map(\.content)) opened=\(opened != nil)")
+
+                // The common case: Start from the launcher that still has focus.
+                let plain = SessionStore()
+                _ = plain.openLauncherInNewPane()
+                let p = plain.openNew(directory: cwd, remoteHost: "studio", fromLauncherPane: plain.panes[0].id)
+                record("launcher start: a focused launcher is replaced and selected",
+                       plain.panes.count == 1
+                       && plain.panes[0].content == .session(p.id)
+                       && plain.focusedPaneIndex == 0
+                       && plain.selection == .session(p.id),
+                       "panes=\(plain.panes.map(\.content)) sel=\(String(describing: plain.selection))")
+
+                // Cmd+Start keeps the launcher and adds a pane.
+                let cmd = SessionStore()
+                _ = cmd.openLauncherInNewPane()
+                let cmdLaunch = AppState()
+                let cmdPane = cmd.panes[0].id
+                cmdLaunch.onLaunch = { [cmd] in cmd.openLaunched($0, fromLauncherPane: cmdPane) }
+                cmdLaunch.launchSession(directory: cwd, remoteHost: "studio", openInNewPane: true)
+                record("launcher start: Cmd+Start keeps the launcher and adds a pane",
+                       cmd.panes.count == 2 && cmd.panes[0].content == .launcher,
+                       "panes=\(cmd.panes.map(\.content))")
+
+                // Landing in a middle launcher pulls the row to that pane's rank.
+                let rows = SessionStore()
+                let ra = OpenSession(origin: .local(cwd), resumeId: "launch-row-a", title: "A", project: "p", status: .live)
+                let rb = OpenSession(origin: .local(cwd), resumeId: "launch-row-b", title: "B", project: "p", status: .live)
+                rows._probeSeedOpenSessions([ra, rb])
+                _ = rows.openInNewPane(ra.id)
+                _ = rows.openLauncherInNewPane()
+                let middle = rows.panes[1].id
+                _ = rows.openInNewPane(rb.id)
+                let rn = rows.openNew(directory: cwd, remoteHost: "studio", fromLauncherPane: middle)
+                record("launcher start: an unfocused launcher's row follows its pane",
+                       rows.openSessions.map(\.id) == [ra.id, rn.id, rb.id]
+                       && rows.focusedPaneIndex == 2,
+                       "rows=\(rows.openSessions.map(\.title)) focus=\(rows.focusedPaneIndex)")
+
+                // The empty strip's launcher: a pane that appeared during the
+                // wait is the user's and must not be filled.
+                let empty = SessionStore()
+                let es = OpenSession(origin: .local(cwd), resumeId: "launch-empty-s", title: "S", project: "p", status: .live)
+                empty._probeSeedOpenSessions([es])
+                let emptyLaunch = AppState()
+                emptyLaunch.onLaunch = { [empty] in empty.openLaunched($0, fromLauncherPane: nil) }
+                empty.openInFocusedPane(es.id)
+                emptyLaunch.launchSession(directory: cwd, remoteHost: "studio", openInNewPane: false)
+                record("launcher start: the empty strip's launch does not take a pane opened meanwhile",
+                       empty.panes.count == 2 && empty.panes[0].content == .session(es.id),
+                       "panes=\(empty.panes.map(\.content))")
             }
 
             // MARK: Pane follows sidebar drag
