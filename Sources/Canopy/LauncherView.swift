@@ -2023,7 +2023,8 @@ struct LauncherView: View {
     /// `openInNewPane` is nil for every synchronous caller, which lets
     /// `AppState.launchSession` sample the modifier itself. Only a caller that
     /// crosses an `await` before reaching here has to pass one — see the
-    /// worktree path and the SSH-continue branch below.
+    /// worktree path and the SSH-continue branch below. `prompt` is required
+    /// for the same reason: such a caller reads the composer before awaiting.
     private func launchLocal(
         _ dir: URL, remoteHost: String?, prompt: LaunchPrompt?, model: String?, effort: String?,
         permission: PermissionMode, openInNewPane: Bool? = nil,

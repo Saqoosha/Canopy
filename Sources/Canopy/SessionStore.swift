@@ -1007,8 +1007,8 @@ final class SessionStore {
             permissionMode: launch.permissionMode,
             remoteHost: launch.remoteHost,
             customApi: launch.customApi,
-            // nil is the empty strip's launcher; a pane that appeared during
-            // the wait is the user's, so it must not be filled.
+            // nil is the empty strip's launcher; once a pane has appeared
+            // during the wait, it opens like a Cmd+Start.
             target: launch.openInNewPane || (paneId == nil && !panes.isEmpty) ? .newPane : .focused,
             initialPrompt: launch.initialPrompt,
             settledTitle: launch.settledTitle,

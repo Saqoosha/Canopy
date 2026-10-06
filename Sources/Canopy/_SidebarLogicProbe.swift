@@ -5478,8 +5478,10 @@ enum SidebarLogicProbe {
                 let cmdPane = cmd.panes[0].id
                 cmdLaunch.onLaunch = { [cmd] in cmd.openLaunched($0, fromLauncherPane: cmdPane) }
                 cmdLaunch.launchSession(directory: cwd, remoteHost: "studio", openInNewPane: true)
+                let cmdOpened = cmd.openSessions.last
                 record("launcher start: Cmd+Start keeps the launcher and adds a pane",
-                       cmd.panes.count == 2 && cmd.panes[0].content == .launcher,
+                       cmd.panes.count == 2 && cmd.panes[0].content == .launcher
+                       && cmdOpened.map { cmd.panes[1].content == .session($0.id) } == true,
                        "panes=\(cmd.panes.map(\.content))")
 
                 // Landing in a middle launcher pulls the row to that pane's rank.
@@ -5505,9 +5507,13 @@ enum SidebarLogicProbe {
                 let emptyLaunch = AppState()
                 emptyLaunch.onLaunch = { [empty] in empty.openLaunched($0, fromLauncherPane: nil) }
                 empty.openInFocusedPane(es.id)
-                emptyLaunch.launchSession(directory: cwd, remoteHost: "studio", openInNewPane: false)
+                emptyLaunch.launchSession(directory: cwd, remoteHost: "studio", openInNewPane: false,
+                                          initialPrompt: .make(text: "go", images: []))
+                let emptyOpened = empty.openSessions.first { $0.id != es.id }
                 record("launcher start: the empty strip's launch does not take a pane opened meanwhile",
-                       empty.panes.count == 2 && empty.panes[0].content == .session(es.id),
+                       empty.panes.count == 2 && empty.panes[0].content == .session(es.id)
+                       && emptyOpened.map { empty.panes[1].content == .session($0.id) } == true
+                       && emptyOpened?.pendingInitialPrompt?.text == "go",
                        "panes=\(empty.panes.map(\.content))")
             }
 
