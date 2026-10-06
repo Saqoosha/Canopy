@@ -354,7 +354,8 @@ final class RosterPublisher {
             // endpoint fix wakes the tracked closure, and a secret fix comes
             // through `secretChanged()`. Recorded rather than guarded,
             // because a guard here would need its own retry clock.
-            connectIfConfigured()
+            // `publish()`, not a bare connect: the relay keeps the last snapshot, so one sent before the loss stays stale until the next change.
+            publish()
         case .after(let delay):
             scheduleReconnect(after: delay)
         }
@@ -379,7 +380,7 @@ final class RosterPublisher {
             Task { @MainActor in
                 guard let self, self.running, self.task == nil else { return }
                 self.lastReconnectAt = Date()
-                self.connectIfConfigured()
+                self.publish()
             }
         }
         reconnectWork = work
