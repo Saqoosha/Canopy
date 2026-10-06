@@ -2592,6 +2592,15 @@ enum SidebarLogicProbe {
                 rosters: ["M2": fresh], machineIds: ["M2"], attached: ["M2:sa"], now: now)
             record("remote rows: a session attached under the origin's process id is dropped",
                    byHostId[0].rows.map(\.id) == ["remote:M2:b"])
+            record("remote rows: dropped rows are counted as attached",
+                   sections[1].attachedCount == 1 && sections[0].attachedCount == 0)
+            let allAttached = SessionStore.remoteLiveSections(
+                rosters: ["M2": fresh], machineIds: ["M2"], attached: ["M2:sa", "M2:b"], now: now)
+            record("remote rows: an all-attached section is empty but not \"none\"",
+                   allAttached[0].rows.isEmpty
+                   && SessionStore.remoteEmptyText(attachedCount: allAttached[0].attachedCount) != SessionStore.remoteEmptyText(attachedCount: 0))
+            record("remote rows: \"No open sessions\" only when nothing was dropped",
+                   SessionStore.remoteEmptyText(attachedCount: 0) == "No open sessions")
             record("remote rows: a stale machine's rows are marked stale",
                    { if case .remoteLive(let r) = sections[0].rows[0] { return r.stale } else { return false } }())
             record("remote rows: a live fresh row can open",

@@ -215,6 +215,9 @@ final class SessionStore {
         let title: String
         let rows: [SidebarRow]
         let loading: Bool
+        /// Sessions left out of `rows` because a pane here already shows them,
+        /// so an empty section can say where they went instead of "none".
+        var attachedCount = 0
         var id: String { machineId }
     }
 
@@ -234,7 +237,18 @@ final class SessionStore {
                 let hidden = attached.contains("\(id):\(live.sessionId)") || attached.contains("\(id):\(pane.sessionId)")
                 return hidden ? nil : .remoteLive(live)
             }
-            return RemoteMachineSection(machineId: id, title: snapshot.displayName, rows: rows, loading: false)
+            return RemoteMachineSection(machineId: id, title: snapshot.displayName, rows: rows, loading: false,
+                                        attachedCount: snapshot.panes.count - rows.count)
+        }
+    }
+
+    /// What an empty remote section says: "none" only when that Mac really
+    /// has nothing, since a session open in a pane here is not "none".
+    static func remoteEmptyText(attachedCount: Int) -> String {
+        switch attachedCount {
+        case 0: "No open sessions"
+        case 1: "1 session, already open here"
+        default: "\(attachedCount) sessions, all already open here"
         }
     }
 

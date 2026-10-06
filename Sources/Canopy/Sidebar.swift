@@ -81,7 +81,8 @@ struct Sidebar: View {
                         if section.loading {
                             Text("Loading…").font(.system(size: 11)).foregroundStyle(.secondary)
                         } else if section.rows.isEmpty {
-                            Text("No open sessions").font(.system(size: 11)).foregroundStyle(.secondary)
+                            Text(SessionStore.remoteEmptyText(attachedCount: section.attachedCount))
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                         ForEach(section.rows, id: \.id) { row in
                             rowView(row)
