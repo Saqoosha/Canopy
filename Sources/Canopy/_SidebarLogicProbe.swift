@@ -2596,9 +2596,11 @@ enum SidebarLogicProbe {
                    sections[1].attachedCount == 1 && sections[0].attachedCount == 0)
             let allAttached = SessionStore.remoteLiveSections(
                 rosters: ["M2": fresh], machineIds: ["M2"], attached: ["M2:sa", "M2:b"], now: now)
-            record("remote rows: an all-attached section is empty but not \"none\"",
-                   allAttached[0].rows.isEmpty
-                   && SessionStore.remoteEmptyText(attachedCount: allAttached[0].attachedCount) != SessionStore.remoteEmptyText(attachedCount: 0))
+            record("remote rows: an all-attached section is empty and counts both",
+                   allAttached[0].rows.isEmpty && allAttached[0].attachedCount == 2)
+            record("remote rows: the empty text names how many are open here",
+                   SessionStore.remoteEmptyText(attachedCount: 1) == "1 session, already open here"
+                   && SessionStore.remoteEmptyText(attachedCount: 2) == "2 sessions, all already open here")
             record("remote rows: \"No open sessions\" only when nothing was dropped",
                    SessionStore.remoteEmptyText(attachedCount: 0) == "No open sessions")
             record("remote rows: a stale machine's rows are marked stale",
