@@ -1859,14 +1859,14 @@ struct LauncherView: View {
             guard !remoteHost.isEmpty, !remoteDirectory.isEmpty else { return }
             SSHHostStore.add(remoteHost)
             savedHosts = SSHHostStore.hosts()
-            launchLocal(URL(fileURLWithPath: remoteDirectory), remoteHost: remoteHost,
+            launchLocal(URL(fileURLWithPath: remoteDirectory), remoteHost: remoteHost, prompt: pendingPromptForLaunch,
                         model: selectedModel, effort: selectedEffort, permission: selectedPermission)
             return
         }
 
         guard let local = selectedDirectory else { return }
         guard startInWorktree, selectedDirectoryIsGitRepo else {
-            launchLocal(local, remoteHost: nil,
+            launchLocal(local, remoteHost: nil, prompt: pendingPromptForLaunch,
                         model: selectedModel, effort: selectedEffort, permission: selectedPermission)
             return
         }
@@ -1881,6 +1881,8 @@ struct LauncherView: View {
         // is long released and Cmd+click quietly lost its new pane. Same hazard
         // the SSH-continue branch documents; same fix.
         let cmdHeld = NSEvent.modifierFlags.contains(.command)
+        // Same for the composer: this pane may show something else by the end.
+        let launchPrompt = pendingPromptForLaunch
         isCreatingWorktree = true
         let repo = local
         let api = buildCustomApiConfig()
@@ -1965,7 +1967,7 @@ struct LauncherView: View {
                         }
                     }
                 }
-                launchLocal(worktree, remoteHost: nil,
+                launchLocal(worktree, remoteHost: nil, prompt: launchPrompt,
                             model: selectedModel, effort: selectedEffort,
                             permission: selectedPermission, openInNewPane: cmdHeld,
                             settledTitle: settledTitle)
@@ -2021,9 +2023,10 @@ struct LauncherView: View {
     /// `openInNewPane` is nil for every synchronous caller, which lets
     /// `AppState.launchSession` sample the modifier itself. Only a caller that
     /// crosses an `await` before reaching here has to pass one — see the
-    /// worktree path and the SSH-continue branch below.
+    /// worktree path and the SSH-continue branch below. `prompt` is required
+    /// for the same reason: such a caller reads the composer before awaiting.
     private func launchLocal(
-        _ dir: URL, remoteHost: String?, model: String?, effort: String?,
+        _ dir: URL, remoteHost: String?, prompt: LaunchPrompt?, model: String?, effort: String?,
         permission: PermissionMode, openInNewPane: Bool? = nil,
         settledTitle: String? = nil
     ) {
@@ -2049,7 +2052,7 @@ struct LauncherView: View {
                 // and a directory with no resumable session is the ordinary
                 // first-run case. Both land on a fresh session, which is what
                 // this path did before the lookup existed.
-                appState.launchSession(directory: dir, resumeSessionId: latest?.id, sessionTitle: latest?.title, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: cmdHeld, initialPrompt: pendingPromptForLaunch)
+                appState.launchSession(directory: dir, resumeSessionId: latest?.id, sessionTitle: latest?.title, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: cmdHeld, initialPrompt: prompt)
                 clearPendingPrompt()
             }
             return
@@ -2063,7 +2066,7 @@ struct LauncherView: View {
         }
         // A settled title names a NEW session's task. A resumed one already
         // has its own title, which it keeps.
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: openInNewPane, initialPrompt: pendingPromptForLaunch, settledTitle: resumeId == nil ? settledTitle : nil)
+        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: openInNewPane, initialPrompt: prompt, settledTitle: resumeId == nil ? settledTitle : nil)
         clearPendingPrompt()
     }
 

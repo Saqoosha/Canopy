@@ -4,11 +4,6 @@ import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "AppState")
 
-enum AppScreen {
-    case launcher
-    case session
-}
-
 enum PermissionMode: String, Codable, CaseIterable, Identifiable {
     case `default` = "default"
     case acceptEdits = "acceptEdits"
@@ -33,19 +28,21 @@ enum PermissionMode: String, Codable, CaseIterable, Identifiable {
 
 @Observable
 final class AppState {
-    private(set) var screen: AppScreen = .launcher
+    /// Receives every launch. Set by the launcher's owner, and called by this
+    /// object rather than observed by a view: a Start can await seconds of
+    /// naming and worktree checkout first, and the view that started it may be
+    /// gone by then — the pane given other content meanwhile. A view-side
+    /// `onChange` died with it and the session never opened; the task awaiting
+    /// the launch holds this object, so this closure still runs.
+    @ObservationIgnored var onLaunch: ((AppState) -> Void)?
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     var permissionMode: PermissionMode = .acceptEdits
     var model: String?
     var effortLevel: String?
     /// Whether Cmd was held when the launch was asked for.
     ///
-    /// `Detail` used to read `NSEvent.modifierFlags` in its `screen` observer,
-    /// which for a synchronous launch was the click instant. The remote branch
-    /// of `LauncherView.launchLocal` awaits an SSH round trip first, so that
-    /// observer can now fire a minute later and would sample whatever is held
-    /// then — a Cmd+click that opens no new pane, or a plain click that opens
-    /// one.
+    /// Stamped rather than read at hand-off: a launch can land after an SSH
+    /// round trip or a worktree checkout, long after Cmd was released.
     ///
     /// Written only by `launchSession`, from its `openInNewPane` parameter, so
     /// no route can be added that forgets to stamp it. Stamping at each call
@@ -96,8 +93,8 @@ final class AppState {
         self.remoteHost = remoteHost
         self.customApi = customApi
         webviewReloadToken += 1
-        screen = .session
         logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) model=\(model ?? "auto", privacy: .public) effort=\(effortLevel ?? "auto", privacy: .public) mode=\(permissionMode.rawValue, privacy: .public) remote=\(remoteHost ?? "local", privacy: .public) customApi=\(customApi?.isEnabled == true ? "yes" : "no", privacy: .public)")
+        onLaunch?(self)
     }
 
     func backToLauncher() {
@@ -107,6 +104,5 @@ final class AppState {
         initialPrompt = nil
         settledTitle = nil
         remoteHost = nil
-        screen = .launcher
     }
 }
