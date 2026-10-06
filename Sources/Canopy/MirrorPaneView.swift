@@ -146,7 +146,11 @@ struct MirrorPaneView: NSViewRepresentable {
 
     static func dismantleNSView(_ host: SessionWebViewHost, coordinator: Coordinator) {
         for sub in host.subviews {
-            if let wk = sub as? WKWebView {
+            // Still the session's webview: another host is taking it over. Stripping it here drops
+            // whatever the page posts before `reclaim` re-adds the handlers, a restart's `init` included.
+            if let wk = sub as? WKWebView, coordinator.session?.webView === wk {
+                logger.notice("[mirror-pane] dismantle left the live webview's handlers in place")
+            } else if let wk = sub as? WKWebView {
                 wk.navigationDelegate = nil
                 wk.uiDelegate = nil
                 let ucc = wk.configuration.userContentController
