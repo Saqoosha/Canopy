@@ -12714,22 +12714,35 @@ enum SidebarLogicProbe {
                                                          folderExists: { _ in true }) == nil)
             let movedTo = "/canopy-probe-missing/My Project/wt"
             let elsewhere = "/nowhere/\(ClaudeSessionHistory.encodedFolderCandidates(for: movedTo)[0])/s.jsonl"
-            record("upgrade blocker: a move the bounded read missed is read from the transcript, and a removed target holds it",
-                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: elsewhere, workingDirectory: folder,
-                                                         folderExists: { $0.path == folder.path },
-                                                         lastRelocated: { _ in movedTo })
-                       == "its folder wt was removed, so it could not resume after a restart")
-            record("upgrade blocker: a moved-to folder that still exists does not hold it, whatever its spelling",
-                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: elsewhere, workingDirectory: folder,
-                                                         folderExists: { _ in true }, lastRelocated: { _ in movedTo }) == nil)
-            record("upgrade blocker: a relocation the transcript is not filed under is not believed",
-                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: elsewhere, workingDirectory: folder,
-                                                         folderExists: { $0.path == folder.path },
-                                                         lastRelocated: { _ in "/canopy-probe-missing/unrelated" }) == nil)
-            record("upgrade blocker: a transcript under the spawn folder never asks for the relocation scan",
-                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: transcript, workingDirectory: folder,
-                                                         folderExists: { $0.path == folder.path },
-                                                         lastRelocated: { _ in movedTo }) == nil)
+            record("relocation past tail: a bounded cwd the transcript is not filed under is replaced by the scanned move",
+                   ClaudeSessionHistory.relocationPastTail(jsonlPath: elsewhere, boundedCwd: folder.path, scan: { _ in movedTo }) == movedTo)
+            record("relocation past tail: a scanned move the transcript is not filed under is not believed",
+                   ClaudeSessionHistory.relocationPastTail(jsonlPath: elsewhere, boundedCwd: folder.path,
+                                                           scan: { _ in "/canopy-probe-missing/unrelated" }) == nil)
+            record("relocation past tail: a bounded cwd the transcript is filed under, or no cwd at all, never asks for the scan",
+                   ClaudeSessionHistory.relocationPastTail(jsonlPath: transcript, boundedCwd: folder.path, scan: { _ in movedTo }) == nil
+                       && ClaudeSessionHistory.relocationPastTail(jsonlPath: elsewhere, boundedCwd: nil, scan: { _ in movedTo }) == nil)
+            do {
+                // The whole path: the `relocated` record sits past the head chunk and before the bounded tail.
+                let moved = "/canopy-probe-missing/Mo ved/wt-\(UUID().uuidString)"
+                let dir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("canopy-probe-\(UUID().uuidString)")
+                    .appendingPathComponent(ClaudeSessionHistory.encodedFolderCandidates(for: moved)[0])
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
+                let file = dir.appendingPathComponent("s.jsonl")
+                let head = "{\"type\":\"user\",\"cwd\":\"/canopy-probe-missing/spawn\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n"
+                    + "{\"type\":\"assistant\",\"text\":\"\(String(repeating: "x", count: 300_000))\"}\n"
+                    + "{\"type\":\"relocated\",\"relocatedCwd\":\"\(moved)\"}\n"
+                let later = "{\"type\":\"assistant\",\"text\":\"\(String(repeating: "y", count: 400_000))\"}\n"
+                try? Data((head + later).utf8).write(to: file)
+                record("cwd(atPath:): a relocated record past the bounded tail is still the session's cwd",
+                       ClaudeSessionHistory.cwd(atPath: file.path) == moved)
+                record("upgrade blocker: that move's removed folder holds the upgrade though the spawn folder exists",
+                       ShimProcess.resumeAfterRestartBlocker(jsonlPath: file.path, workingDirectory: folder,
+                                                             folderExists: { $0.path == folder.path })
+                           == "its folder \(URL(fileURLWithPath: moved).lastPathComponent) was removed, so it could not resume after a restart")
+            }
             do {
                 let file = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-relocated-\(UUID().uuidString).jsonl")
                 defer { try? FileManager.default.removeItem(at: file) }
