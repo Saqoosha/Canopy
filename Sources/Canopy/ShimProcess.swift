@@ -6799,12 +6799,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // turn — forever, on a session that never moved — and only the final
         // resolved comparison catches it. The answer was right; the documented
         // "one folder-name comparison per turn" was not.
-        let resolvedWorkingDirectory = workingDirectory.resolvingSymlinksInPath().path
-        var candidates = ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.path)
-        if resolvedWorkingDirectory != workingDirectory.path {
-            candidates += ClaudeSessionHistory.encodedFolderCandidates(for: resolvedWorkingDirectory)
-        }
-        guard !candidates.contains(folder) else { return nil }
+        guard !ClaudeSessionHistory.isTranscriptFolder(folder, of: workingDirectory.path) else { return nil }
         guard let cwd = ClaudeSessionHistory.cwd(atPath: jsonlPath), !cwd.isEmpty else { return nil }
         let resolved = ClaudeSessionHistory.resolveProjectPath(
             extractedCwd: cwd, projectEncoded: folder

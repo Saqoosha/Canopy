@@ -12719,9 +12719,13 @@ enum SidebarLogicProbe {
             record("relocation past tail: a scanned move the transcript is not filed under is not believed",
                    ClaudeSessionHistory.relocationPastTail(jsonlPath: elsewhere, boundedCwd: folder.path,
                                                            scan: { _ in "/canopy-probe-missing/unrelated" }) == nil)
-            record("relocation past tail: a bounded cwd the transcript is filed under, or no cwd at all, never asks for the scan",
-                   ClaudeSessionHistory.relocationPastTail(jsonlPath: transcript, boundedCwd: folder.path, scan: { _ in movedTo }) == nil
-                       && ClaudeSessionHistory.relocationPastTail(jsonlPath: elsewhere, boundedCwd: nil, scan: { _ in movedTo }) == nil)
+            var scanned = false
+            let filed = ClaudeSessionHistory.relocationPastTail(jsonlPath: transcript, boundedCwd: folder.path,
+                                                                scan: { _ in scanned = true; return movedTo })
+            record("relocation past tail: a bounded cwd the transcript is filed under never asks for the scan",
+                   filed == nil && !scanned)
+            record("relocation past tail: a header with no cwd still gets the scanned move",
+                   ClaudeSessionHistory.relocationPastTail(jsonlPath: elsewhere, boundedCwd: nil, scan: { _ in movedTo }) == movedTo)
             do {
                 // The whole path: the `relocated` record sits past the head chunk and before the bounded tail.
                 let moved = "/canopy-probe-missing/Mo ved/wt-\(UUID().uuidString)"
@@ -12742,6 +12746,9 @@ enum SidebarLogicProbe {
                        ShimProcess.resumeAfterRestartBlocker(jsonlPath: file.path, workingDirectory: folder,
                                                              folderExists: { $0.path == folder.path })
                            == "its folder \(URL(fileURLWithPath: moved).lastPathComponent) was removed, so it could not resume after a restart")
+                record("upgrade blocker: that move's folder still existing does not hold it",
+                       ShimProcess.resumeAfterRestartBlocker(jsonlPath: file.path, workingDirectory: folder,
+                                                             folderExists: { _ in true }) == nil)
             }
             do {
                 let file = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-relocated-\(UUID().uuidString).jsonl")
