@@ -226,6 +226,13 @@ Mirror:  attach {"status": true} → attach_ok, then {"type":"status", branch, v
          goes out empty. attach {"images": true} (Mac clients only) → Read images come as
          canopy-asset URLs; `asset_request` img/<id> is the 768px thumbnail, imgfull/<id> the
          original. Both line buffers cut the connection at 16 MiB, on every reconnect.
+         Every broadcast frame carries a per-shim `seq`; `attach_ok` carries `epoch`, `seq`
+         and `resumed`. attach {"since": {epoch, seq}, "channelId": <the kept page's own>}
+         → when the epoch matches and the shim's `MirrorFrameRing` (4 MB / 20k frames, on from
+         the first phone attach) still holds every frame after `seq`: `resumed: true`, no
+         prefetch, the missed frames retargeted, then the permission status. Any miss takes the
+         full path. A page with requests in flight must not resume: their owners died with the
+         old connection (#320).
 ```
 
 ## CLI Bridge Details

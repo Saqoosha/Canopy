@@ -172,10 +172,59 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// arrives).
     private var cachedInitResponse: [String: Any]?
 
+    // MARK: - Frame cursor (#320)
+
+    /// Names this shim's seq space. A re-attach whose cursor carries another epoch
+    /// (a restarted shim, daemon or SSH reconnect, which all build a new instance)
+    /// gets the full replay.
+    private(set) var mirrorEpoch = UUID().uuidString
+    /// The seq of the last frame stamped; every broadcast payload carries its own as `seq`.
+    private(set) var mirrorSeq = 0
+    /// Nil until the first phone attaches, so a session no phone has watched pays nothing.
+    private var mirrorRing: MirrorFrameRing?
+
+    /// Stamps the next seq on `payload` and buffers it for a later resume.
+    private func stampedForResume(_ payload: [String: Any]) -> [String: Any] {
+        mirrorSeq += 1
+        var stamped = payload
+        stamped["seq"] = mirrorSeq
+        if mirrorRing != nil {
+            let bytes = (try? JSONSerialization.data(withJSONObject: stamped).count) ?? 0
+            mirrorRing?.append(seq: mirrorSeq, payload: stamped, liveChannel: channelId, bytes: bytes)
+        }
+        return stamped
+    }
+
+    /// The frames a re-attaching client missed, or why it must take the full replay.
+    func resumeFrames(for cursor: MirrorResumeCursor) -> MirrorFrameRing.Resume {
+        MirrorFrameRing.resume(ring: mirrorRing, epoch: cursor.epoch, currentEpoch: mirrorEpoch, since: cursor.seq,
+                               latest: mirrorSeq, liveChannelOpen: liveChannelOpen && channelId != nil)
+    }
+
     func attachMirror(_ mirror: any MirrorSink) {
         mirrors[ObjectIdentifier(mirror)] = MirrorClient(sink: mirror, channelId: nil)
+        if mirror.resumesFromFrameCursor, mirrorRing == nil {
+            mirrorRing = MirrorFrameRing(floor: mirrorSeq)
+        }
         refreshOpenRedirect()
         logger.notice("[mirror] attached; \(self.mirrors.count) mirror(s) on this shim")
+    }
+
+    /// Re-attaches a client whose page is still showing this session: binds its own
+    /// channel at once (the kept page does not send `launch_claude` again), posts what
+    /// it missed, then the permission status the launch path would have sent. One
+    /// main-actor call, so no live frame can land between the buffered ones.
+    ///
+    /// Outstanding dialog requests are not re-posted: one sent before the cursor is
+    /// already in the page, and one sent after it is among `frames`.
+    func resumeMirror(_ mirror: any MirrorSink, channelId ownChannel: String, frames: [MirrorFrameRing.Frame]) {
+        mirrors[ObjectIdentifier(mirror)] = MirrorClient(sink: mirror, channelId: ownChannel)
+        for frame in frames {
+            post(Self.retargeted(frame.payload, from: frame.liveChannel, to: ownChannel), to: mirror)
+        }
+        post(syntheticPermissionStatus(channelId: ownChannel), to: mirror)
+        refreshOpenRedirect()
+        logger.notice("[mirror] resumed with \(frames.count) buffered frame(s); \(self.mirrors.count) mirror(s) on this shim")
     }
 
     /// Point this session's `open` at a Mac watching it, or back at this
@@ -2835,6 +2884,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.warning("start() called while already running")
             return true
         }
+        // A new extension process: no buffered frame describes its page, so any old cursor must miss.
+        mirrorEpoch = UUID().uuidString
+        mirrorRing = mirrorRing.map { MirrorFrameRing(floor: mirrorSeq, maxBytes: $0.maxBytes, maxFrames: $0.maxFrames) }
 
         guard let nodeInfo = NodeDiscovery.find() else {
             logger.error("Cannot start shim: Node.js >= 18 not found")
@@ -3617,8 +3669,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 outstandingDialogRequests[requestId] = nil
             }
             if msgType == "response", let requestId = dict["requestId"] as? String, !mirrors.isEmpty {
-                let cancel: [String: Any] = ["type": "from-extension",
-                                             "message": ["type": "cancel_request", "targetRequestId": requestId] as [String: Any]]
+                // Buffered like a broadcast: a phone that re-attaches later must see the dialog withdrawn.
+                let cancel = stampedForResume(["type": "from-extension",
+                                               "message": ["type": "cancel_request", "targetRequestId": requestId] as [String: Any]])
                 if let webView, !isPrimary { post(cancel, to: webView) }
                 for (key, mirror) in mirrors where key != mirrorKey {
                     if let target = mirror.sink { post(cancel, to: target) }
@@ -4759,6 +4812,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return
         }
 
+        // Before the guard: a headless session with its phone gone is exactly when the ring must keep recording.
+        let stamped = stampedForResume(payload)
         guard webView != nil || !mirrors.isEmpty else {
             // A session started for a mirror (`SessionStore.startHeadlessSession`)
             // has no page here by design, and its CLI keeps talking after the
@@ -4766,11 +4821,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if boundSession == nil || boundSession?.webView != nil { logger.error("sendToWebView: webView is nil!") }
             return
         }
-        if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
+        if let webView { post(Self.retargeted(stamped, from: channelId, to: primaryOwnChannel), to: webView) }
         var stale: [ObjectIdentifier] = []
         for (key, mirror) in mirrors {
             guard let target = mirror.sink else { stale.append(key); continue }
-            post(Self.retargeted(payload, from: channelId, to: mirror.channelId), to: target)
+            post(Self.retargeted(stamped, from: channelId, to: mirror.channelId), to: target)
         }
         for key in stale { mirrors[key] = nil }
         if !stale.isEmpty, mirrors.isEmpty { requestOwners.removeAll() }
