@@ -154,14 +154,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard folderExists(folder) else {
             return "its folder \(folder.lastPathComponent) was removed, so it could not resume after a restart"
         }
-        // A relocation whose record has scrolled out of the bounded read falls back to the spawn folder
-        // above; the transcript's own folder still says where it moved.
-        let storage = URL(fileURLWithPath: jsonlPath).deletingLastPathComponent().lastPathComponent
-        let spawn = ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.path)
-            + ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.resolvingSymlinksInPath().path)
-        if !spawn.contains(storage), !folderExists(URL(fileURLWithPath: ClaudeSessionHistory.decodePath(storage))) {
-            return "the folder it moved to was removed, so it could not resume after a restart"
-        }
         return nil
     }
 
