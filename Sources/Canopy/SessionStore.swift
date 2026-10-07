@@ -285,6 +285,20 @@ final class SessionStore {
         }
     }
 
+    /// This Mac's daemon refusing to resume one of its own sessions. Says which half is missing when
+    /// it can: the common case is a worktree removed after its PR merged while the pane stayed open,
+    /// which an update restart then cannot bring back.
+    static func localOpenFailureMessage(
+        folder: URL,
+        folderExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+    ) -> String {
+        guard folderExists(folder) else {
+            let path = (folder.path as NSString).abbreviatingWithTildeInPath
+            return "Could not resume the session: its folder \(path) was removed."
+        }
+        return "Could not resume the session: its folder or transcript is gone."
+    }
+
     /// A reason that arrives after the attach succeeded: the session ended, nothing was refused (#278).
     static func mirrorEndedMessage(reason: String, machineName: String) -> String {
         "The session on \(machineName) stopped: \(reason)"

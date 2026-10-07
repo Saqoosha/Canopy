@@ -12697,6 +12697,73 @@ enum SidebarLogicProbe {
                !ShimProcess.remoteClientBlocksUpgrade(isLocal: false, reattaches: true))
         record("upgrade blocker: an older remote client still holds it",
                ShimProcess.remoteClientBlocksUpgrade(isLocal: false, reattaches: false))
+        do {
+            // The transcript sits under the folder's own encoding, so the relocation check exits
+            // without reading it and the folder asked about is the working directory itself.
+            let folder = URL(fileURLWithPath: "/canopy-probe-missing/merged-worktree")
+            let transcript = "/nowhere/\(ClaudeSessionHistory.encodedFolderCandidates(for: folder.path)[0])/s.jsonl"
+            record("upgrade blocker: a watched session with no transcript holds the upgrade",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: nil, workingDirectory: folder, folderExists: { _ in true })
+                       == "a watched session has no transcript yet")
+            record("upgrade blocker: a session whose folder was removed holds the upgrade",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: transcript, workingDirectory: folder,
+                                                         folderExists: { $0.path != folder.path })
+                       == "its folder merged-worktree was removed, so it could not resume after a restart")
+            record("upgrade blocker: transcript and folder both present do not hold it",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: transcript, workingDirectory: folder,
+                                                         folderExists: { _ in true }) == nil)
+            let movedTo = "/canopy-probe-missing/My Project/wt"
+            let elsewhere = "/nowhere/\(ClaudeSessionHistory.encodedFolderCandidates(for: movedTo)[0])/s.jsonl"
+            record("upgrade blocker: a move the bounded read missed is read from the transcript, and a removed target holds it",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: elsewhere, workingDirectory: folder,
+                                                         folderExists: { $0.path == folder.path },
+                                                         lastRelocated: { _ in movedTo })
+                       == "its folder wt was removed, so it could not resume after a restart")
+            record("upgrade blocker: a moved-to folder that still exists does not hold it, whatever its spelling",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: elsewhere, workingDirectory: folder,
+                                                         folderExists: { _ in true }, lastRelocated: { _ in movedTo }) == nil)
+            record("upgrade blocker: a relocation the transcript is not filed under is not believed",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: elsewhere, workingDirectory: folder,
+                                                         folderExists: { $0.path == folder.path },
+                                                         lastRelocated: { _ in "/canopy-probe-missing/unrelated" }) == nil)
+            record("upgrade blocker: a transcript under the spawn folder never asks for the relocation scan",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: transcript, workingDirectory: folder,
+                                                         folderExists: { $0.path == folder.path },
+                                                         lastRelocated: { _ in movedTo }) == nil)
+            do {
+                let file = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-relocated-\(UUID().uuidString).jsonl")
+                defer { try? FileManager.default.removeItem(at: file) }
+                let filler = String(repeating: "x", count: 1_200_000)
+                let first = "{\"type\":\"relocated\",\"relocatedCwd\":\"/a/first\"}\n"
+                let second = "{\"type\":\"relocated\",\"relocatedCwd\":\"/a/My \\\"Project\\\"/wt\"}\n"
+                let other = "{\"type\":\"user\",\"relocatedCwd\":\"/a/wrong-type\",\"text\":\"\(filler)\"}\n"
+                let partial = "{\"type\":\"relocated\",\"relocatedCwd\":\"/a/unterm"
+                try? Data((first + second + other + partial).utf8).write(to: file)
+                let whole = ClaudeSessionHistory.lastRelocatedCwd(atPath: file.path)
+                let wholeLines = UInt64((first + second + other).utf8.count)
+                record("relocation scan: the last relocated record wins across a chunk boundary; another type and a partial line are not read",
+                       whole.cwd == "/a/My \"Project\"/wt" && whole.end == wholeLines)
+                record("relocation scan: nothing new after the kept offset yields nil, so the caller keeps its last answer",
+                       ClaudeSessionHistory.lastRelocatedCwd(atPath: file.path, from: whole.end).cwd == nil)
+                if let handle = FileHandle(forWritingAtPath: file.path) {
+                    _ = try? handle.seekToEnd()
+                    try? handle.write(contentsOf: Data("inated\"}\n".utf8))
+                    try? handle.close()
+                }
+                record("relocation scan: a record completed after the kept offset is found from that offset",
+                       ClaudeSessionHistory.lastRelocatedCwd(atPath: file.path, from: whole.end).cwd == "/a/unterminated")
+                try? Data(first.utf8).write(to: file)
+                let replaced = ClaudeSessionHistory.lastRelocatedCwd(atPath: file.path, from: whole.end)
+                record("relocation scan: a file shorter than the kept offset is read from the start",
+                       replaced.cwd == "/a/first" && replaced.end == UInt64(first.utf8.count))
+            }
+            record("local open refusal: a removed folder is named",
+                   SessionStore.localOpenFailureMessage(folder: folder, folderExists: { _ in false })
+                       == "Could not resume the session: its folder /canopy-probe-missing/merged-worktree was removed.")
+            record("local open refusal: with the folder present the reason stays generic",
+                   SessionStore.localOpenFailureMessage(folder: folder, folderExists: { _ in true })
+                       == "Could not resume the session: its folder or transcript is gone.")
+        }
         record("attach: restart capability is read only from a literal true",
                MirrorConnection.reattachesAfterRestart(attach: ["restart": true])
                    && !MirrorConnection.reattachesAfterRestart(attach: ["restart": "true"])

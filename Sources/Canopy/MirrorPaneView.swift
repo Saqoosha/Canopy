@@ -305,7 +305,11 @@ struct MirrorPaneView: NSViewRepresentable {
                 }
             case .refused(let reason):
                 if case .spawning = session.status {
-                    onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName))
+                    if isDaemon, reason == MirrorOpenRequest.notOpenable, case .local(let folder) = session.origin {
+                        onFailure(SessionStore.localOpenFailureMessage(folder: folder))
+                    } else {
+                        onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName))
+                    }
                 } else {
                     onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName))
                 }

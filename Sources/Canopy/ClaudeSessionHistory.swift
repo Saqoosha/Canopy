@@ -816,6 +816,39 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).cwd
     }
 
+    /// The last `relocated` record's `relocatedCwd` among the whole lines from `offset` on, and the
+    /// offset after the last whole line read. Unlike `cwd(atPath:)` this is not a bounded window, so
+    /// a record the tail has scrolled past is still found; callers keep `end` and pass it back.
+    /// A file shorter than `offset` was replaced and is read from the start (`end` then comes back lower).
+    static func lastRelocatedCwd(atPath path: String, from offset: UInt64 = 0) -> (cwd: String?, end: UInt64) {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, offset) }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        var end = offset <= size ? offset : 0
+        guard (try? handle.seek(toOffset: end)) != nil else { return (nil, offset) }
+        let marker = Data("relocatedCwd".utf8)
+        var carry = Data()
+        var found: String?
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            carry.append(chunk)
+            // One copy of the remainder per chunk, not per line.
+            var cursor = carry.startIndex
+            while let newline = carry[cursor...].firstIndex(of: 0x0A) {
+                let line = carry[cursor..<newline]
+                end += UInt64(line.count + 1)
+                cursor = carry.index(after: newline)
+                if line.range(of: marker) != nil,
+                   let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                   json["type"] as? String == "relocated",
+                   let value = json["relocatedCwd"] as? String, !value.isEmpty {
+                    found = value
+                }
+            }
+            carry = Data(carry[cursor...])
+        }
+        return (found, end)
+    }
+
     /// Whether a session whose resolved project directory is GONE should still
     /// appear in the list. `loadAllSessions` otherwise drops any session whose
     /// project path fails `fileExists`, which hid readable sessions launched in

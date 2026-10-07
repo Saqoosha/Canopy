@@ -130,12 +130,53 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }) {
             return "a phone or another Mac without automatic reconnect is attached"
         }
-        // A session with no transcript yet cannot be resumed, which matters only while a pane
-        // shows it (one nobody watches the reaper would stop anyway). Local only: a remote
-        // session's transcript is on the other machine, and the lookup would scan the store.
-        if !mirrors.isEmpty, case .local = boundSession?.origin, let id = boundSession?.resumeId,
-           Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory) == nil {
-            return "a watched session has no transcript yet"
+        // Only while a pane shows it (one nobody watches the reaper would stop anyway). Local
+        // only: a remote session's transcript is on the other machine, and the lookup would
+        // scan the store.
+        if !mirrors.isEmpty, case .local = boundSession?.origin, let id = boundSession?.resumeId {
+            return Self.resumeAfterRestartBlocker(
+                jsonlPath: Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory),
+                workingDirectory: workingDirectory,
+                lastRelocated: { [self] path in
+                    if relocatedScan.path != path { relocatedScan = (path, 0, nil) }
+                    let scan = ClaudeSessionHistory.lastRelocatedCwd(atPath: path, from: relocatedScan.end)
+                    // A lower end means the file was replaced: what the old one said no longer holds.
+                    relocatedScan = (path, scan.end, scan.cwd ?? (scan.end < relocatedScan.end ? nil : relocatedScan.cwd))
+                    return relocatedScan.cwd
+                })
+        }
+        return nil
+    }
+
+    /// How far `upgradeBlocker` has read this transcript for `relocated` records, and the last one seen,
+    /// so each check reads only what was appended since.
+    private var relocatedScan: (path: String, end: UInt64, cwd: String?) = ("", 0, nil)
+
+    /// Why the restarted daemon would refuse to resume this session (`MirrorServer.startRequestedSession`), or nil.
+    /// The folder case is a worktree removed after its PR merged while the pane stayed open: the
+    /// running CLI does not notice, and the restart is what ends it for good.
+    static func resumeAfterRestartBlocker(
+        jsonlPath: String?,
+        workingDirectory: URL,
+        folderExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) },
+        lastRelocated: (String) -> String? = { ClaudeSessionHistory.lastRelocatedCwd(atPath: $0).cwd }
+    ) -> String? {
+        guard let jsonlPath else { return "a watched session has no transcript yet" }
+        var folder = effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
+        // The transcript is filed under the folder the session is in. When the bounded read above answers
+        // a folder it is not filed under, the `relocated` record has scrolled out of the tail: read it
+        // from the whole transcript, and take it only if it is the folder the transcript is filed under.
+        let storage = URL(fileURLWithPath: jsonlPath).deletingLastPathComponent().lastPathComponent
+        let filedUnder = { (url: URL) in
+            (ClaudeSessionHistory.encodedFolderCandidates(for: url.path)
+                + ClaudeSessionHistory.encodedFolderCandidates(for: url.resolvingSymlinksInPath().path)).contains(storage)
+        }
+        if !filedUnder(folder), !filedUnder(workingDirectory), let moved = lastRelocated(jsonlPath),
+           filedUnder(URL(fileURLWithPath: moved)) {
+            folder = URL(fileURLWithPath: moved)
+        }
+        guard folderExists(folder) else {
+            return "its folder \(folder.lastPathComponent) was removed, so it could not resume after a restart"
         }
         return nil
     }
