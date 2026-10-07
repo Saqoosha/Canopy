@@ -187,9 +187,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         mirrorSeq += 1
         var stamped = payload
         stamped["seq"] = mirrorSeq
-        if let ring = mirrorRing {
-            // Unmeasurable counts as over the cap: it evicts itself rather than slipping past the byte bound.
-            let bytes = (try? JSONSerialization.data(withJSONObject: stamped).count) ?? ring.maxBytes + 1
+        if mirrorRing != nil {
+            let bytes = (try? JSONSerialization.data(withJSONObject: stamped).count) ?? 0
             mirrorRing?.append(seq: mirrorSeq, payload: stamped, liveChannel: channelId, bytes: bytes)
         }
         return stamped
