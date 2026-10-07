@@ -178,8 +178,8 @@ final class DaemonDelegate {
 
         DaemonUpgradeCenter.shared.refreshExtensionState = { [weak self] in
             guard let self, let state = DaemonUpgradeCenter.shared.state else { return }
-            let next = UpgradeState(runningBuild: state.runningBuild, pendingBuild: state.pendingBuild, heldBy: state.heldBy,
-                                    notUnderLaunchd: state.notUnderLaunchd, extensionState: self.extensionState())
+            var next = state
+            next.extensionState = self.extensionState()
             if next != state { DaemonUpgradeCenter.shared.state = next }
         }
         DaemonUpgradeCenter.shared.restartNow = { [weak self] in
