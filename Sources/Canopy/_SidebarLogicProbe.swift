@@ -2773,6 +2773,8 @@ enum SidebarLogicProbe {
                    empty["model"] == nil && empty["messageCount"] == nil)
             record("status frame: no remote host, no key",
                    empty["remoteHost"] == nil)
+            record("status frame: default login, no account key",
+                   empty["accountName"] == nil)
 
             let data = StatusBarData()
             data.model = "claude-opus-5[1m]"
@@ -2783,6 +2785,7 @@ enum SidebarLogicProbe {
             data.gitBranch = "mbp-session-view-sync"
             data.vcsType = .jj
             data.remoteHost = "studio"
+            data.accountName = "Work"
             let frame = MirrorStatusFrame.payload(from: data)
             record("status frame: window is the compact level, not contextMax",
                    frame["contextWindow"] as? Int == 967_000 && frame["contextUsed"] as? Int == 123_000,
@@ -2810,14 +2813,17 @@ enum SidebarLogicProbe {
                    "window=\(pane.compactionWindow) pct=\(pane.contextPct)")
             record("status apply: branch, vcs and remote host land",
                    pane.gitBranch == "mbp-session-view-sync" && pane.vcsType == .jj && pane.remoteHost == "studio")
+            record("status apply: the session's account lands",
+                   frame["accountName"] as? String == "Work" && pane.accountName == "Work")
             record("status apply: the roster's model, count and machine are left alone",
                    pane.model == "opus" && pane.messageCount == 7 && pane.mirrorMachine == "studio")
             var noRemote = frame
             noRemote["remoteHost"] = nil
+            noRemote["accountName"] = nil
             noRemote["branch"] = ""
             MirrorStatusFrame.apply(noRemote, to: pane)
-            record("status apply: a later line clears a branch and remote host that went away",
-                   pane.gitBranch == "" && pane.remoteHost == nil)
+            record("status apply: a later line clears a branch, remote host and account that went away",
+                   pane.gitBranch == "" && pane.remoteHost == nil && pane.accountName == nil)
             MirrorStatusFrame.apply(["type": "status", "branch": "x"], to: pane)
             record("status apply: a line without the raw fields changes nothing",
                    pane.gitBranch == "" && pane.contextUsed == 123_000)
