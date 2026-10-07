@@ -141,8 +141,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return nil
     }
 
-    /// Why the restarted daemon would refuse to resume this session, or nil. It resumes from the
-    /// transcript, in the session's folder (`MirrorServer.startRequestedSession`), so it needs both.
+    /// Why the restarted daemon would refuse to resume this session (`MirrorServer.startRequestedSession`), or nil.
     /// The folder case is a worktree removed after its PR merged while the pane stayed open: the
     /// running CLI does not notice, and the restart is what ends it for good.
     static func resumeAfterRestartBlocker(

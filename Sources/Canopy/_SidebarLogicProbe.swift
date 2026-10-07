@@ -12714,7 +12714,7 @@ enum SidebarLogicProbe {
                                                          folderExists: { _ in true }) == nil)
             record("local open refusal: a removed folder is named",
                    SessionStore.localOpenFailureMessage(folder: folder, folderExists: { _ in false })
-                       == "Could not resume the session: its folder /canopy-probe-missing/merged-worktree was removed. The conversation is still on disk.")
+                       == "Could not resume the session: its folder /canopy-probe-missing/merged-worktree was removed.")
             record("local open refusal: with the folder present the reason stays generic",
                    SessionStore.localOpenFailureMessage(folder: folder, folderExists: { _ in true })
                        == "Could not resume the session: its folder or transcript is gone.")

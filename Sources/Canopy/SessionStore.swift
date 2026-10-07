@@ -294,7 +294,7 @@ final class SessionStore {
     ) -> String {
         guard folderExists(folder) else {
             let path = (folder.path as NSString).abbreviatingWithTildeInPath
-            return "Could not resume the session: its folder \(path) was removed. The conversation is still on disk."
+            return "Could not resume the session: its folder \(path) was removed."
         }
         return "Could not resume the session: its folder or transcript is gone."
     }
