@@ -12702,6 +12702,77 @@ enum SidebarLogicProbe {
                    && !MirrorConnection.reattachesAfterRestart(attach: ["restart": "true"])
                    && !MirrorConnection.reattachesAfterRestart(attach: [:]))
 
+        // MARK: - Frame cursor resume (#320)
+        do {
+            func frame(_ seq: Int) -> [String: Any] { ["type": "from-extension", "seq": seq] }
+            var ring = MirrorFrameRing(floor: 10, maxBytes: 100, maxFrames: 3)
+            record("frame ring: an empty ring resumes its own floor with nothing to send",
+                   ring.frames(after: 10, latest: 10)?.isEmpty == true)
+            for seq in 11...13 { ring.append(seq: seq, payload: frame(seq), liveChannel: "live", bytes: 10) }
+            record("frame ring: frames after the cursor, oldest first",
+                   ring.frames(after: 11, latest: 13)?.map(\.seq) == [12, 13])
+            record("frame ring: the floor itself is a valid cursor",
+                   ring.frames(after: 10, latest: 13)?.map(\.seq) == [11, 12, 13])
+            record("frame ring: a cursor at the latest seq gets nothing, not a refusal",
+                   ring.frames(after: 13, latest: 13)?.isEmpty == true)
+            record("frame ring: a cursor this shim never issued is refused",
+                   ring.frames(after: 14, latest: 13) == nil)
+            ring.append(seq: 14, payload: frame(14), liveChannel: "live", bytes: 10)
+            record("frame ring: the count cap evicts the oldest and raises the floor",
+                   ring.count == 3 && ring.floor == 11)
+            record("frame ring: a cursor below the floor is refused, one at it is served",
+                   ring.frames(after: 10, latest: 14) == nil && ring.frames(after: 11, latest: 14)?.map(\.seq) == [12, 13, 14])
+            ring.append(seq: 15, payload: frame(15), liveChannel: "live", bytes: 85)
+            record("frame ring: the byte cap evicts until the total fits",
+                   ring.totalBytes <= 100 && ring.floor == 13 && ring.frames(after: 13, latest: 15)?.map(\.seq) == [14, 15])
+            ring.append(seq: 16, payload: frame(16), liveChannel: "live", bytes: 101)
+            record("frame ring: a frame larger than the cap evicts itself, so no cursor before it resumes",
+                   ring.count == 0 && ring.floor == 16 && ring.frames(after: 15, latest: 16) == nil
+                       && ring.frames(after: 16, latest: 16)?.isEmpty == true)
+            record("frame ring: an evicted payload is released at once, not at compaction",
+                   ring.retainedPayloads == 0)
+            var exact = MirrorFrameRing(floor: 0, maxBytes: 100, maxFrames: 10)
+            for seq in 1...4 { exact.append(seq: seq, payload: frame(seq), liveChannel: nil, bytes: 25) }
+            record("frame ring: a total exactly at the byte cap keeps every frame",
+                   exact.count == 4 && exact.floor == 0)
+            var big = MirrorFrameRing(floor: 0, maxBytes: .max, maxFrames: 10)
+            for seq in 1...5000 { big.append(seq: seq, payload: frame(seq), liveChannel: nil, bytes: 1) }
+            record("frame ring: compaction keeps the held window intact",
+                   big.count == 10 && big.floor == 4990 && big.frames(after: 4990, latest: 5000)?.map(\.seq) == Array(4991...5000))
+
+            var held = MirrorFrameRing(floor: 0)
+            held.append(seq: 1, payload: frame(1), liveChannel: "live", bytes: 10)
+            record("frame ring: the channel a frame went out on is kept for the rewrite",
+                   held.frames(after: 0, latest: 1)?.first?.liveChannel == "live")
+            func resumed(_ r: MirrorFrameRing.Resume) -> [Int]? { if case .frames(let f) = r { return f.map(\.seq) }; return nil }
+            func refusal(_ r: MirrorFrameRing.Resume) -> String? { if case .refused(let why) = r { return why }; return nil }
+            record("resume: a matching epoch inside the ring resumes",
+                   resumed(MirrorFrameRing.resume(ring: held, epoch: "e", currentEpoch: "e", since: 0, latest: 1, liveChannelOpen: true)) == [1])
+            record("resume: another epoch takes the full replay",
+                   refusal(MirrorFrameRing.resume(ring: held, epoch: "old", currentEpoch: "e", since: 0, latest: 1, liveChannelOpen: true)) == "epoch changed")
+            record("resume: no live channel takes the full replay, since the kept page will not relaunch",
+                   refusal(MirrorFrameRing.resume(ring: held, epoch: "e", currentEpoch: "e", since: 0, latest: 1, liveChannelOpen: false)) == "no live channel")
+            record("resume: a shim no phone has watched holds nothing to resume from",
+                   refusal(MirrorFrameRing.resume(ring: nil, epoch: "e", currentEpoch: "e", since: 0, latest: 1, liveChannelOpen: true)) == "no frames buffered")
+            record("resume: a cursor past the latest seq takes the full replay",
+                   refusal(MirrorFrameRing.resume(ring: held, epoch: "e", currentEpoch: "e", since: 2, latest: 1, liveChannelOpen: true)) == "cursor 2 is outside 0...1")
+
+            let good: [String: Any] = ["since": ["epoch": "e", "seq": 7], "channelId": "c"]
+            record("resume cursor: since and channelId are read",
+                   MirrorResumeCursor(attach: good) == MirrorResumeCursor(attach: ["since": ["epoch": "e", "seq": NSNumber(value: 7)], "channelId": "c"])
+                       && MirrorResumeCursor(attach: good)?.seq == 7 && MirrorResumeCursor(attach: good)?.channelId == "c")
+            record("resume cursor: an attach without one is a fresh attach",
+                   MirrorResumeCursor(attach: [:]) == nil
+                       && MirrorResumeCursor(attach: ["since": ["epoch": "e", "seq": 7]]) == nil
+                       && MirrorResumeCursor(attach: ["since": ["epoch": "e", "seq": 7], "channelId": ""]) == nil
+                       && MirrorResumeCursor(attach: ["since": ["epoch": "", "seq": 7], "channelId": "c"]) == nil)
+            record("resume cursor: a seq that is not a non-negative integer is no cursor",
+                   MirrorResumeCursor(attach: ["since": ["epoch": "e", "seq": -1], "channelId": "c"]) == nil
+                       && MirrorResumeCursor(attach: ["since": ["epoch": "e", "seq": 1.5], "channelId": "c"]) == nil
+                       && MirrorResumeCursor(attach: ["since": ["epoch": "e", "seq": true], "channelId": "c"]) == nil
+                       && MirrorResumeCursor(attach: ["since": ["epoch": "e", "seq": "7"], "channelId": "c"]) == nil)
+        }
+
         // MARK: - Remote pane re-attach after a daemon restart
         record("restart re-attach: the overlay names the machine",
                { let s = ConnectionState(); s.status = .awaitingRestart(machine: "studio")

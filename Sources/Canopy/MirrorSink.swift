@@ -35,6 +35,10 @@ protocol MirrorSink: AnyObject {
     /// itself after a `daemon_restarting` notice, so a daemon upgrade need not wait for it.
     var reattachesAfterRestart: Bool { get }
 
+    /// Said at attach (`"resume": true`) that it re-attaches with a frame cursor, so
+    /// its first attach turns on the shim's `MirrorFrameRing` (#320).
+    var resumesFromFrameCursor: Bool { get }
+
     /// UI the daemon cannot show itself (`MirrorUIFrame`).
     func deliverUI(_ frame: MirrorUIFrame)
 }
@@ -46,6 +50,7 @@ extension MirrorSink {
     var acceptsUI: Bool { false }
     var isLocalClient: Bool { false }
     var reattachesAfterRestart: Bool { false }
+    var resumesFromFrameCursor: Bool { false }
     func deliverUI(_ frame: MirrorUIFrame) {}
 }
 

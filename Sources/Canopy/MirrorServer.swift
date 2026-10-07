@@ -395,6 +395,8 @@ final class MirrorConnection: MirrorSink {
     /// they did before 2.43.
     private var filesRequested = false
     var acceptsFileTransfers: Bool { isMacClient && filesRequested }
+    /// Set from the attach's `"resume": true`; see `MirrorSink.resumesFromFrameCursor`.
+    private(set) var resumesFromFrameCursor = false
     var acceptsClickedFiles: Bool { filesRequested }
 
     var openRedirectHost: String? {
@@ -670,8 +672,19 @@ final class MirrorConnection: MirrorSink {
         fetchesImages = isMacClient && dict["images"] as? Bool == true
         reattachesAfterRestart = Self.reattachesAfterRestart(attach: dict)
         acceptsUI = isMacClient && dict["ui"] as? Bool == true
+        resumesFromFrameCursor = dict["resume"] as? Bool == true
+        // A page still showing this session re-attaches with a cursor; when the shim still
+        // holds every frame after it, it gets those instead of a replay (#320).
+        var resumeFrames: [MirrorFrameRing.Frame]?
+        let cursor = MirrorResumeCursor(attach: dict)
+        if let cursor {
+            switch shim.resumeFrames(for: cursor) {
+            case .frames(let frames): resumeFrames = frames
+            case .refused(let reason): logger.notice("[mirror-server] resume refused (\(reason, privacy: .public)); full replay")
+            }
+        }
         // Only for a client that says it will use the answer; an older phone asks for the transcript itself.
-        let prefetchId = (dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
+        let prefetchId = (resumeFrames == nil && dict["prefetch"] as? Bool == true) ? "canopy-prefetch-\(UUID().uuidString)" : ""
         // Sent before `attachMirror`, so it is the first line the client sees after attaching.
         sendJSONObject([
             "type": "attach_ok",
@@ -690,8 +703,18 @@ final class MirrorConnection: MirrorSink {
             "prefetchedSessionRequestId": prefetchId,
             // Confirms the negotiation for a client that wants to check; none reads it yet.
             "compress": compressOutbound ? MirrorWire.compressionName : "",
+            // The cursor a later re-attach sends back as `since`. Every broadcast frame after
+            // `seq` reaches this client live, and is buffered once a resuming client has attached.
+            "epoch": shim.mirrorEpoch,
+            // On a resume, the cursor: the buffered frames after it follow this line.
+            "seq": resumeFrames != nil ? cursor?.seq ?? shim.mirrorSeq : shim.mirrorSeq,
+            "resumed": resumeFrames != nil,
         ])
-        shim.attachMirror(self)
+        if let cursor, let resumeFrames {
+            shim.resumeMirror(self, channelId: cursor.channelId, frames: resumeFrames)
+        } else {
+            shim.attachMirror(self)
+        }
         if !prefetchId.isEmpty {
             // Starts the extension reading the transcript while the phone is still loading the page.
             shim.receiveFromMirror(Self.prefetchRequest(sessionId: resolvedId, requestId: prefetchId), from: self)
