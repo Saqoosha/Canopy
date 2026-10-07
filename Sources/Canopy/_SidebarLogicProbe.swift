@@ -12712,6 +12712,10 @@ enum SidebarLogicProbe {
             record("upgrade blocker: transcript and folder both present do not hold it",
                    ShimProcess.resumeAfterRestartBlocker(jsonlPath: transcript, workingDirectory: folder,
                                                          folderExists: { _ in true }) == nil)
+            record("upgrade blocker: a transcript stored under a removed folder holds it though the spawn folder exists",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: "/nowhere/-canopy-probe-gone-worktree/s.jsonl",
+                                                         workingDirectory: folder, folderExists: { $0.path == folder.path })
+                       == "the folder it moved to was removed, so it could not resume after a restart")
             record("local open refusal: a removed folder is named",
                    SessionStore.localOpenFailureMessage(folder: folder, folderExists: { _ in false })
                        == "Could not resume the session: its folder /canopy-probe-missing/merged-worktree was removed.")
