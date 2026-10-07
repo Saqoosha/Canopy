@@ -9,4 +9,6 @@ final class DaemonUpgradeCenter {
     var state: UpgradeState?
     /// Set by `DaemonDelegate`. Returns why it refused, or nil once the restart has begun.
     @ObservationIgnored var restartNow: (() -> String?)?
+    /// Set by `DaemonDelegate`. Re-reads which sessions run an older extension, for a restart that just moved one.
+    @ObservationIgnored var refreshExtensionState: (() -> Void)?
 }

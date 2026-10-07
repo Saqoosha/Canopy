@@ -220,7 +220,10 @@ final class ControlSession {
     private func restartSession(_ request: ControlProtocol.Request) {
         guard let session = requestedSession(request) else { return }
         store.restartSession(session.id)
-        guard store.startHeadlessSession(resumeId: session.resumeId) != nil else {
+        let started = store.startHeadlessSession(resumeId: session.resumeId) != nil
+        // Without this the footer keeps listing the session as on an older extension until the next minute's check.
+        DaemonUpgradeCenter.shared.refreshExtensionState?()
+        guard started else {
             fail(request, MirrorOpenRequest.startFailed)
             return
         }
@@ -237,7 +240,9 @@ final class ControlSession {
         }
         store.switchAccount(session.id, to: account)
         // Same account: nothing was stopped. Another: `restartSession` parked the row.
-        if session.shim == nil, store.startHeadlessSession(resumeId: session.resumeId) == nil {
+        let failed = session.shim == nil && store.startHeadlessSession(resumeId: session.resumeId) == nil
+        DaemonUpgradeCenter.shared.refreshExtensionState?()
+        if failed {
             fail(request, MirrorOpenRequest.startFailed)
             return
         }

@@ -176,6 +176,12 @@ final class DaemonDelegate {
         // shims are gone by now, and a version another process still runs is kept again.
         Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }
 
+        DaemonUpgradeCenter.shared.refreshExtensionState = { [weak self] in
+            guard let self, let state = DaemonUpgradeCenter.shared.state else { return }
+            var next = state
+            next.extensionState = self.extensionState()
+            if next != state { DaemonUpgradeCenter.shared.state = next }
+        }
         DaemonUpgradeCenter.shared.restartNow = { [weak self] in
             let state = DaemonUpgradeCenter.shared.state
             if let refusal = DaemonUpgrade.restartNowRefusal(pendingBuild: state?.pendingBuild,
