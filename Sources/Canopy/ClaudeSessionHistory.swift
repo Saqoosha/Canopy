@@ -1084,7 +1084,8 @@ enum ClaudeSessionHistory {
         private var scans: [String: (end: UInt64, cwd: String?)] = [:]
 
         func lastRelocatedCwd(atPath path: String) -> String? {
-            let kept = lock.withLock { scans[path] } ?? (0, nil)
+            let stored: (end: UInt64, cwd: String?)? = lock.withLock { scans[path] }
+            let kept = stored ?? (end: 0, cwd: nil)
             let scan = ClaudeSessionHistory.lastRelocatedCwd(atPath: path, from: kept.end)
             // A lower end means the file was replaced: what the old one said no longer holds.
             let cwd = scan.cwd ?? (scan.end < kept.end ? nil : kept.cwd)
