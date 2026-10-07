@@ -244,6 +244,8 @@ struct MirrorPaneView: NSViewRepresentable {
         bridge.onStatus = { [weak session] frame in
             guard let session else { return }
             MirrorStatusFrame.apply(frame, to: session.statusBar)
+            // Only the daemon's shim writes accountName; this Mac's sync already knows the account.
+            if session.isDaemonHosted { session.statusBar.accountName = session.claudeAccount?.name }
         }
         let ownAccountFromThisMac = session.isDaemonHosted
         bridge.onUsage = { [weak bridge] frame in

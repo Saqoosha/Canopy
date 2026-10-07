@@ -30,7 +30,6 @@ enum MirrorStatusFrame {
             "didCompact": data.didCompact,
         ]
         if let remote = data.remoteHost { payload["remoteHost"] = remote }
-        if let account = data.accountName { payload["accountName"] = account }
         return payload
     }
 
@@ -50,7 +49,6 @@ enum MirrorStatusFrame {
         data.vcsType = vcsType(frame["vcs"] as? String ?? "")
         data.didCompact = frame["didCompact"] as? Bool ?? false
         data.remoteHost = frame["remoteHost"] as? String
-        data.accountName = frame["accountName"] as? String
     }
 
     private static func vcsType(_ name: String) -> StatusBarData.VCSType {
