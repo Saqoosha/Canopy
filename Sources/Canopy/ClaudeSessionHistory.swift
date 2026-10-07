@@ -816,6 +816,52 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).cwd
     }
 
+    /// The last `relocatedCwd` written at or after `offset`, and where the read ended. Unlike
+    /// `cwd(atPath:)` this reads everything from `offset`, so a record the bounded tail has
+    /// scrolled past is still found; callers keep the returned offset and pass it back.
+    /// Matches the raw key bytes: inside message text the quotes are escaped, so only a real
+    /// record's key matches.
+    static func lastRelocatedCwd(atPath path: String, from offset: UInt64 = 0) -> (cwd: String?, end: UInt64) {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, offset) }
+        defer { try? handle.close() }
+        let needle = Data("\"relocatedCwd\":\"".utf8)
+        let overlap = 8192
+        // Back up so a record straddling the previous read's end is seen whole.
+        var position = offset > UInt64(overlap) ? offset - UInt64(overlap) : 0
+        guard (try? handle.seek(toOffset: position)) != nil else { return (nil, offset) }
+        var carry = Data()
+        var found: String?
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            position += UInt64(chunk.count)
+            let window = carry + chunk
+            var search = window.startIndex..<window.endIndex
+            while let hit = window.range(of: needle, options: .backwards, in: search) {
+                if let close = closingQuote(in: window, from: hit.upperBound),
+                   let value = try? JSONSerialization.jsonObject(
+                       with: Data([0x22]) + window[hit.upperBound..<close] + Data([0x22]), options: .fragmentsAllowed) as? String,
+                   !value.isEmpty {
+                    found = value
+                    break
+                }
+                // Value cut by the window's end: an earlier record in this window is still newer than `found`.
+                search = window.startIndex..<hit.lowerBound
+            }
+            carry = Data(window.suffix(overlap))
+        }
+        return (found, position)
+    }
+
+    /// Index of the unescaped `"` ending a JSON string that starts at `start`, or nil if the data ends first.
+    private static func closingQuote(in data: Data, from start: Data.Index) -> Data.Index? {
+        var i = start
+        while i < data.endIndex {
+            if data[i] == 0x5C { i += 2; continue }
+            if data[i] == 0x22 { return i }
+            i += 1
+        }
+        return nil
+    }
+
     /// Whether a session whose resolved project directory is GONE should still
     /// appear in the list. `loadAllSessions` otherwise drops any session whose
     /// project path fails `fileExists`, which hid readable sessions launched in

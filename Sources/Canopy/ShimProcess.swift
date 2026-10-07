@@ -136,10 +136,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if !mirrors.isEmpty, case .local = boundSession?.origin, let id = boundSession?.resumeId {
             return Self.resumeAfterRestartBlocker(
                 jsonlPath: Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory),
-                workingDirectory: workingDirectory)
+                workingDirectory: workingDirectory,
+                lastRelocated: { [self] path in
+                    if relocatedScan.path != path { relocatedScan = (path, 0, nil) }
+                    let scan = ClaudeSessionHistory.lastRelocatedCwd(atPath: path, from: relocatedScan.end)
+                    relocatedScan = (path, scan.end, scan.cwd ?? relocatedScan.cwd)
+                    return relocatedScan.cwd
+                })
         }
         return nil
     }
+
+    /// How far `upgradeBlocker` has read this transcript for `relocated` records, and the last one seen,
+    /// so each check reads only what was appended since.
+    private var relocatedScan: (path: String, end: UInt64, cwd: String?) = ("", 0, nil)
 
     /// Why the restarted daemon would refuse to resume this session (`MirrorServer.startRequestedSession`), or nil.
     /// The folder case is a worktree removed after its PR merged while the pane stayed open: the
@@ -147,10 +157,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     static func resumeAfterRestartBlocker(
         jsonlPath: String?,
         workingDirectory: URL,
-        folderExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+        folderExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) },
+        lastRelocated: (String) -> String? = { ClaudeSessionHistory.lastRelocatedCwd(atPath: $0).cwd }
     ) -> String? {
         guard let jsonlPath else { return "a watched session has no transcript yet" }
-        let folder = effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
+        var folder = effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
+        // A transcript stored outside the spawn folder means the session moved. When the bounded read
+        // above still answers the spawn folder, its `relocated` record has scrolled out of the tail.
+        let storage = URL(fileURLWithPath: jsonlPath).deletingLastPathComponent().lastPathComponent
+        let spawn = ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.path)
+            + ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.resolvingSymlinksInPath().path)
+        if folder.path == workingDirectory.path, !spawn.contains(storage), let moved = lastRelocated(jsonlPath) {
+            folder = URL(fileURLWithPath: moved)
+        }
         guard folderExists(folder) else {
             return "its folder \(folder.lastPathComponent) was removed, so it could not resume after a restart"
         }
