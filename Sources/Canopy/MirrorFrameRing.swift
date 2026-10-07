@@ -7,7 +7,7 @@ import Foundation
 /// Bounded by bytes and by count, oldest dropped first. `floor` is the highest seq no
 /// longer held: every frame stamped after it is here, which is the whole contract a
 /// resume needs. A frame larger than `maxBytes` on its own evicts itself and raises
-/// `floor` past it, so a cursor from before it falls back to the full replay.
+/// `floor` to it, so a cursor from before it falls back to the full replay.
 struct MirrorFrameRing {
     struct Frame {
         let seq: Int
@@ -18,14 +18,14 @@ struct MirrorFrameRing {
         let bytes: Int
     }
 
-    /// Enough for a few minutes of a busy turn; `stream_event` deltas are most of it.
     static let defaultMaxBytes = 4 << 20
     static let defaultMaxFrames = 20_000
 
     let maxBytes: Int
     let maxFrames: Int
     private(set) var floor: Int
-    private var storage: [Frame] = []
+    /// Evicted slots are nilled at once, so their payloads are freed before the lazy compaction.
+    private var storage: [Frame?] = []
     /// Index of the oldest live frame in `storage`; the prefix is compacted lazily.
     private var head = 0
     private(set) var totalBytes = 0
@@ -37,14 +37,17 @@ struct MirrorFrameRing {
     }
 
     var count: Int { storage.count - head }
+    /// Payloads still referenced, evicted slots included; equals `count` when eviction frees them.
+    var retainedPayloads: Int { storage.reduce(0) { $0 + ($1 == nil ? 0 : 1) } }
 
     /// `seq` must be greater than every seq appended before it.
     mutating func append(seq: Int, payload: [String: Any], liveChannel: String?, bytes: Int) {
         storage.append(Frame(seq: seq, payload: payload, liveChannel: liveChannel, bytes: bytes))
         totalBytes += bytes
-        while head < storage.count, totalBytes > maxBytes || count > maxFrames {
-            totalBytes -= storage[head].bytes
-            floor = storage[head].seq
+        while head < storage.count, totalBytes > maxBytes || count > maxFrames, let evicted = storage[head] {
+            totalBytes -= evicted.bytes
+            floor = evicted.seq
+            storage[head] = nil
             head += 1
         }
         if head > 1024, head * 2 > storage.count {
@@ -58,16 +61,16 @@ struct MirrorFrameRing {
     /// `latest` (a cursor this shim never issued).
     func frames(after since: Int, latest: Int) -> [Frame]? {
         guard since >= floor, since <= latest else { return nil }
-        return storage[head...].filter { $0.seq > since }
+        return storage[head...].compactMap { $0 }.filter { $0.seq > since }
     }
 
-    /// Whether a re-attach may resume, and with which frames. Every refusal falls back
-    /// to today's full replay, so each one is a reason for the log, not an error.
+    /// Every refusal falls back to the full replay, so its reason is for the log, not an error.
     enum Resume {
         case frames([Frame])
         case refused(String)
     }
 
+    /// Whether a re-attach may resume, and with which frames.
     static func resume(ring: MirrorFrameRing?, epoch: String, currentEpoch: String, since: Int,
                        latest: Int, liveChannelOpen: Bool) -> Resume {
         guard epoch == currentEpoch else { return .refused("epoch changed") }
@@ -86,7 +89,7 @@ struct MirrorFrameRing {
 struct MirrorResumeCursor: Equatable {
     let epoch: String
     let seq: Int
-    /// The kept page's own channel, which it minted in its first `launch_claude`.
+    /// The kept page's own channel, from its latest `launch_claude`.
     let channelId: String
 
     init?(attach dict: [String: Any]) {

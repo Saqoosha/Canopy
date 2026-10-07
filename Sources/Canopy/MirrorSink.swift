@@ -35,7 +35,7 @@ protocol MirrorSink: AnyObject {
     /// itself after a `daemon_restarting` notice, so a daemon upgrade need not wait for it.
     var reattachesAfterRestart: Bool { get }
 
-    /// A phone, which re-attaches with a frame cursor after iOS drops its socket, so
+    /// Said at attach (`"resume": true`) that it re-attaches with a frame cursor, so
     /// its first attach turns on the shim's `MirrorFrameRing` (#320).
     var resumesFromFrameCursor: Bool { get }
 

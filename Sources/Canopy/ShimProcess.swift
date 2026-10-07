@@ -174,22 +174,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Frame cursor (#320)
 
-    /// Names this shim's seq space. A re-attach whose cursor carries another epoch
-    /// (a restarted shim, daemon or SSH reconnect, which all build a new instance)
-    /// gets the full replay.
+    /// Names this shim's seq space; renewed on every `start()`. A re-attach whose
+    /// cursor carries another epoch gets the full replay.
     private(set) var mirrorEpoch = UUID().uuidString
     /// The seq of the last frame stamped; every broadcast payload carries its own as `seq`.
     private(set) var mirrorSeq = 0
-    /// Nil until the first phone attaches, so a session no phone has watched pays nothing.
+    /// Nil until a client that resumes attaches; then kept for the shim's life.
     private var mirrorRing: MirrorFrameRing?
 
-    /// Stamps the next seq on `payload` and buffers it for a later resume.
+    /// Stamps the next seq on `payload`, and buffers it while the ring exists.
     private func stampedForResume(_ payload: [String: Any]) -> [String: Any] {
         mirrorSeq += 1
         var stamped = payload
         stamped["seq"] = mirrorSeq
-        if mirrorRing != nil {
-            let bytes = (try? JSONSerialization.data(withJSONObject: stamped).count) ?? 0
+        if let ring = mirrorRing {
+            // Unmeasurable counts as over the cap: it evicts itself rather than slipping past the byte bound.
+            let bytes = (try? JSONSerialization.data(withJSONObject: stamped).count) ?? ring.maxBytes + 1
             mirrorRing?.append(seq: mirrorSeq, payload: stamped, liveChannel: channelId, bytes: bytes)
         }
         return stamped
@@ -3668,8 +3668,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if msgType == "response", let requestId = dict["requestId"] as? String {
                 outstandingDialogRequests[requestId] = nil
             }
-            if msgType == "response", let requestId = dict["requestId"] as? String, !mirrors.isEmpty {
-                // Buffered like a broadcast: a phone that re-attaches later must see the dialog withdrawn.
+            if msgType == "response", let requestId = dict["requestId"] as? String, !mirrors.isEmpty || mirrorRing != nil {
+                // Buffered even with no mirror attached: a phone that resumes must see the dialog withdrawn.
                 let cancel = stampedForResume(["type": "from-extension",
                                                "message": ["type": "cancel_request", "targetRequestId": requestId] as [String: Any]])
                 if let webView, !isPrimary { post(cancel, to: webView) }

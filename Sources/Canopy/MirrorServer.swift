@@ -395,7 +395,8 @@ final class MirrorConnection: MirrorSink {
     /// they did before 2.43.
     private var filesRequested = false
     var acceptsFileTransfers: Bool { isMacClient && filesRequested }
-    var resumesFromFrameCursor: Bool { !isMacClient }
+    /// Set from the attach's `"resume": true`; see `MirrorSink.resumesFromFrameCursor`.
+    private(set) var resumesFromFrameCursor = false
     var acceptsClickedFiles: Bool { filesRequested }
 
     var openRedirectHost: String? {
@@ -671,8 +672,9 @@ final class MirrorConnection: MirrorSink {
         fetchesImages = isMacClient && dict["images"] as? Bool == true
         reattachesAfterRestart = Self.reattachesAfterRestart(attach: dict)
         acceptsUI = isMacClient && dict["ui"] as? Bool == true
+        resumesFromFrameCursor = dict["resume"] as? Bool == true
         // A page still showing this session re-attaches with a cursor; when the shim still
-        // holds every frame after it, those are all it gets (#320).
+        // holds every frame after it, it gets those instead of a replay (#320).
         var resumeFrames: [MirrorFrameRing.Frame]?
         let cursor = MirrorResumeCursor(attach: dict)
         if let cursor {
@@ -701,10 +703,11 @@ final class MirrorConnection: MirrorSink {
             "prefetchedSessionRequestId": prefetchId,
             // Confirms the negotiation for a client that wants to check; none reads it yet.
             "compress": compressOutbound ? MirrorWire.compressionName : "",
-            // The cursor a later re-attach sends back as `since`. Every frame after `seq`
-            // reaches this client live, and is buffered once a phone has attached.
+            // The cursor a later re-attach sends back as `since`. Every broadcast frame after
+            // `seq` reaches this client live, and is buffered once a resuming client has attached.
             "epoch": shim.mirrorEpoch,
-            "seq": shim.mirrorSeq,
+            // On a resume, the cursor: the buffered frames after it follow this line.
+            "seq": resumeFrames != nil ? cursor?.seq ?? shim.mirrorSeq : shim.mirrorSeq,
             "resumed": resumeFrames != nil,
         ])
         if let cursor, let resumeFrames {

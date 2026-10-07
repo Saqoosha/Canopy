@@ -12729,6 +12729,12 @@ enum SidebarLogicProbe {
             record("frame ring: a frame larger than the cap evicts itself, so no cursor before it resumes",
                    ring.count == 0 && ring.floor == 16 && ring.frames(after: 15, latest: 16) == nil
                        && ring.frames(after: 16, latest: 16)?.isEmpty == true)
+            record("frame ring: an evicted payload is released at once, not at compaction",
+                   ring.retainedPayloads == 0)
+            var exact = MirrorFrameRing(floor: 0, maxBytes: 100, maxFrames: 10)
+            for seq in 1...4 { exact.append(seq: seq, payload: frame(seq), liveChannel: nil, bytes: 25) }
+            record("frame ring: a total exactly at the byte cap keeps every frame",
+                   exact.count == 4 && exact.floor == 0)
             var big = MirrorFrameRing(floor: 0, maxBytes: .max, maxFrames: 10)
             for seq in 1...5000 { big.append(seq: seq, payload: frame(seq), liveChannel: nil, bytes: 1) }
             record("frame ring: compaction keeps the held window intact",
