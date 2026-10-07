@@ -224,6 +224,8 @@ final class ControlSession {
             fail(request, MirrorOpenRequest.startFailed)
             return
         }
+        // Without this the footer keeps listing the session as on an older extension until the next minute's check.
+        DaemonUpgradeCenter.shared.refreshExtensionState?()
         reply(request, ["ok": true])
     }
 
