@@ -1045,6 +1045,56 @@ enum ClaudeSessionHistory {
     private static let unreadableMetadata: Metadata = ("Untitled", nil, false, false)
 
     private static func extractMetadataIfReadable(fromPath path: String) -> Metadata? {
+        guard var metadata = boundedMetadataIfReadable(fromPath: path) else { return nil }
+        // Not for rows every caller drops: this can read the whole transcript, once.
+        if !metadata.isBackgroundScheduled, !metadata.isAutomated,
+           let moved = relocationPastTail(jsonlPath: path, boundedCwd: metadata.cwd) {
+            metadata.cwd = moved
+        }
+        return metadata
+    }
+
+    /// True when `folder` — a transcript's storage folder name — is an encoding of `directory`, by either spelling.
+    static func isTranscriptFolder(_ folder: String, of directory: String) -> Bool {
+        encodedFolderCandidates(for: directory).contains(folder)
+            || encodedFolderCandidates(for: URL(fileURLWithPath: directory).resolvingSymlinksInPath().path).contains(folder)
+    }
+
+    /// The folder a session moved to when the bounded read missed its `relocated` record, or nil.
+    /// The CLI files a transcript under the folder the session is in, so a bounded cwd the transcript
+    /// is NOT filed under means the record has scrolled out of the tail: read the last one from the
+    /// whole transcript, and believe it only if the transcript is filed under it.
+    static func relocationPastTail(
+        jsonlPath: String,
+        boundedCwd: String?,
+        scan: (String) -> String? = { RelocationScans.shared.lastRelocatedCwd(atPath: $0) }
+    ) -> String? {
+        let folder = URL(fileURLWithPath: jsonlPath).deletingLastPathComponent().lastPathComponent
+        if let boundedCwd, isTranscriptFolder(folder, of: boundedCwd) { return nil }
+        guard let moved = scan(jsonlPath), isTranscriptFolder(folder, of: moved) else { return nil }
+        return moved
+    }
+
+    /// How far each transcript has been read for `relocated` records and the last one seen, so a
+    /// repeated lookup reads only what was appended. Locked around the table only, never the read:
+    /// the session loaders run off-main while the launcher asks from the main actor.
+    final class RelocationScans: @unchecked Sendable {
+        static let shared = RelocationScans()
+        private let lock = NSLock()
+        private var scans: [String: (end: UInt64, cwd: String?)] = [:]
+
+        func lastRelocatedCwd(atPath path: String) -> String? {
+            let stored: (end: UInt64, cwd: String?)? = lock.withLock { scans[path] }
+            let kept = stored ?? (end: 0, cwd: nil)
+            let scan = ClaudeSessionHistory.lastRelocatedCwd(atPath: path, from: kept.end)
+            // A lower end means the file was replaced: what the old one said no longer holds.
+            let cwd = scan.cwd ?? (scan.end < kept.end ? nil : kept.cwd)
+            lock.withLock { scans[path] = (scan.end, cwd) }
+            return cwd
+        }
+    }
+
+    private static func boundedMetadataIfReadable(fromPath path: String) -> Metadata? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
 

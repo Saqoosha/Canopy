@@ -136,21 +136,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if !mirrors.isEmpty, case .local = boundSession?.origin, let id = boundSession?.resumeId {
             return Self.resumeAfterRestartBlocker(
                 jsonlPath: Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory),
-                workingDirectory: workingDirectory,
-                lastRelocated: { [self] path in
-                    if relocatedScan.path != path { relocatedScan = (path, 0, nil) }
-                    let scan = ClaudeSessionHistory.lastRelocatedCwd(atPath: path, from: relocatedScan.end)
-                    // A lower end means the file was replaced: what the old one said no longer holds.
-                    relocatedScan = (path, scan.end, scan.cwd ?? (scan.end < relocatedScan.end ? nil : relocatedScan.cwd))
-                    return relocatedScan.cwd
-                })
+                workingDirectory: workingDirectory)
         }
         return nil
     }
-
-    /// How far `upgradeBlocker` has read this transcript for `relocated` records, and the last one seen,
-    /// so each check reads only what was appended since.
-    private var relocatedScan: (path: String, end: UInt64, cwd: String?) = ("", 0, nil)
 
     /// Why the restarted daemon would refuse to resume this session (`MirrorServer.startRequestedSession`), or nil.
     /// The folder case is a worktree removed after its PR merged while the pane stayed open: the
@@ -158,23 +147,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     static func resumeAfterRestartBlocker(
         jsonlPath: String?,
         workingDirectory: URL,
-        folderExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) },
-        lastRelocated: (String) -> String? = { ClaudeSessionHistory.lastRelocatedCwd(atPath: $0).cwd }
+        folderExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
     ) -> String? {
         guard let jsonlPath else { return "a watched session has no transcript yet" }
-        var folder = effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
-        // The transcript is filed under the folder the session is in. When the bounded read above answers
-        // a folder it is not filed under, the `relocated` record has scrolled out of the tail: read it
-        // from the whole transcript, and take it only if it is the folder the transcript is filed under.
-        let storage = URL(fileURLWithPath: jsonlPath).deletingLastPathComponent().lastPathComponent
-        let filedUnder = { (url: URL) in
-            (ClaudeSessionHistory.encodedFolderCandidates(for: url.path)
-                + ClaudeSessionHistory.encodedFolderCandidates(for: url.resolvingSymlinksInPath().path)).contains(storage)
-        }
-        if !filedUnder(folder), !filedUnder(workingDirectory), let moved = lastRelocated(jsonlPath),
-           filedUnder(URL(fileURLWithPath: moved)) {
-            folder = URL(fileURLWithPath: moved)
-        }
+        let folder = effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
         guard folderExists(folder) else {
             return "its folder \(folder.lastPathComponent) was removed, so it could not resume after a restart"
         }
@@ -6786,26 +6762,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// and it is uncached: the answer is re-derived per turn because a session
     /// can move again.
     ///
-    /// **The file's own answer is reconciled against the folder, not trusted
-    /// over it.** `cwd(atPath:)` reads a bounded window, so a `relocated`
-    /// record that has scrolled past the 32 KB tail leaves it reporting the
-    /// SPAWN directory — and the header `cwd` is never rewritten, so the
-    /// transcript of a long-moved session says it is still at the root.
-    /// Measured across the four real relocated transcripts on this machine
-    /// (10–46 MB, 115–348 `relocated` records each): the last such record sits
-    /// within the tail for only 83–91% of record positions, so roughly one
-    /// turn in ten would report "no move" and flick the branch label back to
-    /// the root. That last step is inferred from the measurement, not watched
-    /// on a device. `ClaudeSessionHistory.resolveProjectPath`
-    /// already owns exactly this tension and prefers the decoded folder when
-    /// it resolves on disk. **That recovery is bounded by `decodePath`**,
-    /// which joins only a few `-`-separated tokens and cannot restore a space,
-    /// so a worktree under a path like `/Users/me/My Projects/repo` falls back
-    /// to the stale cwd and keeps the pre-fix behaviour. Known and unfixed:
-    /// widening `decodePath` changes a function with other callers. Deciding
-    /// this a second time here is the mechanism the fix removes — and what
-    /// deciding it wrongly would have produced
-    /// that. Passing a non-nil `extractedCwd` is load-bearing, but only
+    /// **A `relocated` record outside the bounded window is still found.**
+    /// `cwd(atPath:)` reads a head chunk plus a 32 KB tail and the header `cwd`
+    /// is never rewritten, so on the four real relocated transcripts here
+    /// (10–46 MB) the bounded read alone misses the last record for roughly one
+    /// position in ten. When its answer is not the folder the transcript is
+    /// filed under, `ClaudeSessionHistory.relocationPastTail` reads the last
+    /// record from the whole transcript, from a kept offset.
+    /// `ClaudeSessionHistory.resolveProjectPath` then reconciles the cwd
+    /// against the folder. Passing a non-nil `extractedCwd` is load-bearing, but only
     /// for one half of it: it makes that helper's final `return decoded`
     /// unreachable, so a decoded folder name is never synthesised out of thin
     /// air. The extracted cwd itself comes back UNCHECKED from two of the
@@ -6834,12 +6799,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // turn — forever, on a session that never moved — and only the final
         // resolved comparison catches it. The answer was right; the documented
         // "one folder-name comparison per turn" was not.
-        let resolvedWorkingDirectory = workingDirectory.resolvingSymlinksInPath().path
-        var candidates = ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.path)
-        if resolvedWorkingDirectory != workingDirectory.path {
-            candidates += ClaudeSessionHistory.encodedFolderCandidates(for: resolvedWorkingDirectory)
-        }
-        guard !candidates.contains(folder) else { return nil }
+        guard !ClaudeSessionHistory.isTranscriptFolder(folder, of: workingDirectory.path) else { return nil }
         guard let cwd = ClaudeSessionHistory.cwd(atPath: jsonlPath), !cwd.isEmpty else { return nil }
         let resolved = ClaudeSessionHistory.resolveProjectPath(
             extractedCwd: cwd, projectEncoded: folder
