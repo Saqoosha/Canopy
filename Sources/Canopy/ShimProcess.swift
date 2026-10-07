@@ -140,7 +140,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 lastRelocated: { [self] path in
                     if relocatedScan.path != path { relocatedScan = (path, 0, nil) }
                     let scan = ClaudeSessionHistory.lastRelocatedCwd(atPath: path, from: relocatedScan.end)
-                    relocatedScan = (path, scan.end, scan.cwd ?? relocatedScan.cwd)
+                    // A lower end means the file was replaced: what the old one said no longer holds.
+                    relocatedScan = (path, scan.end, scan.cwd ?? (scan.end < relocatedScan.end ? nil : relocatedScan.cwd))
                     return relocatedScan.cwd
                 })
         }
@@ -162,12 +163,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ) -> String? {
         guard let jsonlPath else { return "a watched session has no transcript yet" }
         var folder = effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
-        // A transcript stored outside the spawn folder means the session moved. When the bounded read
-        // above still answers the spawn folder, its `relocated` record has scrolled out of the tail.
+        // The transcript is filed under the folder the session is in. When the bounded read above answers
+        // a folder it is not filed under, the `relocated` record has scrolled out of the tail: read it
+        // from the whole transcript, and take it only if it is the folder the transcript is filed under.
         let storage = URL(fileURLWithPath: jsonlPath).deletingLastPathComponent().lastPathComponent
-        let spawn = ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.path)
-            + ClaudeSessionHistory.encodedFolderCandidates(for: workingDirectory.resolvingSymlinksInPath().path)
-        if folder.path == workingDirectory.path, !spawn.contains(storage), let moved = lastRelocated(jsonlPath) {
+        let filedUnder = { (url: URL) in
+            (ClaudeSessionHistory.encodedFolderCandidates(for: url.path)
+                + ClaudeSessionHistory.encodedFolderCandidates(for: url.resolvingSymlinksInPath().path)).contains(storage)
+        }
+        if !filedUnder(folder), !filedUnder(workingDirectory), let moved = lastRelocated(jsonlPath),
+           filedUnder(URL(fileURLWithPath: moved)) {
             folder = URL(fileURLWithPath: moved)
         }
         guard folderExists(folder) else {

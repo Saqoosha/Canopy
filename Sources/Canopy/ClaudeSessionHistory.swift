@@ -816,50 +816,37 @@ enum ClaudeSessionHistory {
         extractMetadata(fromPath: path).cwd
     }
 
-    /// The last `relocatedCwd` written at or after `offset`, and where the read ended. Unlike
-    /// `cwd(atPath:)` this reads everything from `offset`, so a record the bounded tail has
-    /// scrolled past is still found; callers keep the returned offset and pass it back.
-    /// Matches the raw key bytes: inside message text the quotes are escaped, so only a real
-    /// record's key matches.
+    /// The last `relocated` record's `relocatedCwd` among the whole lines from `offset` on, and the
+    /// offset after the last whole line read. Unlike `cwd(atPath:)` this is not a bounded window, so
+    /// a record the tail has scrolled past is still found; callers keep `end` and pass it back.
+    /// A file shorter than `offset` was replaced and is read from the start (`end` then comes back lower).
     static func lastRelocatedCwd(atPath path: String, from offset: UInt64 = 0) -> (cwd: String?, end: UInt64) {
         guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, offset) }
         defer { try? handle.close() }
-        let needle = Data("\"relocatedCwd\":\"".utf8)
-        let overlap = 8192
-        // Back up so a record straddling the previous read's end is seen whole.
-        var position = offset > UInt64(overlap) ? offset - UInt64(overlap) : 0
-        guard (try? handle.seek(toOffset: position)) != nil else { return (nil, offset) }
+        let size = (try? handle.seekToEnd()) ?? 0
+        var end = offset <= size ? offset : 0
+        guard (try? handle.seek(toOffset: end)) != nil else { return (nil, offset) }
+        let marker = Data("relocatedCwd".utf8)
         var carry = Data()
         var found: String?
         while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
-            position += UInt64(chunk.count)
-            let window = carry + chunk
-            var search = window.startIndex..<window.endIndex
-            while let hit = window.range(of: needle, options: .backwards, in: search) {
-                if let close = closingQuote(in: window, from: hit.upperBound),
-                   let value = try? JSONSerialization.jsonObject(
-                       with: Data([0x22]) + window[hit.upperBound..<close] + Data([0x22]), options: .fragmentsAllowed) as? String,
-                   !value.isEmpty {
+            carry.append(chunk)
+            // One copy of the remainder per chunk, not per line.
+            var cursor = carry.startIndex
+            while let newline = carry[cursor...].firstIndex(of: 0x0A) {
+                let line = carry[cursor..<newline]
+                end += UInt64(line.count + 1)
+                cursor = carry.index(after: newline)
+                if line.range(of: marker) != nil,
+                   let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                   json["type"] as? String == "relocated",
+                   let value = json["relocatedCwd"] as? String, !value.isEmpty {
                     found = value
-                    break
                 }
-                // Value cut by the window's end: an earlier record in this window is still newer than `found`.
-                search = window.startIndex..<hit.lowerBound
             }
-            carry = Data(window.suffix(overlap))
+            carry = Data(carry[cursor...])
         }
-        return (found, position)
-    }
-
-    /// Index of the unescaped `"` ending a JSON string that starts at `start`, or nil if the data ends first.
-    private static func closingQuote(in data: Data, from start: Data.Index) -> Data.Index? {
-        var i = start
-        while i < data.endIndex {
-            if data[i] == 0x5C { i += 2; continue }
-            if data[i] == 0x22 { return i }
-            i += 1
-        }
-        return nil
+        return (found, end)
     }
 
     /// Whether a session whose resolved project directory is GONE should still
