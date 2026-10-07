@@ -12697,6 +12697,28 @@ enum SidebarLogicProbe {
                !ShimProcess.remoteClientBlocksUpgrade(isLocal: false, reattaches: true))
         record("upgrade blocker: an older remote client still holds it",
                ShimProcess.remoteClientBlocksUpgrade(isLocal: false, reattaches: false))
+        do {
+            // The transcript sits under the folder's own encoding, so the relocation check exits
+            // without reading it and the folder asked about is the working directory itself.
+            let folder = URL(fileURLWithPath: "/canopy-probe-missing/merged-worktree")
+            let transcript = "/nowhere/\(ClaudeSessionHistory.encodedFolderCandidates(for: folder.path)[0])/s.jsonl"
+            record("upgrade blocker: a watched session with no transcript holds the upgrade",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: nil, workingDirectory: folder, folderExists: { _ in true })
+                       == "a watched session has no transcript yet")
+            record("upgrade blocker: a session whose folder was removed holds the upgrade",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: transcript, workingDirectory: folder,
+                                                         folderExists: { $0.path != folder.path })
+                       == "its folder merged-worktree was removed, so it could not resume after a restart")
+            record("upgrade blocker: transcript and folder both present do not hold it",
+                   ShimProcess.resumeAfterRestartBlocker(jsonlPath: transcript, workingDirectory: folder,
+                                                         folderExists: { _ in true }) == nil)
+            record("local open refusal: a removed folder is named",
+                   SessionStore.localOpenFailureMessage(folder: folder, folderExists: { _ in false })
+                       == "Could not resume the session: its folder /canopy-probe-missing/merged-worktree was removed. The conversation is still on disk.")
+            record("local open refusal: with the folder present the reason stays generic",
+                   SessionStore.localOpenFailureMessage(folder: folder, folderExists: { _ in true })
+                       == "Could not resume the session: its folder or transcript is gone.")
+        }
         record("attach: restart capability is read only from a literal true",
                MirrorConnection.reattachesAfterRestart(attach: ["restart": true])
                    && !MirrorConnection.reattachesAfterRestart(attach: ["restart": "true"])

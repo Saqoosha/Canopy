@@ -130,12 +130,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }) {
             return "a phone or another Mac without automatic reconnect is attached"
         }
-        // A session with no transcript yet cannot be resumed, which matters only while a pane
-        // shows it (one nobody watches the reaper would stop anyway). Local only: a remote
-        // session's transcript is on the other machine, and the lookup would scan the store.
-        if !mirrors.isEmpty, case .local = boundSession?.origin, let id = boundSession?.resumeId,
-           Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory) == nil {
-            return "a watched session has no transcript yet"
+        // Only while a pane shows it (one nobody watches the reaper would stop anyway). Local
+        // only: a remote session's transcript is on the other machine, and the lookup would
+        // scan the store.
+        if !mirrors.isEmpty, case .local = boundSession?.origin, let id = boundSession?.resumeId {
+            return Self.resumeAfterRestartBlocker(
+                jsonlPath: Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory),
+                workingDirectory: workingDirectory)
+        }
+        return nil
+    }
+
+    /// Why the restarted daemon would refuse to resume this session, or nil. It resumes from the
+    /// transcript, in the session's folder (`MirrorServer.startRequestedSession`), so it needs both.
+    /// The folder case is a worktree removed after its PR merged while the pane stayed open: the
+    /// running CLI does not notice, and the restart is what ends it for good.
+    static func resumeAfterRestartBlocker(
+        jsonlPath: String?,
+        workingDirectory: URL,
+        folderExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+    ) -> String? {
+        guard let jsonlPath else { return "a watched session has no transcript yet" }
+        let folder = effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
+        guard folderExists(folder) else {
+            return "its folder \(folder.lastPathComponent) was removed, so it could not resume after a restart"
         }
         return nil
     }
