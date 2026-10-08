@@ -210,9 +210,8 @@ struct SidebarAccountSection: View {
     /// to the sidebar's variable width.
     ///
     /// `pacePercent` (0…1) draws a CodexBar-style pace tick at the
-    /// expected-usage-by-now position. Green when actual usage is at or
-    /// below that expected pace (safe), red when it's above (burning the
-    /// quota faster than the clock).
+    /// expected-usage-by-now position. Red when usage is ahead of that pace
+    /// (`isAheadOfPace`, the same test that tints the fill), green otherwise.
     private func thinBar(percent: Double, pacePercent: Double?) -> some View {
         let clamped = max(0, min(1, percent))
         let barHeight: CGFloat = 4
@@ -222,11 +221,20 @@ struct SidebarAccountSection: View {
         // marker at 4pt height, so the tick never quite sat on the bar.
         // Doing all three (track, fill, marker + halo) in one Canvas
         // guarantees they share the same coordinate space.
-        return Canvas { context, size in
+        let pace = pacePercent.map { max(0, min(1, $0)) }
+        let ahead = pace.map { Self.isAheadOfPace(percent: clamped, pace: $0) }
+        // A Canvas clips to its own frame, so the marker that pokes out above
+        // and below the bar needs room inside it: the canvas is `overhang`
+        // taller on each side, and negative padding hands that space back so
+        // the row still lays out at `barHeight`.
+        let overhang: CGFloat = 2
+        return Canvas { context, canvasSize in
+            let size = CGSize(width: canvasSize.width, height: barHeight)
+            let top = overhang
             let cornerRadius = size.height / 2
             let cornerSize = CGSize(width: cornerRadius, height: cornerRadius)
 
-            let trackRect = CGRect(origin: .zero, size: size)
+            let trackRect = CGRect(origin: CGPoint(x: 0, y: top), size: size)
             context.fill(
                 Path { $0.addRoundedRect(in: trackRect, cornerSize: cornerSize) },
                 with: .color(Color.secondary.opacity(0.15))
@@ -238,18 +246,16 @@ struct SidebarAccountSection: View {
             // ~4pt nub (misreads as ~3–5% used on typical bar widths).
             if clamped > 0 {
                 let fillWidth = max(size.height, size.width * clamped)
-                let fillRect = CGRect(x: 0, y: 0, width: min(fillWidth, size.width), height: size.height)
+                let fillRect = CGRect(x: 0, y: top, width: min(fillWidth, size.width), height: size.height)
                 context.fill(
                     Path { $0.addRoundedRect(in: fillRect, cornerSize: cornerSize) },
-                    with: .color(barColor(clamped))
+                    with: .color(Self.barColor(clamped, aheadOfPace: ahead))
                 )
             }
 
-            if let pace = pacePercent {
-                let pacePos = max(0, min(1, pace))
-                let markerWidth: CGFloat = 1
-                let haloWidth: CGFloat = 3
-                let extend: CGFloat = 2  // extends this many pt above and below the bar
+            if let pacePos = pace {
+                let markerWidth: CGFloat = 2
+                let haloWidth: CGFloat = 4
                 let centerX = size.width * pacePos
                 // Snap the LEFT edge of each rect to the physical pixel
                 // grid. Without this, a 1pt marker whose left edge lands on
@@ -261,30 +267,51 @@ struct SidebarAccountSection: View {
                 func snapLeft(_ x: CGFloat) -> CGFloat {
                     (x * scale).rounded() / scale
                 }
+                // 1pt above and below the bar. Must stay within `overhang`
+                // or the canvas clips it.
+                let extend: CGFloat = 1
                 let haloLeft = snapLeft(max(0, min(size.width - haloWidth, centerX - haloWidth / 2)))
                 let markerLeft = snapLeft(max(0, min(size.width - markerWidth, centerX - markerWidth / 2)))
-                let haloRect = CGRect(x: haloLeft, y: -extend,
+                let haloRect = CGRect(x: haloLeft, y: top - extend,
                                       width: haloWidth, height: size.height + extend * 2)
-                let markerRect = CGRect(x: markerLeft, y: -extend,
+                let markerRect = CGRect(x: markerLeft, y: top - extend,
                                         width: markerWidth, height: size.height + extend * 2)
                 context.fill(Path(haloRect), with: .color(.white.opacity(0.55)))
                 context.fill(
                     Path(markerRect),
-                    with: .color(clamped > pacePos ? .red : .green)
+                    with: .color(ahead == true ? .red : .green)
                 )
             }
         }
-        .frame(height: barHeight)
+        .frame(height: barHeight + overhang * 2)
+        .padding(.vertical, -overhang)
     }
 
-    /// Percent-of-quota thresholds for the rate-limit bars: calm gray while
-    /// comfortable, orange from 50%, red from 80%. Deliberately NOT shared
+    /// How far usage may run past the expected pace before the bar counts
+    /// as ahead of it. Without slack, the first request of a fresh window
+    /// (a few percent used, ~0% elapsed) would turn the bar orange.
+    static let paceSlack = 0.05
+
+    static func isAheadOfPace(percent: Double, pace: Double) -> Bool {
+        percent > pace + paceSlack
+    }
+
+    /// Bar tint. With a pace (`aheadOfPace` non-nil) the colour says whether
+    /// usage is outrunning the clock: gray on or behind pace, orange ahead of
+    /// it, red ahead of it AND past 90% — a high bar that is on pace will
+    /// last to the reset, so it stays gray. Without a pace (per-model rows)
+    /// it falls back to percent-of-quota thresholds: gray, orange from 50%,
+    /// red from 80%. Deliberately NOT shared
     /// with `StatusBarView`'s context meter, which colours from the CLI's own
     /// warn/compact/blocked levels instead (issue #110) — the two used to
     /// match, and re-aligning them would put back the hand-picked cutoffs
     /// that mapped to no real CLI state. These are a genuine fraction of a
     /// known quota, so round numbers are the right model here.
-    private func barColor(_ percent: Double) -> Color {
+    static func barColor(_ percent: Double, aheadOfPace: Bool?) -> Color {
+        if let aheadOfPace {
+            guard aheadOfPace else { return .secondary.opacity(0.6) }
+            return percent >= 0.9 ? .red.opacity(0.75) : .orange.opacity(0.8)
+        }
         if percent >= 0.8 { return .red.opacity(0.75) }
         if percent >= 0.5 { return .orange.opacity(0.8) }
         return .secondary.opacity(0.6)
