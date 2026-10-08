@@ -2,15 +2,6 @@ import SwiftUI
 import os
 
 struct SettingsView: View {
-    /// The saved size doubles as the ideal size, so SwiftUI's own sizing to the
-    /// ideal cannot undo the size `ResizableWindowEnabler` restores.
-    @AppStorage(ResizableWindowEnabler.sizeKey) private var savedSize = ""
-
-    private var idealSize: NSSize {
-        let size = NSSizeFromString(savedSize)
-        return size.width > 0 && size.height > 0 ? size : NSSize(width: 532, height: 670)
-    }
-
     var body: some View {
         TabView {
             GeneralSettingsTab()
@@ -41,8 +32,8 @@ struct SettingsView: View {
         }
         // Resizable: the grouped Forms scroll, so any height above the
         // minimum works, and the relay URL and footers want the width.
-        .frame(minWidth: 460, idealWidth: idealSize.width, maxWidth: .infinity,
-               minHeight: 320, idealHeight: idealSize.height, maxHeight: .infinity)
+        .frame(minWidth: 460, idealWidth: 460, maxWidth: .infinity,
+               minHeight: 320, idealHeight: 616, maxHeight: .infinity)
         .background(ResizableWindowEnabler())
     }
 }
@@ -59,14 +50,14 @@ struct SettingsView: View {
 /// ideal size — and re-applied at attach, while the window is still hidden.
 /// Applying it only one runloop turn later showed SwiftUI's provisional
 /// 900×450 frame on screen for ~40 ms on every first open after launch.
+/// With nothing saved yet, `defaultSize` (a frame size, like the saved one) applies.
 private struct ResizableWindowEnabler: NSViewRepresentable {
-    static let sizeKey = "canopy.settingsWindowSize"
-
     func makeNSView(context: Context) -> NSView { Host() }
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     private final class Host: NSView {
-        private static let sizeKey = ResizableWindowEnabler.sizeKey
+        private static let sizeKey = "canopy.settingsWindowSize"
+        private static let defaultSize = NSSize(width: 532, height: 670)
         private var resizeObserver: NSObjectProtocol?
 
         override func viewDidMoveToWindow() {
@@ -87,9 +78,8 @@ private struct ResizableWindowEnabler: NSViewRepresentable {
                 }
             }
 
-            guard let saved = UserDefaults.standard.string(forKey: Self.sizeKey) else { return }
-            let size = NSSizeFromString(saved)
-            guard size.width > 0, size.height > 0 else { return }
+            let saved = UserDefaults.standard.string(forKey: Self.sizeKey).map(NSSizeFromString)
+            let size = saved.flatMap { $0.width > 0 && $0.height > 0 ? $0 : nil } ?? Self.defaultSize
             Self.apply(size, to: window)
             // Again one turn later, in case SwiftUI's own sizing lands after attach.
             DispatchQueue.main.async { [weak window] in
@@ -104,7 +94,7 @@ private struct ResizableWindowEnabler: NSViewRepresentable {
             frame.origin.y += frame.height - size.height
             frame.size = size
             // A size saved on a larger display must still fit this one.
-            if let visible = window.screen?.visibleFrame {
+            if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
                 frame.size.width = min(frame.width, visible.width)
                 frame.size.height = min(frame.height, visible.height)
                 frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
