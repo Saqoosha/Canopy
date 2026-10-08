@@ -1702,7 +1702,7 @@ final class SessionStore {
     ///
     /// A daemon session is only detached (its pane goes, the daemon keeps it,
     /// the row stays in Open) unless `removeRow` says the row itself is gone.
-    func closeSession(_ id: UUID, keepingFailure: Bool, removeRow: Bool = false) {
+    func closeSession(_ id: UUID, keepingFailure: Bool, removeRow: Bool = false, mirrorEndReason: String? = nil) {
         guard let idx = openSessions.firstIndex(where: { $0.id == id }) else { return }
         let session = openSessions[idx]
         logger.info("closeSession id=\(id.uuidString, privacy: .public) project=\(session.project, privacy: .public)")
@@ -1721,7 +1721,7 @@ final class SessionStore {
             }
             return
         }
-        session.shim?.stop()
+        session.shim?.stop(mirrorEndReason: mirrorEndReason)
         session.shim = nil
         session.webView = nil
         session.mirrorBridge?.close()

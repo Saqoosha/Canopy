@@ -304,14 +304,21 @@ struct MirrorPaneView: NSViewRepresentable {
                     logger.notice("[mirror-pane] extension \(local, privacy: .public) here, \(remote, privacy: .public) on \(machineName, privacy: .public)")
                 }
             case .refused(let reason):
-                if case .spawning = session.status {
+                let showRefusal: () -> Void
+                if case .spawning = session.status, reason != MirrorOpenRequest.stoppedByClient {
                     if isDaemon, reason == MirrorOpenRequest.notOpenable, case .local(let folder) = session.origin {
-                        onFailure(SessionStore.localOpenFailureMessage(folder: folder))
+                        showRefusal = { onFailure(SessionStore.localOpenFailureMessage(folder: folder)) }
                     } else {
-                        onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName))
+                        showRefusal = { onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName)) }
                     }
                 } else {
-                    onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName))
+                    showRefusal = { onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName)) }
+                }
+                // Our own Stop Session ends this client too, attaching or not; held like a drop, discarded when the stop succeeds.
+                if session.isStopping {
+                    session.dropHeldByStop = showRefusal
+                } else {
+                    showRefusal()
                 }
             case .dropped:
                 session.fileTransfer.connectionDropped()

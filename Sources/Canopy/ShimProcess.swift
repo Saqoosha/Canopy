@@ -3500,9 +3500,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    func stop() {
+    /// `mirrorEndReason` tells attached clients the session ended rather than dropping them (#278),
+    /// so a Mac that did not ask for the stop closes its pane instead of offering Retry.
+    /// Only for a stop that ends the session: a restart must stay a drop, which its clients re-attach after.
+    func stop(mirrorEndReason: String? = nil) {
         isIntentionalStop = true
-        disconnectMirrors()
+        disconnectMirrors(reason: mirrorEndReason)
         // Clear the destination here too, whatever the connections' detaches
         // did. A crash still leaves the file; the key is per process, so a
         // stale one is never read again.
