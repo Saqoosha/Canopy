@@ -1,8 +1,9 @@
 # Control protocol
 
 A local agent drives this Mac's Canopy daemon over a Unix socket. The GUI
-uses the same connection. This page is the wire a script needs; the server
-design lives in
+uses the same connection. The same verbs are also reachable over the
+token-authenticated Tailscale TCP listener. This page is the wire a script
+needs; the server design lives in
 `docs/superpowers/specs/2026-09-29-canopy-server-design.md`.
 
 `scripts/canopyctl` is a small client for the verbs below.
@@ -57,34 +58,40 @@ After `hello_ok`, the client sends requests and gets one response per `id`.
 
 A session is named by `key` (the daemon's `OpenSession` id) and/or
 `sessionId` (the resume id). Both may be sent; `key` is tried first.
+Prefer `key` for follow-up calls: `open_session`'s `sessionId` is a
+placeholder the CLI replaces.
 
 ## Verbs
 
 ### Already on the socket
 
-`list_sessions` takes no params.
+This list is partial.
+
+`list_sessions` takes optional `limit` (default 50), `scope` (`open`
+default, or `recent`), and `query` (with `recent`).
 
 `open_session` requires `cwd`, an absolute path of a directory that exists.
 Optional: `permissionMode` (a `PermissionMode` raw value; `bypassPermissions`
 is refused unless the daemon's bypass gate is on), `model`, `effort`,
 `worktreeBranch`, `initialPrompt`. A non-empty `initialPrompt` is submitted
 as the session's first turn. When no pane is attached the daemon synthesizes
-`launch_claude` on channel `canopy-headless`, so the turn runs without a
-webview.
+`init` then `launch_claude` on channel `canopy-headless`, so the turn runs
+without a webview and a later attach still has a cached init.
 
 `stop_session` and `restart_session` take `key` and/or `sessionId`.
 
 `subscribe` asks for `session_state` pushes. Those lines are not responses.
 
-`mkdir` and `create_folder` both create a directory and stay separate verbs.
-Unifying them is a follow-up.
+`mkdir` creates a directory (`parent`, `name`) and returns `{path}`.
 
 ### `send_message`
 
 Puts text on a live session through the same queue the phone uses
 (`PhoneReplyQueue`, capacity 10). A busy session queues the text. A session
 that is not running, or that is waiting on a permission prompt or an
-AskUserQuestion, refuses it.
+AskUserQuestion, refuses it. When the session has no channel and no client
+attached, the daemon first sends a synthetic `init` then `launch_claude`
+(same headless path as `open_session` with `initialPrompt`).
 
 Params: `key` and/or `sessionId`, required `text` (trimmed; blank is
 `"The message was empty"`). A non-empty `attachments` array is refused
@@ -98,13 +105,17 @@ Result:
 
 `disposition` is `injected`, `queued`, or `refused`. `ok` is false only for
 `refused`. `queued` and `refused` may include `reason`. `replyId` identifies
-this control turn for the status verbs.
+this control turn for the status verbs — always pass it on follow-up calls.
 
 ### `session_status`, `latest_reply`, `wait_turn`
 
-All three take optional `key`, `sessionId`, and `replyId`. A blank or
-omitted `replyId` means the control turn in flight, or the last one that
-finished.
+All three take optional `key`, `sessionId`, and `replyId`. An unknown
+`replyId` (never sent, refused, or dropped at teardown) is an error
+`unknown reply id`. Without `replyId`, a queued control message reports
+`turnDone: false`. Prefer the `replyId` from `send_message`.
+
+`latest_reply` reports the last CONTROL turn, not turns typed on the Mac
+or phone.
 
 `state` is `idle`, `working`, or `asking` (`asking` when the last assistant
 turn raised AskUserQuestion, otherwise `working` while a turn is running).

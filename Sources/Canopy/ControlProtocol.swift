@@ -277,10 +277,10 @@ enum ControlProtocol {
         var replyId: String?
     }
 
-    static func parseSessionQuery(_ params: [String: Any]) -> Result<SessionQuery, ControlError> {
+    static func parseSessionQuery(_ params: [String: Any]) -> SessionQuery {
         let raw = (params["replyId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let replyId = (raw?.isEmpty == false) ? raw : nil
-        return .success(SessionQuery(replyId: replyId))
+        return SessionQuery(replyId: replyId)
     }
 
     /// `state` is `idle` / `working` / `asking`. `turnDone` is true only after

@@ -49,10 +49,10 @@ def main(argv):
         ("wait", "wait_turn"),
         ("stop", "stop_session"),
     ):
-        parser = sub.add_parser(name, help=help_text)
-        add_session_flags(parser, require=True)
+        sub_p = sub.add_parser(name, help=help_text)
+        add_session_flags(sub_p, require=True)
         if name != "stop":
-            parser.add_argument("--reply-id", dest="reply_id")
+            sub_p.add_argument("--reply-id", dest="reply_id")
 
     args = parser.parse_args(argv)
     verb, params = build(args)
@@ -63,7 +63,10 @@ def main(argv):
         return 1
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
-    if "error" in result:
+    body = result["result"] if isinstance(result.get("result"), dict) else result
+    if "error" in result or body.get("ok") is False:
+        return 1
+    if args.cmd == "wait" and body.get("turnDone") is not True:
         return 1
     return 0
 
@@ -145,12 +148,7 @@ def read_typed(lines, types):
 
 
 class LineBuffer:
-    """Bytes past the first newline stay for the next read.
-
-    One recv can carry hello_ok and the response, or a session_state
-    push ahead of the response. Dropping the tail hangs until the
-    read timeout.
-    """
+    """Keeps bytes past a newline: one recv can end mid-line or span lines."""
 
     def __init__(self, sock):
         self.sock = sock

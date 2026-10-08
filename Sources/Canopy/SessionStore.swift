@@ -1179,9 +1179,7 @@ final class SessionStore {
             claudeAccount: options.account ?? accountChoice.account,
             resumeIdIsExistingTranscript: isExistingTranscript
         )
-        // Sent by the launch_claude intercept. A control open with an initial
-        // prompt launches that channel itself (`ShimProcess.launchHeadlessChannel`);
-        // an attaching webview still takes this path when no prompt was stored.
+        // Sent by the launch_claude intercept: a control open launches its own headless channel; an attach's open waits for the attaching webview.
         if options.initialPrompt != nil || !options.promptImages.isEmpty {
             session.pendingInitialPrompt = LaunchPrompt.make(text: options.initialPrompt ?? "", images: options.promptImages)
         }

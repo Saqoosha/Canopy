@@ -1777,7 +1777,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// flight, else `idle`. `turnDone` is the control turn whose `result`
     /// already landed; an in-flight id reports `turnDone: false` and no text,
     /// so a previous answer is not mistaken for this one.
-    struct ControlTurnSnapshot: Equatable {
+    nonisolated struct ControlTurnSnapshot: Equatable, Sendable {
         var state: String
         var replyId: String?
         var text: String?
@@ -1788,15 +1788,38 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var controlFinishedReplyId: String?
     private var controlFinishedText: String?
 
-    func controlTurnSnapshot() -> ControlTurnSnapshot {
+    /// Which control turn a status query reports. Nil: `replyId` names no turn this shim knows (never sent, dropped, or forgotten).
+    nonisolated static func controlTurnSnapshot(state: String, replyId: String?, inFlight: String?, queued: Set<String>,
+                                                finishedId: String?, finishedText: String?, latestText: String?) -> ControlTurnSnapshot? {
+        if let replyId {
+            if replyId == inFlight {
+                return ControlTurnSnapshot(state: state, replyId: replyId, text: nil, turnDone: false)
+            }
+            if queued.contains(replyId) {
+                return ControlTurnSnapshot(state: state, replyId: replyId, text: nil, turnDone: false)
+            }
+            if replyId == finishedId {
+                return ControlTurnSnapshot(state: state, replyId: replyId, text: finishedText, turnDone: true)
+            }
+            return nil
+        }
+        if let inFlight {
+            return ControlTurnSnapshot(state: state, replyId: inFlight, text: nil, turnDone: false)
+        }
+        if !queued.isEmpty {
+            return ControlTurnSnapshot(state: state, replyId: nil, text: nil, turnDone: false)
+        }
+        if let finishedId {
+            return ControlTurnSnapshot(state: state, replyId: finishedId, text: finishedText, turnDone: true)
+        }
+        return ControlTurnSnapshot(state: state, replyId: nil, text: latestText, turnDone: false)
+    }
+
+    func controlTurnSnapshot(replyId: String?) -> ControlTurnSnapshot? {
         let state = lastAssistantHadAskUserQuestion ? "asking" : (isWorking ? "working" : "idle")
-        if let inflight = controlTurnReplyId {
-            return ControlTurnSnapshot(state: state, replyId: inflight, text: nil, turnDone: false)
-        }
-        if let finished = controlFinishedReplyId {
-            return ControlTurnSnapshot(state: state, replyId: finished, text: controlFinishedText, turnDone: true)
-        }
-        return ControlTurnSnapshot(state: state, replyId: nil, text: latestReplyText, turnDone: false)
+        return Self.controlTurnSnapshot(state: state, replyId: replyId, inFlight: controlTurnReplyId,
+                                        queued: controlReplyIds, finishedId: controlFinishedReplyId,
+                                        finishedText: controlFinishedText, latestText: latestReplyText)
     }
 
     /// Tear down the flight's state in one place, so no path can clear the
@@ -1913,6 +1936,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // re-queuing a prompt the injector keeps rejecting spins this
                 // tick forever, and the log line is what makes the loss
                 // findable. Error, not notice: the phone was told `ok`.
+                if let replyId = next.replyId { controlReplyIds.remove(replyId) }
                 logger.error("roster reply \(self.keepAliveLogLabel, privacy: .public): queued prompt refused at injection — dropped")
             }
         }
@@ -1957,6 +1981,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Retires any tick already dequeued, which `cancel()` cannot reach.
         phoneReplyQueueGeneration &+= 1
         let dropped = queuedPhoneReplies.removeAll()
+        controlReplyIds.removeAll()
         guard dropped > 0 else { return }
         logger.error("roster reply \(self.keepAliveLogLabel, privacy: .public): dropped \(dropped, privacy: .public) queued prompt(s) — the shim is gone")
     }
@@ -3653,16 +3678,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         handleWebviewMessage(dict, sender: sink, isPrimary: false)
     }
 
-    /// A pane-less session has no webview to mint a channel, so `open_session`'s
-    /// `initialPrompt` would sit on `pendingInitialPrompt` forever. One synthetic
-    /// `launch_claude` is what the intercept already waits for: it assigns
-    /// `channelId` and then calls `sendPendingInitialPrompt`.
-    func launchHeadlessChannel() {
+    /// A pane-less session has no webview to send `init` and `launch_claude`; this sends both. No-op when any client holds or opened a channel.
+    @discardableResult
+    func launchHeadlessChannel() -> Bool {
+        guard channelId == nil, !liveChannelOpen, webView == nil, mirrors.isEmpty else { return false }
+        // `init` first: its response becomes `cachedInitResponse`, which a client attaching later is answered from.
         handleWebviewMessage(
-            ["type": "launch_claude", "channelId": "canopy-headless"],
-            sender: nil,
-            isPrimary: true
-        )
+            ["type": "request", "requestId": "canopy-headless-init-\(UUID().uuidString.lowercased())",
+             "request": ["type": "init"] as [String: Any]],
+            sender: nil, isPrimary: true)
+        var launch: [String: Any] = ["type": "launch_claude", "channelId": "canopy-headless",
+                                     "permissionMode": permissionMode.rawValue]
+        if remoteHost == nil { launch["cwd"] = workingDirectory.path }
+        if resumeIdIsExistingTranscript, let resumeSessionId { launch["resume"] = resumeSessionId }
+        handleWebviewMessage(launch, sender: nil, isPrimary: true)
+        return true
     }
 
     /// The attached Mac that shows a UI request, when this shim has no webview of its own (the daemon).
@@ -6524,6 +6554,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // longer has anything for it to unlatch.
         endPhoneReplyFlight()
         discardQueuedPhoneReplies()
+        controlTurnReplyId = nil
+        controlReplyIds.removeAll()
         // The id of an event streamed by the shim that just died. The
         // reconnected session's first completion would otherwise carry it,
         // and the phone would drop that push against an event from before
@@ -7894,9 +7926,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "user":
             processUserToolResults(ioMsg)
         case "result":
+            // Capture before the `isWorking` gate: an immediate API error can
+            // land `result` while `isWorking` is still false, and the control
+            // turn must finish then too.
+            let finalText = ioMsg["result"] as? String
+            latestReplyText = finalText ?? ""
+            if let replyId = controlTurnReplyId {
+                controlFinishedReplyId = replyId
+                controlFinishedText = finalText ?? ""
+                controlTurnReplyId = nil
+            }
             if isWorking {
                 isWorking = false
-                postTaskCompletedNotification(finalText: ioMsg["result"] as? String)
+                postTaskCompletedNotification(finalText: finalText)
             }
             // Backstop: the turn has finished either way, so nothing should
             // still be treating a reply as in flight. The ordinary path
@@ -8523,12 +8565,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // disappears. Found by four reviewers independently.
         let eventIdForThisTurn = lastAssistantEventId
         lastAssistantEventId = nil
-        latestReplyText = finalText ?? ""
-        if let replyId = controlTurnReplyId {
-            controlFinishedReplyId = replyId
-            controlFinishedText = finalText ?? ""
-            controlTurnReplyId = nil
-        }
         if let session = boundSession {
             let pushBody = finalText?.isEmpty == false
                 ? Self.truncatedNotificationBody(finalText!, maxBytes: 2400)

@@ -92,6 +92,8 @@ final class ControlSession {
                 reply(request, ControlProtocol.replyWire(disposition: "refused", reason: "not running", replyId: replyId))
                 return
             }
+            // No-op when a client already holds a channel; opens one when the session has none.
+            shim.launchHeadlessChannel()
             shim.noteControlReply(replyId)
             switch shim.submitPhoneReply(text: message.text, replyId: replyId) {
             case .injected:
@@ -114,16 +116,16 @@ final class ControlSession {
     }
 
     private func replyTurn(_ request: ControlProtocol.Request, includeText: Bool) {
-        switch ControlProtocol.parseSessionQuery(request.params) {
-        case .failure(let error): fail(request, error.message)
-        case .success:
-            guard let session = requestedSession(request) else { return }
-            guard let shim = session.shim else { fail(request, "not running"); return }
-            let snap = shim.controlTurnSnapshot()
-            reply(request, ControlProtocol.statusWire(
-                state: snap.state, replyId: snap.replyId,
-                text: includeText ? snap.text : nil, turnDone: snap.turnDone))
+        let query = ControlProtocol.parseSessionQuery(request.params)
+        guard let session = requestedSession(request) else { return }
+        guard let shim = session.shim else { fail(request, "not running"); return }
+        guard let snap = shim.controlTurnSnapshot(replyId: query.replyId) else {
+            fail(request, "unknown reply id")
+            return
         }
+        reply(request, ControlProtocol.statusWire(
+            state: snap.state, replyId: snap.replyId,
+            text: includeText ? snap.text : nil, turnDone: snap.turnDone))
     }
 
     /// `wait_turn` must not block `handle()` — the socket read loop is stuck
@@ -131,19 +133,19 @@ final class ControlSession {
     /// connection already uses. The poll is bounded (0.5 s × 120) so a turn
     /// that never finishes still answers.
     private func waitTurn(_ request: ControlProtocol.Request) {
-        switch ControlProtocol.parseSessionQuery(request.params) {
-        case .failure(let error): fail(request, error.message)
-        case .success(let query):
-            guard let session = requestedSession(request) else { return }
-            guard session.shim != nil else { fail(request, "not running"); return }
-            pollTurn(request, session: session, replyId: query.replyId, remaining: 120)
-        }
+        let query = ControlProtocol.parseSessionQuery(request.params)
+        guard let session = requestedSession(request) else { return }
+        guard session.shim != nil else { fail(request, "not running"); return }
+        pollTurn(request, session: session, replyId: query.replyId, remaining: 120)
     }
 
     private func pollTurn(_ request: ControlProtocol.Request, session: OpenSession, replyId: String?, remaining: Int) {
         guard let shim = session.shim else { fail(request, "not running"); return }
-        let snap = shim.controlTurnSnapshot()
-        let matched = snap.turnDone && (replyId == nil || snap.replyId == replyId)
+        guard let snap = shim.controlTurnSnapshot(replyId: replyId) else {
+            fail(request, "unknown reply id")
+            return
+        }
+        let matched = snap.turnDone
         if matched || remaining <= 0 {
             reply(request, ControlProtocol.statusWire(
                 state: snap.state, replyId: snap.replyId, text: snap.text, turnDone: snap.turnDone))
@@ -304,15 +306,12 @@ final class ControlSession {
     private func restartSession(_ request: ControlProtocol.Request) {
         guard let session = requestedSession(request) else { return }
         store.restartSession(session.id)
-        let shim = store.startHeadlessSession(resumeId: session.resumeId)
+        let started = store.startHeadlessSession(resumeId: session.resumeId) != nil
         // Without this the footer keeps listing the session as on an older extension until the next minute's check.
         DaemonUpgradeCenter.shared.refreshExtensionState?()
-        guard let shim else {
+        guard started else {
             fail(request, MirrorOpenRequest.startFailed)
             return
-        }
-        if session.pendingInitialPrompt != nil {
-            shim.launchHeadlessChannel()
         }
         reply(request, ["ok": true])
     }
@@ -327,15 +326,11 @@ final class ControlSession {
         }
         store.switchAccount(session.id, to: account)
         // Same account: nothing was stopped. Another: `restartSession` parked the row.
-        let needsStart = session.shim == nil
-        let started = needsStart ? store.startHeadlessSession(resumeId: session.resumeId) : nil
+        let failed = session.shim == nil && store.startHeadlessSession(resumeId: session.resumeId) == nil
         DaemonUpgradeCenter.shared.refreshExtensionState?()
-        if needsStart && started == nil {
+        if failed {
             fail(request, MirrorOpenRequest.startFailed)
             return
-        }
-        if let started, session.pendingInitialPrompt != nil {
-            started.launchHeadlessChannel()
         }
         reply(request, ["ok": true])
     }

@@ -1943,20 +1943,51 @@ enum SidebarLogicProbe {
                        queued["ok"] as? Bool == true && queued["disposition"] as? String == "queued"
                            && queued["reason"] as? String == "session busy")
                 record("control query: a missing reply id is the current turn",
-                       ControlProtocol.parseSessionQuery([:]) == .success(ControlProtocol.SessionQuery(replyId: nil)))
+                       ControlProtocol.parseSessionQuery([:]) == ControlProtocol.SessionQuery(replyId: nil))
                 record("control query: a blank reply id is the current turn",
-                       ControlProtocol.parseSessionQuery(["replyId": "  "]) == .success(ControlProtocol.SessionQuery(replyId: nil)))
+                       ControlProtocol.parseSessionQuery(["replyId": "  "]) == ControlProtocol.SessionQuery(replyId: nil))
                 record("control query: a reply id is trimmed",
-                       ControlProtocol.parseSessionQuery(["replyId": "  abc  "]) == .success(ControlProtocol.SessionQuery(replyId: "abc")))
+                       ControlProtocol.parseSessionQuery(["replyId": "  abc  "]) == ControlProtocol.SessionQuery(replyId: "abc"))
                 let status = ControlProtocol.statusWire(state: "idle", replyId: "r1", text: "hi", turnDone: true)
                 record("control status: wire carries state, reply id, text, and turnDone",
                        status["ok"] as? Bool == true && status["state"] as? String == "idle"
                            && status["replyId"] as? String == "r1" && status["text"] as? String == "hi"
                            && status["turnDone"] as? Bool == true)
                 let bare = ControlProtocol.statusWire(state: "working", replyId: nil, text: nil, turnDone: false)
-                record("control status: an in-flight turn omits reply id and text",
+                record("control status: no control turn omits reply id and text",
                        bare["state"] as? String == "working" && bare["turnDone"] as? Bool == false
                            && bare["replyId"] == nil && bare["text"] == nil)
+                // Pure control-turn snapshot rules (probe-reachable without a shim).
+                func snap(_ replyId: String?, inFlight: String?, queued: Set<String>,
+                          finishedId: String?, finishedText: String?, latestText: String?) -> ShimProcess.ControlTurnSnapshot? {
+                    ShimProcess.controlTurnSnapshot(state: "idle", replyId: replyId, inFlight: inFlight, queued: queued,
+                                                    finishedId: finishedId, finishedText: finishedText, latestText: latestText)
+                }
+                record("control turn: replyId matching in-flight is not done",
+                       snap("a", inFlight: "a", queued: [], finishedId: "old", finishedText: "done", latestText: nil)
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "a", text: nil, turnDone: false))
+                record("control turn: in-flight beats finished when replyId is nil",
+                       snap(nil, inFlight: "a", queued: [], finishedId: "old", finishedText: "done", latestText: "x")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "a", text: nil, turnDone: false))
+                record("control turn: queued reply id with a prior finished turn stays not done",
+                       snap("q", inFlight: nil, queued: ["q"], finishedId: "old", finishedText: "done", latestText: nil)
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "q", text: nil, turnDone: false))
+                record("control turn: replyId nil over a non-empty queue is not done",
+                       snap(nil, inFlight: nil, queued: ["q"], finishedId: "old", finishedText: "done", latestText: "x")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: nil, text: nil, turnDone: false))
+                record("control turn: finished id asked by name is done with its text",
+                       snap("fin", inFlight: nil, queued: [], finishedId: "fin", finishedText: "hello", latestText: "x")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "fin", text: "hello", turnDone: true))
+                record("control turn: a finished id asked by a different id is unknown",
+                       snap("other", inFlight: nil, queued: [], finishedId: "fin", finishedText: "hello", latestText: nil) == nil)
+                record("control turn: an unknown id is nil",
+                       snap("nope", inFlight: nil, queued: [], finishedId: nil, finishedText: nil, latestText: "x") == nil)
+                record("control turn: replyId nil with only a finished turn is done",
+                       snap(nil, inFlight: nil, queued: [], finishedId: "fin", finishedText: "hello", latestText: "x")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "fin", text: "hello", turnDone: true))
+                record("control turn: replyId nil with nothing control-owned yields latestText",
+                       snap(nil, inFlight: nil, queued: [], finishedId: nil, finishedText: nil, latestText: "latest")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: nil, text: "latest", turnDone: false))
             }
             // Canopy Server reaper.
             do {
