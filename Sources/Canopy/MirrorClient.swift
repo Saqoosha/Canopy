@@ -72,12 +72,15 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     /// False for the daemon's local socket, which is trusted without a password.
     private let sendsToken: Bool
     private let openRequest: MirrorOpenRequest?
+    /// The folder this Mac resolved for a resume; only this Mac's daemon reads it.
+    private let resumeCwd: String?
     private var closed = false
 
     init(endpoint: MirrorEndpoint, sessionId: String, key: String? = nil, token: String, webView: WKWebView,
-         fetchesImages: Bool = false, open: MirrorOpenRequest? = nil) {
+         fetchesImages: Bool = false, open: MirrorOpenRequest? = nil, resumeCwd: String? = nil) {
         self.fetchesImages = fetchesImages
         self.openRequest = open
+        self.resumeCwd = resumeCwd
         self.token = token
         self.sessionId = sessionId
         self.key = key
@@ -217,6 +220,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if !sendsToken { attach["token"] = nil }
         // `open`: start this session over there if nothing is running it yet (a Recents or folder row).
         if let openRequest { attach["open"] = openRequest.wire }
+        if openRequest == .resume, let resumeCwd { attach["cwd"] = resumeCwd }
         sendJSONObject(attach)
         scheduleReceive()
     }

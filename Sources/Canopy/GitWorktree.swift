@@ -154,11 +154,9 @@ enum GitWorktree {
         } else {
             return nil
         }
-        var byRealPath: [String: URL] = [:]
-        for candidate in candidates where isCheckout(candidate) {
-            byRealPath[realPath(candidate)] = byRealPath[realPath(candidate)] ?? candidate.standardizedFileURL
-        }
-        return byRealPath.count == 1 ? byRealPath.values.first : nil
+        // The real path, which is how the CLI records a cwd and names its project folder.
+        let real = Set(candidates.filter(isCheckout).map(realPath))
+        return real.count == 1 ? real.first.map { URL(fileURLWithPath: $0) } : nil
     }
 
     static func isGitRepo(_ dir: URL) -> Bool {

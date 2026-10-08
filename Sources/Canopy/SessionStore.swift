@@ -776,7 +776,7 @@ final class SessionStore {
         !rowCwd.isEmpty && rowCwd != current.path && !exists(current.path) && isCheckout(rowCwd)
     }
 
-    /// A main checkout holds its `.git` as a folder; a linked worktree's is a file.
+    /// `GitWorktree.isMainCheckout` for a path string.
     nonisolated static func isMainCheckout(_ path: String) -> Bool {
         GitWorktree.isMainCheckout(URL(fileURLWithPath: path))
     }
@@ -1120,7 +1120,9 @@ final class SessionStore {
             return existing
         }
         return openNew(
-            directory: ClaudeSessionHistory.directoryToOpen(entry) ?? entry.projectDirectory,
+            directory: ClaudeSessionHistory.directoryToOpen(
+                entry, knownCheckouts: recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load())
+                ?? entry.projectDirectory,
             resumeId: entry.id,
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,

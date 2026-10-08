@@ -572,20 +572,24 @@ final class MirrorConnection: MirrorSink {
 
     /// The shim an `open` request asks for, started with no pane on this Mac,
     /// or the `attach_error` message saying why there is none.
-    private func startRequestedSession(_ request: MirrorOpenRequest, sessionId: String) -> Result<ShimProcess, OpenFailure> {
+    private func startRequestedSession(_ request: MirrorOpenRequest, sessionId: String,
+                                       localCwd: String? = nil) -> Result<ShimProcess, OpenFailure> {
         let shim: ShimProcess?
         switch request {
         case .resume:
             if store.openSessions.contains(where: { $0.resumeId == sessionId }) {
                 // Open but dormant: it already knows its own folder.
                 shim = store.startHeadlessSession(resumeId: sessionId)
-            } else if let entry = store.recents.first(where: { $0.id == sessionId })
-                        // Recents may not be loaded yet, and a removed worktree's row can only be
-                        // reopened from an entry the loader built (`rescueCheckout`).
-                        ?? (Self.isSessionIdShaped(sessionId)
-                            ? ClaudeSessionHistory.loadAllSessions().first(where: { $0.id == sessionId }) : nil),
-                      entry.canOpen,
-                      let directory = ClaudeSessionHistory.directoryToOpen(entry) {
+            } else if let localCwd, Self.isSessionIdShaped(sessionId),
+                      ClaudeSessionHistory.isFiled(sessionId: sessionId, under: URL(fileURLWithPath: localCwd)) {
+                // This Mac's GUI names the folder it resolved, e.g. the checkout a removed
+                // worktree's transcript was just moved to; Recents may predate the move.
+                shim = store.startHeadlessSession(directory: URL(fileURLWithPath: localCwd), resumeId: sessionId,
+                                                  isExistingTranscript: true,
+                                                  title: store.recents.first(where: { $0.id == sessionId })?.title)
+            } else if let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen,
+                      let directory = ClaudeSessionHistory.directoryToOpen(
+                          entry, knownCheckouts: store.recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load()) {
                 shim = store.startHeadlessSession(directory: directory, resumeId: sessionId,
                                                   isExistingTranscript: true, title: entry.title)
             } else if !store.recents.contains(where: { $0.id == sessionId }), Self.isSessionIdShaped(sessionId),
@@ -650,7 +654,8 @@ final class MirrorConnection: MirrorSink {
             // A session found but not running is restarted as itself, under its current id;
             // opening under the client's id could start a duplicate or miss a replaced placeholder.
             if named != nil { request = .resume }
-            switch startRequestedSession(request, sessionId: named?.resumeId ?? sessionId) {
+            switch startRequestedSession(request, sessionId: named?.resumeId ?? sessionId,
+                                         localCwd: trustsPeer ? dict["cwd"] as? String : nil) {
             case .success(let shim):
                 existing = shim
                 // A Mac pane holds its session; the phone has no pane, and no way to stop one.

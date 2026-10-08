@@ -5369,8 +5369,8 @@ enum SidebarLogicProbe {
                    rescue(managed, ["/r/Other", "/r/Canopy"]) == "/r/Canopy")
             record("rescue: two different checkouts of that name → no guess",
                    rescue(managed, ["/r/Canopy", "/d/Canopy"]) == nil)
-            record("rescue: two spellings of one checkout count once",
-                   rescue(managed, ["/r/Canopy", "/d/Canopy"], realPath: sameDisk) != nil)
+            record("rescue: two spellings of one checkout count once, as its real path",
+                   rescue(managed, ["/d/Canopy", "/r/Canopy"], realPath: sameDisk) == "/r/Canopy")
             record("rescue: no known checkout of that name → nothing",
                    rescue(managed, ["/r/Other"]) == nil)
             record("rescue: a known folder that is not a checkout is not one",
@@ -5389,6 +5389,14 @@ enum SidebarLogicProbe {
             let marked = ClaudeSessionHistory.withRescueCheckouts([gone, alive], knownCheckouts: [], isCheckout: isCheckout)
             record("rescue: a removed worktree's row becomes openable through another row's checkout",
                    marked[0].canOpen && marked[0].rescueCheckout?.path == "/r/Canopy" && marked[1].rescueCheckout == nil)
+            record("rescue: a recent directory alone can name the checkout",
+                   ClaudeSessionHistory.withRescueCheckouts([gone], knownCheckouts: [URL(fileURLWithPath: "/r/Canopy")],
+                                                            isCheckout: isCheckout)[0].rescueCheckout?.path == "/r/Canopy")
+            let liveWorktree = SessionEntry(id: UUID().uuidString, title: "t", timestamp: Date(),
+                                            projectDirectory: managed, canOpen: true, logPath: "/z.jsonl")
+            record("rescue: a worktree that still exists gets no rescue checkout",
+                   ClaudeSessionHistory.withRescueCheckouts([liveWorktree, alive], knownCheckouts: [],
+                                                            isCheckout: isCheckout)[0].rescueCheckout == nil)
             var noLog = gone
             noLog.logPath = nil
             record("rescue: a row with no transcript path stays closed",
@@ -5421,10 +5429,33 @@ enum SidebarLogicProbe {
                        && !fm.fileExists(atPath: wtFolder.appendingPathComponent("\(sid).jsonl").path))
             record("rescue: a second open (the daemon after the GUI) finds it already moved",
                    ClaudeSessionHistory.directoryToOpen(entry) == checkout)
+            record("rescue: the daemon finds the moved transcript filed under the checkout",
+                   ClaudeSessionHistory.isFiled(sessionId: sid, under: checkout)
+                       && !ClaudeSessionHistory.isFiled(sessionId: UUID().uuidString.lowercased(), under: checkout))
             var missing = entry
             missing.rescueCheckout = nil
             record("rescue: a removed folder with no checkout cannot be opened",
                    ClaudeSessionHistory.directoryToOpen(missing) == nil)
+            // Listed while the worktree still existed: canOpen true, no rescue checkout yet.
+            let stale = SessionEntry(id: sid, title: "t", timestamp: Date(),
+                                     projectDirectory: GitWorktree.worktreesRoot
+                                         .appendingPathComponent("\(checkout.lastPathComponent)/feat"),
+                                     logPath: entry.logPath)
+            record("rescue: a row listed before its worktree went away finds the checkout when opened",
+                   ClaudeSessionHistory.directoryToOpen(stale) == nil
+                       && ClaudeSessionHistory.directoryToOpen(stale, knownCheckouts: [checkout])?.path
+                            == checkout.resolvingSymlinksInPath().path,
+                   "got=\(String(describing: ClaudeSessionHistory.directoryToOpen(stale, knownCheckouts: [checkout])?.path)) want=\(checkout.path)")
+            let alivePath = fm.temporaryDirectory
+            var existing = SessionEntry(id: sid, title: "t", timestamp: Date(), projectDirectory: alivePath, logPath: "/nope.jsonl")
+            existing.rescueCheckout = checkout
+            record("rescue: a folder that exists opens as itself and nothing moves",
+                   ClaudeSessionHistory.directoryToOpen(existing) == alivePath)
+            var lost = SessionEntry(id: UUID().uuidString.lowercased(), title: "t", timestamp: Date(),
+                                    projectDirectory: managed, logPath: "/no/such/transcript.jsonl")
+            lost.rescueCheckout = checkout
+            record("rescue: a failed move opens nothing",
+                   ClaudeSessionHistory.directoryToOpen(lost) == nil)
         }
 
         // MARK: - Panes
