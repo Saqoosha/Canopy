@@ -589,7 +589,7 @@ final class MirrorConnection: MirrorSink {
                                                   title: store.recents.first(where: { $0.id == sessionId })?.title)
             } else if let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen,
                       let directory = ClaudeSessionHistory.directoryToOpen(
-                          entry, knownCheckouts: store.recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load()) {
+                          entry, knownCheckouts: store.rescueCandidates) {
                 shim = store.startHeadlessSession(directory: directory, resumeId: sessionId,
                                                   isExistingTranscript: true, title: entry.title)
             } else if !store.recents.contains(where: { $0.id == sessionId }), Self.isSessionIdShaped(sessionId),

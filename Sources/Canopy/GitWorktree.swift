@@ -136,7 +136,7 @@ enum GitWorktree {
     static func checkoutForRemovedWorktree(
         _ dir: URL, knownCheckouts: [URL],
         isCheckout: (URL) -> Bool = { isMainCheckout($0) },
-        realPath: (URL) -> String = { $0.resolvingSymlinksInPath().path }
+        realPath: (URL) -> String = { realPath(of: $0) }
     ) -> URL? {
         let standardized = dir.standardizedFileURL
         let parent = standardized.deletingLastPathComponent()
@@ -157,6 +157,13 @@ enum GitWorktree {
         // The real path, which is how the CLI records a cwd and names its project folder.
         let real = Set(candidates.filter(isCheckout).map(realPath))
         return real.count == 1 ? real.first.map { URL(fileURLWithPath: $0) } : nil
+    }
+
+    /// `realpath(3)`: unlike `resolvingSymlinksInPath`, keeps `/private/tmp` as the CLI records it.
+    static func realPath(of url: URL) -> String {
+        guard let resolved = realpath(url.path, nil) else { return url.standardizedFileURL.path }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     static func isGitRepo(_ dir: URL) -> Bool {

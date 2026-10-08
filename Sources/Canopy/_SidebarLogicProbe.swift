@@ -5405,17 +5405,19 @@ enum SidebarLogicProbe {
             // The move itself, on real files: a scratch checkout, and a transcript in a
             // throwaway folder under ~/.claude/projects standing in for the worktree's.
             let fm = FileManager.default
-            let checkout = fm.temporaryDirectory.appendingPathComponent("canopy-probe-rescue-\(UUID().uuidString)")
+            let scratch = fm.temporaryDirectory.appendingPathComponent("canopy-probe-rescue-\(UUID().uuidString)")
             let projects = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
             let wtFolder = projects.appendingPathComponent("-canopy-probe-rescue-wt-\(UUID().uuidString)")
+            let sid = UUID().uuidString.lowercased()
+            try? fm.createDirectory(at: scratch.appendingPathComponent(".git"), withIntermediateDirectories: true)
+            // As the rescue names it: its real path (`/private/var/…`, not `/var/…`).
+            let checkout = URL(fileURLWithPath: GitWorktree.realPath(of: scratch))
             let destFolder = projects.appendingPathComponent(ClaudeSessionHistory.encodePath(checkout.path))
             defer {
-                try? fm.removeItem(at: checkout)
+                try? fm.removeItem(at: scratch)
                 try? fm.removeItem(at: wtFolder)
                 try? fm.removeItem(at: destFolder)
             }
-            let sid = UUID().uuidString.lowercased()
-            try? fm.createDirectory(at: checkout.appendingPathComponent(".git"), withIntermediateDirectories: true)
             try? fm.createDirectory(at: wtFolder.appendingPathComponent("\(sid)/subagents"), withIntermediateDirectories: true)
             try? "{}\n".write(to: wtFolder.appendingPathComponent("\(sid).jsonl"), atomically: true, encoding: .utf8)
             var entry = SessionEntry(id: sid, title: "t", timestamp: Date(), projectDirectory: managed,
@@ -5443,9 +5445,7 @@ enum SidebarLogicProbe {
                                      logPath: entry.logPath)
             record("rescue: a row listed before its worktree went away finds the checkout when opened",
                    ClaudeSessionHistory.directoryToOpen(stale) == nil
-                       && ClaudeSessionHistory.directoryToOpen(stale, knownCheckouts: [checkout])?.path
-                            == checkout.resolvingSymlinksInPath().path,
-                   "got=\(String(describing: ClaudeSessionHistory.directoryToOpen(stale, knownCheckouts: [checkout])?.path)) want=\(checkout.path)")
+                       && ClaudeSessionHistory.directoryToOpen(stale, knownCheckouts: [scratch]) == checkout)
             let alivePath = fm.temporaryDirectory
             var existing = SessionEntry(id: sid, title: "t", timestamp: Date(), projectDirectory: alivePath, logPath: "/nope.jsonl")
             existing.rescueCheckout = checkout

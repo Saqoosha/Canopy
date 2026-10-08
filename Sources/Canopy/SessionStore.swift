@@ -1099,6 +1099,9 @@ final class SessionStore {
         launch.backToLauncher()
     }
 
+    /// Where a removed worktree's session may reopen: the openable rows' folders and the recent directories.
+    var rescueCandidates: [URL] { recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load() }
+
     /// Open a closed local row by spawning a shim with --resume against the
     /// existing JSONL. If `permissionMode` is nil, falls back to the global
     /// default in `CanopySettings.defaultPermissionMode`.
@@ -1120,7 +1123,7 @@ final class SessionStore {
             return existing
         }
         guard let directory = ClaudeSessionHistory.directoryToOpen(
-            entry, knownCheckouts: recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load())
+            entry, knownCheckouts: rescueCandidates)
         else {
             // The folder is gone and the transcript could not be moved to a checkout.
             noteSessionFailure(title: entry.title, message: "Could not reopen this session: its folder is gone "
