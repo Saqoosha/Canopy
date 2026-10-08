@@ -197,6 +197,8 @@ final class DaemonDelegate {
             return nil
         }
 
+        // From launch, so `listen` sees sessions opened before any client connects.
+        ControlEventLog.shared.track(store)
         let server = MirrorServer(store: store, token: MirrorAccess.token(createIfMissing: false) ?? "")
         server.acceptsControl = true
         server.refreshesToken = true

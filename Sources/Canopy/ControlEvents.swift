@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ControlEvents")
 
 /// One thing a `listen` client can wait for. Recorded by the daemon whether or
 /// not anyone is listening, so a client that reconnects with its cursor still
@@ -13,8 +16,8 @@ nonisolated struct ControlEvent: Equatable, Sendable {
         case asking
         case sessionOpened = "session_opened"
         case sessionClosed = "session_closed"
-        /// Not recorded: what `listen` returns when events between the
-        /// cursor and now were lost (daemon restart, or the log wrapped).
+        /// Not recorded: what `listen` returns when the cursor cannot be
+        /// continued (daemon restart, log wrapped, or a cursor ahead of the log).
         case gap
     }
 
@@ -33,9 +36,9 @@ nonisolated struct ControlEvent: Equatable, Sendable {
     var addressedTo: String?
 
     var wire: [String: Any] {
-        // A gap names no session; its `state` slot carries the reason.
+        // A gap names no session and no event; its `state` slot carries the reason.
         if kind == .gap {
-            return ["event": kind.rawValue, "seq": seq, "at": at.timeIntervalSince1970, "reason": state ?? ""]
+            return ["event": kind.rawValue, "at": at.timeIntervalSince1970, "reason": state ?? ""]
         }
         var out: [String: Any] = [
             "event": kind.rawValue, "seq": seq, "key": key, "sessionId": sessionId,
@@ -54,9 +57,8 @@ nonisolated struct ControlEvent: Equatable, Sendable {
     }
 
     /// Who a reply says it is for, read off its first non-blank line:
-    /// `Written for: X`, `To: X`, `宛先: X`, or a short `X へ` / `X 宛`.
-    /// Markdown decoration (`#`, `>`, `*`, `_`) around the line is ignored.
-    /// Nil when the reply names no one this way.
+    /// `Written for: X` or `宛先: X`. Markdown decoration (`#`, `>`, `*`, `_`)
+    /// around the line is ignored. Nil when the reply names no one this way.
     static func addressee(of text: String) -> String? {
         guard let line = text.split(whereSeparator: \.isNewline)
             .map({ $0.trimmingCharacters(in: .whitespaces) })
@@ -68,15 +70,8 @@ nonisolated struct ControlEvent: Equatable, Sendable {
             return trimmed.isEmpty ? nil : trimmed
         }
         let lower = stripped.lowercased()
-        for prefix in ["written for:", "to:", "宛先:", "宛先："] where lower.hasPrefix(prefix) {
+        for prefix in ["written for:", "宛先:", "宛先："] where lower.hasPrefix(prefix) {
             return clean(stripped.dropFirst(prefix.count))
-        }
-        // A greeting line, not a sentence that happens to end in へ.
-        guard stripped.count <= 40 else { return nil }
-        for suffix in ["へ", "宛", "宛て"] {
-            var body = Substring(stripped)
-            while let last = body.last, "。.:：".contains(last) { body = body.dropLast() }
-            if body.hasSuffix(suffix) { return clean(body.dropLast(suffix.count)) }
         }
         return nil
     }
@@ -102,7 +97,8 @@ nonisolated struct ControlEvent: Equatable, Sendable {
                                   texts: [String]) -> [(id: String, texts: [String])] {
         var turn = turn
         if let last = turn.last, last.id == id {
-            let merged = texts.starts(with: last.texts) ? texts : last.texts + texts
+            let cumulative = texts.count > last.texts.count && texts.starts(with: last.texts)
+            let merged = cumulative ? texts : last.texts + texts
             turn[turn.count - 1] = (id, merged)
         } else if !texts.isEmpty {
             turn.append((id, texts))
@@ -110,7 +106,7 @@ nonisolated struct ControlEvent: Equatable, Sendable {
         return turn
     }
 
-    /// Longest `text` a recorded turn keeps, in UTF-8 bytes.
+    /// Longest `text` a recorded event keeps, in UTF-8 bytes.
     static let textMaxBytes = 32_000
 }
 
@@ -169,6 +165,12 @@ nonisolated struct ControlListenParams: Equatable, Sendable {
 
     static func parse(_ params: [String: Any]) -> Result<ControlListenParams, ControlProtocol.ControlError> {
         var kinds = ControlListenFilter.kindNames.subtracting(["addressed"])
+        if params["addressedTo"] != nil, !(params["addressedTo"] is String) {
+            return .failure(.init("addressedTo must be a string"))
+        }
+        if params["since"] != nil, !(params["since"] is String) {
+            return .failure(.init("since must be a cursor string"))
+        }
         if let raw = params["events"] {
             guard let list = raw as? [String], !list.isEmpty else {
                 return .failure(.init("events must be a non-empty array of strings"))
@@ -183,6 +185,9 @@ nonisolated struct ControlListenParams: Equatable, Sendable {
         let to = addressedTo?.isEmpty == false ? addressedTo : nil
         // Naming a recipient without naming events means "replies to that recipient".
         if to != nil, params["events"] == nil { kinds = ["addressed"] }
+        if to != nil, !kinds.contains("addressed") {
+            return .failure(.init("addressedTo needs events to include addressed"))
+        }
         var since: ControlEventCursor?
         if let raw = params["since"] as? String, !raw.isEmpty {
             guard let cursor = ControlEventCursor(wire: raw) else {
@@ -191,8 +196,14 @@ nonisolated struct ControlListenParams: Equatable, Sendable {
             since = cursor
         }
         var timeout = defaultTimeout
-        if let raw = params["timeout"] as? Double { timeout = raw } else if let raw = params["timeout"] as? Int { timeout = Double(raw) }
-        guard timeout > 0 else { return .failure(.init("timeout must be positive")) }
+        if let raw = params["timeout"] {
+            // `is Bool` is true for a JSON 0 or 1 too; only the CF type tells `true` from `1`.
+            guard CFGetTypeID(raw as CFTypeRef) != CFBooleanGetTypeID(), let number = (raw as? NSNumber)?.doubleValue ?? (raw as? Int).map(Double.init),
+                  number.isFinite, number > 0 else {
+                return .failure(.init("timeout must be a positive number of seconds"))
+            }
+            timeout = max(number, 1)
+        }
         var key: String?
         var sessionId: String?
         for ref in ControlProtocol.sessionRefs(params) {
@@ -230,7 +241,8 @@ nonisolated enum ControlListenScan: Equatable, Sendable {
         }
         if since.seq > latestSeq { return gap("unknown_cursor", resumeAt: latestSeq) }
         if since.seq < oldest - 1 { return gap("overflow", resumeAt: oldest - 1) }
-        for event in events where event.seq > since.seq && filter.matches(event) {
+        // Seqs are contiguous in the ring, so the first event after the cursor is at a known index.
+        for event in events[(since.seq - oldest + 1)...] where filter.matches(event) {
             return .event(event, cursor: ControlEventCursor(epoch: epoch, seq: event.seq))
         }
         return .wait(cursor: ControlEventCursor(epoch: epoch, seq: latestSeq))
@@ -244,6 +256,8 @@ final class ControlEventLog {
     static let shared = ControlEventLog()
     static let capacity = 1000
 
+    private init() {}
+
     let epoch = String(UUID().uuidString.lowercased().prefix(8))
     private(set) var events: [ControlEvent] = []
     private(set) var latestSeq = 0
@@ -251,7 +265,10 @@ final class ControlEventLog {
 
     func record(_ kind: ControlEvent.Kind, session: OpenSession?, state: String? = nil, replyId: String? = nil,
                 requestId: String? = nil, toolName: String? = nil, text: String? = nil, addressedTo: String? = nil) {
-        guard let session else { return }
+        guard let session else {
+            logger.notice("[control] \(kind.rawValue, privacy: .public) not recorded: no bound session")
+            return
+        }
         record(kind, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
                state: state, replyId: replyId, requestId: requestId, toolName: toolName, text: text,
                addressedTo: addressedTo)

@@ -65,7 +65,8 @@ def main(argv):
 
     listen_p = sub.add_parser(
         "listen",
-        help="listen: block until an event, print it, exit 0 (2 on timeout)",
+        help="listen: block until an event, print it; exit 0 event, "
+        "3 timeout, 4 connection lost, 1 error",
     )
     listen_p.add_argument("--key")
     listen_p.add_argument("--session-id", dest="session_id")
@@ -79,7 +80,7 @@ def main(argv):
     listen_p.add_argument(
         "--to",
         dest="addressed_to",
-        help="only replies addressed to this name (implies --event addressed)",
+        help="only replies addressed to this name (adds --event addressed)",
     )
     listen_p.add_argument("--since", help="cursor from a previous listen")
     listen_p.add_argument(
@@ -95,7 +96,8 @@ def main(argv):
         result = transact(args.socket, verb, params, read_timeout)
     except OSError as exc:
         print(f"canopyctl: {exc}", file=sys.stderr)
-        return 1
+        # A listen loop retries this with its cursor; a daemon restart lands here.
+        return 4 if args.cmd == "listen" else 1
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     body = result["result"] if isinstance(result.get("result"), dict) else result
@@ -104,7 +106,7 @@ def main(argv):
     if args.cmd == "wait" and body.get("turnDone") is not True:
         return 1
     if args.cmd == "listen" and body.get("timedOut") is True:
-        return 2
+        return 3
     return 0
 
 
@@ -133,9 +135,11 @@ def build(args):
     params = session_params(args)
     if args.cmd == "listen":
         if args.events:
-            params["events"] = args.events
+            params["events"] = list(args.events)
         if args.addressed_to:
             params["addressedTo"] = args.addressed_to
+            if args.events and "addressed" not in args.events:
+                params["events"].append("addressed")
         if args.since:
             params["since"] = args.since
         params["timeout"] = args.timeout

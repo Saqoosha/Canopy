@@ -1845,7 +1845,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return working ? "working" : "idle"
     }
 
-    /// The `state` every control verb and `listen` event reports.
+    /// The `state` the turn verbs (`session_status`, `latest_reply`, `wait_turn`) and `listen` events report.
     var controlStateWire: String {
         Self.controlState(
             askingQuestion: lastAssistantHadAskUserQuestion || !pendingAskUserQuestionRequestIds.isEmpty,
@@ -6551,9 +6551,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
             if isNewPermissionRequest {
+                // Capped like `pending_requests`: the event outlives the request it describes.
+                let rendered = Self.renderedToolInput(request["inputs"])
                 ControlEventLog.shared.record(toolName == "AskUserQuestion" ? .asking : .permission,
                                               session: boundSession, state: controlStateWire, requestId: requestId,
-                                              toolName: toolName, text: Self.renderedToolInput(request["inputs"]))
+                                              toolName: toolName,
+                                              text: rendered.isEmpty ? nil : Self.truncatedNotificationBody(
+                                                  rendered, maxBytes: Self.pendingRequestInputMaxBytes))
             }
             // A raised hand is the one state where the notification is worth
             // more than the roster row: it is the only state that cannot
@@ -8038,12 +8042,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var turnTextBlocks: [(id: String, texts: [String])] = []
 
     private func collectTurnText(_ ioMsg: [String: Any]) {
+        guard let frame = Self.mainTurnText(ioMsg) else { return }
+        turnTextBlocks = ControlEvent.appendingTurnText(turnTextBlocks, id: frame.id, texts: frame.texts)
+    }
+
+    /// The text blocks of a main-conversation `assistant` frame; nil for any other frame, a subagent's included.
+    nonisolated static func mainTurnText(_ ioMsg: [String: Any]) -> (id: String, texts: [String])? {
         guard ioMsg["type"] as? String == "assistant",
               ioMsg["parent_tool_use_id"] as? String == nil,
               let message = ioMsg["message"] as? [String: Any],
-              let content = message["content"] as? [[String: Any]] else { return }
+              let content = message["content"] as? [[String: Any]] else { return nil }
         let texts = content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
-        turnTextBlocks = ControlEvent.appendingTurnText(turnTextBlocks, id: message["id"] as? String ?? "", texts: texts)
+        return (message["id"] as? String ?? "", texts)
     }
 
     /// Track CLI working state from io_message events flowing to webview.
@@ -8109,7 +8119,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             refreshAskingState()
             // Every main-conversation turn, typed on the Mac, the phone or the control API.
-            // Recap and keep-alive turns never reach this tracker.
             let turn = ControlEvent.turnReply(blocks: turnTextBlocks.flatMap(\.texts), result: finalText ?? "")
             turnTextBlocks = []
             ControlEventLog.shared.record(.turnDone, session: boundSession, state: controlStateWire,
