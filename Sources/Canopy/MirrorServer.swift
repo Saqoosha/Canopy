@@ -698,7 +698,7 @@ final class MirrorConnection: MirrorSink {
             },
             "userScripts": WebViewContainer.sessionUserScripts.map { ["source": $0.source, "atDocumentStart": $0.atDocumentStart] },
             // Lets the phone cache the assets it fetches, keyed by the extension they came from.
-            "extensionVersion": CCExtension.extensionVersion() ?? "",
+            "extensionVersion": shim.extensionVersion ?? CCExtension.extensionVersion() ?? "",
             // The replay is already being fetched; the phone answers its page's get_session_request with it.
             "prefetchedSessionRequestId": prefetchId,
             // Confirms the negotiation for a client that wants to check; none reads it yet.
@@ -764,7 +764,9 @@ final class MirrorConnection: MirrorSink {
             reply["base64"] = image.data.base64EncodedString()
             return
         }
-        guard let path = dict["path"] as? String, let root = CCExtension.extensionPath()?.standardizedFileURL else {
+        // The attached session's own extension, so its page matches its extension host after an update.
+        guard let path = dict["path"] as? String,
+              let root = (shim?.extensionDirectory ?? CCExtension.extensionPath())?.standardizedFileURL else {
             reply["error"] = "no extension"
             return
         }

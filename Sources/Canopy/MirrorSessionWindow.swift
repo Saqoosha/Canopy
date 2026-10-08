@@ -45,7 +45,8 @@ final class MirrorSessionWindow: NSObject, NSWindowDelegate {
         WebViewContainer.loadCCWebview(
             webView,
             resumeSessionId: session.resumeId,
-            entryFileName: WebViewContainer.entryFileName(for: nil)
+            entryFileName: WebViewContainer.entryFileName(for: nil),
+            extensionPath: shim.extensionDirectory
         )
 
         let window = NSWindow(

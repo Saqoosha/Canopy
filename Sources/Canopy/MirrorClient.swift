@@ -216,10 +216,6 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if let openRequest { attach["open"] = openRequest.wire }
         sendJSONObject(attach)
         scheduleReceive()
-        // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
-        if let webView {
-            WebViewContainer.loadCCWebview(webView, resumeSessionId: sessionId, entryFileName: WebViewContainer.entryFileName(for: nil))
-        }
     }
 
     nonisolated private func scheduleReceive() {
@@ -285,6 +281,13 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             logger.notice("[mirror-attach] attach_ok")
             extensionVersion = dict["extensionVersion"] as? String
             hostSessionId = (dict["hostSessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // Loaded after attach_ok, from the extension the host runs when it is installed here.
+            if let webView {
+                let local = extensionVersion.flatMap { $0.isEmpty ? nil : CCExtension.installedPath(version: $0) }
+                WebViewContainer.loadCCWebview(webView, resumeSessionId: sessionId,
+                                               entryFileName: WebViewContainer.entryFileName(for: nil),
+                                               extensionPath: local)
+            }
             deliverOutcome(.attached)
             return
         }

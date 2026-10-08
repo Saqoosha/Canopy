@@ -13,6 +13,21 @@ enum CCExtension {
 
     /// Find the newest installed CC extension path across all known locations.
     static func extensionPath() -> URL? {
+        guard let best = installedFolders()
+            .max(by: { $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedAscending })
+        else {
+            logger.error("CC extension not found in any known location")
+            return nil
+        }
+        return best
+    }
+
+    /// The installed folder holding `version`, so a page can match the extension host a session runs.
+    static func installedPath(version: String) -> URL? {
+        installedFolders().first { self.version(at: $0) == version }
+    }
+
+    private static func installedFolders() -> [URL] {
         let searchDirs = [
             canopyExtensionsDir,
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vscode/extensions"),
@@ -26,13 +41,7 @@ enum CCExtension {
                 $0.lastPathComponent.hasPrefix("anthropic.claude-code-")
             })
         }
-        guard let best = allCandidates
-            .max(by: { $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedAscending })
-        else {
-            logger.error("CC extension not found in any known location")
-            return nil
-        }
-        return best
+        return allCandidates
     }
 
     /// Read extension version from package.json (e.g., "2.1.87").

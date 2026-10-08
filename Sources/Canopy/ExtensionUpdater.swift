@@ -133,6 +133,9 @@ final class ExtensionUpdater {
         } catch {
             failure = (version, error.localizedDescription)
             state = .failed(message: error.localizedDescription)
+            SessionNotifier.post(title: "Claude Code extension update failed",
+                                 body: "v\(version): \(error.localizedDescription)",
+                                 showWhileFrontmost: true)
             logger.error("Extension update failed: \(error.localizedDescription, privacy: .public)")
         }
     }

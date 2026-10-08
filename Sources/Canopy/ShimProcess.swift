@@ -472,6 +472,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     var isLive: Bool { process?.isRunning == true && !isIntentionalStop }
     /// The extension version this shim started on; nil until it starts, or when unreadable.
     private(set) var extensionVersion: String?
+    /// The extension folder this shim started on; a page for it must load from the same one.
+    private(set) var extensionDirectory: URL?
 
     /// Whether any shim process is currently running. Used by AppDelegate's
     /// quit-time confirmation alert. `isIntentionalStop` shims are excluded —
@@ -2972,6 +2974,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             showErrorInWebView("Claude Code extension not found. Install it in VSCode first.")
             return false
         }
+        extensionDirectory = URL(fileURLWithPath: extensionPath)
         extensionVersion = CCExtension.version(at: URL(fileURLWithPath: extensionPath))
 
         // Verify the working directory exists before starting the shim.
