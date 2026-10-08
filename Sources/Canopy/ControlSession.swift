@@ -49,7 +49,6 @@ final class ControlSession {
         case "list_folders": listFolders(request)
         case "browse_dir": browse(request)
         case "mkdir": makeFolder(request)
-        case "create_folder": createFolder(request)
         case "open_session": openSession(request)
         case "stop_session": stopSession(request)
         case "subscribe": subscribe(request)
@@ -146,17 +145,6 @@ final class ControlSession {
         }
         switch ControlProtocol.mkdir(parent: parent, name: name) {
         case .success(let path): reply(request, ["path": path])
-        case .failure(let error): fail(request, error.message)
-        }
-    }
-
-    private func createFolder(_ request: ControlProtocol.Request) {
-        guard let path = request.params["path"] as? String, let name = request.params["name"] as? String else {
-            fail(request, "path and name are required")
-            return
-        }
-        switch ControlProtocol.createFolder(path: path, name: name) {
-        case .success(let created): reply(request, ["path": created])
         case .failure(let error): fail(request, error.message)
         }
     }
