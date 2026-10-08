@@ -66,7 +66,7 @@ final class ExtensionUpdater {
             state = .failed(message: failure.message)
         } else {
             // New sessions pick the newest installed version at spawn, so installing is all an update takes.
-            await installUpdate(version: latestVer)
+            await installUpdate(version: latestVer, automatic: !retryingFailure)
         }
     }
 
@@ -117,7 +117,7 @@ final class ExtensionUpdater {
         }
     }
 
-    private func installUpdate(version: String) async {
+    private func installUpdate(version: String, automatic: Bool) async {
         state = .downloading
         do {
             let vsixURL = try await downloadVSIX(version: version)
@@ -133,9 +133,12 @@ final class ExtensionUpdater {
         } catch {
             failure = (version, error.localizedDescription)
             state = .failed(message: error.localizedDescription)
-            SessionNotifier.post(title: "Claude Code extension update failed",
-                                 body: "v\(version): \(error.localizedDescription)",
-                                 showWhileFrontmost: true)
+            // A Retry click already has the banner in front of it.
+            if automatic {
+                SessionNotifier.post(title: "Claude Code extension update failed",
+                                     body: "v\(version): \(error.localizedDescription)",
+                                     showWhileFrontmost: true)
+            }
             logger.error("Extension update failed: \(error.localizedDescription, privacy: .public)")
         }
     }
