@@ -1838,8 +1838,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return ControlTurnSnapshot(state: state, replyId: nil, text: latestText, turnDone: false)
     }
 
+    /// `state` for the status verbs. A question outranks a permission prompt because an AskUserQuestion is itself one.
+    nonisolated static func controlState(askingQuestion: Bool, permissionPending: Bool, working: Bool) -> String {
+        if askingQuestion { return "asking" }
+        if permissionPending { return "permission" }
+        return working ? "working" : "idle"
+    }
+
     func controlTurnSnapshot(replyId: String?) -> ControlTurnSnapshot? {
-        let state = lastAssistantHadAskUserQuestion ? "asking" : (isWorking ? "working" : "idle")
+        let state = Self.controlState(
+            askingQuestion: lastAssistantHadAskUserQuestion || !pendingAskUserQuestionRequestIds.isEmpty,
+            permissionPending: !pendingPermissionRequestIds.subtracting(pendingAskUserQuestionRequestIds).isEmpty,
+            working: isWorking)
         // The first-turn id lives on the session, so a shim rebuilt before sending it still reports it queued.
         var queued = controlReplyIds
         if let firstTurn = boundSession?.pendingInitialPromptReplyId { queued.insert(firstTurn) }
@@ -6452,6 +6462,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     static let pendingRequestInputMaxBytes = 4000
+    static let pendingRequestRawMaxBytes = 16_384
 
     /// One outstanding request as `pending_requests` reports it; the same rendering the phone's push uses.
     static func pendingRequestWire(requestId: String, toolName: String, inputs: Any?) -> [String: Any] {
@@ -6463,6 +6474,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             "input": truncatedNotificationBody(renderedToolInput(inputs), maxBytes: pendingRequestInputMaxBytes),
         ]
         if isQuestion, let choices = askChoices(from: inputs) { wire["choices"] = choices }
+        // The tool's own input, structured; omitted when it is not JSON or too large to send whole.
+        if let inputs, JSONSerialization.isValidJSONObject(inputs),
+           let data = try? JSONSerialization.data(withJSONObject: inputs),
+           data.count <= pendingRequestRawMaxBytes {
+            wire["inputRaw"] = inputs
+        }
         return wire
     }
 

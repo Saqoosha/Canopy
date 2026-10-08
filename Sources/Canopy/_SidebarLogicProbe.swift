@@ -2002,6 +2002,20 @@ enum SidebarLogicProbe {
                                    "options": [["label": "Postgres"], ["label": "SQLite"]]]],
                 ])
                 let askOptions = (askWire["choices"] as? [[String: Any]])?.first?["options"] as? [[String: Any]]
+                record("control pending: a small input also comes back structured",
+                       (bashWire["inputRaw"] as? [String: Any])?["command"] as? String == "ls -la")
+                let hugeWire = ShimProcess.pendingRequestWire(
+                    requestId: "p3", toolName: "Write",
+                    inputs: ["content": String(repeating: "x", count: ShimProcess.pendingRequestRawMaxBytes + 1)])
+                record("control pending: an input past the raw budget is not sent structured",
+                       hugeWire["inputRaw"] == nil && hugeWire["input"] != nil)
+                record("control state: a question outranks a permission prompt",
+                       ShimProcess.controlState(askingQuestion: true, permissionPending: true, working: true) == "asking")
+                record("control state: a permission prompt outranks working",
+                       ShimProcess.controlState(askingQuestion: false, permissionPending: true, working: true) == "permission")
+                record("control state: otherwise working or idle",
+                       ShimProcess.controlState(askingQuestion: false, permissionPending: false, working: true) == "working"
+                           && ShimProcess.controlState(askingQuestion: false, permissionPending: false, working: false) == "idle")
                 record("control pending: an AskUserQuestion is kind question and carries its choices",
                        askWire["kind"] as? String == "question"
                            && askOptions?.compactMap { $0["label"] as? String } == ["Postgres", "SQLite"])

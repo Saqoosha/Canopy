@@ -135,7 +135,8 @@ tell that human; there is no verb to answer them. Params: `key` and/or
 ```
 
 `input` is the tool input rendered the way the phone's notification shows it,
-cut to about 4 KB. `choices` appears only on `question`. An empty list means
+cut to about 4 KB. `inputRaw` is the same input as structured JSON, omitted
+when it exceeds 16 KB. `choices` appears only on `question`. An empty list means
 nothing is waiting, which includes a session that is not running.
 
 ### `session_status`, `latest_reply`, `wait_turn`
@@ -148,8 +149,10 @@ All three take optional `key`, `sessionId`, and `replyId`. An unknown
 `latest_reply` reports the last CONTROL turn, not turns typed on the Mac
 or phone.
 
-`state` is `idle`, `working`, or `asking` (`asking` when the last assistant
-turn raised AskUserQuestion, otherwise `working` while a turn is running).
+`state` is `idle`, `working`, `permission`, or `asking`. `asking` means an
+AskUserQuestion is waiting; `permission` means a tool permission prompt is
+waiting (`pending_requests` shows it); otherwise `working` while a turn is
+running.
 `turnDone` is true only after that control turn's result has been captured.
 An in-flight control turn reports `turnDone: false` and no `text`, so a
 previous answer is not reported as this turn.
