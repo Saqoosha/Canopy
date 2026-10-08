@@ -12136,6 +12136,10 @@ enum SidebarLogicProbe {
             record("account parse: empty optional fields become nil",
                    account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","displayName":"","organizationName":""}}"#)
                        .map { $0.displayName == nil && $0.organizationName == nil } ?? false)
+            record("account parse: the organization UUID is read, and an empty one is nil",
+                   account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","organizationUuid":"org-1"}}"#)?.organizationUuid == "org-1"
+                       && account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","organizationUuid":""}}"#)
+                           .map { $0.organizationUuid == nil } ?? false)
             record("account parse: a missing oauthAccount is no account",
                    account(#"{"numStartups":3}"#) == nil)
             record("account parse: an empty email is no account",

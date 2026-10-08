@@ -52,21 +52,23 @@ enum KeychainAuth {
         readOAuthFromKeychain()
     }
 
-    /// Read the organization UUID stored alongside the OAuth tokens.
-    static func readOrganizationUUID() -> String? {
-        readKeychainBlob()?["organizationUuid"] as? String
-    }
-
-    /// Convenience: returns (accessToken, orgUUID) if both are present in
-    /// Keychain. Empty strings are treated as missing — sending an empty
+    /// Convenience: returns (accessToken, orgUUID) if both are present.
+    /// Empty strings are treated as missing — sending an empty
     /// `Authorization` / `x-organization-uuid` header would produce a
-    /// confusing 401/400 from the API.
+    /// confusing 401/400 from the API. Current CLIs no longer store the
+    /// organization in the Keychain blob (measured on 2.1.294: only
+    /// `claudeAiOauth` and `mcpOAuth`), so it falls back to `.claude.json`.
     static func readAccessTokenAndOrg() -> (token: String, orgUUID: String)? {
         guard let blob = readKeychainBlob(),
               let oauth = blob["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String, !token.isEmpty,
-              let org = blob["organizationUuid"] as? String, !org.isEmpty
+              let token = oauth["accessToken"] as? String, !token.isEmpty
         else { return nil }
+        guard let org = (blob["organizationUuid"] as? String).flatMap({ $0.isEmpty ? nil : $0 })
+                ?? ClaudeAccountInfo.currentOrganizationUuid()
+        else {
+            logger.warning("No organization UUID in the Keychain blob or .claude.json")
+            return nil
+        }
         return (token, org)
     }
 
