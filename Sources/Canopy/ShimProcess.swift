@@ -470,14 +470,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Running and not being stopped on purpose.
     var isLive: Bool { process?.isRunning == true && !isIntentionalStop }
 
-    /// The Mac should stay awake for this session (`SleepGuard`): the reaper's busy — a turn,
-    /// a background task, or a permission request or question waiting. The waiting cases
-    /// count because they are answered from the phone, which cannot reach a sleeping Mac.
-    /// An SSH session's background tasks do not: their completion is never seen here.
+    /// When a turn last started or the CLI last sent a frame (`SleepGuardPolicy.sessionHolds`).
+    private var lastSessionActivityAt = Date.distantPast
+
+    /// The Mac should stay awake for this session (`SleepGuard`). Rules in `SleepGuardPolicy.sessionHolds`.
     var holdsSystemAwake: Bool {
-        isLive && SessionReaper.isBusy(working: isWorking, permissionPending: !pendingPermissionRequestIds.isEmpty,
-                                       asking: lastAssistantHadAskUserQuestion,
-                                       backgroundTasks: remoteHost == nil ? pendingBackgroundTaskIds.count : 0)
+        isLive && SleepGuardPolicy.sessionHolds(
+            working: isWorking, waitingOnHuman: !pendingPermissionRequestIds.isEmpty || lastAssistantHadAskUserQuestion,
+            reconcilableBackgroundTasks: remoteHost == nil ? pendingBackgroundTaskIds.count : 0,
+            sinceActivity: Date().timeIntervalSince(lastSessionActivityAt))
     }
     /// The extension version this shim started on; nil until it starts, or when unreadable.
     private(set) var extensionVersion: String?
@@ -617,6 +618,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // outstanding AskUserQuestion asking state — the user already
             // responded, we're back to thinking.
             if isWorking && !oldValue {
+                lastSessionActivityAt = Date()
+                SleepGuard.reevaluateAll()
                 lastAssistantHadAskUserQuestion = false
                 // The turn is now known to have started — CLI frames are
                 // flowing back through `trackWorkingState`, so the ordinary
@@ -7841,6 +7844,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let ioMsg = nested["message"] as? [String: Any],
               let ioType = ioMsg["type"] as? String
         else { return }
+        lastSessionActivityAt = Date()
 
         switch ioType {
         case "assistant", "stream_event":

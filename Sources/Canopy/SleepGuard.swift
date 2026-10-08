@@ -26,9 +26,23 @@ final class SleepGuard {
     private var assertion: IOPMAssertionID?
     private var lastLogged: String?
     private var acquireFailing = false
+    private static var instances: [Weak] = []
+    private struct Weak { weak var guardian: SleepGuard? }
 
     init(sessions: @escaping () -> [OpenSession]) {
         self.sessions = sessions
+        Self.instances.append(Weak(guardian: self))
+    }
+
+    /// Re-decide now rather than at the next tick: a turn started from the phone does not
+    /// reset the idle timer, so a Mac near its idle deadline could sleep before the tick.
+    static func reevaluateAll() {
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                instances.removeAll { $0.guardian == nil }
+                for entry in instances where entry.guardian?.timer != nil { entry.guardian?.tick() }
+            }
+        }
     }
 
     func start() {
@@ -48,7 +62,7 @@ final class SleepGuard {
     private func tick() {
         let working = sessions().filter { $0.shim?.holdsSystemAwake == true }.count
         let decision = SleepGuardPolicy.decide(enabled: CanopySettings.shared.preventSleepWhileWorking,
-                                               workingSessions: working, battery: BatteryReading.current())
+                                               workingSessions: working, power: PowerSource.current())
         let held: Bool
         if decision.hold {
             held = acquire()
@@ -86,23 +100,28 @@ final class SleepGuard {
     }
 }
 
-/// The internal battery's state, or nil on a Mac without one.
-struct BatteryReading: Equatable {
-    var onBattery: Bool
-    var percent: Int
+/// The internal battery, kept apart from a read that failed: treating a failure as
+/// "no battery" would silently disable the floor on a laptop.
+enum PowerSource: Equatable {
+    case noBattery
+    case battery(onBattery: Bool, percent: Int)
+    case unreadable
 
-    static func current() -> BatteryReading? {
+    static func current() -> PowerSource {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
-        for source in list {
-            guard let desc = IOPSGetPowerSourceDescription(info, source)?.takeUnretainedValue() as? [String: Any],
-                  desc[kIOPSTypeKey] as? String == kIOPSInternalBatteryType,
-                  let current = desc[kIOPSCurrentCapacityKey] as? Int,
-                  let max = desc[kIOPSMaxCapacityKey] as? Int, max > 0 else { continue }
-            let state = desc[kIOPSPowerSourceStateKey] as? String
-            return BatteryReading(onBattery: state == kIOPSBatteryPowerValue, percent: current * 100 / max)
-        }
-        return nil
+              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return .unreadable }
+        return parse(list.map { IOPSGetPowerSourceDescription(info, $0)?.takeUnretainedValue() as? [String: Any] })
+    }
+
+    /// One entry per power source; nil where its description could not be read.
+    static func parse(_ descriptions: [[String: Any]?]) -> PowerSource {
+        guard !descriptions.contains(where: { $0 == nil }) else { return .unreadable }
+        guard let desc = descriptions.compactMap({ $0 }).first(where: { $0[kIOPSTypeKey] as? String == kIOPSInternalBatteryType })
+        else { return .noBattery }
+        guard let current = desc[kIOPSCurrentCapacityKey] as? Int,
+              let max = desc[kIOPSMaxCapacityKey] as? Int, max > 0,
+              let state = desc[kIOPSPowerSourceStateKey] as? String else { return .unreadable }
+        return .battery(onBattery: state == kIOPSBatteryPowerValue, percent: current * 100 / max)
     }
 }
 
@@ -112,13 +131,30 @@ enum SleepGuardPolicy {
     /// a sleeping Mac resumes the turn later, a dead one loses it.
     static let batteryFloorPercent = 20
 
-    /// `battery` is read only once a session is busy: it is an IOKit query, and the idle case is every tick.
-    static func decide(enabled: Bool, workingSessions: Int, battery: @autoclosure () -> BatteryReading?) -> (hold: Bool, reason: String) {
+    /// A turn or a waiting question holds only this long after the session's last activity
+    /// (a turn starting, or any CLI frame). Bounds both a question left overnight and a
+    /// working flag latched by a CLI that died under a live shim, which no frame clears.
+    static let staleAfter: TimeInterval = 60 * 60
+
+    /// Local background tasks are exempt: their completion is reconciled from the transcript,
+    /// and a long one sends no frames while it runs. Remote ones are never passed in.
+    static func sessionHolds(working: Bool, waitingOnHuman: Bool, reconcilableBackgroundTasks: Int,
+                             sinceActivity: TimeInterval) -> Bool {
+        if reconcilableBackgroundTasks > 0 { return true }
+        return (working || waitingOnHuman) && sinceActivity < staleAfter
+    }
+
+    /// `power` is read only once a session is busy: it is an IOKit query, and the idle case is every tick.
+    static func decide(enabled: Bool, workingSessions: Int, power: @autoclosure () -> PowerSource) -> (hold: Bool, reason: String) {
         guard enabled else { return (false, "turned off in Settings") }
         guard workingSessions > 0 else { return (false, "no session is busy") }
-        if let battery = battery(), battery.onBattery, battery.percent < batteryFloorPercent {
+        switch power() {
+        case .unreadable:
+            return (false, "battery state is unreadable")
+        case .battery(onBattery: true, let percent) where percent < batteryFloorPercent:
             return (false, "on battery below \(batteryFloorPercent)%")
+        case .battery, .noBattery:
+            return (true, "a session is busy")
         }
-        return (true, "a session is busy")
     }
 }
