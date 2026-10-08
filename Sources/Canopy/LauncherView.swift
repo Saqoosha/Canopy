@@ -165,7 +165,7 @@ struct LauncherView: View {
     /// The other-Mac folder browser, separate from the SSH one's flag.
     @State private var showPeerBrowser = false
     @State private var showCloneSheet = false
-    @State private var updater = ExtensionUpdater()
+    @State private var updater = ExtensionUpdater.shared
 
     // Web (Claude Code Web) session teleport
     @State private var showWebSessions = false
@@ -1455,13 +1455,8 @@ struct LauncherView: View {
 
         case .done(let version):
             updateBannerCard(icon: "checkmark.circle.fill", iconColor: .green, tint: .green) {
-                Text("Extension v\(version) installed. Restart Canopy to apply.")
+                Text("Extension v\(version) installed. New sessions use it.")
                     .font(.system(size: 12))
-                Button("Restart Now") {
-                    AppDelegate.relaunch()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
 
         case .failed(let message):
@@ -1470,7 +1465,7 @@ struct LauncherView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                 Button("Retry") {
-                    Task { await updater.checkForUpdate() }
+                    Task { await updater.retry() }
                 }
                 .controlSize(.small)
             }

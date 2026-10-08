@@ -19,6 +19,14 @@ final class ExtensionUpdater {
 
     static let changelogURL = URL(string: "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md")!
 
+    /// One per process: every launcher pane checks on appear, and an update now installs
+    /// without a click, so per-pane instances would race two installs into one folder.
+    static let shared = ExtensionUpdater()
+
+    /// A version whose install failed in this process. Not installed again without a click,
+    /// so a version that fails its start check is not re-downloaded on every launcher mount.
+    private var failedVersion: String?
+
     private(set) var state: State = .idle
 
     /// How far the VSIX download has got. Non-nil only while `state` is
@@ -56,6 +64,9 @@ final class ExtensionUpdater {
             state = .upToDate
         } else {
             state = .updateAvailable(latestVersion: latestVer, currentVersion: extVer)
+            // New sessions pick the newest installed version at spawn, so installing is all
+            // an update takes; running sessions keep theirs until they restart.
+            if latestVer != failedVersion { await installUpdate(version: latestVer) }
         }
     }
 
@@ -106,6 +117,12 @@ final class ExtensionUpdater {
         }
     }
 
+    /// The failed banner's Retry: a click is consent to try the failed version again.
+    func retry() async {
+        failedVersion = nil
+        await checkForUpdate()
+    }
+
     func triggerInstall() async {
         guard case .updateAvailable(let version, _) = state else { return }
         await installUpdate(version: version)
@@ -119,7 +136,11 @@ final class ExtensionUpdater {
             try await installVSIX(at: vsixURL, version: version)
             await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }.value
             state = .done(version: version)
+            // The install needs no click now, so the launcher banner may never be on screen.
+            SessionNotifier.post(title: "Claude Code extension updated",
+                                 body: "v\(version) is installed. New sessions use it.")
         } catch {
+            failedVersion = version
             state = .failed(message: error.localizedDescription)
             logger.error("Extension update failed: \(error.localizedDescription, privacy: .public)")
         }
