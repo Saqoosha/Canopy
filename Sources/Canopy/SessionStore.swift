@@ -1194,8 +1194,7 @@ final class SessionStore {
             claudeAccount: options.account ?? accountChoice.account,
             resumeIdIsExistingTranscript: isExistingTranscript
         )
-        // Sent by the launch_claude intercept, i.e. once the first client's
-        // webview attaches — a headless session has no webview of its own.
+        // Sent by the launch_claude intercept: a control open launches its own headless channel; an attach's open waits for the attaching webview.
         if options.initialPrompt != nil || !options.promptImages.isEmpty {
             session.pendingInitialPrompt = LaunchPrompt.make(text: options.initialPrompt ?? "", images: options.promptImages)
         }

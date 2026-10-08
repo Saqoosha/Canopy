@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Send one request to a local Canopy daemon control socket.
+
+See docs/CONTROL_PROTOCOL.md. Stdlib only.
+"""
+
+import argparse
+import json
+import os
+import socket
+import sys
+import uuid
+from pathlib import Path
+
+DEFAULT_SOCK = (
+    Path.home()
+    / "Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.sock"
+)
+# wait_turn polls for 60s; the read has to outlast that.
+READ_TIMEOUT = 90.0
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--socket",
+        default=os.environ.get("CANOPY_CONTROL_SOCK", str(DEFAULT_SOCK)),
+        help="control socket path (or CANOPY_CONTROL_SOCK)",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="list_sessions")
+
+    open_p = sub.add_parser("open", help="open_session")
+    open_p.add_argument("--cwd", required=True)
+    open_p.add_argument("--model")
+    open_p.add_argument("--effort")
+    open_p.add_argument("--permission-mode", dest="permission_mode")
+    open_p.add_argument("--worktree-branch", dest="worktree_branch")
+    open_p.add_argument("--initial-prompt", dest="initial_prompt")
+
+    send_p = sub.add_parser("send", help="send_message")
+    add_session_flags(send_p, require=True)
+    send_p.add_argument("--text", required=True)
+
+    for name, help_text in (
+        ("status", "session_status"),
+        ("reply", "latest_reply"),
+        ("wait", "wait_turn"),
+        ("stop", "stop_session"),
+    ):
+        sub_p = sub.add_parser(name, help=help_text)
+        add_session_flags(sub_p, require=True)
+        if name != "stop":
+            sub_p.add_argument("--reply-id", dest="reply_id")
+
+    args = parser.parse_args(argv)
+    verb, params = build(args)
+    try:
+        result = transact(args.socket, verb, params)
+    except OSError as exc:
+        print(f"canopyctl: {exc}", file=sys.stderr)
+        return 1
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    body = result["result"] if isinstance(result.get("result"), dict) else result
+    if "error" in result or body.get("ok") is False:
+        return 1
+    if args.cmd == "wait" and body.get("turnDone") is not True:
+        return 1
+    return 0
+
+
+def add_session_flags(parser, require):
+    parser.add_argument("--key")
+    parser.add_argument("--session-id", dest="session_id")
+    parser.set_defaults(_require_session=require)
+
+
+def build(args):
+    if args.cmd == "list":
+        return "list_sessions", {}
+    if args.cmd == "open":
+        params = {"cwd": args.cwd}
+        optional = {
+            "model": args.model,
+            "effort": args.effort,
+            "permissionMode": args.permission_mode,
+            "worktreeBranch": args.worktree_branch,
+            "initialPrompt": args.initial_prompt,
+        }
+        for key, value in optional.items():
+            if value:
+                params[key] = value
+        return "open_session", params
+    params = session_params(args)
+    if args.cmd == "send":
+        params["text"] = args.text
+        return "send_message", params
+    if args.cmd == "stop":
+        return "stop_session", params
+    verbs = {"status": "session_status", "reply": "latest_reply", "wait": "wait_turn"}
+    if args.reply_id:
+        params["replyId"] = args.reply_id
+    return verbs[args.cmd], params
+
+
+def session_params(args):
+    params = {}
+    if args.key:
+        params["key"] = args.key
+    if args.session_id:
+        params["sessionId"] = args.session_id
+    if getattr(args, "_require_session", False) and not params:
+        raise SystemExit("canopyctl: pass --key and/or --session-id")
+    return params
+
+
+def transact(path, verb, params):
+    request_id = uuid.uuid4().hex
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(READ_TIMEOUT)
+    sock.connect(path)
+    lines = LineBuffer(sock)
+    try:
+        send_line(sock, {"type": "hello", "protocolVersion": 1})
+        hello = read_typed(lines, {"hello_ok", "hello_error"})
+        if hello.get("type") == "hello_error":
+            message = hello.get("message") or "daemon refused hello"
+            raise OSError(message)
+        send_line(
+            sock,
+            {"type": "request", "id": request_id, "verb": verb, "params": params},
+        )
+        while True:
+            line = lines.read_line()
+            if line.get("type") == "response" and line.get("id") == request_id:
+                return line
+    finally:
+        sock.close()
+
+
+def read_typed(lines, types):
+    while True:
+        line = lines.read_line()
+        if line.get("type") in types:
+            return line
+
+
+class LineBuffer:
+    """Keeps bytes past a newline: one recv can end mid-line or span lines."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b""
+
+    def read_line(self):
+        while b"\n" not in self.buf:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise OSError("daemon closed the socket")
+            self.buf += chunk
+        raw, _, rest = self.buf.partition(b"\n")
+        self.buf = rest
+        return json.loads(raw.decode("utf-8"))
+
+
+def send_line(sock, obj):
+    sock.sendall((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

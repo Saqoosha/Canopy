@@ -236,6 +236,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// mirror's init, and the CLI is gone before its `launch_claude` even
     /// arrives).
     private var cachedInitResponse: [String: Any]?
+    /// Mirror inits that arrived while `launchHeadlessChannel`'s own init was unanswered; answered from the cache when it lands.
+    private var initsAwaitingHeadlessResponse: [(requestId: String, mirror: ObjectIdentifier)] = []
+    private var headlessInitInFlight = false
 
     // MARK: - Frame cursor (#320)
 
@@ -1723,6 +1726,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Remembered BEFORE the injection goes out: the echo can arrive on
         // the very next frame, and a pair recorded afterwards would miss it.
         pendingPhoneReply = replyId.map { (id: $0, text: trimmed) }
+        if let replyId, controlReplyIds.contains(replyId) {
+            controlTurnReplyId = replyId
+            controlReplyIds.remove(replyId)
+        }
         // The same envelope `requestKeepAlive` sends, with the phone's text.
         // `origin: ["kind": "human"]` is correct and load-bearing here: a
         // reply IS a human's input, arriving by a different route, and the
@@ -1755,6 +1762,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.phoneReplyInFlight, self.phoneReplyGeneration == generation else { return }
             self.endPhoneReplyFlight()
+            // Injection never reached the CLI, so nothing will clear this.
+            self.controlTurnReplyId = nil
             // Error, not notice: a latched reply refuses every later reply
             // from this shim silently — the phone gets no indication why.
             logger.error("roster reply \(self.keepAliveLogLabel, privacy: .public): no CLI activity after \(Self.phoneReplyTimeoutSeconds)s — unlatched")
@@ -1770,6 +1779,67 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `stampUser`. Overwritten by the next reply; cleared once matched, so a
     /// later identical prompt typed on the Mac is not mistaken for it.
     private var pendingPhoneReply: (id: String, text: String)?
+    /// Reply ids `send_message` registered before `submitPhoneReply`. The
+    /// drain calls `requestPhoneReply` directly, so the stamp has to live
+    /// there rather than only on the immediate `.injected` return.
+    private var controlReplyIds: Set<String> = []
+    /// The control reply whose turn is in flight. `pendingPhoneReply` is
+    /// cleared when the echo matches, long before the turn ends.
+    private var controlTurnReplyId: String?
+
+    func noteControlReply(_ id: String) { controlReplyIds.insert(id) }
+    func forgetControlReply(_ id: String) { controlReplyIds.remove(id) }
+
+    /// What `session_status` / `latest_reply` / `wait_turn` read. `state` is
+    /// `asking` while a question is up, else `working` while a turn is in
+    /// flight, else `idle`. `turnDone` is the control turn whose `result`
+    /// already landed; an in-flight id reports `turnDone: false` and no text,
+    /// so a previous answer is not mistaken for this one.
+    nonisolated struct ControlTurnSnapshot: Equatable, Sendable {
+        var state: String
+        var replyId: String?
+        var text: String?
+        var turnDone: Bool
+    }
+
+    private var latestReplyText: String?
+    private var controlFinishedReplyId: String?
+    private var controlFinishedTexts: [String: String] = [:]
+    private var controlFinishedOrder: [String] = []
+
+    /// Which control turn a status query reports. Nil: `replyId` names no turn this shim knows (never sent, dropped, or forgotten).
+    nonisolated static func controlTurnSnapshot(state: String, replyId: String?, inFlight: String?, queued: Set<String>,
+                                                finishedId: String?, finished: [String: String], latestText: String?) -> ControlTurnSnapshot? {
+        if let replyId {
+            if replyId == inFlight {
+                return ControlTurnSnapshot(state: state, replyId: replyId, text: nil, turnDone: false)
+            }
+            if queued.contains(replyId) {
+                return ControlTurnSnapshot(state: state, replyId: replyId, text: nil, turnDone: false)
+            }
+            if let text = finished[replyId] {
+                return ControlTurnSnapshot(state: state, replyId: replyId, text: text, turnDone: true)
+            }
+            return nil
+        }
+        if let inFlight {
+            return ControlTurnSnapshot(state: state, replyId: inFlight, text: nil, turnDone: false)
+        }
+        if !queued.isEmpty {
+            return ControlTurnSnapshot(state: state, replyId: nil, text: nil, turnDone: false)
+        }
+        if let finishedId, let text = finished[finishedId] {
+            return ControlTurnSnapshot(state: state, replyId: finishedId, text: text, turnDone: true)
+        }
+        return ControlTurnSnapshot(state: state, replyId: nil, text: latestText, turnDone: false)
+    }
+
+    func controlTurnSnapshot(replyId: String?) -> ControlTurnSnapshot? {
+        let state = lastAssistantHadAskUserQuestion ? "asking" : (isWorking ? "working" : "idle")
+        return Self.controlTurnSnapshot(state: state, replyId: replyId, inFlight: controlTurnReplyId,
+                                        queued: controlReplyIds, finishedId: controlFinishedReplyId,
+                                        finished: controlFinishedTexts, latestText: latestReplyText)
+    }
 
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog behind.
@@ -1885,6 +1955,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // re-queuing a prompt the injector keeps rejecting spins this
                 // tick forever, and the log line is what makes the loss
                 // findable. Error, not notice: the phone was told `ok`.
+                if let replyId = next.replyId { controlReplyIds.remove(replyId) }
                 logger.error("roster reply \(self.keepAliveLogLabel, privacy: .public): queued prompt refused at injection — dropped")
             }
         }
@@ -1929,6 +2000,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Retires any tick already dequeued, which `cancel()` cannot reach.
         phoneReplyQueueGeneration &+= 1
         let dropped = queuedPhoneReplies.removeAll()
+        controlReplyIds.removeAll()
         guard dropped > 0 else { return }
         logger.error("roster reply \(self.keepAliveLogLabel, privacy: .public): dropped \(dropped, privacy: .public) queued prompt(s) — the shim is gone")
     }
@@ -3625,6 +3697,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         handleWebviewMessage(dict, sender: sink, isPrimary: false)
     }
 
+    private func answerInitFromCache(_ response: [String: Any], requestId: String, to sink: any MirrorSink) {
+        var cached = response
+        if var state = cached["state"] as? [String: Any] {
+            state["sweptStaleChannels"] = false
+            cached["state"] = state
+        }
+        logger.notice("[mirror] init answered from cache for \(requestId, privacy: .public)")
+        post(["type": "from-extension",
+              "message": ["type": "response", "requestId": requestId, "response": cached] as [String: Any]],
+             to: sink)
+    }
+
+    /// A pane-less session has no webview to send `init` and `launch_claude`; this sends both. No-op when any client holds or opened a channel.
+    @discardableResult
+    func launchHeadlessChannel() -> Bool {
+        guard isLive, channelId == nil, !liveChannelOpen, webView == nil, mirrors.isEmpty else { return false }
+        headlessInitInFlight = cachedInitResponse == nil
+        // `init` first: its response becomes `cachedInitResponse`, which a client attaching later is answered from.
+        handleWebviewMessage(
+            ["type": "request", "requestId": "canopy-headless-init-\(UUID().uuidString.lowercased())",
+             "request": ["type": "init"] as [String: Any]],
+            sender: nil, isPrimary: true)
+        var launch: [String: Any] = ["type": "launch_claude", "channelId": "canopy-headless"]
+        if remoteHost == nil { launch["cwd"] = workingDirectory.path }
+        if resumeIdIsExistingTranscript, let resumeSessionId { launch["resume"] = resumeSessionId }
+        handleWebviewMessage(launch, sender: nil, isPrimary: true)
+        return true
+    }
+
     /// The attached Mac that shows a UI request, when this shim has no webview of its own (the daemon).
     /// With `fallback` false, only the client that sent `requestId`.
     private func uiClient(for requestId: String?, fallback: Bool = true) -> (any MirrorSink)? {
@@ -3687,15 +3788,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            (dict["request"] as? [String: Any])?["type"] as? String == "init",
            let requestId = dict["requestId"] as? String
         {
-            if var cached = cachedInitResponse {
-                if var state = cached["state"] as? [String: Any] {
-                    state["sweptStaleChannels"] = false
-                    cached["state"] = state
-                }
-                logger.notice("[mirror] init answered from cache for \(requestId, privacy: .public)")
-                post(["type": "from-extension",
-                      "message": ["type": "response", "requestId": requestId, "response": cached] as [String: Any]],
-                     to: sender)
+            if let cached = cachedInitResponse {
+                answerInitFromCache(cached, requestId: requestId, to: sender)
+                return
+            }
+            if headlessInitInFlight {
+                initsAwaitingHeadlessResponse.append((requestId: requestId, mirror: mirrorKey))
+                logger.notice("[mirror] init parked until the headless init_response lands")
                 return
             }
             // A session started for a mirror (`SessionStore.startHeadlessSession`)
@@ -4434,6 +4533,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             {
                 cachedInitResponse = resp
                 logger.notice("[mirror] init_response cached")
+                headlessInitInFlight = false
+                let parked = initsAwaitingHeadlessResponse
+                initsAwaitingHeadlessResponse.removeAll()
+                for entry in parked {
+                    if let sink = mirrors[entry.mirror]?.sink { answerInitFromCache(resp, requestId: entry.requestId, to: sink) }
+                }
             }
             if frame["type"] as? String == "close_channel",
                let closed = frame["channelId"] as? String, closed == channelId
@@ -6488,6 +6593,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // longer has anything for it to unlatch.
         endPhoneReplyFlight()
         discardQueuedPhoneReplies()
+        controlTurnReplyId = nil
         // The id of an event streamed by the shim that just died. The
         // reconnected session's first completion would otherwise carry it,
         // and the phone would drop that push against an event from before
@@ -7862,9 +7968,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case "user":
             processUserToolResults(ioMsg)
         case "result":
+            // Capture before the `isWorking` gate: an immediate API error can
+            // land `result` while `isWorking` is still false, and the control
+            // turn must finish then too.
+            let finalText = ioMsg["result"] as? String
+            latestReplyText = finalText ?? ""
+            if let replyId = controlTurnReplyId {
+                controlFinishedReplyId = replyId
+                controlFinishedTexts[replyId] = finalText ?? ""
+                controlFinishedOrder.append(replyId)
+                while controlFinishedOrder.count > 32 {
+                    let old = controlFinishedOrder.removeFirst()
+                    controlFinishedTexts.removeValue(forKey: old)
+                }
+                controlTurnReplyId = nil
+            }
             if isWorking {
                 isWorking = false
-                postTaskCompletedNotification(finalText: ioMsg["result"] as? String)
+                postTaskCompletedNotification(finalText: finalText)
             }
             // Backstop: the turn has finished either way, so nothing should
             // still be treating a reply as in flight. The ordinary path

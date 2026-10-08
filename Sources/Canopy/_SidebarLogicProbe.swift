@@ -1916,6 +1916,82 @@ enum SidebarLogicProbe {
                 record("control open: an unknown permission mode is refused, not defaulted",
                        ControlProtocol.parseOpenParams(["cwd": controlDir.path, "permissionMode": "yolo"], allowBypass: false)
                            == .failure(ControlProtocol.ControlError("unknown permission mode")))
+                record("control send: text is trimmed",
+                       ControlProtocol.parseSendMessage(["text": "  hello  "])
+                           == .success(ControlProtocol.SendMessage(text: "hello")))
+                record("control send: blank text is refused",
+                       ControlProtocol.parseSendMessage(["text": "  "])
+                           == .failure(ControlProtocol.ControlError("The message was empty")))
+                record("control send: missing text is refused",
+                       ControlProtocol.parseSendMessage([:])
+                           == .failure(ControlProtocol.ControlError("The message was empty")))
+                record("control send: a non-empty attachments array is refused",
+                       ControlProtocol.parseSendMessage(["text": "hi", "attachments": [["path": "a.png"]]])
+                           == .failure(ControlProtocol.ControlError("attachments are not supported")))
+                record("control send: an empty attachments array is fine",
+                       ControlProtocol.parseSendMessage(["text": "hi", "attachments": [] as [Any]])
+                           == .success(ControlProtocol.SendMessage(text: "hi")))
+                let injected = ControlProtocol.replyWire(disposition: "injected", reason: nil, replyId: "r1")
+                record("control send: injected is ok and carries the reply id",
+                       injected["ok"] as? Bool == true && injected["disposition"] as? String == "injected"
+                           && injected["replyId"] as? String == "r1" && injected["reason"] == nil)
+                let refused = ControlProtocol.replyWire(disposition: "refused", reason: "not running", replyId: "r2")
+                record("control send: refused is not ok and names the reason",
+                       refused["ok"] as? Bool == false && refused["disposition"] as? String == "refused"
+                           && refused["reason"] as? String == "not running")
+                let queued = ControlProtocol.replyWire(disposition: "queued", reason: "session busy", replyId: "r3")
+                record("control send: queued is ok",
+                       queued["ok"] as? Bool == true && queued["disposition"] as? String == "queued"
+                           && queued["reason"] as? String == "session busy")
+                record("control query: a missing reply id is the current turn",
+                       ControlProtocol.parseSessionQuery([:]) == ControlProtocol.SessionQuery(replyId: nil))
+                record("control query: a blank reply id is the current turn",
+                       ControlProtocol.parseSessionQuery(["replyId": "  "]) == ControlProtocol.SessionQuery(replyId: nil))
+                record("control query: a reply id is trimmed",
+                       ControlProtocol.parseSessionQuery(["replyId": "  abc  "]) == ControlProtocol.SessionQuery(replyId: "abc"))
+                let status = ControlProtocol.statusWire(state: "idle", replyId: "r1", text: "hi", turnDone: true)
+                record("control status: wire carries state, reply id, text, and turnDone",
+                       status["ok"] as? Bool == true && status["state"] as? String == "idle"
+                           && status["replyId"] as? String == "r1" && status["text"] as? String == "hi"
+                           && status["turnDone"] as? Bool == true)
+                let bare = ControlProtocol.statusWire(state: "working", replyId: nil, text: nil, turnDone: false)
+                record("control status: no control turn omits reply id and text",
+                       bare["state"] as? String == "working" && bare["turnDone"] as? Bool == false
+                           && bare["replyId"] == nil && bare["text"] == nil)
+                // Pure control-turn snapshot rules (probe-reachable without a shim).
+                func snap(_ replyId: String?, inFlight: String?, queued: Set<String>,
+                          finishedId: String?, finished: [String: String], latestText: String?) -> ShimProcess.ControlTurnSnapshot? {
+                    ShimProcess.controlTurnSnapshot(state: "idle", replyId: replyId, inFlight: inFlight, queued: queued,
+                                                    finishedId: finishedId, finished: finished, latestText: latestText)
+                }
+                record("control turn: replyId matching in-flight is not done",
+                       snap("a", inFlight: "a", queued: [], finishedId: "old", finished: ["old": "done"], latestText: nil)
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "a", text: nil, turnDone: false))
+                record("control turn: in-flight beats finished when replyId is nil",
+                       snap(nil, inFlight: "a", queued: [], finishedId: "old", finished: ["old": "done"], latestText: "x")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "a", text: nil, turnDone: false))
+                record("control turn: queued reply id with a prior finished turn stays not done",
+                       snap("q", inFlight: nil, queued: ["q"], finishedId: "old", finished: ["old": "done"], latestText: nil)
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "q", text: nil, turnDone: false))
+                record("control turn: replyId nil over a non-empty queue is not done",
+                       snap(nil, inFlight: nil, queued: ["q"], finishedId: "old", finished: ["old": "done"], latestText: "x")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: nil, text: nil, turnDone: false))
+                record("control turn: finished id asked by name is done with its text",
+                       snap("fin", inFlight: nil, queued: [], finishedId: "fin", finished: ["fin": "hello"], latestText: "x")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "fin", text: "hello", turnDone: true))
+                record("control turn: a finished id asked by a different id is unknown",
+                       snap("other", inFlight: nil, queued: [], finishedId: "fin", finished: ["fin": "hello"], latestText: nil) == nil)
+                record("control turn: an unknown id is nil",
+                       snap("nope", inFlight: nil, queued: [], finishedId: nil, finished: [:], latestText: "x") == nil)
+                record("control turn: replyId nil with only a finished turn is done",
+                       snap(nil, inFlight: nil, queued: [], finishedId: "fin", finished: ["fin": "hello"], latestText: "x")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "fin", text: "hello", turnDone: true))
+                record("control turn: replyId nil with nothing control-owned yields latestText",
+                       snap(nil, inFlight: nil, queued: [], finishedId: nil, finished: [:], latestText: "latest")
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: nil, text: "latest", turnDone: false))
+                record("control turn: an earlier finished id is still done after a later one",
+                       snap("r1", inFlight: nil, queued: [], finishedId: "r2", finished: ["r1": "one", "r2": "two"], latestText: nil)
+                           == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "r1", text: "one", turnDone: true))
             }
             // Canopy Server reaper.
             do {

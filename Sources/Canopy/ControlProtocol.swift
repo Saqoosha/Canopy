@@ -6,7 +6,8 @@ import Foundation
 /// A control connection is a `MirrorServer` connection whose first line is
 /// `hello`. After `hello_ok`, the client sends `request` lines and gets one
 /// `response` per id; after `subscribe` the server also pushes
-/// `session_state` lines. See docs/superpowers/specs/2026-09-29-canopy-server-design.md.
+/// `session_state` lines. `send_message` delivers a user turn through the
+/// same queue the phone uses. See docs/superpowers/specs/2026-09-29-canopy-server-design.md.
 enum ControlProtocol {
     static let version = 1
     static let helloType = "hello"
@@ -240,5 +241,54 @@ enum ControlProtocol {
                       permissionMode: wire["permissionMode"] as? String ?? "",
                       accountId: wire["accountId"] as? String)
         }
+    }
+
+    struct SendMessage: Equatable {
+        var text: String
+    }
+
+    /// `send_message`: `text` is required (trimmed; blank is refused). A
+    /// non-empty `attachments` array is refused — image upload is not this
+    /// verb. An absent or empty array is fine.
+    static func parseSendMessage(_ params: [String: Any]) -> Result<SendMessage, ControlError> {
+        let text = (params["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return .failure(ControlError("The message was empty")) }
+        if let attachments = params["attachments"] as? [Any], !attachments.isEmpty {
+            return .failure(ControlError("attachments are not supported"))
+        }
+        return .success(SendMessage(text: text))
+    }
+
+    /// Disposition strings match `PhoneReplyDisposition`: injected / queued / refused.
+    static func replyWire(disposition: String, reason: String?, replyId: String) -> [String: Any] {
+        var wire: [String: Any] = [
+            "ok": disposition != "refused",
+            "disposition": disposition,
+            "replyId": replyId,
+        ]
+        if let reason, !reason.isEmpty { wire["reason"] = reason }
+        return wire
+    }
+
+    /// `session_status` / `latest_reply` / `wait_turn` share one optional
+    /// `replyId`. Absent or blank means "the control turn in flight, or the
+    /// last one that finished".
+    struct SessionQuery: Equatable {
+        var replyId: String?
+    }
+
+    static func parseSessionQuery(_ params: [String: Any]) -> SessionQuery {
+        let raw = (params["replyId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replyId = (raw?.isEmpty == false) ? raw : nil
+        return SessionQuery(replyId: replyId)
+    }
+
+    /// `state` is `idle` / `working` / `asking`. `turnDone` is true only after
+    /// the control turn's `result` has been captured.
+    static func statusWire(state: String, replyId: String?, text: String?, turnDone: Bool) -> [String: Any] {
+        var wire: [String: Any] = ["ok": true, "state": state, "turnDone": turnDone]
+        if let replyId, !replyId.isEmpty { wire["replyId"] = replyId }
+        if let text { wire["text"] = text }
+        return wire
     }
 }

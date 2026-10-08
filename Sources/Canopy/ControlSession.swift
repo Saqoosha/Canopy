@@ -71,11 +71,92 @@ final class ControlSession {
             if let refusal = restart() { return fail(request, refusal) }
             reply(request, ["ok": true])
         case "mirror_status": reply(request, ["status": MirrorServerStatus.shared.state.wire])
+        case "send_message": sendMessage(request)
+        case "session_status": sessionStatus(request)
+        case "latest_reply": latestReply(request)
+        case "wait_turn": waitTurn(request)
         default: fail(request, "unknown verb")
         }
     }
 
     // MARK: - Verbs
+
+    private func sendMessage(_ request: ControlProtocol.Request) {
+        switch ControlProtocol.parseSendMessage(request.params) {
+        case .failure(let error):
+            fail(request, error.message)
+        case .success(let message):
+            guard let session = requestedSession(request) else { return }
+            let replyId = UUID().uuidString.lowercased()
+            guard let shim = session.shim else {
+                reply(request, ControlProtocol.replyWire(disposition: "refused", reason: "not running", replyId: replyId))
+                return
+            }
+            // No-op when a client already holds a channel; opens one when the session has none.
+            shim.launchHeadlessChannel()
+            shim.noteControlReply(replyId)
+            switch shim.submitPhoneReply(text: message.text, replyId: replyId) {
+            case .injected:
+                reply(request, ControlProtocol.replyWire(disposition: "injected", reason: nil, replyId: replyId))
+            case .queued(let reason):
+                reply(request, ControlProtocol.replyWire(disposition: "queued", reason: reason, replyId: replyId))
+            case .refused(let reason):
+                shim.forgetControlReply(replyId)
+                reply(request, ControlProtocol.replyWire(disposition: "refused", reason: reason, replyId: replyId))
+            }
+        }
+    }
+
+    private func sessionStatus(_ request: ControlProtocol.Request) {
+        replyTurn(request, includeText: false)
+    }
+
+    private func latestReply(_ request: ControlProtocol.Request) {
+        replyTurn(request, includeText: true)
+    }
+
+    private func replyTurn(_ request: ControlProtocol.Request, includeText: Bool) {
+        let query = ControlProtocol.parseSessionQuery(request.params)
+        guard let session = requestedSession(request) else { return }
+        guard let shim = session.shim else { fail(request, "not running"); return }
+        guard let snap = shim.controlTurnSnapshot(replyId: query.replyId) else {
+            fail(request, "unknown reply id")
+            return
+        }
+        reply(request, ControlProtocol.statusWire(
+            state: snap.state, replyId: snap.replyId,
+            text: includeText ? snap.text : nil, turnDone: snap.turnDone))
+    }
+
+    /// `wait_turn` must not block `handle()` — the socket read loop is stuck
+    /// until it returns. A later `reply` from the main queue is the shape the
+    /// connection already uses. The poll is bounded (0.5 s × 120) so a turn
+    /// that never finishes still answers.
+    private func waitTurn(_ request: ControlProtocol.Request) {
+        let query = ControlProtocol.parseSessionQuery(request.params)
+        guard let session = requestedSession(request) else { return }
+        guard session.shim != nil else { fail(request, "not running"); return }
+        pollTurn(request, session: session, replyId: query.replyId, remaining: 120)
+    }
+
+    private func pollTurn(_ request: ControlProtocol.Request, session: OpenSession, replyId: String?, remaining: Int) {
+        guard let shim = session.shim else { fail(request, "not running"); return }
+        guard let snap = shim.controlTurnSnapshot(replyId: replyId) else {
+            fail(request, "unknown reply id")
+            return
+        }
+        let matched = snap.turnDone
+        if matched || remaining <= 0 {
+            reply(request, ControlProtocol.statusWire(
+                state: snap.state, replyId: snap.replyId, text: snap.text, turnDone: snap.turnDone))
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.pollTurn(request, session: session, replyId: replyId, remaining: remaining - 1)
+            }
+        }
+    }
 
     private func listSessions(_ request: ControlProtocol.Request) {
         let limit = ControlProtocol.limit(request.params, default: 50)
@@ -179,6 +260,11 @@ final class ControlSession {
               let session = shim.boundSession else {
             fail(request, MirrorOpenRequest.startFailed)
             return
+        }
+        // The prompt is stored on the session; nothing sends it until a
+        // `launch_claude` assigns a channel. A control open has no webview.
+        if session.pendingInitialPrompt != nil {
+            shim.launchHeadlessChannel()
         }
         reply(request, ["sessionId": sessionId, "key": session.id.uuidString, "cwd": directory.path])
     }
