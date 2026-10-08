@@ -2,6 +2,15 @@ import SwiftUI
 import os
 
 struct SettingsView: View {
+    /// The saved size doubles as the ideal size, so SwiftUI's own sizing to the
+    /// ideal cannot undo the size `ResizableWindowEnabler` restores.
+    @AppStorage(ResizableWindowEnabler.sizeKey) private var savedSize = ""
+
+    private var idealSize: NSSize {
+        let size = NSSizeFromString(savedSize)
+        return size.width > 0 && size.height > 0 ? size : NSSize(width: 532, height: 670)
+    }
+
     var body: some View {
         TabView {
             GeneralSettingsTab()
@@ -32,8 +41,8 @@ struct SettingsView: View {
         }
         // Resizable: the grouped Forms scroll, so any height above the
         // minimum works, and the relay URL and footers want the width.
-        .frame(minWidth: 460, idealWidth: 460, maxWidth: .infinity,
-               minHeight: 320, idealHeight: 616, maxHeight: .infinity)
+        .frame(minWidth: 460, idealWidth: idealSize.width, maxWidth: .infinity,
+               minHeight: 320, idealHeight: idealSize.height, maxHeight: .infinity)
         .background(ResizableWindowEnabler())
     }
 }
@@ -47,13 +56,17 @@ struct SettingsView: View {
 /// sizes the window to the content's ideal size, so only the position survived.
 /// The size is saved at the end of a user's live resize only — SwiftUI's own
 /// programmatic resizes also fire `didResize` and would overwrite it with the
-/// ideal size — and re-applied one runloop turn after attach, past SwiftUI's sizing.
+/// ideal size — and re-applied at attach, while the window is still hidden.
+/// Applying it only one runloop turn later showed SwiftUI's provisional
+/// 900×450 frame on screen for ~40 ms on every first open after launch.
 private struct ResizableWindowEnabler: NSViewRepresentable {
+    static let sizeKey = "canopy.settingsWindowSize"
+
     func makeNSView(context: Context) -> NSView { Host() }
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     private final class Host: NSView {
-        private static let sizeKey = "canopy.settingsWindowSize"
+        private static let sizeKey = ResizableWindowEnabler.sizeKey
         private var resizeObserver: NSObjectProtocol?
 
         override func viewDidMoveToWindow() {
@@ -77,21 +90,28 @@ private struct ResizableWindowEnabler: NSViewRepresentable {
             guard let saved = UserDefaults.standard.string(forKey: Self.sizeKey) else { return }
             let size = NSSizeFromString(saved)
             guard size.width > 0, size.height > 0 else { return }
+            Self.apply(size, to: window)
+            // Again one turn later, in case SwiftUI's own sizing lands after attach.
             DispatchQueue.main.async { [weak window] in
                 guard let window else { return }
-                var frame = window.frame
-                // Keep the top-left corner where AppKit's autosave put it.
-                frame.origin.y += frame.height - size.height
-                frame.size = size
-                // A size saved on a larger display must still fit this one.
-                if let visible = window.screen?.visibleFrame {
-                    frame.size.width = min(frame.width, visible.width)
-                    frame.size.height = min(frame.height, visible.height)
-                    frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
-                    frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
-                }
-                window.setFrame(frame, display: true)
+                Self.apply(size, to: window)
             }
+        }
+
+        private static func apply(_ size: NSSize, to window: NSWindow) {
+            var frame = window.frame
+            // Keep the top-left corner where AppKit's autosave put it.
+            frame.origin.y += frame.height - size.height
+            frame.size = size
+            // A size saved on a larger display must still fit this one.
+            if let visible = window.screen?.visibleFrame {
+                frame.size.width = min(frame.width, visible.width)
+                frame.size.height = min(frame.height, visible.height)
+                frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+                frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+            }
+            guard frame != window.frame else { return }
+            window.setFrame(frame, display: true)
         }
     }
 }
