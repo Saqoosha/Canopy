@@ -90,7 +90,7 @@ final class ControlSession {
             guard let session = requestedSession(request) else { return }
             let replyId = UUID().uuidString.lowercased()
             guard let shim = session.shim else {
-                reply(request, ControlProtocol.replyWire(.refused("not running", code: .dead), replyId: replyId))
+                reply(request, ControlProtocol.replyWire(Self.notRunningRefusal, replyId: replyId))
                 return
             }
             // No-op when a client already holds a channel; opens one when the session has none.
@@ -136,10 +136,14 @@ final class ControlSession {
         pollTurn(request, session: session, replyId: query.replyId, remaining: 120)
     }
 
+    private static var notRunningRefusal: ShimProcess.PhoneReplyDisposition {
+        let dead = ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: false, awaitingAnswer: false)!
+        return .refused(dead.reason, code: dead.code)
+    }
+
     private func pendingRequests(_ request: ControlProtocol.Request) {
         guard let session = requestedSession(request) else { return }
-        guard let shim = session.shim else { fail(request, "not running"); return }
-        reply(request, ["requests": shim.pendingRequestsWire()])
+        reply(request, ["requests": session.shim?.pendingRequestsWire() ?? []])
     }
 
     private func pollTurn(_ request: ControlProtocol.Request, session: OpenSession, replyId: String?, remaining: Int) {
@@ -270,7 +274,6 @@ final class ControlSession {
         if session.pendingInitialPrompt != nil {
             let replyId = UUID().uuidString.lowercased()
             session.pendingInitialPromptReplyId = replyId
-            shim.noteControlReply(replyId)
             result["replyId"] = replyId
             shim.launchHeadlessChannel()
         }

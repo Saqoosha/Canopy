@@ -1280,7 +1280,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         session.pendingInitialPrompt = nil
         if let replyId = session.pendingInitialPromptReplyId {
             session.pendingInitialPromptReplyId = nil
-            controlReplyIds.remove(replyId)
             controlTurnReplyId = replyId
         }
 
@@ -1841,8 +1840,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     func controlTurnSnapshot(replyId: String?) -> ControlTurnSnapshot? {
         let state = lastAssistantHadAskUserQuestion ? "asking" : (isWorking ? "working" : "idle")
+        // The first-turn id lives on the session, so a shim rebuilt before sending it still reports it queued.
+        var queued = controlReplyIds
+        if let firstTurn = boundSession?.pendingInitialPromptReplyId { queued.insert(firstTurn) }
         return Self.controlTurnSnapshot(state: state, replyId: replyId, inFlight: controlTurnReplyId,
-                                        queued: controlReplyIds, finishedId: controlFinishedReplyId,
+                                        queued: queued, finishedId: controlFinishedReplyId,
                                         finished: controlFinishedTexts, latestText: latestReplyText)
     }
 
@@ -6433,6 +6435,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return "```json\n" + text + "\n```"
     }
 
+    static let pendingRequestInputMaxBytes = 4000
+
     /// One outstanding request as `pending_requests` reports it; the same rendering the phone's push uses.
     static func pendingRequestWire(requestId: String, toolName: String, inputs: Any?) -> [String: Any] {
         let isQuestion = toolName == "AskUserQuestion"
@@ -6440,13 +6444,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             "requestId": requestId,
             "toolName": toolName,
             "kind": isQuestion ? "question" : "permission",
-            "input": truncatedNotificationBody(renderedToolInput(inputs), maxBytes: 4000),
+            "input": truncatedNotificationBody(renderedToolInput(inputs), maxBytes: pendingRequestInputMaxBytes),
         ]
         if isQuestion, let choices = askChoices(from: inputs) { wire["choices"] = choices }
         return wire
     }
 
-    /// Outstanding permission and AskUserQuestion requests, oldest id order not guaranteed; sorted by requestId for a stable answer.
+    /// Outstanding permission and AskUserQuestion requests, sorted by requestId only so repeated calls agree; not arrival order.
     func pendingRequestsWire() -> [[String: Any]] {
         pendingPermissionRequestIds.sorted().map { id in
             Self.pendingRequestWire(requestId: id, toolName: pendingPermissionRequestToolNames[id] ?? "",

@@ -2007,8 +2007,8 @@ enum SidebarLogicProbe {
                            && askOptions?.compactMap { $0["label"] as? String } == ["Postgres", "SQLite"])
                 let longWire = ShimProcess.pendingRequestWire(requestId: "p2", toolName: "Bash",
                                                               inputs: ["command": String(repeating: "x", count: 10_000)])
-                record("control pending: a long input is cut to about 4 KB",
-                       ((longWire["input"] as? String)?.utf8.count ?? .max) <= 4_100)
+                record("control pending: a long input is cut to the input budget",
+                       ((longWire["input"] as? String)?.utf8.count ?? .max) <= ShimProcess.pendingRequestInputMaxBytes)
                 record("control turn: an earlier finished id is still done after a later one",
                        snap("r1", inFlight: nil, queued: [], finishedId: "r2", finished: ["r1": "one", "r2": "two"], latestText: nil)
                            == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "r1", text: "one", turnDone: true))

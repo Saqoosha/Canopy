@@ -136,7 +136,7 @@ tell that human; there is no verb to answer them. Params: `key` and/or
 
 `input` is the tool input rendered the way the phone's notification shows it,
 cut to about 4 KB. `choices` appears only on `question`. An empty list means
-nothing is waiting.
+nothing is waiting, which includes a session that is not running.
 
 ### `session_status`, `latest_reply`, `wait_turn`
 
