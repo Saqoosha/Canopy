@@ -63,6 +63,11 @@ final class CanopySettings {
     var seedWorktreeArtifacts: Bool = true {
         didSet { save() }
     }
+
+    /// Hold an idle-sleep assertion while a session is working (`SleepGuard`).
+    var preventSleepWhileWorking: Bool = true {
+        didSet { save() }
+    }
     /// Which pad this Canopy drives: none, the local USB one, or a bridge on
     /// another Mac. Replaces the old `macroPadEnabled` boolean, which is read
     /// once at load for migration and then never written again.
@@ -197,6 +202,7 @@ final class CanopySettings {
         set(\.recapEnabled, dict["canopy.recapEnabled"] as? Bool)
         set(\.keepAliveEnabled, dict["canopy.keepAliveEnabled"] as? Bool)
         set(\.seedWorktreeArtifacts, dict["canopy.seedWorktreeArtifacts"] as? Bool)
+        set(\.preventSleepWhileWorking, dict["canopy.preventSleepWhileWorking"] as? Bool)
         set(\.defaultPermissionMode, (dict["canopy.defaultPermissionMode"] as? String).flatMap(PermissionMode.init(rawValue:)))
         set(\.machineDisplayName, dict["canopy.machineDisplayName"] as? String)
         set(\.rosterEnabled, dict["canopy.rosterEnabled"] as? Bool)
@@ -236,6 +242,9 @@ final class CanopySettings {
         }
         if let seed = dict["canopy.seedWorktreeArtifacts"] as? Bool {
             seedWorktreeArtifacts = seed
+        }
+        if let preventSleep = dict["canopy.preventSleepWhileWorking"] as? Bool {
+            preventSleepWhileWorking = preventSleep
         }
         let storedSourceRaw = dict["canopy.macroPadSource"] as? String
         macroPadRemoteHost = (dict["canopy.macroPadRemoteHost"] as? String) ?? ""
@@ -315,6 +324,7 @@ final class CanopySettings {
         dict["canopy.recapEnabled"] = recapEnabled
         dict["canopy.keepAliveEnabled"] = keepAliveEnabled
         dict["canopy.seedWorktreeArtifacts"] = seedWorktreeArtifacts
+        dict["canopy.preventSleepWhileWorking"] = preventSleepWhileWorking
         dict["canopy.macroPadSource"] = macroPadSource.rawValue
         dict["canopy.macroPadRemoteHost"] = macroPadRemoteHost
         // Retire the pre-source key on the first save after migration.

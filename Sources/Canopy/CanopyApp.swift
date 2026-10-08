@@ -420,6 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private var configuredWindows = NSHashTable<NSWindow>.weakObjects()
     private var delegateProxies: [ObjectIdentifier: WindowDelegateProxy] = [:]
+    private let sleepGuard = SleepGuard { SessionStore.shared?.openSessions ?? [] }
 
     /// Drives the external MacroPad. Created once, on the first window's
     /// `.task`, and kept for the process lifetime — it also owns the
@@ -650,6 +651,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installKeyTypingMonitor()
         RecapCoordinator.shared.start()
         KeepAliveCoordinator.shared.start()
+        // Sessions this process still runs itself (SSH remote, Debug without a daemon).
+        sleepGuard.start()
         GPUProcessReaper.start()
         DaemonRegistration.ensureRegistered()
         // The sidebar's usage bars have no writer until a shim runs, so a
