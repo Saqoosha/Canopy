@@ -109,6 +109,50 @@ enum ControlProtocol {
         return .success(path)
     }
 
+    /// Phone `create_folder`: `{path, name}`. Distinct from `mkdir`'s `{parent, name}`
+    /// so existing clients keep their error strings. Messages are the substrings
+    /// Canopy Mobile's `RemoteFolder.mapFailed` matches.
+    static func createFolder(path: String, name: String) -> Result<String, ControlError> {
+        guard path.hasPrefix("/") else { return .failure(ControlError("path must be absolute")) }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return .failure(ControlError("not a folder"))
+        }
+        let trimmed = RemoteDirectoryRules.trimmedName(name)
+        if let problem = RemoteDirectoryRules.newFolderNameProblem(trimmed) {
+            return .failure(ControlError("invalid name: \(problem)"))
+        }
+        let child = RemoteDirectoryRules.childPath(of: path, name: trimmed)
+        let normalizedParent = RemoteDirectoryRules.normalizedAbsolute(path)
+        let normalizedChild = RemoteDirectoryRules.normalizedAbsolute(child)
+        // Slash and ".." already fail `newFolderNameProblem`, so a fixture cannot
+        // reach this guard. It stays as defense in depth for a name that joins
+        // outside the parent after normalization.
+        let expectedPrefix = normalizedParent == "/" ? "/" : normalizedParent + "/"
+        guard normalizedChild.hasPrefix(expectedPrefix), normalizedChild != normalizedParent else {
+            return .failure(ControlError("invalid name"))
+        }
+        if FileManager.default.fileExists(atPath: child) {
+            return .failure(ControlError("already exists"))
+        }
+        do {
+            try FileManager.default.createDirectory(atPath: child, withIntermediateDirectories: false)
+        } catch let error as NSError {
+            return .failure(ControlError(isWriteDenied(error) ? "permission denied" : "cannot create folder"))
+        }
+        return .success(child)
+    }
+
+    /// FileManager wraps POSIX `EACCES` in `NSCocoaErrorDomain` 513. Walk
+    /// `NSUnderlyingErrorKey` so either spelling maps to the phone's
+    /// "permission denied" substring.
+    private static func isWriteDenied(_ error: NSError) -> Bool {
+        if error.domain == NSCocoaErrorDomain && error.code == NSFileWriteNoPermissionError { return true }
+        if error.domain == NSPOSIXErrorDomain && (error.code == Int(EACCES) || error.code == Int(EPERM)) { return true }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError { return isWriteDenied(underlying) }
+        return false
+    }
+
     struct OpenParams: Equatable {
         let cwd: String
         let model: String?

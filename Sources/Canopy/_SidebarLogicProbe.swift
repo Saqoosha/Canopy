@@ -1854,6 +1854,56 @@ enum SidebarLogicProbe {
                 record("control mkdir: '..' is refused and nothing is created beside the parent",
                        ControlProtocol.mkdir(parent: controlDir.appendingPathComponent("zeta").path, name: "..")
                            == .failure(ControlProtocol.ControlError("That name is reserved.")))
+                record("control create_folder: a relative path is refused",
+                       ControlProtocol.createFolder(path: "relative", name: "x")
+                           == .failure(ControlProtocol.ControlError("path must be absolute")))
+                record("control create_folder: a file parent is not a folder",
+                       ControlProtocol.createFolder(path: controlDir.appendingPathComponent("b.txt").path, name: "x")
+                           == .failure(ControlProtocol.ControlError("not a folder")))
+                record("control create_folder: a missing parent is not a folder",
+                       ControlProtocol.createFolder(path: controlDir.appendingPathComponent("no-such").path, name: "x")
+                           == .failure(ControlProtocol.ControlError("not a folder")))
+                record("control create_folder: an empty name is invalid",
+                       ControlProtocol.createFolder(path: controlDir.path, name: "")
+                           == .failure(ControlProtocol.ControlError("invalid name: Enter a folder name.")))
+                record("control create_folder: a whitespace name is invalid",
+                       ControlProtocol.createFolder(path: controlDir.path, name: "   ")
+                           == .failure(ControlProtocol.ControlError("invalid name: Enter a folder name.")))
+                record("control create_folder: dot is reserved",
+                       ControlProtocol.createFolder(path: controlDir.path, name: ".")
+                           == .failure(ControlProtocol.ControlError("invalid name: That name is reserved.")))
+                record("control create_folder: dotdot is reserved",
+                       ControlProtocol.createFolder(path: controlDir.path, name: "..")
+                           == .failure(ControlProtocol.ControlError("invalid name: That name is reserved.")))
+                record("control create_folder: a slash is invalid and creates nothing",
+                       ControlProtocol.createFolder(path: controlDir.path, name: "a/b")
+                           == .failure(ControlProtocol.ControlError("invalid name: A folder name cannot contain a slash."))
+                           && !FileManager.default.fileExists(atPath: controlDir.appendingPathComponent("a").path))
+                record("control create_folder: a control character is invalid",
+                       ControlProtocol.createFolder(path: controlDir.path, name: "bad\u{0001}name")
+                           == .failure(ControlProtocol.ControlError("invalid name: A folder name cannot contain control characters.")))
+                let created = ControlProtocol.createFolder(path: controlDir.path, name: "  phone one  ")
+                record("control create_folder: a trimmed name is created",
+                       created == .success(controlDir.appendingPathComponent("phone one").path)
+                           && FileManager.default.fileExists(atPath: controlDir.appendingPathComponent("phone one").path))
+                record("control create_folder: an existing folder is already exists",
+                       ControlProtocol.createFolder(path: controlDir.path, name: "zeta")
+                           == .failure(ControlProtocol.ControlError("already exists")))
+                record("control create_folder: no intermediate directories",
+                       ControlProtocol.createFolder(path: controlDir.path, name: "zeta/inner")
+                           == .failure(ControlProtocol.ControlError("invalid name: A folder name cannot contain a slash."))
+                           && !FileManager.default.fileExists(atPath: controlDir.appendingPathComponent("zeta").appendingPathComponent("inner").path))
+                record("control create_folder: a trailing slash on the parent still creates",
+                       ControlProtocol.createFolder(path: controlDir.path + "/", name: "trail")
+                           == .success(controlDir.appendingPathComponent("trail").path))
+                let locked = controlDir.appendingPathComponent("locked")
+                try? FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: locked.path)
+                let denied = ControlProtocol.createFolder(path: locked.path, name: "nope")
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+                record("control create_folder: a mode-0555 parent is permission denied",
+                       denied == .failure(ControlProtocol.ControlError("permission denied"))
+                           && !FileManager.default.fileExists(atPath: locked.appendingPathComponent("nope").path))
                 let openOK = ControlProtocol.parseOpenParams(["cwd": controlDir.path, "model": "opus", "permissionMode": "plan",
                                                               "initialPrompt": "hi", "worktreeBranch": "fix-x"], allowBypass: false)
                 record("control open: all fields parse",
