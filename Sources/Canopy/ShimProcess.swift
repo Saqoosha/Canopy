@@ -178,14 +178,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var remoteMcpAuthRequests: [String: ObjectIdentifier] = [:]
 
     /// The other Mac an `open_url` from the shim should go to, if any.
-    /// Claims the request it answers, so only the first `open_url` per request is redirected.
-    private func takeMcpAuthURLTarget() -> (any MirrorSink)? {
-        for (requestId, key) in remoteMcpAuthRequests {
-            guard let sink = mirrors[key]?.sink, Self.takesRemoteMcpAuth(sink) else { continue }
-            remoteMcpAuthRequests[requestId] = nil
-            return sink
-        }
-        return nil
+    private var mcpAuthURLTarget: (any MirrorSink)? {
+        remoteMcpAuthRequests.values.lazy.compactMap { self.mirrors[$0]?.sink }
+            .first { Self.takesRemoteMcpAuth($0) }
     }
 
     /// A Mac on another machine that takes `open_url` frames. The phone is left
@@ -200,16 +195,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `isWebUI` makes the extension's own panel offer a field to paste that
     /// address-bar URL, which goes back as `submit_mcp_oauth_callback_url`.
     /// `requiresUserAction` is forced because the panel is shown only then.
-    /// Whether an OAuth URL's `redirect_uri` is a loopback callback. A claude.ai
-    /// proxy server's URL has none; its flow finishes in the browser.
-    static func redirectsToLocalhost(_ authURL: String) -> Bool {
-        guard let redirect = URLComponents(string: authURL)?.queryItems?
-                .first(where: { $0.name == "redirect_uri" })?.value,
-              let host = URLComponents(string: redirect)?.host?.lowercased()
-        else { return false }
-        return host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1"
-    }
-
     static func patchingMcpAuthForRemoteClient(_ payload: [String: Any]) -> [String: Any] {
         guard var message = payload["message"] as? [String: Any],
               var response = message["response"] as? [String: Any],
@@ -223,6 +208,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         var out = payload
         out["message"] = message
         return out
+    }
+
+    /// Whether an OAuth URL's `redirect_uri` is a loopback callback. A claude.ai
+    /// proxy server's URL has none; its flow finishes in the browser.
+    static func redirectsToLocalhost(_ authURL: String) -> Bool {
+        guard let redirect = URLComponents(string: authURL)?.queryItems?
+                .first(where: { $0.name == "redirect_uri" })?.value,
+              let host = URLComponents(string: redirect)?.host?.lowercased()
+        else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1"
     }
 
     /// `tool_permission_request` and `user_dialog_request` frames still awaiting an answer, re-sent to a client that launches late.
@@ -4353,7 +4348,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         case "open_url":
             if let urlStr = msg["url"] as? String, let url = URL(string: urlStr) {
-                if ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let target = takeMcpAuthURLTarget() {
+                if ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let target = mcpAuthURLTarget {
                     logger.notice("open_url: MCP auth page sent to the Mac that asked")
                     MirrorFileSender.sendURL(urlStr, to: target)
                 } else {
