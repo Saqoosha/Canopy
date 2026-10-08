@@ -441,10 +441,11 @@ private struct SessionFailureBanner: View {
         }
     }
 
+    /// Names the session only: the message says what happened, and not every message is a start failure.
     private var headline: String {
         failure.count > 1
-            ? "\(failure.count) sessions failed to start"
-            : "\(failure.title) failed to start"
+            ? "\(failure.count) sessions"
+            : failure.title
     }
 }
 
