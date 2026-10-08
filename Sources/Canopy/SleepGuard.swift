@@ -24,7 +24,8 @@ final class SleepGuard {
     private let sessions: () -> [OpenSession]
     private var timer: Timer?
     private var assertion: IOPMAssertionID?
-    private var lastReason: String?
+    private var lastLogged: String?
+    private var acquireFailing = false
 
     init(sessions: @escaping () -> [OpenSession]) {
         self.sessions = sessions
@@ -48,24 +49,34 @@ final class SleepGuard {
         let working = sessions().filter { $0.shim?.holdsSystemAwake == true }.count
         let decision = SleepGuardPolicy.decide(enabled: CanopySettings.shared.preventSleepWhileWorking,
                                                workingSessions: working, battery: BatteryReading.current())
-        if decision.reason != lastReason {
-            lastReason = decision.reason
-            logger.notice("\(decision.hold ? "holding" : "not holding", privacy: .public) idle sleep: \(decision.reason, privacy: .public)")
+        let held: Bool
+        if decision.hold {
+            held = acquire()
+        } else {
+            release()
+            held = false
         }
-        decision.hold ? acquire() : release()
+        let line = "\(held ? "holding" : decision.hold ? "failed to hold" : "not holding") idle sleep: \(decision.reason)"
+        if line != lastLogged {
+            lastLogged = line
+            logger.notice("\(line, privacy: .public)")
+        }
     }
 
-    private func acquire() {
-        guard assertion == nil else { return }
+    private func acquire() -> Bool {
+        guard assertion == nil else { return true }
         var id: IOPMAssertionID = 0
         let result = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
                                                  IOPMAssertionLevel(kIOPMAssertionLevelOn),
                                                  "Canopy: a Claude session is busy" as CFString, &id)
         guard result == kIOReturnSuccess else {
-            logger.error("IOPMAssertionCreateWithName failed: \(result)")
-            return
+            if !acquireFailing { logger.error("IOPMAssertionCreateWithName failed: 0x\(String(UInt32(bitPattern: result), radix: 16), privacy: .public)") }
+            acquireFailing = true
+            return false
         }
+        acquireFailing = false
         assertion = id
+        return true
     }
 
     private func release() {
@@ -101,12 +112,13 @@ enum SleepGuardPolicy {
     /// a sleeping Mac resumes the turn later, a dead one loses it.
     static let batteryFloorPercent = 20
 
-    static func decide(enabled: Bool, workingSessions: Int, battery: BatteryReading?) -> (hold: Bool, reason: String) {
+    /// `battery` is read only once a session is busy: it is an IOKit query, and the idle case is every tick.
+    static func decide(enabled: Bool, workingSessions: Int, battery: @autoclosure () -> BatteryReading?) -> (hold: Bool, reason: String) {
         guard enabled else { return (false, "turned off in Settings") }
         guard workingSessions > 0 else { return (false, "no session is busy") }
-        if let battery, battery.onBattery, battery.percent < batteryFloorPercent {
-            return (false, "on battery at \(battery.percent)%, below \(batteryFloorPercent)%")
+        if let battery = battery(), battery.onBattery, battery.percent < batteryFloorPercent {
+            return (false, "on battery below \(batteryFloorPercent)%")
         }
-        return (true, "\(workingSessions) session(s) busy")
+        return (true, "a session is busy")
     }
 }
