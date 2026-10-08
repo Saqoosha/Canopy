@@ -2550,6 +2550,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// button does the same (see the capture doc's "verbatim" example), and
     /// a phone decision has nothing of its own to put there.
     private var pendingPermissionRequestInputs: [String: Any] = [:]
+    /// Tool name per outstanding request, cleared with the inputs.
+    private var pendingPermissionRequestToolNames: [String: String] = [:]
     /// The CLI's own `addRules` proposal per outstanding request, kept so an
     /// "always allow" from the phone can echo it back verbatim. Empty or
     /// absent means the CLI proposed nothing, and the phone is told not to
@@ -6431,6 +6433,27 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return "```json\n" + text + "\n```"
     }
 
+    /// One outstanding request as `pending_requests` reports it; the same rendering the phone's push uses.
+    static func pendingRequestWire(requestId: String, toolName: String, inputs: Any?) -> [String: Any] {
+        let isQuestion = toolName == "AskUserQuestion"
+        var wire: [String: Any] = [
+            "requestId": requestId,
+            "toolName": toolName,
+            "kind": isQuestion ? "question" : "permission",
+            "input": truncatedNotificationBody(renderedToolInput(inputs), maxBytes: 4000),
+        ]
+        if isQuestion, let choices = askChoices(from: inputs) { wire["choices"] = choices }
+        return wire
+    }
+
+    /// Outstanding permission and AskUserQuestion requests, oldest id order not guaranteed; sorted by requestId for a stable answer.
+    func pendingRequestsWire() -> [[String: Any]] {
+        pendingPermissionRequestIds.sorted().map { id in
+            Self.pendingRequestWire(requestId: id, toolName: pendingPermissionRequestToolNames[id] ?? "",
+                                    inputs: pendingPermissionRequestInputs[id])
+        }
+    }
+
     private func updateWindowTitle(_ title: String) {
         sessionTitle = title
         // Sidebar shell: SwiftUI's `.navigationTitle` on Detail and the
@@ -6471,6 +6494,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 SleepGuard.reevaluateActive()
             }
             pendingPermissionRequestInputs[requestId] = request["inputs"]
+            pendingPermissionRequestToolNames[requestId] = request["toolName"] as? String ?? ""
             // The CLI computes the rule that "always allow" would write, and
             // the extension's own webview just hands it straight back — it
             // constructs its request object as
@@ -6529,6 +6553,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            pendingPermissionRequestIds.remove(targetRequestId) != nil
         {
             pendingPermissionRequestInputs.removeValue(forKey: targetRequestId)
+            pendingPermissionRequestToolNames.removeValue(forKey: targetRequestId)
             pendingPermissionRequestSuggestions.removeValue(forKey: targetRequestId)
             clearAskUserQuestionFlagIfMatching(targetRequestId)
             refreshAskingState()
@@ -6554,6 +6579,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         else { return }
         guard pendingPermissionRequestIds.remove(requestId) != nil else { return }
         pendingPermissionRequestInputs.removeValue(forKey: requestId)
+        pendingPermissionRequestToolNames.removeValue(forKey: requestId)
         pendingPermissionRequestSuggestions.removeValue(forKey: requestId)
         clearAskUserQuestionFlagIfMatching(requestId)
         refreshAskingState()
@@ -6568,6 +6594,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         outstandingDialogRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
+        pendingPermissionRequestToolNames.removeAll()
         // Cleared with `…Inputs`, which it is keyed alongside: both are
         // per-outstanding-request state, and leaving one behind on a shim
         // exit accumulated entries for the life of the process.

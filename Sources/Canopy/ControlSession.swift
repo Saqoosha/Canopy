@@ -75,6 +75,7 @@ final class ControlSession {
         case "session_status": sessionStatus(request)
         case "latest_reply": latestReply(request)
         case "wait_turn": waitTurn(request)
+        case "pending_requests": pendingRequests(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -133,6 +134,12 @@ final class ControlSession {
         guard let session = requestedSession(request) else { return }
         guard session.shim != nil else { fail(request, "not running"); return }
         pollTurn(request, session: session, replyId: query.replyId, remaining: 120)
+    }
+
+    private func pendingRequests(_ request: ControlProtocol.Request) {
+        guard let session = requestedSession(request) else { return }
+        guard let shim = session.shim else { fail(request, "not running"); return }
+        reply(request, ["requests": shim.pendingRequestsWire()])
     }
 
     private func pollTurn(_ request: ControlProtocol.Request, session: OpenSession, replyId: String?, remaining: Int) {

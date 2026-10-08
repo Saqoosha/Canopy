@@ -1992,6 +1992,23 @@ enum SidebarLogicProbe {
                 record("control turn: replyId nil with nothing control-owned yields latestText",
                        snap(nil, inFlight: nil, queued: [], finishedId: nil, finished: [:], latestText: "latest")
                            == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: nil, text: "latest", turnDone: false))
+                let bashWire = ShimProcess.pendingRequestWire(requestId: "p1", toolName: "Bash", inputs: ["command": "ls -la"])
+                record("control pending: a tool permission is kind permission with its rendered input and no choices",
+                       bashWire["requestId"] as? String == "p1" && bashWire["toolName"] as? String == "Bash"
+                           && bashWire["kind"] as? String == "permission"
+                           && (bashWire["input"] as? String)?.contains("ls -la") == true && bashWire["choices"] == nil)
+                let askWire = ShimProcess.pendingRequestWire(requestId: "q1", toolName: "AskUserQuestion", inputs: [
+                    "questions": [["question": "Which database?", "header": "DB", "multiSelect": false,
+                                   "options": [["label": "Postgres"], ["label": "SQLite"]]]],
+                ])
+                let askOptions = (askWire["choices"] as? [[String: Any]])?.first?["options"] as? [[String: Any]]
+                record("control pending: an AskUserQuestion is kind question and carries its choices",
+                       askWire["kind"] as? String == "question"
+                           && askOptions?.compactMap { $0["label"] as? String } == ["Postgres", "SQLite"])
+                let longWire = ShimProcess.pendingRequestWire(requestId: "p2", toolName: "Bash",
+                                                              inputs: ["command": String(repeating: "x", count: 10_000)])
+                record("control pending: a long input is cut to about 4 KB",
+                       ((longWire["input"] as? String)?.utf8.count ?? .max) <= 4_100)
                 record("control turn: an earlier finished id is still done after a later one",
                        snap("r1", inFlight: nil, queued: [], finishedId: "r2", finished: ["r1": "one", "r2": "two"], latestText: nil)
                            == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: "r1", text: "one", turnDone: true))

@@ -48,10 +48,11 @@ def main(argv):
         ("reply", "latest_reply"),
         ("wait", "wait_turn"),
         ("stop", "stop_session"),
+        ("pending", "pending_requests"),
     ):
         sub_p = sub.add_parser(name, help=help_text)
         add_session_flags(sub_p, require=True)
-        if name != "stop":
+        if name not in ("stop", "pending"):
             sub_p.add_argument("--reply-id", dest="reply_id")
 
     args = parser.parse_args(argv)
@@ -99,6 +100,8 @@ def build(args):
         return "send_message", params
     if args.cmd == "stop":
         return "stop_session", params
+    if args.cmd == "pending":
+        return "pending_requests", params
     verbs = {"status": "session_status", "reply": "latest_reply", "wait": "wait_turn"}
     if args.reply_id:
         params["replyId"] = args.reply_id

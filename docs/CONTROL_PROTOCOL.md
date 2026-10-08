@@ -122,6 +122,22 @@ A `refused` result also carries `reasonCode`, for deciding whether to retry:
 
 A busy session is not refused; the message is `queued`.
 
+### `pending_requests`
+
+Read-only. Lists what a session is waiting on a human for, so an agent can
+tell that human; there is no verb to answer them. Params: `key` and/or
+`sessionId`.
+
+```json
+{"requests":[{"requestId":"…","toolName":"Bash","kind":"permission","input":"…"},
+             {"requestId":"…","toolName":"AskUserQuestion","kind":"question","input":"…",
+              "choices":[{"question":"…","header":"…","options":[{"label":"…"}]}]}]}
+```
+
+`input` is the tool input rendered the way the phone's notification shows it,
+cut to about 4 KB. `choices` appears only on `question`. An empty list means
+nothing is waiting.
+
 ### `session_status`, `latest_reply`, `wait_turn`
 
 All three take optional `key`, `sessionId`, and `replyId`. An unknown
