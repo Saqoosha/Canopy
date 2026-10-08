@@ -11,9 +11,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorPane"
 /// move, and the two-hosts-one-webview re-adoption rule holds here too.
 struct MirrorPaneView: NSViewRepresentable {
     let session: OpenSession
-    /// Called once with a user-facing message when the attach is refused or the
-    /// socket drops before `attach_ok`; the caller closes the pane.
-    let onFailure: (String) -> Void
+    /// Called once with a user-facing message when the attach fails or the session ends; the caller closes the pane.
+    let onFailure: (_ message: String, _ ended: Bool) -> Void
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, SessionWebViewHostOwner {
         var consoleHandler: ConsoleLogHandler?
@@ -198,7 +197,7 @@ struct MirrorPaneView: NSViewRepresentable {
                 coordinator.reportedMissingPairing = true
                 let machine = session.statusBar.mirrorMachine ?? "this Mac"
                 DispatchQueue.main.async {
-                    onFailure("No password stored for \(machine). Paste its connection in Settings › Remote.")
+                    onFailure("No password stored for \(machine). Paste its connection in Settings › Remote.", false)
                 }
             }
             return WKWebView()
@@ -221,7 +220,7 @@ struct MirrorPaneView: NSViewRepresentable {
                 // The pane may have been closed or remounted during the wait; then this attempt is moot.
                 guard session.webView === webView else { return }
                 guard running else {
-                    onFailure("This Mac's session service did not start. Quit and reopen Canopy to try again.")
+                    onFailure("This Mac's session service did not start. Quit and reopen Canopy to try again.", false)
                     return
                 }
                 attachBridge(to: webView, target: target, assetHandler: assetHandler, coordinator: coordinator)
@@ -308,12 +307,12 @@ struct MirrorPaneView: NSViewRepresentable {
                 let showRefusal: () -> Void
                 if case .spawning = session.status, reason != MirrorOpenRequest.stoppedByClient {
                     if isDaemon, reason == MirrorOpenRequest.notOpenable, case .local(let folder) = session.origin {
-                        showRefusal = { onFailure(SessionStore.localOpenFailureMessage(folder: folder)) }
+                        showRefusal = { onFailure(SessionStore.localOpenFailureMessage(folder: folder), false) }
                     } else {
-                        showRefusal = { onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName)) }
+                        showRefusal = { onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName), false) }
                     }
                 } else {
-                    showRefusal = { onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName)) }
+                    showRefusal = { onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName), true) }
                 }
                 // Our own Stop Session ends this client too, attaching or not; held like a drop, discarded when the stop succeeds.
                 if session.isStopping {
@@ -327,7 +326,7 @@ struct MirrorPaneView: NSViewRepresentable {
                     guard let session else { return }
                     if case .spawning = session.status {
                         onFailure(isDaemon ? "Could not reach this Mac's session service."
-                                           : "Could not reach \(machineName). Is its live mirror on?")
+                                           : "Could not reach \(machineName). Is its live mirror on?", false)
                     } else {
                         session.connection.status = .reconnectFailed
                         session.isThinking = false

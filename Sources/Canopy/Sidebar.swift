@@ -184,7 +184,7 @@ struct Sidebar: View {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
-                            Text(err)
+                            Text(err.message)
                                 .font(.caption)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 4)
@@ -196,13 +196,15 @@ struct Sidebar: View {
                             }
                             .buttonStyle(.plain)
                         }
-                        Button("Open Settings…") {
-                            openSettings()
-                            store.remoteAttachError = nil
+                        if err.offersSettings {
+                            Button("Open Settings…") {
+                                openSettings()
+                                store.remoteAttachError = nil
+                            }
+                            .buttonStyle(.link)
+                            .font(.caption)
+                            .padding(.leading, 24)
                         }
-                        .buttonStyle(.link)
-                        .font(.caption)
-                        .padding(.leading, 24)
                     }
                     .padding(8)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
