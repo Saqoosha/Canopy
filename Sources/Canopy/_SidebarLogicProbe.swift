@@ -1942,6 +1942,21 @@ enum SidebarLogicProbe {
                 record("control send: queued is ok",
                        queued["ok"] as? Bool == true && queued["disposition"] as? String == "queued"
                            && queued["reason"] as? String == "session busy")
+                record("control query: a missing reply id is the current turn",
+                       ControlProtocol.parseSessionQuery([:]) == .success(ControlProtocol.SessionQuery(replyId: nil)))
+                record("control query: a blank reply id is the current turn",
+                       ControlProtocol.parseSessionQuery(["replyId": "  "]) == .success(ControlProtocol.SessionQuery(replyId: nil)))
+                record("control query: a reply id is trimmed",
+                       ControlProtocol.parseSessionQuery(["replyId": "  abc  "]) == .success(ControlProtocol.SessionQuery(replyId: "abc")))
+                let status = ControlProtocol.statusWire(state: "idle", replyId: "r1", text: "hi", turnDone: true)
+                record("control status: wire carries state, reply id, text, and turnDone",
+                       status["ok"] as? Bool == true && status["state"] as? String == "idle"
+                           && status["replyId"] as? String == "r1" && status["text"] as? String == "hi"
+                           && status["turnDone"] as? Bool == true)
+                let bare = ControlProtocol.statusWire(state: "working", replyId: nil, text: nil, turnDone: false)
+                record("control status: an in-flight turn omits reply id and text",
+                       bare["state"] as? String == "working" && bare["turnDone"] as? Bool == false
+                           && bare["replyId"] == nil && bare["text"] == nil)
             }
             // Canopy Server reaper.
             do {

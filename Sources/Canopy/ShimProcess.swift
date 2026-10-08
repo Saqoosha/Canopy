@@ -1772,6 +1772,33 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     func noteControlReply(_ id: String) { controlReplyIds.insert(id) }
     func forgetControlReply(_ id: String) { controlReplyIds.remove(id) }
 
+    /// What `session_status` / `latest_reply` / `wait_turn` read. `state` is
+    /// `asking` while a question is up, else `working` while a turn is in
+    /// flight, else `idle`. `turnDone` is the control turn whose `result`
+    /// already landed; an in-flight id reports `turnDone: false` and no text,
+    /// so a previous answer is not mistaken for this one.
+    struct ControlTurnSnapshot: Equatable {
+        var state: String
+        var replyId: String?
+        var text: String?
+        var turnDone: Bool
+    }
+
+    private var latestReplyText: String?
+    private var controlFinishedReplyId: String?
+    private var controlFinishedText: String?
+
+    func controlTurnSnapshot() -> ControlTurnSnapshot {
+        let state = lastAssistantHadAskUserQuestion ? "asking" : (isWorking ? "working" : "idle")
+        if let inflight = controlTurnReplyId {
+            return ControlTurnSnapshot(state: state, replyId: inflight, text: nil, turnDone: false)
+        }
+        if let finished = controlFinishedReplyId {
+            return ControlTurnSnapshot(state: state, replyId: finished, text: controlFinishedText, turnDone: true)
+        }
+        return ControlTurnSnapshot(state: state, replyId: nil, text: latestReplyText, turnDone: false)
+    }
+
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog behind.
     private func endPhoneReplyFlight() {
@@ -8496,6 +8523,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // disappears. Found by four reviewers independently.
         let eventIdForThisTurn = lastAssistantEventId
         lastAssistantEventId = nil
+        latestReplyText = finalText ?? ""
+        if let replyId = controlTurnReplyId {
+            controlFinishedReplyId = replyId
+            controlFinishedText = finalText ?? ""
+            controlTurnReplyId = nil
+        }
         if let session = boundSession {
             let pushBody = finalText?.isEmpty == false
                 ? Self.truncatedNotificationBody(finalText!, maxBytes: 2400)

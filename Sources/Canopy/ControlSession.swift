@@ -72,6 +72,9 @@ final class ControlSession {
             reply(request, ["ok": true])
         case "mirror_status": reply(request, ["status": MirrorServerStatus.shared.state.wire])
         case "send_message": sendMessage(request)
+        case "session_status": sessionStatus(request)
+        case "latest_reply": latestReply(request)
+        case "wait_turn": waitTurn(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -98,6 +101,57 @@ final class ControlSession {
             case .refused(let reason):
                 shim.forgetControlReply(replyId)
                 reply(request, ControlProtocol.replyWire(disposition: "refused", reason: reason, replyId: replyId))
+            }
+        }
+    }
+
+    private func sessionStatus(_ request: ControlProtocol.Request) {
+        replyTurn(request, includeText: false)
+    }
+
+    private func latestReply(_ request: ControlProtocol.Request) {
+        replyTurn(request, includeText: true)
+    }
+
+    private func replyTurn(_ request: ControlProtocol.Request, includeText: Bool) {
+        switch ControlProtocol.parseSessionQuery(request.params) {
+        case .failure(let error): fail(request, error.message)
+        case .success:
+            guard let session = requestedSession(request) else { return }
+            guard let shim = session.shim else { fail(request, "not running"); return }
+            let snap = shim.controlTurnSnapshot()
+            reply(request, ControlProtocol.statusWire(
+                state: snap.state, replyId: snap.replyId,
+                text: includeText ? snap.text : nil, turnDone: snap.turnDone))
+        }
+    }
+
+    /// `wait_turn` must not block `handle()` — the socket read loop is stuck
+    /// until it returns. A later `reply` from the main queue is the shape the
+    /// connection already uses. The poll is bounded (0.5 s × 120) so a turn
+    /// that never finishes still answers.
+    private func waitTurn(_ request: ControlProtocol.Request) {
+        switch ControlProtocol.parseSessionQuery(request.params) {
+        case .failure(let error): fail(request, error.message)
+        case .success(let query):
+            guard let session = requestedSession(request) else { return }
+            guard session.shim != nil else { fail(request, "not running"); return }
+            pollTurn(request, session: session, replyId: query.replyId, remaining: 120)
+        }
+    }
+
+    private func pollTurn(_ request: ControlProtocol.Request, session: OpenSession, replyId: String?, remaining: Int) {
+        guard let shim = session.shim else { fail(request, "not running"); return }
+        let snap = shim.controlTurnSnapshot()
+        let matched = snap.turnDone && (replyId == nil || snap.replyId == replyId)
+        if matched || remaining <= 0 {
+            reply(request, ControlProtocol.statusWire(
+                state: snap.state, replyId: snap.replyId, text: snap.text, turnDone: snap.turnDone))
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.pollTurn(request, session: session, replyId: replyId, remaining: remaining - 1)
             }
         }
     }

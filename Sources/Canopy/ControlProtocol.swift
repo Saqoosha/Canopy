@@ -269,4 +269,26 @@ enum ControlProtocol {
         if let reason, !reason.isEmpty { wire["reason"] = reason }
         return wire
     }
+
+    /// `session_status` / `latest_reply` / `wait_turn` share one optional
+    /// `replyId`. Absent or blank means "the control turn in flight, or the
+    /// last one that finished".
+    struct SessionQuery: Equatable {
+        var replyId: String?
+    }
+
+    static func parseSessionQuery(_ params: [String: Any]) -> Result<SessionQuery, ControlError> {
+        let raw = (params["replyId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replyId = (raw?.isEmpty == false) ? raw : nil
+        return .success(SessionQuery(replyId: replyId))
+    }
+
+    /// `state` is `idle` / `working` / `asking`. `turnDone` is true only after
+    /// the control turn's `result` has been captured.
+    static func statusWire(state: String, replyId: String?, text: String?, turnDone: Bool) -> [String: Any] {
+        var wire: [String: Any] = ["ok": true, "state": state, "turnDone": turnDone]
+        if let replyId, !replyId.isEmpty { wire["replyId"] = replyId }
+        if let text { wire["text"] = text }
+        return wire
+    }
 }
