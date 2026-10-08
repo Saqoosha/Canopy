@@ -41,6 +41,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         }
     }
     private(set) var extensionVersion: String?
+    /// This Mac's daemon: the host's extension folder is ours, kept by cleanup while its shim runs.
+    private let hostIsThisMac: Bool
     /// The origin's `OpenSession.id` for this session, from `attach_ok`; nil from a Mac that predates it.
     private(set) var hostSessionId: String?
     /// True for a pane whose webview has a `MirrorAssetSchemeHandler`: the attach then asks for Read images as
@@ -80,6 +82,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         self.sessionId = sessionId
         self.key = key
         self.sendsToken = endpoint.needsToken
+        if case .unix = endpoint { hostIsThisMac = true } else { hostIsThisMac = false }
         self.webView = webView
         self.connection = NWConnection(to: endpoint.nwEndpoint, using: endpoint.parameters)
         super.init()
@@ -216,10 +219,6 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if let openRequest { attach["open"] = openRequest.wire }
         sendJSONObject(attach)
         scheduleReceive()
-        // Loaded only now, so the webview's `init` cannot reach the socket ahead of `attach`.
-        if let webView {
-            WebViewContainer.loadCCWebview(webView, resumeSessionId: sessionId, entryFileName: WebViewContainer.entryFileName(for: nil))
-        }
     }
 
     nonisolated private func scheduleReceive() {
@@ -285,6 +284,15 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             logger.notice("[mirror-attach] attach_ok")
             extensionVersion = dict["extensionVersion"] as? String
             hostSessionId = (dict["hostSessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // Loaded after attach_ok; for this Mac's daemon, from the folder its shim runs.
+            if let webView {
+                let local = hostIsThisMac ? extensionVersion.flatMap { $0.isEmpty ? nil : CCExtension.installedPath(version: $0) } : nil
+                // Interpolated unescaped into the entry HTML, so only a UUID from the host is accepted.
+                let resolvedId = (dict["sessionId"] as? String).flatMap { UUID(uuidString: $0) != nil ? $0 : nil } ?? sessionId
+                WebViewContainer.loadCCWebview(webView, resumeSessionId: resolvedId,
+                                               entryFileName: WebViewContainer.entryFileName(for: nil),
+                                               extensionPath: local)
+            }
             deliverOutcome(.attached)
             return
         }

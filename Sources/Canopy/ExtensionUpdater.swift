@@ -10,14 +10,18 @@ final class ExtensionUpdater {
         case idle
         case checking
         case upToDate
-        case updateAvailable(latestVersion: String, currentVersion: String?)
         case downloading
         case installing
         case done(version: String)
         case failed(message: String)
     }
 
-    static let changelogURL = URL(string: "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md")!
+    /// One per process: every launcher pane checks on appear, and an update now installs
+    /// without a click, so per-pane instances would race two installs into one folder.
+    static let shared = ExtensionUpdater()
+
+    /// The last failed install in this process. That version is not installed again without a click.
+    private var failure: (version: String, message: String)?
 
     private(set) var state: State = .idle
 
@@ -37,25 +41,32 @@ final class ExtensionUpdater {
         }
     }
 
-    func checkForUpdate() async {
+    /// `retryingFailure` is the banner's Retry: a click is consent to try the failed version again.
+    func checkForUpdate(retryingFailure: Bool = false) async {
         guard state == .idle || state == .upToDate || state.isTerminal else { return }
 
         state = .checking
+        // A failed lookup keeps a stored failure, and its Retry, on screen.
+        let fallback: State = failure.map { .failed(message: $0.message) } ?? .idle
         guard let latestVer = await marketplaceLatestVersion() else {
             logger.warning("Could not determine marketplace latest version")
-            state = .idle
+            state = fallback
             return
         }
         guard Self.isValidVersion(latestVer) else {
             logger.error("Marketplace returned invalid version string: \(latestVer, privacy: .public)")
-            state = .idle
+            state = fallback
             return
         }
         let extVer = CCExtension.extensionVersion()
         if let extVer, Self.compareVersions(extVer, latestVer) >= 0 {
             state = .upToDate
+        } else if let failure, failure.version == latestVer, !retryingFailure {
+            // Terminal, so a later mount still checks and picks up a fixed newer version.
+            state = .failed(message: failure.message)
         } else {
-            state = .updateAvailable(latestVersion: latestVer, currentVersion: extVer)
+            // New sessions pick the newest installed version at spawn, so installing is all an update takes.
+            await installUpdate(version: latestVer, automatic: !retryingFailure)
         }
     }
 
@@ -106,21 +117,28 @@ final class ExtensionUpdater {
         }
     }
 
-    func triggerInstall() async {
-        guard case .updateAvailable(let version, _) = state else { return }
-        await installUpdate(version: version)
-    }
-
-    private func installUpdate(version: String) async {
+    private func installUpdate(version: String, automatic: Bool) async {
         state = .downloading
         do {
             let vsixURL = try await downloadVSIX(version: version)
             state = .installing
             try await installVSIX(at: vsixURL, version: version)
             await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }.value
+            failure = nil
             state = .done(version: version)
+            // The install needs no click now, so the launcher banner may never be on screen.
+            SessionNotifier.post(title: "Claude Code extension updated",
+                                 body: "v\(version) is installed. New sessions use it.",
+                                 showWhileFrontmost: true)
         } catch {
+            failure = (version, error.localizedDescription)
             state = .failed(message: error.localizedDescription)
+            // A Retry click already has the banner in front of it.
+            if automatic {
+                SessionNotifier.post(title: "Claude Code extension update failed",
+                                     body: "v\(version): \(error.localizedDescription)",
+                                     showWhileFrontmost: true)
+            }
             logger.error("Extension update failed: \(error.localizedDescription, privacy: .public)")
         }
     }

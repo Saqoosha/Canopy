@@ -165,7 +165,7 @@ struct LauncherView: View {
     /// The other-Mac folder browser, separate from the SSH one's flag.
     @State private var showPeerBrowser = false
     @State private var showCloneSheet = false
-    @State private var updater = ExtensionUpdater()
+    private let updater = ExtensionUpdater.shared
 
     // Web (Claude Code Web) session teleport
     @State private var showWebSessions = false
@@ -1384,14 +1384,17 @@ struct LauncherView: View {
 
     /// The banner's slot is always laid out, banner or not, so the icon,
     /// headline, chips and composer never move when a banner appears or goes
-    /// away. It reserves the height of the update-available card — the tallest
-    /// ordinary state — with an invisible copy of it; a long failure message
+    /// away. It reserves the height of a one-line banner with a button (the
+    /// failed state) with an invisible copy of one; a long failure message
     /// can still grow the slot past that. Equal padding above and below, so
     /// the gap between headline and banner matches the one between banner and
     /// chips.
     private var extensionUpdateSlot: some View {
         ZStack {
-            updateAvailableCard(latestVersion: "0.0.0", currentVersion: "0.0.0")
+            updateBannerCard(icon: "exclamationmark.triangle.fill", iconColor: .orange, tint: .orange) {
+                Text(" ").font(.system(size: 12))
+                Button(" ") {}.controlSize(.small)
+            }
                 .hidden()
                 .accessibilityHidden(true)
                 .frame(width: 1)  // reserve its height only, never its width
@@ -1400,38 +1403,9 @@ struct LauncherView: View {
         .padding(.vertical, 18)
     }
 
-    private func updateAvailableCard(latestVersion: String, currentVersion: String?) -> some View {
-        updateBannerCard(icon: "arrow.down.circle", iconColor: .blue, tint: .blue) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Extension update available")
-                    .font(.system(size: 12, weight: .semibold))
-                HStack(spacing: 6) {
-                    if let currentVersion {
-                        Text("v\(currentVersion) → v\(latestVersion)")
-                    } else {
-                        Text("v\(latestVersion)")
-                    }
-                    Text("·").foregroundStyle(.tertiary)
-                    Link("Changelog", destination: ExtensionUpdater.changelogURL)
-                        .foregroundStyle(Color.accentColor)
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            }
-            Button("Update") {
-                Task { await updater.triggerInstall() }
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        }
-    }
-
     @ViewBuilder
     private var extensionUpdateBanner: some View {
         switch updater.state {
-        case .updateAvailable(let latestVersion, let currentVersion):
-            updateAvailableCard(latestVersion: latestVersion, currentVersion: currentVersion)
-
         case .downloading:
             updateBannerCard(tint: .secondary) {
                 ProgressView().controlSize(.small)
@@ -1455,13 +1429,8 @@ struct LauncherView: View {
 
         case .done(let version):
             updateBannerCard(icon: "checkmark.circle.fill", iconColor: .green, tint: .green) {
-                Text("Extension v\(version) installed. Restart Canopy to apply.")
+                Text("Extension v\(version) installed. New sessions use it.")
                     .font(.system(size: 12))
-                Button("Restart Now") {
-                    AppDelegate.relaunch()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
 
         case .failed(let message):
@@ -1470,7 +1439,7 @@ struct LauncherView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                 Button("Retry") {
-                    Task { await updater.checkForUpdate() }
+                    Task { await updater.checkForUpdate(retryingFailure: true) }
                 }
                 .controlSize(.small)
             }

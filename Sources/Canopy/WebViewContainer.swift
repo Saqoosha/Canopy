@@ -216,6 +216,7 @@ struct WebViewContainer: NSViewRepresentable {
             // would target the live reconnected shim at quit time and kill
             // the user's session without confirmation.
             let inheritedSession = shimProcess?.boundSession
+            let pageExtension = shimProcess?.extensionDirectory
 
             // Clean up old shim's message handler
             let ucc = webView.configuration.userContentController
@@ -271,7 +272,15 @@ struct WebViewContainer: NSViewRepresentable {
                 // launch_claude and the remote CLI is never re-spawned — the
                 // overlay would clear over a dead pane. didFinish then calls
                 // newShim.webViewDidFinishLoad() naturally.
-                webView.reload()
+                if let newExtension = newShim.extensionDirectory, newExtension != pageExtension {
+                    // An update installed since: the page must come from the extension the new shim runs.
+                    WebViewContainer.loadCCWebview(webView, resumeSessionId: sessionId,
+                                       entryFileName: WebViewContainer.entryFileName(for: inheritedSession),
+                                       includeKeychainAuth: inheritedSession?.claudeAccount == nil,
+                                       extensionPath: newExtension)
+                } else {
+                    webView.reload()
+                }
             } else {
                 logger.error("Reconnect attempt \(self.reconnectAttempt) failed: shim start returned false")
                 ucc.removeScriptMessageHandler(forName: "vscodeHost")
@@ -620,15 +629,17 @@ struct WebViewContainer: NSViewRepresentable {
     private func loadCCWebview(_ webView: WKWebView) {
         Self.loadCCWebview(webView, resumeSessionId: resumeSessionId,
                            entryFileName: Self.entryFileName(for: boundSession),
-                           includeKeychainAuth: boundSession?.claudeAccount == nil)
+                           includeKeychainAuth: boundSession?.claudeAccount == nil,
+                           extensionPath: boundSession?.shim?.extensionDirectory)
     }
 
     /// Writes the entry HTML for `resumeSessionId` under `entryFileName` and
     /// loads it. Static so a mirror webview loads the exact page a pane does.
     static func loadCCWebview(
-        _ webView: WKWebView, resumeSessionId: String?, entryFileName: String, includeKeychainAuth: Bool = true
+        _ webView: WKWebView, resumeSessionId: String?, entryFileName: String, includeKeychainAuth: Bool = true,
+        extensionPath: URL? = nil
     ) {
-        guard let extPath = CCExtension.extensionPath() else {
+        guard let extPath = extensionPath ?? CCExtension.extensionPath() else {
             webView.loadHTMLString(
                 "<html><body style='background:#ffffff;color:#333;padding:40px;font-family:sans-serif'>"
                 + "<h1>Canopy</h1><p>Claude Code extension not found. Install it in VSCode first.</p></body></html>",
