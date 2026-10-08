@@ -70,7 +70,7 @@ enum KeychainAuth {
 
     /// The blob's own organization, else the default login's `~/.claude.json`: current CLIs
     /// keep only `claudeAiOauth` and `mcpOAuth` in the blob (measured on 2.1.294). Never
-    /// `CLAUDE_CONFIG_DIR`'s file — the token is always the default Keychain item's.
+    /// `CLAUDE_CONFIG_DIR`'s file — `readAccessTokenAndOrg` reads the default Keychain item.
     static func organizationUuid(keychainBlob: [String: Any], defaultConfig: () -> String?) -> String? {
         if let org = keychainBlob["organizationUuid"] as? String, !org.isEmpty { return org }
         return defaultConfig()
@@ -87,7 +87,12 @@ enum KeychainAuth {
 
     private static func defaultConfigOrganizationUuid() -> String? {
         let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")
-        return (try? Data(contentsOf: url)).flatMap(organizationUuid(inClaudeJSON:))
+        do {
+            return organizationUuid(inClaudeJSON: try Data(contentsOf: url))
+        } catch {
+            logger.warning("Reading ~/.claude.json failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     /// The access token alone, for callers that do not need the organization.
