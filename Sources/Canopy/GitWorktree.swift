@@ -121,6 +121,46 @@ enum GitWorktree {
         return nil
     }
 
+    /// A main checkout holds its `.git` as a folder; a linked worktree's is a file.
+    static func isMainCheckout(_ dir: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: dir.appendingPathComponent(".git").path,
+                                              isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    /// The main checkout a removed worktree hung off, where its sessions can be
+    /// reopened. Git no longer knows the worktree, so the path has to say: the
+    /// in-repo and sibling layouts name the checkout outright, and the managed
+    /// one (`~/.claude/worktrees/<repo>/<branch>`) names only the repository, so
+    /// a known checkout of that name stands in — when exactly one resolves.
+    static func checkoutForRemovedWorktree(
+        _ dir: URL, knownCheckouts: [URL],
+        isCheckout: (URL) -> Bool = { isMainCheckout($0) },
+        realPath: (URL) -> String = { $0.resolvingSymlinksInPath().path }
+    ) -> URL? {
+        let standardized = dir.standardizedFileURL
+        let parent = standardized.deletingLastPathComponent()
+        let parentName = parent.lastPathComponent
+        let candidates: [URL]
+        if parent.deletingLastPathComponent().path == worktreesRoot.path {
+            let repo = parentName
+            candidates = knownCheckouts.filter { $0.standardizedFileURL.lastPathComponent == repo }
+        } else if parentName.hasSuffix("-worktrees"), parentName.count > "-worktrees".count {
+            candidates = [parent.deletingLastPathComponent()
+                .appendingPathComponent(String(parentName.dropLast("-worktrees".count)))]
+        } else if parentName == "worktrees", parent.deletingLastPathComponent().lastPathComponent == ".claude",
+                  parent.path != worktreesRoot.path {
+            candidates = [parent.deletingLastPathComponent().deletingLastPathComponent()]
+        } else {
+            return nil
+        }
+        var byRealPath: [String: URL] = [:]
+        for candidate in candidates where isCheckout(candidate) {
+            byRealPath[realPath(candidate)] = byRealPath[realPath(candidate)] ?? candidate.standardizedFileURL
+        }
+        return byRealPath.count == 1 ? byRealPath.values.first : nil
+    }
+
     static func isGitRepo(_ dir: URL) -> Bool {
         var isDirectory: ObjCBool = false
         let gitPath = dir.appendingPathComponent(".git").path

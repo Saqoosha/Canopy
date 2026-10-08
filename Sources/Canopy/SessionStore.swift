@@ -778,9 +778,7 @@ final class SessionStore {
 
     /// A main checkout holds its `.git` as a folder; a linked worktree's is a file.
     nonisolated static func isMainCheckout(_ path: String) -> Bool {
-        var isDirectory: ObjCBool = false
-        return FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent(".git"),
-                                              isDirectory: &isDirectory) && isDirectory.boolValue
+        GitWorktree.isMainCheckout(URL(fileURLWithPath: path))
     }
 
     /// The session removed its own worktree after the canopy-bridge mod left
@@ -1122,7 +1120,7 @@ final class SessionStore {
             return existing
         }
         return openNew(
-            directory: entry.projectDirectory,
+            directory: ClaudeSessionHistory.directoryToOpen(entry) ?? entry.projectDirectory,
             resumeId: entry.id,
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,

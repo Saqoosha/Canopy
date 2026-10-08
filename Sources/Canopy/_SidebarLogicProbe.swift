@@ -5355,6 +5355,78 @@ enum SidebarLogicProbe {
                    ShimProcess.scrubbingCanopyAssignedKeys(["CANOPY_CLI_CWD": "/x", "CANOPY_WORKTREE": "/y"]).isEmpty)
         }
 
+        // MARK: - Removed-worktree rescue
+        do {
+            let managed = GitWorktree.worktreesRoot.appendingPathComponent("Canopy/fix-login")
+            let checkouts: Set<String> = ["/r/Canopy", "/d/Canopy", "/r/Other", "/p/app", "/q/repo"]
+            let isCheckout: (URL) -> Bool = { checkouts.contains($0.standardizedFileURL.path) }
+            let sameDisk: (URL) -> String = { $0.path == "/d/Canopy" ? "/r/Canopy" : $0.path }
+            func rescue(_ dir: URL, _ known: [String], realPath: @escaping (URL) -> String = { $0.path }) -> String? {
+                GitWorktree.checkoutForRemovedWorktree(dir, knownCheckouts: known.map { URL(fileURLWithPath: $0) },
+                                                       isCheckout: isCheckout, realPath: realPath)?.path
+            }
+            record("rescue: a managed worktree finds the one checkout of its repo's name",
+                   rescue(managed, ["/r/Other", "/r/Canopy"]) == "/r/Canopy")
+            record("rescue: two different checkouts of that name → no guess",
+                   rescue(managed, ["/r/Canopy", "/d/Canopy"]) == nil)
+            record("rescue: two spellings of one checkout count once",
+                   rescue(managed, ["/r/Canopy", "/d/Canopy"], realPath: sameDisk) != nil)
+            record("rescue: no known checkout of that name → nothing",
+                   rescue(managed, ["/r/Other"]) == nil)
+            record("rescue: a known folder that is not a checkout is not one",
+                   rescue(managed, ["/x/Canopy"]) == nil)
+            record("rescue: the sibling layout names its checkout",
+                   rescue(URL(fileURLWithPath: "/p/app-worktrees/feat"), []) == "/p/app")
+            record("rescue: the in-repo layout names its checkout",
+                   rescue(URL(fileURLWithPath: "/q/repo/.claude/worktrees/feat"), []) == "/q/repo")
+            record("rescue: a folder that is no worktree layout → nothing",
+                   rescue(URL(fileURLWithPath: "/q/repo/build"), ["/q/repo"]) == nil)
+
+            let gone = SessionEntry(id: UUID().uuidString, title: "t", timestamp: Date(),
+                                    projectDirectory: managed, canOpen: false, logPath: "/x.jsonl")
+            let alive = SessionEntry(id: UUID().uuidString, title: "t", timestamp: Date(),
+                                     projectDirectory: URL(fileURLWithPath: "/r/Canopy"), logPath: "/y.jsonl")
+            let marked = ClaudeSessionHistory.withRescueCheckouts([gone, alive], knownCheckouts: [], isCheckout: isCheckout)
+            record("rescue: a removed worktree's row becomes openable through another row's checkout",
+                   marked[0].canOpen && marked[0].rescueCheckout?.path == "/r/Canopy" && marked[1].rescueCheckout == nil)
+            var noLog = gone
+            noLog.logPath = nil
+            record("rescue: a row with no transcript path stays closed",
+                   !ClaudeSessionHistory.withRescueCheckouts([noLog, alive], knownCheckouts: [], isCheckout: isCheckout)[0].canOpen)
+
+            // The move itself, on real files: a scratch checkout, and a transcript in a
+            // throwaway folder under ~/.claude/projects standing in for the worktree's.
+            let fm = FileManager.default
+            let checkout = fm.temporaryDirectory.appendingPathComponent("canopy-probe-rescue-\(UUID().uuidString)")
+            let projects = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+            let wtFolder = projects.appendingPathComponent("-canopy-probe-rescue-wt-\(UUID().uuidString)")
+            let destFolder = projects.appendingPathComponent(ClaudeSessionHistory.encodePath(checkout.path))
+            defer {
+                try? fm.removeItem(at: checkout)
+                try? fm.removeItem(at: wtFolder)
+                try? fm.removeItem(at: destFolder)
+            }
+            let sid = UUID().uuidString.lowercased()
+            try? fm.createDirectory(at: checkout.appendingPathComponent(".git"), withIntermediateDirectories: true)
+            try? fm.createDirectory(at: wtFolder.appendingPathComponent("\(sid)/subagents"), withIntermediateDirectories: true)
+            try? "{}\n".write(to: wtFolder.appendingPathComponent("\(sid).jsonl"), atomically: true, encoding: .utf8)
+            var entry = SessionEntry(id: sid, title: "t", timestamp: Date(), projectDirectory: managed,
+                                     canOpen: true, logPath: wtFolder.appendingPathComponent("\(sid).jsonl").path)
+            entry.rescueCheckout = checkout
+            let opened = ClaudeSessionHistory.directoryToOpen(entry)
+            record("rescue: opening moves the transcript and its folder to the checkout's project folder",
+                   opened == checkout
+                       && fm.fileExists(atPath: destFolder.appendingPathComponent("\(sid).jsonl").path)
+                       && fm.fileExists(atPath: destFolder.appendingPathComponent("\(sid)/subagents").path)
+                       && !fm.fileExists(atPath: wtFolder.appendingPathComponent("\(sid).jsonl").path))
+            record("rescue: a second open (the daemon after the GUI) finds it already moved",
+                   ClaudeSessionHistory.directoryToOpen(entry) == checkout)
+            var missing = entry
+            missing.rescueCheckout = nil
+            record("rescue: a removed folder with no checkout cannot be opened",
+                   ClaudeSessionHistory.directoryToOpen(missing) == nil)
+        }
+
         // MARK: - Panes
         do {
             // Brief names openA / openB / recentAsOpen; only openA/openB are

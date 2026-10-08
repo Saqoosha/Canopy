@@ -33,6 +33,10 @@ struct SessionEntry: Identifiable, Hashable {
     /// measured) — the use that function's own doc rules out as "always the
     /// fallback, never the primary lookup".
     var logPath: String? = nil
+    /// The main checkout a removed worktree's session reopens in, when one was
+    /// found (`GitWorktree.checkoutForRemovedWorktree`); `canOpen` is then true.
+    /// Opening goes through `ClaudeSessionHistory.directoryToOpen`.
+    var rescueCheckout: URL? = nil
 
     var projectName: String { GitWorktree.projectDisplayName(for: projectDirectory) }
 }
@@ -438,7 +442,59 @@ enum ClaudeSessionHistory {
                 """)
         }
 
-        return selection.kept
+        return withRescueCheckouts(selection.kept, knownCheckouts: RecentDirectories.load())
+    }
+
+    /// Marks the rows of removed worktrees that can reopen in their main
+    /// checkout. Known checkouts are the other rows' folders plus the recent
+    /// directories — the repository a worktree came from is usually both.
+    static func withRescueCheckouts(
+        _ entries: [SessionEntry], knownCheckouts extra: [URL],
+        isCheckout: (URL) -> Bool = { GitWorktree.isMainCheckout($0) }
+    ) -> [SessionEntry] {
+        let known = entries.filter(\.canOpen).map(\.projectDirectory) + extra
+        return entries.map { entry in
+            guard !entry.canOpen, entry.logPath != nil,
+                  let checkout = GitWorktree.checkoutForRemovedWorktree(
+                      entry.projectDirectory, knownCheckouts: known, isCheckout: isCheckout)
+            else { return entry }
+            var rescued = entry
+            rescued.rescueCheckout = checkout
+            rescued.canOpen = true
+            return rescued
+        }
+    }
+
+    /// The folder to open a listed session in: its own while it exists, else
+    /// the checkout its removed worktree hung off — after moving the transcript
+    /// into that checkout's project folder, since the CLI resumes and the
+    /// extension renders only from the folder of the cwd (measured: a session
+    /// born in a removed worktree resumed there with its context). Idempotent:
+    /// the GUI and the daemon both call it for the same open. Nil when neither
+    /// works.
+    static func directoryToOpen(_ entry: SessionEntry) -> URL? {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: entry.projectDirectory.path) { return entry.projectDirectory }
+        guard let checkout = entry.rescueCheckout, let source = entry.logPath else { return nil }
+        let destFolder = claudeDir.appendingPathComponent(
+            encodedFolderCandidates(for: checkout.path).first { fm.fileExists(atPath: claudeDir.appendingPathComponent($0).path) }
+                ?? encodePath(checkout.path))
+        let dest = destFolder.appendingPathComponent("\(entry.id).jsonl")
+        if fm.fileExists(atPath: dest.path) { return checkout }
+        do {
+            try fm.createDirectory(at: destFolder, withIntermediateDirectories: true)
+            try fm.moveItem(atPath: source, toPath: dest.path)
+            // Subagent transcripts and tool results live beside the log, under its id.
+            let siblings = (source as NSString).deletingPathExtension
+            if fm.fileExists(atPath: siblings) {
+                try? fm.moveItem(atPath: siblings, toPath: destFolder.appendingPathComponent(entry.id).path)
+            }
+            logger.notice("Moved a removed worktree's transcript to its checkout's project folder")
+            return checkout
+        } catch {
+            logger.error("Could not move a removed worktree's transcript: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     private typealias Metadata = (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool)

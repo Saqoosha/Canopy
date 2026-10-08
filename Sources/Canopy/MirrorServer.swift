@@ -579,8 +579,14 @@ final class MirrorConnection: MirrorSink {
             if store.openSessions.contains(where: { $0.resumeId == sessionId }) {
                 // Open but dormant: it already knows its own folder.
                 shim = store.startHeadlessSession(resumeId: sessionId)
-            } else if let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen {
-                shim = store.startHeadlessSession(directory: entry.projectDirectory, resumeId: sessionId,
+            } else if let entry = store.recents.first(where: { $0.id == sessionId })
+                        // Recents may not be loaded yet, and a removed worktree's row can only be
+                        // reopened from an entry the loader built (`rescueCheckout`).
+                        ?? (Self.isSessionIdShaped(sessionId)
+                            ? ClaudeSessionHistory.loadAllSessions().first(where: { $0.id == sessionId }) : nil),
+                      entry.canOpen,
+                      let directory = ClaudeSessionHistory.directoryToOpen(entry) {
+                shim = store.startHeadlessSession(directory: directory, resumeId: sessionId,
                                                   isExistingTranscript: true, title: entry.title)
             } else if !store.recents.contains(where: { $0.id == sessionId }), Self.isSessionIdShaped(sessionId),
                       let path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId),

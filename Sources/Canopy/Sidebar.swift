@@ -609,7 +609,7 @@ struct Sidebar: View {
         case .closedLocal(let entry):
             // Gone means gone: offering Finder a directory we already know is
             // absent can only log a warning and look like nothing happened.
-            return entry.canOpen ? entry.projectDirectory : nil
+            return entry.canOpen ? (entry.rescueCheckout ?? entry.projectDirectory) : nil
         case .closedCloud, .launcher, .remoteLive:
             return nil
         }
