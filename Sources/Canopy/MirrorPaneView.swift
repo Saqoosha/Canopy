@@ -305,7 +305,7 @@ struct MirrorPaneView: NSViewRepresentable {
                 }
             case .refused(let reason):
                 let showRefusal: () -> Void
-                if case .spawning = session.status {
+                if case .spawning = session.status, reason != MirrorOpenRequest.stoppedByClient {
                     if isDaemon, reason == MirrorOpenRequest.notOpenable, case .local(let folder) = session.origin {
                         showRefusal = { onFailure(SessionStore.localOpenFailureMessage(folder: folder)) }
                     } else {
@@ -314,7 +314,7 @@ struct MirrorPaneView: NSViewRepresentable {
                 } else {
                     showRefusal = { onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName)) }
                 }
-                // Our own Stop Session ends this client too; held like a drop, and discarded when the stop succeeds.
+                // Our own Stop Session ends this client too, attaching or not; held like a drop, discarded when the stop succeeds.
                 if session.isStopping {
                     session.dropHeldByStop = showRefusal
                 } else {
