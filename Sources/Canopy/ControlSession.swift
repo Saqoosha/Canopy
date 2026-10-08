@@ -75,6 +75,7 @@ final class ControlSession {
         case "session_status": sessionStatus(request)
         case "latest_reply": latestReply(request)
         case "wait_turn": waitTurn(request)
+        case "pending_requests": pendingRequests(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -89,21 +90,17 @@ final class ControlSession {
             guard let session = requestedSession(request) else { return }
             let replyId = UUID().uuidString.lowercased()
             guard let shim = session.shim else {
-                reply(request, ControlProtocol.replyWire(disposition: "refused", reason: "not running", replyId: replyId))
+                reply(request, ControlProtocol.replyWire(Self.notRunningRefusal, replyId: replyId))
                 return
             }
             // No-op when a client already holds a channel; opens one when the session has none.
             shim.launchHeadlessChannel()
             shim.noteControlReply(replyId)
-            switch shim.submitPhoneReply(text: message.text, replyId: replyId) {
-            case .injected:
-                reply(request, ControlProtocol.replyWire(disposition: "injected", reason: nil, replyId: replyId))
-            case .queued(let reason):
-                reply(request, ControlProtocol.replyWire(disposition: "queued", reason: reason, replyId: replyId))
-            case .refused(let reason):
+            let disposition = shim.submitPhoneReply(text: message.text, replyId: replyId)
+            if case .refused = disposition {
                 shim.forgetControlReply(replyId)
-                reply(request, ControlProtocol.replyWire(disposition: "refused", reason: reason, replyId: replyId))
             }
+            reply(request, ControlProtocol.replyWire(disposition, replyId: replyId))
         }
     }
 
@@ -137,6 +134,16 @@ final class ControlSession {
         guard let session = requestedSession(request) else { return }
         guard session.shim != nil else { fail(request, "not running"); return }
         pollTurn(request, session: session, replyId: query.replyId, remaining: 120)
+    }
+
+    private static var notRunningRefusal: ShimProcess.PhoneReplyDisposition {
+        let dead = ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: false, awaitingAnswer: false)!
+        return .refused(dead.reason, code: dead.code)
+    }
+
+    private func pendingRequests(_ request: ControlProtocol.Request) {
+        guard let session = requestedSession(request) else { return }
+        reply(request, ["requests": session.shim?.pendingRequestsWire() ?? []])
     }
 
     private func pollTurn(_ request: ControlProtocol.Request, session: OpenSession, replyId: String?, remaining: Int) {
@@ -263,10 +270,14 @@ final class ControlSession {
         }
         // The prompt is stored on the session; nothing sends it until a
         // `launch_claude` assigns a channel. A control open has no webview.
+        var result: [String: Any] = ["sessionId": sessionId, "key": session.id.uuidString, "cwd": directory.path]
         if session.pendingInitialPrompt != nil {
+            let replyId = UUID().uuidString.lowercased()
+            session.pendingInitialPromptReplyId = replyId
+            result["replyId"] = replyId
             shim.launchHeadlessChannel()
         }
-        reply(request, ["sessionId": sessionId, "key": session.id.uuidString, "cwd": directory.path])
+        reply(request, result)
     }
 
     private func stopSession(_ request: ControlProtocol.Request) {

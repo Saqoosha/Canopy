@@ -78,6 +78,9 @@ as the session's first turn. When no pane is attached the daemon synthesizes
 `init` then `launch_claude` on channel `canopy-headless`, so the turn runs
 without a webview and a later attach still has a cached init.
 
+The result is `{sessionId, key, cwd}`, plus `replyId` when `initialPrompt`
+was given. Pass that `replyId` to `wait_turn` to wait for the first answer.
+
 `stop_session` and `restart_session` take `key` and/or `sessionId`.
 
 `subscribe` asks for `session_state` pushes. Those lines are not responses.
@@ -106,6 +109,34 @@ Result:
 `disposition` is `injected`, `queued`, or `refused`. `ok` is false only for
 `refused`. `queued` and `refused` may include `reason`. `replyId` identifies
 this control turn for the status verbs — always pass it on follow-up calls.
+
+A `refused` result also carries `reasonCode`, for deciding whether to retry:
+
+| `reasonCode` | Meaning | Retry? |
+|---|---|---|
+| `dead` | The session is not running (it may be reconnecting) | Later |
+| `permission_pending` | A permission prompt waits for a human | Not until it is answered |
+| `asking` | An AskUserQuestion waits for a human | Not until it is answered |
+| `queue_full` | 10 messages are already waiting | After the session catches up |
+
+A busy session is not refused; the message is `queued`. Blank `text` never
+reaches this table: it is an `error` response before anything is queued.
+
+### `pending_requests`
+
+Read-only. Lists what a session is waiting on a human for, so an agent can
+tell that human; there is no verb to answer them. Params: `key` and/or
+`sessionId`.
+
+```json
+{"requests":[{"requestId":"…","toolName":"Bash","kind":"permission","input":"…"},
+             {"requestId":"…","toolName":"AskUserQuestion","kind":"question","input":"…",
+              "choices":[{"question":"…","header":"…","options":[{"label":"…"}]}]}]}
+```
+
+`input` is the tool input rendered the way the phone's notification shows it,
+cut to about 4 KB. `choices` appears only on `question`. An empty list means
+nothing is waiting, which includes a session that is not running.
 
 ### `session_status`, `latest_reply`, `wait_turn`
 

@@ -259,15 +259,23 @@ enum ControlProtocol {
         return .success(SendMessage(text: text))
     }
 
-    /// Disposition strings match `PhoneReplyDisposition`: injected / queued / refused.
-    static func replyWire(disposition: String, reason: String?, replyId: String) -> [String: Any] {
-        var wire: [String: Any] = [
-            "ok": disposition != "refused",
-            "disposition": disposition,
-            "replyId": replyId,
-        ]
-        if let reason, !reason.isEmpty { wire["reason"] = reason }
-        return wire
+    static func replyWire(_ disposition: ShimProcess.PhoneReplyDisposition, replyId: String) -> [String: Any] {
+        switch disposition {
+        case .injected:
+            return ["ok": true, "disposition": "injected", "replyId": replyId]
+        case .queued(let reason):
+            var wire: [String: Any] = ["ok": true, "disposition": "queued", "replyId": replyId]
+            if !reason.isEmpty { wire["reason"] = reason }
+            return wire
+        case .refused(let reason, let code):
+            return [
+                "ok": false,
+                "disposition": "refused",
+                "reason": reason,
+                "reasonCode": code.rawValue,
+                "replyId": replyId,
+            ]
+        }
     }
 
     /// `session_status` / `latest_reply` / `wait_turn` share one optional

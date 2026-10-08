@@ -47,7 +47,7 @@ enum RosterRouting {
             case .queued(let why):
                 // Deliberately unlogged — see the note above the closure.
                 return .queued(why)
-            case .refused(let why):
+            case .refused(let why, _):
                 logger.notice("roster reply: session \(envelope.sessionId, privacy: .public) refused — \(why, privacy: .public)")
                 return .refused(why)
             }

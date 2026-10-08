@@ -1278,6 +1278,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return
         }
         session.pendingInitialPrompt = nil
+        if let replyId = session.pendingInitialPromptReplyId {
+            session.pendingInitialPromptReplyId = nil
+            controlTurnReplyId = replyId
+        }
 
         sendToShim([
             "type": "webview_message",
@@ -1510,7 +1514,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `isRunning` lingers true for a few ms after `stop()` returns, which is
     /// exactly the window `stop()`'s own discard is placed to cover. See
     /// `hasActiveSession`, which records the same measurement.
-    private func blockingReasonForReply() -> String? {
+    private func blockingReasonForReply() -> (reason: String, code: PhoneReplyRefusal)? {
         Self.phoneReplyBlockingReason(
             shimIsLive: process?.isRunning == true && !isIntentionalStop,
             permissionOutstanding: !pendingPermissionRequestIds.isEmpty,
@@ -1558,7 +1562,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// decides whether a user's words come back to them or vanish.
     nonisolated static func phoneReplyBlockingReason(shimIsLive: Bool,
                                                      permissionOutstanding: Bool,
-                                                     awaitingAnswer: Bool) -> String? {
+                                                     awaitingAnswer: Bool) -> (reason: String, code: PhoneReplyRefusal)? {
         // First, because it is the only one of the three the user cannot fix
         // by looking at the Mac's screen.
         if !shimIsLive {
@@ -1569,13 +1573,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // and `start()` has never run at all; one genuinely stopped does
             // need reopening. "Reopen it on the Mac" was the first wording
             // and it is wrong instruction in two of the three.
-            return "That session is not running on the Mac right now — try again shortly, or reopen it there"
+            return ("That session is not running on the Mac right now — try again shortly, or reopen it there", .dead)
         }
         if permissionOutstanding {
-            return "That session is waiting for a permission answer — answer it on the Mac first"
+            return ("That session is waiting for a permission answer — answer it on the Mac first", .permissionPending)
         }
         if awaitingAnswer {
-            return "That session is waiting for an answer to its own question"
+            return ("That session is waiting for an answer to its own question", .asking)
         }
         return nil
     }
@@ -1613,9 +1617,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                                   gateReason: String?) -> PhoneReplyDisposition {
         switch result {
         case .empty:
-            return .refused("The message was empty")
+            return .refused("The message was empty", code: .empty)
         case .full(let capacity):
-            return .refused("Already \(capacity) messages waiting — let the session catch up")
+            return .refused("Already \(capacity) messages waiting — let the session catch up", code: .queueFull)
         case .queued:
             // Reported as it stands NOW, and it can be stale by the time the
             // phone renders it — the turn may end a second later. That is the
@@ -1656,8 +1660,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // case — the one this whole change exists to make findable —
             // was recorded as a completely different cause, and it is the
             // first line anyone reading an SSH-drop log would hit.
-            logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): refused — \(blocking, privacy: .public)")
-            return .refused(blocking)
+            logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): refused — \(blocking.reason, privacy: .public)")
+            return .refused(blocking.reason, code: blocking.code)
         }
         if Self.phoneReplyMayInjectNow(queueIsEmpty: queuedPhoneReplies.isEmpty,
                                        gateReason: ineligibilityReasonForReply()),
@@ -1836,8 +1840,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     func controlTurnSnapshot(replyId: String?) -> ControlTurnSnapshot? {
         let state = lastAssistantHadAskUserQuestion ? "asking" : (isWorking ? "working" : "idle")
+        // The first-turn id lives on the session, so a shim rebuilt before sending it still reports it queued.
+        var queued = controlReplyIds
+        if let firstTurn = boundSession?.pendingInitialPromptReplyId { queued.insert(firstTurn) }
         return Self.controlTurnSnapshot(state: state, replyId: replyId, inFlight: controlTurnReplyId,
-                                        queued: controlReplyIds, finishedId: controlFinishedReplyId,
+                                        queued: queued, finishedId: controlFinishedReplyId,
                                         finished: controlFinishedTexts, latestText: latestReplyText)
     }
 
@@ -1870,6 +1877,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Phone reply queue
 
+    /// Machine-readable refusal, so a caller can decide whether retrying helps.
+    enum PhoneReplyRefusal: String, Equatable, Sendable {
+        case dead
+        case permissionPending = "permission_pending"
+        case asking
+        case queueFull = "queue_full"
+        case empty
+    }
+
     /// What became of a prompt the phone submitted. Returned rather than a
     /// `Bool` because `queued` is a success the phone must be able to tell
     /// from `injected` — same 200, different thing to say about it.
@@ -1887,7 +1903,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case queued(reason: String)
         /// Waiting would not help — blank text, a full queue, or one of the
         /// three in `phoneReplyBlockingReason`.
-        case refused(String)
+        case refused(String, code: PhoneReplyRefusal)
     }
 
     /// Prompts waiting for a shim that can take one. See `PhoneReplyQueue`
@@ -2536,6 +2552,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// button does the same (see the capture doc's "verbatim" example), and
     /// a phone decision has nothing of its own to put there.
     private var pendingPermissionRequestInputs: [String: Any] = [:]
+    /// Tool name per outstanding request, cleared with the inputs.
+    private var pendingPermissionRequestToolNames: [String: String] = [:]
     /// The CLI's own `addRules` proposal per outstanding request, kept so an
     /// "always allow" from the phone can echo it back verbatim. Empty or
     /// absent means the CLI proposed nothing, and the phone is told not to
@@ -6417,6 +6435,29 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return "```json\n" + text + "\n```"
     }
 
+    static let pendingRequestInputMaxBytes = 4000
+
+    /// One outstanding request as `pending_requests` reports it; the same rendering the phone's push uses.
+    static func pendingRequestWire(requestId: String, toolName: String, inputs: Any?) -> [String: Any] {
+        let isQuestion = toolName == "AskUserQuestion"
+        var wire: [String: Any] = [
+            "requestId": requestId,
+            "toolName": toolName,
+            "kind": isQuestion ? "question" : "permission",
+            "input": truncatedNotificationBody(renderedToolInput(inputs), maxBytes: pendingRequestInputMaxBytes),
+        ]
+        if isQuestion, let choices = askChoices(from: inputs) { wire["choices"] = choices }
+        return wire
+    }
+
+    /// Outstanding permission and AskUserQuestion requests, sorted by requestId only so repeated calls agree; not arrival order.
+    func pendingRequestsWire() -> [[String: Any]] {
+        pendingPermissionRequestIds.sorted().map { id in
+            Self.pendingRequestWire(requestId: id, toolName: pendingPermissionRequestToolNames[id] ?? "",
+                                    inputs: pendingPermissionRequestInputs[id])
+        }
+    }
+
     private func updateWindowTitle(_ title: String) {
         sessionTitle = title
         // Sidebar shell: SwiftUI's `.navigationTitle` on Detail and the
@@ -6457,6 +6498,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 SleepGuard.reevaluateActive()
             }
             pendingPermissionRequestInputs[requestId] = request["inputs"]
+            pendingPermissionRequestToolNames[requestId] = request["toolName"] as? String ?? ""
             // The CLI computes the rule that "always allow" would write, and
             // the extension's own webview just hands it straight back — it
             // constructs its request object as
@@ -6515,6 +6557,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            pendingPermissionRequestIds.remove(targetRequestId) != nil
         {
             pendingPermissionRequestInputs.removeValue(forKey: targetRequestId)
+            pendingPermissionRequestToolNames.removeValue(forKey: targetRequestId)
             pendingPermissionRequestSuggestions.removeValue(forKey: targetRequestId)
             clearAskUserQuestionFlagIfMatching(targetRequestId)
             refreshAskingState()
@@ -6540,6 +6583,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         else { return }
         guard pendingPermissionRequestIds.remove(requestId) != nil else { return }
         pendingPermissionRequestInputs.removeValue(forKey: requestId)
+        pendingPermissionRequestToolNames.removeValue(forKey: requestId)
         pendingPermissionRequestSuggestions.removeValue(forKey: requestId)
         clearAskUserQuestionFlagIfMatching(requestId)
         refreshAskingState()
@@ -6554,6 +6598,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         outstandingDialogRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
+        pendingPermissionRequestToolNames.removeAll()
         // Cleared with `…Inputs`, which it is keyed alongside: both are
         // per-outstanding-request state, and leaving one behind on a shim
         // exit accumulated entries for the life of the process.
