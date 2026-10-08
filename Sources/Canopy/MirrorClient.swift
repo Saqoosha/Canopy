@@ -287,7 +287,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             // Loaded after attach_ok; for this Mac's daemon, from the folder its shim runs.
             if let webView {
                 let local = hostIsThisMac ? extensionVersion.flatMap { $0.isEmpty ? nil : CCExtension.installedPath(version: $0) } : nil
-                let resolvedId = (dict["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sessionId
+                // Interpolated unescaped into the entry HTML, so only a UUID from the host is accepted.
+                let resolvedId = (dict["sessionId"] as? String).flatMap { UUID(uuidString: $0) != nil ? $0 : nil } ?? sessionId
                 WebViewContainer.loadCCWebview(webView, resumeSessionId: resolvedId,
                                                entryFileName: WebViewContainer.entryFileName(for: nil),
                                                extensionPath: local)
