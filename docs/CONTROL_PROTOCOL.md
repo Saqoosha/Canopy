@@ -118,9 +118,9 @@ A `refused` result also carries `reasonCode`, for deciding whether to retry:
 | `permission_pending` | A permission prompt waits for a human | Not until it is answered |
 | `asking` | An AskUserQuestion waits for a human | Not until it is answered |
 | `queue_full` | 10 messages are already waiting | After the session catches up |
-| `empty` | The text was blank | No |
 
-A busy session is not refused; the message is `queued`.
+A busy session is not refused; the message is `queued`. Blank `text` never
+reaches this table: it is an `error` response before anything is queued.
 
 ### `pending_requests`
 
