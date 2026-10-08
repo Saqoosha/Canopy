@@ -3,6 +3,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
+import IOKit.ps
 import Network
 import ServiceManagement
 import os.log
@@ -6744,6 +6745,47 @@ enum SidebarLogicProbe {
                        .contains("\\\"hi\\\"") )
             record("RecapScript escapes newlines rather than breaking the literal",
                    !RecapScript.setCall(text: "line1\nline2").contains("\n"))
+        }
+
+        // MARK: - Sleep guard (see SleepGuardPolicy)
+        do {
+            let floor = SleepGuardPolicy.batteryFloorPercent
+            func hold(_ enabled: Bool, _ working: Int, _ power: PowerSource) -> Bool {
+                SleepGuardPolicy.decide(enabled: enabled, workingSessions: working, power: power).hold
+            }
+            record("SleepGuard holds while a session works on a Mac with no battery", hold(true, 1, .noBattery))
+            record("SleepGuard does not hold with no working session", !hold(true, 0, .noBattery))
+            record("SleepGuard does not hold when turned off", !hold(false, 1, .noBattery))
+            record("SleepGuard holds on battery at the floor", hold(true, 1, .battery(onBattery: true, percent: floor)))
+            record("SleepGuard releases on battery just below the floor",
+                   !hold(true, 1, .battery(onBattery: true, percent: floor - 1)))
+            record("SleepGuard holds below the floor while on AC power",
+                   hold(true, 1, .battery(onBattery: false, percent: floor - 1)))
+            record("SleepGuard does not hold when the battery cannot be read", !hold(true, 1, .unreadable))
+
+            let battery: [String: Any] = [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSCurrentCapacityKey: 15,
+                                           kIOPSMaxCapacityKey: 100, kIOPSPowerSourceStateKey: kIOPSBatteryPowerValue]
+            var noState = battery
+            noState[kIOPSPowerSourceStateKey] = nil
+            let ups: [String: Any] = [kIOPSTypeKey: kIOPSUPSType]
+            record("PowerSource reads an internal battery", PowerSource.parse([ups, battery]) == .battery(onBattery: true, percent: 15))
+            record("PowerSource: no internal battery is noBattery", PowerSource.parse([ups]) == .noBattery)
+            record("PowerSource: a missing power-state key is unreadable, not AC", PowerSource.parse([noState]) == .unreadable)
+            record("PowerSource: an unreadable entry with no battery found is unreadable", PowerSource.parse([ups, nil]) == .unreadable)
+            record("PowerSource: an unreadable accessory does not hide a readable battery",
+                   PowerSource.parse([nil, battery]) == .battery(onBattery: true, percent: 15))
+
+            let stale = SleepGuardPolicy.staleAfter
+            func session(_ working: Bool, _ waiting: Bool, _ bg: Int, _ since: TimeInterval) -> Bool {
+                SleepGuardPolicy.sessionHolds(working: working, waitingOnHuman: waiting,
+                                              reconcilableBackgroundTasks: bg, sinceActivity: since)
+            }
+            record("SleepGuard session: a working turn holds before the stale limit", session(true, false, 0, stale - 1))
+            record("SleepGuard session: a working flag stops holding at the stale limit", !session(true, false, 0, stale))
+            record("SleepGuard session: a waiting question holds before the stale limit", session(false, true, 0, stale - 1))
+            record("SleepGuard session: a waiting question stops holding at the stale limit", !session(false, true, 0, stale))
+            record("SleepGuard session: a local background task holds past the stale limit", session(false, false, 1, stale * 10))
+            record("SleepGuard session: an idle session does not hold", !session(false, false, 0, 0))
         }
 
         // MARK: - Prompt-cache keep-alive (see KeepAliveGate / KeepAliveCoordinator)

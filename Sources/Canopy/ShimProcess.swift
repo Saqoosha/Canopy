@@ -469,6 +469,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Running and not being stopped on purpose.
     var isLive: Bool { process?.isRunning == true && !isIntentionalStop }
+
+    /// When a turn last started, a permission request arrived, or the CLI last sent a frame (`SleepGuardPolicy.sessionHolds`).
+    private var lastSessionActivityAt = Date.distantPast
+
+    /// The Mac should stay awake for this session (`SleepGuard`). Rules in `SleepGuardPolicy.sessionHolds`.
+    var holdsSystemAwake: Bool {
+        isLive && SleepGuardPolicy.sessionHolds(
+            working: isWorking, waitingOnHuman: !pendingPermissionRequestIds.isEmpty || lastAssistantHadAskUserQuestion,
+            reconcilableBackgroundTasks: remoteHost == nil ? pendingBackgroundTaskIds.count : 0,
+            sinceActivity: Date().timeIntervalSince(lastSessionActivityAt))
+    }
     /// The extension version this shim started on; nil until it starts, or when unreadable.
     private(set) var extensionVersion: String?
     /// The extension folder this shim started on; a page for it must load from the same one.
@@ -607,6 +618,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // outstanding AskUserQuestion asking state — the user already
             // responded, we're back to thinking.
             if isWorking && !oldValue {
+                lastSessionActivityAt = Date()
+                SleepGuard.reevaluateActive()
                 lastAssistantHadAskUserQuestion = false
                 // The turn is now known to have started — CLI frames are
                 // flowing back through `trackWorkingState`, so the ordinary
@@ -6334,6 +6347,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            request["type"] as? String == "tool_permission_request"
         {
             let isNewPermissionRequest = pendingPermissionRequestIds.insert(requestId).inserted
+            if isNewPermissionRequest {
+                lastSessionActivityAt = Date()
+                SleepGuard.reevaluateActive()
+            }
             pendingPermissionRequestInputs[requestId] = request["inputs"]
             // The CLI computes the rule that "always allow" would write, and
             // the extension's own webview just hands it straight back — it
@@ -7831,6 +7848,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let ioMsg = nested["message"] as? [String: Any],
               let ioType = ioMsg["type"] as? String
         else { return }
+        // A frame reviving a stale session re-decides now; every frame would flood the main queue.
+        let wasStale = Date().timeIntervalSince(lastSessionActivityAt) >= SleepGuardPolicy.staleAfter
+        lastSessionActivityAt = Date()
+        if wasStale { SleepGuard.reevaluateActive() }
 
         switch ioType {
         case "assistant", "stream_event":
