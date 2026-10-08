@@ -171,6 +171,44 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// request Canopy itself made — falls through to the broadcast.
     private var requestOwners: [String: RequestOwner] = [:]
 
+    /// In-flight `authenticate_mcp_server` requests from another Mac, by id.
+    /// The extension opens the OAuth page (`open_url` from the shim) before it
+    /// answers, so while one is outstanding that page belongs on the Mac that
+    /// asked, not on this screen (the daemon host nobody is sitting at).
+    private var remoteMcpAuthRequests: [String: ObjectIdentifier] = [:]
+
+    /// The other Mac an `open_url` from the shim should go to, if any.
+    private var mcpAuthURLTarget: (any MirrorSink)? {
+        remoteMcpAuthRequests.values.lazy.compactMap { self.mirrors[$0]?.sink }
+            .first { Self.takesRemoteMcpAuth($0) }
+    }
+
+    /// A Mac on another machine that takes `open_url` frames. The phone is left
+    /// out: it has its own browser story, and the local GUI is this machine.
+    private static func takesRemoteMcpAuth(_ sink: any MirrorSink) -> Bool {
+        sink.acceptsFileTransfers && !sink.isLocalClient
+    }
+
+    /// Rewrites an `authenticate_mcp_server` response for a client on another
+    /// machine. The CLI waits for the OAuth redirect on THIS machine's
+    /// localhost, so the browser on the client lands on a connection error;
+    /// `isWebUI` makes the extension's own panel offer a field to paste that
+    /// address-bar URL, which goes back as `submit_mcp_oauth_callback_url`.
+    /// `requiresUserAction` is forced because the panel is shown only then.
+    static func patchingMcpAuthForRemoteClient(_ payload: [String: Any]) -> [String: Any] {
+        guard var message = payload["message"] as? [String: Any],
+              var response = message["response"] as? [String: Any],
+              response["type"] as? String == "authenticate_mcp_server",
+              response["authUrl"] is String
+        else { return payload }
+        response["isWebUI"] = true
+        response["requiresUserAction"] = true
+        message["response"] = response
+        var out = payload
+        out["message"] = message
+        return out
+    }
+
     /// `tool_permission_request` and `user_dialog_request` frames still awaiting an answer, re-sent to a client that launches late.
     private var outstandingDialogRequests: [String: [String: Any]] = [:]
 
@@ -296,6 +334,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if case .mirror(let owner) = $0.value { return owner != key }
             return true
         }
+        remoteMcpAuthRequests = remoteMcpAuthRequests.filter { $0.value != key }
         if mirrors.isEmpty {
             requestOwners.removeAll()
             quietSince = Date()
@@ -3707,6 +3746,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             if let requestId = dict["requestId"] as? String, msgType == "request", !mirrors.isEmpty {
                 requestOwners[requestId] = mirrorKey.map { .mirror($0) } ?? .primary
+                if let mirrorKey, let sender, Self.takesRemoteMcpAuth(sender),
+                   (dict["request"] as? [String: Any])?["type"] as? String == "authenticate_mcp_server" {
+                    remoteMcpAuthRequests[requestId] = mirrorKey
+                }
             }
             if let mirrorKey {
                 let requestType = (dict["request"] as? [String: Any])?["type"] as? String ?? "-"
@@ -4293,7 +4336,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         case "open_url":
             if let urlStr = msg["url"] as? String, let url = URL(string: urlStr) {
-                NSWorkspace.shared.open(url)
+                if let target = mcpAuthURLTarget, ["http", "https"].contains(url.scheme ?? "") {
+                    logger.notice("open_url: MCP auth page sent to the Mac that asked")
+                    MirrorFileSender.sendURL(urlStr, to: target)
+                } else {
+                    NSWorkspace.shared.open(url)
+                }
             }
 
         case "open_terminal":
@@ -4789,12 +4837,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let requestId = inner["requestId"] as? String,
            let owner = requestOwners.removeValue(forKey: requestId)
         {
+            let wasRemoteMcpAuth = remoteMcpAuthRequests.removeValue(forKey: requestId) != nil
             switch owner {
             case .primary:
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
-                    let payload = addingBoundSessionIfMissing(payload)
+                    var payload = addingBoundSessionIfMissing(payload)
+                    if wasRemoteMcpAuth { payload = Self.patchingMcpAuthForRemoteClient(payload) }
                     let shaped: [String: Any]
                     if let connection = target as? MirrorConnection {
                         let session = boundSession?.resumeId ?? ""

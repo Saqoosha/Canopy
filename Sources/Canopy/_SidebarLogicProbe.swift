@@ -6819,6 +6819,25 @@ enum SidebarLogicProbe {
             let echoMsg = envelope(echoBlocks(KeepAliveGate.promptText))
             let otherUserMsg = envelope(echoBlocks("fix the failing test"))
 
+            do {
+                func auth(_ response: [String: Any]) -> [String: Any] {
+                    ["type": "from-extension", "message": ["type": "response", "requestId": "r1", "response": response] as [String: Any]]
+                }
+                func inner(_ p: [String: Any]) -> [String: Any]? {
+                    (p["message"] as? [String: Any])?["response"] as? [String: Any]
+                }
+                let patched = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
+                    ["type": "authenticate_mcp_server", "authUrl": "https://x/auth", "requiresUserAction": false, "isWebUI": false])))
+                record("remote MCP auth: response offers the paste field",
+                       patched?["isWebUI"] as? Bool == true && patched?["requiresUserAction"] as? Bool == true)
+                let noURL = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
+                    ["type": "authenticate_mcp_server", "requiresUserAction": false])))
+                record("remote MCP auth: no authUrl (already authenticated) is left alone",
+                       noURL?["isWebUI"] == nil && noURL?["requiresUserAction"] as? Bool == false)
+                let other = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
+                    ["type": "clear_mcp_server_auth", "authUrl": "https://x/auth"])))
+                record("remote MCP auth: other responses are left alone", other?["isWebUI"] == nil)
+            }
             record("disposition passes everything through when no refresh is in flight",
                    ShimProcess.keepAliveDisposition(initMsg, inFlight: false, echoSeen: false) == .passThrough)
             // The shipped bug, now one red assertion.
