@@ -3,6 +3,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
+import IOKit.ps
 import Network
 import ServiceManagement
 import os.log
@@ -5431,6 +5432,109 @@ enum SidebarLogicProbe {
                    ShimProcess.scrubbingCanopyAssignedKeys(["CANOPY_CLI_CWD": "/x", "CANOPY_WORKTREE": "/y"]).isEmpty)
         }
 
+        // MARK: - Removed-worktree rescue
+        do {
+            let managed = GitWorktree.worktreesRoot.appendingPathComponent("Canopy/fix-login")
+            let checkouts: Set<String> = ["/r/Canopy", "/d/Canopy", "/r/Other", "/p/app", "/q/repo"]
+            let isCheckout: (URL) -> Bool = { checkouts.contains($0.standardizedFileURL.path) }
+            let sameDisk: (URL) -> String = { $0.path == "/d/Canopy" ? "/r/Canopy" : $0.path }
+            func rescue(_ dir: URL, _ known: [String], realPath: @escaping (URL) -> String = { $0.path }) -> String? {
+                GitWorktree.checkoutForRemovedWorktree(dir, knownCheckouts: known.map { URL(fileURLWithPath: $0) },
+                                                       isCheckout: isCheckout, realPath: realPath)?.path
+            }
+            record("rescue: a managed worktree finds the one checkout of its repo's name",
+                   rescue(managed, ["/r/Other", "/r/Canopy"]) == "/r/Canopy")
+            record("rescue: two different checkouts of that name → no guess",
+                   rescue(managed, ["/r/Canopy", "/d/Canopy"]) == nil)
+            record("rescue: two spellings of one checkout count once, as its real path",
+                   rescue(managed, ["/d/Canopy", "/r/Canopy"], realPath: sameDisk) == "/r/Canopy")
+            record("rescue: no known checkout of that name → nothing",
+                   rescue(managed, ["/r/Other"]) == nil)
+            record("rescue: a known folder that is not a checkout is not one",
+                   rescue(managed, ["/x/Canopy"]) == nil)
+            record("rescue: the sibling layout names its checkout",
+                   rescue(URL(fileURLWithPath: "/p/app-worktrees/feat"), []) == "/p/app")
+            record("rescue: the in-repo layout names its checkout",
+                   rescue(URL(fileURLWithPath: "/q/repo/.claude/worktrees/feat"), []) == "/q/repo")
+            record("rescue: a folder that is no worktree layout → nothing",
+                   rescue(URL(fileURLWithPath: "/q/repo/build"), ["/q/repo"]) == nil)
+
+            let gone = SessionEntry(id: UUID().uuidString, title: "t", timestamp: Date(),
+                                    projectDirectory: managed, canOpen: false, logPath: "/x.jsonl")
+            let alive = SessionEntry(id: UUID().uuidString, title: "t", timestamp: Date(),
+                                     projectDirectory: URL(fileURLWithPath: "/r/Canopy"), logPath: "/y.jsonl")
+            let marked = ClaudeSessionHistory.withRescueCheckouts([gone, alive], knownCheckouts: [], isCheckout: isCheckout)
+            record("rescue: a removed worktree's row becomes openable through another row's checkout",
+                   marked[0].canOpen && marked[0].rescueCheckout?.path == "/r/Canopy" && marked[1].rescueCheckout == nil)
+            record("rescue: a recent directory alone can name the checkout",
+                   ClaudeSessionHistory.withRescueCheckouts([gone], knownCheckouts: [URL(fileURLWithPath: "/r/Canopy")],
+                                                            isCheckout: isCheckout)[0].rescueCheckout?.path == "/r/Canopy")
+            let liveWorktree = SessionEntry(id: UUID().uuidString, title: "t", timestamp: Date(),
+                                            projectDirectory: managed, canOpen: true, logPath: "/z.jsonl")
+            record("rescue: a worktree that still exists gets no rescue checkout",
+                   ClaudeSessionHistory.withRescueCheckouts([liveWorktree, alive], knownCheckouts: [],
+                                                            isCheckout: isCheckout)[0].rescueCheckout == nil)
+            var noLog = gone
+            noLog.logPath = nil
+            record("rescue: a row with no transcript path stays closed",
+                   !ClaudeSessionHistory.withRescueCheckouts([noLog, alive], knownCheckouts: [], isCheckout: isCheckout)[0].canOpen)
+
+            // The move itself, on real files: a scratch checkout, and a transcript in a
+            // throwaway folder under ~/.claude/projects standing in for the worktree's.
+            let fm = FileManager.default
+            let scratch = fm.temporaryDirectory.appendingPathComponent("canopy-probe-rescue-\(UUID().uuidString)")
+            let projects = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+            let wtFolder = projects.appendingPathComponent("-canopy-probe-rescue-wt-\(UUID().uuidString)")
+            let sid = UUID().uuidString.lowercased()
+            try? fm.createDirectory(at: scratch.appendingPathComponent(".git"), withIntermediateDirectories: true)
+            // As the rescue names it: its real path (`/private/var/…`, not `/var/…`).
+            let checkout = URL(fileURLWithPath: GitWorktree.realPath(of: scratch))
+            let destFolder = projects.appendingPathComponent(ClaudeSessionHistory.encodePath(checkout.path))
+            defer {
+                try? fm.removeItem(at: scratch)
+                try? fm.removeItem(at: wtFolder)
+                try? fm.removeItem(at: destFolder)
+            }
+            try? fm.createDirectory(at: wtFolder.appendingPathComponent("\(sid)/subagents"), withIntermediateDirectories: true)
+            try? "{}\n".write(to: wtFolder.appendingPathComponent("\(sid).jsonl"), atomically: true, encoding: .utf8)
+            var entry = SessionEntry(id: sid, title: "t", timestamp: Date(), projectDirectory: managed,
+                                     canOpen: true, logPath: wtFolder.appendingPathComponent("\(sid).jsonl").path)
+            entry.rescueCheckout = checkout
+            let opened = ClaudeSessionHistory.directoryToOpen(entry)
+            record("rescue: opening moves the transcript and its folder to the checkout's project folder",
+                   opened == checkout
+                       && fm.fileExists(atPath: destFolder.appendingPathComponent("\(sid).jsonl").path)
+                       && fm.fileExists(atPath: destFolder.appendingPathComponent("\(sid)/subagents").path)
+                       && !fm.fileExists(atPath: wtFolder.appendingPathComponent("\(sid).jsonl").path))
+            record("rescue: a second open (the daemon after the GUI) finds it already moved",
+                   ClaudeSessionHistory.directoryToOpen(entry) == checkout)
+            record("rescue: the daemon finds the moved transcript filed under the checkout",
+                   ClaudeSessionHistory.isFiled(sessionId: sid, under: checkout)
+                       && !ClaudeSessionHistory.isFiled(sessionId: UUID().uuidString.lowercased(), under: checkout))
+            var missing = entry
+            missing.rescueCheckout = nil
+            record("rescue: a removed folder with no checkout cannot be opened",
+                   ClaudeSessionHistory.directoryToOpen(missing) == nil)
+            // Listed while the worktree still existed: canOpen true, no rescue checkout yet.
+            let stale = SessionEntry(id: sid, title: "t", timestamp: Date(),
+                                     projectDirectory: GitWorktree.worktreesRoot
+                                         .appendingPathComponent("\(checkout.lastPathComponent)/feat"),
+                                     logPath: entry.logPath)
+            record("rescue: a row listed before its worktree went away finds the checkout when opened",
+                   ClaudeSessionHistory.directoryToOpen(stale) == nil
+                       && ClaudeSessionHistory.directoryToOpen(stale, knownCheckouts: [scratch]) == checkout)
+            let alivePath = fm.temporaryDirectory
+            var existing = SessionEntry(id: sid, title: "t", timestamp: Date(), projectDirectory: alivePath, logPath: "/nope.jsonl")
+            existing.rescueCheckout = checkout
+            record("rescue: a folder that exists opens as itself and nothing moves",
+                   ClaudeSessionHistory.directoryToOpen(existing) == alivePath)
+            var lost = SessionEntry(id: UUID().uuidString.lowercased(), title: "t", timestamp: Date(),
+                                    projectDirectory: managed, logPath: "/no/such/transcript.jsonl")
+            lost.rescueCheckout = checkout
+            record("rescue: a failed move opens nothing",
+                   ClaudeSessionHistory.directoryToOpen(lost) == nil)
+        }
+
         // MARK: - Panes
         do {
             // Brief names openA / openB / recentAsOpen; only openA/openB are
@@ -6717,6 +6821,47 @@ enum SidebarLogicProbe {
                        .contains("\\\"hi\\\"") )
             record("RecapScript escapes newlines rather than breaking the literal",
                    !RecapScript.setCall(text: "line1\nline2").contains("\n"))
+        }
+
+        // MARK: - Sleep guard (see SleepGuardPolicy)
+        do {
+            let floor = SleepGuardPolicy.batteryFloorPercent
+            func hold(_ enabled: Bool, _ working: Int, _ power: PowerSource) -> Bool {
+                SleepGuardPolicy.decide(enabled: enabled, workingSessions: working, power: power).hold
+            }
+            record("SleepGuard holds while a session works on a Mac with no battery", hold(true, 1, .noBattery))
+            record("SleepGuard does not hold with no working session", !hold(true, 0, .noBattery))
+            record("SleepGuard does not hold when turned off", !hold(false, 1, .noBattery))
+            record("SleepGuard holds on battery at the floor", hold(true, 1, .battery(onBattery: true, percent: floor)))
+            record("SleepGuard releases on battery just below the floor",
+                   !hold(true, 1, .battery(onBattery: true, percent: floor - 1)))
+            record("SleepGuard holds below the floor while on AC power",
+                   hold(true, 1, .battery(onBattery: false, percent: floor - 1)))
+            record("SleepGuard does not hold when the battery cannot be read", !hold(true, 1, .unreadable))
+
+            let battery: [String: Any] = [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSCurrentCapacityKey: 15,
+                                           kIOPSMaxCapacityKey: 100, kIOPSPowerSourceStateKey: kIOPSBatteryPowerValue]
+            var noState = battery
+            noState[kIOPSPowerSourceStateKey] = nil
+            let ups: [String: Any] = [kIOPSTypeKey: kIOPSUPSType]
+            record("PowerSource reads an internal battery", PowerSource.parse([ups, battery]) == .battery(onBattery: true, percent: 15))
+            record("PowerSource: no internal battery is noBattery", PowerSource.parse([ups]) == .noBattery)
+            record("PowerSource: a missing power-state key is unreadable, not AC", PowerSource.parse([noState]) == .unreadable)
+            record("PowerSource: an unreadable entry with no battery found is unreadable", PowerSource.parse([ups, nil]) == .unreadable)
+            record("PowerSource: an unreadable accessory does not hide a readable battery",
+                   PowerSource.parse([nil, battery]) == .battery(onBattery: true, percent: 15))
+
+            let stale = SleepGuardPolicy.staleAfter
+            func session(_ working: Bool, _ waiting: Bool, _ bg: Int, _ since: TimeInterval) -> Bool {
+                SleepGuardPolicy.sessionHolds(working: working, waitingOnHuman: waiting,
+                                              reconcilableBackgroundTasks: bg, sinceActivity: since)
+            }
+            record("SleepGuard session: a working turn holds before the stale limit", session(true, false, 0, stale - 1))
+            record("SleepGuard session: a working flag stops holding at the stale limit", !session(true, false, 0, stale))
+            record("SleepGuard session: a waiting question holds before the stale limit", session(false, true, 0, stale - 1))
+            record("SleepGuard session: a waiting question stops holding at the stale limit", !session(false, true, 0, stale))
+            record("SleepGuard session: a local background task holds past the stale limit", session(false, false, 1, stale * 10))
+            record("SleepGuard session: an idle session does not hold", !session(false, false, 0, 0))
         }
 
         // MARK: - Prompt-cache keep-alive (see KeepAliveGate / KeepAliveCoordinator)
@@ -12067,6 +12212,18 @@ enum SidebarLogicProbe {
             record("account parse: empty optional fields become nil",
                    account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","displayName":"","organizationName":""}}"#)
                        .map { $0.displayName == nil && $0.organizationName == nil } ?? false)
+            func org(_ json: String) -> String? { KeychainAuth.organizationUuid(inClaudeJSON: Data(json.utf8)) }
+            record("org uuid: read from oauthAccount, with or without an email",
+                   org(#"{"oauthAccount":{"organizationUuid":"org-1"}}"#) == "org-1"
+                       && org(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","organizationUuid":"org-2"}}"#) == "org-2")
+            record("org uuid: empty, missing or malformed → nil",
+                   org(#"{"oauthAccount":{"organizationUuid":""}}"#) == nil && org(#"{"oauthAccount":{}}"#) == nil
+                       && org("not json") == nil)
+            record("org uuid: the Keychain blob's own wins over the config",
+                   KeychainAuth.organizationUuid(keychainBlob: ["organizationUuid": "kc"], defaultConfig: { "cfg" }) == "kc")
+            record("org uuid: an absent or empty blob org falls back to the config",
+                   KeychainAuth.organizationUuid(keychainBlob: [:], defaultConfig: { "cfg" }) == "cfg"
+                       && KeychainAuth.organizationUuid(keychainBlob: ["organizationUuid": ""], defaultConfig: { "cfg" }) == "cfg")
             record("account parse: a missing oauthAccount is no account",
                    account(#"{"numStartups":3}"#) == nil)
             record("account parse: an empty email is no account",

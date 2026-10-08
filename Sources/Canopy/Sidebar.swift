@@ -184,7 +184,7 @@ struct Sidebar: View {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
-                            Text(err)
+                            Text(err.message)
                                 .font(.caption)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 4)
@@ -196,13 +196,15 @@ struct Sidebar: View {
                             }
                             .buttonStyle(.plain)
                         }
-                        Button("Open Settings…") {
-                            openSettings()
-                            store.remoteAttachError = nil
+                        if err.offersSettings {
+                            Button("Open Settings…") {
+                                openSettings()
+                                store.remoteAttachError = nil
+                            }
+                            .buttonStyle(.link)
+                            .font(.caption)
+                            .padding(.leading, 24)
                         }
-                        .buttonStyle(.link)
-                        .font(.caption)
-                        .padding(.leading, 24)
                     }
                     .padding(8)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
@@ -551,8 +553,8 @@ struct Sidebar: View {
 
     /// Whether clicking a row can actually produce a session.
     ///
-    /// A closed local row answers no when its directory is gone
-    /// (`SessionEntry.canOpen`, measured once by `loadAllSessions`). A remote
+    /// A closed local row answers no when its directory is gone and no checkout
+    /// can take it (`SessionEntry.canOpen`). A remote
     /// live row answers no when the home Mac reported `live: false`. Stale
     /// does not block the click — see `SidebarRow.canOpen`.
     private func canOpen(_ row: SidebarRow) -> Bool {
@@ -607,9 +609,8 @@ struct Sidebar: View {
         case .open(let s):
             return s.origin.localWorkingDirectory
         case .closedLocal(let entry):
-            // Gone means gone: offering Finder a directory we already know is
-            // absent can only log a warning and look like nothing happened.
-            return entry.canOpen ? entry.projectDirectory : nil
+            // A gone folder shows the checkout it reopens in, or nothing.
+            return entry.canOpen ? (entry.rescueCheckout ?? entry.projectDirectory) : nil
         case .closedCloud, .launcher, .remoteLive:
             return nil
         }

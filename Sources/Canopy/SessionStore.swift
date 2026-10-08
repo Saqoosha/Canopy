@@ -304,8 +304,14 @@ final class SessionStore {
         "The session on \(machineName) stopped: \(reason)"
     }
 
+    /// The sidebar banner's text. `offersSettings` is false when Settings cannot help, as for a session stopped elsewhere.
+    struct RemoteNotice: Equatable {
+        let message: String
+        var offersSettings = true
+    }
+
     /// The most recent attach refusal, for the sidebar banner: no pairing, or a pane whose attach failed.
-    var remoteAttachError: String?
+    var remoteAttachError: RemoteNotice?
 
     func openRemoteLive(_ remote: RemoteLiveSession, target: PaneTarget) {
         if let existing = openSessions.first(where: {
@@ -322,7 +328,7 @@ final class SessionStore {
             return
         }
         if let refusal = remoteAttachRefusal(machineId: remote.machineId, machineName: remote.machineName) {
-            remoteAttachError = refusal
+            remoteAttachError = RemoteNotice(message: refusal)
             logger.notice("openRemoteLive: refused before attach for \(remote.machineId, privacy: .public)")
             return
         }
@@ -358,7 +364,7 @@ final class SessionStore {
     /// True when the attach may go ahead; otherwise records why for the sidebar banner.
     private func refuseRemoteAttachIfUnpaired(machineId: String, machineName: String) -> Bool {
         guard let refusal = remoteAttachRefusal(machineId: machineId, machineName: machineName) else { return true }
-        remoteAttachError = refusal
+        remoteAttachError = RemoteNotice(message: refusal)
         logger.notice("remote open refused before attach for \(machineId, privacy: .public)")
         return false
     }
@@ -776,11 +782,9 @@ final class SessionStore {
         !rowCwd.isEmpty && rowCwd != current.path && !exists(current.path) && isCheckout(rowCwd)
     }
 
-    /// A main checkout holds its `.git` as a folder; a linked worktree's is a file.
+    /// `GitWorktree.isMainCheckout` for a path string.
     nonisolated static func isMainCheckout(_ path: String) -> Bool {
-        var isDirectory: ObjCBool = false
-        return FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent(".git"),
-                                              isDirectory: &isDirectory) && isDirectory.boolValue
+        GitWorktree.isMainCheckout(URL(fileURLWithPath: path))
     }
 
     /// The session removed its own worktree after the canopy-bridge mod left
@@ -1101,11 +1105,14 @@ final class SessionStore {
         launch.backToLauncher()
     }
 
+    /// Where a removed worktree's session may reopen: the openable rows' folders and the recent directories.
+    var rescueCandidates: [URL] { recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load() }
+
     /// Open a closed local row by spawning a shim with --resume against the
     /// existing JSONL. If `permissionMode` is nil, falls back to the global
     /// default in `CanopySettings.defaultPermissionMode`.
     @discardableResult
-    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil, target: PaneTarget = .focused) -> OpenSession {
+    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil, target: PaneTarget = .focused) -> OpenSession? {
         // If this session is already open, honor target (focused vs new pane).
         if let existing = openSessions.first(where: { $0.resumeId == entry.id }) {
             switch target {
@@ -1121,8 +1128,16 @@ final class SessionStore {
             }
             return existing
         }
+        guard let directory = ClaudeSessionHistory.directoryToOpen(
+            entry, knownCheckouts: rescueCandidates)
+        else {
+            // The folder is gone and the transcript could not be moved to a checkout.
+            noteSessionFailure(title: entry.title, message: "Could not reopen this session: its folder is gone "
+                               + "and its transcript could not be moved to the repository's main checkout.", status: -2)
+            return nil
+        }
         return openNew(
-            directory: entry.projectDirectory,
+            directory: directory,
             resumeId: entry.id,
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,
@@ -1311,7 +1326,7 @@ final class SessionStore {
             let failure = await Self.stopOnPeer(machineId: machineId, machineName: machineName, key: key, resumeId: resumeId)
             self?.finishStop(session, stopped: failure == nil, restore: restore)
             // The sidebar banner, not the launcher's: the pane is still up, so no launcher shows.
-            if let failure { self?.remoteAttachError = "Could not stop \(session.title). \(failure)" }
+            if let failure { self?.remoteAttachError = RemoteNotice(message: "Could not stop \(session.title). \(failure)") }
         }
     }
 
@@ -1333,7 +1348,7 @@ final class SessionStore {
             // On success the id stays: the row goes when that Mac's roster stops listing it.
             guard let failure else { return }
             self?.stoppingRemoteIds.remove(remote.sessionId)
-            self?.remoteAttachError = "Could not stop the session. \(failure)"
+            self?.remoteAttachError = RemoteNotice(message: "Could not stop the session. \(failure)")
         }
     }
 

@@ -8,20 +8,10 @@ struct SessionEntry: Identifiable, Hashable {
     let title: String
     let timestamp: Date
     let projectDirectory: URL
-    /// False when `projectDirectory` is gone — the state a git worktree
-    /// removed after merging leaves behind. Such a session stays in the list
-    /// (#221) but CANNOT be opened: `ShimProcess.start` refuses a missing
-    /// spawn cwd, so the sidebar draws it as unopenable rather than letting a
-    /// click fail. Its transcript is still readable, which is what the row's
-    /// "Copy Session Log Path" is for.
-    ///
-    /// Defaulted to true because the only reader is the sidebar's closed-local
-    /// row, and `loadAllSessions` alone feeds those — it already has the
-    /// answer, the same `fileExists` its keep decision consults, so no row
-    /// pays a second stat. The other two loaders never reach a reader:
-    /// `loadSessionsFromDir` serves the launcher, whose directory may be gone
-    /// (see `LauncherView.latestSession`), and a remote entry's cwd is checked
-    /// on the other machine, not here.
+    /// False when `projectDirectory` is gone and no checkout was found to
+    /// reopen it in (`rescueCheckout`); the row stays listed (#221) with
+    /// "Copy Session Log Path". Defaulted so loaders other than
+    /// `loadAllSessions` need not answer it.
     var canOpen: Bool = true
     /// This session's transcript on disk, when the loader that built the entry
     /// already knew it. `loadAllSessions` does — it walks `.jsonl` files, so
@@ -33,6 +23,10 @@ struct SessionEntry: Identifiable, Hashable {
     /// measured) — the use that function's own doc rules out as "always the
     /// fallback, never the primary lookup".
     var logPath: String? = nil
+    /// The main checkout a removed worktree's session reopens in, when one was
+    /// found (`GitWorktree.checkoutForRemovedWorktree`); `canOpen` is then true.
+    /// Opening goes through `ClaudeSessionHistory.directoryToOpen`.
+    var rescueCheckout: URL? = nil
 
     var projectName: String { GitWorktree.projectDisplayName(for: projectDirectory) }
 }
@@ -438,7 +432,86 @@ enum ClaudeSessionHistory {
                 """)
         }
 
-        return selection.kept
+        return withRescueCheckouts(selection.kept, knownCheckouts: RecentDirectories.load())
+    }
+
+    /// Marks the rows of removed worktrees that can reopen in their main
+    /// checkout, judged against the openable rows' folders plus `knownCheckouts`.
+    /// A row needs its `logPath`: that is the file `directoryToOpen` moves.
+    static func withRescueCheckouts(
+        _ entries: [SessionEntry], knownCheckouts extra: [URL],
+        isCheckout: (URL) -> Bool = { GitWorktree.isMainCheckout($0) }
+    ) -> [SessionEntry] {
+        let known = entries.filter(\.canOpen).map(\.projectDirectory) + extra
+        return entries.map { entry in
+            guard !entry.canOpen, entry.logPath != nil,
+                  let checkout = GitWorktree.checkoutForRemovedWorktree(
+                      entry.projectDirectory, knownCheckouts: known, isCheckout: isCheckout)
+            else { return entry }
+            var rescued = entry
+            rescued.rescueCheckout = checkout
+            rescued.canOpen = true
+            return rescued
+        }
+    }
+
+    /// The folder to open a listed session in: its own while it exists, else
+    /// the checkout its removed worktree hung off — after moving the transcript
+    /// into that checkout's project folder, because the extension renders only
+    /// from the cwd's folders (and `git worktree list`), and a removed worktree
+    /// is in neither. `knownCheckouts` covers a row listed before its worktree
+    /// went away. Idempotent: the GUI and the daemon both call it. Nil when
+    /// neither works.
+    static func directoryToOpen(_ entry: SessionEntry, knownCheckouts: [URL] = []) -> URL? {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: entry.projectDirectory.path) { return entry.projectDirectory }
+        var entry = entry
+        if entry.rescueCheckout == nil {
+            entry.canOpen = false
+            entry = withRescueCheckouts([entry], knownCheckouts: knownCheckouts)[0]
+        }
+        guard let checkout = entry.rescueCheckout, let source = entry.logPath else { return nil }
+        // The CLI files a cwd's transcripts under the current encoding; a legacy folder is not read for it.
+        let destFolder = claudeDir.appendingPathComponent(encodePath(checkout.path))
+        let dest = destFolder.appendingPathComponent("\(entry.id).jsonl")
+        if fm.fileExists(atPath: dest.path), source != dest.path, fm.fileExists(atPath: source) {
+            // Only something writing the old path after a move does this; the checkout's copy is the one opened.
+            logger.error("Session \(entry.id, privacy: .public) has a transcript in both its worktree's and its checkout's folder")
+        } else if !fm.fileExists(atPath: dest.path) {
+            guard fm.fileExists(atPath: source) else {
+                logger.error("Session \(entry.id, privacy: .public)'s transcript is gone from where it was listed")
+                return nil
+            }
+            do {
+                try fm.createDirectory(at: destFolder, withIntermediateDirectories: true)
+                try fm.moveItem(atPath: source, toPath: dest.path)
+                logger.notice("Moved session \(entry.id, privacy: .public)'s transcript to its checkout's project folder")
+            } catch where fm.fileExists(atPath: dest.path) {
+                // Another Canopy moved it first.
+            } catch {
+                logger.error("Could not move session \(entry.id, privacy: .public)'s transcript: \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        }
+        // Subagent transcripts and tool results live beside the log, under its id;
+        // moved on their own so an earlier half-done move is finished here.
+        let siblings = (source as NSString).deletingPathExtension
+        let destSiblings = destFolder.appendingPathComponent(entry.id).path
+        if fm.fileExists(atPath: siblings), !fm.fileExists(atPath: destSiblings) {
+            do {
+                try fm.moveItem(atPath: siblings, toPath: destSiblings)
+            } catch {
+                logger.error("Could not move session \(entry.id, privacy: .public)'s subagent folder: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return checkout
+    }
+
+    /// Whether `sessionId`'s transcript is filed under `dir`'s own project folders, without the store-wide scan.
+    static func isFiled(sessionId: String, under dir: URL) -> Bool {
+        encodedFolderCandidates(for: dir.path).contains {
+            FileManager.default.fileExists(atPath: claudeDir.appendingPathComponent("\($0)/\(sessionId).jsonl").path)
+        }
     }
 
     private typealias Metadata = (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool)
@@ -860,15 +933,7 @@ enum ClaudeSessionHistory {
     /// `GitWorktree.projectDisplayName` derives `<repo> · <branch>` from that
     /// path lexically, no `fileExists`.
     ///
-    /// This restores the row to the list; it does NOT make it reopenable.
-    /// `ShimProcess.start` refuses a missing spawn cwd, and spawning in the
-    /// repository instead was tried and rejected (#223): read off extension
-    /// 2.1.268, the webview's transcript resolver enumerates only the cwd's
-    /// encoded folders plus what `git worktree list` reports, and a removed
-    /// worktree is in neither — so the pane would open on an empty chat.
-    /// Derived from the bundle, not observed on device. The row is unopenable
-    /// instead (`SessionEntry.canOpen`), and its log is reached by path —
-    /// see the sidebar's "Copy Session Log Path".
+    /// Reopening, when a checkout is found, is `withRescueCheckouts` / `directoryToOpen`.
     ///
     /// Kept iff the missing directory is a recognized worktree layout. A
     /// genuinely dead project — a deleted repo, an unmounted drive — is not one
