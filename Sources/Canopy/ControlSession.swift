@@ -256,8 +256,7 @@ final class ControlSession {
                 return
             }
         }
-        // A placeholder the CLI's own id replaces once a client's webview
-        // launches it; the client attaches with this id right away.
+        // A placeholder the CLI's id replaces once a turn has run; follow-ups should use `key`.
         let sessionId = UUID().uuidString.lowercased()
         let options = SessionStore.HeadlessOptions(model: params.model, effort: params.effort,
                                                    permissionMode: params.permissionMode,

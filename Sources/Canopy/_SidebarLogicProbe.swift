@@ -7057,6 +7057,20 @@ enum SidebarLogicProbe {
             record("isKeepAliveEcho refuses a message with no message payload",
                    !ShimProcess.isKeepAliveEcho(["type": "user"]))
 
+            // --- sessionIdFromInit: the id a pane-less session adopts.
+            func ioFrame(_ io: [String: Any]) -> [String: Any] { ["type": "io_message", "message": io] }
+            let initSid = "9fea80f2-c6a2-4a1f-adf2-a7401b0ac7e1"
+            record("sessionIdFromInit reads a system/init's session_id",
+                   ShimProcess.sessionIdFromInit(ioFrame(["type": "system", "subtype": "init", "session_id": initSid])) == initSid)
+            record("sessionIdFromInit ignores another system subtype",
+                   ShimProcess.sessionIdFromInit(ioFrame(["type": "system", "subtype": "status", "session_id": initSid])) == nil)
+            record("sessionIdFromInit ignores a non-system frame carrying session_id",
+                   ShimProcess.sessionIdFromInit(ioFrame(["type": "result", "subtype": "init", "session_id": initSid])) == nil)
+            record("sessionIdFromInit refuses an id that is not a UUID",
+                   ShimProcess.sessionIdFromInit(ioFrame(["type": "system", "subtype": "init", "session_id": "canopy-headless"])) == nil)
+            record("sessionIdFromInit ignores a frame that is not an io_message",
+                   ShimProcess.sessionIdFromInit(["type": "system", "subtype": "init", "session_id": initSid]) == nil)
+
             // --- keepAliveFrameForWebView: what the webview is handed.
             func inner(_ m: [String: Any]?) -> [String: Any]? {
                 (m?["message"] as? [String: Any])?["message"] as? [String: Any]
