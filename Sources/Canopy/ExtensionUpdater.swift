@@ -41,24 +41,27 @@ final class ExtensionUpdater {
         }
     }
 
-    func checkForUpdate() async {
+    /// `retryingFailure` is the banner's Retry: a click is consent to try the failed version again.
+    func checkForUpdate(retryingFailure: Bool = false) async {
         guard state == .idle || state == .upToDate || state.isTerminal else { return }
 
         state = .checking
+        // A failed lookup keeps a stored failure, and its Retry, on screen.
+        let fallback: State = failure.map { .failed(message: $0.message) } ?? .idle
         guard let latestVer = await marketplaceLatestVersion() else {
             logger.warning("Could not determine marketplace latest version")
-            state = .idle
+            state = fallback
             return
         }
         guard Self.isValidVersion(latestVer) else {
             logger.error("Marketplace returned invalid version string: \(latestVer, privacy: .public)")
-            state = .idle
+            state = fallback
             return
         }
         let extVer = CCExtension.extensionVersion()
         if let extVer, Self.compareVersions(extVer, latestVer) >= 0 {
             state = .upToDate
-        } else if let failure, failure.version == latestVer {
+        } else if let failure, failure.version == latestVer, !retryingFailure {
             // Terminal, so a later mount still checks and picks up a fixed newer version.
             state = .failed(message: failure.message)
         } else {
@@ -114,18 +117,6 @@ final class ExtensionUpdater {
         }
     }
 
-    /// The failed banner's Retry: a click is consent to try the failed version again.
-    func retry() async {
-        let previous = failure
-        failure = nil
-        await checkForUpdate()
-        // A Marketplace lookup that failed leaves .idle; keep the failure and its Retry on screen.
-        if state == .idle, let previous {
-            failure = previous
-            state = .failed(message: previous.message)
-        }
-    }
-
     private func installUpdate(version: String) async {
         state = .downloading
         do {
@@ -133,11 +124,12 @@ final class ExtensionUpdater {
             state = .installing
             try await installVSIX(at: vsixURL, version: version)
             await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }.value
+            failure = nil
             state = .done(version: version)
             // The install needs no click now, so the launcher banner may never be on screen.
             SessionNotifier.post(title: "Claude Code extension updated",
                                  body: "v\(version) is installed. New sessions use it.",
-                                 identifier: SessionNotifier.foregroundPrefix + "extension-\(version)")
+                                 showWhileFrontmost: true)
         } catch {
             failure = (version, error.localizedDescription)
             state = .failed(message: error.localizedDescription)

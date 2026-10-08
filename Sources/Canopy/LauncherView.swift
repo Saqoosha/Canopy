@@ -1384,15 +1384,16 @@ struct LauncherView: View {
 
     /// The banner's slot is always laid out, banner or not, so the icon,
     /// headline, chips and composer never move when a banner appears or goes
-    /// away. It reserves the height of a one-line banner with an invisible
-    /// copy of one; a long failure message
+    /// away. It reserves the height of a one-line banner with a button (the
+    /// failed state) with an invisible copy of one; a long failure message
     /// can still grow the slot past that. Equal padding above and below, so
     /// the gap between headline and banner matches the one between banner and
     /// chips.
     private var extensionUpdateSlot: some View {
         ZStack {
-            updateBannerCard(icon: "checkmark.circle.fill", iconColor: .green, tint: .green) {
+            updateBannerCard(icon: "exclamationmark.triangle.fill", iconColor: .orange, tint: .orange) {
                 Text(" ").font(.system(size: 12))
+                Button(" ") {}.controlSize(.small)
             }
                 .hidden()
                 .accessibilityHidden(true)
@@ -1438,7 +1439,7 @@ struct LauncherView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                 Button("Retry") {
-                    Task { await updater.retry() }
+                    Task { await updater.checkForUpdate(retryingFailure: true) }
                 }
                 .controlSize(.small)
             }

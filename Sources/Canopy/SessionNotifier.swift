@@ -6,15 +6,15 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SessionNoti
 /// The local banner for a session event. One place for the in-process shim and
 /// for a daemon session's Mac client, which decide separately whether to show it.
 enum SessionNotifier {
-    /// Requests whose identifier starts with this show even while Canopy is frontmost.
-    static let foregroundPrefix = "canopy.foreground."
+    static let showWhileFrontmostKey = "canopy.showWhileFrontmost"
 
-    static func post(title: String, body: String, identifier: String = UUID().uuidString) {
+    static func post(title: String, body: String, showWhileFrontmost: Bool = false) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
-        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        if showWhileFrontmost { content.userInfo[showWhileFrontmostKey] = true }
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             if let error { logger.error("Notification error: \(error.localizedDescription, privacy: .public)") }
         }
@@ -27,6 +27,6 @@ final class ForegroundNotificationPresenter: NSObject, UNUserNotificationCenterD
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        notification.request.identifier.hasPrefix(SessionNotifier.foregroundPrefix) ? [.banner, .sound] : []
+        notification.request.content.userInfo[SessionNotifier.showWhileFrontmostKey] as? Bool == true ? [.banner, .sound] : []
     }
 }
