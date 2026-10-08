@@ -1278,6 +1278,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return
         }
         session.pendingInitialPrompt = nil
+        if let replyId = session.pendingInitialPromptReplyId {
+            session.pendingInitialPromptReplyId = nil
+            controlReplyIds.remove(replyId)
+            controlTurnReplyId = replyId
+        }
 
         sendToShim([
             "type": "webview_message",
@@ -1510,7 +1515,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `isRunning` lingers true for a few ms after `stop()` returns, which is
     /// exactly the window `stop()`'s own discard is placed to cover. See
     /// `hasActiveSession`, which records the same measurement.
-    private func blockingReasonForReply() -> String? {
+    private func blockingReasonForReply() -> (reason: String, code: PhoneReplyRefusal)? {
         Self.phoneReplyBlockingReason(
             shimIsLive: process?.isRunning == true && !isIntentionalStop,
             permissionOutstanding: !pendingPermissionRequestIds.isEmpty,
@@ -1558,7 +1563,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// decides whether a user's words come back to them or vanish.
     nonisolated static func phoneReplyBlockingReason(shimIsLive: Bool,
                                                      permissionOutstanding: Bool,
-                                                     awaitingAnswer: Bool) -> String? {
+                                                     awaitingAnswer: Bool) -> (reason: String, code: PhoneReplyRefusal)? {
         // First, because it is the only one of the three the user cannot fix
         // by looking at the Mac's screen.
         if !shimIsLive {
@@ -1569,13 +1574,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // and `start()` has never run at all; one genuinely stopped does
             // need reopening. "Reopen it on the Mac" was the first wording
             // and it is wrong instruction in two of the three.
-            return "That session is not running on the Mac right now — try again shortly, or reopen it there"
+            return ("That session is not running on the Mac right now — try again shortly, or reopen it there", .dead)
         }
         if permissionOutstanding {
-            return "That session is waiting for a permission answer — answer it on the Mac first"
+            return ("That session is waiting for a permission answer — answer it on the Mac first", .permissionPending)
         }
         if awaitingAnswer {
-            return "That session is waiting for an answer to its own question"
+            return ("That session is waiting for an answer to its own question", .asking)
         }
         return nil
     }
@@ -1613,9 +1618,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                                   gateReason: String?) -> PhoneReplyDisposition {
         switch result {
         case .empty:
-            return .refused("The message was empty")
+            return .refused("The message was empty", code: .empty)
         case .full(let capacity):
-            return .refused("Already \(capacity) messages waiting — let the session catch up")
+            return .refused("Already \(capacity) messages waiting — let the session catch up", code: .queueFull)
         case .queued:
             // Reported as it stands NOW, and it can be stale by the time the
             // phone renders it — the turn may end a second later. That is the
@@ -1656,8 +1661,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // case — the one this whole change exists to make findable —
             // was recorded as a completely different cause, and it is the
             // first line anyone reading an SSH-drop log would hit.
-            logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): refused — \(blocking, privacy: .public)")
-            return .refused(blocking)
+            logger.notice("roster reply \(self.keepAliveLogLabel, privacy: .public): refused — \(blocking.reason, privacy: .public)")
+            return .refused(blocking.reason, code: blocking.code)
         }
         if Self.phoneReplyMayInjectNow(queueIsEmpty: queuedPhoneReplies.isEmpty,
                                        gateReason: ineligibilityReasonForReply()),
@@ -1870,6 +1875,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Phone reply queue
 
+    /// Machine-readable refusal, so a caller can decide whether retrying helps.
+    enum PhoneReplyRefusal: String, Equatable, Sendable {
+        case dead
+        case permissionPending = "permission_pending"
+        case asking
+        case queueFull = "queue_full"
+        case empty
+    }
+
     /// What became of a prompt the phone submitted. Returned rather than a
     /// `Bool` because `queued` is a success the phone must be able to tell
     /// from `injected` — same 200, different thing to say about it.
@@ -1887,7 +1901,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case queued(reason: String)
         /// Waiting would not help — blank text, a full queue, or one of the
         /// three in `phoneReplyBlockingReason`.
-        case refused(String)
+        case refused(String, code: PhoneReplyRefusal)
     }
 
     /// Prompts waiting for a shim that can take one. See `PhoneReplyQueue`

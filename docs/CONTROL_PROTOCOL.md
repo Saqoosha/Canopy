@@ -78,6 +78,9 @@ as the session's first turn. When no pane is attached the daemon synthesizes
 `init` then `launch_claude` on channel `canopy-headless`, so the turn runs
 without a webview and a later attach still has a cached init.
 
+The result is `{sessionId, key, cwd}`, plus `replyId` when `initialPrompt`
+was given. Pass that `replyId` to `wait_turn` to wait for the first answer.
+
 `stop_session` and `restart_session` take `key` and/or `sessionId`.
 
 `subscribe` asks for `session_state` pushes. Those lines are not responses.
@@ -106,6 +109,18 @@ Result:
 `disposition` is `injected`, `queued`, or `refused`. `ok` is false only for
 `refused`. `queued` and `refused` may include `reason`. `replyId` identifies
 this control turn for the status verbs — always pass it on follow-up calls.
+
+A `refused` result also carries `reasonCode`, for deciding whether to retry:
+
+| `reasonCode` | Meaning | Retry? |
+|---|---|---|
+| `dead` | The session is not running (it may be reconnecting) | Later |
+| `permission_pending` | A permission prompt waits for a human | Not until it is answered |
+| `asking` | An AskUserQuestion waits for a human | Not until it is answered |
+| `queue_full` | 10 messages are already waiting | After the session catches up |
+| `empty` | The text was blank | No |
+
+A busy session is not refused; the message is `queued`.
 
 ### `session_status`, `latest_reply`, `wait_turn`
 

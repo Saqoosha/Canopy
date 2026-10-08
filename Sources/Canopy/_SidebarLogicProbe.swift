@@ -1931,18 +1931,21 @@ enum SidebarLogicProbe {
                 record("control send: an empty attachments array is fine",
                        ControlProtocol.parseSendMessage(["text": "hi", "attachments": [] as [Any]])
                            == .success(ControlProtocol.SendMessage(text: "hi")))
-                let injected = ControlProtocol.replyWire(disposition: "injected", reason: nil, replyId: "r1")
+                let injected = ControlProtocol.replyWire(.injected, replyId: "r1")
                 record("control send: injected is ok and carries the reply id",
                        injected["ok"] as? Bool == true && injected["disposition"] as? String == "injected"
-                           && injected["replyId"] as? String == "r1" && injected["reason"] == nil)
-                let refused = ControlProtocol.replyWire(disposition: "refused", reason: "not running", replyId: "r2")
+                           && injected["replyId"] as? String == "r1" && injected["reason"] == nil && injected["reasonCode"] == nil)
+                let refused = ControlProtocol.replyWire(.refused("not running", code: .dead), replyId: "r2")
                 record("control send: refused is not ok and names the reason",
                        refused["ok"] as? Bool == false && refused["disposition"] as? String == "refused"
-                           && refused["reason"] as? String == "not running")
-                let queued = ControlProtocol.replyWire(disposition: "queued", reason: "session busy", replyId: "r3")
+                           && refused["reason"] as? String == "not running" && refused["reasonCode"] as? String == "dead")
+                record("control send: refusal codes are the wire spellings",
+                       [ShimProcess.PhoneReplyRefusal.dead, .permissionPending, .asking, .queueFull, .empty].map(\.rawValue)
+                           == ["dead", "permission_pending", "asking", "queue_full", "empty"])
+                let queued = ControlProtocol.replyWire(.queued(reason: "session busy"), replyId: "r3")
                 record("control send: queued is ok",
                        queued["ok"] as? Bool == true && queued["disposition"] as? String == "queued"
-                           && queued["reason"] as? String == "session busy")
+                           && queued["reason"] as? String == "session busy" && queued["reasonCode"] == nil)
                 record("control query: a missing reply id is the current turn",
                        ControlProtocol.parseSessionQuery([:]) == ControlProtocol.SessionQuery(replyId: nil))
                 record("control query: a blank reply id is the current turn",
@@ -12046,17 +12049,21 @@ enum SidebarLogicProbe {
         record("reply blocking: a live idle shim blocks nothing",
                ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: false, awaitingAnswer: false) == nil)
         record("reply blocking: a dead shim refuses, and says the session is not running",
-               ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: false, awaitingAnswer: false)
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: false, awaitingAnswer: false)?.reason
                    == "That session is not running on the Mac right now — try again shortly, or reopen it there")
         record("reply blocking: a dead shim refuses before either human gate is consulted",
-               ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: true, awaitingAnswer: true)
-                   == ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: false, awaitingAnswer: false))
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: true, awaitingAnswer: true)?.reason
+                   == ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: false, awaitingAnswer: false)?.reason)
         record("reply blocking: an outstanding permission says to answer it on the Mac",
-               ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: true, awaitingAnswer: false)
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: true, awaitingAnswer: false)?.reason
                    == "That session is waiting for a permission answer — answer it on the Mac first")
         record("reply blocking: an unanswered question says the session is waiting on one",
-               ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: false, awaitingAnswer: true)
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: false, awaitingAnswer: true)?.reason
                    == "That session is waiting for an answer to its own question")
+        record("reply blocking: each refusal carries its code",
+               ShimProcess.phoneReplyBlockingReason(shimIsLive: false, permissionOutstanding: true, awaitingAnswer: true)?.code == .dead
+                   && ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: true, awaitingAnswer: true)?.code == .permissionPending
+                   && ShimProcess.phoneReplyBlockingReason(shimIsLive: true, permissionOutstanding: false, awaitingAnswer: true)?.code == .asking)
 
         // MARK: - Phone reply disposition (what the phone is actually told)
         //
@@ -12068,13 +12075,13 @@ enum SidebarLogicProbe {
         // under a 200), passed every assertion in the suite.
         record("reply disposition: blank text is refused, and says so",
                ShimProcess.phoneReplyDisposition(for: .empty, gateReason: nil)
-                   == .refused("The message was empty"))
+                   == .refused("The message was empty", code: .empty))
         record("reply disposition: blank text is refused whatever the gate says",
                ShimProcess.phoneReplyDisposition(for: .empty, gateReason: "session busy")
-                   == .refused("The message was empty"))
+                   == .refused("The message was empty", code: .empty))
         record("reply disposition: a full queue refuses, naming the number it holds",
                ShimProcess.phoneReplyDisposition(for: .full(capacity: PhoneReplyQueue.capacity), gateReason: nil)
-                   == .refused("Already \(PhoneReplyQueue.capacity) messages waiting — let the session catch up"))
+                   == .refused("Already \(PhoneReplyQueue.capacity) messages waiting — let the session catch up", code: .queueFull))
         record("reply disposition: a queued prompt carries the gate's own words",
                ShimProcess.phoneReplyDisposition(for: .queued(depth: 1), gateReason: "session busy")
                    == .queued(reason: "session busy"))
