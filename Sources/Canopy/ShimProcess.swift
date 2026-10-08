@@ -473,7 +473,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The Mac should stay awake for this session (`SleepGuard`): the reaper's busy — a turn,
     /// a background task, or a permission request or question waiting. The waiting cases
     /// count because they are answered from the phone, which cannot reach a sleeping Mac.
-    var holdsSystemAwake: Bool { isLive && reaperInputs.isBusy }
+    /// An SSH session's background tasks do not: their completion is never seen here.
+    var holdsSystemAwake: Bool {
+        isLive && SessionReaper.isBusy(working: isWorking, permissionPending: !pendingPermissionRequestIds.isEmpty,
+                                       asking: lastAssistantHadAskUserQuestion,
+                                       backgroundTasks: remoteHost == nil ? pendingBackgroundTaskIds.count : 0)
+    }
     /// The extension version this shim started on; nil until it starts, or when unreadable.
     private(set) var extensionVersion: String?
     /// The extension folder this shim started on; a page for it must load from the same one.
