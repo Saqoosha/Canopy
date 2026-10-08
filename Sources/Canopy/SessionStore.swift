@@ -1103,7 +1103,7 @@ final class SessionStore {
     /// existing JSONL. If `permissionMode` is nil, falls back to the global
     /// default in `CanopySettings.defaultPermissionMode`.
     @discardableResult
-    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil, target: PaneTarget = .focused) -> OpenSession {
+    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil, target: PaneTarget = .focused) -> OpenSession? {
         // If this session is already open, honor target (focused vs new pane).
         if let existing = openSessions.first(where: { $0.resumeId == entry.id }) {
             switch target {
@@ -1119,10 +1119,16 @@ final class SessionStore {
             }
             return existing
         }
+        guard let directory = ClaudeSessionHistory.directoryToOpen(
+            entry, knownCheckouts: recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load())
+        else {
+            // The folder is gone and the transcript could not be moved to a checkout.
+            noteSessionFailure(title: entry.title, message: "Could not reopen this session: its folder is gone "
+                               + "and its transcript could not be moved to the repository's main checkout.", status: -2)
+            return nil
+        }
         return openNew(
-            directory: ClaudeSessionHistory.directoryToOpen(
-                entry, knownCheckouts: recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load())
-                ?? entry.projectDirectory,
+            directory: directory,
             resumeId: entry.id,
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,

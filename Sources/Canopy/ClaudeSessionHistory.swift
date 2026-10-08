@@ -474,7 +474,10 @@ enum ClaudeSessionHistory {
         // The CLI files a cwd's transcripts under the current encoding; a legacy folder is not read for it.
         let destFolder = claudeDir.appendingPathComponent(encodePath(checkout.path))
         let dest = destFolder.appendingPathComponent("\(entry.id).jsonl")
-        if !fm.fileExists(atPath: dest.path) {
+        if fm.fileExists(atPath: dest.path), fm.fileExists(atPath: source) {
+            // Only something writing the old path after a move does this; the checkout's copy is the one opened.
+            logger.error("Session \(entry.id, privacy: .public) has a transcript in both its worktree's and its checkout's folder")
+        } else if !fm.fileExists(atPath: dest.path) {
             do {
                 try fm.createDirectory(at: destFolder, withIntermediateDirectories: true)
                 try fm.moveItem(atPath: source, toPath: dest.path)
