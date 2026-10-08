@@ -311,7 +311,13 @@ struct MirrorPaneView: NSViewRepresentable {
                         onFailure(SessionStore.mirrorFailureMessage(reason: reason, machineName: machineName))
                     }
                 } else {
-                    onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName))
+                    let showEnded = { onFailure(SessionStore.mirrorEndedMessage(reason: reason, machineName: machineName)) }
+                    // Our own Stop Session ends this client too; held like a drop, and discarded when the stop succeeds.
+                    if session.isStopping {
+                        session.dropHeldByStop = showEnded
+                    } else {
+                        showEnded()
+                    }
                 }
             case .dropped:
                 session.fileTransfer.connectionDropped()

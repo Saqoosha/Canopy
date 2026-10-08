@@ -138,6 +138,9 @@ enum MirrorOpenRequest: Equatable {
     /// `attach_error` messages for an open the server refused or could not start.
     static let notOpenable = "cannot open"
     static let startFailed = "start failed"
+    /// `attach_error` for every client of a session `stop_session` ended; read after
+    /// "The session on <Mac> stopped: " (`SessionStore.mirrorEndedMessage`).
+    static let stoppedByClient = "Stop Session was chosen on another device."
 
     var wire: [String: Any] {
         switch self {

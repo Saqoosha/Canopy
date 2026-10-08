@@ -185,7 +185,7 @@ final class ControlSession {
 
     private func stopSession(_ request: ControlProtocol.Request) {
         guard let session = requestedSession(request) else { return }
-        store.closeSession(session.id, keepingFailure: false)
+        store.closeSession(session.id, keepingFailure: false, mirrorEndReason: MirrorOpenRequest.stoppedByClient)
         reply(request, ["ok": true])
     }
 

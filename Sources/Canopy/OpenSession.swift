@@ -268,7 +268,7 @@ final class OpenSession: Identifiable, Hashable {
     /// as the stop it asked for rather than as a lost connection.
     var isStopping = false
 
-    /// The pane's drop handling, held back while `isStopping`; run if the stop fails.
+    /// The pane's drop or session-ended handling, held back while `isStopping`; run if the stop fails.
     @ObservationIgnored var dropHeldByStop: (() -> Void)?
 
     /// The daemon's `OpenSession.id` for this session, once known.
