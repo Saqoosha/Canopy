@@ -304,8 +304,14 @@ final class SessionStore {
         "The session on \(machineName) stopped: \(reason)"
     }
 
+    /// The sidebar banner's text. `offersSettings` is false when Settings cannot help, as for a session stopped elsewhere.
+    struct RemoteNotice: Equatable {
+        let message: String
+        var offersSettings = true
+    }
+
     /// The most recent attach refusal, for the sidebar banner: no pairing, or a pane whose attach failed.
-    var remoteAttachError: String?
+    var remoteAttachError: RemoteNotice?
 
     func openRemoteLive(_ remote: RemoteLiveSession, target: PaneTarget) {
         if let existing = openSessions.first(where: {
@@ -322,7 +328,7 @@ final class SessionStore {
             return
         }
         if let refusal = remoteAttachRefusal(machineId: remote.machineId, machineName: remote.machineName) {
-            remoteAttachError = refusal
+            remoteAttachError = RemoteNotice(message: refusal)
             logger.notice("openRemoteLive: refused before attach for \(remote.machineId, privacy: .public)")
             return
         }
@@ -358,7 +364,7 @@ final class SessionStore {
     /// True when the attach may go ahead; otherwise records why for the sidebar banner.
     private func refuseRemoteAttachIfUnpaired(machineId: String, machineName: String) -> Bool {
         guard let refusal = remoteAttachRefusal(machineId: machineId, machineName: machineName) else { return true }
-        remoteAttachError = refusal
+        remoteAttachError = RemoteNotice(message: refusal)
         logger.notice("remote open refused before attach for \(machineId, privacy: .public)")
         return false
     }
@@ -1321,7 +1327,7 @@ final class SessionStore {
             let failure = await Self.stopOnPeer(machineId: machineId, machineName: machineName, key: key, resumeId: resumeId)
             self?.finishStop(session, stopped: failure == nil, restore: restore)
             // The sidebar banner, not the launcher's: the pane is still up, so no launcher shows.
-            if let failure { self?.remoteAttachError = "Could not stop \(session.title). \(failure)" }
+            if let failure { self?.remoteAttachError = RemoteNotice(message: "Could not stop \(session.title). \(failure)") }
         }
     }
 
@@ -1343,7 +1349,7 @@ final class SessionStore {
             // On success the id stays: the row goes when that Mac's roster stops listing it.
             guard let failure else { return }
             self?.stoppingRemoteIds.remove(remote.sessionId)
-            self?.remoteAttachError = "Could not stop the session. \(failure)"
+            self?.remoteAttachError = RemoteNotice(message: "Could not stop the session. \(failure)")
         }
     }
 

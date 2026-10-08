@@ -18,10 +18,12 @@ struct SessionContainer: View {
         ZStack {
             VStack(spacing: 0) {
                 if session.origin.mirrorTarget != nil || session.isDaemonHosted {
-                    MirrorPaneView(session: session) { message in
+                    MirrorPaneView(session: session) { message, ended in
                         session.lastFatalError = message
                         // The other-Mac banner; a local daemon failure takes the shim-crash path alone.
-                        if !session.isDaemonHosted { SessionStore.shared?.remoteAttachError = message }
+                        if !session.isDaemonHosted {
+                            SessionStore.shared?.remoteAttachError = .init(message: message, offersSettings: !ended)
+                        }
                         onCrash?(-2)
                     }
                     .overlay {
