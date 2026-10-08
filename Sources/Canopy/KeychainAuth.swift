@@ -52,22 +52,47 @@ enum KeychainAuth {
         readOAuthFromKeychain()
     }
 
-    /// Read the organization UUID stored alongside the OAuth tokens.
-    static func readOrganizationUUID() -> String? {
-        readKeychainBlob()?["organizationUuid"] as? String
-    }
-
-    /// Convenience: returns (accessToken, orgUUID) if both are present in
-    /// Keychain. Empty strings are treated as missing — sending an empty
+    /// Convenience: returns (accessToken, orgUUID) if both are present.
+    /// Empty strings are treated as missing — sending an empty
     /// `Authorization` / `x-organization-uuid` header would produce a
     /// confusing 401/400 from the API.
     static func readAccessTokenAndOrg() -> (token: String, orgUUID: String)? {
         guard let blob = readKeychainBlob(),
               let oauth = blob["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String, !token.isEmpty,
-              let org = blob["organizationUuid"] as? String, !org.isEmpty
+              let token = oauth["accessToken"] as? String, !token.isEmpty
         else { return nil }
+        guard let org = organizationUuid(keychainBlob: blob, defaultConfig: defaultConfigOrganizationUuid) else {
+            logger.warning("No organization UUID in the Keychain blob or ~/.claude.json")
+            return nil
+        }
         return (token, org)
+    }
+
+    /// The blob's own organization, else the default login's `~/.claude.json`: current CLIs
+    /// keep only `claudeAiOauth` and `mcpOAuth` in the blob (measured on 2.1.294). Never
+    /// `CLAUDE_CONFIG_DIR`'s file — `readAccessTokenAndOrg` reads the default Keychain item.
+    static func organizationUuid(keychainBlob: [String: Any], defaultConfig: () -> String?) -> String? {
+        if let org = keychainBlob["organizationUuid"] as? String, !org.isEmpty { return org }
+        return defaultConfig()
+    }
+
+    /// `oauthAccount.organizationUuid` in a `.claude.json`'s bytes, or nil.
+    static func organizationUuid(inClaudeJSON data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = root["oauthAccount"] as? [String: Any],
+              let org = account["organizationUuid"] as? String, !org.isEmpty
+        else { return nil }
+        return org
+    }
+
+    private static func defaultConfigOrganizationUuid() -> String? {
+        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")
+        do {
+            return organizationUuid(inClaudeJSON: try Data(contentsOf: url))
+        } catch {
+            logger.warning("Reading ~/.claude.json failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     /// The access token alone, for callers that do not need the organization.
