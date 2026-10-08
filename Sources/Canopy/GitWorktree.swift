@@ -686,8 +686,15 @@ enum GitWorktree {
         ), result.status == 0 else { return nil }
         let lines = String(decoding: result.stdout, as: UTF8.self)
             .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard lines.count == 2, !lines[1].isEmpty, lines[0] != lines[1] else { return nil }
-        let common = URL(fileURLWithPath: lines[1])
+        guard lines.count == 2 else { return nil }
+        return checkout(gitDir: lines[0], commonDir: lines[1])
+    }
+
+    /// The checkout a linked worktree's git dir hangs off, or nil when the two
+    /// are the same (not a linked worktree) or the common dir is not a `.git` folder.
+    static func checkout(gitDir: String, commonDir: String) -> URL? {
+        guard !commonDir.isEmpty, gitDir != commonDir else { return nil }
+        let common = URL(fileURLWithPath: commonDir)
         guard common.lastPathComponent == ".git" else { return nil }
         return common.deletingLastPathComponent()
     }
@@ -708,13 +715,11 @@ enum GitWorktree {
     /// The parsing half, given `rev-parse --show-toplevel --git-dir --git-common-dir` output.
     static func checkoutOfWorktreeRoot(_ dir: URL, revParse: String) -> URL? {
         let lines = revParse.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard lines.count == 3, !lines[2].isEmpty, lines[1] != lines[2],
+        guard lines.count == 3,
               URL(fileURLWithPath: lines[0]).resolvingSymlinksInPath().path
                 == dir.resolvingSymlinksInPath().standardizedFileURL.path
         else { return nil }
-        let common = URL(fileURLWithPath: lines[2])
-        guard common.lastPathComponent == ".git" else { return nil }
-        return common.deletingLastPathComponent()
+        return checkout(gitDir: lines[1], commonDir: lines[2])
     }
 
     // MARK: - Seeding a fresh worktree (probe-reachable helpers)

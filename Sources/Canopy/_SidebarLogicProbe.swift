@@ -5330,13 +5330,27 @@ enum SidebarLogicProbe {
             let gone = "/h/.claude/worktrees/Canopy/fix"
             let alive: Set<String> = ["/r/Canopy", "/r/Canopy/"]
             let exists: (String) -> Bool = { alive.contains($0) }
+            let isCheckout: (String) -> Bool = { $0 == "/r/Canopy" || $0 == "/r/Canopy/" }
             record("checkout move: a removed worktree follows the daemon to the checkout",
-                   SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "/r/Canopy", exists: exists))
+                   SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "/r/Canopy",
+                                                    exists: exists, isCheckout: isCheckout))
             record("checkout move: a folder that still exists is never replaced",
-                   !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: "/r/Canopy"), rowCwd: "/r/Canopy/", exists: exists))
+                   !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: "/r/Canopy"), rowCwd: "/r/Canopy/",
+                                                     exists: exists, isCheckout: isCheckout))
             record("checkout move: nowhere to go → stay",
-                   !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "/elsewhere", exists: exists)
-                       && !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "", exists: exists))
+                   !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "/elsewhere",
+                                                     exists: exists, isCheckout: isCheckout)
+                       && !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "",
+                                                            exists: exists, isCheckout: isCheckout))
+            let wtRoot = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-wt-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: wtRoot.appendingPathComponent("main/.git"), withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: wtRoot.appendingPathComponent("linked"), withIntermediateDirectories: true)
+            try? "gitdir: /x".write(to: wtRoot.appendingPathComponent("linked/.git"), atomically: true, encoding: .utf8)
+            record("checkout move: a main checkout has a .git folder; a linked worktree's is a file",
+                   SessionStore.isMainCheckout(wtRoot.appendingPathComponent("main").path)
+                       && !SessionStore.isMainCheckout(wtRoot.appendingPathComponent("linked").path)
+                       && !SessionStore.isMainCheckout(wtRoot.appendingPathComponent("missing").path))
+            try? FileManager.default.removeItem(at: wtRoot)
             record("worktree entry: both keys are scrubbed from an inherited environment",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CANOPY_CLI_CWD": "/x", "CANOPY_WORKTREE": "/y"]).isEmpty)
         }

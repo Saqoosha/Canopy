@@ -770,9 +770,17 @@ final class SessionStore {
     /// Any other difference — a path spelled two ways — must not restart a pane.
     nonisolated static func followsCheckoutMove(
         current: URL, rowCwd: String,
-        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        isCheckout: (String) -> Bool = { SessionStore.isMainCheckout($0) }
     ) -> Bool {
-        !rowCwd.isEmpty && rowCwd != current.path && !exists(current.path) && exists(rowCwd)
+        !rowCwd.isEmpty && rowCwd != current.path && !exists(current.path) && isCheckout(rowCwd)
+    }
+
+    /// A main checkout holds its `.git` as a folder; a linked worktree's is a file.
+    nonisolated static func isMainCheckout(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent(".git"),
+                                              isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
     /// The session removed its own worktree after the canopy-bridge mod left
@@ -786,8 +794,8 @@ final class SessionStore {
             logger.notice("moveToCheckout: no local session owns this shim any more; not moved")
             return
         }
-        guard FileManager.default.fileExists(atPath: checkout.path) else {
-            logger.error("moveToCheckout: the checkout is missing too; leaving the session")
+        guard Self.isMainCheckout(checkout.path) else {
+            logger.error("moveToCheckout: the reported checkout is not a main checkout; leaving the session")
             return
         }
         logger.notice("moveToCheckout id=\(session.id.uuidString, privacy: .public)")

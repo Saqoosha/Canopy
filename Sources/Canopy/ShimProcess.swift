@@ -122,10 +122,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// turns, and a remote client that will not re-attach on its own. Checked only
     /// while an upgrade waits, since the transcript lookup can scan the store.
     var upgradeBlocker: String? {
-        if reaperInputs.isBusy { return "a turn, question or background task is running" }
-        if keepAliveInFlight { return "a keep-alive refresh is in flight" }
-        if recapRequestInFlight { return "a recap is in flight" }
-        if phoneReplyInFlight || !queuedPhoneReplies.isEmpty { return "a phone reply is waiting" }
+        if let reason = restartLosesWork { return reason }
         if boundSession?.pendingInitialPrompt != nil { return "the first prompt has not been sent" }
         if mirrors.values.contains(where: { client in
             client.sink.map { Self.remoteClientBlocksUpgrade(isLocal: $0.isLocalClient, reattaches: $0.reattachesAfterRestart) } ?? false
@@ -4198,6 +4195,33 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return (tokens: positiveInt(context["tokens"]), window: positiveInt(context["window"]))
     }
 
+    /// The move restarts this shim, so it waits for a moment with nothing to lose:
+    /// a prompt typed right after the turn, or a queued phone reply, would die
+    /// with it. Busy → the latch stays and the next `result` tries again.
+    private func moveToCheckoutWhenQuiet() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, let checkout = self.checkoutAfterRemoval else { return }
+            if let reason = self.restartLosesWork {
+                logger.notice("[worktree] removed; waiting to move (\(reason, privacy: .public))")
+                return
+            }
+            self.checkoutAfterRemoval = nil
+            logger.notice("[worktree] removed; moving the session to the checkout")
+            NotificationCenter.default.post(
+                name: Self.worktreeRemovedNotification, object: self,
+                userInfo: [Self.checkoutKey: checkout])
+        }
+    }
+
+    /// `upgradeBlocker`'s own-session half: what a restart now would drop.
+    private var restartLosesWork: String? {
+        if reaperInputs.isBusy { return "a turn, question or background task is running" }
+        if keepAliveInFlight { return "a keep-alive refresh is in flight" }
+        if recapRequestInFlight { return "a recap is in flight" }
+        if phoneReplyInFlight || !queuedPhoneReplies.isEmpty { return "a phone reply is waiting" }
+        return nil
+    }
+
     /// The canopy-bridge mod's report of entering or leaving a worktree, whether
     /// the session is where it should be (`ok`), and the checkout it left to
     /// when it left ahead of a removal.
@@ -4349,22 +4373,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     return
                 }
                 // Not mid-turn: restarting now would kill the removal itself.
-                if let checkout = checkoutAfterRemoval,
+                if checkoutAfterRemoval != nil,
                    nested["type"] as? String == "io_message",
                    (nested["message"] as? [String: Any])?["type"] as? String == "result"
                 {
-                    checkoutAfterRemoval = nil
                     if FileManager.default.fileExists(atPath: workingDirectory.path) {
+                        checkoutAfterRemoval = nil
                         logger.notice("[worktree] the turn ended with the worktree still there; staying")
                     } else {
-                        logger.notice("[worktree] removed; moving the session to the checkout")
-                        let shim = self
-                        // Async: this is mid-frame, and the move stops this shim.
-                        DispatchQueue.main.async {
-                            NotificationCenter.default.post(
-                                name: Self.worktreeRemovedNotification, object: shim,
-                                userInfo: [Self.checkoutKey: checkout])
-                        }
+                        moveToCheckoutWhenQuiet()
                     }
                 }
             }
