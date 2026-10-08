@@ -116,8 +116,14 @@ final class ExtensionUpdater {
 
     /// The failed banner's Retry: a click is consent to try the failed version again.
     func retry() async {
+        let previous = failure
         failure = nil
         await checkForUpdate()
+        // A Marketplace lookup that failed leaves .idle; keep the failure and its Retry on screen.
+        if state == .idle, let previous {
+            failure = previous
+            state = .failed(message: previous.message)
+        }
     }
 
     private func installUpdate(version: String) async {
@@ -130,7 +136,8 @@ final class ExtensionUpdater {
             state = .done(version: version)
             // The install needs no click now, so the launcher banner may never be on screen.
             SessionNotifier.post(title: "Claude Code extension updated",
-                                 body: "v\(version) is installed. New sessions use it.")
+                                 body: "v\(version) is installed. New sessions use it.",
+                                 identifier: SessionNotifier.foregroundPrefix + "extension-\(version)")
         } catch {
             failure = (version, error.localizedDescription)
             state = .failed(message: error.localizedDescription)

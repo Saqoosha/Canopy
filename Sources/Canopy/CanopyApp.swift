@@ -1240,6 +1240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().delegate = ForegroundNotificationPresenter.shared
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error {
                 logger.error("Notification permission error: \(error.localizedDescription)")
