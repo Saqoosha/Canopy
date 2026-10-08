@@ -236,6 +236,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// mirror's init, and the CLI is gone before its `launch_claude` even
     /// arrives).
     private var cachedInitResponse: [String: Any]?
+    /// Mirror inits that arrived while `launchHeadlessChannel`'s own init was unanswered; answered from the cache when it lands.
+    private var initsAwaitingHeadlessResponse: [(requestId: String, mirror: ObjectIdentifier)] = []
+    private var headlessInitInFlight = false
 
     // MARK: - Frame cursor (#320)
 
@@ -3694,10 +3697,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         handleWebviewMessage(dict, sender: sink, isPrimary: false)
     }
 
+    private func answerInitFromCache(_ response: [String: Any], requestId: String, to sink: any MirrorSink) {
+        var cached = response
+        if var state = cached["state"] as? [String: Any] {
+            state["sweptStaleChannels"] = false
+            cached["state"] = state
+        }
+        logger.notice("[mirror] init answered from cache for \(requestId, privacy: .public)")
+        post(["type": "from-extension",
+              "message": ["type": "response", "requestId": requestId, "response": cached] as [String: Any]],
+             to: sink)
+    }
+
     /// A pane-less session has no webview to send `init` and `launch_claude`; this sends both. No-op when any client holds or opened a channel.
     @discardableResult
     func launchHeadlessChannel() -> Bool {
         guard isLive, channelId == nil, !liveChannelOpen, webView == nil, mirrors.isEmpty else { return false }
+        headlessInitInFlight = cachedInitResponse == nil
         // `init` first: its response becomes `cachedInitResponse`, which a client attaching later is answered from.
         handleWebviewMessage(
             ["type": "request", "requestId": "canopy-headless-init-\(UUID().uuidString.lowercased())",
@@ -3772,15 +3788,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            (dict["request"] as? [String: Any])?["type"] as? String == "init",
            let requestId = dict["requestId"] as? String
         {
-            if var cached = cachedInitResponse {
-                if var state = cached["state"] as? [String: Any] {
-                    state["sweptStaleChannels"] = false
-                    cached["state"] = state
-                }
-                logger.notice("[mirror] init answered from cache for \(requestId, privacy: .public)")
-                post(["type": "from-extension",
-                      "message": ["type": "response", "requestId": requestId, "response": cached] as [String: Any]],
-                     to: sender)
+            if let cached = cachedInitResponse {
+                answerInitFromCache(cached, requestId: requestId, to: sender)
+                return
+            }
+            if headlessInitInFlight {
+                initsAwaitingHeadlessResponse.append((requestId: requestId, mirror: mirrorKey))
+                logger.notice("[mirror] init parked until the headless init_response lands")
                 return
             }
             // A session started for a mirror (`SessionStore.startHeadlessSession`)
@@ -4519,6 +4533,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             {
                 cachedInitResponse = resp
                 logger.notice("[mirror] init_response cached")
+                headlessInitInFlight = false
+                let parked = initsAwaitingHeadlessResponse
+                initsAwaitingHeadlessResponse.removeAll()
+                for entry in parked {
+                    if let sink = mirrors[entry.mirror]?.sink { answerInitFromCache(resp, requestId: entry.requestId, to: sink) }
+                }
             }
             if frame["type"] as? String == "close_channel",
                let closed = frame["channelId"] as? String, closed == channelId
