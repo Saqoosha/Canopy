@@ -4117,7 +4117,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// extension resolves the session off local disk (see `start()`'s
     /// `CANOPY_REMOTE_RESUME` block). Handed to the CLI directly, as the SSH
     /// remote path does, an unresolvable `--resume` exits 1.
-    /// Called through `adoptReportedSessionId`.
     /// Sync the real id back onto the owning OpenSession so the sidebar's
     /// open-vs-recents dedup and `openLocal`'s already-open check compare
     /// against the JSONL that actually exists — otherwise the same session
@@ -4174,12 +4173,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// The `session_id` of a CLI `system/init` io_message, or nil for any other frame.
-    nonisolated static func sessionIdFromInit(_ message: [String: Any]) -> String? {
-        guard message["type"] as? String == "from-extension",
-              let nested = message["message"] as? [String: Any],
-              nested["type"] as? String == "io_message",
-              let ioMsg = nested["message"] as? [String: Any],
+    /// The `session_id` of a CLI `system/init`, given the extension's unwrapped frame; nil for any other.
+    nonisolated static func sessionIdFromInit(_ frame: [String: Any]) -> String? {
+        guard frame["type"] as? String == "io_message",
+              let ioMsg = frame["message"] as? [String: Any],
               ioMsg["type"] as? String == "system", ioMsg["subtype"] as? String == "init",
               let sid = ioMsg["session_id"] as? String, UUID(uuidString: sid) != nil
         else { return nil }
@@ -4565,8 +4562,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             trackWorkingState(innerMessage)
             trackPermissionState(stdoutMessage: msg)
-            // A pane-less session has no webview to report its id; without this a pane attaching later loads the placeholder.
-            if activeSessionId == nil, let sid = Self.sessionIdFromInit(innerMessage) { adoptReportedSessionId(sid) }
+            // A pane-less session's only id report once it has run a turn; no webview sends one.
+            if activeSessionId == nil, let sid = Self.sessionIdFromInit(frame) { adoptReportedSessionId(sid) }
             extractStatusData(innerMessage)
             extractTitle(innerMessage)
             extractRawUsage(innerMessage)

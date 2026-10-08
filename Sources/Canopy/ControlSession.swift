@@ -249,7 +249,7 @@ final class ControlSession {
                 return
             }
         }
-        // A placeholder the CLI's id replaces at its first `init`; follow-ups should use `key`.
+        // A placeholder the CLI's id replaces once a turn has run; follow-ups should use `key`.
         let sessionId = UUID().uuidString.lowercased()
         let options = SessionStore.HeadlessOptions(model: params.model, effort: params.effort,
                                                    permissionMode: params.permissionMode,
