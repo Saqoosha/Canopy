@@ -1854,6 +1854,26 @@ enum SidebarLogicProbe {
                 record("control mkdir: '..' is refused and nothing is created beside the parent",
                        ControlProtocol.mkdir(parent: controlDir.appendingPathComponent("zeta").path, name: "..")
                            == .failure(ControlProtocol.ControlError("That name is reserved.")))
+                record("control mkdir: a relative parent is refused",
+                       ControlProtocol.mkdir(parent: "relative", name: "x")
+                           == .failure(ControlProtocol.ControlError("path must be absolute")))
+                record("control mkdir: a file parent is not a folder",
+                       ControlProtocol.mkdir(parent: controlDir.appendingPathComponent("b.txt").path, name: "x")
+                           == .failure(ControlProtocol.ControlError("not a folder")))
+                record("control mkdir: a missing parent is not a folder",
+                       ControlProtocol.mkdir(parent: controlDir.appendingPathComponent("no-such").path, name: "x")
+                           == .failure(ControlProtocol.ControlError("not a folder")))
+                record("control mkdir: a trailing slash on the parent still creates",
+                       ControlProtocol.mkdir(parent: controlDir.path + "/", name: "trail")
+                           == .success(controlDir.appendingPathComponent("trail").path))
+                let locked = controlDir.appendingPathComponent("locked")
+                try? FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: locked.path)
+                let denied = ControlProtocol.mkdir(parent: locked.path, name: "nope")
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+                record("control mkdir: a mode-0555 parent is permission denied",
+                       denied == .failure(ControlProtocol.ControlError("permission denied"))
+                           && !FileManager.default.fileExists(atPath: locked.appendingPathComponent("nope").path))
                 let openOK = ControlProtocol.parseOpenParams(["cwd": controlDir.path, "model": "opus", "permissionMode": "plan",
                                                               "initialPrompt": "hi", "worktreeBranch": "fix-x"], allowBypass: false)
                 record("control open: all fields parse",

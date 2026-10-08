@@ -95,8 +95,15 @@ enum ControlProtocol {
     }
 
     /// Creates one folder. No `-p`: an existing folder is reported, the way
-    /// `RemoteDirectoryBrowser`'s New Folder does.
+    /// `RemoteDirectoryBrowser`'s New Folder does. A peer Mac's browser shows
+    /// these messages verbatim; Canopy Mobile matches "already exists" and
+    /// "permission denied" as substrings.
     static func mkdir(parent: String, name: String) -> Result<String, ControlError> {
+        guard parent.hasPrefix("/") else { return .failure(ControlError("path must be absolute")) }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parent, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return .failure(ControlError("not a folder"))
+        }
         let trimmed = RemoteDirectoryRules.trimmedName(name)
         if let problem = RemoteDirectoryRules.newFolderNameProblem(trimmed) { return .failure(ControlError(problem)) }
         let path = RemoteDirectoryRules.childPath(of: parent, name: trimmed)
@@ -104,9 +111,18 @@ enum ControlProtocol {
         do {
             try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
         } catch {
-            return .failure(ControlError("cannot create folder"))
+            return .failure(ControlError(isWriteDenied(error as NSError) ? "permission denied" : "cannot create folder"))
         }
         return .success(path)
+    }
+
+    /// FileManager wraps POSIX `EACCES` in `NSCocoaErrorDomain` 513. Walk
+    /// `NSUnderlyingErrorKey` so either spelling counts.
+    private static func isWriteDenied(_ error: NSError) -> Bool {
+        if error.domain == NSCocoaErrorDomain && error.code == NSFileWriteNoPermissionError { return true }
+        if error.domain == NSPOSIXErrorDomain && (error.code == Int(EACCES) || error.code == Int(EPERM)) { return true }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError { return isWriteDenied(underlying) }
+        return false
     }
 
     struct OpenParams: Equatable {
