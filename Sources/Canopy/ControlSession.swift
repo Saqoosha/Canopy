@@ -205,6 +205,11 @@ final class ControlSession {
             fail(request, MirrorOpenRequest.startFailed)
             return
         }
+        // The prompt is stored on the session; nothing sends it until a
+        // `launch_claude` assigns a channel. A control open has no webview.
+        if session.pendingInitialPrompt != nil {
+            shim.launchHeadlessChannel()
+        }
         reply(request, ["sessionId": sessionId, "key": session.id.uuidString, "cwd": directory.path])
     }
 
@@ -245,12 +250,15 @@ final class ControlSession {
     private func restartSession(_ request: ControlProtocol.Request) {
         guard let session = requestedSession(request) else { return }
         store.restartSession(session.id)
-        let started = store.startHeadlessSession(resumeId: session.resumeId) != nil
+        let shim = store.startHeadlessSession(resumeId: session.resumeId)
         // Without this the footer keeps listing the session as on an older extension until the next minute's check.
         DaemonUpgradeCenter.shared.refreshExtensionState?()
-        guard started else {
+        guard let shim else {
             fail(request, MirrorOpenRequest.startFailed)
             return
+        }
+        if session.pendingInitialPrompt != nil {
+            shim.launchHeadlessChannel()
         }
         reply(request, ["ok": true])
     }
@@ -265,11 +273,15 @@ final class ControlSession {
         }
         store.switchAccount(session.id, to: account)
         // Same account: nothing was stopped. Another: `restartSession` parked the row.
-        let failed = session.shim == nil && store.startHeadlessSession(resumeId: session.resumeId) == nil
+        let needsStart = session.shim == nil
+        let started = needsStart ? store.startHeadlessSession(resumeId: session.resumeId) : nil
         DaemonUpgradeCenter.shared.refreshExtensionState?()
-        if failed {
+        if needsStart && started == nil {
             fail(request, MirrorOpenRequest.startFailed)
             return
+        }
+        if let started, session.pendingInitialPrompt != nil {
+            started.launchHeadlessChannel()
         }
         reply(request, ["ok": true])
     }

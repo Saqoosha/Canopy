@@ -3626,6 +3626,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         handleWebviewMessage(dict, sender: sink, isPrimary: false)
     }
 
+    /// A pane-less session has no webview to mint a channel, so `open_session`'s
+    /// `initialPrompt` would sit on `pendingInitialPrompt` forever. One synthetic
+    /// `launch_claude` is what the intercept already waits for: it assigns
+    /// `channelId` and then calls `sendPendingInitialPrompt`.
+    func launchHeadlessChannel() {
+        handleWebviewMessage(
+            ["type": "launch_claude", "channelId": "canopy-headless"],
+            sender: nil,
+            isPrimary: true
+        )
+    }
+
     /// The attached Mac that shows a UI request, when this shim has no webview of its own (the daemon).
     /// With `fallback` false, only the client that sent `requestId`.
     private func uiClient(for requestId: String?, fallback: Bool = true) -> (any MirrorSink)? {
