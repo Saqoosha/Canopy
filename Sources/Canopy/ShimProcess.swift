@@ -8068,6 +8068,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             {
                 cliResolvedModel = model
             }
+            // A session a control `open_session` started has no webview, so no
+            // `update_session_state` ever replaces its placeholder id, and a pane
+            // attaching later loads the placeholder and shows an empty chat until
+            // some later frame makes its webview adopt the real id. The CLI's own
+            // `init` names the transcript. Only while the id is still a
+            // placeholder, so a later init (a recap fork's) cannot move it.
+            if ioMsg["subtype"] as? String == "init",
+               boundSession?.resumeIdIsExistingTranscript == false,
+               let sid = ioMsg["session_id"] as? String, UUID(uuidString: sid) != nil
+            {
+                backfillResumeId(sid)
+            }
 
         case "stream_event":
             guard let event = ioMsg["event"] as? [String: Any],
