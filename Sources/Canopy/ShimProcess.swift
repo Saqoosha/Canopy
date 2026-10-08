@@ -178,9 +178,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var remoteMcpAuthRequests: [String: ObjectIdentifier] = [:]
 
     /// The other Mac an `open_url` from the shim should go to, if any.
-    private var mcpAuthURLTarget: (any MirrorSink)? {
-        remoteMcpAuthRequests.values.lazy.compactMap { self.mirrors[$0]?.sink }
-            .first { Self.takesRemoteMcpAuth($0) }
+    /// Claims the request it answers, so only the first `open_url` per request is redirected.
+    private func takeMcpAuthURLTarget() -> (any MirrorSink)? {
+        for (requestId, key) in remoteMcpAuthRequests {
+            guard let sink = mirrors[key]?.sink, Self.takesRemoteMcpAuth(sink) else { continue }
+            remoteMcpAuthRequests[requestId] = nil
+            return sink
+        }
+        return nil
     }
 
     /// A Mac on another machine that takes `open_url` frames. The phone is left
@@ -195,11 +200,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `isWebUI` makes the extension's own panel offer a field to paste that
     /// address-bar URL, which goes back as `submit_mcp_oauth_callback_url`.
     /// `requiresUserAction` is forced because the panel is shown only then.
+    /// Whether an OAuth URL's `redirect_uri` is a loopback callback. A claude.ai
+    /// proxy server's URL has none; its flow finishes in the browser.
+    static func redirectsToLocalhost(_ authURL: String) -> Bool {
+        guard let redirect = URLComponents(string: authURL)?.queryItems?
+                .first(where: { $0.name == "redirect_uri" })?.value,
+              let host = URLComponents(string: redirect)?.host?.lowercased()
+        else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1"
+    }
+
     static func patchingMcpAuthForRemoteClient(_ payload: [String: Any]) -> [String: Any] {
         guard var message = payload["message"] as? [String: Any],
               var response = message["response"] as? [String: Any],
               response["type"] as? String == "authenticate_mcp_server",
-              response["authUrl"] is String
+              let authURL = response["authUrl"] as? String,
+              Self.redirectsToLocalhost(authURL)
         else { return payload }
         response["isWebUI"] = true
         response["requiresUserAction"] = true
@@ -358,6 +374,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         mirrors.removeAll()
         requestOwners.removeAll()
+        remoteMcpAuthRequests.removeAll()
     }
 
     /// What a client is told when this daemon session's shim dies: the shim's own fatal error when
@@ -4336,7 +4353,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         case "open_url":
             if let urlStr = msg["url"] as? String, let url = URL(string: urlStr) {
-                if let target = mcpAuthURLTarget, ["http", "https"].contains(url.scheme ?? "") {
+                if ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let target = takeMcpAuthURLTarget() {
                     logger.notice("open_url: MCP auth page sent to the Mac that asked")
                     MirrorFileSender.sendURL(urlStr, to: target)
                 } else {
@@ -4837,14 +4854,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let requestId = inner["requestId"] as? String,
            let owner = requestOwners.removeValue(forKey: requestId)
         {
-            let wasRemoteMcpAuth = remoteMcpAuthRequests.removeValue(forKey: requestId) != nil
+            remoteMcpAuthRequests[requestId] = nil
             switch owner {
             case .primary:
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
             case .mirror(let key):
                 if let target = mirrors[key]?.sink {
                     var payload = addingBoundSessionIfMissing(payload)
-                    if wasRemoteMcpAuth { payload = Self.patchingMcpAuthForRemoteClient(payload) }
+                    if Self.takesRemoteMcpAuth(target) { payload = Self.patchingMcpAuthForRemoteClient(payload) }
                     let shaped: [String: Any]
                     if let connection = target as? MirrorConnection {
                         let session = boundSession?.resumeId ?? ""
@@ -4894,7 +4911,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             post(Self.retargeted(stamped, from: channelId, to: mirror.channelId), to: target)
         }
         for key in stale { mirrors[key] = nil }
-        if !stale.isEmpty, mirrors.isEmpty { requestOwners.removeAll() }
+        if !stale.isEmpty {
+            if mirrors.isEmpty { requestOwners.removeAll() }
+            remoteMcpAuthRequests = remoteMcpAuthRequests.filter { mirrors[$0.value] != nil }
+        }
     }
 
     /// One payload into one client. `payload` must already be in the

@@ -556,6 +556,36 @@ enum SidebarLogicProbe {
                arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } == "first block second block",
                "got \(arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
 
+        // MARK: - Remote MCP auth (a pane on another Mac's daemon)
+
+        do {
+            func auth(_ response: [String: Any]) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "response", "requestId": "r1", "response": response] as [String: Any]]
+            }
+            func inner(_ p: [String: Any]) -> [String: Any]? {
+                (p["message"] as? [String: Any])?["response"] as? [String: Any]
+            }
+            let loopbackURL = "https://x/authorize?client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A53123%2Fcallback&state=s"
+            let patched = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
+                ["type": "authenticate_mcp_server", "authUrl": loopbackURL, "requiresUserAction": false, "isWebUI": false])))
+            record("remote MCP auth: a loopback redirect offers the paste field",
+                   patched?["isWebUI"] as? Bool == true && patched?["requiresUserAction"] as? Bool == true)
+            let proxy = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
+                ["type": "authenticate_mcp_server", "authUrl": "https://claude.ai/api/organizations/o/mcp/start-auth/s?product_surface=claude-vscode",
+                 "requiresUserAction": true])))
+            record("remote MCP auth: a claude.ai proxy URL (no loopback redirect) is left alone", proxy?["isWebUI"] == nil)
+            record("remote MCP auth: 127.0.0.1 counts as loopback, a remote host does not",
+                   ShimProcess.redirectsToLocalhost("https://x/a?redirect_uri=http://127.0.0.1:9/cb")
+                       && !ShimProcess.redirectsToLocalhost("https://x/a?redirect_uri=https://example.com/cb"))
+            let noURL = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
+                ["type": "authenticate_mcp_server", "requiresUserAction": false])))
+            record("remote MCP auth: no authUrl (already authenticated) is left alone",
+                   noURL?["isWebUI"] == nil && noURL?["requiresUserAction"] as? Bool == false)
+            let other = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
+                ["type": "clear_mcp_server_auth", "authUrl": loopbackURL])))
+            record("remote MCP auth: other responses are left alone", other?["isWebUI"] == nil)
+        }
+
         // MARK: - Session selection budget (the sidebar's shrinking list)
         //
         // `loadAllSessions` used to `prefix(50)` the candidates and only then
@@ -6819,25 +6849,6 @@ enum SidebarLogicProbe {
             let echoMsg = envelope(echoBlocks(KeepAliveGate.promptText))
             let otherUserMsg = envelope(echoBlocks("fix the failing test"))
 
-            do {
-                func auth(_ response: [String: Any]) -> [String: Any] {
-                    ["type": "from-extension", "message": ["type": "response", "requestId": "r1", "response": response] as [String: Any]]
-                }
-                func inner(_ p: [String: Any]) -> [String: Any]? {
-                    (p["message"] as? [String: Any])?["response"] as? [String: Any]
-                }
-                let patched = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
-                    ["type": "authenticate_mcp_server", "authUrl": "https://x/auth", "requiresUserAction": false, "isWebUI": false])))
-                record("remote MCP auth: response offers the paste field",
-                       patched?["isWebUI"] as? Bool == true && patched?["requiresUserAction"] as? Bool == true)
-                let noURL = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
-                    ["type": "authenticate_mcp_server", "requiresUserAction": false])))
-                record("remote MCP auth: no authUrl (already authenticated) is left alone",
-                       noURL?["isWebUI"] == nil && noURL?["requiresUserAction"] as? Bool == false)
-                let other = inner(ShimProcess.patchingMcpAuthForRemoteClient(auth(
-                    ["type": "clear_mcp_server_auth", "authUrl": "https://x/auth"])))
-                record("remote MCP auth: other responses are left alone", other?["isWebUI"] == nil)
-            }
             record("disposition passes everything through when no refresh is in flight",
                    ShimProcess.keepAliveDisposition(initMsg, inFlight: false, echoSeen: false) == .passThrough)
             // The shipped bug, now one red assertion.
