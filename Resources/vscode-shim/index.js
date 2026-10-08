@@ -88,6 +88,26 @@ if (process.env.CANOPY_SSH_HOST) {
   };
 }
 
+// Worktree sessions: the workspace stays the worktree, so file search,
+// open_file and diffs read the worktree, but the CLI itself starts in the main
+// checkout. The canopy-bridge mod then enters the worktree with EnterWorktree,
+// which is what lets ExitWorktree move the transcript back to the checkout
+// later. See `ShimProcess.worktreeEntry`. Only the CLI spawn is rewritten — it
+// is the one that carries `--input-format stream-json`; git, ripgrep and MCP
+// spawns keep the workspace cwd.
+if (process.env.CANOPY_CLI_CWD) {
+  const cliCwd = process.env.CANOPY_CLI_CWD;
+  process.stderr.write(`[vscode-shim] CLI starts in ${cliCwd} (worktree session)\n`);
+  const child_process = require("node:child_process");
+  const origSpawn = child_process.spawn;
+  child_process.spawn = function (command, args, options) {
+    if (Array.isArray(args) && args.includes("--input-format") && options && typeof options === "object") {
+      return origSpawn.call(this, command, args, { ...options, cwd: cliCwd });
+    }
+    return origSpawn.apply(this, arguments);
+  };
+}
+
 const { writeStdout, startStdinReader } = require("./protocol.js");
 const { createExtensionContext } = require("./context.js");
 const { createCommands } = require("./commands.js");

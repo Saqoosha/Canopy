@@ -754,6 +754,47 @@ final class SessionStore {
 
     init() {
         Self.shared = self
+        worktreeRemovalObserver = NotificationCenter.default.addObserver(
+            forName: ShimProcess.worktreeRemovedNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let shim = note.object as? ShimProcess,
+                  let checkout = note.userInfo?[ShimProcess.checkoutKey] as? URL else { return }
+            MainActor.assumeIsolated { self?.moveToCheckout(shim: shim, checkout: checkout) }
+        }
+    }
+
+    @ObservationIgnored private var worktreeRemovalObserver: (any NSObjectProtocol)?
+
+    /// Whether the GUI should take the daemon's new cwd for a session: only the
+    /// `moveToCheckout` case, a folder that is gone replaced by one that exists.
+    /// Any other difference — a path spelled two ways — must not restart a pane.
+    nonisolated static func followsCheckoutMove(
+        current: URL, rowCwd: String,
+        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> Bool {
+        !rowCwd.isEmpty && rowCwd != current.path && !exists(current.path) && exists(rowCwd)
+    }
+
+    /// The session removed its own worktree after the canopy-bridge mod left
+    /// it (`ShimProcess.checkoutAfterRemoval`): run it on in the checkout, so
+    /// the extension's workspace — file search, open_file, diffs — is a folder
+    /// that exists. Same resume id; the transcript is already filed there.
+    /// A GUI pane follows through `session_state` (`applyDaemonSessions`).
+    func moveToCheckout(shim: ShimProcess, checkout: URL) {
+        guard let session = openSessions.first(where: { $0.shim === shim }),
+              case .local = session.origin else { return }
+        guard FileManager.default.fileExists(atPath: checkout.path) else {
+            logger.error("moveToCheckout: the checkout is missing too; leaving the session")
+            return
+        }
+        logger.notice("moveToCheckout id=\(session.id.uuidString, privacy: .public)")
+        session.origin = .local(checkout)
+        session.project = GitWorktree.projectDisplayName(for: checkout)
+        let headless = session.runsShimHere
+        restartSession(session.id, notifyDaemon: false)
+        if headless, startHeadlessSession(resumeId: session.resumeId) == nil {
+            logger.error("moveToCheckout: the session did not restart")
+        }
     }
 
     // No deinit cleanup: SessionStore lives for the app's lifetime
@@ -1354,6 +1395,13 @@ final class SessionStore {
                 session.permissionMode = mode
             }
             session.statusBar.messageCount = row.messageCount
+            if case .local(let dir) = session.origin,
+               Self.followsCheckoutMove(current: dir, rowCwd: row.cwd) {
+                logger.notice("applyDaemonSessions: following a removed worktree to its checkout")
+                session.origin = .local(URL(fileURLWithPath: row.cwd))
+                session.project = row.project
+                if paned.contains(session.id) { restartSession(session.id, notifyDaemon: false) }
+            }
         }
         for row in plan.adds {
             guard let key = row.key else { continue }
