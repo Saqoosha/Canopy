@@ -227,7 +227,7 @@ struct SidebarAccountSection: View {
         // and below the bar needs room inside it: the canvas is `overhang`
         // taller on each side, and negative padding hands that space back so
         // the row still lays out at `barHeight`.
-        let overhang: CGFloat = 2
+        let overhang: CGFloat = 1
         return Canvas { context, canvasSize in
             let size = CGSize(width: canvasSize.width, height: barHeight)
             let top = overhang
@@ -267,9 +267,7 @@ struct SidebarAccountSection: View {
                 func snapLeft(_ x: CGFloat) -> CGFloat {
                     (x * scale).rounded() / scale
                 }
-                // 1pt above and below the bar. Must stay within `overhang`
-                // or the canvas clips it.
-                let extend: CGFloat = 1
+                let extend = overhang
                 let haloLeft = snapLeft(max(0, min(size.width - haloWidth, centerX - haloWidth / 2)))
                 let markerLeft = snapLeft(max(0, min(size.width - markerWidth, centerX - markerWidth / 2)))
                 let haloRect = CGRect(x: haloLeft, y: top - extend,
@@ -279,7 +277,7 @@ struct SidebarAccountSection: View {
                 context.fill(Path(haloRect), with: .color(.white.opacity(0.55)))
                 context.fill(
                     Path(markerRect),
-                    with: .color(ahead == true ? .red : .green)
+                    with: .color(ahead == true || clamped >= 1 ? .red : .green)
                 )
             }
         }
@@ -309,6 +307,7 @@ struct SidebarAccountSection: View {
     /// known quota, so round numbers are the right model here.
     static func barColor(_ percent: Double, aheadOfPace: Bool?) -> Color {
         if let aheadOfPace {
+            if percent >= 1 { return .red.opacity(0.75) }  // exhausted: blocked whatever the pace
             guard aheadOfPace else { return .secondary.opacity(0.6) }
             return percent >= 0.9 ? .red.opacity(0.75) : .orange.opacity(0.8)
         }
