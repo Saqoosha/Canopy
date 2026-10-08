@@ -11,9 +11,7 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "MirrorPane"
 /// move, and the two-hosts-one-webview re-adoption rule holds here too.
 struct MirrorPaneView: NSViewRepresentable {
     let session: OpenSession
-    /// Called once with a user-facing message when the attach is refused or the
-    /// socket drops before `attach_ok`; the caller closes the pane.
-    /// The message, and whether the session ended rather than failed to attach.
+    /// Called once with a user-facing message when the attach fails or the session ends; the caller closes the pane.
     let onFailure: (_ message: String, _ ended: Bool) -> Void
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, SessionWebViewHostOwner {
