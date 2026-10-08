@@ -1992,6 +1992,117 @@ enum SidebarLogicProbe {
                 record("control turn: replyId nil with nothing control-owned yields latestText",
                        snap(nil, inFlight: nil, queued: [], finishedId: nil, finished: [:], latestText: "latest")
                            == ShimProcess.ControlTurnSnapshot(state: "idle", replyId: nil, text: "latest", turnDone: false))
+                // `listen`: addressee convention, cursor wire, filter, and the scan's gap rules.
+                record("listen addressee: Written for: names the reader",
+                       ControlEvent.addressee(of: "\n  Written for: Engineer.\nbody") == "Engineer")
+                record("listen addressee: markdown around the line is ignored",
+                       ControlEvent.addressee(of: "**Written for: Engineer (grok bot)**") == "Engineer (grok bot)")
+                record("listen addressee: a short へ line names the reader",
+                       ControlEvent.addressee(of: "Engineer へ\n結果です") == "Engineer")
+                record("listen addressee: 宛先: names the reader",
+                       ControlEvent.addressee(of: "宛先：Engineer") == "Engineer")
+                record("listen addressee: only the first non-blank line counts",
+                       ControlEvent.addressee(of: "done.\nWritten for: Engineer") == nil)
+                record("listen addressee: a long sentence ending in へ is not an address",
+                       ControlEvent.addressee(of: String(repeating: "あ", count: 50) + "へ") == nil)
+                record("listen addressee: an empty Written for: is nil",
+                       ControlEvent.addressee(of: "Written for:") == nil)
+                let continued = ControlEvent.turnReply(blocks: ["Written for: Engineer\nhello", "a Stop hook's follow-up"],
+                                                       result: "a Stop hook's follow-up")
+                record("listen turn: an addressed block before the final one still names the reader",
+                       continued.addressedTo == "Engineer" && continued.text == "Written for: Engineer\nhello\n\na Stop hook's follow-up")
+                let plain = ControlEvent.turnReply(blocks: ["working on it", "done"], result: "done")
+                record("listen turn: no addressed block reports the result text",
+                       plain.addressedTo == nil && plain.text == "done")
+                record("listen turn: no blocks falls back to the result",
+                       ControlEvent.turnReply(blocks: [], result: "Engineer へ\nok").addressedTo == "Engineer")
+                let cumulative = ControlEvent.appendingTurnText(ControlEvent.appendingTurnText([], id: "m1", texts: ["a"]),
+                                                                id: "m1", texts: ["a", "b"])
+                let perBlock = ControlEvent.appendingTurnText(ControlEvent.appendingTurnText([], id: "m1", texts: ["a"]),
+                                                              id: "m1", texts: ["b"])
+                let nextMessage = ControlEvent.appendingTurnText(perBlock, id: "m2", texts: ["c"])
+                record("listen turn: a cumulative frame replaces, a per-block frame appends, a new id starts a group",
+                       cumulative.flatMap(\.texts) == ["a", "b"] && perBlock.flatMap(\.texts) == ["a", "b"]
+                           && nextMessage.flatMap(\.texts) == ["a", "b", "c"] && nextMessage.count == 2)
+                record("listen cursor: wire round-trips",
+                       ControlEventCursor(wire: ControlEventCursor(epoch: "ab12", seq: 7).wire) == ControlEventCursor(epoch: "ab12", seq: 7))
+                record("listen cursor: junk is refused",
+                       ControlEventCursor(wire: "nope") == nil && ControlEventCursor(wire: ".3") == nil
+                           && ControlEventCursor(wire: "ab.-1") == nil)
+                func listenEvent(_ seq: Int, _ kind: ControlEvent.Kind, key: String = "k1", to: String? = nil) -> ControlEvent {
+                    ControlEvent(seq: seq, kind: kind, key: key, sessionId: "s-\(key)", title: "t",
+                                 at: Date(timeIntervalSince1970: 0), addressedTo: to)
+                }
+                let everyKind = ControlListenFilter(kinds: ControlListenFilter.kindNames.subtracting(["addressed"]))
+                record("listen filter: addressed matches only a turn naming someone",
+                       ControlListenFilter(kinds: ["addressed"]).matches(listenEvent(1, .turnDone, to: "Engineer"))
+                           && !ControlListenFilter(kinds: ["addressed"]).matches(listenEvent(1, .turnDone)))
+                record("listen filter: addressedTo is a case-insensitive substring",
+                       ControlListenFilter(kinds: ["addressed"], addressedTo: "engineer").matches(listenEvent(1, .turnDone, to: "Engineer (grok)"))
+                           && !ControlListenFilter(kinds: ["addressed"], addressedTo: "Saqoosha").matches(listenEvent(1, .turnDone, to: "Engineer")))
+                record("listen filter: key narrows",
+                       !ControlListenFilter(kinds: ["turn_done"], key: "k2").matches(listenEvent(1, .turnDone))
+                           && ControlListenFilter(kinds: ["turn_done"], key: "k1").matches(listenEvent(1, .turnDone)))
+                record("listen filter: a gap passes any filter",
+                       ControlListenFilter(kinds: ["permission"], key: "zz").matches(listenEvent(1, .gap)))
+                record("listen filter: unlisted kinds do not match",
+                       !ControlListenFilter(kinds: ["permission"]).matches(listenEvent(1, .turnDone)))
+                func listenParse(_ params: [String: Any]) -> ControlListenParams? {
+                    if case .success(let parsed) = ControlListenParams.parse(params) { return parsed }
+                    return nil
+                }
+                record("listen params: no events means every kind except addressed",
+                       listenParse([:])?.filter.kinds == everyKind.kinds && listenParse([:])?.since == nil
+                           && listenParse([:])?.timeout == ControlListenParams.defaultTimeout)
+                record("listen params: addressedTo alone means addressed",
+                       listenParse(["addressedTo": " Engineer "])?.filter == ControlListenFilter(kinds: ["addressed"], addressedTo: "Engineer"))
+                record("listen params: unknown event, bad cursor and non-positive timeout are refused",
+                       listenParse(["events": ["turn_done", "bogus"]]) == nil && listenParse(["since": "x"]) == nil
+                           && listenParse(["timeout": 0]) == nil && listenParse(["events": [String]()]) == nil)
+                record("listen params: timeout is capped",
+                       listenParse(["timeout": 99_999])?.timeout == ControlListenParams.maxTimeout)
+                record("listen params: key and sessionId become the filter",
+                       listenParse(["key": "k", "sessionId": "s", "events": ["permission"]])?.filter
+                           == ControlListenFilter(kinds: ["permission"], key: "k", sessionId: "s"))
+                let ring = [listenEvent(5, .turnDone), listenEvent(6, .permission, key: "k2"), listenEvent(7, .turnDone, to: "Engineer")]
+                func listenScan(_ since: ControlEventCursor?, _ filter: ControlListenFilter, events: [ControlEvent]? = nil) -> ControlListenScan {
+                    let held = events ?? ring
+                    return ControlListenScan.scan(events: held, epoch: "e1", latestSeq: held.last?.seq ?? 0, since: since,
+                                                  filter: filter, now: Date(timeIntervalSince1970: 0))
+                }
+                record("listen scan: no cursor waits from the newest event",
+                       listenScan(nil, everyKind) == .wait(cursor: ControlEventCursor(epoch: "e1", seq: 7)))
+                record("listen scan: returns the first match after the cursor",
+                       listenScan(ControlEventCursor(epoch: "e1", seq: 5), everyKind)
+                           == .event(ring[1], cursor: ControlEventCursor(epoch: "e1", seq: 6)))
+                record("listen scan: skips non-matching events to the next match",
+                       listenScan(ControlEventCursor(epoch: "e1", seq: 4), ControlListenFilter(kinds: ["addressed"]))
+                           == .event(ring[2], cursor: ControlEventCursor(epoch: "e1", seq: 7)))
+                record("listen scan: nothing new waits at the newest seq",
+                       listenScan(ControlEventCursor(epoch: "e1", seq: 5), ControlListenFilter(kinds: ["asking"]))
+                           == .wait(cursor: ControlEventCursor(epoch: "e1", seq: 7)))
+                func gapReason(_ scan: ControlListenScan) -> (String?, Int)? {
+                    if case .event(let event, let cursor) = scan, event.kind == .gap { return (event.state, cursor.seq) }
+                    return nil
+                }
+                let restarted = gapReason(listenScan(ControlEventCursor(epoch: "old", seq: 99), everyKind))
+                record("listen scan: another epoch is a restart gap resuming before the oldest held event",
+                       restarted?.0 == "daemon_restarted" && restarted?.1 == 4)
+                let overflow = gapReason(listenScan(ControlEventCursor(epoch: "e1", seq: 2), everyKind))
+                record("listen scan: a cursor older than the ring is an overflow gap",
+                       overflow?.0 == "overflow" && overflow?.1 == 4)
+                record("listen scan: a cursor right before the oldest event is not a gap",
+                       gapReason(listenScan(ControlEventCursor(epoch: "e1", seq: 4), everyKind)) == nil)
+                let ahead = gapReason(listenScan(ControlEventCursor(epoch: "e1", seq: 50), everyKind))
+                record("listen scan: a cursor past the newest seq is an unknown-cursor gap",
+                       ahead?.0 == "unknown_cursor" && ahead?.1 == 7)
+                let gapWire = listenEvent(3, .gap).wire
+                record("listen wire: a gap carries its reason and names no session",
+                       gapWire["event"] as? String == "gap" && gapWire["key"] == nil && gapWire["title"] == nil
+                           && gapWire["reason"] as? String == "")
+                let emptyRestart = gapReason(listenScan(ControlEventCursor(epoch: "old", seq: 3), everyKind, events: []))
+                record("listen scan: a restart with nothing recorded resumes at zero",
+                       emptyRestart?.0 == "daemon_restarted" && emptyRestart?.1 == 0)
                 let bashWire = ShimProcess.pendingRequestWire(requestId: "p1", toolName: "Bash", inputs: ["command": "ls -la"])
                 record("control pending: a tool permission is kind permission with its rendered input and no choices",
                        bashWire["requestId"] as? String == "p1" && bashWire["toolName"] as? String == "Bash"

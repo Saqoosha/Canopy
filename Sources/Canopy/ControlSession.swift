@@ -18,6 +18,8 @@ final class ControlSession {
     private var lastUpgradeState: UpgradeState?
     private var recheck: Timer?
     private var stopped = false
+    /// Open `listen` requests on this connection, by request id.
+    private var listens: [String: (waiter: UUID, cursor: ControlEventCursor)] = [:]
 
     /// `ShimProcess` is not `@Observable`, so a client attaching or a shim
     /// dying changes a row without waking the observation tracker. This
@@ -30,12 +32,15 @@ final class ControlSession {
         self.isLocal = isLocal
         self.allowBypass = allowBypass
         self.send = send
+        // Sessions opened or closed from now on are recorded for `listen`, connected or not.
+        ControlEventLog.shared.track(store)
     }
 
     func stop() {
         stopped = true
         recheck?.invalidate()
         recheck = nil
+        for id in Array(listens.keys) { endListen(id) }
     }
 
     func handle(_ dict: [String: Any]) {
@@ -76,6 +81,7 @@ final class ControlSession {
         case "latest_reply": latestReply(request)
         case "wait_turn": waitTurn(request)
         case "pending_requests": pendingRequests(request)
+        case "listen": listen(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -163,6 +169,54 @@ final class ControlSession {
                 self?.pollTurn(request, session: session, replyId: replyId, remaining: remaining - 1)
             }
         }
+    }
+
+    /// Answers with the first matching event after `since`, or waits for one.
+    /// Like `wait_turn` it never blocks `handle()`: the request parks a waiter
+    /// on the log and is answered from whichever append matches, or by its timeout.
+    private func listen(_ request: ControlProtocol.Request) {
+        let params: ControlListenParams
+        switch ControlListenParams.parse(request.params) {
+        case .success(let parsed): params = parsed
+        case .failure(let error): return fail(request, error.message)
+        }
+        guard listens[request.id] == nil else { return fail(request, "a listen with this id is already open") }
+        let log = ControlEventLog.shared
+        let start: ControlEventCursor
+        switch log.scan(since: params.since, filter: params.filter) {
+        case .event(let event, let next): return replyEvent(request, event, cursor: next)
+        case .wait(let next): start = next
+        }
+        let id = request.id
+        let filter = params.filter
+        let waiter = log.addWaiter { [weak self] in
+            guard let self, let cursor = self.listens[id]?.cursor else { return }
+            switch log.scan(since: cursor, filter: filter) {
+            case .event(let event, let next):
+                self.endListen(id)
+                self.replyEvent(request, event, cursor: next)
+            case .wait(let next):
+                self.listens[id]?.cursor = next
+            }
+        }
+        listens[id] = (waiter, start)
+        DispatchQueue.main.asyncAfter(deadline: .now() + params.timeout) { [weak self] in
+            MainActor.assumeIsolated {
+                // The waiter id tells this listen apart from a later one reusing the request id.
+                guard let self, let entry = self.listens[id], entry.waiter == waiter else { return }
+                self.endListen(id)
+                self.reply(request, ["timedOut": true, "cursor": entry.cursor.wire])
+            }
+        }
+    }
+
+    private func replyEvent(_ request: ControlProtocol.Request, _ event: ControlEvent, cursor: ControlEventCursor) {
+        reply(request, ["event": event.wire, "cursor": cursor.wire])
+    }
+
+    private func endListen(_ id: String) {
+        guard let entry = listens.removeValue(forKey: id) else { return }
+        ControlEventLog.shared.removeWaiter(entry.waiter)
     }
 
     private func listSessions(_ request: ControlProtocol.Request) {
