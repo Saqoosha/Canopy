@@ -6555,9 +6555,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 let rendered = Self.renderedToolInput(request["inputs"])
                 ControlEventLog.shared.record(toolName == "AskUserQuestion" ? .asking : .permission,
                                               session: boundSession, state: controlStateWire, requestId: requestId,
-                                              toolName: toolName,
-                                              text: rendered.isEmpty ? nil : Self.truncatedNotificationBody(
-                                                  rendered, maxBytes: Self.pendingRequestInputMaxBytes))
+                                              toolName: toolName, text: rendered.isEmpty ? nil : rendered,
+                                              textMaxBytes: Self.pendingRequestInputMaxBytes)
             }
             // A raised hand is the one state where the notification is worth
             // more than the roster row: it is the only state that cannot

@@ -189,12 +189,12 @@ Params, all optional:
 | Param | Meaning |
 |---|---|
 | `events` | Array of event names to wait for. Default: every event except `addressed`. Unknown names are an error |
-| `key`, `sessionId` | Only events from that session, which must be open (else `no such session`). Resolved like the other verbs |
+| `key`, `sessionId` | Only events from that session. Without `since` it must be open (else `no such session`); with `since` a session that has since closed is still read from the log |
 | `addressedTo` | Only `addressed` turns whose reader contains this text (case-insensitive). Alone, it means `events: ["addressed"]`; with `events`, those must include `addressed` |
 | `since` | A `cursor` string from an earlier `listen`. The first matching event after it is returned at once. Omitted: only events after this request |
 | `timeout` | Seconds, default 300, at least 1, capped at 3600 |
 
-A param of the wrong type is an error. One connection may hold 16 open
+A param of the wrong type is an error; `null` is the same as leaving it out. One connection may hold 16 open
 `listen` requests; each is answered under its own `id`, and closing the
 connection cancels them.
 
@@ -245,8 +245,9 @@ the ring wrapped past the cursor; `"unknown_cursor"` means the cursor is
 ahead of the log.
 
 `canopyctl listen` prints the response and exits 0 on an event, 3 on
-timeout, 4 when the connection was lost (a daemon restart), and 1 on any
-other error (2 is argparse's usage error):
+timeout, 4 when the socket could not be reached or dropped (a daemon
+restart), and 1 on any other error, a refused `hello` included (2 is
+argparse's usage error):
 
 ```sh
 cursor=""

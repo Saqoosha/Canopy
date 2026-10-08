@@ -2020,9 +2020,6 @@ enum SidebarLogicProbe {
                 let middle = ControlEvent.turnReply(blocks: ["let me check", "Written for: X\nhi", "tail"], result: "tail")
                 record("listen turn: text starts at the addressed block, not at the turn's first",
                        middle.addressedTo == "X" && middle.text == "Written for: X\nhi\n\ntail")
-                record("listen turn: a per-block frame repeating the previous text is appended, not merged",
-                       ControlEvent.appendingTurnText(ControlEvent.appendingTurnText([], id: "m", texts: ["Done."]),
-                                                      id: "m", texts: ["Done."]).flatMap(\.texts) == ["Done.", "Done."])
                 let mainFrame: [String: Any] = ["type": "assistant", "parent_tool_use_id": NSNull(),
                                                 "message": ["id": "m1", "content": [["type": "text", "text": "hi"],
                                                                                     ["type": "tool_use", "name": "Bash"]]]]
@@ -2174,6 +2171,17 @@ enum SidebarLogicProbe {
                 listenRequest("L4", ["key": "no-such-key"])
                 record("listen verb: a session that is not open is refused at once",
                        listenReplies("L4").first?["error"] as? String == "no such session")
+                listenRequest("L5", ["key": "probe-key", "since": ControlEventCursor(epoch: log.epoch, seq: log.latestSeq - 2).wire])
+                let l5Event = (listenReplies("L5").first?["result"] as? [String: Any])?["event"] as? [String: Any]
+                record("listen verb: with a cursor, a session no longer open is still read from the log",
+                       l5Event?["key"] as? String == "probe-key" && l5Event?["event"] as? String == "turn_done")
+                log.record(.permission, key: "probe-key", sessionId: "s", title: "t", text: String(repeating: "x", count: 50),
+                           textMaxBytes: 10)
+                record("listen log: text cut at the caller's limit is flagged truncated",
+                       log.events.last?.textTruncated == true && (log.events.last?.text?.utf8.count ?? 99) <= 10)
+                record("listen params: a JSON null is the same as leaving the param out",
+                       listenParse(["since": NSNull(), "addressedTo": NSNull(), "timeout": NSNull()])
+                           == listenParse([:]))
                 for index in 0..<ControlSession.maxOpenListens { listenRequest("cap-\(index)", ["events": ["asking"]]) }
                 record("listen verb: open listens per connection are capped",
                        listenSent.contains { $0["error"] as? String == "too many open listens" })

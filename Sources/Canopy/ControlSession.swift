@@ -182,10 +182,15 @@ final class ControlSession {
         guard listens.count < Self.maxOpenListens else { return fail(request, "too many open listens") }
         var filter = params.filter
         // Resolved like every other verb, so a stale or mistyped id fails now instead of timing out.
-        if !ControlProtocol.sessionRefs(request.params).isEmpty {
-            guard let session = requestedSession(request) else { return }
-            filter.key = session.id.uuidString
-            filter.sessionId = nil
+        // With a cursor the session may have closed since; its events are still in the log.
+        let refs = ControlProtocol.sessionRefs(request.params)
+        if !refs.isEmpty {
+            if let session = store.openSession(for: refs) {
+                filter.key = session.id.uuidString
+                filter.sessionId = nil
+            } else if params.since == nil {
+                return fail(request, "no such session")
+            }
         }
         let log = ControlEventLog.shared
         let id = request.id

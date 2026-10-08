@@ -97,8 +97,7 @@ nonisolated struct ControlEvent: Equatable, Sendable {
                                   texts: [String]) -> [(id: String, texts: [String])] {
         var turn = turn
         if let last = turn.last, last.id == id {
-            let cumulative = texts.count > last.texts.count && texts.starts(with: last.texts)
-            let merged = cumulative ? texts : last.texts + texts
+            let merged = texts.starts(with: last.texts) ? texts : last.texts + texts
             turn[turn.count - 1] = (id, merged)
         } else if !texts.isEmpty {
             turn.append((id, texts))
@@ -165,6 +164,8 @@ nonisolated struct ControlListenParams: Equatable, Sendable {
 
     static func parse(_ params: [String: Any]) -> Result<ControlListenParams, ControlProtocol.ControlError> {
         var kinds = ControlListenFilter.kindNames.subtracting(["addressed"])
+        // A JSON null is the same as leaving the param out.
+        let params = params.filter { !($0.value is NSNull) }
         if params["addressedTo"] != nil, !(params["addressedTo"] is String) {
             return .failure(.init("addressedTo must be a string"))
         }
@@ -198,8 +199,8 @@ nonisolated struct ControlListenParams: Equatable, Sendable {
         var timeout = defaultTimeout
         if let raw = params["timeout"] {
             // `is Bool` is true for a JSON 0 or 1 too; only the CF type tells `true` from `1`.
-            guard CFGetTypeID(raw as CFTypeRef) != CFBooleanGetTypeID(), let number = (raw as? NSNumber)?.doubleValue ?? (raw as? Int).map(Double.init),
-                  number.isFinite, number > 0 else {
+            let isBool = CFGetTypeID(raw as CFTypeRef) == CFBooleanGetTypeID()
+            guard !isBool, let number = (raw as? NSNumber)?.doubleValue, number.isFinite, number > 0 else {
                 return .failure(.init("timeout must be a positive number of seconds"))
             }
             timeout = max(number, 1)
@@ -242,7 +243,8 @@ nonisolated enum ControlListenScan: Equatable, Sendable {
         if since.seq > latestSeq { return gap("unknown_cursor", resumeAt: latestSeq) }
         if since.seq < oldest - 1 { return gap("overflow", resumeAt: oldest - 1) }
         // Seqs are contiguous in the ring, so the first event after the cursor is at a known index.
-        for event in events[(since.seq - oldest + 1)...] where filter.matches(event) {
+        let start = min(max(since.seq - oldest + 1, 0), events.count)
+        for event in events[start...] where filter.matches(event) {
             return .event(event, cursor: ControlEventCursor(epoch: epoch, seq: event.seq))
         }
         return .wait(cursor: ControlEventCursor(epoch: epoch, seq: latestSeq))
@@ -264,26 +266,27 @@ final class ControlEventLog {
     private var waiters: [UUID: () -> Void] = [:]
 
     func record(_ kind: ControlEvent.Kind, session: OpenSession?, state: String? = nil, replyId: String? = nil,
-                requestId: String? = nil, toolName: String? = nil, text: String? = nil, addressedTo: String? = nil) {
+                requestId: String? = nil, toolName: String? = nil, text: String? = nil, addressedTo: String? = nil,
+                textMaxBytes: Int = ControlEvent.textMaxBytes) {
         guard let session else {
             logger.notice("[control] \(kind.rawValue, privacy: .public) not recorded: no bound session")
             return
         }
         record(kind, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
                state: state, replyId: replyId, requestId: requestId, toolName: toolName, text: text,
-               addressedTo: addressedTo)
+               addressedTo: addressedTo, textMaxBytes: textMaxBytes)
     }
 
     func record(_ kind: ControlEvent.Kind, key: String, sessionId: String, title: String, state: String? = nil,
                 replyId: String? = nil, requestId: String? = nil, toolName: String? = nil, text: String? = nil,
-                addressedTo: String? = nil) {
+                addressedTo: String? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
         latestSeq += 1
         var event = ControlEvent(seq: latestSeq, kind: kind, key: key, sessionId: sessionId, title: title, at: Date(),
                                  state: state, replyId: replyId, requestId: requestId, toolName: toolName,
                                  addressedTo: addressedTo)
         if let text {
-            event.text = ShimProcess.truncatedNotificationBody(text, maxBytes: ControlEvent.textMaxBytes)
-            event.textTruncated = text.utf8.count > ControlEvent.textMaxBytes
+            event.text = ShimProcess.truncatedNotificationBody(text, maxBytes: textMaxBytes)
+            event.textTruncated = text.utf8.count > textMaxBytes
         }
         events.append(event)
         if events.count > Self.capacity { events.removeFirst(events.count - Self.capacity) }

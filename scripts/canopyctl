@@ -94,6 +94,9 @@ def main(argv):
         read_timeout = min(args.timeout, 3600) + 30
     try:
         result = transact(args.socket, verb, params, read_timeout)
+    except HelloRefused as exc:
+        print(f"canopyctl: {exc}", file=sys.stderr)
+        return 1
     except OSError as exc:
         print(f"canopyctl: {exc}", file=sys.stderr)
         # A listen loop retries this with its cursor; a daemon restart lands here.
@@ -108,6 +111,10 @@ def main(argv):
     if args.cmd == "listen" and body.get("timedOut") is True:
         return 3
     return 0
+
+
+class HelloRefused(Exception):
+    """The daemon answered hello_error: retrying will not help."""
 
 
 def add_session_flags(parser, require):
@@ -179,7 +186,7 @@ def transact(path, verb, params, read_timeout=READ_TIMEOUT):
         hello = read_typed(lines, {"hello_ok", "hello_error"})
         if hello.get("type") == "hello_error":
             message = hello.get("message") or "daemon refused hello"
-            raise OSError(message)
+            raise HelloRefused(message)
         send_line(
             sock,
             {"type": "request", "id": request_id, "verb": verb, "params": params},
