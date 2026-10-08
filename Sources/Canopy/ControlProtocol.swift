@@ -6,7 +6,8 @@ import Foundation
 /// A control connection is a `MirrorServer` connection whose first line is
 /// `hello`. After `hello_ok`, the client sends `request` lines and gets one
 /// `response` per id; after `subscribe` the server also pushes
-/// `session_state` lines. See docs/superpowers/specs/2026-09-29-canopy-server-design.md.
+/// `session_state` lines. `send_message` delivers a user turn through the
+/// same queue the phone uses. See docs/superpowers/specs/2026-09-29-canopy-server-design.md.
 enum ControlProtocol {
     static let version = 1
     static let helloType = "hello"
@@ -240,5 +241,32 @@ enum ControlProtocol {
                       permissionMode: wire["permissionMode"] as? String ?? "",
                       accountId: wire["accountId"] as? String)
         }
+    }
+
+    struct SendMessage: Equatable {
+        var text: String
+    }
+
+    /// `send_message`: `text` is required (trimmed; blank is refused). A
+    /// non-empty `attachments` array is refused — image upload is not this
+    /// verb. An absent or empty array is fine.
+    static func parseSendMessage(_ params: [String: Any]) -> Result<SendMessage, ControlError> {
+        let text = (params["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return .failure(ControlError("The message was empty")) }
+        if let attachments = params["attachments"] as? [Any], !attachments.isEmpty {
+            return .failure(ControlError("attachments are not supported"))
+        }
+        return .success(SendMessage(text: text))
+    }
+
+    /// Disposition strings match `PhoneReplyDisposition`: injected / queued / refused.
+    static func replyWire(disposition: String, reason: String?, replyId: String) -> [String: Any] {
+        var wire: [String: Any] = [
+            "ok": disposition != "refused",
+            "disposition": disposition,
+            "replyId": replyId,
+        ]
+        if let reason, !reason.isEmpty { wire["reason"] = reason }
+        return wire
     }
 }

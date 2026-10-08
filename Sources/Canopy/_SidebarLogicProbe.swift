@@ -1915,6 +1915,33 @@ enum SidebarLogicProbe {
                 record("control open: an unknown permission mode is refused, not defaulted",
                        ControlProtocol.parseOpenParams(["cwd": controlDir.path, "permissionMode": "yolo"], allowBypass: false)
                            == .failure(ControlProtocol.ControlError("unknown permission mode")))
+                record("control send: text is trimmed",
+                       ControlProtocol.parseSendMessage(["text": "  hello  "])
+                           == .success(ControlProtocol.SendMessage(text: "hello")))
+                record("control send: blank text is refused",
+                       ControlProtocol.parseSendMessage(["text": "  "])
+                           == .failure(ControlProtocol.ControlError("The message was empty")))
+                record("control send: missing text is refused",
+                       ControlProtocol.parseSendMessage([:])
+                           == .failure(ControlProtocol.ControlError("The message was empty")))
+                record("control send: a non-empty attachments array is refused",
+                       ControlProtocol.parseSendMessage(["text": "hi", "attachments": [["path": "a.png"]]])
+                           == .failure(ControlProtocol.ControlError("attachments are not supported")))
+                record("control send: an empty attachments array is fine",
+                       ControlProtocol.parseSendMessage(["text": "hi", "attachments": [] as [Any]])
+                           == .success(ControlProtocol.SendMessage(text: "hi")))
+                let injected = ControlProtocol.replyWire(disposition: "injected", reason: nil, replyId: "r1")
+                record("control send: injected is ok and carries the reply id",
+                       injected["ok"] as? Bool == true && injected["disposition"] as? String == "injected"
+                           && injected["replyId"] as? String == "r1" && injected["reason"] == nil)
+                let refused = ControlProtocol.replyWire(disposition: "refused", reason: "not running", replyId: "r2")
+                record("control send: refused is not ok and names the reason",
+                       refused["ok"] as? Bool == false && refused["disposition"] as? String == "refused"
+                           && refused["reason"] as? String == "not running")
+                let queued = ControlProtocol.replyWire(disposition: "queued", reason: "session busy", replyId: "r3")
+                record("control send: queued is ok",
+                       queued["ok"] as? Bool == true && queued["disposition"] as? String == "queued"
+                           && queued["reason"] as? String == "session busy")
             }
             // Canopy Server reaper.
             do {

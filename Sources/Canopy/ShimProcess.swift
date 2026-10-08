@@ -1710,6 +1710,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Remembered BEFORE the injection goes out: the echo can arrive on
         // the very next frame, and a pair recorded afterwards would miss it.
         pendingPhoneReply = replyId.map { (id: $0, text: trimmed) }
+        if let replyId, controlReplyIds.contains(replyId) {
+            controlTurnReplyId = replyId
+            controlReplyIds.remove(replyId)
+        }
         // The same envelope `requestKeepAlive` sends, with the phone's text.
         // `origin: ["kind": "human"]` is correct and load-bearing here: a
         // reply IS a human's input, arriving by a different route, and the
@@ -1757,6 +1761,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `stampUser`. Overwritten by the next reply; cleared once matched, so a
     /// later identical prompt typed on the Mac is not mistaken for it.
     private var pendingPhoneReply: (id: String, text: String)?
+    /// Reply ids `send_message` registered before `submitPhoneReply`. The
+    /// drain calls `requestPhoneReply` directly, so the stamp has to live
+    /// there rather than only on the immediate `.injected` return.
+    private var controlReplyIds: Set<String> = []
+    /// The control reply whose turn is in flight. `pendingPhoneReply` is
+    /// cleared when the echo matches, long before the turn ends.
+    private var controlTurnReplyId: String?
+
+    func noteControlReply(_ id: String) { controlReplyIds.insert(id) }
+    func forgetControlReply(_ id: String) { controlReplyIds.remove(id) }
 
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog behind.

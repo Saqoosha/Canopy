@@ -71,11 +71,36 @@ final class ControlSession {
             if let refusal = restart() { return fail(request, refusal) }
             reply(request, ["ok": true])
         case "mirror_status": reply(request, ["status": MirrorServerStatus.shared.state.wire])
+        case "send_message": sendMessage(request)
         default: fail(request, "unknown verb")
         }
     }
 
     // MARK: - Verbs
+
+    private func sendMessage(_ request: ControlProtocol.Request) {
+        switch ControlProtocol.parseSendMessage(request.params) {
+        case .failure(let error):
+            fail(request, error.message)
+        case .success(let message):
+            guard let session = requestedSession(request) else { return }
+            let replyId = UUID().uuidString.lowercased()
+            guard let shim = session.shim else {
+                reply(request, ControlProtocol.replyWire(disposition: "refused", reason: "not running", replyId: replyId))
+                return
+            }
+            shim.noteControlReply(replyId)
+            switch shim.submitPhoneReply(text: message.text, replyId: replyId) {
+            case .injected:
+                reply(request, ControlProtocol.replyWire(disposition: "injected", reason: nil, replyId: replyId))
+            case .queued(let reason):
+                reply(request, ControlProtocol.replyWire(disposition: "queued", reason: reason, replyId: replyId))
+            case .refused(let reason):
+                shim.forgetControlReply(replyId)
+                reply(request, ControlProtocol.replyWire(disposition: "refused", reason: reason, replyId: replyId))
+            }
+        }
+    }
 
     private func listSessions(_ request: ControlProtocol.Request) {
         let limit = ControlProtocol.limit(request.params, default: 50)
