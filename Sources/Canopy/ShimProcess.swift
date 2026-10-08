@@ -470,7 +470,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Running and not being stopped on purpose.
     var isLive: Bool { process?.isRunning == true && !isIntentionalStop }
 
-    /// When a turn last started or the CLI last sent a frame (`SleepGuardPolicy.sessionHolds`).
+    /// When a turn last started, a permission request arrived, or the CLI last sent a frame (`SleepGuardPolicy.sessionHolds`).
     private var lastSessionActivityAt = Date.distantPast
 
     /// The Mac should stay awake for this session (`SleepGuard`). Rules in `SleepGuardPolicy.sessionHolds`.
@@ -619,7 +619,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // responded, we're back to thinking.
             if isWorking && !oldValue {
                 lastSessionActivityAt = Date()
-                SleepGuard.reevaluateAll()
+                SleepGuard.reevaluateActive()
                 lastAssistantHadAskUserQuestion = false
                 // The turn is now known to have started — CLI frames are
                 // flowing back through `trackWorkingState`, so the ordinary
@@ -6347,6 +6347,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            request["type"] as? String == "tool_permission_request"
         {
             let isNewPermissionRequest = pendingPermissionRequestIds.insert(requestId).inserted
+            if isNewPermissionRequest {
+                lastSessionActivityAt = Date()
+                SleepGuard.reevaluateActive()
+            }
             pendingPermissionRequestInputs[requestId] = request["inputs"]
             // The CLI computes the rule that "always allow" would write, and
             // the extension's own webview just hands it straight back — it

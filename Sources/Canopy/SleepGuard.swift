@@ -26,27 +26,24 @@ final class SleepGuard {
     private var assertion: IOPMAssertionID?
     private var lastLogged: String?
     private var acquireFailing = false
-    private static var instances: [Weak] = []
-    private struct Weak { weak var guardian: SleepGuard? }
+    /// The started guard; one per process.
+    private static weak var active: SleepGuard?
 
     init(sessions: @escaping () -> [OpenSession]) {
         self.sessions = sessions
-        Self.instances.append(Weak(guardian: self))
     }
 
     /// Re-decide now rather than at the next tick: a turn started from the phone does not
     /// reset the idle timer, so a Mac near its idle deadline could sleep before the tick.
-    static func reevaluateAll() {
+    static func reevaluateActive() {
         DispatchQueue.main.async {
-            MainActor.assumeIsolated {
-                instances.removeAll { $0.guardian == nil }
-                for entry in instances where entry.guardian?.timer != nil { entry.guardian?.tick() }
-            }
+            MainActor.assumeIsolated { active?.tick() }
         }
     }
 
     func start() {
         guard timer == nil else { return }
+        Self.active = self
         timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -56,6 +53,7 @@ final class SleepGuard {
     func stop() {
         timer?.invalidate()
         timer = nil
+        if Self.active === self { Self.active = nil }
         release()
     }
 
@@ -113,11 +111,11 @@ enum PowerSource: Equatable {
         return parse(list.map { IOPSGetPowerSourceDescription(info, $0)?.takeUnretainedValue() as? [String: Any] })
     }
 
-    /// One entry per power source; nil where its description could not be read.
+    /// One entry per power source; nil where its description could not be read, which may
+    /// be the battery itself, so it is unreadable only when no readable entry is the battery.
     static func parse(_ descriptions: [[String: Any]?]) -> PowerSource {
-        guard !descriptions.contains(where: { $0 == nil }) else { return .unreadable }
         guard let desc = descriptions.compactMap({ $0 }).first(where: { $0[kIOPSTypeKey] as? String == kIOPSInternalBatteryType })
-        else { return .noBattery }
+        else { return descriptions.contains { $0 == nil } ? .unreadable : .noBattery }
         guard let current = desc[kIOPSCurrentCapacityKey] as? Int,
               let max = desc[kIOPSMaxCapacityKey] as? Int, max > 0,
               let state = desc[kIOPSPowerSourceStateKey] as? String else { return .unreadable }

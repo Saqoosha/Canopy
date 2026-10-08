@@ -6668,7 +6668,9 @@ enum SidebarLogicProbe {
             record("PowerSource reads an internal battery", PowerSource.parse([ups, battery]) == .battery(onBattery: true, percent: 15))
             record("PowerSource: no internal battery is noBattery", PowerSource.parse([ups]) == .noBattery)
             record("PowerSource: a missing power-state key is unreadable, not AC", PowerSource.parse([noState]) == .unreadable)
-            record("PowerSource: an unreadable description is unreadable", PowerSource.parse([ups, nil]) == .unreadable)
+            record("PowerSource: an unreadable entry with no battery found is unreadable", PowerSource.parse([ups, nil]) == .unreadable)
+            record("PowerSource: an unreadable accessory does not hide a readable battery",
+                   PowerSource.parse([nil, battery]) == .battery(onBattery: true, percent: 15))
 
             let stale = SleepGuardPolicy.staleAfter
             func session(_ working: Bool, _ waiting: Bool, _ bg: Int, _ since: TimeInterval) -> Bool {
