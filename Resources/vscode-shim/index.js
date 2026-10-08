@@ -88,6 +88,21 @@ if (process.env.CANOPY_SSH_HOST) {
   };
 }
 
+// Worktree sessions start the CLI in the main checkout; why: `ShimProcess.worktreeEntry`.
+// Only the CLI spawn carries `--input-format`; git, ripgrep and MCP keep the workspace cwd.
+if (process.env.CANOPY_CLI_CWD) {
+  const cliCwd = process.env.CANOPY_CLI_CWD;
+  process.stderr.write(`[vscode-shim] CLI starts in ${cliCwd} (worktree session)\n`);
+  const child_process = require("node:child_process");
+  const origSpawn = child_process.spawn;
+  child_process.spawn = function (command, args, options) {
+    if (Array.isArray(args) && args.includes("--input-format") && options && typeof options === "object") {
+      return origSpawn.call(this, command, args, { ...options, cwd: cliCwd });
+    }
+    return origSpawn.apply(this, arguments);
+  };
+}
+
 const { writeStdout, startStdinReader } = require("./protocol.js");
 const { createExtensionContext } = require("./context.js");
 const { createCommands } = require("./commands.js");

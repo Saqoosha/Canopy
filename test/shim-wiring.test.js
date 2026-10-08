@@ -93,6 +93,40 @@ test("index.js passes the session's own cwd through to workspaceState", () => {
     }
 });
 
+test("CANOPY_CLI_CWD moves only the CLI spawn, not the extension's other children", async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "canopy-clicwd-")));
+    try {
+        const ext = path.join(dir, "ext");
+        const cli = path.join(dir, "cli");
+        fs.mkdirSync(ext);
+        fs.mkdirSync(cli);
+        fs.writeFileSync(path.join(ext, "package.json"), JSON.stringify({ name: "p", version: "0.0.0", main: "extension.js" }));
+        fs.writeFileSync(path.join(ext, "extension.js"),
+            "exports.activate = () => {\n"
+            + "  const cp = require('child_process');\n"
+            + `  cp.spawn('/bin/sh', ['-c', 'pwd -P > ${dir}/cli.txt', 'sh', '--input-format', 'stream-json'], { cwd: '${dir}' });\n`
+            + `  cp.spawn('/bin/sh', ['-c', 'pwd -P > ${dir}/other.txt'], { cwd: '${dir}' });\n`
+            + "};\n");
+        spawnSync(process.execPath, [SHIM, "--extension-path", ext, "--cwd", dir,
+            "--settings-path", path.join(dir, "settings.json")], {
+            input: "", encoding: "utf-8", timeout: 30000,
+            env: { ...process.env, HOME: dir, CANOPY_CLI_CWD: cli },
+        });
+        const read = async (name) => {
+            for (let i = 0; i < 50; i++) {
+                const file = path.join(dir, name);
+                if (fs.existsSync(file) && fs.readFileSync(file, "utf-8").trim()) return fs.readFileSync(file, "utf-8").trim();
+                await new Promise((r) => setTimeout(r, 100));
+            }
+            return null;
+        };
+        assert.equal(await read("cli.txt"), cli);
+        assert.equal(await read("other.txt"), dir);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test("index.js passes CANOPY_SSH_HOST through, so a remote session gets its own file", () => {
     const cwd = "/tmp/canopy-wiring-workspace";
     const { home, storagePath } = runShim({ cwd, env: { CANOPY_SSH_HOST: "wiring-host" } });

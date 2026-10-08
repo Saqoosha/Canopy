@@ -5275,6 +5275,84 @@ enum SidebarLogicProbe {
                    ShimProcess.pluginDirs(prepending: bridge, to: "/a:\(bridge)") == "\(bridge):/a")
             record("bridge dirs: the scrub keeps an inherited value",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
+
+            let entered = ShimProcess.bridgeWorktreeNote(frame(
+                plugin: "canopy-bridge", text: #"{"v":1,"ok":true,"worktree":"entered"}"#))
+            record("bridge worktree: the note is read off a bridge frame",
+                   entered?.note == "entered" && entered?.ok == true && entered?.checkout == nil,
+                   "got=\(String(describing: entered))")
+            let exited = ShimProcess.bridgeWorktreeNote(frame(
+                plugin: "canopy-bridge", text: #"{"v":1,"ok":true,"worktree":"exited before remove","checkout":"/r/Canopy"}"#))
+            record("bridge worktree: an exit ahead of a removal carries the checkout",
+                   exited?.note == "exited before remove" && exited?.checkout == "/r/Canopy",
+                   "got=\(String(describing: exited))")
+            let failed = ShimProcess.bridgeWorktreeNote(frame(
+                plugin: "canopy-bridge", text: #"{"v":1,"ok":false,"worktree":"enter failed: x"}"#))
+            record("bridge worktree: a failure says so", failed?.ok == false)
+            let unmarked = ShimProcess.bridgeWorktreeNote(frame(
+                plugin: "canopy-bridge", text: #"{"v":1,"worktree":"entered"}"#))
+            record("bridge worktree: a note without ok counts as a failure", unmarked?.ok == false)
+            record("bridge worktree: v != 1 → nil",
+                   ShimProcess.bridgeWorktreeNote(frame(
+                       plugin: "canopy-bridge", text: #"{"v":2,"worktree":"entered"}"#)) == nil)
+            record("bridge worktree: a context frame carries no note",
+                   ShimProcess.bridgeWorktreeNote(valid) == nil)
+            record("bridge worktree: another plugin's frame carries no note",
+                   ShimProcess.bridgeWorktreeNote(frame(
+                       plugin: "other-plugin", text: #"{"v":1,"worktree":"entered"}"#)) == nil)
+
+            // Whether start() feeds these three inputs correctly needs a live
+            // shim; measured on device only.
+            let repo = URL(fileURLWithPath: "/r/Canopy")
+            let wt = URL(fileURLWithPath: "/h/.claude/worktrees/Canopy/fix")
+            let fresh = ShimProcess.worktreeEntry(worktree: wt, mainCheckout: repo, resumesTranscript: false)
+            record("worktree entry: a fresh session in a worktree starts its CLI in the checkout",
+                   fresh?.cliDirectory == repo && fresh?.worktree == wt,
+                   "got=\(String(describing: fresh))")
+            record("worktree entry: a resume is left where it is",
+                   ShimProcess.worktreeEntry(worktree: wt, mainCheckout: repo, resumesTranscript: true) == nil)
+            record("worktree entry: not in a linked worktree → nothing",
+                   ShimProcess.worktreeEntry(worktree: wt, mainCheckout: nil, resumesTranscript: false) == nil)
+            record("worktree entry: the checkout itself → nothing",
+                   ShimProcess.worktreeEntry(worktree: repo, mainCheckout: URL(fileURLWithPath: "/r/Canopy/"),
+                                             resumesTranscript: false) == nil)
+            let revParse = "/h/wt/fix\n/r/Canopy/.git/worktrees/fix\n/r/Canopy/.git\n"
+            record("worktree root: a linked worktree's top level names its checkout",
+                   GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/h/wt/fix"), revParse: revParse)?.path == "/r/Canopy")
+            record("worktree root: a subfolder of the worktree → nothing",
+                   GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/h/wt/fix/Sources"), revParse: revParse) == nil)
+            record("worktree root: the main checkout → nothing",
+                   GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/r/Canopy"),
+                                                      revParse: "/r/Canopy\n/r/Canopy/.git\n/r/Canopy/.git\n") == nil)
+
+            // The move itself (restart, re-attach) needs a live shim and a
+            // daemon; measured against the Debug daemon, not the GUI pane.
+            let gone = "/h/.claude/worktrees/Canopy/fix"
+            let alive: Set<String> = ["/r/Canopy", "/r/Canopy/"]
+            let exists: (String) -> Bool = { alive.contains($0) }
+            let isCheckout: (String) -> Bool = { $0 == "/r/Canopy" || $0 == "/r/Canopy/" }
+            record("checkout move: a removed worktree follows the daemon to the checkout",
+                   SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "/r/Canopy",
+                                                    exists: exists, isCheckout: isCheckout))
+            record("checkout move: a folder that still exists is never replaced",
+                   !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: "/r/Canopy"), rowCwd: "/r/Canopy/",
+                                                     exists: exists, isCheckout: isCheckout))
+            record("checkout move: nowhere to go → stay",
+                   !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "/elsewhere",
+                                                     exists: exists, isCheckout: isCheckout)
+                       && !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "",
+                                                            exists: exists, isCheckout: isCheckout))
+            let wtRoot = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-wt-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: wtRoot.appendingPathComponent("main/.git"), withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: wtRoot.appendingPathComponent("linked"), withIntermediateDirectories: true)
+            try? "gitdir: /x".write(to: wtRoot.appendingPathComponent("linked/.git"), atomically: true, encoding: .utf8)
+            record("checkout move: a main checkout has a .git folder; a linked worktree's is a file",
+                   SessionStore.isMainCheckout(wtRoot.appendingPathComponent("main").path)
+                       && !SessionStore.isMainCheckout(wtRoot.appendingPathComponent("linked").path)
+                       && !SessionStore.isMainCheckout(wtRoot.appendingPathComponent("missing").path))
+            try? FileManager.default.removeItem(at: wtRoot)
+            record("worktree entry: both keys are scrubbed from an inherited environment",
+                   ShimProcess.scrubbingCanopyAssignedKeys(["CANOPY_CLI_CWD": "/x", "CANOPY_WORKTREE": "/y"]).isEmpty)
         }
 
         // MARK: - Panes

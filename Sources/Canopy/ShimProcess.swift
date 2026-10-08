@@ -68,6 +68,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "CANOPY_REMOTE_EFFORT",
         "CANOPY_PANE",
         "CANOPY_OPEN_KEY",
+        "CANOPY_CLI_CWD",
+        "CANOPY_WORKTREE",
     ]
 
     /// Drops `canopyAssignedEnvKeys` from an inherited environment. Both shim
@@ -120,10 +122,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// turns, and a remote client that will not re-attach on its own. Checked only
     /// while an upgrade waits, since the transcript lookup can scan the store.
     var upgradeBlocker: String? {
-        if reaperInputs.isBusy { return "a turn, question or background task is running" }
-        if keepAliveInFlight { return "a keep-alive refresh is in flight" }
-        if recapRequestInFlight { return "a recap is in flight" }
-        if phoneReplyInFlight || !queuedPhoneReplies.isEmpty { return "a phone reply is waiting" }
+        if let reason = restartLosesWork { return reason }
         if boundSession?.pendingInitialPrompt != nil { return "the first prompt has not been sent" }
         if mirrors.values.contains(where: { client in
             client.sink.map { Self.remoteClientBlocksUpgrade(isLocal: $0.isLocalClient, reattaches: $0.reattachesAfterRestart) } ?? false
@@ -2483,6 +2482,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// True once a canopy-bridge frame supplied the context window; the
     /// `result` branch then leaves `contextMax` to it.
     private var contextMaxFromBridge = false
+    /// Set when the mod left the worktree ahead of a `git worktree remove`.
+    private var checkoutAfterRemoval: URL?
 
     @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, claudeAccount: ClaudeAccount? = nil, resumeIdIsExistingTranscript: Bool) {
@@ -3006,6 +3007,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Not in `canopyAssignedEnvKeys`: a user's own mod dirs must survive.
         if let bridgeMod = Self.installBridgeMod() {
             env["CLAUDE_CODE_PLUGIN_DIRS"] = Self.pluginDirs(prepending: bridgeMod, to: env["CLAUDE_CODE_PLUGIN_DIRS"])
+            // The mod is what enters the worktree, so without it the CLI must
+            // stay where the workspace is.
+            if remoteHost == nil, !resumeIdIsExistingTranscript,
+               let checkout = GitWorktree.checkoutOfWorktreeRoot(workingDirectory) {
+                let transcriptExists = resumeSessionId.map {
+                    Self.jsonlPath(sessionId: $0, workingDirectory: workingDirectory) != nil
+                } ?? false
+                if let entry = Self.worktreeEntry(
+                    worktree: workingDirectory, mainCheckout: checkout, resumesTranscript: transcriptExists
+                ) {
+                    env["CANOPY_CLI_CWD"] = entry.cliDirectory.path
+                    env["CANOPY_WORKTREE"] = entry.worktree.path
+                    logger.notice("[worktree] CLI starts in the main checkout and enters the worktree")
+                }
+            }
         }
 
         // Ensure PATH includes directories where tools like rg (ripgrep) live.
@@ -4125,6 +4141,28 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Where a local session's CLI starts, when it should not start in its workspace.
+    ///
+    /// A session started inside a linked worktree is stranded once the worktree
+    /// is removed: its transcript is filed under the worktree's project folder
+    /// and nothing moves it. One that starts in the main checkout and ENTERS the
+    /// worktree (EnterWorktree, called by the canopy-bridge mod) can leave with
+    /// ExitWorktree, which moves the transcript back to the checkout's folder —
+    /// measured against CLI 2.1.287, across a resume, and with the worktree
+    /// outside the repository. So a fresh session in a worktree gets this.
+    ///
+    /// Never for a resume: the CLI restores the worktree from the transcript by
+    /// itself, and a session that was started inside the worktree has no
+    /// checkout state to restore, so moving its CLI would move the session.
+    nonisolated static func worktreeEntry(
+        worktree: URL, mainCheckout: URL?, resumesTranscript: Bool
+    ) -> (cliDirectory: URL, worktree: URL)? {
+        guard !resumesTranscript, let mainCheckout,
+              mainCheckout.standardizedFileURL.path != worktree.standardizedFileURL.path
+        else { return nil }
+        return (mainCheckout, worktree)
+    }
+
     /// `bridge` first, then the inherited dirs without another copy of it.
     nonisolated static func pluginDirs(prepending bridge: String, to inherited: String?) -> String {
         let rest = (inherited ?? "").split(separator: ":").map(String.init).filter { !$0.isEmpty && $0 != bridge }
@@ -4159,6 +4197,52 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         return (tokens: positiveInt(context["tokens"]), window: positiveInt(context["window"]))
     }
+
+    /// The move restarts this shim, so it waits for a moment with nothing to lose:
+    /// a prompt typed right after the turn, or a queued phone reply, would die
+    /// with it. Busy → the latch stays and the next `result` tries again.
+    private func moveToCheckoutWhenQuiet() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, let checkout = self.checkoutAfterRemoval else { return }
+            if let reason = self.restartLosesWork {
+                logger.notice("[worktree] removed; waiting to move (\(reason, privacy: .public))")
+                return
+            }
+            self.checkoutAfterRemoval = nil
+            logger.notice("[worktree] removed; moving the session to the checkout")
+            NotificationCenter.default.post(
+                name: Self.worktreeRemovedNotification, object: self,
+                userInfo: [Self.checkoutKey: checkout])
+        }
+    }
+
+    /// `upgradeBlocker`'s own-session half: what a restart now would drop.
+    private var restartLosesWork: String? {
+        if reaperInputs.isBusy { return "a turn, question or background task is running" }
+        if keepAliveInFlight { return "a keep-alive refresh is in flight" }
+        if recapRequestInFlight { return "a recap is in flight" }
+        if phoneReplyInFlight || !queuedPhoneReplies.isEmpty { return "a phone reply is waiting" }
+        return nil
+    }
+
+    /// The canopy-bridge mod's report of entering or leaving a worktree, whether
+    /// the session is where it should be (`ok`), and the checkout it left to
+    /// when it left ahead of a removal.
+    nonisolated static func bridgeWorktreeNote(_ ioMsg: [String: Any]) -> (note: String, ok: Bool, checkout: String?)? {
+        guard isBridgeFrame(ioMsg),
+              let data = (ioMsg["text"] as? String)?.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["v"] as? Int == 1,
+              let note = obj["worktree"] as? String
+        else { return nil }
+        return (note, obj["ok"] as? Bool ?? false, obj["checkout"] as? String)
+    }
+
+    /// Posted with the shim as `object` and the checkout URL under `checkoutKey`
+    /// when a turn ends with this session's worktree removed after the mod left
+    /// it. `SessionStore` moves the session there.
+    static let worktreeRemovedNotification = Notification.Name("ShimProcess.worktreeRemoved")
+    static let checkoutKey = "checkout"
 
     /// True for any canopy-bridge `ui_log`, including ones whose text is garbage.
     nonisolated static func isBridgeFrame(_ ioMsg: [String: Any]) -> Bool {
@@ -4277,10 +4361,31 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                             statusBarData?.contextMax = window
                             UserDefaults.standard.set(window, forKey: Self.contextMaxKey(workingDirectory))
                         }
+                    } else if let report = Self.bridgeWorktreeNote(frame) {
+                        if !report.ok {
+                            logger.error("[worktree] \(report.note, privacy: .public)")
+                        } else {
+                            logger.notice("[worktree] \(report.note, privacy: .public)")
+                        }
+                        if let checkout = report.checkout, !checkout.isEmpty {
+                            checkoutAfterRemoval = URL(fileURLWithPath: checkout)
+                        }
                     } else {
                         logger.warning("[bridge] ui_log text failed to parse")
                     }
                     return
+                }
+                // Not mid-turn: restarting now would kill the removal itself.
+                if checkoutAfterRemoval != nil,
+                   nested["type"] as? String == "io_message",
+                   (nested["message"] as? [String: Any])?["type"] as? String == "result"
+                {
+                    if FileManager.default.fileExists(atPath: workingDirectory.path) {
+                        checkoutAfterRemoval = nil
+                        logger.notice("[worktree] the turn ended with the worktree still there; staying")
+                    } else {
+                        moveToCheckoutWhenQuiet()
+                    }
                 }
             }
             // Must run ahead of every tracker below: the recap turn reports
@@ -6335,6 +6440,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
         bgTaskIdMap.removeAll()
+        checkoutAfterRemoval = nil
         // Benign today — the flag's only setter is always followed by an
         // apply that clears it first thing — but it is the one piece of this
         // subsystem's state the reset would otherwise skip, and "benign"
