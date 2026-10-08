@@ -692,6 +692,31 @@ enum GitWorktree {
         return common.deletingLastPathComponent()
     }
 
+    /// `mainCheckoutRoot`, but only when `dir` is the linked worktree's own top
+    /// level: EnterWorktree refuses any other path, and a subfolder left in the
+    /// checkout would edit the checkout.
+    static func checkoutOfWorktreeRoot(_ dir: URL, timeout: TimeInterval = 5) -> URL? {
+        guard let result = try? runCommand(
+            "/usr/bin/git",
+            ["-C", dir.path, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"],
+            timeout: timeout,
+            wantsStdout: true
+        ), result.status == 0 else { return nil }
+        return checkoutOfWorktreeRoot(dir, revParse: String(decoding: result.stdout, as: UTF8.self))
+    }
+
+    /// The parsing half, given `rev-parse --show-toplevel --git-dir --git-common-dir` output.
+    static func checkoutOfWorktreeRoot(_ dir: URL, revParse: String) -> URL? {
+        let lines = revParse.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard lines.count == 3, !lines[2].isEmpty, lines[1] != lines[2],
+              URL(fileURLWithPath: lines[0]).resolvingSymlinksInPath().path
+                == dir.resolvingSymlinksInPath().standardizedFileURL.path
+        else { return nil }
+        let common = URL(fileURLWithPath: lines[2])
+        guard common.lastPathComponent == ".git" else { return nil }
+        return common.deletingLastPathComponent()
+    }
+
     // MARK: - Seeding a fresh worktree (probe-reachable helpers)
 
     /// A fresh worktree contains only tracked files, so **it usually cannot

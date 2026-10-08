@@ -4,9 +4,22 @@ function worktreeLog($, worktree, extra) {
   $.ui.log(JSON.stringify({ v: 1, worktree, ...extra }))
 }
 
+// `$.process.run` defaults to the session's cwd, which may be the removed worktree.
 async function canopyWorktree($) {
-  return (await $.process.run(['printenv', 'CANOPY_WORKTREE'])).stdout.trim()
+  return (await $.process.run(['printenv', 'CANOPY_WORKTREE'], { cwd: '/' })).stdout.trim()
 }
+
+// Whether one of the command's arguments is `path`, or ends in its last component.
+function namesPath(command, path) {
+  const name = path.split('/').pop()
+  return !!name && command.split(/\s+/).some(raw => {
+    const arg = raw.replace(/^['"]|['"]$/g, '').replace(/\/+$/, '')
+    return arg === path || arg === name || arg.endsWith('/' + name)
+  })
+}
+
+// The worktree this module is re-entering after a removal that did not happen.
+let reentering
 
 export function register(on) {
   on('session.measure', async ($, e, next) => {
@@ -17,18 +30,12 @@ export function register(on) {
     return r
   })
 
-  // Worktree sessions. Canopy starts a fresh session's CLI in the main checkout
-  // and names the worktree in CANOPY_WORKTREE (`ShimProcess.worktreeEntry`), so
-  // the session ENTERS it here. Entering writes `relocated` records, and leaving
-  // with ExitWorktree moves the transcript back to the main checkout's project
-  // folder — which is what keeps the session openable after the worktree is
-  // removed. A session started inside the worktree has no checkout to return
-  // to: ExitWorktree answers it with a no-op, and its transcript is stranded.
+  // Enter the worktree Canopy named in CANOPY_WORKTREE. Why: `ShimProcess.worktreeEntry`.
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     try {
       const wt = await canopyWorktree($)
-      // A resume restores the worktree on its own, so the CLI reports it here.
+      // A CLI re-spawned in this shim resumes inside the worktree already.
       if (!wt || r.cwd === wt) return r
       const res = await $.tool.call({ tool: 'EnterWorktree', path: wt })
       worktreeLog($, res.deny || res.isError ? `enter failed: ${res.deny ?? res.text ?? ''}` : 'entered')
@@ -38,37 +45,47 @@ export function register(on) {
     return r
   })
 
-  // Entering a worktree outside `.claude/worktrees/` asks for permission, and
-  // nobody is at the prompt yet. Allow only this plugin's own call to the path
-  // Canopy named; every other EnterWorktree keeps the engine's verdict.
+  // Entering a worktree outside `.claude/worktrees/` asks, and nobody is at the
+  // prompt. Allow only this plugin's own call to the path it means to enter.
   on('tool.check', { tool: 'EnterWorktree' }, async ($, e, next) => {
     const verdict = await next(e)
     if (next.origin?.plugin !== $.plugin.name) return verdict
-    const wt = await canopyWorktree($)
-    return wt && e.input?.path === wt
+    const path = e.input?.path
+    return path && (path === reentering || path === await canopyWorktree($))
       ? { decision: 'allow', reason: 'Canopy started this session for this worktree' }
       : verdict
   })
 
-  // Removing the session's own worktree with git leaves the transcript in the
-  // worktree's project folder: the shell moves, the transcript does not. Leave
-  // with ExitWorktree first, which moves it. A session that never entered
-  // through EnterWorktree gets a no-op and the command runs unchanged.
+  // A git removal leaves the transcript in the worktree's project folder; leaving
+  // with ExitWorktree first moves it to the checkout's. If the worktree is still
+  // there afterwards — the removal failed, or named another worktree — go back in.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (/\bworktree\s+remove\b/.test(e.command ?? '')) {
-      const cwd = await $.session.cwd()
-      const name = cwd.split('/').pop()
-      if (name && e.command.includes(name)) {
-        const res = await $.tool.call({ tool: 'ExitWorktree', action: 'keep' })
-        if (res.deny || res.isError) {
-          worktreeLog($, `exit before remove: ${res.deny ?? res.text ?? ''}`)
-        } else {
-          // Canopy moves the open pane to this checkout once the turn ends
-          // with the worktree gone (`ShimProcess.checkoutAfterRemoval`).
-          worktreeLog($, 'exited before remove', { checkout: res.result?.originalCwd })
-        }
-      }
+    const command = e.command ?? ''
+    if (!/\bworktree\s+remove\b/.test(command)) return next(e)
+    const cwd = await $.session.cwd()
+    if (!namesPath(command, cwd)) return next(e)
+    const left = await $.tool.call({ tool: 'ExitWorktree', action: 'keep' })
+    if (left.deny || left.isError) {
+      worktreeLog($, `exit before remove: ${left.deny ?? left.text ?? ''}`)
+      return next(e)
     }
-    return next(e)
+    const ran = await next(e)
+    try {
+      if ((await $.process.run(['/bin/test', '-d', cwd], { cwd: '/' })).exitCode !== 0) {
+        // Canopy moves the open pane to this checkout once the turn ends.
+        worktreeLog($, 'exited before remove', { checkout: left.result?.originalCwd })
+        return ran
+      }
+      reentering = cwd
+      const back = await $.tool.call({ tool: 'EnterWorktree', path: cwd })
+      worktreeLog($, back.deny || back.isError
+        ? `still in the checkout: re-entering failed: ${back.deny ?? back.text ?? ''}`
+        : 'the worktree is still there; back in it')
+    } catch (err) {
+      worktreeLog($, `after remove threw: ${String(err)}`)
+    } finally {
+      reentering = undefined
+    }
+    return ran
   })
 }

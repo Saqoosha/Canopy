@@ -782,7 +782,10 @@ final class SessionStore {
     /// A GUI pane follows through `session_state` (`applyDaemonSessions`).
     func moveToCheckout(shim: ShimProcess, checkout: URL) {
         guard let session = openSessions.first(where: { $0.shim === shim }),
-              case .local = session.origin else { return }
+              case .local = session.origin else {
+            logger.notice("moveToCheckout: no local session owns this shim any more; not moved")
+            return
+        }
         guard FileManager.default.fileExists(atPath: checkout.path) else {
             logger.error("moveToCheckout: the checkout is missing too; leaving the session")
             return

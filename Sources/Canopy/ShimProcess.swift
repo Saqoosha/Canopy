@@ -2485,8 +2485,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// True once a canopy-bridge frame supplied the context window; the
     /// `result` branch then leaves `contextMax` to it.
     private var contextMaxFromBridge = false
-    /// Set when the mod left the worktree ahead of a `git worktree remove`;
-    /// read when that turn ends. Async post: this is mid-frame, and the move stops this shim.
+    /// Set when the mod left the worktree ahead of a `git worktree remove`.
     private var checkoutAfterRemoval: URL?
 
     @MainActor
@@ -3013,14 +3012,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             env["CLAUDE_CODE_PLUGIN_DIRS"] = Self.pluginDirs(prepending: bridgeMod, to: env["CLAUDE_CODE_PLUGIN_DIRS"])
             // The mod is what enters the worktree, so without it the CLI must
             // stay where the workspace is.
-            if remoteHost == nil {
+            if remoteHost == nil, !resumeIdIsExistingTranscript,
+               let checkout = GitWorktree.checkoutOfWorktreeRoot(workingDirectory) {
                 let transcriptExists = resumeSessionId.map {
                     Self.jsonlPath(sessionId: $0, workingDirectory: workingDirectory) != nil
                 } ?? false
                 if let entry = Self.worktreeEntry(
-                    worktree: workingDirectory,
-                    mainCheckout: transcriptExists ? nil : GitWorktree.mainCheckoutRoot(for: workingDirectory),
-                    resumesTranscript: transcriptExists
+                    worktree: workingDirectory, mainCheckout: checkout, resumesTranscript: transcriptExists
                 ) {
                     env["CANOPY_CLI_CWD"] = entry.cliDirectory.path
                     env["CANOPY_WORKTREE"] = entry.worktree.path
@@ -4212,6 +4210,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return (note, obj["checkout"] as? String)
     }
 
+    /// The mod's notes that mean the session may be running outside its worktree.
+    nonisolated static func worktreeNoteIsFailure(_ note: String) -> Bool {
+        !["entered", "exited before remove", "the worktree is still there; back in it"].contains(note)
+    }
+
     /// Posted with the shim as `object` and the checkout URL under `checkoutKey`
     /// when a turn ends with this session's worktree removed after the mod left
     /// it. `SessionStore` moves the session there.
@@ -4336,7 +4339,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                             UserDefaults.standard.set(window, forKey: Self.contextMaxKey(workingDirectory))
                         }
                     } else if let report = Self.bridgeWorktreeNote(frame) {
-                        logger.notice("[worktree] \(report.note, privacy: .public)")
+                        if Self.worktreeNoteIsFailure(report.note) {
+                            logger.error("[worktree] \(report.note, privacy: .public)")
+                        } else {
+                            logger.notice("[worktree] \(report.note, privacy: .public)")
+                        }
                         if let checkout = report.checkout, !checkout.isEmpty {
                             checkoutAfterRemoval = URL(fileURLWithPath: checkout)
                         }
@@ -4356,6 +4363,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     } else {
                         logger.notice("[worktree] removed; moving the session to the checkout")
                         let shim = self
+                        // Async: this is mid-frame, and the move stops this shim.
                         DispatchQueue.main.async {
                             NotificationCenter.default.post(
                                 name: Self.worktreeRemovedNotification, object: shim,
@@ -6416,6 +6424,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         lastAssistantHadAskUserQuestion = false
         pendingBackgroundTaskIds.removeAll()
         bgTaskIdMap.removeAll()
+        checkoutAfterRemoval = nil
         // Benign today — the flag's only setter is always followed by an
         // apply that clears it first thing — but it is the one piece of this
         // subsystem's state the reset would otherwise skip, and "benign"

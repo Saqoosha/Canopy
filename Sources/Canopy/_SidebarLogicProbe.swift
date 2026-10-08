@@ -5285,6 +5285,15 @@ enum SidebarLogicProbe {
             record("bridge worktree: an exit ahead of a removal carries the checkout",
                    exited?.note == "exited before remove" && exited?.checkout == "/r/Canopy",
                    "got=\(String(describing: exited))")
+            record("bridge worktree: the mod's success notes are not failures",
+                   ["entered", "exited before remove", "the worktree is still there; back in it"]
+                       .allSatisfy { !ShimProcess.worktreeNoteIsFailure($0) })
+            record("bridge worktree: a failed enter is a failure",
+                   ShimProcess.worktreeNoteIsFailure("enter failed: denied")
+                       && ShimProcess.worktreeNoteIsFailure("still in the checkout: re-entering failed: x"))
+            record("bridge worktree: v != 1 → nil",
+                   ShimProcess.bridgeWorktreeNote(frame(
+                       plugin: "canopy-bridge", text: #"{"v":2,"worktree":"entered"}"#)) == nil)
             record("bridge worktree: a context frame carries no note",
                    ShimProcess.bridgeWorktreeNote(valid) == nil)
             record("bridge worktree: another plugin's frame carries no note",
@@ -5306,8 +5315,17 @@ enum SidebarLogicProbe {
             record("worktree entry: the checkout itself → nothing",
                    ShimProcess.worktreeEntry(worktree: repo, mainCheckout: URL(fileURLWithPath: "/r/Canopy/"),
                                              resumesTranscript: false) == nil)
+            let revParse = "/h/wt/fix\n/r/Canopy/.git/worktrees/fix\n/r/Canopy/.git\n"
+            record("worktree root: a linked worktree's top level names its checkout",
+                   GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/h/wt/fix"), revParse: revParse)?.path == "/r/Canopy")
+            record("worktree root: a subfolder of the worktree → nothing",
+                   GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/h/wt/fix/Sources"), revParse: revParse) == nil)
+            record("worktree root: the main checkout → nothing",
+                   GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/r/Canopy"),
+                                                      revParse: "/r/Canopy\n/r/Canopy/.git\n/r/Canopy/.git\n") == nil)
+
             // The move itself (restart, re-attach) needs a live shim and a
-            // daemon; measured on device only.
+            // daemon; measured against the Debug daemon, not the GUI pane.
             let gone = "/h/.claude/worktrees/Canopy/fix"
             let alive: Set<String> = ["/r/Canopy", "/r/Canopy/"]
             let exists: (String) -> Bool = { alive.contains($0) }
