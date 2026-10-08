@@ -6643,6 +6643,23 @@ enum SidebarLogicProbe {
                    !RecapScript.setCall(text: "line1\nline2").contains("\n"))
         }
 
+        // MARK: - Sleep guard (see SleepGuardPolicy)
+        do {
+            let floor = SleepGuardPolicy.batteryFloorPercent
+            func hold(_ enabled: Bool, _ working: Int, _ battery: BatteryReading?) -> Bool {
+                SleepGuardPolicy.decide(enabled: enabled, workingSessions: working, battery: battery).hold
+            }
+            record("SleepGuard holds while a session works on a Mac with no battery", hold(true, 1, nil))
+            record("SleepGuard does not hold with no working session", !hold(true, 0, nil))
+            record("SleepGuard does not hold when turned off", !hold(false, 1, nil))
+            record("SleepGuard holds on battery at the floor",
+                   hold(true, 1, BatteryReading(onBattery: true, percent: floor)))
+            record("SleepGuard releases on battery just below the floor",
+                   !hold(true, 1, BatteryReading(onBattery: true, percent: floor - 1)))
+            record("SleepGuard holds below the floor while on AC power",
+                   hold(true, 1, BatteryReading(onBattery: false, percent: floor - 1)))
+        }
+
         // MARK: - Prompt-cache keep-alive (see KeepAliveGate / KeepAliveCoordinator)
         //
         // Every number here is DERIVED from the production constant rather

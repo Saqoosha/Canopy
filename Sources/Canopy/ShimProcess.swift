@@ -469,6 +469,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Running and not being stopped on purpose.
     var isLive: Bool { process?.isRunning == true && !isIntentionalStop }
+
+    /// The Mac should stay awake for this session (`SleepGuard`): the reaper's busy — a turn,
+    /// a background task, or a permission request or question waiting. The waiting cases
+    /// count because they are answered from the phone, which cannot reach a sleeping Mac.
+    var holdsSystemAwake: Bool { isLive && reaperInputs.isBusy }
     /// The extension version this shim started on; nil until it starts, or when unreadable.
     private(set) var extensionVersion: String?
     /// The extension folder this shim started on; a page for it must load from the same one.

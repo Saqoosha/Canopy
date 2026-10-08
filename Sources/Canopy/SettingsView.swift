@@ -149,6 +149,12 @@ private struct GeneralSettingsTab: View {
             }
 
             Section {
+                Toggle("Prevent sleep while a session is working", isOn: $settings.preventSleepWhileWorking)
+            } footer: {
+                SettingsFooter(text: "While a session is running a turn or a background task, or is waiting for your answer, the Mac does not idle-sleep, so its network connection stays up and the phone can still reach it. The display can still turn off. Not on battery below 20%. Closing the lid on battery still sleeps.")
+            }
+
+            Section {
                 Toggle("Keep idle sessions' cache warm", isOn: $settings.keepAliveEnabled)
                 Toggle("Copy ignored build files into new worktrees", isOn: $settings.seedWorktreeArtifacts)
             } footer: {

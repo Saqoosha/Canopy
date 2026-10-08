@@ -62,6 +62,7 @@ final class DaemonDelegate {
     private let store = SessionStore()
     private var server: MirrorServer?
     private var reaper: DaemonReaper?
+    private var sleepGuard: SleepGuard?
     private var rosterPublisher: RosterPublisher?
     private var config = DaemonConfig.defaults
     private var configModified: Date?
@@ -234,6 +235,10 @@ final class DaemonDelegate {
         let reaper = DaemonReaper(store: store)
         self.reaper = reaper
         reaper.start()
+
+        let sleepGuard = SleepGuard { [store] in store.openSessions }
+        self.sleepGuard = sleepGuard
+        sleepGuard.start()
 
         upgradeTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.restartIfUpgraded() }
@@ -450,6 +455,7 @@ final class DaemonDelegate {
         configTimer?.invalidate()
         usageTimer?.invalidate()
         reaper?.stop()
+        sleepGuard?.stop()
         // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
         // Shims first: a replacement daemon may take the socket the moment it is gone, and must
