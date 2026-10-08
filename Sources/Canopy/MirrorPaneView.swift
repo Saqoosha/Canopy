@@ -237,7 +237,8 @@ struct MirrorPaneView: NSViewRepresentable {
                               assetHandler: MirrorAssetSchemeHandler, coordinator: Coordinator) {
         let bridge = RemoteMirrorBridge(endpoint: target.endpoint, sessionId: session.resumeId, key: session.daemonKey,
                                         token: target.token, webView: webView, fetchesImages: true,
-                                        open: session.isDaemonHosted ? session.daemonOpenRequest : session.pendingMirrorOpen)
+                                        open: session.isDaemonHosted ? session.daemonOpenRequest : session.pendingMirrorOpen,
+                                        resumeCwd: session.isDaemonHosted ? session.origin.workingDirectory.path : nil)
         assetHandler.bridge = bridge
         registerHandlers(on: webView, bridge: bridge, coordinator: coordinator)
         let machineName = target.machine

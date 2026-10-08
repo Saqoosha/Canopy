@@ -776,11 +776,9 @@ final class SessionStore {
         !rowCwd.isEmpty && rowCwd != current.path && !exists(current.path) && isCheckout(rowCwd)
     }
 
-    /// A main checkout holds its `.git` as a folder; a linked worktree's is a file.
+    /// `GitWorktree.isMainCheckout` for a path string.
     nonisolated static func isMainCheckout(_ path: String) -> Bool {
-        var isDirectory: ObjCBool = false
-        return FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent(".git"),
-                                              isDirectory: &isDirectory) && isDirectory.boolValue
+        GitWorktree.isMainCheckout(URL(fileURLWithPath: path))
     }
 
     /// The session removed its own worktree after the canopy-bridge mod left
@@ -1101,11 +1099,14 @@ final class SessionStore {
         launch.backToLauncher()
     }
 
+    /// Where a removed worktree's session may reopen: the openable rows' folders and the recent directories.
+    var rescueCandidates: [URL] { recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load() }
+
     /// Open a closed local row by spawning a shim with --resume against the
     /// existing JSONL. If `permissionMode` is nil, falls back to the global
     /// default in `CanopySettings.defaultPermissionMode`.
     @discardableResult
-    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil, target: PaneTarget = .focused) -> OpenSession {
+    func openLocal(_ entry: SessionEntry, permissionMode: PermissionMode? = nil, target: PaneTarget = .focused) -> OpenSession? {
         // If this session is already open, honor target (focused vs new pane).
         if let existing = openSessions.first(where: { $0.resumeId == entry.id }) {
             switch target {
@@ -1121,8 +1122,16 @@ final class SessionStore {
             }
             return existing
         }
+        guard let directory = ClaudeSessionHistory.directoryToOpen(
+            entry, knownCheckouts: rescueCandidates)
+        else {
+            // The folder is gone and the transcript could not be moved to a checkout.
+            noteSessionFailure(title: entry.title, message: "Could not reopen this session: its folder is gone "
+                               + "and its transcript could not be moved to the repository's main checkout.", status: -2)
+            return nil
+        }
         return openNew(
-            directory: entry.projectDirectory,
+            directory: directory,
             resumeId: entry.id,
             sessionTitle: entry.title,
             permissionMode: permissionMode ?? CanopySettings.shared.defaultPermissionMode,
