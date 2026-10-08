@@ -10,22 +10,18 @@ final class ExtensionUpdater {
         case idle
         case checking
         case upToDate
-        case updateAvailable(latestVersion: String, currentVersion: String?)
         case downloading
         case installing
         case done(version: String)
         case failed(message: String)
     }
 
-    static let changelogURL = URL(string: "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md")!
-
     /// One per process: every launcher pane checks on appear, and an update now installs
     /// without a click, so per-pane instances would race two installs into one folder.
     static let shared = ExtensionUpdater()
 
-    /// A version whose install failed in this process. Not installed again without a click,
-    /// so a version that fails its start check is not re-downloaded on every launcher mount.
-    private var failedVersion: String?
+    /// The last failed install in this process. That version is not installed again without a click.
+    private var failure: (version: String, message: String)?
 
     private(set) var state: State = .idle
 
@@ -62,11 +58,12 @@ final class ExtensionUpdater {
         let extVer = CCExtension.extensionVersion()
         if let extVer, Self.compareVersions(extVer, latestVer) >= 0 {
             state = .upToDate
+        } else if let failure, failure.version == latestVer {
+            // Terminal, so a later mount still checks and picks up a fixed newer version.
+            state = .failed(message: failure.message)
         } else {
-            state = .updateAvailable(latestVersion: latestVer, currentVersion: extVer)
-            // New sessions pick the newest installed version at spawn, so installing is all
-            // an update takes; running sessions keep theirs until they restart.
-            if latestVer != failedVersion { await installUpdate(version: latestVer) }
+            // New sessions pick the newest installed version at spawn, so installing is all an update takes.
+            await installUpdate(version: latestVer)
         }
     }
 
@@ -119,13 +116,8 @@ final class ExtensionUpdater {
 
     /// The failed banner's Retry: a click is consent to try the failed version again.
     func retry() async {
-        failedVersion = nil
+        failure = nil
         await checkForUpdate()
-    }
-
-    func triggerInstall() async {
-        guard case .updateAvailable(let version, _) = state else { return }
-        await installUpdate(version: version)
     }
 
     private func installUpdate(version: String) async {
@@ -140,7 +132,7 @@ final class ExtensionUpdater {
             SessionNotifier.post(title: "Claude Code extension updated",
                                  body: "v\(version) is installed. New sessions use it.")
         } catch {
-            failedVersion = version
+            failure = (version, error.localizedDescription)
             state = .failed(message: error.localizedDescription)
             logger.error("Extension update failed: \(error.localizedDescription, privacy: .public)")
         }
