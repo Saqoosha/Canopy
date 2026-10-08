@@ -10,7 +10,6 @@ struct ClaudeAccountInfo {
     let email: String
     let displayName: String?
     let organizationName: String?
-    var organizationUuid: String? = nil
 
     /// Keyed by mtime: the sidebar footer asks on every body evaluation, the
     /// file changes far less often. A parse failure is cached too, until the
@@ -28,11 +27,6 @@ struct ClaudeAccountInfo {
         let info = parse(url)
         cache = (mtime, info)
         return info
-    }
-
-    /// This Mac's organization, read fresh off `.claude.json`; callable off the main actor.
-    static func currentOrganizationUuid() -> String? {
-        parse(configURL())?.organizationUuid
     }
 
     private static func configURL() -> URL {
@@ -73,8 +67,7 @@ struct ClaudeAccountInfo {
         }
         return ClaudeAccountInfo(email: email,
                                  displayName: nonEmpty("displayName"),
-                                 organizationName: nonEmpty("organizationName"),
-                                 organizationUuid: nonEmpty("organizationUuid"))
+                                 organizationName: nonEmpty("organizationName"))
     }
 
     @MainActor private static var dirCache: [String: (mtime: Date, info: ClaudeAccountInfo?)] = [:]

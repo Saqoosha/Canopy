@@ -55,21 +55,39 @@ enum KeychainAuth {
     /// Convenience: returns (accessToken, orgUUID) if both are present.
     /// Empty strings are treated as missing — sending an empty
     /// `Authorization` / `x-organization-uuid` header would produce a
-    /// confusing 401/400 from the API. Current CLIs no longer store the
-    /// organization in the Keychain blob (measured on 2.1.294: only
-    /// `claudeAiOauth` and `mcpOAuth`), so it falls back to `.claude.json`.
+    /// confusing 401/400 from the API.
     static func readAccessTokenAndOrg() -> (token: String, orgUUID: String)? {
         guard let blob = readKeychainBlob(),
               let oauth = blob["claudeAiOauth"] as? [String: Any],
               let token = oauth["accessToken"] as? String, !token.isEmpty
         else { return nil }
-        guard let org = (blob["organizationUuid"] as? String).flatMap({ $0.isEmpty ? nil : $0 })
-                ?? ClaudeAccountInfo.currentOrganizationUuid()
-        else {
-            logger.warning("No organization UUID in the Keychain blob or .claude.json")
+        guard let org = organizationUuid(keychainBlob: blob, defaultConfig: defaultConfigOrganizationUuid) else {
+            logger.warning("No organization UUID in the Keychain blob or ~/.claude.json")
             return nil
         }
         return (token, org)
+    }
+
+    /// The blob's own organization, else the default login's `~/.claude.json`: current CLIs
+    /// keep only `claudeAiOauth` and `mcpOAuth` in the blob (measured on 2.1.294). Never
+    /// `CLAUDE_CONFIG_DIR`'s file — the token is always the default Keychain item's.
+    static func organizationUuid(keychainBlob: [String: Any], defaultConfig: () -> String?) -> String? {
+        if let org = keychainBlob["organizationUuid"] as? String, !org.isEmpty { return org }
+        return defaultConfig()
+    }
+
+    /// `oauthAccount.organizationUuid` in a `.claude.json`'s bytes, or nil.
+    static func organizationUuid(inClaudeJSON data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = root["oauthAccount"] as? [String: Any],
+              let org = account["organizationUuid"] as? String, !org.isEmpty
+        else { return nil }
+        return org
+    }
+
+    private static func defaultConfigOrganizationUuid() -> String? {
+        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")
+        return (try? Data(contentsOf: url)).flatMap(organizationUuid(inClaudeJSON:))
     }
 
     /// The access token alone, for callers that do not need the organization.

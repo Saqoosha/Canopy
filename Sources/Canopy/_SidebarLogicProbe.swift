@@ -12136,10 +12136,18 @@ enum SidebarLogicProbe {
             record("account parse: empty optional fields become nil",
                    account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","displayName":"","organizationName":""}}"#)
                        .map { $0.displayName == nil && $0.organizationName == nil } ?? false)
-            record("account parse: the organization UUID is read, and an empty one is nil",
-                   account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","organizationUuid":"org-1"}}"#)?.organizationUuid == "org-1"
-                       && account(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","organizationUuid":""}}"#)
-                           .map { $0.organizationUuid == nil } ?? false)
+            func org(_ json: String) -> String? { KeychainAuth.organizationUuid(inClaudeJSON: Data(json.utf8)) }
+            record("org uuid: read from oauthAccount, with or without an email",
+                   org(#"{"oauthAccount":{"organizationUuid":"org-1"}}"#) == "org-1"
+                       && org(#"{"oauthAccount":{"emailAddress":"a@saqoo.sh","organizationUuid":"org-2"}}"#) == "org-2")
+            record("org uuid: empty, missing or malformed → nil",
+                   org(#"{"oauthAccount":{"organizationUuid":""}}"#) == nil && org(#"{"oauthAccount":{}}"#) == nil
+                       && org("not json") == nil)
+            record("org uuid: the Keychain blob's own wins over the config",
+                   KeychainAuth.organizationUuid(keychainBlob: ["organizationUuid": "kc"], defaultConfig: { "cfg" }) == "kc")
+            record("org uuid: an absent or empty blob org falls back to the config",
+                   KeychainAuth.organizationUuid(keychainBlob: [:], defaultConfig: { "cfg" }) == "cfg"
+                       && KeychainAuth.organizationUuid(keychainBlob: ["organizationUuid": ""], defaultConfig: { "cfg" }) == "cfg")
             record("account parse: a missing oauthAccount is no account",
                    account(#"{"numStartups":3}"#) == nil)
             record("account parse: an empty email is no account",
