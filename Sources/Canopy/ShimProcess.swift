@@ -7848,7 +7848,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               let ioMsg = nested["message"] as? [String: Any],
               let ioType = ioMsg["type"] as? String
         else { return }
+        // A frame reviving a stale session re-decides now; every frame would flood the main queue.
+        let wasStale = Date().timeIntervalSince(lastSessionActivityAt) >= SleepGuardPolicy.staleAfter
         lastSessionActivityAt = Date()
+        if wasStale { SleepGuard.reevaluateActive() }
 
         switch ioType {
         case "assistant", "stream_event":

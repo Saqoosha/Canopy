@@ -44,9 +44,12 @@ final class SleepGuard {
     func start() {
         guard timer == nil else { return }
         Self.active = self
-        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        // `.common`, so a modal alert in the GUI does not freeze the release.
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
         tick()
     }
 
