@@ -1,7 +1,7 @@
 // Canopy reads these lines off the stream-json wire (system/ui_log, plugin
 // "canopy-bridge") and never forwards them to the webview.
-function worktreeLog($, worktree, extra) {
-  $.ui.log(JSON.stringify({ v: 1, worktree, ...extra }))
+function worktreeLog($, ok, worktree, extra) {
+  $.ui.log(JSON.stringify({ v: 1, ok, worktree, ...extra }))
 }
 
 // `$.process.run` defaults to the session's cwd, which may be the removed worktree.
@@ -9,12 +9,16 @@ async function canopyWorktree($) {
   return (await $.process.run(['printenv', 'CANOPY_WORKTREE'], { cwd: '/' })).stdout.trim()
 }
 
-// Whether one of the command's arguments is `path`, or ends in its last component.
+// Whether the command names `path`: in full, or as an argument ending in its last component.
 function namesPath(command, path) {
   const name = path.split('/').pop()
-  return !!name && command.split(/\s+/).some(raw => {
-    const arg = raw.replace(/^['"]|['"]$/g, '').replace(/\/+$/, '')
-    return arg === path || arg === name || arg.endsWith('/' + name)
+  if (!name) return false
+  for (let i = command.indexOf(path); i >= 0; i = command.indexOf(path, i + 1)) {
+    if (!/[\w.-]/.test(command[i + path.length] ?? '')) return true  // not `${path}-2`
+  }
+  return command.split(/\s+/).some(raw => {
+    const arg = raw.replace(/^[('"]+|[)'";&|]+$/g, '').replace(/\/+$/, '')
+    return arg === name || arg.endsWith('/' + name)
   })
 }
 
@@ -38,9 +42,10 @@ export function register(on) {
       // A CLI re-spawned in this shim resumes inside the worktree already.
       if (!wt || r.cwd === wt) return r
       const res = await $.tool.call({ tool: 'EnterWorktree', path: wt })
-      worktreeLog($, res.deny || res.isError ? `enter failed: ${res.deny ?? res.text ?? ''}` : 'entered')
+      if (res.deny || res.isError) worktreeLog($, false, `enter failed: ${res.deny ?? res.text ?? ''}`)
+      else worktreeLog($, true, 'entered')
     } catch (err) {
-      worktreeLog($, `enter threw: ${String(err)}`)
+      worktreeLog($, false, `enter threw: ${String(err)}`)
     }
     return r
   })
@@ -65,27 +70,35 @@ export function register(on) {
     const cwd = await $.session.cwd()
     if (!namesPath(command, cwd)) return next(e)
     const left = await $.tool.call({ tool: 'ExitWorktree', action: 'keep' })
-    if (left.deny || left.isError) {
-      worktreeLog($, `exit before remove: ${left.deny ?? left.text ?? ''}`)
+    const checkout = left.result?.originalCwd
+    // No checkout: this session did not enter through EnterWorktree (one started
+    // inside the worktree), or the exit was refused. Nothing to move back.
+    if (left.deny || left.isError || !checkout) {
+      const why = left.deny ?? left.text ?? ''
+      if ((left.deny || left.isError) && !/No-op/.test(why)) worktreeLog($, false, `exit before remove: ${why}`)
       return next(e)
     }
-    const ran = await next(e)
     try {
-      if ((await $.process.run(['/bin/test', '-d', cwd], { cwd: '/' })).exitCode !== 0) {
-        // Canopy moves the open pane to this checkout once the turn ends.
-        worktreeLog($, 'exited before remove', { checkout: left.result?.originalCwd })
-        return ran
-      }
-      reentering = cwd
-      const back = await $.tool.call({ tool: 'EnterWorktree', path: cwd })
-      worktreeLog($, back.deny || back.isError
-        ? `still in the checkout: re-entering failed: ${back.deny ?? back.text ?? ''}`
-        : 'the worktree is still there; back in it')
-    } catch (err) {
-      worktreeLog($, `after remove threw: ${String(err)}`)
+      return await next(e)
     } finally {
-      reentering = undefined
+      try {
+        if ((await $.process.run(['/bin/test', '-d', cwd], { cwd: '/' })).exitCode !== 0) {
+          // Canopy moves the open pane to this checkout once the turn ends.
+          worktreeLog($, true, 'exited before remove', { checkout })
+        } else {
+          reentering = cwd
+          const back = await $.tool.call({ tool: 'EnterWorktree', path: cwd })
+          if (back.deny || back.isError) {
+            worktreeLog($, false, `still in the checkout: re-entering failed: ${back.deny ?? back.text ?? ''}`)
+          } else {
+            worktreeLog($, true, 'the worktree is still there; back in it')
+          }
+        }
+      } catch (err) {
+        worktreeLog($, false, `after remove threw: ${String(err)}`)
+      } finally {
+        reentering = undefined
+      }
     }
-    return ran
   })
 }

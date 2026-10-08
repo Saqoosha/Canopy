@@ -5277,20 +5277,21 @@ enum SidebarLogicProbe {
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
 
             let entered = ShimProcess.bridgeWorktreeNote(frame(
-                plugin: "canopy-bridge", text: #"{"v":1,"worktree":"entered"}"#))
+                plugin: "canopy-bridge", text: #"{"v":1,"ok":true,"worktree":"entered"}"#))
             record("bridge worktree: the note is read off a bridge frame",
-                   entered?.note == "entered" && entered?.checkout == nil, "got=\(String(describing: entered))")
+                   entered?.note == "entered" && entered?.ok == true && entered?.checkout == nil,
+                   "got=\(String(describing: entered))")
             let exited = ShimProcess.bridgeWorktreeNote(frame(
-                plugin: "canopy-bridge", text: #"{"v":1,"worktree":"exited before remove","checkout":"/r/Canopy"}"#))
+                plugin: "canopy-bridge", text: #"{"v":1,"ok":true,"worktree":"exited before remove","checkout":"/r/Canopy"}"#))
             record("bridge worktree: an exit ahead of a removal carries the checkout",
                    exited?.note == "exited before remove" && exited?.checkout == "/r/Canopy",
                    "got=\(String(describing: exited))")
-            record("bridge worktree: the mod's success notes are not failures",
-                   ["entered", "exited before remove", "the worktree is still there; back in it"]
-                       .allSatisfy { !ShimProcess.worktreeNoteIsFailure($0) })
-            record("bridge worktree: a failed enter is a failure",
-                   ShimProcess.worktreeNoteIsFailure("enter failed: denied")
-                       && ShimProcess.worktreeNoteIsFailure("still in the checkout: re-entering failed: x"))
+            let failed = ShimProcess.bridgeWorktreeNote(frame(
+                plugin: "canopy-bridge", text: #"{"v":1,"ok":false,"worktree":"enter failed: x"}"#))
+            record("bridge worktree: a failure says so", failed?.ok == false)
+            let unmarked = ShimProcess.bridgeWorktreeNote(frame(
+                plugin: "canopy-bridge", text: #"{"v":1,"worktree":"entered"}"#))
+            record("bridge worktree: a note without ok counts as a failure", unmarked?.ok == false)
             record("bridge worktree: v != 1 → nil",
                    ShimProcess.bridgeWorktreeNote(frame(
                        plugin: "canopy-bridge", text: #"{"v":2,"worktree":"entered"}"#)) == nil)

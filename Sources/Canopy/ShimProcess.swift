@@ -4198,21 +4198,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return (tokens: positiveInt(context["tokens"]), window: positiveInt(context["window"]))
     }
 
-    /// The canopy-bridge mod's report of entering or leaving a worktree, and the
-    /// checkout it left to when it left ahead of a removal.
-    nonisolated static func bridgeWorktreeNote(_ ioMsg: [String: Any]) -> (note: String, checkout: String?)? {
+    /// The canopy-bridge mod's report of entering or leaving a worktree, whether
+    /// the session is where it should be (`ok`), and the checkout it left to
+    /// when it left ahead of a removal.
+    nonisolated static func bridgeWorktreeNote(_ ioMsg: [String: Any]) -> (note: String, ok: Bool, checkout: String?)? {
         guard isBridgeFrame(ioMsg),
               let data = (ioMsg["text"] as? String)?.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               obj["v"] as? Int == 1,
               let note = obj["worktree"] as? String
         else { return nil }
-        return (note, obj["checkout"] as? String)
-    }
-
-    /// The mod's notes that mean the session may be running outside its worktree.
-    nonisolated static func worktreeNoteIsFailure(_ note: String) -> Bool {
-        !["entered", "exited before remove", "the worktree is still there; back in it"].contains(note)
+        return (note, obj["ok"] as? Bool ?? false, obj["checkout"] as? String)
     }
 
     /// Posted with the shim as `object` and the checkout URL under `checkoutKey`
@@ -4339,7 +4335,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                             UserDefaults.standard.set(window, forKey: Self.contextMaxKey(workingDirectory))
                         }
                     } else if let report = Self.bridgeWorktreeNote(frame) {
-                        if Self.worktreeNoteIsFailure(report.note) {
+                        if !report.ok {
                             logger.error("[worktree] \(report.note, privacy: .public)")
                         } else {
                             logger.notice("[worktree] \(report.note, privacy: .public)")
