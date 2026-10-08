@@ -4051,29 +4051,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if reqType == "rename_tab" || reqType == "update_session_state" {
                 // Track session ID for title persistence.
                 if let sid = request["sessionId"] as? String, UUID(uuidString: sid) != nil {
-                    let wasUnset = activeSessionId == nil
-                    activeSessionId = sid
-                    backfillResumeId(sid)
-                    // First time the CLI reports its id: it is alive, and on a
-                    // reconnect this is the proof the resume succeeded. Reset
-                    // the reconnect budget here rather than on shim spawn.
-                    if wasUnset { delegate?.shimProcessDidBecomeReady(self) }
-                    // Save any title that was generated before we had a session ID.
-                    // `userOwnsTitle` is checked here like on every other
-                    // automatic path: a generation that finished before the id
-                    // arrived must not land on top of a name the user typed in
-                    // the meantime. Narrow — `resumeSessionId` is almost always
-                    // set, so this rarely holds a value — but it is the one
-                    // automatic writer that used to skip the check.
-                    if let pending = pendingGeneratedTitle {
-                        pendingGeneratedTitle = nil
-                        if !userOwnsTitle {
-                            if !SessionTitleStore.save(title: pending, forSessionId: sid, settled: titleIsSettled) {
-                                logger.warning("Generated title not persisted; it will not survive relaunch")
-                            }
-                            generatedSessionTitle = pending
-                        }
-                    }
+                    adoptReportedSessionId(sid)
                 }
                 if let title = request["title"] as? String, !title.isEmpty {
                     let truncated = Self.truncatedTitle(title)
@@ -4139,8 +4117,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// extension resolves the session off local disk (see `start()`'s
     /// `CANOPY_REMOTE_RESUME` block). Handed to the CLI directly, as the SSH
     /// remote path does, an unresolvable `--resume` exits 1.
-    /// Called whenever the webview reports a session id (`update_session_state`
-    /// or `rename_tab` — both carry `sessionId` through the same handler).
+    /// Called through `adoptReportedSessionId`.
     /// Sync the real id back onto the owning OpenSession so the sidebar's
     /// open-vs-recents dedup and `openLocal`'s already-open check compare
     /// against the JSONL that actually exists — otherwise the same session
@@ -4167,6 +4144,46 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             store.lastActiveResumeId = sid
             SessionStorePersistence.saveLastActiveResumeId(sid)
         }
+    }
+
+    /// The CLI's session id, from a webview's `update_session_state` / `rename_tab`
+    /// or from the CLI's own `system/init`.
+    private func adoptReportedSessionId(_ sid: String) {
+        let wasUnset = activeSessionId == nil
+        activeSessionId = sid
+        backfillResumeId(sid)
+        // First time the CLI reports its id: it is alive, and on a
+        // reconnect this is the proof the resume succeeded. Reset
+        // the reconnect budget here rather than on shim spawn.
+        if wasUnset { delegate?.shimProcessDidBecomeReady(self) }
+        // Save any title that was generated before we had a session ID.
+        // `userOwnsTitle` is checked here like on every other
+        // automatic path: a generation that finished before the id
+        // arrived must not land on top of a name the user typed in
+        // the meantime. Narrow — `resumeSessionId` is almost always
+        // set, so this rarely holds a value — but it is the one
+        // automatic writer that used to skip the check.
+        if let pending = pendingGeneratedTitle {
+            pendingGeneratedTitle = nil
+            if !userOwnsTitle {
+                if !SessionTitleStore.save(title: pending, forSessionId: sid, settled: titleIsSettled) {
+                    logger.warning("Generated title not persisted; it will not survive relaunch")
+                }
+                generatedSessionTitle = pending
+            }
+        }
+    }
+
+    /// The `session_id` of a CLI `system/init` io_message, or nil for any other frame.
+    nonisolated static func sessionIdFromInit(_ message: [String: Any]) -> String? {
+        guard message["type"] as? String == "from-extension",
+              let nested = message["message"] as? [String: Any],
+              nested["type"] as? String == "io_message",
+              let ioMsg = nested["message"] as? [String: Any],
+              ioMsg["type"] as? String == "system", ioMsg["subtype"] as? String == "init",
+              let sid = ioMsg["session_id"] as? String, UUID(uuidString: sid) != nil
+        else { return nil }
+        return sid
     }
 
     // MARK: - WebView Ready
@@ -4548,6 +4565,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             trackWorkingState(innerMessage)
             trackPermissionState(stdoutMessage: msg)
+            // A pane-less session has no webview to report its id; without this a pane attaching later loads the placeholder.
+            if activeSessionId == nil, let sid = Self.sessionIdFromInit(innerMessage) { adoptReportedSessionId(sid) }
             extractStatusData(innerMessage)
             extractTitle(innerMessage)
             extractRawUsage(innerMessage)
@@ -8067,18 +8086,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                let model = ioMsg["model"] as? String, !model.isEmpty
             {
                 cliResolvedModel = model
-            }
-            // A session a control `open_session` started has no webview, so no
-            // `update_session_state` ever replaces its placeholder id, and a pane
-            // attaching later loads the placeholder and shows an empty chat until
-            // some later frame makes its webview adopt the real id. The CLI's own
-            // `init` names the transcript. Only while the id is still a
-            // placeholder, so a later init (a recap fork's) cannot move it.
-            if ioMsg["subtype"] as? String == "init",
-               boundSession?.resumeIdIsExistingTranscript == false,
-               let sid = ioMsg["session_id"] as? String, UUID(uuidString: sid) != nil
-            {
-                backfillResumeId(sid)
             }
 
         case "stream_event":
