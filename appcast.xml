@@ -6,6 +6,33 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>3.9.0</title>
+            <pubDate>Thu, 08 Oct 2026 22:32:20 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>174</sparkle:version>
+            <sparkle:shortVersionString>3.9.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Features
+- A local control API lets scripts and agents drive daemon sessions: send a message, check status, read the latest reply, and wait for a turn to finish. `scripts/canopyctl` is a command-line client for it.
+- An initial prompt given when opening a session now runs even with no window attached.
+
+### Changes
+- Clearer notices when a session is stopped from another device.
+
+### Bug Fixes
+- Sessions now read the organization UUID from `.claude.json` when the Keychain has none.
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.9.0/Canopy-3.9.0.dmg" length="6137036" type="application/octet-stream" sparkle:edSignature="EueDF4WT2jtndwW2kDHPXFYEiwG+MqpYnw2eEb91qmR5/eJJmdpp5k3JmSWOvO5t1dol0nSSpFSCFbBGkz8bBA=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.9.0/Canopy174-173.delta" sparkle:deltaFrom="173" length="412722" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="zfhH/beQ6San0wc+kcpnplnySOUv3yLOK+XFOJ/jOSDyR0zy0WD6dlhE2DXmRrn/+X2NIJb11Jes1IEdiQ8aBg=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.9.0/Canopy174-172.delta" sparkle:deltaFrom="172" length="605374" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="vMHwlaSV9a3D+kSiC8is6uJ3995yJO73zXC3cJhgO0t2G6xgl9pxGXnS6T9M9uzyA0El7xsp3g3s3BdyfAnkBw=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.9.0/Canopy174-171.delta" sparkle:deltaFrom="171" length="701414" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="lN0q7vxCnTyOkQsanbc0UqtRPHlVxd3b1PHsJK9gqfndGzCCo9d8d3DKMHtrUYePXvitm4fOmZyNa26qalHMCA=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.9.0/Canopy174-170.delta" sparkle:deltaFrom="170" length="711514" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="0vIol8eyolzqSkk+q09vq36YMK+hyqluihT5EXW8/9M8XaIzqrU6f7qT60hrtoQwmUFQn4vJRnm5sNXL8bCvCg=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.9.0/Canopy174-168.delta" sparkle:deltaFrom="168" length="713226" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="x2HIugv1enDKTAbW9Wb+NtKSV524MzgvXGAhPFsToT9p0Xt4bKZjMmiuIbZS3JqV7l+x+f87hglyCaVMSAK1AQ=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>3.8.0</title>
             <pubDate>Thu, 08 Oct 2026 21:12:43 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -56,26 +83,6 @@
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.7.0/Canopy172-168.delta" sparkle:deltaFrom="168" length="566422" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="a5aE6rdcslhFhBj1ndBefv1zs5oBK/JIuBFnBILiPLkxz9StAVrDqkZLMTial74t64dbpCuowNfnCpnoZun/Bg=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.7.0/Canopy172-167.delta" sparkle:deltaFrom="167" length="592154" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="z2b5TgFYVpLw87YFB/3yOMQ/cwTpJ8tZq25Hy57fisXbM709J85PsnyPEQcQSuGYNruNYKXlQjCgGlE6F/KgDw=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.7.0/Canopy172-166.delta" sparkle:deltaFrom="166" length="605442" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="cgSi/UFuEo8ohYktbEM7tyEG6rTO4wpTjU7R5KHXjvVS3xBpXD75SWax94ctZInSz1z4d8nAn3ijMYqjvKfrBQ=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>3.6.3</title>
-            <pubDate>Thu, 08 Oct 2026 13:03:09 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>171</sparkle:version>
-            <sparkle:shortVersionString>3.6.3</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Bug Fixes
-- Authenticating an MCP server from a pane attached to another Mac now opens the sign-in page on the Mac you are using, not on the remote one. After approving, paste the address shown in your browser into the field in the MCP panel to finish.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.6.3/Canopy-3.6.3.dmg" length="6093010" type="application/octet-stream" sparkle:edSignature="Ir4+RyhZSyJ2j54AMfF3Wk9bN67kBIagQvUKI3J3AaOi61sIhO1O6NNI7Xt9P2Pv+ekBd0OdgbPEKMRkQruYDg=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.6.3/Canopy171-170.delta" sparkle:deltaFrom="170" length="333046" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="SZtih543m8R1cXHoCXuUKhkNweZ0SNZi8d6tkvUIS5LOLTNoP0MENHGuUOGgHnUCKL/ywnaHzLqIpt/Nm4QmAQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.6.3/Canopy171-168.delta" sparkle:deltaFrom="168" length="367210" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="I25QOprgLgcPHE7V/XdqYMcKbv1kPZQcNQFgSMt+nFQZOZcZ6Qbftuk4GQpNbCgGPt9LgY9ORFrCyHrb5OjUBg=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.6.3/Canopy171-167.delta" sparkle:deltaFrom="167" length="404226" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="64FRv8n9ZhBCzqdSsRSXxjy8BnETmcPxr+vMPB85iikRUfe/7zO3UHkbfYg5RiqCYHlrKhQ8a5jq8Vfcd0MRAg=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.6.3/Canopy171-166.delta" sparkle:deltaFrom="166" length="471102" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="gTnM9j5VILJ3U6FAtRwfXiBbEl5M5g0jGjsN+ez+9fcAYX4A+OZd1kh4bMBKJDt+QDEPFhZLt3EF20OtkAhvAQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.6.3/Canopy171-165.delta" sparkle:deltaFrom="165" length="472070" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="2mZJDaDbUorhSdb8b8R3wvV4xDj8Wj5BG0Yljw7EgvHPpwTuyIWLXlU+BI+hBJ28uzBNbTZ3HpJ8p9bdp4qiDQ=="/>
             </sparkle:deltas>
         </item>
         <item>
