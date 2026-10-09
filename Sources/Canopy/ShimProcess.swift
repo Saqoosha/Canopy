@@ -5093,6 +5093,29 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// `allowed_warning` → `allowed` for the 5-hour and weekly windows the sidebar
+    /// shows: the extension keeps dismissals per webview, so N panes showed N copies.
+    /// `allowed` (not a drop) lets the extension clear a banner already up. Applied
+    /// in `sendToWebView`, after the trackers have read the original frame.
+    nonisolated static func quietingRateLimitWarning(_ message: [String: Any]) -> [String: Any] {
+        guard message["type"] as? String == "from-extension",
+              var nested = message["message"] as? [String: Any],
+              nested["type"] as? String == "io_message",
+              var io = nested["message"] as? [String: Any],
+              io["type"] as? String == "rate_limit_event",
+              var info = io["rate_limit_info"] as? [String: Any],
+              info["status"] as? String == "allowed_warning",
+              let type = info["rateLimitType"] as? String,
+              type == "five_hour" || type == "seven_day"
+        else { return message }
+        info["status"] = "allowed"
+        io["rate_limit_info"] = info
+        nested["message"] = io
+        var out = message
+        out["message"] = nested
+        return out
+    }
+
     private func sendToWebView(_ message: Any) {
         guard let dict = message as? [String: Any] else {
             logger.warning("sendToWebView: message is not a dictionary: \(String(describing: type(of: message)), privacy: .public)")
@@ -5177,11 +5200,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if boundSession == nil || boundSession?.webView != nil { logger.error("sendToWebView: webView is nil!") }
             return
         }
-        if let webView { post(Self.retargeted(stamped, from: channelId, to: primaryOwnChannel), to: webView) }
+        // A phone shows one session and has no Usage section, so it keeps the warning.
+        let quieted = Self.quietingRateLimitWarning(stamped)
+        if let webView { post(Self.retargeted(quieted, from: channelId, to: primaryOwnChannel), to: webView) }
         var stale: [ObjectIdentifier] = []
         for (key, mirror) in mirrors {
             guard let target = mirror.sink else { stale.append(key); continue }
-            post(Self.retargeted(stamped, from: channelId, to: mirror.channelId), to: target)
+            let isPhone = (target as? MirrorConnection)?.isMacClient == false
+            post(Self.retargeted(isPhone ? stamped : quieted, from: channelId, to: mirror.channelId), to: target)
         }
         for key in stale { mirrors[key] = nil }
         if !stale.isEmpty {

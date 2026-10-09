@@ -12564,6 +12564,25 @@ enum SidebarLogicProbe {
                    RateLimitHit.signal(from: ev(["status": "something_new", "rateLimitType": "five_hour"])) == .unknown)
             record("limit banner: an empty type is not a hit",
                    RateLimitHit.signal(from: ev(["status": "rejected", "rateLimitType": ""])) == .unknown)
+            // The webview-bound rewrite that keeps the extension's warning
+            // banner off every pane.
+            func wrapped(_ info: [String: Any]) -> [String: Any] {
+                ["type": "from-extension", "message": ["type": "io_message", "channelId": "c", "message": ev(info)]]
+            }
+            func statusOut(_ m: [String: Any]) -> String? {
+                (((m["message"] as? [String: Any])?["message"] as? [String: Any])?["rate_limit_info"] as? [String: Any])?["status"] as? String
+            }
+            let quieted = ShimProcess.quietingRateLimitWarning(wrapped(["status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.75]))
+            record("limit warning: allowed_warning reaches the webview as allowed",
+                   statusOut(quieted) == "allowed", "got \(statusOut(quieted) ?? "nil")")
+            let quietedInfo = ((quieted["message"] as? [String: Any])?["message"] as? [String: Any])?["rate_limit_info"] as? [String: Any]
+            record("limit warning: the rest of the frame is kept",
+                   quietedInfo?["rateLimitType"] as? String == "seven_day"
+                       && (quieted["message"] as? [String: Any])?["channelId"] as? String == "c")
+            record("limit warning: a bucket the sidebar has no row for keeps its warning",
+                   statusOut(ShimProcess.quietingRateLimitWarning(wrapped(["status": "allowed_warning", "rateLimitType": "seven_day_sonnet"]))) == "allowed_warning")
+            record("limit warning: rejected passes unchanged",
+                   statusOut(ShimProcess.quietingRateLimitWarning(wrapped(["status": "rejected", "rateLimitType": "five_hour"]))) == "rejected")
             // The shim's latch: what `extractStatusData` writes for each signal.
             let held = RateLimitHit(limitType: "five_hour", resetsAt: nil)
             let newer = RateLimitHit(limitType: "seven_day", resetsAt: nil)
