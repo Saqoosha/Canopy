@@ -31,6 +31,8 @@ final class SleepGuard {
     private var lastLogged: String?
     private var acquireFailing = false
     private let controlsClamshell: Bool
+    /// Read once: whether `AppleClamshellState` exists. A lid-less Mac has nothing to disable.
+    private var hasLid = false
     /// The flag may be set: by this guard, or left by a daemon that died holding it.
     private var clamshellMayBeDisabled = false
     private var loggedClamshellDeferral = false
@@ -55,8 +57,9 @@ final class SleepGuard {
     func start() {
         guard timer == nil else { return }
         Self.active = self
-        // A previous daemon that died while holding may have left the flag set.
-        clamshellMayBeDisabled = controlsClamshell
+        hasLid = controlsClamshell && ClamshellSleep.lidClosed() != nil
+        // A previous daemon that stopped or died while holding may have left the flag set.
+        clamshellMayBeDisabled = hasLid
         // `.common`, so a modal alert in the GUI does not freeze the release.
         let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
@@ -70,9 +73,10 @@ final class SleepGuard {
         timer?.invalidate()
         timer = nil
         if Self.active === self { Self.active = nil }
-        // The flag is left as it is: a stop is usually a restart, and turning lid-close sleep
-        // back on here sleeps a lid-closed Mac before the next daemon can hold it again.
         releaseAssertions()
+        // Only with the lid open: a stop is usually a restart, and turning lid-close sleep back
+        // on with the lid closed sleeps the Mac before the next daemon can hold it again.
+        if ClamshellSleep.lidClosed() == false { restoreClamshellSleepIfHarmless() }
     }
 
     private func tick() {
@@ -139,8 +143,7 @@ final class SleepGuard {
     /// rather than sleep (measured). It has no effect on battery, and the opposite change
     /// (unplugging with the lid closed) still sleeps; only a root `pmset disablesleep` stops that.
     private func holdClamshell() {
-        // No `AppleClamshellState` means no lid (a desktop Mac): nothing to disable.
-        guard controlsClamshell, ClamshellSleep.lidClosed() != nil else { return }
+        guard hasLid else { return }
         if systemAssertion == nil {
             var id: IOPMAssertionID = 0
             let result = IOPMAssertionCreateWithDescription(kIOPMAssertionTypePreventSystemSleep as CFString,
@@ -165,6 +168,7 @@ final class SleepGuard {
     }
 
     private func releaseAssertions() {
+        systemAssertionFailing = false
         if let id = systemAssertion {
             IOPMAssertionRelease(id)
             systemAssertion = nil
@@ -176,7 +180,7 @@ final class SleepGuard {
     }
 
     private func restoreClamshellSleepIfHarmless() {
-        guard controlsClamshell, clamshellMayBeDisabled else { return }
+        guard hasLid, clamshellMayBeDisabled else { return }
         let lidClosed = ClamshellSleep.lidClosed()
         let lit = ClamshellSleep.litDisplayCount()
         guard SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: lidClosed, litDisplays: lit) else {
@@ -219,7 +223,7 @@ enum ClamshellSleep {
         return result == KERN_SUCCESS
     }
 
-    /// `AppleClamshellState`, or nil on a Mac with no lid.
+    /// `AppleClamshellState`, or nil when absent (no lid) or unreadable.
     static func lidClosed() -> Bool? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
         defer { IOObjectRelease(service) }
@@ -281,10 +285,9 @@ enum SleepGuardPolicy {
     }
 
     /// Re-enabling lid-close sleep with the lid closed blanks a lit display and may sleep the
-    /// Mac, so only when the lid is open or nothing is lit. `lidClosed` nil means no lid; an
-    /// unreadable display count counts as lit.
+    /// Mac, so only when the lid is open or nothing is lit. An unreadable input counts as unsafe.
     static func mayRestoreClamshellSleep(lidClosed: Bool?, litDisplays: Int?) -> Bool {
-        lidClosed != true || litDisplays == 0
+        lidClosed == false || litDisplays == 0
     }
 
     /// `power` is read only once a session is busy: it is an IOKit query, and the idle case is every tick.

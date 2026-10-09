@@ -55,18 +55,19 @@ enum DaemonRegistration {
     /// The only clean way to undo `register()` — `launchctl bootout` stops the
     /// job but leaves the Login Items record, which re-arms it at next login.
     static func unregisterAndExit() -> Never {
+        // No daemon will run to re-enable lid-close sleep, which a stop with the lid closed
+        // leaves disabled. Before the unregister, so a second run can still reset it.
+        MainActor.assumeIsolated {
+            if SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: ClamshellSleep.lidClosed(),
+                                                         litDisplays: ClamshellSleep.litDisplayCount()) {
+                if !ClamshellSleep.setDisabled(false) { print("could not re-enable lid-close sleep") }
+            } else {
+                print("lid-close sleep may still be disabled; open the lid and run this again to reset it")
+            }
+        }
         do {
             try service.unregister()
             print("daemon agent unregistered")
-            // No daemon will run to re-enable lid-close sleep, which a stop leaves disabled.
-            MainActor.assumeIsolated {
-                if SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: ClamshellSleep.lidClosed(),
-                                                             litDisplays: ClamshellSleep.litDisplayCount()) {
-                    ClamshellSleep.setDisabled(false)
-                } else {
-                    print("lid-close sleep may still be disabled; open the lid and run this again to reset it")
-                }
-            }
             exit(0)
         } catch {
             print("daemon agent unregister failed: \(error.localizedDescription)")

@@ -166,6 +166,10 @@ private struct GeneralSettingsTab: View {
                     }
                 }
                 .disabled(!settings.preventSleepWhileWorking)
+                .onDisappear {
+                    // A keyboard or VoiceOver adjustment never ends an edit.
+                    if let draft = floorDraft { settings.sleepBatteryFloorPercent = Int(draft); floorDraft = nil }
+                }
             } footer: {
                 SettingsFooter(text: "While a session is running a turn or is waiting for your answer, the Mac stays awake, lid closed included, so its network connection stays up and the phone or another Mac can reach it. With \"Stay reachable\" on it stays awake even with nothing running. A session with no activity for an hour stops counting; a local background task counts until it finishes. The display can still sleep — use display sleep rather than the monitor's power button. Not on battery below the threshold. Do not put it in a bag while it is awake.")
             }
