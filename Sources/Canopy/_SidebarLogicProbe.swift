@@ -7157,7 +7157,8 @@ enum SidebarLogicProbe {
         do {
             let floor = SleepGuardPolicy.defaultBatteryFloorPercent
             func hold(_ enabled: Bool, _ working: Int, _ power: PowerSource) -> Bool {
-                SleepGuardPolicy.decide(enabled: enabled, workingSessions: working, power: power).hold
+                SleepGuardPolicy.decide(enabled: enabled, workingSessions: working, stayReachable: false,
+                                        openSessions: 0, power: power).hold
             }
             record("SleepGuard holds while a session works on a Mac with no battery", hold(true, 1, .noBattery))
             record("SleepGuard does not hold with no working session", !hold(true, 0, .noBattery))
@@ -7168,14 +7169,25 @@ enum SidebarLogicProbe {
             record("SleepGuard holds below the floor while on AC power",
                    hold(true, 1, .battery(onBattery: false, percent: floor - 1)))
             record("SleepGuard does not hold when the battery cannot be read", !hold(true, 1, .unreadable))
-            func reach(_ enabled: Bool, _ power: PowerSource) -> Bool {
-                SleepGuardPolicy.decide(enabled: enabled, workingSessions: 0, stayReachable: true, power: power).hold
+            func reach(_ enabled: Bool, _ power: PowerSource, open: Int = 1) -> Bool {
+                SleepGuardPolicy.decide(enabled: enabled, workingSessions: 0, stayReachable: true,
+                                        openSessions: open, power: power).hold
             }
             record("SleepGuard stay-reachable holds with no busy session", reach(true, .battery(onBattery: false, percent: 50)))
+            record("SleepGuard stay-reachable does not hold with no session open", !reach(true, .noBattery, open: 0))
+            record("SleepGuard stay-reachable says why it let go with no session open",
+                   SleepGuardPolicy.decide(enabled: true, workingSessions: 0, stayReachable: true,
+                                           openSessions: 0, power: .noBattery).reason == "no session is open")
+            record("SleepGuard without stay-reachable does not hold for an open idle session",
+                   !SleepGuardPolicy.decide(enabled: true, workingSessions: 0, stayReachable: false,
+                                            openSessions: 1, power: .noBattery).hold)
+            record("SleepGuard holds for a busy session even with stay-reachable and no open count",
+                   SleepGuardPolicy.decide(enabled: true, workingSessions: 1, stayReachable: true,
+                                           openSessions: 0, power: .noBattery).hold)
             record("SleepGuard stay-reachable yields to the Settings switch", !reach(false, .noBattery))
             let custom = floor + 30
             func holdAt(_ percent: Int) -> Bool {
-                SleepGuardPolicy.decide(enabled: true, workingSessions: 1, batteryFloor: custom,
+                SleepGuardPolicy.decide(enabled: true, workingSessions: 1, stayReachable: false, openSessions: 0, batteryFloor: custom,
                                         power: .battery(onBattery: true, percent: percent)).hold
             }
             record("SleepGuard honours a custom battery floor at the floor", holdAt(custom))
@@ -7259,7 +7271,7 @@ enum SidebarLogicProbe {
                                 now: t0.addingTimeInterval(60)) == .started(percent: 60)
             }())
             record("SleepGuard reports a floor release as such",
-                   SleepGuardPolicy.decide(enabled: true, workingSessions: 1, batteryFloor: 20,
+                   SleepGuardPolicy.decide(enabled: true, workingSessions: 1, stayReachable: false, openSessions: 0, batteryFloor: 20,
                                            power: .battery(onBattery: true, percent: 19)).belowFloor)
             record("SleepGuard clamshell: restores with the lid open", restore(false, 1))
             record("SleepGuard clamshell: restores with the lid closed and nothing lit", restore(true, 0))
@@ -8416,8 +8428,8 @@ enum SidebarLogicProbe {
                    stamp.sessionId == idB && stamp.seq > afterFirst + 1,
                    "stamp=\(stamp)")
 
-            // --- the indicator's symbol table. A misspelled SF Symbol renders
-            // as a broken-image glyph and is invisible until someone looks at
+            // --- the indicator's symbol table. A misspelled SF Symbol makes
+            // `glyph` draw nothing, which is invisible until someone looks at
             // the window; `square.grid.2x2.slash` shipped in a draft of the
             // source selector and does not exist.
             //
@@ -8438,7 +8450,7 @@ enum SidebarLogicProbe {
             var pathlessBusyHelp: [String] = []
             for link in MacroPadStatus.demoCycle {
                 let appearance = MacroPadIndicator.appearance(for: link)
-                if NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: nil) == nil {
+                if MacroPadIndicator.glyph(appearance.symbol, color: .black, label: "probe").size == .zero {
                     unresolved.append(appearance.symbol)
                 }
                 if appearance.help.isEmpty { blankHelp.append(appearance.symbol) }
@@ -8449,6 +8461,11 @@ enum SidebarLogicProbe {
                 if case .portBusy(let path) = link, !appearance.help.contains(path) {
                     pathlessBusyHelp.append(appearance.help)
                 }
+            }
+            // `AwakeIndicator` draws through the same `glyph`.
+            for symbol in ["cup.and.saucer", "cup.and.saucer.fill"]
+            where MacroPadIndicator.glyph(symbol, color: .black, label: "probe").size == .zero {
+                unresolved.append(symbol)
             }
             record("indicator: every link state resolves to a real SF Symbol",
                    unresolved.isEmpty,

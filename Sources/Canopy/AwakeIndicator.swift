@@ -42,16 +42,22 @@ final class AwakeStatus {
     }
 }
 
-/// A small glyph in the sidebar footer while the Mac is held awake; nothing otherwise.
+/// A small glyph in the sidebar footer: filled while the Mac is held awake, an outline otherwise.
+/// One colour for both: the fill carries the state, so a paler outline would only be harder to see.
 struct AwakeIndicator: View {
     private let status = AwakeStatus.shared
 
     var body: some View {
-        // Started from `applicationDidFinishLaunching`: a `.task` here would never run
-        // while the view draws nothing.
+        // Started from `applicationDidFinishLaunching`, not a `.task` here.
+        // Drawn like `MacroPadIndicator`'s glyph beside it, so the two match in colour.
         if let reason = status.reason {
-            Image(systemName: "cup.and.saucer.fill")
+            Image(nsImage: MacroPadIndicator.glyph("cup.and.saucer.fill", color: .secondaryLabelColor, pointSize: 10,
+                                                  label: "Keeping the Mac awake"))
                 .help("Keeping the Mac awake: \(reason)")
+        } else {
+            Image(nsImage: MacroPadIndicator.glyph("cup.and.saucer", color: .secondaryLabelColor, pointSize: 10,
+                                                  label: "Not keeping the Mac awake"))
+                .help("Not keeping the Mac awake")
         }
     }
 }
