@@ -27,6 +27,10 @@ struct SessionEntry: Identifiable, Hashable {
     /// found (`GitWorktree.checkoutForRemovedWorktree`); `canOpen` is then true.
     /// Opening goes through `ClaudeSessionHistory.directoryToOpen`.
     var rescueCheckout: URL? = nil
+    /// When the session started (its first record), and the first thing a person typed in it.
+    /// Filled by `loadAllSessions`; the control API's session list reports them.
+    var startedAt: Date? = nil
+    var firstPrompt: String? = nil
 
     var projectName: String { GitWorktree.projectDisplayName(for: projectDirectory) }
 }
@@ -415,7 +419,9 @@ enum ClaudeSessionHistory {
                 timestamp: candidate.modDate,
                 projectDirectory: URL(fileURLWithPath: projectPath),
                 canOpen: projectExists,
-                logPath: candidate.path
+                logPath: candidate.path,
+                startedAt: metadata.startedAt,
+                firstPrompt: metadata.firstPrompt
             )
         }
 
@@ -514,7 +520,7 @@ enum ClaudeSessionHistory {
         }
     }
 
-    private typealias Metadata = (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool)
+    private typealias Metadata = (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?)
     nonisolated(unsafe) private static var metadataCache: [String: (modified: Date, metadata: Metadata)] = [:]
     private static let metadataCacheLock = NSLock()
 
@@ -1165,11 +1171,11 @@ enum ClaudeSessionHistory {
     /// this path could be handed is `observer-sessions` itself at 1,056 files,
     /// 111.9 → 1,045.2 MiB — which is the argument for keeping that list on
     /// the caller rather than moving it down.
-    private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
+    private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?) {
         extractMetadataIfReadable(fromPath: path) ?? unreadableMetadata
     }
 
-    private static let unreadableMetadata: Metadata = ("Untitled", nil, false, false)
+    private static let unreadableMetadata: Metadata = ("Untitled", nil, false, false, nil, nil)
 
     private static func extractMetadataIfReadable(fromPath path: String) -> Metadata? {
         guard var metadata = boundedMetadataIfReadable(fromPath: path) else { return nil }
@@ -1368,6 +1374,15 @@ enum ClaudeSessionHistory {
 }
 
 extension ClaudeSessionHistory {
+    /// A transcript record's `timestamp` (ISO 8601 with milliseconds, as the CLI writes it).
+    static func parseTimestamp(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
     /// The per-line half of `extractMetadata`, lifted out of it so the SSH
     /// remote path can apply the SAME filters to header bytes fetched off
     /// another machine.
@@ -1401,6 +1416,12 @@ extension ClaudeSessionHistory {
         private var aiTitle: String?
         private var firstUserMessage: String?
         private var firstCwd: String?
+        /// The first record's `timestamp`: when the session started.
+        private var startedAt: Date?
+        /// The first prompt a person typed, longer than the title's cut. Meta records (hook
+        /// output, command caveats) and tool results are not prompts.
+        private var firstPrompt: String?
+        static let firstPromptMaxLength = 500
         private var lastRelocatedCwd: String?
         private var entrypoint: String?
         private(set) var isBackgroundScheduled = false
@@ -1432,6 +1453,10 @@ extension ClaudeSessionHistory {
 
             if firstCwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
                 firstCwd = value
+            }
+
+            if startedAt == nil, let value = json["timestamp"] as? String {
+                startedAt = ClaudeSessionHistory.parseTimestamp(value)
             }
 
             if entrypoint == nil, let value = json["entrypoint"] as? String, !value.isEmpty {
@@ -1485,6 +1510,24 @@ extension ClaudeSessionHistory {
                     if !joined.isEmpty { firstUserMessage = String(joined.prefix(100)) }
                 }
             }
+
+            if firstPrompt == nil, json["isMeta"] as? Bool != true, let message = json["message"] as? [String: Any] {
+                let text: String
+                if let content = message["content"] as? String {
+                    text = content
+                } else if let blocks = message["content"] as? [[String: Any]] {
+                    // A tool result is a user record too; only text blocks are what someone typed.
+                    text = blocks.filter { $0["type"] as? String == "text" }
+                        .compactMap { $0["text"] as? String }.joined(separator: " ")
+                } else {
+                    text = ""
+                }
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                // `<command-name>`, `<local-command-stdout>`, `<system-reminder>`: the CLI's, not the person's.
+                if !trimmed.isEmpty, !trimmed.hasPrefix("<") {
+                    firstPrompt = String(trimmed.prefix(Self.firstPromptMaxLength))
+                }
+            }
         }
 
         /// Record a relocation the line scan never reached. Only
@@ -1492,11 +1535,13 @@ extension ClaudeSessionHistory {
         /// the line scan's own rule.
         mutating func noteRelocated(_ cwd: String) { lastRelocatedCwd = cwd }
 
-        var result: (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
+        var result: (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?) {
             (aiTitle ?? firstUserMessage ?? "Untitled",
              lastRelocatedCwd ?? firstCwd,
              isBackgroundScheduled,
-             entrypoint?.hasPrefix("sdk-") == true)
+             entrypoint?.hasPrefix("sdk-") == true,
+             startedAt,
+             firstPrompt)
         }
     }
 }

@@ -69,8 +69,39 @@ placeholder the CLI replaces.
 
 This list is partial.
 
-`list_sessions` takes optional `limit` (default 50), `scope` (`open`
-default, or `recent`), and `query` (with `recent`).
+`list_sessions` takes optional `limit` (default 50) and `scope` (`open`
+default, or `recent`).
+
+`scope: "recent"` lists past sessions, most recently active first. These are
+the rows `open_session`'s `resumeSessionId` continues. Without filters it
+returns the newest sessions the daemon keeps (about 50). With any filter
+it reads every transcript on the Mac. The first such read takes a few
+seconds (about 5 s here); later ones reuse cached headers. Params:
+
+| Param | Meaning |
+|---|---|
+| `query` | Whitespace-separated words; every one must appear (case-insensitive) in the title, project, cwd or first prompt |
+| `project` | Text the project name or cwd contains (case-insensitive) |
+| `since`, `until` | Keep sessions active at some point in the period. A `yyyy-MM-dd` date (this Mac's time zone; the whole day), an ISO 8601 date-time, or Unix seconds. Anything else is an error |
+| `includeOpen` | `true` also lists open sessions, with `key` and live `state` |
+
+A row adds these fields to the `open` scope's:
+
+| Field | Meaning |
+|---|---|
+| `sessionId` | The id to pass as `resumeSessionId`. Same value as `resumeId` |
+| `startedAt` | Unix seconds of the transcript's first record, when it has one |
+| `lastActiveAt` | Unix seconds of the transcript's last write |
+| `firstPrompt` | The first thing a person typed, cut at 500 characters. Hook output, slash-command markup and tool results are skipped |
+
+`title` is the session's title: the name it was given or generated,
+otherwise the start of its first message. Closed rows have `state`
+`"closed"`, no `key`, and empty `model` / `permissionMode`.
+
+```sh
+canopyctl sessions --project ghostline --since 2026-10-01 --table
+canopyctl sessions --query "VDGS layout"        # JSON, open sessions included
+```
 
 `open_session` requires `cwd`, an absolute path of a directory that exists.
 Optional: `permissionMode` (a `PermissionMode` raw value; `bypassPermissions`
@@ -89,7 +120,7 @@ was given. Pass that `replyId` to `wait_turn` to wait for the first answer.
 instead of starting one: a session that was closed, or that a daemon restart
 dropped. The CLI is started with `--resume`, so the model has the whole
 conversation. Find the id with `list_sessions` `scope: "recent"` (each row's
-`resumeId`) or `history`.
+`sessionId`).
 
 The folder is the session's own, resolved the way the GUI reopens a closed
 row. It handles a session that moved into a worktree, and a removed
@@ -125,8 +156,8 @@ A refusal is an error response with an `errorCode` beside `error`:
 | `start_failed` | The session could not be started |
 
 ```sh
-canopyctl list --scope recent --query ghostline
-canopyctl resume <resumeId> --initial-prompt "Next: …"   # same as: open --resume <resumeId>
+canopyctl sessions --project ghostline --table
+canopyctl resume <sessionId> --initial-prompt "Next: …"   # same as: open --resume <sessionId>
 canopyctl wait --key <key> --reply-id <replyId>
 ```
 

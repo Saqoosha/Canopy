@@ -287,31 +287,86 @@ final class ControlSession {
         case "open":
             reply(request, ["sessions": openRows().prefix(limit).map(\.wire)])
         case "recent":
+            let filter: ControlProtocol.SessionListFilter
+            switch ControlProtocol.SessionListFilter.parse(request.params) {
+            case .success(let parsed): filter = parsed
+            case .failure(let error): return fail(request, error.message)
+            }
+            let includeOpen = request.params["includeOpen"] as? Bool == true
             Task { @MainActor in
-                let query = (request.params["query"] as? String ?? "").lowercased()
-                // Answer from the list the daemon holds; the rescan an unfiltered ask starts
-                // serves the next one. A search never starts one: that would be one per keystroke.
-                if store.recents.isEmpty {
-                    await Self.refreshRecents(store).value
-                } else if query.isEmpty {
-                    _ = Self.refreshRecents(store)
+                let entries: [SessionEntry]
+                if filter.needsEverySession {
+                    entries = await Self.everySession().value
+                } else {
+                    // Answer from the list the daemon holds; the rescan an ask starts serves the next one.
+                    if store.recents.isEmpty {
+                        await Self.refreshRecents(store).value
+                    } else {
+                        _ = Self.refreshRecents(store)
+                    }
+                    entries = store.recents
                 }
                 guard !stopped else { return }
-                let open = Set(store.openSessions.map(\.resumeId))
-                let rows = store.recents
-                    .filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
-                    .filter { query.isEmpty || $0.title.lowercased().contains(query) || $0.projectName.lowercased().contains(query) }
-                    .prefix(limit)
-                    .map { ControlProtocol.SessionRow(
-                        key: nil, resumeId: $0.id, title: $0.title, project: $0.projectName,
-                        cwd: $0.projectDirectory.path, state: "closed", running: false, clients: 0,
-                        lastActiveAt: $0.timestamp.timeIntervalSince1970, model: "", messageCount: 0,
-                        permissionMode: "", accountId: nil).wire }
-                reply(request, ["sessions": Array(rows)])
+                reply(request, ["sessions": recentRows(entries, filter: filter, includeOpen: includeOpen, limit: limit)])
             }
         default:
             fail(request, "unknown scope")
         }
+    }
+
+    /// `scope: "recent"`'s rows, newest activity first. A closed row carries `sessionId` (the id
+    /// `open_session`'s `resumeSessionId` takes, also sent as `resumeId`), `startedAt` and
+    /// `firstPrompt` when its transcript records them. With `includeOpen`, open sessions are
+    /// listed too, with their `key` and live state.
+    private func recentRows(_ entries: [SessionEntry], filter: ControlProtocol.SessionListFilter,
+                            includeOpen: Bool, limit: Int) -> [[String: Any]] {
+        let byId = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func extras(_ dict: inout [String: Any], _ entry: SessionEntry?, id: String) {
+            dict["sessionId"] = id
+            if let startedAt = entry?.startedAt { dict["startedAt"] = startedAt.timeIntervalSince1970 }
+            if let prompt = entry?.firstPrompt { dict["firstPrompt"] = prompt }
+        }
+        var rows: [(at: Double, wire: [String: Any])] = []
+        let open = Set(store.openSessions.map(\.resumeId))
+        if includeOpen {
+            for row in openRows() {
+                let entry = byId[row.resumeId]
+                guard filter.matches(title: row.title, project: row.project, cwd: row.cwd, firstPrompt: entry?.firstPrompt,
+                                     startedAt: entry?.startedAt, lastActiveAt: Date(timeIntervalSince1970: row.lastActiveAt))
+                else { continue }
+                var dict = row.wire
+                extras(&dict, entry, id: row.resumeId)
+                rows.append((row.lastActiveAt, dict))
+            }
+        }
+        for entry in entries where entry.canOpen && !open.contains(entry.id) && !store.hiddenIds.contains(entry.id) {
+            guard filter.matches(title: entry.title, project: entry.projectName, cwd: entry.projectDirectory.path,
+                                 firstPrompt: entry.firstPrompt, startedAt: entry.startedAt, lastActiveAt: entry.timestamp)
+            else { continue }
+            var dict = ControlProtocol.SessionRow(
+                key: nil, resumeId: entry.id, title: entry.title, project: entry.projectName,
+                cwd: entry.projectDirectory.path, state: "closed", running: false, clients: 0,
+                lastActiveAt: entry.timestamp.timeIntervalSince1970, model: "", messageCount: 0,
+                permissionMode: "", accountId: nil).wire
+            extras(&dict, entry, id: entry.id)
+            rows.append((entry.timestamp.timeIntervalSince1970, dict))
+        }
+        return rows.sorted { $0.at > $1.at }.prefix(limit).map(\.wire)
+    }
+
+    /// Every session on the Mac, uncapped; one read at a time across connections. Headers are
+    /// cached by mtime (`ClaudeSessionHistory.cachedMetadata`), so only the first read is slow.
+    private static var everySessionRead: Task<[SessionEntry], Never>?
+
+    private static func everySession() -> Task<[SessionEntry], Never> {
+        if let running = everySessionRead { return running }
+        let task = Task { @MainActor in
+            let all = await Task.detached { ClaudeSessionHistory.loadAllSessions(keep: .max, scanLimit: .max) }.value
+            everySessionRead = nil
+            return all
+        }
+        everySessionRead = task
+        return task
     }
 
     /// One rescan at a time across every control connection; asks during one share it.

@@ -232,6 +232,64 @@ enum ControlProtocol {
         return ClaudeSessionHistory.LaunchSettings(model: requested.model ?? inherited.model, permissionMode: mode)
     }
 
+    /// `list_sessions` `scope: "recent"`'s filters. Any of them makes the list read every
+    /// transcript on the Mac rather than the newest `maxSessionsToKeep`, since an older
+    /// session is exactly what a period or a project filter is looking for.
+    struct SessionListFilter: Equatable {
+        /// Lowercased; every term must appear in the title, project, cwd or first prompt.
+        var terms: [String] = []
+        /// Lowercased; must appear in the project name or the cwd.
+        var project: String?
+        /// The session was active at some point in `since...until`.
+        var since: Date?
+        var until: Date?
+
+        var needsEverySession: Bool { !terms.isEmpty || project != nil || since != nil || until != nil }
+
+        static func parse(_ params: [String: Any]) -> Result<SessionListFilter, ControlError> {
+            var filter = SessionListFilter()
+            if let query = params["query"] as? String {
+                filter.terms = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+            }
+            if let project = (params["project"] as? String)?.trimmingCharacters(in: .whitespaces), !project.isEmpty {
+                filter.project = project.lowercased()
+            }
+            for key in ["since", "until"] {
+                guard let raw = params[key], !(raw is NSNull) else { continue }
+                guard let date = date(raw, endOfDay: key == "until") else {
+                    return .failure(ControlError("\(key) must be an ISO 8601 date or Unix seconds"))
+                }
+                if key == "since" { filter.since = date } else { filter.until = date }
+            }
+            return .success(filter)
+        }
+
+        /// Unix seconds, an ISO 8601 date-time, or a bare `yyyy-MM-dd` in this Mac's time zone
+        /// (the start of that day for `since`, its end for `until`).
+        static func date(_ raw: Any, endOfDay: Bool) -> Date? {
+            if let seconds = raw as? Double { return Date(timeIntervalSince1970: seconds) }
+            if let seconds = raw as? Int { return Date(timeIntervalSince1970: TimeInterval(seconds)) }
+            guard let text = (raw as? String)?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+            if let date = ClaudeSessionHistory.parseTimestamp(text) { return date }
+            let day = DateFormatter()
+            day.locale = Locale(identifier: "en_US_POSIX")
+            day.dateFormat = "yyyy-MM-dd"
+            guard let start = day.date(from: text) else { return nil }
+            return endOfDay ? Calendar.current.date(byAdding: .day, value: 1, to: start)?.addingTimeInterval(-0.001) : start
+        }
+
+        func matches(title: String, project: String, cwd: String, firstPrompt: String?,
+                     startedAt: Date?, lastActiveAt: Date) -> Bool {
+            if let since, lastActiveAt < since { return false }
+            if let until, (startedAt ?? lastActiveAt) > until { return false }
+            if let wanted = self.project, !project.lowercased().contains(wanted), !cwd.lowercased().contains(wanted) {
+                return false
+            }
+            let haystack = [title, project, cwd, firstPrompt ?? ""].joined(separator: "\n").lowercased()
+            return terms.allSatisfy { haystack.contains($0) }
+        }
+    }
+
     enum SessionRef: Equatable {
         case key(String)
         case resumeId(String)

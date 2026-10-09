@@ -2015,6 +2015,55 @@ enum SidebarLogicProbe {
                        resolved(goneId, localCwd: controlDir.path) == .success(controlDir.path))
                 try? FileManager.default.removeItem(at: filedTranscript)
                 if !filedFolderExisted { try? FileManager.default.removeItem(at: filedFolder) }
+                // list_sessions scope=recent filters.
+                typealias ListFilter = ControlProtocol.SessionListFilter
+                record("control list: no filter reads only the held recents",
+                       (try? ListFilter.parse([:]).get())?.needsEverySession == false)
+                record("control list: query, project, since or until each read every session",
+                       ["query": "x", "project": "p", "since": "2026-10-01", "until": 1_791_000_000].allSatisfy {
+                           (try? ListFilter.parse([$0.key: $0.value]).get())?.needsEverySession == true })
+                record("control list: an unreadable date is refused, not ignored",
+                       ListFilter.parse(["since": "last tuesday"]) == .failure(ControlProtocol.ControlError("since must be an ISO 8601 date or Unix seconds")))
+                let dayStart = ListFilter.date("2026-10-01", endOfDay: false)!
+                let dayEnd = ListFilter.date("2026-10-01", endOfDay: true)!
+                record("control list: a bare date is that whole local day, start for since and end for until",
+                       Calendar.current.component(.hour, from: dayStart) == 0
+                           && Calendar.current.isDate(dayStart, inSameDayAs: dayEnd)
+                           && dayEnd.timeIntervalSince(dayStart) > 86_399 && dayEnd.timeIntervalSince(dayStart) < 86_400.01)
+                record("control list: ISO 8601 and Unix seconds parse",
+                       ListFilter.date("2026-10-09T13:32:57.356Z", endOfDay: false)?.timeIntervalSince1970 == 1_791_552_777.356
+                           && ListFilter.date(1_791_552_777.0, endOfDay: false)?.timeIntervalSince1970 == 1_791_552_777)
+                let filter = try! ListFilter.parse(["query": "VDGS  fix", "project": "canopy",
+                                                    "since": "2026-10-01", "until": "2026-10-05"]).get()
+                let inside = Calendar.current.date(byAdding: .hour, value: 12, to: dayStart)!
+                func listMatch(title: String = "Fix VDGS layout", project: String = "Canopy · main", cwd: String = "/r/Canopy",
+                               prompt: String? = nil, started: Date? = nil, last: Date) -> Bool {
+                    filter.matches(title: title, project: project, cwd: cwd, firstPrompt: prompt, startedAt: started, lastActiveAt: last)
+                }
+                record("control list: every query term must appear, case-insensitively, in any field",
+                       listMatch(last: inside)
+                           && listMatch(title: "untitled", prompt: "please FIX the vdgs panel", last: inside)
+                           && !listMatch(title: "VDGS only", last: inside))
+                record("control list: project matches the project name or the cwd",
+                       listMatch(project: "other", cwd: "/x/canopy-wt", last: inside)
+                           && !listMatch(project: "ghostline", cwd: "/r/ghostline", last: inside))
+                record("control list: the period keeps a session active at any point inside it",
+                       listMatch(started: dayStart.addingTimeInterval(-86_400 * 3), last: inside)
+                           && !listMatch(last: dayStart.addingTimeInterval(-1))
+                           && !listMatch(started: ListFilter.date("2026-10-06", endOfDay: false), last: ListFilter.date("2026-10-07", endOfDay: false)!))
+                var header = ClaudeSessionHistory.HeaderScanner()
+                for line in [
+                    #"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-09T08:45:34.484Z"}"#,
+                    #"{"type":"user","isMeta":true,"timestamp":"2026-10-09T08:45:35.000Z","message":{"role":"user","content":"Caveat: hook output"}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:45:36.000Z","message":{"role":"user","content":"<command-name>/model</command-name>"}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:45:37.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"ls output"}]}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:45:38.000Z","message":{"role":"user","content":[{"type":"text","text":"  Fix the VDGS panel  "}]}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:46:00.000Z","message":{"role":"user","content":"second prompt"}}"#,
+                ] { header.consume(Data(line.utf8)) }
+                record("control list: startedAt is the first record's timestamp",
+                       header.result.startedAt?.timeIntervalSince1970 == 1_791_535_534.484)
+                record("control list: firstPrompt skips meta, CLI markup and tool results, and is trimmed",
+                       header.result.firstPrompt == "Fix the VDGS panel")
                 record("control resume: errorCode rides beside error only when given",
                        ControlProtocol.errorResponse(id: "1", message: "m", code: "no_transcript")["errorCode"] as? String == "no_transcript"
                            && ControlProtocol.errorResponse(id: "1", message: "m")["errorCode"] == nil)

@@ -46,6 +46,21 @@ def main(argv):
     list_p.add_argument("--query", help="with --scope recent: title or project")
     list_p.add_argument("--limit", type=int)
 
+    sessions_p = sub.add_parser(
+        "sessions",
+        help="past sessions, closed ones included (list_sessions scope=recent); "
+        "pick a sessionId and pass it to resume",
+    )
+    sessions_p.add_argument("--project", help="project name or cwd contains this")
+    sessions_p.add_argument("--query", help="words in the title, project, cwd or first prompt")
+    sessions_p.add_argument("--since", help="active on or after: YYYY-MM-DD, ISO 8601, or Unix seconds")
+    sessions_p.add_argument("--until", help="active on or before: YYYY-MM-DD, ISO 8601, or Unix seconds")
+    sessions_p.add_argument("--limit", type=int, help="default 50")
+    sessions_p.add_argument(
+        "--closed-only", action="store_true", help="leave out sessions that are open now"
+    )
+    sessions_p.add_argument("--table", action="store_true", help="one line per session instead of JSON")
+
     open_p = sub.add_parser(
         "open", help="open_session (--resume continues a session that is not open)"
     )
@@ -125,9 +140,12 @@ def main(argv):
         print(f"canopyctl: {exc}", file=sys.stderr)
         # A listen loop retries this with its cursor; a daemon restart lands here.
         return 4 if args.cmd == "listen" else 1
+    body = result["result"] if isinstance(result.get("result"), dict) else result
+    if getattr(args, "table", False) and "error" not in result:
+        print_session_table(body.get("sessions", []))
+        return 0
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
-    body = result["result"] if isinstance(result.get("result"), dict) else result
     if "error" in result or body.get("ok") is False:
         return 1
     if args.cmd == "wait" and body.get("turnDone") is not True:
@@ -135,6 +153,32 @@ def main(argv):
     if args.cmd == "listen" and body.get("timedOut") is True:
         return 3
     return 0
+
+
+def print_session_table(sessions):
+    """started  last active  state  sessionId  project  title — first prompt"""
+    import datetime
+
+    def when(seconds):
+        if not seconds:
+            return "-" * 16
+        return datetime.datetime.fromtimestamp(seconds).strftime("%Y-%m-%d %H:%M")
+
+    for row in sessions:
+        prompt = " ".join((row.get("firstPrompt") or "").split())
+        if len(prompt) > 80:
+            prompt = prompt[:79] + "…"
+        line = "  ".join(
+            [
+                when(row.get("startedAt")),
+                when(row.get("lastActiveAt")),
+                f"{row.get('state', ''):<10}",
+                row.get("sessionId") or row.get("resumeId", ""),
+                row.get("project", ""),
+                " ".join((row.get("title") or "").split()),
+            ]
+        )
+        print(f"{line} — {prompt}" if prompt else line)
 
 
 class HelloRefused(Exception):
@@ -161,6 +205,19 @@ def build(args):
             params["scope"] = args.scope
         if args.query:
             params["query"] = args.query
+        if args.limit is not None:
+            params["limit"] = args.limit
+        return "list_sessions", params
+    if args.cmd == "sessions":
+        params = {"scope": "recent", "includeOpen": not args.closed_only}
+        for key, value in (
+            ("project", args.project),
+            ("query", args.query),
+            ("since", args.since),
+            ("until", args.until),
+        ):
+            if value:
+                params[key] = value
         if args.limit is not None:
             params["limit"] = args.limit
         return "list_sessions", params
