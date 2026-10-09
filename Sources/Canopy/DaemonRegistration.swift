@@ -58,6 +58,15 @@ enum DaemonRegistration {
         do {
             try service.unregister()
             print("daemon agent unregistered")
+            // No daemon will run to re-enable lid-close sleep, which a stop leaves disabled.
+            MainActor.assumeIsolated {
+                if SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: ClamshellSleep.lidClosed(),
+                                                             litDisplays: ClamshellSleep.litDisplayCount()) {
+                    ClamshellSleep.setDisabled(false)
+                } else {
+                    print("lid-close sleep may still be disabled; open the lid and run this again to reset it")
+                }
+            }
             exit(0)
         } catch {
             print("daemon agent unregister failed: \(error.localizedDescription)")

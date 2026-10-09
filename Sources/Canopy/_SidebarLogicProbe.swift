@@ -7213,7 +7213,7 @@ enum SidebarLogicProbe {
             record("SleepGuard clamshell: restores with the lid open", restore(false, 1))
             record("SleepGuard clamshell: restores with the lid closed and nothing lit", restore(true, 0))
             record("SleepGuard clamshell: defers with the lid closed and a display lit", !restore(true, 1))
-            record("SleepGuard clamshell: defers when the lid cannot be read and a display is lit", !restore(nil, 1))
+            record("SleepGuard clamshell: restores on a Mac with no lid", restore(nil, 1))
             record("SleepGuard clamshell: defers when the lid is closed and displays cannot be read", !restore(true, nil))
         }
 

@@ -70,7 +70,9 @@ final class SleepGuard {
         timer?.invalidate()
         timer = nil
         if Self.active === self { Self.active = nil }
-        release()
+        // The flag is left as it is: a stop is usually a restart, and turning lid-close sleep
+        // back on here sleeps a lid-closed Mac before the next daemon can hold it again.
+        releaseAssertions()
     }
 
     private func tick() {
@@ -106,7 +108,9 @@ final class SleepGuard {
     private func acquire(reason: String) -> Bool {
         if let id = assertion {
             if reason != assertionReason {
-                IOPMAssertionSetProperty(id, kIOPMAssertionDetailsKey as CFString, reason as CFString)
+                for held in [id, systemAssertion].compactMap({ $0 }) {
+                    IOPMAssertionSetProperty(held, kIOPMAssertionDetailsKey as CFString, reason as CFString)
+                }
                 assertionReason = reason
             }
             return true
@@ -127,6 +131,7 @@ final class SleepGuard {
     }
 
     private var systemAssertion: IOPMAssertionID?
+    private var systemAssertionFailing = false
 
     /// Re-applied every tick while holding: another daemon (a Debug build) starting or
     /// releasing resets the shared flag, and so does powerd on a power-source change. The
@@ -134,13 +139,19 @@ final class SleepGuard {
     /// rather than sleep (measured). It has no effect on battery, and the opposite change
     /// (unplugging with the lid closed) still sleeps; only a root `pmset disablesleep` stops that.
     private func holdClamshell() {
-        guard controlsClamshell else { return }
+        // No `AppleClamshellState` means no lid (a desktop Mac): nothing to disable.
+        guard controlsClamshell, ClamshellSleep.lidClosed() != nil else { return }
         if systemAssertion == nil {
             var id: IOPMAssertionID = 0
-            if IOPMAssertionCreateWithDescription(kIOPMAssertionTypePreventSystemSleep as CFString,
-                                                  Self.assertionName as CFString, assertionReason as CFString?,
-                                                  nil, nil, 0, nil, &id) == kIOReturnSuccess {
+            let result = IOPMAssertionCreateWithDescription(kIOPMAssertionTypePreventSystemSleep as CFString,
+                                                            Self.assertionName as CFString, assertionReason as CFString?,
+                                                            nil, nil, 0, nil, &id)
+            if result == kIOReturnSuccess {
                 systemAssertion = id
+                systemAssertionFailing = false
+            } else if !systemAssertionFailing {
+                systemAssertionFailing = true
+                logger.error("PreventSystemSleep assertion failed: 0x\(String(UInt32(bitPattern: result), radix: 16), privacy: .public)")
             }
         }
         ClamshellSleep.setDisabled(true)
@@ -149,11 +160,15 @@ final class SleepGuard {
     }
 
     private func release() {
+        releaseAssertions()
+        restoreClamshellSleepIfHarmless()
+    }
+
+    private func releaseAssertions() {
         if let id = systemAssertion {
             IOPMAssertionRelease(id)
             systemAssertion = nil
         }
-        restoreClamshellSleepIfHarmless()
         guard let id = assertion else { return }
         IOPMAssertionRelease(id)
         assertion = nil
@@ -204,7 +219,7 @@ enum ClamshellSleep {
         return result == KERN_SUCCESS
     }
 
-    /// `AppleClamshellState`, or nil when it cannot be read.
+    /// `AppleClamshellState`, or nil on a Mac with no lid.
     static func lidClosed() -> Bool? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
         defer { IOObjectRelease(service) }
@@ -266,9 +281,10 @@ enum SleepGuardPolicy {
     }
 
     /// Re-enabling lid-close sleep with the lid closed blanks a lit display and may sleep the
-    /// Mac, so only when the lid is open or nothing is lit. An unreadable input counts as unsafe.
+    /// Mac, so only when the lid is open or nothing is lit. `lidClosed` nil means no lid; an
+    /// unreadable display count counts as lit.
     static func mayRestoreClamshellSleep(lidClosed: Bool?, litDisplays: Int?) -> Bool {
-        lidClosed == false || litDisplays == 0
+        lidClosed != true || litDisplays == 0
     }
 
     /// `power` is read only once a session is busy: it is an IOKit query, and the idle case is every tick.

@@ -127,6 +127,7 @@ private struct SettingsFooter: View {
 
 private struct GeneralSettingsTab: View {
     @Bindable private var settings = CanopySettings.shared
+    @State private var floorDraft: Double?
 
     var body: some View {
         Form {
@@ -152,11 +153,17 @@ private struct GeneralSettingsTab: View {
                 Toggle("Prevent sleep while a session is working", isOn: $settings.preventSleepWhileWorking)
                 Toggle("Stay reachable remotely", isOn: $settings.stayReachableRemotely)
                     .disabled(!settings.preventSleepWhileWorking)
-                LabeledContent("Allow sleep on battery below \(settings.sleepBatteryFloorPercent)%") {
-                    Slider(value: Binding(get: { Double(settings.sleepBatteryFloorPercent) },
-                                          set: { settings.sleepBatteryFloorPercent = Int($0) }),
+                LabeledContent("Allow sleep on battery below \(Int(floorDraft ?? Double(settings.sleepBatteryFloorPercent)))%") {
+                    // Saved on release: every save rewrites settings.json and wakes the daemon's reload.
+                    Slider(value: Binding(get: { floorDraft ?? Double(settings.sleepBatteryFloorPercent) },
+                                          set: { floorDraft = $0 }),
                            in: Double(SleepGuardPolicy.batteryFloorRange.lowerBound)...Double(SleepGuardPolicy.batteryFloorRange.upperBound),
-                           step: 5)
+                           step: 5) { editing in
+                        if !editing, let draft = floorDraft {
+                            settings.sleepBatteryFloorPercent = Int(draft)
+                            floorDraft = nil
+                        }
+                    }
                 }
                 .disabled(!settings.preventSleepWhileWorking)
             } footer: {
