@@ -240,10 +240,24 @@ struct MacroPadIndicator: View {
     /// invisible until someone looks at the window.
     struct Appearance {
         let symbol: String
-        let tint: AnyShapeStyle
+        /// An `NSColor`, not a SwiftUI style: the `Menu` label is redrawn by an
+        /// `NSPopUpButton` as a template image, which drops `.tertiary` /
+        /// `.quaternary` and drew the glyph near-black beside `AwakeIndicator`.
+        let tint: NSColor
         let help: String
         /// State name, rendered beside the glyph only while the demo runs.
         let demoLabel: String
+    }
+
+    /// A palette-coloured symbol is not a template image, so the popup draws it as given.
+    /// `AwakeIndicator` draws through this too, so the footer's two glyphs share one colour.
+    static func glyph(_ symbol: String, color: NSColor, pointSize: CGFloat = 9) -> NSImage {
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) ?? NSImage()
+        image.isTemplate = false
+        return image
     }
 
     var body: some View {
@@ -257,9 +271,7 @@ struct MacroPadIndicator: View {
             MacroPadCommands()
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: appearance.symbol)
-                    .font(.system(size: 9))
-                    .foregroundStyle(appearance.tint)
+                Image(nsImage: Self.glyph(appearance.symbol, color: appearance.tint))
                 if status.isDemo {
                     Text(appearance.demoLabel)
                         .font(.caption2)
@@ -377,8 +389,8 @@ struct MacroPadIndicator: View {
         case .disabled:
             // Slashed, not absent: this is a state the user can leave, so it
             // reads as switched-off hardware rather than as missing hardware.
-            // Quaternary keeps it from competing with the version string it
-            // sits beside.
+            // The slash, not a paler colour, is what tells it apart from the
+            // other states.
             //
             // "inactive", not "off": this case collapses three causes and only
             // one of them is the user's choice. The initial value is also here
@@ -394,15 +406,15 @@ struct MacroPadIndicator: View {
             // so the next typo fails a test instead. See the probe for what
             // that does and does not buy.
             return Appearance(symbol: "square.slash",
-                              tint: AnyShapeStyle(.quaternary),
+                              tint: NSColor.secondaryLabelColor,
                               help: "MacroPad inactive — click to change source",
                               demoLabel: "off")
         case .searching:
-            // Outline + quaternary: findable when you go looking for it,
-            // quiet enough not to read as a warning. An unplugged pad is the
-            // normal state for most of the day.
+            // Outline in the same colour as connected: the fill is what says
+            // connected, and a neutral grey does not read as a warning. An
+            // unplugged pad is the normal state for most of the day.
             return Appearance(symbol: "square.grid.2x2",
-                              tint: AnyShapeStyle(.quaternary),
+                              tint: NSColor.secondaryLabelColor,
                               help: "MacroPad not connected — click to change source",
                               demoLabel: "searching")
         case .portBusy(let path):
@@ -421,22 +433,22 @@ struct MacroPadIndicator: View {
             // holder — and because the footer has room for a glyph, not a
             // device node.
             return Appearance(symbol: "lock.square",
-                              tint: AnyShapeStyle(Color.orange.opacity(0.8)),
+                              tint: NSColor.systemOrange.withAlphaComponent(0.8),
                               help: "MacroPad port is held by another process (\(path)) — `lsof` it to find out which; another Canopy build on this Mac is the one confirmed cause. Click to change source",
                               demoLabel: "port busy")
         case .connected(.unreachable):
             return Appearance(symbol: "square.grid.2x2",
-                              tint: AnyShapeStyle(Color.orange.opacity(0.8)),
+                              tint: NSColor.systemOrange.withAlphaComponent(0.8),
                               help: "MacroPad connected, but the NeoKey is not responding — check the Qwiic cable. Click to change source",
                               demoLabel: "connected · 0 keys")
         case .connected(.counting):
             return Appearance(symbol: "square.grid.2x2.fill",
-                              tint: AnyShapeStyle(.tertiary),
+                              tint: NSColor.secondaryLabelColor,
                               help: "MacroPad connected — click to change source",
                               demoLabel: "connected · no count")
         case .connected(.available(let count)):
             return Appearance(symbol: "square.grid.2x2.fill",
-                              tint: AnyShapeStyle(.tertiary),
+                              tint: NSColor.secondaryLabelColor,
                               help: "MacroPad connected — \(count) \(count == 1 ? "key" : "keys"). Click to change source",
                               demoLabel: "connected · \(count) keys")
         }

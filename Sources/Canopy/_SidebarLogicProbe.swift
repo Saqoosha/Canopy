@@ -7168,10 +7168,15 @@ enum SidebarLogicProbe {
             record("SleepGuard holds below the floor while on AC power",
                    hold(true, 1, .battery(onBattery: false, percent: floor - 1)))
             record("SleepGuard does not hold when the battery cannot be read", !hold(true, 1, .unreadable))
-            func reach(_ enabled: Bool, _ power: PowerSource) -> Bool {
-                SleepGuardPolicy.decide(enabled: enabled, workingSessions: 0, stayReachable: true, power: power).hold
+            func reach(_ enabled: Bool, _ power: PowerSource, open: Int = 1) -> Bool {
+                SleepGuardPolicy.decide(enabled: enabled, workingSessions: 0, stayReachable: true,
+                                        openSessions: open, power: power).hold
             }
             record("SleepGuard stay-reachable holds with no busy session", reach(true, .battery(onBattery: false, percent: 50)))
+            record("SleepGuard stay-reachable does not hold with no session open", !reach(true, .noBattery, open: 0))
+            record("SleepGuard holds for a busy session even with stay-reachable and no open count",
+                   SleepGuardPolicy.decide(enabled: true, workingSessions: 1, stayReachable: true,
+                                           openSessions: 0, power: .noBattery).hold)
             record("SleepGuard stay-reachable yields to the Settings switch", !reach(false, .noBattery))
             let custom = floor + 30
             func holdAt(_ percent: Int) -> Bool {

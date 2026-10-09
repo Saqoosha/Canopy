@@ -82,7 +82,8 @@ final class SleepGuard {
     }
 
     private func tick() {
-        let working = sessions().filter { $0.shim?.holdsSystemAwake == true }.count
+        let open = sessions()
+        let working = open.filter { $0.shim?.holdsSystemAwake == true }.count
         let settings = CanopySettings.shared
         // Read at most once per tick, so the decision and the battery alert see one charge.
         var powerRead: PowerSource?
@@ -94,6 +95,7 @@ final class SleepGuard {
         }
         let decision = SleepGuardPolicy.decide(enabled: settings.preventSleepWhileWorking, workingSessions: working,
                                                stayReachable: controlsClamshell && settings.stayReachableRemotely,
+                                               openSessions: open.count,
                                                batteryFloor: settings.sleepBatteryFloorPercent,
                                                power: power())
         // Before `release()`: a release notice must leave before lid-close sleep is re-enabled.
@@ -402,12 +404,15 @@ enum SleepGuardPolicy {
     }
 
     /// `power` is read only once a session is busy: it is an IOKit query, and the idle case is every tick.
-    /// `stayReachable`: hold with no busy session too, so the phone or another Mac can reach it at any time.
-    static func decide(enabled: Bool, workingSessions: Int, stayReachable: Bool = false,
+    /// `stayReachable`: hold with no busy session too, so the phone or another Mac can reach it,
+    /// but only while a session is open: with none there is nothing to reach.
+    static func decide(enabled: Bool, workingSessions: Int, stayReachable: Bool = false, openSessions: Int = 0,
                        batteryFloor: Int = defaultBatteryFloorPercent,
                        power: @autoclosure () -> PowerSource) -> SleepDecision {
         guard enabled else { return SleepDecision(hold: false, reason: "turned off in Settings") }
-        guard workingSessions > 0 || stayReachable else { return SleepDecision(hold: false, reason: "no session is busy") }
+        guard workingSessions > 0 || (stayReachable && openSessions > 0) else {
+            return SleepDecision(hold: false, reason: stayReachable ? "no session is open" : "no session is busy")
+        }
         switch power() {
         case .unreadable:
             return SleepDecision(hold: false, reason: "battery state is unreadable")
