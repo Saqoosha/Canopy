@@ -275,6 +275,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         refreshOpenRedirect()
         logger.notice("[mirror] attached; \(self.mirrors.count) mirror(s) on this shim")
+        checkForRemovedFolder()
     }
 
     /// Re-attaches a client whose page is still showing this session: binds its own
@@ -4367,6 +4368,27 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return (tokens: positiveInt(context["tokens"]), window: positiveInt(context["window"]))
     }
 
+    /// The spawn folder was removed elsewhere after the session left it (#295):
+    /// if the transcript is filed in an existing main checkout, move there.
+    /// Run at turn end and on a mirror attach, since an idle session sees no turn.
+    private func checkForRemovedFolder() {
+        let dir = workingDirectory
+        guard remoteHost == nil, checkoutAfterRemoval == nil,
+              !FileManager.default.fileExists(atPath: dir.path) else { return }
+        let logPath = sessionJSONLPath()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let effective = Self.effectiveVCSDirectory(jsonlPath: logPath, workingDirectory: dir)
+            guard GitWorktree.isMainCheckout(effective) else { return }
+            let checkout = URL(fileURLWithPath: GitWorktree.realPath(of: effective))
+            DispatchQueue.main.async {
+                guard let self, self.checkoutAfterRemoval == nil else { return }
+                logger.notice("[worktree] the session's folder was removed elsewhere; moving it to the checkout")
+                self.checkoutAfterRemoval = checkout
+                self.moveToCheckoutWhenQuiet()
+            }
+        }
+    }
+
     /// The move restarts this shim, so it waits for a moment with nothing to lose:
     /// a prompt typed right after the turn, or a queued phone reply, would die
     /// with it. Busy → the latch stays and the next `result` tries again.
@@ -6321,7 +6343,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let truncated = Self.truncatedTitle(text)
         guard truncated != sessionTitle else { return }
         hasGeneratedTitle = true
+        installedFallbackTitle = truncated
         updateWindowTitle(truncated)
+    }
+
+    /// The fallback `installFallbackTitle` last showed; never sent as a name.
+    private var installedFallbackTitle: String?
+
+    /// The session's name for a push (#293): nil while the row shows a fallback.
+    private var pushedSessionTitle: String? {
+        if let generatedSessionTitle { return generatedSessionTitle }
+        return sessionTitle.isEmpty || sessionTitle == installedFallbackTitle ? nil : sessionTitle
     }
 
     /// Record that a human named this session, so nothing automatic overwrites
@@ -6624,7 +6656,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                     choices: toolName == "AskUserQuestion"
                                         ? Self.askChoices(from: request["inputs"])
                                         : nil,
-                                    sessionTitle: generatedSessionTitle)
+                                    sessionTitle: pushedSessionTitle)
             }
             refreshAskingState()
             return
@@ -8339,23 +8371,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     jsonlPath: logPath, workingDirectory: dir
                 )
                 let vcsInfo = Self.detectVCSInfo(at: effective)
-                // Spawn folder removed elsewhere after the session left it (#295).
-                let checkout = !FileManager.default.fileExists(atPath: dir.path)
-                    && GitWorktree.isMainCheckout(effective)
-                    ? URL(fileURLWithPath: GitWorktree.realPath(of: effective)) : nil
                 DispatchQueue.main.async {
                     // Assign on the nil branch too — see the init-time refresh
                     // for why an early return here would strand a branch name
                     // the session has since left.
                     self?.statusBarData?.vcsType = vcsInfo?.type ?? .unknown
                     self?.statusBarData?.gitBranch = vcsInfo?.branch ?? ""
-                    if let checkout, let self, self.remoteHost == nil, self.checkoutAfterRemoval == nil {
-                        logger.notice("[worktree] the session's folder was removed elsewhere; moving it to the checkout")
-                        self.checkoutAfterRemoval = checkout
-                        self.moveToCheckoutWhenQuiet()
-                    }
                 }
             }
+            checkForRemovedFolder()
             // Refresh rate limits after each turn
             requestUsageUpdate()
 
@@ -8801,7 +8825,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 // not be. See `RosterNotifier.post`.
                                 bodyFull: finalText,
                                 eventId: eventIdForThisTurn,
-                                sessionTitle: generatedSessionTitle)
+                                sessionTitle: pushedSessionTitle)
         }
 
         if webView == nil, !uiClients.isEmpty {
