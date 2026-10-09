@@ -2179,6 +2179,62 @@ enum SidebarLogicProbe {
                            textMaxBytes: 10)
                 record("listen log: text cut at the caller's limit is flagged truncated",
                        log.events.last?.textTruncated == true && (log.events.last?.text?.utf8.count ?? 99) <= 10)
+                func jsonlLine(_ object: [String: Any]) -> String {
+                    String(decoding: (try? JSONSerialization.data(withJSONObject: object)) ?? Data(), as: UTF8.self)
+                }
+                func userLine(_ text: String, at: String = "t", extra: [String: Any] = [:]) -> String {
+                    jsonlLine(["type": "user", "timestamp": at,
+                               "message": ["role": "user", "content": [["type": "text", "text": text]]]].merging(extra) { $1 })
+                }
+                func assistantLine(_ text: String, sidechain: Bool = false) -> String {
+                    jsonlLine(["type": "assistant", "isSidechain": sidechain,
+                               "message": ["id": "m", "content": [["type": "text", "text": text]]]])
+                }
+                let toolResultLine = jsonlLine(["type": "user", "message": ["content": [["type": "tool_result", "content": "ok"]]]])
+                let transcript = [
+                    assistantLine("tail of a turn whose prompt is outside the window"),
+                    userLine("typed in the pane", at: "t1"),
+                    assistantLine("working"),
+                    toolResultLine,
+                    assistantLine("subagent says hi", sidechain: true),
+                    jsonlLine(["type": "user", "parent_tool_use_id": "toolu_9",
+                               "message": ["content": [["type": "text", "text": "a subagent's own prompt"]]]]),
+                    assistantLine("Written for: Engineer\ndone"),
+                    userLine(KeepAliveGate.promptText, at: "t2"),
+                    assistantLine("OK"),
+                    userLine("<task-notification>bg finished</task-notification>", at: "t3"),
+                    assistantLine("the background task passed"),
+                    userLine("from the phone", at: "t4"),
+                ].joined(separator: "\n")
+                let history = ControlHistory.turns(inJSONL: transcript)
+                record("history: turns come from the transcript, a pane prompt included, and the reply runs from its addressed block",
+                       history.first == ControlHistoryTurn(prompt: "typed in the pane", reply: "Written for: Engineer\ndone",
+                                                           addressedTo: "Engineer", at: "t1"))
+                record("history: a keep-alive and its reply are left out, and a subagent's text is not the turn's",
+                       history.count == 3 && !history.contains { $0.reply == "OK" || $0.reply.contains("subagent") })
+                record("history: a turn no person started has no prompt",
+                       history.dropFirst().first == ControlHistoryTurn(prompt: nil, reply: "the background task passed", at: "t3"))
+                record("history: a prompt still waiting for its reply is the last turn, with an empty reply",
+                       history.last == ControlHistoryTurn(prompt: "from the phone", reply: "", at: "t4"))
+                record("history: a user record classifies as prompt, keep-alive, other or continuation",
+                       ClaudeSessionHistory.classifyUserRecord(["type": "user", "message": ["content": "hi"]]) == .prompt("hi")
+                           && ClaudeSessionHistory.classifyUserRecord(["type": "user", "message": ["content": KeepAliveGate.promptText]]) == .keepAlive
+                           && ClaudeSessionHistory.classifyUserRecord(["type": "user", "message": ["content": "<command-name>/recap</command-name>"]]) == .other
+                           && ClaudeSessionHistory.classifyUserRecord(["type": "user", "isMeta": true, "message": ["content": "x"]]) == .continuation
+                           && ClaudeSessionHistory.classifyUserRecord(["type": "assistant"]) == nil)
+                record("listen prompt: a live echo yields the prompt; a subagent's or a synthetic one does not",
+                       ShimProcess.livePrompt(["type": "user", "parent_tool_use_id": NSNull(),
+                                               "message": ["content": [["type": "text", "text": "go"]]]]) == "go"
+                           && ShimProcess.livePrompt(["type": "user", "parent_tool_use_id": "toolu_1",
+                                                      "message": ["content": [["type": "text", "text": "go"]]]]) == nil
+                           && ShimProcess.livePrompt(["type": "user", "isSynthetic": true,
+                                                      "message": ["content": [["type": "text", "text": "go"]]]]) == nil)
+                var promptEvent = listenEvent(11, .turnDone)
+                promptEvent.prompt = "go"
+                record("listen wire: turn_done carries the prompt that started it", promptEvent.wire["prompt"] as? String == "go")
+                log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t",
+                           prompt: String(repeating: "p", count: ControlEvent.textMaxBytes + 1))
+                record("listen log: a cut prompt is flagged truncated", log.events.last?.wire["promptTruncated"] as? Bool == true)
                 record("listen params: a JSON null is the same as leaving the param out",
                        listenParse(["since": NSNull(), "addressedTo": NSNull(), "timeout": NSNull()])
                            == listenParse([:]))

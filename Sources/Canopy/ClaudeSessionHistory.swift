@@ -806,46 +806,58 @@ enum ClaudeSessionHistory {
         return [first] + tailPrompts
     }
 
-    private static func parseUserPrompts(_ text: String) -> [String] {
+    /// What a `user` record (a JSONL line or a live frame) is to a reader of the conversation.
+    enum UserRecordKind: Equatable {
+        /// A prompt a person sent: typed in a pane, from the phone, or through the control API.
+        case prompt(String)
+        /// Canopy's own prompt-cache refresh.
+        case keepAlive
+        /// Text the CLI or a tool wrote (a slash-command wrapper, a task notification, …).
+        case other
+        /// Not a new turn: tool results, meta records, empty text.
+        case continuation
+    }
+
+    /// Classifies a `user` record; nil for any other record type.
+    nonisolated static func classifyUserRecord(_ json: [String: Any]) -> UserRecordKind? {
+        guard json["type"] as? String == "user" else { return nil }
+        guard json["isMeta"] as? Bool != true, let message = json["message"] as? [String: Any] else { return .continuation }
+        if json["isCompactSummary"] as? Bool == true { return .other }
+        var extracted: String?
+        if let content = message["content"] as? String {
+            extracted = content
+        } else if let contentArr = message["content"] as? [[String: Any]] {
+            // Text blocks only — tool_result blocks have no top-level "text".
+            let joined = contentArr
+                .filter { $0["type"] as? String == "text" }
+                .compactMap { $0["text"] as? String }
+                .joined(separator: "\n")
+            if !joined.isEmpty { extracted = joined }
+        }
+        let trimmed = (extracted ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .continuation }
+        // Canopy's own prompt-cache keep-alive. It is a REAL user record in
+        // the JSONL, so a session kept warm overnight is dominated by refreshes.
+        // Derived from the constant so the two cannot drift.
+        if trimmed.hasPrefix(KeepAliveGate.promptPrefix) { return .keepAlive }
         // `<command-` covers both `<command-message>` (line 1 of a
         // slash-command record) and `<command-name>`.
-        let skipPrefixes = [
+        let otherPrefixes = [
             "Caveat:", "<command-", "<local-command",
             "<task-notification", "<system-reminder",
             "[Request interrupted",
             "This session is being continued",
-            // Canopy's own prompt-cache keep-alive. It is a REAL user record
-            // in the JSONL, and this loader reads a TAIL window — so a
-            // session kept warm overnight is dominated by refreshes, and the
-            // title generator would be fed those instead of the user's work.
-            // Derived from the constant so the two cannot drift.
-            KeepAliveGate.promptPrefix,
         ]
+        if otherPrefixes.contains(where: { trimmed.hasPrefix($0) }) { return .other }
+        return .prompt(trimmed)
+    }
+
+    private static func parseUserPrompts(_ text: String) -> [String] {
         var prompts: [String] = []
         for line in text.split(separator: "\n") {
             guard let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  json["type"] as? String == "user",
-                  json["isMeta"] as? Bool != true,
-                  json["isCompactSummary"] as? Bool != true,
-                  let message = json["message"] as? [String: Any]
-            else { continue }
-
-            var extracted: String?
-            if let content = message["content"] as? String {
-                extracted = content
-            } else if let contentArr = message["content"] as? [[String: Any]] {
-                // Text blocks only — tool_result blocks have no top-level "text".
-                let joined = contentArr
-                    .filter { $0["type"] as? String == "text" }
-                    .compactMap { $0["text"] as? String }
-                    .joined(separator: "\n")
-                if !joined.isEmpty { extracted = joined }
-            }
-            guard let raw = extracted else { continue }
-            var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty,
-                  !skipPrefixes.contains(where: { trimmed.hasPrefix($0) })
+                  case .prompt(var trimmed) = classifyUserRecord(json)
             else { continue }
             // Pasted-image placeholders: strip the tokens but keep the user's
             // words ("[Image #1] fix this layout" → "fix this layout"); a
