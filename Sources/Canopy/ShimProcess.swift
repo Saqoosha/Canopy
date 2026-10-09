@@ -6723,6 +6723,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// raised-hand, hourglass, or spinning subagent row — once the process
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
+        outputRateStart = nil
+        outputRateSawThinking = false
         turnTextBlocks = []
         turnPrompt = nil
         outstandingDialogRequests.removeAll()
@@ -8334,8 +8336,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
             // Output rate: `message_delta` carries the request's cumulative
             // `output_tokens`, so the rate is known once per request, at its end.
-            // The recap's fork is not the user's conversation.
-            if eventType == "content_block_start", !recapRequestInFlight,
+            if eventType == "content_block_start",
                let blockType = (event["content_block"] as? [String: Any])?["type"] as? String
             {
                 if blockType == "thinking" || blockType == "redacted_thinking" {
