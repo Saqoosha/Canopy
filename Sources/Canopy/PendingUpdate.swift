@@ -64,13 +64,19 @@ struct PendingUpdateRow: View {
 private struct PendingUpdateDetail: View {
     let state: UpgradeState
     @State private var error: String?
+    /// Rows already restarted from this popover, so a second click does not restart them again.
+    @State private var restarted: Set<String> = []
 
     /// Restarts every stale session's shim on the newest extension, keeping their conversations.
     private func restartAll(_ rows: [StaleExtensionSession]) {
-        guard let store = SessionStore.shared else { return }
+        error = nil
+        guard let store = SessionStore.shared else {
+            error = "Could not restart: no sessions are open in this window."
+            return
+        }
         var targets: [(row: StaleExtensionSession, session: OpenSession)] = []
         var missing: [String] = []
-        for row in rows {
+        for row in rows where !restarted.contains(row.key) {
             if let session = store.openSessions.first(where: { $0.daemonKey == row.key }) {
                 targets.append((row, session))
             } else {
@@ -78,21 +84,31 @@ private struct PendingUpdateDetail: View {
             }
         }
         // A row's blocker is up to a minute old; each pane's own flags are current.
-        let busy: [UpgradeHold] = targets.compactMap { target in
+        func busyReason(_ target: (row: StaleExtensionSession, session: OpenSession)) -> String? {
             let live = target.session.isThinking || target.session.isAsking || target.session.isWaiting
-            guard let reason = target.row.blocker ?? (live ? "working" : nil) else { return nil }
-            return UpgradeHold(key: target.row.key, title: target.row.title, reason: reason)
+            return target.row.blocker ?? (live ? "working" : nil)
         }
+        let busy = targets.compactMap { target in busyReason(target).map { "\(target.row.title): \($0)" } }
         if !busy.isEmpty {
+            let idleCount = targets.count - busy.count
             let alert = NSAlert()
             alert.messageText = "Restart \(targets.count) session\(targets.count == 1 ? "" : "s")?"
-            alert.informativeText = PendingUpdate.confirmation(busy)
-            alert.addButton(withTitle: "Restart")
+            alert.informativeText = "Busy:\n" + busy.joined(separator: "\n")
+                + "\n\nRestarting stops their current work. Conversations are kept."
+            alert.addButton(withTitle: "Restart All")
+            if idleCount > 0 { alert.addButton(withTitle: "Restart Idle Only") }
             alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: break
+            case .alertSecondButtonReturn where idleCount > 0: targets.removeAll { busyReason($0) != nil }
+            default: return
+            }
         }
-        for target in targets { store.restartSession(target.session.id) }
-        error = missing.isEmpty ? nil : "Not open in this window: \(missing.joined(separator: ", "))."
+        for target in targets {
+            restarted.insert(target.row.key)
+            store.restartSession(target.session.id)
+        }
+        if !missing.isEmpty { error = "Not open in this window: \(missing.joined(separator: ", "))." }
     }
 
     var body: some View {
@@ -122,6 +138,7 @@ private struct PendingUpdateDetail: View {
                     }
                 }
                 Button(ext.stale.count == 1 ? "Restart" : "Restart All") { restartAll(ext.stale) }
+                    .disabled(ext.stale.allSatisfy { restarted.contains($0.key) })
             }
             if let error { Text(error).font(.system(size: 11)).foregroundStyle(.red) }
         }
