@@ -141,7 +141,9 @@ final class DaemonDelegate {
 
     private func publishUpgradeState(pending: String?, holds: [UpgradeHold], underLaunchd: Bool) {
         let state = UpgradeState(runningBuild: DaemonUpgrade.launchedBuild ?? "?", pendingBuild: pending, heldBy: holds,
-                                 notUnderLaunchd: !underLaunchd, extensionState: extensionState())
+                                 notUnderLaunchd: !underLaunchd, extensionState: extensionState(),
+                                 runningVersion: DaemonUpgrade.launchedVersion,
+                                 pendingVersion: pending == nil ? nil : DaemonUpgrade.onDiskVersion())
         if DaemonUpgradeCenter.shared.state != state { DaemonUpgradeCenter.shared.state = state }
     }
 

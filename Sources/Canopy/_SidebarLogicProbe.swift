@@ -13710,6 +13710,26 @@ enum SidebarLogicProbe {
                        == "Update ready — the session service will not restart on its own")
             record("pending update: restarting outranks the count",
                    PendingUpdate.headline(state("150", [hold]), restarting: true) == "Update ready — restarting…")
+            func versioned(_ running: String?, _ pending: String?) -> UpgradeState {
+                UpgradeState(runningBuild: "149", pendingBuild: "150", heldBy: [], notUnderLaunchd: false,
+                             extensionState: nil, runningVersion: running, pendingVersion: pending)
+            }
+            record("pending update: the popover names versions, not builds",
+                   PendingUpdate.buildLine(versioned("3.1.0", "3.2.0"), pending: "150", ownBuild: nil, ownVersion: nil)
+                       == "Canopy 3.2.0 is installed; the session service still runs 3.1.0.")
+            record("pending update: builds stand in when the versions match or one is unknown",
+                   PendingUpdate.buildLine(versioned("3.2.0", "3.2.0"), pending: "150", ownBuild: nil, ownVersion: nil)
+                       == "Canopy build 150 is installed; the session service still runs build 149."
+                       && PendingUpdate.buildLine(state("150", []), pending: "150", ownBuild: "150", ownVersion: "3.2.0")
+                       == "Canopy build 150 is installed; the session service still runs build 149.")
+            record("pending update: an older daemon's pending build borrows this GUI's version only when it is this build",
+                   PendingUpdate.buildLine(versioned("3.1.0", nil), pending: "150", ownBuild: "150", ownVersion: "3.2.0")
+                       == "Canopy 3.2.0 is installed; the session service still runs 3.1.0."
+                       && PendingUpdate.buildLine(versioned("3.1.0", nil), pending: "150", ownBuild: "151", ownVersion: "3.2.0")
+                       == "Canopy build 150 is installed; the session service still runs build 149.")
+            record("pending update: versions survive the wire, and an older daemon's frame still parses",
+                   UpgradeState(wire: versioned("3.1.0", "3.2.0").wire) == versioned("3.1.0", "3.2.0")
+                       && UpgradeState(wire: ["runningBuild": "149", "pendingBuild": "150", "heldBy": []])?.runningVersion == nil)
             let ext = ExtensionUpgradeState(installed: "2.1.290",
                                             stale: [StaleExtensionSession(key: "a", title: "A", running: "2.1.286", blocker: nil)])
             record("pending update: a stale extension alone gets its own line",

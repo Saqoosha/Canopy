@@ -7,13 +7,23 @@ import Foundation
 enum DaemonUpgrade {
     /// The build the running process was launched from, read once.
     static let launchedBuild: String? = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+    /// The marketing version (`3.12.0`) beside `launchedBuild`, for display only.
+    static let launchedVersion: String? = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
 
     /// The build now on disk, read fresh; `Bundle.main` caches the launch-time Info.plist.
     static func onDiskBuild(bundleURL: URL = Bundle.main.bundleURL) -> String? {
+        onDiskInfo(bundleURL: bundleURL)?["CFBundleVersion"] as? String
+    }
+
+    /// The marketing version now on disk, for display only.
+    static func onDiskVersion(bundleURL: URL = Bundle.main.bundleURL) -> String? {
+        onDiskInfo(bundleURL: bundleURL)?["CFBundleShortVersionString"] as? String
+    }
+
+    private static func onDiskInfo(bundleURL: URL) -> [String: Any]? {
         let plist = bundleURL.appendingPathComponent("Contents/Info.plist")
-        guard let data = try? Data(contentsOf: plist),
-              let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
-        return dict["CFBundleVersion"] as? String
+        guard let data = try? Data(contentsOf: plist) else { return nil }
+        return try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
     }
 
     /// Restart only for a readable, different build that was already on disk at the previous
@@ -83,6 +93,9 @@ struct ExtensionUpgradeState: Equatable {
 struct UpgradeState: Equatable {
     var runningBuild: String
     var pendingBuild: String?
+    /// Marketing versions for display; absent from a daemon built before these fields existed.
+    var runningVersion: String?
+    var pendingVersion: String?
     var heldBy: [UpgradeHold]
     var notUnderLaunchd: Bool
     var extensionState: ExtensionUpgradeState?
@@ -96,6 +109,8 @@ struct UpgradeState: Equatable {
             "notUnderLaunchd": notUnderLaunchd,
         ]
         if let pendingBuild { dict["pendingBuild"] = pendingBuild }
+        if let runningVersion { dict["runningVersion"] = runningVersion }
+        if let pendingVersion { dict["pendingVersion"] = pendingVersion }
         if let extensionState {
             let stale = extensionState.stale.map { row -> [String: Any] in
                 var r: [String: Any] = ["key": row.key, "title": row.title, "running": row.running]
@@ -108,9 +123,11 @@ struct UpgradeState: Equatable {
     }
 
     init(runningBuild: String, pendingBuild: String?, heldBy: [UpgradeHold], notUnderLaunchd: Bool,
-         extensionState: ExtensionUpgradeState?) {
+         extensionState: ExtensionUpgradeState?, runningVersion: String? = nil, pendingVersion: String? = nil) {
         self.runningBuild = runningBuild
         self.pendingBuild = pendingBuild
+        self.runningVersion = runningVersion
+        self.pendingVersion = pendingVersion
         self.heldBy = heldBy
         self.notUnderLaunchd = notUnderLaunchd
         self.extensionState = extensionState
@@ -138,6 +155,7 @@ struct UpgradeState: Equatable {
             ext = ExtensionUpgradeState(installed: installed, stale: stale)
         }
         self.init(runningBuild: running, pendingBuild: wire["pendingBuild"] as? String, heldBy: parsedHolds,
-                  notUnderLaunchd: wire["notUnderLaunchd"] as? Bool ?? false, extensionState: ext)
+                  notUnderLaunchd: wire["notUnderLaunchd"] as? Bool ?? false, extensionState: ext,
+                  runningVersion: wire["runningVersion"] as? String, pendingVersion: wire["pendingVersion"] as? String)
     }
 }
