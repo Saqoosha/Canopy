@@ -126,16 +126,33 @@ final class SleepGuard {
         return true
     }
 
+    private var systemAssertion: IOPMAssertionID?
+
     /// Re-applied every tick while holding: another daemon (a Debug build) starting or
-    /// releasing resets the shared flag.
+    /// releasing resets the shared flag, and so does powerd on a power-source change. The
+    /// PreventSystemSleep assertion covers that change onto AC: the Mac drops to dark wake
+    /// rather than sleep (measured). It has no effect on battery, and the opposite change
+    /// (unplugging with the lid closed) still sleeps; only a root `pmset disablesleep` stops that.
     private func holdClamshell() {
         guard controlsClamshell else { return }
+        if systemAssertion == nil {
+            var id: IOPMAssertionID = 0
+            if IOPMAssertionCreateWithDescription(kIOPMAssertionTypePreventSystemSleep as CFString,
+                                                  Self.assertionName as CFString, assertionReason as CFString?,
+                                                  nil, nil, 0, nil, &id) == kIOReturnSuccess {
+                systemAssertion = id
+            }
+        }
         ClamshellSleep.setDisabled(true)
         clamshellMayBeDisabled = true
         loggedClamshellDeferral = false
     }
 
     private func release() {
+        if let id = systemAssertion {
+            IOPMAssertionRelease(id)
+            systemAssertion = nil
+        }
         restoreClamshellSleepIfHarmless()
         guard let id = assertion else { return }
         IOPMAssertionRelease(id)
