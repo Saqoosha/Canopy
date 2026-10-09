@@ -121,7 +121,7 @@ the user overrides them.
     held.
   - "Update ready — restarting…" from **Restart now** until the GUI reconnects
     to the new daemon.
-  - "Extension 2.1.290 — 3 sessions on older versions" when only (3) applies.
+  - "3 sessions on an older extension" when only (3) applies.
 - Clicking the line opens a popover listing each hold (session title and
   reason) and a **Restart now** button.
 - **Restart now** asks for confirmation first, naming the sessions whose work

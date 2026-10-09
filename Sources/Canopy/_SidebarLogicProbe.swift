@@ -13640,6 +13640,9 @@ enum SidebarLogicProbe {
                                             stale: [StaleExtensionSession(key: "a", title: "A", running: "2.1.286", blocker: nil)])
             record("pending update: a stale extension alone gets its own line",
                    PendingUpdate.headline(state(nil, [], ext), restarting: false) == "1 session on an older extension")
+            let ext2 = ExtensionUpgradeState(installed: "2.1.290", stale: ext.stale + ext.stale)
+            record("pending update: the stale-extension line counts in the plural",
+                   PendingUpdate.headline(state(nil, [], ext2), restarting: false) == "2 sessions on an older extension")
             record("pending update: confirmation names what is interrupted",
                    PendingUpdate.confirmation([hold])
                        == "1 session is busy: Fix CI. Restarting stops its current work. Conversations are kept.")
