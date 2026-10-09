@@ -1916,6 +1916,198 @@ enum SidebarLogicProbe {
                 record("control open: an unknown permission mode is refused, not defaulted",
                        ControlProtocol.parseOpenParams(["cwd": controlDir.path, "permissionMode": "yolo"], allowBypass: false)
                            == .failure(ControlProtocol.ControlError("unknown permission mode")))
+                // open_session with resumeSessionId.
+                let resumeId = UUID().uuidString.lowercased()
+                func resumeCode(_ params: [String: Any], allowBypass: Bool = false) -> String? {
+                    if case .failure(let error)? = ControlProtocol.parseResumeParams(params, allowBypass: allowBypass) { return error.code }
+                    return nil
+                }
+                record("control resume: no resumeSessionId means a plain open",
+                       ControlProtocol.parseResumeParams(["cwd": controlDir.path], allowBypass: false) == nil)
+                record("control resume: all fields parse, cwd optional",
+                       (try? ControlProtocol.parseResumeParams(["resumeSessionId": resumeId, "cwd": controlDir.path, "model": "opus",
+                                                                "effort": "high", "permissionMode": "plan", "initialPrompt": "go on"],
+                                                               allowBypass: false)?.get())
+                           == ControlProtocol.ResumeParams(sessionId: resumeId, cwd: controlDir.path, model: "opus", effort: "high",
+                                                           permissionMode: .plan, initialPrompt: "go on")
+                           && (try? ControlProtocol.parseResumeParams(["resumeSessionId": resumeId], allowBypass: false)?.get())?.cwd == nil)
+                record("control resume: a non-UUID id is invalid_session_id, never joined into a path",
+                       resumeCode(["resumeSessionId": "../../etc/passwd"]) == "invalid_session_id"
+                           && resumeCode(["resumeSessionId": 42]) == "invalid_session_id")
+                record("control resume: an uppercase id is lowercased, so it finds the open session's spelling",
+                       (try? ControlProtocol.parseResumeParams(["resumeSessionId": resumeId.uppercased()], allowBypass: false)?.get())?.sessionId == resumeId)
+                record("control resume: a null resumeSessionId is a plain open",
+                       ControlProtocol.parseResumeParams(["resumeSessionId": NSNull(), "cwd": controlDir.path], allowBypass: false) == nil)
+                record("control resume: a whitespace-only initialPrompt is no prompt",
+                       (try? ControlProtocol.parseResumeParams(["resumeSessionId": resumeId, "initialPrompt": "  \n "], allowBypass: false)?.get())?.initialPrompt == nil)
+                record("control resume: worktreeBranch is worktree_not_supported",
+                       resumeCode(["resumeSessionId": resumeId, "worktreeBranch": "fix-x"]) == "worktree_not_supported")
+                record("control resume: a relative cwd is invalid_cwd, a missing one folder_missing",
+                       resumeCode(["resumeSessionId": resumeId, "cwd": "rel/path"]) == "invalid_cwd"
+                           && resumeCode(["resumeSessionId": resumeId, "cwd": controlDir.appendingPathComponent("nope").path]) == "folder_missing")
+                record("control resume: an explicit bypass is refused while the opt-in is off, allowed when on",
+                       resumeCode(["resumeSessionId": resumeId, "permissionMode": "bypassPermissions"]) == "bypass_disabled"
+                           && resumeCode(["resumeSessionId": resumeId, "permissionMode": "bypassPermissions"], allowBypass: true) == nil
+                           && resumeCode(["resumeSessionId": resumeId, "permissionMode": "yolo"]) == "invalid_permission_mode")
+                let inherited = ClaudeSessionHistory.LaunchSettings(model: "claude-opus-5-5", permissionMode: .auto)
+                let bareResume = try! ControlProtocol.parseResumeParams(["resumeSessionId": resumeId], allowBypass: true)!.get()
+                let overriding = try! ControlProtocol.parseResumeParams(["resumeSessionId": resumeId, "model": "sonnet",
+                                                                         "permissionMode": "plan"], allowBypass: false)!.get()
+                record("control resume: the transcript's model and mode are the default",
+                       ControlProtocol.resumedLaunch(inherited: inherited, requested: bareResume, allowBypass: false) == inherited)
+                record("control resume: requested model and mode override the inherited ones",
+                       ControlProtocol.resumedLaunch(inherited: inherited, requested: overriding, allowBypass: false)
+                           == ClaudeSessionHistory.LaunchSettings(model: "sonnet", permissionMode: .plan))
+                let inheritedBypass = ClaudeSessionHistory.LaunchSettings(model: nil, permissionMode: .bypassPermissions)
+                record("control resume: an inherited bypass is dropped when the opt-in is off, kept when on",
+                       ControlProtocol.resumedLaunch(inherited: inheritedBypass, requested: bareResume, allowBypass: false).permissionMode == nil
+                           && ControlProtocol.resumedLaunch(inherited: inheritedBypass, requested: bareResume, allowBypass: true).permissionMode == .bypassPermissions)
+                let tail = """
+                {"type":"user","permissionMode":"plan","message":{"role":"user","content":"a"}}
+                {"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[]}}
+                {"type":"user","permissionMode":"acceptEdits","message":{"role":"user","content":"b"}}
+                {"type":"assistant","message":{"model":"claude-opus-5-5","content":[]}}
+                {"type":"assistant","message":{"model":"<synthetic>","content":[]}}
+                {"type":"system","subtype":"status"}
+                """
+                record("control resume: the last real model and the last user permission mode are read",
+                       ClaudeSessionHistory.lastLaunchSettings(in: Data(tail.utf8), startsAtLineBoundary: true)
+                           == ClaudeSessionHistory.LaunchSettings(model: "claude-opus-5-5", permissionMode: .acceptEdits))
+                let fragment = "ermissionMode\":\"bypassPermissions\"}\n{\"type\":\"assistant\",\"message\":{\"model\":\"m1\"}}"
+                let unknownMode = "{\"type\":\"user\",\"permissionMode\":\"bypassPermissions\"}\n{\"type\":\"user\",\"permissionMode\":\"future-mode\"}\n"
+                record("control resume: the last recorded mode decides even when this build does not know it",
+                       ClaudeSessionHistory.lastLaunchSettings(in: Data(unknownMode.utf8), startsAtLineBoundary: true).permissionMode == nil)
+                record("control resume: a mid-file window drops its first line; an unterminated last line is read",
+                       ClaudeSessionHistory.lastLaunchSettings(in: Data(("{\"type\":\"user\",\"permissionMode\":\"plan\"}\n" + fragment).utf8),
+                                                               startsAtLineBoundary: false)
+                           == ClaudeSessionHistory.LaunchSettings(model: "m1", permissionMode: nil)
+                           && ClaudeSessionHistory.lastLaunchSettings(in: Data("{\"type\":\"user\",\"permissionMode\":\"plan\"}\n".utf8),
+                                                                      startsAtLineBoundary: true).permissionMode == .plan)
+                // resolveClosedSession, with Recents empty: the transcript scan path.
+                let resolver = SessionStore()
+                let resumeFolder = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".claude/projects/-canopy-probe-resume-\(resumeId)")
+                try? FileManager.default.createDirectory(at: resumeFolder, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: resumeFolder) }
+                func plant(_ id: String, cwd: String) {
+                    try? Data("{\"type\":\"user\",\"cwd\":\"\(cwd)\",\"sessionId\":\"\(id)\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n".utf8)
+                        .write(to: resumeFolder.appendingPathComponent("\(id).jsonl"))
+                }
+                func resolved(_ id: String, localCwd: String? = nil) -> Result<String, SessionStore.ResumeFailure> {
+                    resolver.resolveClosedSession(sessionId: id, localCwd: localCwd).map(\.directory.path)
+                }
+                let liveId = UUID().uuidString.lowercased()
+                func listedResolve(_ entry: SessionEntry) -> Result<String, SessionStore.ResumeFailure> {
+                    SessionStore.resolveClosedSession(sessionId: entry.id, localCwd: nil, recents: [entry], knownCheckouts: [])
+                        .map(\.directory.path)
+                }
+                let listedId = UUID().uuidString.lowercased()
+                record("control resume: a Recents row that can open resolves to its folder, without a transcript scan",
+                       listedResolve(SessionEntry(id: listedId, title: "t", timestamp: Date(), projectDirectory: controlDir))
+                           == .success(controlDir.path))
+                record("control resume: a Recents row that cannot open stays refused",
+                       listedResolve(SessionEntry(id: listedId, title: "t", timestamp: Date(), projectDirectory: controlDir, canOpen: false))
+                           == .failure(.folderMissing))
+                let goneId = UUID().uuidString.lowercased()
+                plant(liveId, cwd: controlDir.path)
+                plant(goneId, cwd: controlDir.appendingPathComponent("removed-\(goneId)").path)
+                record("control resume: a malformed id is invalid_session_id",
+                       resolved("not-a-uuid") == .failure(.invalidSessionId))
+                record("control resume: an id with no transcript here is no_transcript",
+                       resolved(UUID().uuidString.lowercased()) == .failure(.noTranscript))
+                record("control resume: a transcript whose folder exists resolves to its cwd",
+                       resolved(liveId) == .success(controlDir.path))
+                record("control resume: a transcript whose folder is gone is folder_missing",
+                       resolved(goneId) == .failure(.folderMissing))
+                record("control resume: a localCwd the transcript is not filed under is only a hint",
+                       resolved(liveId, localCwd: FileManager.default.temporaryDirectory.path) == .success(controlDir.path)
+                           && resolved(goneId, localCwd: FileManager.default.temporaryDirectory.path) == .failure(.folderMissing))
+                // Filed under localCwd's own project folder: localCwd wins over the header's (gone) cwd,
+                // which is how a removed worktree's transcript moved to its checkout reopens there.
+                let filedFolder = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".claude/projects")
+                    .appendingPathComponent(ClaudeSessionHistory.encodedFolderCandidates(for: controlDir.path)[0])
+                let filedFolderExisted = FileManager.default.fileExists(atPath: filedFolder.path)
+                try? FileManager.default.createDirectory(at: filedFolder, withIntermediateDirectories: true)
+                let filedTranscript = filedFolder.appendingPathComponent("\(goneId).jsonl")
+                try? FileManager.default.copyItem(at: resumeFolder.appendingPathComponent("\(goneId).jsonl"), to: filedTranscript)
+                record("control resume: a localCwd the transcript is filed under is used",
+                       resolved(goneId, localCwd: controlDir.path) == .success(controlDir.path))
+                try? FileManager.default.removeItem(at: filedTranscript)
+                if !filedFolderExisted { try? FileManager.default.removeItem(at: filedFolder) }
+                // list_sessions scope=recent filters.
+                typealias ListFilter = ControlProtocol.SessionListFilter
+                record("control list: no filter reads only the held recents",
+                       (try? ListFilter.parse([:]).get())?.needsEverySession == false)
+                record("control list: query, project, since or until each read every session",
+                       ["query": "x", "project": "p", "since": "2026-10-01", "until": 1_791_000_000].allSatisfy {
+                           (try? ListFilter.parse([$0.key: $0.value]).get())?.needsEverySession == true })
+                record("control list: an unreadable date is refused, not ignored",
+                       ListFilter.parse(["since": "last tuesday"]) == .failure(ControlProtocol.ControlError("since must be an ISO 8601 date or Unix seconds")))
+                let dayStart = ListFilter.date("2026-10-01", endOfDay: false)!
+                let dayEnd = ListFilter.date("2026-10-01", endOfDay: true)!
+                record("control list: a bare date is that whole local day, start for since and end for until",
+                       Calendar.current.component(.hour, from: dayStart) == 0
+                           && Calendar.current.isDate(dayStart, inSameDayAs: dayEnd)
+                           && dayEnd.timeIntervalSince(dayStart) > 86_399 && dayEnd.timeIntervalSince(dayStart) < 86_400.01)
+                record("control list: a JSON boolean is not a date",
+                       ListFilter.date(true as NSNumber, endOfDay: false) == nil
+                           && ListFilter.parse(["since": true]) == .failure(ControlProtocol.ControlError("since must be an ISO 8601 date or Unix seconds")))
+                record("control list: ISO 8601 and Unix seconds parse",
+                       ListFilter.date("2026-10-09T13:32:57.356Z", endOfDay: false)?.timeIntervalSince1970 == 1_791_552_777.356
+                           && ListFilter.date(1_791_552_777.0, endOfDay: false)?.timeIntervalSince1970 == 1_791_552_777)
+                let filter = try! ListFilter.parse(["query": "VDGS  fix", "project": "canopy",
+                                                    "since": "2026-10-01", "until": "2026-10-05"]).get()
+                let inside = Calendar.current.date(byAdding: .hour, value: 12, to: dayStart)!
+                func listMatch(title: String = "Fix VDGS layout", project: String = "Canopy · main", cwd: String = "/r/Canopy",
+                               prompt: String? = nil, started: Date? = nil, last: Date) -> Bool {
+                    filter.matches(title: title, project: project, cwd: cwd, firstPrompt: prompt, startedAt: started, lastActiveAt: last)
+                }
+                record("control list: every query term must appear, case-insensitively, in any field",
+                       listMatch(last: inside)
+                           && listMatch(title: "untitled", prompt: "please FIX the vdgs panel", last: inside)
+                           && !listMatch(title: "VDGS only", last: inside))
+                record("control list: project matches the project name or the cwd",
+                       listMatch(project: "Canopy · main", cwd: "/elsewhere", last: inside)
+                           && listMatch(project: "other", cwd: "/x/canopy-wt", last: inside)
+                           && !listMatch(project: "ghostline", cwd: "/r/ghostline", last: inside))
+                record("control list: query words may sit only in the project or only in the cwd",
+                       listMatch(title: "fix", project: "VDGS", cwd: "/r/canopy", last: inside)
+                           && listMatch(title: "fix", project: "canopy", cwd: "/r/vdgs-panel", last: inside))
+                record("control list: the period keeps a session active at any point inside it",
+                       listMatch(started: inside, last: ListFilter.date("2026-10-09", endOfDay: false)!)
+                           && listMatch(started: dayStart.addingTimeInterval(-86_400 * 3), last: inside)
+                           && !listMatch(last: dayStart.addingTimeInterval(-1))
+                           && !listMatch(started: ListFilter.date("2026-10-06", endOfDay: false), last: ListFilter.date("2026-10-07", endOfDay: false)!))
+                var header = ClaudeSessionHistory.HeaderScanner()
+                for line in [
+                    #"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-09T08:45:34.484Z"}"#,
+                    #"{"type":"user","isMeta":true,"timestamp":"2026-10-09T08:45:35.000Z","message":{"role":"user","content":"Caveat: hook output"}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:45:36.000Z","message":{"role":"user","content":"<command-name>/model</command-name>"}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:45:37.000Z","message":{"role":"user","content":[{"type":"tool_result","text":"ls output","content":"ls output"}]}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:45:38.000Z","message":{"role":"user","content":[{"type":"text","text":"  Fix the VDGS panel  "}]}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:46:00.000Z","message":{"role":"user","content":"second prompt"}}"#,
+                ] { header.consume(Data(line.utf8)) }
+                var ideHeader = ClaudeSessionHistory.HeaderScanner()
+                ideHeader.consume(Data(#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<ide_opened_file>a.swift</ide_opened_file>"},{"type":"text","text":"fix the layout bug"}]}}"#.utf8))
+                record("control list: an IDE block before the typed text does not hide the first prompt",
+                       ideHeader.result.firstPrompt == "fix the layout bug")
+                var reminderHeader = ClaudeSessionHistory.HeaderScanner()
+                reminderHeader.consume(Data(#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>ctx</system-reminder>"},{"type":"text","text":"Caveat: noise"},{"type":"text","text":"fix the layout bug"}]}}"#.utf8))
+                record("control list: CLI markup and caveat blocks are dropped per block, not with the whole record",
+                       reminderHeader.result.firstPrompt == "fix the layout bug")
+                record("control list: startedAt is the first record's timestamp",
+                       header.result.startedAt?.timeIntervalSince1970 == 1_791_535_534.484)
+                record("control list: firstPrompt skips meta, CLI markup and tool results, and is trimmed",
+                       header.result.firstPrompt == "Fix the VDGS panel")
+                var longHeader = ClaudeSessionHistory.HeaderScanner()
+                let longPrompt = String(repeating: "x", count: ClaudeSessionHistory.HeaderScanner.firstPromptMaxLength + 7)
+                longHeader.consume(try! JSONSerialization.data(withJSONObject: ["type": "user", "message": ["role": "user", "content": longPrompt]]))
+                record("control list: firstPrompt is cut at its maximum length",
+                       longHeader.result.firstPrompt?.count == ClaudeSessionHistory.HeaderScanner.firstPromptMaxLength)
+                record("control resume: errorCode rides beside error only when given",
+                       ControlProtocol.errorResponse(id: "1", message: "m", code: "no_transcript")["errorCode"] as? String == "no_transcript"
+                           && ControlProtocol.errorResponse(id: "1", message: "m")["errorCode"] == nil)
                 record("control send: text is trimmed",
                        ControlProtocol.parseSendMessage(["text": "  hello  "])
                            == .success(ControlProtocol.SendMessage(text: "hello")))
@@ -2684,8 +2876,10 @@ enum SidebarLogicProbe {
                        && NewSessionOptions(permissionMode: .bypassPermissions).refusal(allowBypass: true) == nil
                        && NewSessionOptions(permissionMode: .plan).refusal(allowBypass: false) == nil)
             record("resume fallback: only a UUID-shaped id reaches the transcript scan",
-                   MirrorConnection.isSessionIdShaped("d249fc17-cfc3-4ab7-a2ab-976110f83c2f")
-                       && !MirrorConnection.isSessionIdShaped("../../etc/x") && !MirrorConnection.isSessionIdShaped(""))
+                   ["../../etc/x", ""].allSatisfy {
+                       if case .failure(.invalidSessionId) = SessionStore().resolveClosedSession(sessionId: $0, localCwd: nil) { return true }
+                       return false
+                   })
             // Canopy Server UI frames (daemon → Mac client).
             func throughJSON(_ wire: [String: Any]) -> [String: Any] {
                 guard let data = try? JSONSerialization.data(withJSONObject: wire),

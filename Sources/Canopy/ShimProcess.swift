@@ -2593,7 +2593,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     var statusBarData: StatusBarData?
     weak var delegate: ShimProcessDelegate?
-    private var isIntentionalStop = false
+    private(set) var isIntentionalStop = false
 
     /// The model string the CLI resolved for this session, taken from the
     /// `system` / `init` event. This is the key space `result.modelUsage` is

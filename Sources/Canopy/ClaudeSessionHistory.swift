@@ -27,6 +27,10 @@ struct SessionEntry: Identifiable, Hashable {
     /// found (`GitWorktree.checkoutForRemovedWorktree`); `canOpen` is then true.
     /// Opening goes through `ClaudeSessionHistory.directoryToOpen`.
     var rescueCheckout: URL? = nil
+    /// When the session started (its first timestamped record), and the first thing a person typed in it.
+    /// Filled by `loadAllSessions`; the control API's session list reports them.
+    var startedAt: Date? = nil
+    var firstPrompt: String? = nil
 
     var projectName: String { GitWorktree.projectDisplayName(for: projectDirectory) }
 }
@@ -415,7 +419,9 @@ enum ClaudeSessionHistory {
                 timestamp: candidate.modDate,
                 projectDirectory: URL(fileURLWithPath: projectPath),
                 canOpen: projectExists,
-                logPath: candidate.path
+                logPath: candidate.path,
+                startedAt: metadata.startedAt,
+                firstPrompt: metadata.firstPrompt
             )
         }
 
@@ -514,7 +520,7 @@ enum ClaudeSessionHistory {
         }
     }
 
-    private typealias Metadata = (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool)
+    private typealias Metadata = (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?)
     nonisolated(unsafe) private static var metadataCache: [String: (modified: Date, metadata: Metadata)] = [:]
     private static let metadataCacheLock = NSLock()
 
@@ -934,6 +940,61 @@ enum ClaudeSessionHistory {
         return (found, end)
     }
 
+    /// The model and permission mode a session last ran with, as its transcript records them:
+    /// `message.model` on the last assistant record (`<synthetic>`, the CLI's id for a reply no
+    /// model wrote, is skipped) and `permissionMode` on the last user record. What the control
+    /// API's resume inherits. Effort is not recorded in a transcript.
+    struct LaunchSettings: Equatable {
+        var model: String?
+        var permissionMode: PermissionMode?
+    }
+
+    /// `lastLaunchSettings(in:)` over the transcript's tail; a window missing either field is widened once.
+    /// `permissionMode` is only on typed-prompt records, so a long agentic turn can push it past 1 MB.
+    static func lastLaunchSettings(atPath path: String) -> LaunchSettings {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return LaunchSettings() }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        var found = LaunchSettings()
+        for window: UInt64 in [1 << 20, 8 << 20] {
+            let start = size > window ? size - window : 0
+            guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { break }
+            found = lastLaunchSettings(in: data, startsAtLineBoundary: start == 0)
+            if (found.model != nil && found.permissionMode != nil) || start == 0 { break }
+        }
+        return found
+    }
+
+    /// The pure half of `lastLaunchSettings(atPath:)`. A window that starts mid-file drops its
+    /// first line, which is a fragment; an unterminated last line is parsed: it may be a whole record
+    /// still missing its newline, and a fragment never parses.
+    static func lastLaunchSettings(in data: Data, startsAtLineBoundary: Bool) -> LaunchSettings {
+        var lines = data.split(separator: 0x0A, omittingEmptySubsequences: false)
+        if !startsAtLineBoundary, !lines.isEmpty { lines.removeFirst() }
+        var found = LaunchSettings()
+        // The last user record carrying a mode decides it, even one this build does not know.
+        var modeDecided = false
+        for line in lines.reversed() {
+            if found.model != nil && modeDecided { break }
+            guard !line.isEmpty, let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            switch json["type"] as? String {
+            case "assistant" where found.model == nil:
+                if let model = (json["message"] as? [String: Any])?["model"] as? String,
+                   !model.isEmpty, model != "<synthetic>" {
+                    found.model = model
+                }
+            case "user" where !modeDecided:
+                if let raw = json["permissionMode"] as? String {
+                    found.permissionMode = PermissionMode(rawValue: raw)
+                    modeDecided = true
+                }
+            default:
+                break
+            }
+        }
+        return found
+    }
+
     /// Whether a session whose resolved project directory is GONE should still
     /// appear in the list. `loadAllSessions` otherwise drops any session whose
     /// project path fails `fileExists`, which hid readable sessions launched in
@@ -1115,11 +1176,11 @@ enum ClaudeSessionHistory {
     /// this path could be handed is `observer-sessions` itself at 1,056 files,
     /// 111.9 → 1,045.2 MiB — which is the argument for keeping that list on
     /// the caller rather than moving it down.
-    private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
+    private static func extractMetadata(fromPath path: String) -> (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?) {
         extractMetadataIfReadable(fromPath: path) ?? unreadableMetadata
     }
 
-    private static let unreadableMetadata: Metadata = ("Untitled", nil, false, false)
+    private static let unreadableMetadata: Metadata = ("Untitled", nil, false, false, nil, nil)
 
     private static func extractMetadataIfReadable(fromPath path: String) -> Metadata? {
         guard var metadata = boundedMetadataIfReadable(fromPath: path) else { return nil }
@@ -1318,6 +1379,15 @@ enum ClaudeSessionHistory {
 }
 
 extension ClaudeSessionHistory {
+    /// A transcript record's `timestamp` (ISO 8601 with milliseconds, as the CLI writes it).
+    static func parseTimestamp(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
     /// The per-line half of `extractMetadata`, lifted out of it so the SSH
     /// remote path can apply the SAME filters to header bytes fetched off
     /// another machine.
@@ -1351,6 +1421,12 @@ extension ClaudeSessionHistory {
         private var aiTitle: String?
         private var firstUserMessage: String?
         private var firstCwd: String?
+        /// The first timestamped record's `timestamp`: when the session started.
+        private var startedAt: Date?
+        /// The first prompt a person typed within the header window, longer than the title's cut.
+        /// Meta records (hook output, command caveats) and tool results are not prompts.
+        private var firstPrompt: String?
+        static let firstPromptMaxLength = 500
         private var lastRelocatedCwd: String?
         private var entrypoint: String?
         private(set) var isBackgroundScheduled = false
@@ -1382,6 +1458,10 @@ extension ClaudeSessionHistory {
 
             if firstCwd == nil, let value = json["cwd"] as? String, !value.isEmpty {
                 firstCwd = value
+            }
+
+            if startedAt == nil, let value = json["timestamp"] as? String {
+                startedAt = ClaudeSessionHistory.parseTimestamp(value)
             }
 
             if entrypoint == nil, let value = json["entrypoint"] as? String, !value.isEmpty {
@@ -1435,6 +1515,31 @@ extension ClaudeSessionHistory {
                     if !joined.isEmpty { firstUserMessage = String(joined.prefix(100)) }
                 }
             }
+
+            if firstPrompt == nil, json["isMeta"] as? Bool != true, json["isCompactSummary"] as? Bool != true,
+               let message = json["message"] as? [String: Any] {
+                let texts: [String]
+                if let content = message["content"] as? String {
+                    texts = [content]
+                } else if let blocks = message["content"] as? [[String: Any]] {
+                    // A tool result is a user record too; only text blocks are what someone typed.
+                    texts = blocks.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }
+                } else {
+                    texts = []
+                }
+                // Per block, by the prompt history's rule (`classifyUserRecord`: keep-alive, caveats,
+                // CLI markup), plus any other leading tag (`<ide_opened_file>`): those blocks can
+                // precede the person's text in the same record.
+                let typed = texts.compactMap { text -> String? in
+                    let block: [String: Any] = ["type": "user", "message": ["role": "user", "content": text]]
+                    guard case .prompt(let trimmed) = ClaudeSessionHistory.classifyUserRecord(block),
+                          !trimmed.hasPrefix("<") else { return nil }
+                    return trimmed
+                }.joined(separator: " ")
+                if !typed.isEmpty {
+                    firstPrompt = String(typed.prefix(Self.firstPromptMaxLength))
+                }
+            }
         }
 
         /// Record a relocation the line scan never reached. Only
@@ -1442,11 +1547,13 @@ extension ClaudeSessionHistory {
         /// the line scan's own rule.
         mutating func noteRelocated(_ cwd: String) { lastRelocatedCwd = cwd }
 
-        var result: (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool) {
+        var result: (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?) {
             (aiTitle ?? firstUserMessage ?? "Untitled",
              lastRelocatedCwd ?? firstCwd,
              isBackgroundScheduled,
-             entrypoint?.hasPrefix("sdk-") == true)
+             entrypoint?.hasPrefix("sdk-") == true,
+             startedAt,
+             firstPrompt)
         }
     }
 }

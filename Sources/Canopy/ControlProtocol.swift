@@ -59,8 +59,11 @@ enum ControlProtocol {
         ["type": "response", "id": id, "result": result]
     }
 
-    static func errorResponse(id: String, message: String) -> [String: Any] {
-        ["type": "response", "id": id, "error": message]
+    /// `code` is a stable machine-readable `errorCode` beside the human `error`, set only by some refusals.
+    static func errorResponse(id: String, message: String, code: String? = nil) -> [String: Any] {
+        var response: [String: Any] = ["type": "response", "id": id, "error": message]
+        if let code { response["errorCode"] = code }
+        return response
     }
 
     struct DirEntry: Equatable {
@@ -161,6 +164,136 @@ enum ControlProtocol {
                                    initialPrompt: nonEmpty("initialPrompt")))
     }
 
+    /// `open_session` with `resumeSessionId`: continue a session that is not open, or name the
+    /// one that is. Everything but the id is optional.
+    struct ResumeParams: Equatable {
+        let sessionId: String
+        /// Must be a folder the transcript is filed under; checked where the transcript is looked up.
+        let cwd: String?
+        let model: String?
+        let effort: String?
+        let permissionMode: PermissionMode?
+        let initialPrompt: String?
+    }
+
+    /// A refused resume: `message` for people, `code` (`errorCode` on the wire) for the caller to branch on.
+    struct ResumeError: Error, Equatable {
+        let message: String
+        let code: String
+        init(_ message: String, code: String) {
+            self.message = message
+            self.code = code
+        }
+    }
+
+    /// Nil when the request does not ask for a resume (`open_session` then means a new session).
+    static func parseResumeParams(_ params: [String: Any], allowBypass: Bool) -> Result<ResumeParams, ResumeError>? {
+        guard let raw = params["resumeSessionId"], !(raw is NSNull) else { return nil }
+        // Lowercased: the CLI's ids are, and lookups of open sessions and Recents compare exactly,
+        // while a case-insensitive volume would still find the transcript under another spelling.
+        guard let sessionId = (raw as? String)?.lowercased(), UUID(uuidString: sessionId) != nil else {
+            return .failure(ResumeError("resumeSessionId is not a session id", code: "invalid_session_id"))
+        }
+        func nonEmpty(_ key: String) -> String? {
+            (params[key] as? String).flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        }
+        // A new worktree has no transcript, so there is nothing in it to continue.
+        guard nonEmpty("worktreeBranch") == nil else {
+            return .failure(ResumeError("worktreeBranch cannot be combined with resumeSessionId", code: "worktree_not_supported"))
+        }
+        let cwd = nonEmpty("cwd")
+        if let cwd {
+            var isDirectory: ObjCBool = false
+            guard cwd.hasPrefix("/") else { return .failure(ResumeError("cwd must be absolute", code: "invalid_cwd")) }
+            guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
+                return .failure(ResumeError("not a folder", code: "folder_missing"))
+            }
+        }
+        var mode: PermissionMode?
+        if let raw = params["permissionMode"] as? String {
+            guard let parsed = PermissionMode(rawValue: raw) else {
+                return .failure(ResumeError("unknown permission mode", code: "invalid_permission_mode"))
+            }
+            if parsed == .bypassPermissions, !allowBypass {
+                return .failure(ResumeError("bypass permissions is off on this Mac", code: "bypass_disabled"))
+            }
+            mode = parsed
+        }
+        return .success(ResumeParams(sessionId: sessionId, cwd: cwd, model: nonEmpty("model"), effort: nonEmpty("effort"),
+                                     permissionMode: mode, initialPrompt: nonEmpty("initialPrompt")))
+    }
+
+    /// The model and permission mode a resumed session starts with: the request's, else what the
+    /// transcript last recorded. An inherited `bypassPermissions` the Mac's opt-in no longer allows
+    /// is dropped (nil: this Mac's default mode) rather than refused, since nobody asked for it;
+    /// an explicit one was already refused by `parseResumeParams`.
+    static func resumedLaunch(inherited: ClaudeSessionHistory.LaunchSettings, requested: ResumeParams,
+                              allowBypass: Bool) -> ClaudeSessionHistory.LaunchSettings {
+        var mode = requested.permissionMode ?? inherited.permissionMode
+        if mode == .bypassPermissions, !allowBypass { mode = nil }
+        return ClaudeSessionHistory.LaunchSettings(model: requested.model ?? inherited.model, permissionMode: mode)
+    }
+
+    /// `list_sessions` `scope: "recent"`'s filters. Any of them makes the list read every
+    /// transcript on the Mac rather than the newest `maxSessionsToKeep`, since an older
+    /// session is exactly what a period or a project filter is looking for.
+    struct SessionListFilter: Equatable {
+        /// Lowercased; every term must appear in the title, project, cwd or first prompt.
+        var terms: [String] = []
+        /// Lowercased; must appear in the project name or the cwd.
+        var project: String?
+        /// The session was active at some point in `since...until`.
+        var since: Date?
+        var until: Date?
+
+        var needsEverySession: Bool { !terms.isEmpty || project != nil || since != nil || until != nil }
+
+        static func parse(_ params: [String: Any]) -> Result<SessionListFilter, ControlError> {
+            var filter = SessionListFilter()
+            if let query = params["query"] as? String {
+                filter.terms = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+            }
+            if let project = (params["project"] as? String)?.trimmingCharacters(in: .whitespaces), !project.isEmpty {
+                filter.project = project.lowercased()
+            }
+            for key in ["since", "until"] {
+                guard let raw = params[key], !(raw is NSNull) else { continue }
+                guard let date = date(raw, endOfDay: key == "until") else {
+                    return .failure(ControlError("\(key) must be an ISO 8601 date or Unix seconds"))
+                }
+                if key == "since" { filter.since = date } else { filter.until = date }
+            }
+            return .success(filter)
+        }
+
+        /// Unix seconds, an ISO 8601 date-time, or a bare `yyyy-MM-dd` in this Mac's time zone
+        /// (the start of that day for `since`, its end for `until`).
+        static func date(_ raw: Any, endOfDay: Bool) -> Date? {
+            // A JSON boolean bridges to NSNumber too, and would read as 1970.
+            if let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+            if let seconds = raw as? Double { return Date(timeIntervalSince1970: seconds) }
+            if let seconds = raw as? Int { return Date(timeIntervalSince1970: TimeInterval(seconds)) }
+            guard let text = (raw as? String)?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+            if let date = ClaudeSessionHistory.parseTimestamp(text) { return date }
+            let day = DateFormatter()
+            day.locale = Locale(identifier: "en_US_POSIX")
+            day.dateFormat = "yyyy-MM-dd"
+            guard let start = day.date(from: text) else { return nil }
+            return endOfDay ? Calendar.current.date(byAdding: .day, value: 1, to: start)?.addingTimeInterval(-0.001) : start
+        }
+
+        func matches(title: String, project: String, cwd: String, firstPrompt: String?,
+                     startedAt: Date?, lastActiveAt: Date) -> Bool {
+            if let since, lastActiveAt < since { return false }
+            if let until, (startedAt ?? lastActiveAt) > until { return false }
+            if let wanted = self.project, !project.lowercased().contains(wanted), !cwd.lowercased().contains(wanted) {
+                return false
+            }
+            let haystack = [title, project, cwd, firstPrompt ?? ""].joined(separator: "\n").lowercased()
+            return terms.allSatisfy { haystack.contains($0) }
+        }
+    }
+
     enum SessionRef: Equatable {
         case key(String)
         case resumeId(String)
@@ -173,7 +306,8 @@ enum ControlProtocol {
     static func sessionRefs(_ params: [String: Any]) -> [SessionRef] {
         var refs: [SessionRef] = []
         if let key = params["key"] as? String, !key.isEmpty { refs.append(.key(key)) }
-        if let id = params["sessionId"] as? String, !id.isEmpty { refs.append(.resumeId(id)) }
+        // The CLI's ids are lowercase; an uppercase spelling names the same session.
+        if let id = params["sessionId"] as? String, !id.isEmpty { refs.append(.resumeId(id.lowercased())) }
         return refs
     }
 

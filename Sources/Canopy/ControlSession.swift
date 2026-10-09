@@ -93,20 +93,25 @@ final class ControlSession {
             fail(request, error.message)
         case .success(let message):
             guard let session = requestedSession(request) else { return }
-            let replyId = UUID().uuidString.lowercased()
             guard let shim = session.shim else {
-                reply(request, ControlProtocol.replyWire(Self.notRunningRefusal, replyId: replyId))
+                reply(request, ControlProtocol.replyWire(Self.notRunningRefusal, replyId: UUID().uuidString.lowercased()))
                 return
             }
-            // No-op when a client already holds a channel; opens one when the session has none.
-            shim.launchHeadlessChannel()
-            shim.noteControlReply(replyId)
-            let disposition = shim.submitPhoneReply(text: message.text, replyId: replyId)
-            if case .refused = disposition {
-                shim.forgetControlReply(replyId)
-            }
-            reply(request, ControlProtocol.replyWire(disposition, replyId: replyId))
+            reply(request, submitControlMessage(message.text, to: shim))
         }
+    }
+
+    /// `send_message`'s delivery, also used by a resume that names a session already running.
+    private func submitControlMessage(_ text: String, to shim: ShimProcess) -> [String: Any] {
+        let replyId = UUID().uuidString.lowercased()
+        // No-op when a client already holds a channel; opens one when the session has none.
+        shim.launchHeadlessChannel()
+        shim.noteControlReply(replyId)
+        let disposition = shim.submitPhoneReply(text: text, replyId: replyId)
+        if case .refused = disposition {
+            shim.forgetControlReply(replyId)
+        }
+        return ControlProtocol.replyWire(disposition, replyId: replyId)
     }
 
     private func sessionStatus(_ request: ControlProtocol.Request) {
@@ -242,7 +247,7 @@ final class ControlSession {
             result["key"] = session.id.uuidString
             result["sessionId"] = session.resumeId
             result["state"] = session.shim?.controlStateWire ?? "idle"
-        } else if let sessionId = request.params["sessionId"] as? String, UUID(uuidString: sessionId) != nil {
+        } else if let sessionId = (request.params["sessionId"] as? String)?.lowercased(), UUID(uuidString: sessionId) != nil {
             // A closed session is still readable by its id.
             path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId)
             result["sessionId"] = sessionId
@@ -282,32 +287,91 @@ final class ControlSession {
         case "open":
             reply(request, ["sessions": openRows().prefix(limit).map(\.wire)])
         case "recent":
+            let filter: ControlProtocol.SessionListFilter
+            switch ControlProtocol.SessionListFilter.parse(request.params) {
+            case .success(let parsed): filter = parsed
+            case .failure(let error): return fail(request, error.message)
+            }
+            let includeOpen = request.params["includeOpen"] as? Bool == true
+            let recentLimit = min(limit, Self.maxRecentLimit)
             Task { @MainActor in
-                let query = (request.params["query"] as? String ?? "").lowercased()
-                // Answer from the list the daemon holds; the rescan an unfiltered ask starts
-                // serves the next one. A search never starts one: that would be one per keystroke.
-                if store.recents.isEmpty {
-                    await Self.refreshRecents(store).value
-                } else if query.isEmpty {
-                    _ = Self.refreshRecents(store)
+                let entries: [SessionEntry]
+                if filter.needsEverySession {
+                    entries = await Self.everySession().value
+                } else {
+                    // Answer from the list the daemon holds; the rescan an ask starts serves the next one.
+                    if store.recents.isEmpty {
+                        await Self.refreshRecents(store).value
+                    } else {
+                        _ = Self.refreshRecents(store)
+                    }
+                    entries = store.recents
                 }
                 guard !stopped else { return }
-                let open = Set(store.openSessions.map(\.resumeId))
-                let rows = store.recents
-                    .filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
-                    .filter { query.isEmpty || $0.title.lowercased().contains(query) || $0.projectName.lowercased().contains(query) }
-                    .prefix(limit)
-                    .map { ControlProtocol.SessionRow(
-                        key: nil, resumeId: $0.id, title: $0.title, project: $0.projectName,
-                        cwd: $0.projectDirectory.path, state: "closed", running: false, clients: 0,
-                        lastActiveAt: $0.timestamp.timeIntervalSince1970, model: "", messageCount: 0,
-                        permissionMode: "", accountId: nil).wire }
-                reply(request, ["sessions": Array(rows)])
+                reply(request, ["sessions": recentRows(entries, filter: filter, includeOpen: includeOpen, limit: recentLimit)])
             }
         default:
             fail(request, "unknown scope")
         }
     }
+
+    /// `scope: "recent"`'s rows, newest activity first. Every row carries `sessionId` (the id
+    /// `open_session`'s `resumeSessionId` takes, also sent as `resumeId`), `startedAt` and
+    /// `firstPrompt` when its transcript records them. With `includeOpen`, open sessions are
+    /// listed too, with their `key` and live state.
+    private func recentRows(_ entries: [SessionEntry], filter: ControlProtocol.SessionListFilter,
+                            includeOpen: Bool, limit: Int) -> [[String: Any]] {
+        let byId = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func extras(_ dict: inout [String: Any], _ entry: SessionEntry?, id: String) {
+            dict["sessionId"] = id
+            if let startedAt = entry?.startedAt { dict["startedAt"] = startedAt.timeIntervalSince1970 }
+            if let prompt = entry?.firstPrompt { dict["firstPrompt"] = prompt }
+        }
+        var rows: [(at: Double, wire: [String: Any])] = []
+        let open = Set(store.openSessions.map(\.resumeId))
+        if includeOpen {
+            for row in openRows() {
+                let entry = byId[row.resumeId]
+                guard filter.matches(title: row.title, project: row.project, cwd: row.cwd, firstPrompt: entry?.firstPrompt,
+                                     startedAt: entry?.startedAt, lastActiveAt: Date(timeIntervalSince1970: row.lastActiveAt))
+                else { continue }
+                var dict = row.wire
+                extras(&dict, entry, id: row.resumeId)
+                rows.append((row.lastActiveAt, dict))
+            }
+        }
+        for entry in entries where entry.canOpen && !open.contains(entry.id) && !store.hiddenIds.contains(entry.id) {
+            guard filter.matches(title: entry.title, project: entry.projectName, cwd: entry.projectDirectory.path,
+                                 firstPrompt: entry.firstPrompt, startedAt: entry.startedAt, lastActiveAt: entry.timestamp)
+            else { continue }
+            var dict = ControlProtocol.SessionRow(
+                key: nil, resumeId: entry.id, title: entry.title, project: entry.projectName,
+                cwd: entry.projectDirectory.path, state: "closed", running: false, clients: 0,
+                lastActiveAt: entry.timestamp.timeIntervalSince1970, model: "", messageCount: 0,
+                permissionMode: "", accountId: nil).wire
+            extras(&dict, entry, id: entry.id)
+            rows.append((entry.timestamp.timeIntervalSince1970, dict))
+        }
+        return rows.sorted { $0.at > $1.at }.prefix(limit).map(\.wire)
+    }
+
+    /// Every session on the Mac, uncapped; one read at a time across connections. Headers are
+    /// cached by mtime (`ClaudeSessionHistory.cachedMetadata`), so only a first read is slow.
+    private static var everySessionRead: Task<[SessionEntry], Never>?
+
+    private static func everySession() -> Task<[SessionEntry], Never> {
+        if let running = everySessionRead { return running }
+        let task = Task { @MainActor in
+            let all = await Task.detached { ClaudeSessionHistory.loadAllSessions(keep: .max, scanLimit: .max) }.value
+            everySessionRead = nil
+            return all
+        }
+        everySessionRead = task
+        return task
+    }
+
+    /// `scope: "recent"`'s ceiling on `limit`: each row can carry 500 characters of prompt.
+    static let maxRecentLimit = 500
 
     /// One rescan at a time across every control connection; asks during one share it.
     private static var recentsRefresh: Task<Void, Never>?
@@ -349,6 +413,13 @@ final class ControlSession {
     }
 
     private func openSession(_ request: ControlProtocol.Request) {
+        if let resume = ControlProtocol.parseResumeParams(request.params, allowBypass: allowBypass()) {
+            switch resume {
+            case .success(let params): resumeSession(request, params)
+            case .failure(let error): fail(request, error.message, code: error.code)
+            }
+            return
+        }
         let params: ControlProtocol.OpenParams
         switch ControlProtocol.parseOpenParams(request.params, allowBypass: allowBypass()) {
         case .success(let parsed): params = parsed
@@ -388,6 +459,99 @@ final class ControlSession {
             shim.launchHeadlessChannel()
         }
         reply(request, result)
+    }
+
+    /// `open_session` with `resumeSessionId`. A session already open is named, never opened twice;
+    /// one that is not is resolved the way reopening a closed row in the GUI is
+    /// (`SessionStore.resolveClosedSession`) and started headless with `--resume`.
+    private func resumeSession(_ request: ControlProtocol.Request, _ params: ControlProtocol.ResumeParams) {
+        if let session = store.openSession(for: [.resumeId(params.sessionId)]) {
+            if let shim = session.shim, shim.isLive {
+                var result = resumeResult(session, alreadyOpen: true)
+                if let prompt = params.initialPrompt {
+                    result.merge(submitControlMessage(prompt, to: shim)) { _, new in new }
+                }
+                return reply(request, result)
+            }
+            // Open but not running (launch-restored, or its shim died): started as itself. A dead
+            // shim is parked first, as `restart_session` does; `startHeadlessSession` refuses one.
+            if let shim = session.shim {
+                // A stop in progress is not a crash to recover from.
+                guard !shim.isIntentionalStop else { return fail(request, "the session is stopping", code: "start_failed") }
+                store.restartSession(session.id, mirrorsReattach: true)
+            }
+            guard let shim = store.startHeadlessSession(resumeId: session.resumeId) else {
+                return fail(request, MirrorOpenRequest.startFailed, code: "start_failed")
+            }
+            return finishResume(request, session: session, shim: shim, prompt: params.initialPrompt, alreadyOpen: true)
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Resolution reads Recents, which also knows the checkout a removed worktree reopens in.
+            if store.recents.isEmpty { await Self.refreshRecents(store).value }
+            guard !stopped else { return }
+            if store.openSession(for: [.resumeId(params.sessionId)]) != nil { return resumeSession(request, params) }
+            if let cwd = params.cwd, !ClaudeSessionHistory.isFiled(sessionId: params.sessionId, under: URL(fileURLWithPath: cwd)) {
+                return fail(request, "the session's transcript is not filed under cwd", code: "cwd_mismatch")
+            }
+            let target: (directory: URL, title: String?)
+            switch store.resolveClosedSession(sessionId: params.sessionId, localCwd: params.cwd) {
+            case .success(let resolved): target = resolved
+            case .failure(let failure): return fail(request, Self.message(for: failure), code: failure.code)
+            }
+            let sessionId = params.sessionId
+            // The tail read runs off the main actor, like `history`'s: a transcript can be tens of MB.
+            let path = ShimProcess.jsonlPath(sessionId: sessionId, workingDirectory: target.directory)
+            let inherited = await Task.detached {
+                path.map(ClaudeSessionHistory.lastLaunchSettings(atPath:)) ?? .init()
+            }.value
+            if path == nil || inherited.model == nil || inherited.permissionMode == nil {
+                logger.notice("control open_session: \(sessionId, privacy: .public) inherits model=\(inherited.model ?? "none", privacy: .public) mode=\(inherited.permissionMode?.rawValue ?? "none", privacy: .public) (transcript \(path == nil ? "not found" : "read", privacy: .public))")
+            }
+            guard !stopped else { return }
+            if store.openSession(for: [.resumeId(sessionId)]) != nil { return resumeSession(request, params) }
+            let launch = ControlProtocol.resumedLaunch(inherited: inherited, requested: params, allowBypass: allowBypass())
+            let options = SessionStore.HeadlessOptions(model: launch.model, effort: params.effort,
+                                                       permissionMode: launch.permissionMode)
+            guard let shim = store.startHeadlessSession(directory: target.directory, resumeId: sessionId,
+                                                        isExistingTranscript: true, title: target.title, options: options),
+                  let session = shim.boundSession else {
+                return fail(request, MirrorOpenRequest.startFailed, code: "start_failed")
+            }
+            logger.notice("control open_session: resumed \(sessionId, privacy: .public)")
+            finishResume(request, session: session, shim: shim, prompt: params.initialPrompt, alreadyOpen: false)
+        }
+    }
+
+    /// A resumed session's first turn goes the way `open_session`'s `initialPrompt` does: held on
+    /// the session until the headless `launch_claude` assigns a channel.
+    private func finishResume(_ request: ControlProtocol.Request, session: OpenSession, shim: ShimProcess,
+                              prompt: String?, alreadyOpen: Bool) {
+        var result = resumeResult(session, alreadyOpen: alreadyOpen)
+        if let prompt, let launchPrompt = LaunchPrompt.make(text: prompt, images: []) {
+            let replyId = UUID().uuidString.lowercased()
+            session.pendingInitialPrompt = launchPrompt
+            session.pendingInitialPromptReplyId = replyId
+            result["replyId"] = replyId
+            shim.launchHeadlessChannel()
+        }
+        reply(request, result)
+    }
+
+    private func resumeResult(_ session: OpenSession, alreadyOpen: Bool) -> [String: Any] {
+        var result: [String: Any] = ["sessionId": session.resumeId, "key": session.id.uuidString,
+                                     "cwd": session.origin.workingDirectory.path, "alreadyOpen": alreadyOpen,
+                                     "permissionMode": session.permissionMode.rawValue]
+        if let model = session.model { result["model"] = model }
+        return result
+    }
+
+    static func message(for failure: SessionStore.ResumeFailure) -> String {
+        switch failure {
+        case .invalidSessionId: "resumeSessionId is not a session id"
+        case .noTranscript: "no transcript for this session on this Mac"
+        case .folderMissing: "the session's folder is gone"
+        }
     }
 
     private func stopSession(_ request: ControlProtocol.Request) {
@@ -543,9 +707,9 @@ final class ControlSession {
         send(ControlProtocol.response(id: request.id, result: result))
     }
 
-    private func fail(_ request: ControlProtocol.Request, _ message: String) {
+    private func fail(_ request: ControlProtocol.Request, _ message: String, code: String? = nil) {
         guard !stopped else { return }
         logger.notice("control \(request.verb, privacy: .public) refused: \(message, privacy: .public)")
-        send(ControlProtocol.errorResponse(id: request.id, message: message))
+        send(ControlProtocol.errorResponse(id: request.id, message: message, code: code))
     }
 }

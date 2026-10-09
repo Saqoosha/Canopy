@@ -1211,6 +1211,52 @@ final class SessionStore {
         return shim
     }
 
+    /// Why a closed session cannot be resumed here. `code` is what the control API reports.
+    enum ResumeFailure: String, Error, Equatable {
+        /// Not a CLI session id (they are UUIDs); never joined into a path.
+        case invalidSessionId = "invalid_session_id"
+        /// No transcript for this id on this Mac.
+        case noTranscript = "no_transcript"
+        /// The transcript is here but its folder is gone and no checkout was found to reopen it in.
+        case folderMissing = "folder_missing"
+
+        var code: String { rawValue }
+    }
+
+    /// The folder and title a session that is not open would be resumed with: what reopening
+    /// a closed row does, for the GUI (through a mirror `attach` with `open: resume`) and the
+    /// control API alike. `localCwd` is a folder the caller already resolved, used when the
+    /// transcript is filed under it; Recents may predate a move (a removed worktree's
+    /// transcript moved to its checkout). May move a removed worktree's transcript
+    /// (`directoryToOpen`). Does not look at open sessions.
+    func resolveClosedSession(sessionId: String, localCwd: String?) -> Result<(directory: URL, title: String?), ResumeFailure> {
+        Self.resolveClosedSession(sessionId: sessionId, localCwd: localCwd, recents: recents, knownCheckouts: rescueCandidates)
+    }
+
+    /// The store-free half, so the probe can hand it a Recents list.
+    static func resolveClosedSession(sessionId: String, localCwd: String?, recents: [SessionEntry],
+                                     knownCheckouts: [URL]) -> Result<(directory: URL, title: String?), ResumeFailure> {
+        guard UUID(uuidString: sessionId) != nil else { return .failure(.invalidSessionId) }
+        let listed = recents.first { $0.id == sessionId }
+        if let localCwd, ClaudeSessionHistory.isFiled(sessionId: sessionId, under: URL(fileURLWithPath: localCwd)) {
+            return .success((URL(fileURLWithPath: localCwd), listed?.title))
+        }
+        if let listed {
+            // One Recents lists and refuses (`canOpen`) stays refused.
+            guard listed.canOpen,
+                  let directory = ClaudeSessionHistory.directoryToOpen(listed, knownCheckouts: knownCheckouts)
+            else { return .failure(.folderMissing) }
+            return .success((directory, listed.title))
+        }
+        // Recents is refreshed asynchronously and may not hold a session that was just
+        // created, teleported or restored.
+        guard let path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId) else { return .failure(.noTranscript) }
+        guard let cwd = ClaudeSessionHistory.cwd(atPath: path), FileManager.default.fileExists(atPath: cwd) else {
+            return .failure(.folderMissing)
+        }
+        return .success((URL(fileURLWithPath: cwd), SessionTitleStore.title(forSessionId: sessionId)))
+    }
+
     /// Spawn the shim for an open row that has none (a new headless row, or
     /// a launch-restored `.dormant` one). Returns a live shim, or nil when it
     /// could not start or the row's existing shim is dead.
