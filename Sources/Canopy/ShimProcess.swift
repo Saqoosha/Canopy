@@ -4406,6 +4406,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return (note, obj["ok"] as? Bool ?? false, obj["checkout"] as? String)
     }
 
+    /// Where a live session goes when its folder is gone and the mod never saw
+    /// the removal: the folder its transcript is filed under now, only when
+    /// that is an existing main checkout. A transcript still filed under the
+    /// removed folder is left for `ClaudeSessionHistory.directoryToOpen` to
+    /// move on the next open; `moveToCheckout` resumes from the checkout's folder.
+    nonisolated static func checkoutForVanishedFolder(
+        relocated: URL?,
+        isCheckout: (URL) -> Bool = { GitWorktree.isMainCheckout($0) }
+    ) -> URL? {
+        guard let relocated, isCheckout(relocated) else { return nil }
+        return relocated
+    }
+
     /// Posted with the shim as `object` and the checkout URL under `checkoutKey`
     /// when a turn ends with this session's worktree removed after the mod left
     /// it. `SessionStore` moves the session there.
@@ -4542,6 +4555,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         logger.warning("[bridge] ui_log text failed to parse")
                     }
                     return
+                }
+                // The folder removed by something the mod did not see — another
+                // session or a terminal — after the session had left it (#295).
+                if checkoutAfterRemoval == nil, remoteHost == nil,
+                   nested["type"] as? String == "io_message",
+                   (nested["message"] as? [String: Any])?["type"] as? String == "result",
+                   !FileManager.default.fileExists(atPath: workingDirectory.path),
+                   let id = boundSession?.resumeId,
+                   let checkout = Self.checkoutForVanishedFolder(
+                       relocated: Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory)
+                           .flatMap { Self.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: workingDirectory) })
+                {
+                    logger.notice("[worktree] the session's folder was removed elsewhere; its transcript is in the checkout")
+                    checkoutAfterRemoval = checkout
                 }
                 // Not mid-turn: restarting now would kill the removal itself.
                 if checkoutAfterRemoval != nil,
