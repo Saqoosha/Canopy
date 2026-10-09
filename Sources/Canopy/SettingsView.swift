@@ -150,8 +150,17 @@ private struct GeneralSettingsTab: View {
 
             Section {
                 Toggle("Prevent sleep while a session is working", isOn: $settings.preventSleepWhileWorking)
+                Toggle("Stay reachable remotely", isOn: $settings.stayReachableRemotely)
+                    .disabled(!settings.preventSleepWhileWorking)
+                LabeledContent("Allow sleep on battery below \(settings.sleepBatteryFloorPercent)%") {
+                    Slider(value: Binding(get: { Double(settings.sleepBatteryFloorPercent) },
+                                          set: { settings.sleepBatteryFloorPercent = Int($0) }),
+                           in: Double(SleepGuardPolicy.batteryFloorRange.lowerBound)...Double(SleepGuardPolicy.batteryFloorRange.upperBound),
+                           step: 5)
+                }
+                .disabled(!settings.preventSleepWhileWorking)
             } footer: {
-                SettingsFooter(text: "While a session is running a turn or is waiting for your answer, the Mac does not idle-sleep, so its network connection stays up and the phone can still reach it. A session with no activity for an hour stops counting; a local background task counts until it finishes. The display can still turn off. Not on battery below \(SleepGuardPolicy.batteryFloorPercent)%. Closing the lid on battery still sleeps.")
+                SettingsFooter(text: "While a session is running a turn or is waiting for your answer, the Mac stays awake, lid closed included, so its network connection stays up and the phone or another Mac can reach it. With \"Stay reachable\" on it stays awake even with nothing running. A session with no activity for an hour stops counting; a local background task counts until it finishes. The display can still sleep — use display sleep rather than the monitor's power button. Not on battery below the threshold. Do not put it in a bag while it is awake.")
             }
 
             Section {

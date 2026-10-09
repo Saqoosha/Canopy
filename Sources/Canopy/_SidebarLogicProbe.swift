@@ -7155,7 +7155,7 @@ enum SidebarLogicProbe {
 
         // MARK: - Sleep guard (see SleepGuardPolicy)
         do {
-            let floor = SleepGuardPolicy.batteryFloorPercent
+            let floor = SleepGuardPolicy.defaultBatteryFloorPercent
             func hold(_ enabled: Bool, _ working: Int, _ power: PowerSource) -> Bool {
                 SleepGuardPolicy.decide(enabled: enabled, workingSessions: working, power: power).hold
             }
@@ -7168,6 +7168,20 @@ enum SidebarLogicProbe {
             record("SleepGuard holds below the floor while on AC power",
                    hold(true, 1, .battery(onBattery: false, percent: floor - 1)))
             record("SleepGuard does not hold when the battery cannot be read", !hold(true, 1, .unreadable))
+            func reach(_ enabled: Bool, _ power: PowerSource) -> Bool {
+                SleepGuardPolicy.decide(enabled: enabled, workingSessions: 0, stayReachable: true, power: power).hold
+            }
+            record("SleepGuard stay-reachable holds with no busy session", reach(true, .battery(onBattery: false, percent: 50)))
+            record("SleepGuard stay-reachable yields to the Settings switch", !reach(false, .noBattery))
+            let custom = floor + 30
+            func holdAt(_ percent: Int) -> Bool {
+                SleepGuardPolicy.decide(enabled: true, workingSessions: 1, batteryFloor: custom,
+                                        power: .battery(onBattery: true, percent: percent)).hold
+            }
+            record("SleepGuard honours a custom battery floor at the floor", holdAt(custom))
+            record("SleepGuard honours a custom battery floor just below it", !holdAt(custom - 1))
+            record("SleepGuard stay-reachable yields to the battery floor",
+                   !reach(true, .battery(onBattery: true, percent: floor - 1)))
 
             let battery: [String: Any] = [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSCurrentCapacityKey: 15,
                                            kIOPSMaxCapacityKey: 100, kIOPSPowerSourceStateKey: kIOPSBatteryPowerValue]
@@ -7192,6 +7206,15 @@ enum SidebarLogicProbe {
             record("SleepGuard session: a waiting question stops holding at the stale limit", !session(false, true, 0, stale))
             record("SleepGuard session: a local background task holds past the stale limit", session(false, false, 1, stale * 10))
             record("SleepGuard session: an idle session does not hold", !session(false, false, 0, 0))
+
+            func restore(_ lid: Bool?, _ lit: Int?) -> Bool {
+                SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: lid, litDisplays: lit)
+            }
+            record("SleepGuard clamshell: restores with the lid open", restore(false, 1))
+            record("SleepGuard clamshell: restores with the lid closed and nothing lit", restore(true, 0))
+            record("SleepGuard clamshell: defers with the lid closed and a display lit", !restore(true, 1))
+            record("SleepGuard clamshell: defers when the lid cannot be read and a display is lit", !restore(nil, 1))
+            record("SleepGuard clamshell: defers when the lid is closed and displays cannot be read", !restore(true, nil))
         }
 
         // MARK: - Prompt-cache keep-alive (see KeepAliveGate / KeepAliveCoordinator)
