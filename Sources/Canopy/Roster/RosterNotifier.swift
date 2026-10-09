@@ -89,7 +89,8 @@ enum RosterNotifier {
                      requestId: String? = nil, allowAlways: Bool = false,
                      answerable: Bool = true,
                      choices: [[String: Any]]? = nil,
-                     eventId: String? = nil) {
+                     eventId: String? = nil,
+                     sessionTitle: String? = nil) {
         guard let target = resolvedTarget() else { return }
         var payload: [String: Any] = [
             "machine": target.machineId,
@@ -111,6 +112,11 @@ enum RosterNotifier {
         }
         if let resumeId, !resumeId.isEmpty {
             payload["resumeId"] = resumeId
+        }
+        // The session's name, for the phone's History once the roster no longer
+        // lists the session (#293). `title` stays the banner title.
+        if let sessionTitle, !sessionTitle.isEmpty {
+            payload["sessionTitle"] = String(sessionTitle.prefix(SessionTitleGenerator.maxTitleLength))
         }
         if let requestId {
             payload["requestId"] = requestId

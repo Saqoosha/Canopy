@@ -6649,7 +6649,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                     answerable: toolName != "AskUserQuestion",
                                     choices: toolName == "AskUserQuestion"
                                         ? Self.askChoices(from: request["inputs"])
-                                        : nil)
+                                        : nil,
+                                    sessionTitle: sessionTitle)
             }
             refreshAskingState()
             return
@@ -8816,7 +8817,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 // The banner is cut; the conversation should
                                 // not be. See `RosterNotifier.post`.
                                 bodyFull: finalText,
-                                eventId: eventIdForThisTurn)
+                                eventId: eventIdForThisTurn,
+                                sessionTitle: sessionTitle)
         }
 
         if webView == nil, !uiClients.isEmpty {
