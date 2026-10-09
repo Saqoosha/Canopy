@@ -2616,6 +2616,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Counting them against any stream timestamp read 118 tok/s where the text streamed at
     /// 102. What is left is the rate the user watches the answer arrive at.
     private var outputRateStart: Date?
+    private var outputRateSawThinking = false
 
     /// True once a canopy-bridge frame supplied the context window; the
     /// `result` branch then leaves `contextMax` to it.
@@ -8290,26 +8291,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 data.clearCompactIndicator()
                 requestUsageUpdate()
                 outputRateStart = nil
-            }
-
-            // Output rate: `message_delta` carries the request's cumulative
-            // `output_tokens`, so the rate is known once per request, at its end.
-            if eventType == "content_block_start", outputRateStart == nil,
-               let blockType = (event["content_block"] as? [String: Any])?["type"] as? String,
-               blockType != "thinking", blockType != "redacted_thinking"
-            {
-                outputRateStart = Date()
-            }
-            if eventType == "message_delta",
-               let start = outputRateStart,
-               let usage = event["usage"] as? [String: Any],
-               let output = usage["output_tokens"] as? Int
-            {
-                outputRateStart = nil
-                let thinking = (usage["output_tokens_details"] as? [String: Any])?["thinking_tokens"] as? Int ?? 0
-                if let rate = Self.outputTokensPerSecond(tokens: output - thinking, seconds: Date().timeIntervalSince(start)) {
-                    data.outputTokensPerSecond = rate
-                }
+                outputRateSawThinking = false
             }
 
             // Neither `message_start` block in this branch is gated on
@@ -8347,6 +8329,29 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     let cacheCreate = usage["cache_creation_input_tokens"] as? Int ?? 0
                     let cacheRead = usage["cache_read_input_tokens"] as? Int ?? 0
                     data.contextUsed = input + cacheCreate + cacheRead
+                }
+            }
+
+            // Output rate: `message_delta` carries the request's cumulative
+            // `output_tokens`, so the rate is known once per request, at its end.
+            // The recap's fork is not the user's conversation.
+            if eventType == "content_block_start", !recapRequestInFlight,
+               let blockType = (event["content_block"] as? [String: Any])?["type"] as? String
+            {
+                if blockType == "thinking" || blockType == "redacted_thinking" {
+                    outputRateSawThinking = true
+                } else if outputRateStart == nil {
+                    outputRateStart = Date()
+                }
+            }
+            if eventType == "message_delta", let start = outputRateStart {
+                outputRateStart = nil
+                if let usage = event["usage"] as? [String: Any],
+                   let rate = Self.outputTokensPerSecond(
+                       usage: usage, sawThinking: outputRateSawThinking,
+                       seconds: Date().timeIntervalSince(start))
+                {
+                    data.outputTokensPerSecond = rate
                 }
             }
 
@@ -8443,12 +8448,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Output tokens per second for one API request, rounded; nil when the
-    /// request is too short to give a meaningful rate. A one-line tool call
-    /// streams a handful of tokens in a few milliseconds, and showing that as
-    /// "900 tok/s" would replace a real reading with noise, so such a request
-    /// leaves the previous figure standing.
-    nonisolated static func outputTokensPerSecond(tokens: Int, seconds: TimeInterval) -> Int? {
+    /// Non-thinking output tokens per second for one API request, rounded, from its
+    /// `message_delta` usage; nil when there is nothing trustworthy to show. A request
+    /// under 20 tokens or 0.5 s (a one-line tool call streams in milliseconds) would read
+    /// as noise, so it leaves the previous figure standing. So does a request that thought
+    /// without reporting `output_tokens_details.thinking_tokens`: thinking time is never in
+    /// `seconds`, so counting those tokens would inflate the rate by however much it thought.
+    nonisolated static func outputTokensPerSecond(usage: [String: Any], sawThinking: Bool,
+                                                  seconds: TimeInterval) -> Int? {
+        guard let output = usage["output_tokens"] as? Int else { return nil }
+        let thinking = (usage["output_tokens_details"] as? [String: Any])?["thinking_tokens"] as? Int
+        if sawThinking, thinking == nil { return nil }
+        let tokens = output - (thinking ?? 0)
         guard tokens >= 20, seconds >= 0.5 else { return nil }
         return Int((Double(tokens) / seconds).rounded())
     }

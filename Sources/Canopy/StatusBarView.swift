@@ -260,7 +260,7 @@ struct StatusBarView: View {
                     .monospacedDigit()
             }
             .foregroundStyle(.tertiary)
-            .help("Output speed of the last response: \(rate) tokens per second, thinking excluded, from its first visible block to its end")
+            .help("Output speed of the last measured response: \(rate) tokens per second, thinking excluded. Short requests (tool calls) are not measured")
         }
     }
 
