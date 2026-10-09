@@ -148,7 +148,7 @@ All three take optional `key`, `sessionId`, and `replyId`. An unknown
 `turnDone: false`. Prefer the `replyId` from `send_message`.
 
 `latest_reply` reports the last CONTROL turn, not turns typed on the Mac
-or phone.
+or phone. To read those too, use `history`.
 
 `state` is `idle`, `working`, `permission`, or `asking`. `asking` means an
 AskUserQuestion is waiting; `permission` means a tool permission prompt is
@@ -174,6 +174,28 @@ turn finished with none):
 `wait_turn` polls until `turnDone` or 60 seconds (0.5 s × 120), then returns
 the same object as `latest_reply`. The client's read timeout has to be
 longer than that; `canopyctl` uses 90 seconds.
+
+### `history`
+
+Read-only. The last turns of a session, read from its transcript, so turns
+typed in a pane or on the phone are there as well as control turns, and so
+are turns from before a daemon restart. Params: `key` and/or `sessionId`,
+optional `limit` (turns, default 10, at most 50). A session that is no longer
+open can still be read by `sessionId`. A session whose transcript is on
+another machine (SSH remote, another Mac) is refused.
+
+```json
+{"key":"…","sessionId":"…","state":"idle",
+ "turns":[{"prompt":"…","reply":"…","at":"2026-10-09T01:11:26.609Z","addressedTo":"Engineer"}]}
+```
+
+Turns are oldest first. `prompt` is what the person sent; it is absent on a
+turn no one started (the model answering a background task's
+notification). `reply` follows the same rule as `turn_done`'s `text`: from
+the addressed block to the end when there is one, else the turn's last text
+block. A turn still running has the text written so far, or `""`. Keep-alive
+refreshes and subagent text are left out. `state` and `key` are present only
+for an open session.
 
 ### `listen`
 
@@ -220,11 +242,13 @@ Result when an event matched:
 ```json
 {"cursor":"1a2b3c4d.42",
  "event":{"event":"turn_done","seq":42,"key":"…","sessionId":"…","title":"…","at":1791476315.48,
-          "state":"idle","replyId":"…","text":"Written for: Engineer\n…","addressedTo":"Engineer"}}
+          "state":"idle","prompt":"…","replyId":"…","text":"Written for: Engineer\n…","addressedTo":"Engineer"}}
 ```
 
-`replyId` is present when the turn came from `send_message` or an
-`initialPrompt`. `text` on `turn_done` is the turn's reply: from the addressed
+`prompt` on `turn_done` is what the person sent to start the turn, whether
+typed in a pane, on the phone or through the control API; it is absent on a
+turn no one started. `replyId` is present when the turn came from
+`send_message` or an `initialPrompt`. `text` on `turn_done` is the turn's reply: from the addressed
 block to the end when there is one, else the CLI's final `result` text, cut
 at 32,000 bytes with `textTruncated: true`. `permission` and `asking` carry
 `requestId`, `toolName`, and the rendered tool input as `text`, cut at about

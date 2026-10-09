@@ -80,6 +80,7 @@ final class ControlSession {
         case "wait_turn": waitTurn(request)
         case "pending_requests": pendingRequests(request)
         case "listen": listen(request)
+        case "history": history(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -222,6 +223,41 @@ final class ControlSession {
     }
 
     static let maxOpenListens = 16
+
+    /// The last turns of a session read from its transcript, whoever typed them.
+    /// The read runs off the main actor: a transcript can be tens of MB.
+    private func history(_ request: ControlProtocol.Request) {
+        let refs = ControlProtocol.sessionRefs(request.params)
+        guard !refs.isEmpty else { return fail(request, "key or sessionId is required") }
+        let limit = min(max(ControlProtocol.limit(request.params, default: ControlHistory.defaultLimit), 1),
+                        ControlHistory.maxLimit)
+        var result: [String: Any] = [:]
+        let path: String?
+        if let session = store.openSession(for: refs) {
+            switch session.origin {
+            case .remote, .mirror: return fail(request, "the transcript is on another machine")
+            case .local, .teleportedFrom: break
+            }
+            path = ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: session.origin.workingDirectory)
+            result["key"] = session.id.uuidString
+            result["sessionId"] = session.resumeId
+            result["state"] = session.shim?.controlStateWire ?? "idle"
+        } else if let sessionId = request.params["sessionId"] as? String, UUID(uuidString: sessionId) != nil {
+            // A closed session is still readable by its id.
+            path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId)
+            result["sessionId"] = sessionId
+        } else {
+            return fail(request, "no such session")
+        }
+        guard let path else { return fail(request, "no transcript for this session") }
+        Task { @MainActor [weak self] in
+            let turns = await Task.detached { ControlHistory.read(path: path, limit: limit) }.value
+            guard let self else { return }
+            guard let turns else { return self.fail(request, "transcript unreadable") }
+            result["turns"] = turns.map(\.wire)
+            self.reply(request, result)
+        }
+    }
 
     private func replyEvent(_ id: String, _ event: ControlEvent, cursor: ControlEventCursor) {
         logger.notice("control listen \(id, privacy: .public): \(event.kind.rawValue, privacy: .public) at \(cursor.wire, privacy: .public)")

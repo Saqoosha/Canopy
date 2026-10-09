@@ -6642,6 +6642,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
         turnTextBlocks = []
+        turnPrompt = nil
         outstandingDialogRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
@@ -8039,6 +8040,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// The current turn's main-conversation text blocks, by message id, for `turn_done`.
     private var turnTextBlocks: [(id: String, texts: [String])] = []
+    /// The prompt that started the current turn, for `turn_done`.
+    private var turnPrompt: String?
+
+    /// The prompt in a live `user` echo, the same rule `history` applies to the transcript.
+    nonisolated static func livePrompt(_ ioMsg: [String: Any]) -> String? {
+        guard ioMsg["parent_tool_use_id"] as? String == nil, ioMsg["isSynthetic"] as? Bool != true,
+              case .prompt(let text) = ClaudeSessionHistory.classifyUserRecord(ioMsg) else { return nil }
+        return text
+    }
 
     private func collectTurnText(_ ioMsg: [String: Any]) {
         guard let frame = Self.mainTurnText(ioMsg) else { return }
@@ -8077,6 +8087,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             detectTaskStopLaunch(in: ioMsg)
             isWorking = true
         case "user":
+            if let prompt = Self.livePrompt(ioMsg) { turnPrompt = prompt }
             processUserToolResults(ioMsg)
         case "result":
             // Capture before the `isWorking` gate: an immediate API error can
@@ -8121,7 +8132,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             let turn = ControlEvent.turnReply(blocks: turnTextBlocks.flatMap(\.texts), result: finalText ?? "")
             turnTextBlocks = []
             ControlEventLog.shared.record(.turnDone, session: boundSession, state: controlStateWire,
-                                          replyId: finishedControlReply, text: turn.text, addressedTo: turn.addressedTo)
+                                          replyId: finishedControlReply, text: turn.text, addressedTo: turn.addressedTo,
+                                          prompt: turnPrompt)
+            turnPrompt = nil
         default:
             break
         }

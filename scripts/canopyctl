@@ -63,6 +63,12 @@ def main(argv):
         if name not in ("stop", "pending"):
             sub_p.add_argument("--reply-id", dest="reply_id")
 
+    history_p = sub.add_parser(
+        "history", help="history: the last turns, pane and phone ones included"
+    )
+    add_session_flags(history_p, require=True)
+    history_p.add_argument("--limit", type=int, help="turns (default 10, max 50)")
+
     listen_p = sub.add_parser(
         "listen",
         help="listen: block until an event, print it; exit 0 event, "
@@ -140,6 +146,10 @@ def build(args):
                 params[key] = value
         return "open_session", params
     params = session_params(args)
+    if args.cmd == "history":
+        if args.limit is not None:
+            params["limit"] = args.limit
+        return "history", params
     if args.cmd == "listen":
         if args.events:
             params["events"] = list(args.events)

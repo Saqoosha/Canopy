@@ -34,6 +34,8 @@ nonisolated struct ControlEvent: Equatable, Sendable {
     var text: String?
     var textTruncated = false
     var addressedTo: String?
+    /// On `turn_done`: what the person sent to start the turn, wherever they typed it.
+    var prompt: String?
 
     var wire: [String: Any] {
         // A gap names no session and no event; its `state` slot carries the reason.
@@ -53,6 +55,7 @@ nonisolated struct ControlEvent: Equatable, Sendable {
             if textTruncated { out["textTruncated"] = true }
         }
         if let addressedTo { out["addressedTo"] = addressedTo }
+        if let prompt { out["prompt"] = prompt }
         return out
     }
 
@@ -267,23 +270,24 @@ final class ControlEventLog {
 
     func record(_ kind: ControlEvent.Kind, session: OpenSession?, state: String? = nil, replyId: String? = nil,
                 requestId: String? = nil, toolName: String? = nil, text: String? = nil, addressedTo: String? = nil,
-                textMaxBytes: Int = ControlEvent.textMaxBytes) {
+                prompt: String? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
         guard let session else {
             logger.notice("[control] \(kind.rawValue, privacy: .public) not recorded: no bound session")
             return
         }
         record(kind, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
                state: state, replyId: replyId, requestId: requestId, toolName: toolName, text: text,
-               addressedTo: addressedTo, textMaxBytes: textMaxBytes)
+               addressedTo: addressedTo, prompt: prompt, textMaxBytes: textMaxBytes)
     }
 
     func record(_ kind: ControlEvent.Kind, key: String, sessionId: String, title: String, state: String? = nil,
                 replyId: String? = nil, requestId: String? = nil, toolName: String? = nil, text: String? = nil,
-                addressedTo: String? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
+                addressedTo: String? = nil, prompt: String? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
         latestSeq += 1
         var event = ControlEvent(seq: latestSeq, kind: kind, key: key, sessionId: sessionId, title: title, at: Date(),
                                  state: state, replyId: replyId, requestId: requestId, toolName: toolName,
                                  addressedTo: addressedTo)
+        event.prompt = prompt.map { ShimProcess.truncatedNotificationBody($0, maxBytes: ControlEvent.textMaxBytes) }
         if let text {
             event.text = ShimProcess.truncatedNotificationBody(text, maxBytes: textMaxBytes)
             event.textTruncated = text.utf8.count > textMaxBytes
