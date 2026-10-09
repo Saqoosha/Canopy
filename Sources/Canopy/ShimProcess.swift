@@ -2605,9 +2605,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// model rather than only the launch one.
     private var cliResolvedModel: String = ""
 
-    /// When the current API request's first `content_block_delta` arrived; nil between
-    /// requests. The status bar's output rate is measured from here, not from
-    /// `message_start`, so time-to-first-token (prefill, queueing) does not count against it.
+    /// When the current API request's first non-thinking `content_block_start` arrived;
+    /// nil between requests. The status bar's output rate is the request's non-thinking
+    /// output tokens over the time from here to `message_delta`.
+    ///
+    /// Thinking is excluded from both sides because its time is not on the wire. Thinking
+    /// is not displayed, so its block streams one empty `thinking_delta`, and the block's
+    /// start, its delta and `message_start` all land within a fraction of a second of the
+    /// text block — measured on Opus 5.5 at effort high, 281 thinking tokens "took" 0.5 s.
+    /// Counting them against any stream timestamp read 118 tok/s where the text streamed at
+    /// 102. What is left is the rate the user watches the answer arrive at.
     private var outputRateStart: Date?
 
     /// True once a canopy-bridge frame supplied the context window; the
@@ -8287,7 +8294,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
             // Output rate: `message_delta` carries the request's cumulative
             // `output_tokens`, so the rate is known once per request, at its end.
-            if eventType == "content_block_delta", outputRateStart == nil {
+            if eventType == "content_block_start", outputRateStart == nil,
+               let blockType = (event["content_block"] as? [String: Any])?["type"] as? String,
+               blockType != "thinking", blockType != "redacted_thinking"
+            {
                 outputRateStart = Date()
             }
             if eventType == "message_delta",
@@ -8296,7 +8306,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                let output = usage["output_tokens"] as? Int
             {
                 outputRateStart = nil
-                if let rate = Self.outputTokensPerSecond(tokens: output, seconds: Date().timeIntervalSince(start)) {
+                let thinking = (usage["output_tokens_details"] as? [String: Any])?["thinking_tokens"] as? Int ?? 0
+                if let rate = Self.outputTokensPerSecond(tokens: output - thinking, seconds: Date().timeIntervalSince(start)) {
                     data.outputTokensPerSecond = rate
                 }
             }
