@@ -59,8 +59,11 @@ enum ControlProtocol {
         ["type": "response", "id": id, "result": result]
     }
 
-    static func errorResponse(id: String, message: String) -> [String: Any] {
-        ["type": "response", "id": id, "error": message]
+    /// `code` is a stable machine-readable `errorCode` beside the human `error`; few verbs set one.
+    static func errorResponse(id: String, message: String, code: String? = nil) -> [String: Any] {
+        var response: [String: Any] = ["type": "response", "id": id, "error": message]
+        if let code { response["errorCode"] = code }
+        return response
     }
 
     struct DirEntry: Equatable {
@@ -159,6 +162,74 @@ enum ControlProtocol {
         return .success(OpenParams(cwd: cwd, model: nonEmpty("model"), effort: nonEmpty("effort"),
                                    permissionMode: mode, worktreeBranch: nonEmpty("worktreeBranch"),
                                    initialPrompt: nonEmpty("initialPrompt")))
+    }
+
+    /// `open_session` with `resumeSessionId`: continue a session that is not open, or name the
+    /// one that is. Everything but the id is optional and overrides what the session last ran with.
+    struct ResumeParams: Equatable {
+        let sessionId: String
+        /// Must be a folder the transcript is filed under; checked where the transcript is looked up.
+        let cwd: String?
+        let model: String?
+        let effort: String?
+        let permissionMode: PermissionMode?
+        let initialPrompt: String?
+    }
+
+    /// A refused resume: `message` for people, `code` (`errorCode` on the wire) for the caller to branch on.
+    struct ResumeError: Error, Equatable {
+        let message: String
+        let code: String
+        init(_ message: String, code: String) {
+            self.message = message
+            self.code = code
+        }
+    }
+
+    /// Nil when the request does not ask for a resume (`open_session` then means a new session).
+    static func parseResumeParams(_ params: [String: Any], allowBypass: Bool) -> Result<ResumeParams, ResumeError>? {
+        guard let raw = params["resumeSessionId"] else { return nil }
+        guard let sessionId = raw as? String, UUID(uuidString: sessionId) != nil else {
+            return .failure(ResumeError("resumeSessionId is not a session id", code: "invalid_session_id"))
+        }
+        func nonEmpty(_ key: String) -> String? {
+            (params[key] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        // A new worktree has no transcript, so there is nothing in it to continue.
+        guard nonEmpty("worktreeBranch") == nil else {
+            return .failure(ResumeError("worktreeBranch cannot be combined with resumeSessionId", code: "worktree_not_supported"))
+        }
+        let cwd = nonEmpty("cwd")
+        if let cwd {
+            var isDirectory: ObjCBool = false
+            guard cwd.hasPrefix("/") else { return .failure(ResumeError("cwd must be absolute", code: "invalid_cwd")) }
+            guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
+                return .failure(ResumeError("not a folder", code: "folder_missing"))
+            }
+        }
+        var mode: PermissionMode?
+        if let raw = params["permissionMode"] as? String {
+            guard let parsed = PermissionMode(rawValue: raw) else {
+                return .failure(ResumeError("unknown permission mode", code: "invalid_permission_mode"))
+            }
+            if parsed == .bypassPermissions, !allowBypass {
+                return .failure(ResumeError("bypass permissions is off on this Mac", code: "bypass_disabled"))
+            }
+            mode = parsed
+        }
+        return .success(ResumeParams(sessionId: sessionId, cwd: cwd, model: nonEmpty("model"), effort: nonEmpty("effort"),
+                                     permissionMode: mode, initialPrompt: nonEmpty("initialPrompt")))
+    }
+
+    /// The model and permission mode a resumed session starts with: the request's, else what the
+    /// transcript last recorded. An inherited `bypassPermissions` the Mac's opt-in no longer allows
+    /// is dropped (nil: this Mac's default mode) rather than refused, since nobody asked for it;
+    /// an explicit one was already refused by `parseResumeParams`.
+    static func resumedLaunch(inherited: ClaudeSessionHistory.LaunchSettings, requested: ResumeParams,
+                              allowBypass: Bool) -> ClaudeSessionHistory.LaunchSettings {
+        var mode = requested.permissionMode ?? inherited.permissionMode
+        if mode == .bypassPermissions, !allowBypass { mode = nil }
+        return ClaudeSessionHistory.LaunchSettings(model: requested.model ?? inherited.model, permissionMode: mode)
     }
 
     enum SessionRef: Equatable {

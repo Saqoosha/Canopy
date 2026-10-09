@@ -597,29 +597,17 @@ final class MirrorConnection: MirrorSink {
             if store.openSessions.contains(where: { $0.resumeId == sessionId }) {
                 // Open but dormant: it already knows its own folder.
                 shim = store.startHeadlessSession(resumeId: sessionId)
-            } else if let localCwd, Self.isSessionIdShaped(sessionId),
-                      ClaudeSessionHistory.isFiled(sessionId: sessionId, under: URL(fileURLWithPath: localCwd)) {
-                // This Mac's GUI names the folder it resolved, e.g. the checkout a removed
-                // worktree's transcript was just moved to; Recents may predate the move.
-                shim = store.startHeadlessSession(directory: URL(fileURLWithPath: localCwd), resumeId: sessionId,
-                                                  isExistingTranscript: true,
-                                                  title: store.recents.first(where: { $0.id == sessionId })?.title)
-            } else if let entry = store.recents.first(where: { $0.id == sessionId }), entry.canOpen,
-                      let directory = ClaudeSessionHistory.directoryToOpen(
-                          entry, knownCheckouts: store.rescueCandidates) {
-                shim = store.startHeadlessSession(directory: directory, resumeId: sessionId,
-                                                  isExistingTranscript: true, title: entry.title)
-            } else if !store.recents.contains(where: { $0.id == sessionId }), Self.isSessionIdShaped(sessionId),
-                      let path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId),
-                      let cwd = ClaudeSessionHistory.cwd(atPath: path),
-                      FileManager.default.fileExists(atPath: cwd) {
-                // Recents is refreshed asynchronously and may not hold a session that was just
-                // created, teleported or restored. One Recents lists and refuses (`canOpen`) stays refused.
-                shim = store.startHeadlessSession(directory: URL(fileURLWithPath: cwd), resumeId: sessionId,
-                                                  isExistingTranscript: true, title: nil)
             } else {
-                logger.error("[mirror-server] open refused: \(sessionId, privacy: .public) is not a session here")
-                return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
+                // This Mac's GUI names the folder it resolved (`localCwd`). The control API's
+                // `open_session` resume goes through the same resolution.
+                switch store.resolveClosedSession(sessionId: sessionId, localCwd: localCwd) {
+                case .success(let target):
+                    shim = store.startHeadlessSession(directory: target.directory, resumeId: sessionId,
+                                                      isExistingTranscript: true, title: target.title)
+                case .failure(let failure):
+                    logger.error("[mirror-server] open refused: \(sessionId, privacy: .public) is not a session here (\(failure.code, privacy: .public))")
+                    return .failure(OpenFailure(MirrorOpenRequest.notOpenable))
+                }
             }
         case .new(let cwd, let options):
             if let refusal = options.refusal(allowBypass: server?.bypassAllowed() ?? false) {

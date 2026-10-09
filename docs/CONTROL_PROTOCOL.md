@@ -54,7 +54,9 @@ After `hello_ok`, the client sends requests and gets one response per `id`.
 {"type":"response","id":"<same>","error":"<message>"}
 ```
 
-`id` and `verb` must be non-empty. Omitted `params` is `{}`.
+`id` and `verb` must be non-empty. Omitted `params` is `{}`. Some errors
+also carry a stable `errorCode` to branch on (so far only `open_session`
+with `resumeSessionId`); branch on it rather than on `error`'s wording.
 
 A session is named by `key` (the daemon's `OpenSession` id) and/or
 `sessionId` (the resume id). Both may be sent; `key` is tried first.
@@ -80,6 +82,53 @@ without a webview and a later attach still has a cached init.
 
 The result is `{sessionId, key, cwd}`, plus `replyId` when `initialPrompt`
 was given. Pass that `replyId` to `wait_turn` to wait for the first answer.
+
+#### Continuing a session
+
+`open_session` with `resumeSessionId` continues an existing conversation
+instead of starting one: a session that was closed, or that a daemon restart
+dropped. The CLI is started with `--resume`, so the model has the whole
+conversation. Find the id with `list_sessions` `scope: "recent"` (each row's
+`resumeId`) or `history`.
+
+The folder is the session's own, resolved the way the GUI reopens a closed
+row. It handles a session that moved into a worktree, and a removed
+worktree whose checkout is known. `cwd` is optional. When given, it must be
+a folder the transcript is filed under. `model` and `permissionMode` default
+to what the transcript last recorded; pass them to override. `effort` is not
+recorded, so it uses the CLI default unless given. An inherited
+`bypassPermissions` becomes this Mac's default mode while the bypass gate is
+off. `worktreeBranch` cannot be combined with `resumeSessionId`.
+`initialPrompt` is sent as the next turn.
+
+The result is `{sessionId, key, cwd, alreadyOpen, permissionMode}`, plus
+`model` when one is set and `replyId` when `initialPrompt` was given. If the
+session is already open, nothing new is started: `alreadyOpen` is true and
+`key` names the open session. `cwd`, `model`, `effort` and `permissionMode`
+are ignored then. An open session that is not running is started as itself.
+An `initialPrompt` to a session that is already running goes through
+`send_message`'s queue, so the result also carries that verb's `disposition`
+(and `reason` / `reasonCode` when `queued` or `refused`).
+
+A refusal is an error response with an `errorCode` beside `error`:
+
+| `errorCode` | Meaning |
+|---|---|
+| `invalid_session_id` | `resumeSessionId` is not a session id (UUID) |
+| `no_transcript` | No transcript for this id on this Mac (an SSH remote session's is on the other machine) |
+| `folder_missing` | The session's folder, or the given `cwd`, is gone, and no checkout was found to reopen it in |
+| `cwd_mismatch` | The transcript is not filed under the given `cwd` |
+| `invalid_cwd` | `cwd` is not an absolute path |
+| `worktree_not_supported` | `worktreeBranch` was given |
+| `invalid_permission_mode` | Unknown `permissionMode` |
+| `bypass_disabled` | `bypassPermissions` was asked for while the bypass gate is off |
+| `start_failed` | The session could not be started |
+
+```sh
+canopyctl list --scope recent --query ghostline
+canopyctl resume <resumeId> --initial-prompt "Next: …"   # same as: open --resume <resumeId>
+canopyctl wait --key <key> --reply-id <replyId>
+```
 
 `stop_session` and `restart_session` take `key` and/or `sessionId`.
 

@@ -934,6 +934,56 @@ enum ClaudeSessionHistory {
         return (found, end)
     }
 
+    /// The model and permission mode a session last ran with, as its transcript records them:
+    /// `message.model` on the last assistant record (`<synthetic>`, the CLI's id for a reply no
+    /// model wrote, is skipped) and `permissionMode` on the last user record. What the control
+    /// API's resume inherits. Effort is not recorded in a transcript.
+    struct LaunchSettings: Equatable {
+        var model: String?
+        var permissionMode: PermissionMode?
+    }
+
+    /// `lastLaunchSettings(in:)` over the transcript's tail. Both fields are on every turn, so
+    /// the tail holds them; a window that found neither is widened once before giving up.
+    static func lastLaunchSettings(atPath path: String) -> LaunchSettings {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return LaunchSettings() }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        var found = LaunchSettings()
+        for window: UInt64 in [1 << 20, 8 << 20] {
+            let start = size > window ? size - window : 0
+            guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { break }
+            found = lastLaunchSettings(in: data, startsAtLineBoundary: start == 0)
+            if (found.model != nil && found.permissionMode != nil) || start == 0 { break }
+        }
+        return found
+    }
+
+    /// The pure half of `lastLaunchSettings(atPath:)`. A window that starts mid-file drops its
+    /// first line, which is a fragment; an unterminated last line is parsed, since it is whole
+    /// when the CLI died mid-write and a fragment never parses.
+    static func lastLaunchSettings(in data: Data, startsAtLineBoundary: Bool) -> LaunchSettings {
+        var lines = data.split(separator: 0x0A, omittingEmptySubsequences: false)
+        if !startsAtLineBoundary, !lines.isEmpty { lines.removeFirst() }
+        var found = LaunchSettings()
+        for line in lines.reversed() {
+            if found.model != nil && found.permissionMode != nil { break }
+            guard !line.isEmpty, let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            switch json["type"] as? String {
+            case "assistant" where found.model == nil:
+                if let model = (json["message"] as? [String: Any])?["model"] as? String,
+                   !model.isEmpty, model != "<synthetic>" {
+                    found.model = model
+                }
+            case "user" where found.permissionMode == nil:
+                if let raw = json["permissionMode"] as? String { found.permissionMode = PermissionMode(rawValue: raw) }
+            default:
+                break
+            }
+        }
+        return found
+    }
+
     /// Whether a session whose resolved project directory is GONE should still
     /// appear in the list. `loadAllSessions` otherwise drops any session whose
     /// project path fails `fileExists`, which hid readable sessions launched in

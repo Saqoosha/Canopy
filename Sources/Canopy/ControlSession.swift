@@ -93,20 +93,25 @@ final class ControlSession {
             fail(request, error.message)
         case .success(let message):
             guard let session = requestedSession(request) else { return }
-            let replyId = UUID().uuidString.lowercased()
             guard let shim = session.shim else {
-                reply(request, ControlProtocol.replyWire(Self.notRunningRefusal, replyId: replyId))
+                reply(request, ControlProtocol.replyWire(Self.notRunningRefusal, replyId: UUID().uuidString.lowercased()))
                 return
             }
-            // No-op when a client already holds a channel; opens one when the session has none.
-            shim.launchHeadlessChannel()
-            shim.noteControlReply(replyId)
-            let disposition = shim.submitPhoneReply(text: message.text, replyId: replyId)
-            if case .refused = disposition {
-                shim.forgetControlReply(replyId)
-            }
-            reply(request, ControlProtocol.replyWire(disposition, replyId: replyId))
+            reply(request, submitControlMessage(message.text, to: shim))
         }
+    }
+
+    /// `send_message`'s delivery, also used by a resume that names a session already running.
+    private func submitControlMessage(_ text: String, to shim: ShimProcess) -> [String: Any] {
+        let replyId = UUID().uuidString.lowercased()
+        // No-op when a client already holds a channel; opens one when the session has none.
+        shim.launchHeadlessChannel()
+        shim.noteControlReply(replyId)
+        let disposition = shim.submitPhoneReply(text: text, replyId: replyId)
+        if case .refused = disposition {
+            shim.forgetControlReply(replyId)
+        }
+        return ControlProtocol.replyWire(disposition, replyId: replyId)
     }
 
     private func sessionStatus(_ request: ControlProtocol.Request) {
@@ -349,6 +354,13 @@ final class ControlSession {
     }
 
     private func openSession(_ request: ControlProtocol.Request) {
+        if let resume = ControlProtocol.parseResumeParams(request.params, allowBypass: allowBypass()) {
+            switch resume {
+            case .success(let params): resumeSession(request, params)
+            case .failure(let error): fail(request, error.message, code: error.code)
+            }
+            return
+        }
         let params: ControlProtocol.OpenParams
         switch ControlProtocol.parseOpenParams(request.params, allowBypass: allowBypass()) {
         case .success(let parsed): params = parsed
@@ -388,6 +400,90 @@ final class ControlSession {
             shim.launchHeadlessChannel()
         }
         reply(request, result)
+    }
+
+    /// `open_session` with `resumeSessionId`. A session already open is named, never opened twice;
+    /// one that is not is resolved the way reopening a closed row in the GUI is
+    /// (`SessionStore.resolveClosedSession`) and started headless with `--resume`.
+    private func resumeSession(_ request: ControlProtocol.Request, _ params: ControlProtocol.ResumeParams) {
+        if let session = store.openSession(for: [.resumeId(params.sessionId)]) {
+            if let shim = session.shim, shim.isLive {
+                var result = resumeResult(session, alreadyOpen: true)
+                if let prompt = params.initialPrompt {
+                    result.merge(submitControlMessage(prompt, to: shim)) { _, new in new }
+                }
+                return reply(request, result)
+            }
+            // Open but not running (launch-restored, or its shim died): started as itself.
+            guard let shim = store.startHeadlessSession(resumeId: session.resumeId) else {
+                return fail(request, MirrorOpenRequest.startFailed, code: "start_failed")
+            }
+            return finishResume(request, session: session, shim: shim, prompt: params.initialPrompt, alreadyOpen: true)
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Resolution reads Recents, which also knows the checkout a removed worktree reopens in.
+            if store.recents.isEmpty { await Self.refreshRecents(store).value }
+            guard !stopped else { return }
+            if store.openSession(for: [.resumeId(params.sessionId)]) != nil { return resumeSession(request, params) }
+            if let cwd = params.cwd, !ClaudeSessionHistory.isFiled(sessionId: params.sessionId, under: URL(fileURLWithPath: cwd)) {
+                return fail(request, "the session's transcript is not filed under cwd", code: "cwd_mismatch")
+            }
+            let target: (directory: URL, title: String?)
+            switch store.resolveClosedSession(sessionId: params.sessionId, localCwd: params.cwd) {
+            case .success(let resolved): target = resolved
+            case .failure(let failure): return fail(request, Self.message(for: failure), code: failure.code)
+            }
+            let sessionId = params.sessionId
+            // The read runs off the main actor, like `history`'s: a transcript can be tens of MB.
+            let path = ShimProcess.jsonlPath(sessionId: sessionId, workingDirectory: target.directory)
+            let inherited = await Task.detached {
+                path.map(ClaudeSessionHistory.lastLaunchSettings(atPath:)) ?? .init()
+            }.value
+            guard !stopped else { return }
+            if store.openSession(for: [.resumeId(sessionId)]) != nil { return resumeSession(request, params) }
+            let launch = ControlProtocol.resumedLaunch(inherited: inherited, requested: params, allowBypass: allowBypass())
+            let options = SessionStore.HeadlessOptions(model: launch.model, effort: params.effort,
+                                                       permissionMode: launch.permissionMode)
+            guard let shim = store.startHeadlessSession(directory: target.directory, resumeId: sessionId,
+                                                        isExistingTranscript: true, title: target.title, options: options),
+                  let session = shim.boundSession else {
+                return fail(request, MirrorOpenRequest.startFailed, code: "start_failed")
+            }
+            logger.notice("control open_session: resumed \(sessionId, privacy: .public)")
+            finishResume(request, session: session, shim: shim, prompt: params.initialPrompt, alreadyOpen: false)
+        }
+    }
+
+    /// A resumed session's first turn goes the way `open_session`'s `initialPrompt` does: held on
+    /// the session until the headless `launch_claude` assigns a channel.
+    private func finishResume(_ request: ControlProtocol.Request, session: OpenSession, shim: ShimProcess,
+                              prompt: String?, alreadyOpen: Bool) {
+        var result = resumeResult(session, alreadyOpen: alreadyOpen)
+        if let prompt, let launchPrompt = LaunchPrompt.make(text: prompt, images: []) {
+            let replyId = UUID().uuidString.lowercased()
+            session.pendingInitialPrompt = launchPrompt
+            session.pendingInitialPromptReplyId = replyId
+            result["replyId"] = replyId
+            shim.launchHeadlessChannel()
+        }
+        reply(request, result)
+    }
+
+    private func resumeResult(_ session: OpenSession, alreadyOpen: Bool) -> [String: Any] {
+        var result: [String: Any] = ["sessionId": session.resumeId, "key": session.id.uuidString,
+                                     "cwd": session.origin.workingDirectory.path, "alreadyOpen": alreadyOpen,
+                                     "permissionMode": session.permissionMode.rawValue]
+        if let model = session.model { result["model"] = model }
+        return result
+    }
+
+    static func message(for failure: SessionStore.ResumeFailure) -> String {
+        switch failure {
+        case .invalidSessionId: "resumeSessionId is not a session id"
+        case .noTranscript: "no transcript for this session on this Mac"
+        case .folderMissing: "the session's folder is gone"
+        }
     }
 
     private func stopSession(_ request: ControlProtocol.Request) {
@@ -543,9 +639,9 @@ final class ControlSession {
         send(ControlProtocol.response(id: request.id, result: result))
     }
 
-    private func fail(_ request: ControlProtocol.Request, _ message: String) {
+    private func fail(_ request: ControlProtocol.Request, _ message: String, code: String? = nil) {
         guard !stopped else { return }
         logger.notice("control \(request.verb, privacy: .public) refused: \(message, privacy: .public)")
-        send(ControlProtocol.errorResponse(id: request.id, message: message))
+        send(ControlProtocol.errorResponse(id: request.id, message: message, code: code))
     }
 }

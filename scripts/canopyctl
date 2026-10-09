@@ -37,15 +37,33 @@ def main(argv):
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("list", help="list_sessions")
+    list_p = sub.add_parser("list", help="list_sessions")
+    list_p.add_argument(
+        "--scope",
+        choices=("open", "recent"),
+        help="recent: closed sessions; each row's resumeId is what resume takes",
+    )
+    list_p.add_argument("--query", help="with --scope recent: title or project")
+    list_p.add_argument("--limit", type=int)
 
-    open_p = sub.add_parser("open", help="open_session")
-    open_p.add_argument("--cwd", required=True)
-    open_p.add_argument("--model")
-    open_p.add_argument("--effort")
-    open_p.add_argument("--permission-mode", dest="permission_mode")
+    open_p = sub.add_parser(
+        "open", help="open_session (--resume continues a session that is not open)"
+    )
+    open_p.add_argument("--cwd", help="required unless --resume")
+    open_p.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="continue this session (resumeSessionId); returns its key if already open",
+    )
+    add_open_flags(open_p)
     open_p.add_argument("--worktree-branch", dest="worktree_branch")
-    open_p.add_argument("--initial-prompt", dest="initial_prompt")
+
+    resume_p = sub.add_parser(
+        "resume", help="open_session with resumeSessionId: continue a session"
+    )
+    resume_p.add_argument("session_id", metavar="SESSION_ID")
+    resume_p.add_argument("--cwd", help="must hold the transcript; default: its own")
+    add_open_flags(resume_p)
 
     send_p = sub.add_parser("send", help="send_message")
     add_session_flags(send_p, require=True)
@@ -123,6 +141,13 @@ class HelloRefused(Exception):
     """The daemon answered hello_error: retrying will not help."""
 
 
+def add_open_flags(parser):
+    parser.add_argument("--model")
+    parser.add_argument("--effort")
+    parser.add_argument("--permission-mode", dest="permission_mode")
+    parser.add_argument("--initial-prompt", dest="initial_prompt")
+
+
 def add_session_flags(parser, require):
     parser.add_argument("--key")
     parser.add_argument("--session-id", dest="session_id")
@@ -131,14 +156,26 @@ def add_session_flags(parser, require):
 
 def build(args):
     if args.cmd == "list":
-        return "list_sessions", {}
-    if args.cmd == "open":
-        params = {"cwd": args.cwd}
+        params = {}
+        if args.scope:
+            params["scope"] = args.scope
+        if args.query:
+            params["query"] = args.query
+        if args.limit is not None:
+            params["limit"] = args.limit
+        return "list_sessions", params
+    if args.cmd in ("open", "resume"):
+        resume = args.session_id if args.cmd == "resume" else args.resume
+        if not resume and not args.cwd:
+            raise SystemExit("canopyctl: open needs --cwd or --resume")
+        params = {}
         optional = {
+            "resumeSessionId": resume,
+            "cwd": args.cwd,
             "model": args.model,
             "effort": args.effort,
             "permissionMode": args.permission_mode,
-            "worktreeBranch": args.worktree_branch,
+            "worktreeBranch": getattr(args, "worktree_branch", None),
             "initialPrompt": args.initial_prompt,
         }
         for key, value in optional.items():

@@ -1916,6 +1916,108 @@ enum SidebarLogicProbe {
                 record("control open: an unknown permission mode is refused, not defaulted",
                        ControlProtocol.parseOpenParams(["cwd": controlDir.path, "permissionMode": "yolo"], allowBypass: false)
                            == .failure(ControlProtocol.ControlError("unknown permission mode")))
+                // open_session with resumeSessionId.
+                let resumeId = UUID().uuidString.lowercased()
+                func resumeCode(_ params: [String: Any], allowBypass: Bool = false) -> String? {
+                    if case .failure(let error)? = ControlProtocol.parseResumeParams(params, allowBypass: allowBypass) { return error.code }
+                    return nil
+                }
+                record("control resume: no resumeSessionId means a plain open",
+                       ControlProtocol.parseResumeParams(["cwd": controlDir.path], allowBypass: false) == nil)
+                record("control resume: all fields parse, cwd optional",
+                       (try? ControlProtocol.parseResumeParams(["resumeSessionId": resumeId, "cwd": controlDir.path, "model": "opus",
+                                                                "effort": "high", "permissionMode": "plan", "initialPrompt": "go on"],
+                                                               allowBypass: false)?.get())
+                           == ControlProtocol.ResumeParams(sessionId: resumeId, cwd: controlDir.path, model: "opus", effort: "high",
+                                                           permissionMode: .plan, initialPrompt: "go on")
+                           && (try? ControlProtocol.parseResumeParams(["resumeSessionId": resumeId], allowBypass: false)?.get())?.cwd == nil)
+                record("control resume: a non-UUID id is invalid_session_id, never joined into a path",
+                       resumeCode(["resumeSessionId": "../../etc/passwd"]) == "invalid_session_id"
+                           && resumeCode(["resumeSessionId": 42]) == "invalid_session_id")
+                record("control resume: worktreeBranch is worktree_not_supported",
+                       resumeCode(["resumeSessionId": resumeId, "worktreeBranch": "fix-x"]) == "worktree_not_supported")
+                record("control resume: a relative cwd is invalid_cwd, a missing one folder_missing",
+                       resumeCode(["resumeSessionId": resumeId, "cwd": "rel/path"]) == "invalid_cwd"
+                           && resumeCode(["resumeSessionId": resumeId, "cwd": controlDir.appendingPathComponent("nope").path]) == "folder_missing")
+                record("control resume: an explicit bypass is refused while the opt-in is off, allowed when on",
+                       resumeCode(["resumeSessionId": resumeId, "permissionMode": "bypassPermissions"]) == "bypass_disabled"
+                           && resumeCode(["resumeSessionId": resumeId, "permissionMode": "bypassPermissions"], allowBypass: true) == nil
+                           && resumeCode(["resumeSessionId": resumeId, "permissionMode": "yolo"]) == "invalid_permission_mode")
+                let inherited = ClaudeSessionHistory.LaunchSettings(model: "claude-opus-5-5", permissionMode: .auto)
+                let bareResume = try! ControlProtocol.parseResumeParams(["resumeSessionId": resumeId], allowBypass: true)!.get()
+                let overriding = try! ControlProtocol.parseResumeParams(["resumeSessionId": resumeId, "model": "sonnet",
+                                                                         "permissionMode": "plan"], allowBypass: false)!.get()
+                record("control resume: the transcript's model and mode are the default",
+                       ControlProtocol.resumedLaunch(inherited: inherited, requested: bareResume, allowBypass: false) == inherited)
+                record("control resume: requested model and mode override the inherited ones",
+                       ControlProtocol.resumedLaunch(inherited: inherited, requested: overriding, allowBypass: false)
+                           == ClaudeSessionHistory.LaunchSettings(model: "sonnet", permissionMode: .plan))
+                let inheritedBypass = ClaudeSessionHistory.LaunchSettings(model: nil, permissionMode: .bypassPermissions)
+                record("control resume: an inherited bypass is dropped when the opt-in is off, kept when on",
+                       ControlProtocol.resumedLaunch(inherited: inheritedBypass, requested: bareResume, allowBypass: false).permissionMode == nil
+                           && ControlProtocol.resumedLaunch(inherited: inheritedBypass, requested: bareResume, allowBypass: true).permissionMode == .bypassPermissions)
+                let tail = """
+                {"type":"user","permissionMode":"plan","message":{"role":"user","content":"a"}}
+                {"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[]}}
+                {"type":"user","permissionMode":"acceptEdits","message":{"role":"user","content":"b"}}
+                {"type":"assistant","message":{"model":"claude-opus-5-5","content":[]}}
+                {"type":"assistant","message":{"model":"<synthetic>","content":[]}}
+                {"type":"system","subtype":"status"}
+                """
+                record("control resume: the last real model and the last user permission mode are read",
+                       ClaudeSessionHistory.lastLaunchSettings(in: Data(tail.utf8), startsAtLineBoundary: true)
+                           == ClaudeSessionHistory.LaunchSettings(model: "claude-opus-5-5", permissionMode: .acceptEdits))
+                let fragment = "ermissionMode\":\"bypassPermissions\"}\n{\"type\":\"assistant\",\"message\":{\"model\":\"m1\"}}"
+                record("control resume: a mid-file window drops its first line; an unterminated last line is read",
+                       ClaudeSessionHistory.lastLaunchSettings(in: Data(("{\"type\":\"user\",\"permissionMode\":\"plan\"}\n" + fragment).utf8),
+                                                               startsAtLineBoundary: false)
+                           == ClaudeSessionHistory.LaunchSettings(model: "m1", permissionMode: nil)
+                           && ClaudeSessionHistory.lastLaunchSettings(in: Data("{\"type\":\"user\",\"permissionMode\":\"plan\"}\n".utf8),
+                                                                      startsAtLineBoundary: true).permissionMode == .plan)
+                // resolveClosedSession, with Recents empty: the transcript scan path.
+                let resolver = SessionStore()
+                let resumeFolder = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".claude/projects/-canopy-probe-resume-\(resumeId)")
+                try? FileManager.default.createDirectory(at: resumeFolder, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: resumeFolder) }
+                func plant(_ id: String, cwd: String) {
+                    try? Data("{\"type\":\"user\",\"cwd\":\"\(cwd)\",\"sessionId\":\"\(id)\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n".utf8)
+                        .write(to: resumeFolder.appendingPathComponent("\(id).jsonl"))
+                }
+                func resolved(_ id: String, localCwd: String? = nil) -> Result<String, SessionStore.ResumeFailure> {
+                    resolver.resolveClosedSession(sessionId: id, localCwd: localCwd).map(\.directory.path)
+                }
+                let liveId = UUID().uuidString.lowercased()
+                let goneId = UUID().uuidString.lowercased()
+                plant(liveId, cwd: controlDir.path)
+                plant(goneId, cwd: controlDir.appendingPathComponent("removed-\(goneId)").path)
+                record("control resume: a malformed id is invalid_session_id",
+                       resolved("not-a-uuid") == .failure(.invalidSessionId))
+                record("control resume: an id with no transcript here is no_transcript",
+                       resolved(UUID().uuidString.lowercased()) == .failure(.noTranscript))
+                record("control resume: a transcript whose folder exists resolves to its cwd",
+                       resolved(liveId) == .success(controlDir.path))
+                record("control resume: a transcript whose folder is gone is folder_missing",
+                       resolved(goneId) == .failure(.folderMissing))
+                record("control resume: a localCwd the transcript is not filed under is only a hint",
+                       resolved(liveId, localCwd: FileManager.default.temporaryDirectory.path) == .success(controlDir.path)
+                           && resolved(goneId, localCwd: FileManager.default.temporaryDirectory.path) == .failure(.folderMissing))
+                // Filed under localCwd's own project folder: localCwd wins over the header's (gone) cwd,
+                // which is how a removed worktree's transcript moved to its checkout reopens there.
+                let filedFolder = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".claude/projects")
+                    .appendingPathComponent(ClaudeSessionHistory.encodedFolderCandidates(for: controlDir.path)[0])
+                let filedFolderExisted = FileManager.default.fileExists(atPath: filedFolder.path)
+                try? FileManager.default.createDirectory(at: filedFolder, withIntermediateDirectories: true)
+                let filedTranscript = filedFolder.appendingPathComponent("\(goneId).jsonl")
+                try? FileManager.default.copyItem(at: resumeFolder.appendingPathComponent("\(goneId).jsonl"), to: filedTranscript)
+                record("control resume: a localCwd the transcript is filed under is used",
+                       resolved(goneId, localCwd: controlDir.path) == .success(controlDir.path))
+                try? FileManager.default.removeItem(at: filedTranscript)
+                if !filedFolderExisted { try? FileManager.default.removeItem(at: filedFolder) }
+                record("control resume: errorCode rides beside error only when given",
+                       ControlProtocol.errorResponse(id: "1", message: "m", code: "no_transcript")["errorCode"] as? String == "no_transcript"
+                           && ControlProtocol.errorResponse(id: "1", message: "m")["errorCode"] == nil)
                 record("control send: text is trimmed",
                        ControlProtocol.parseSendMessage(["text": "  hello  "])
                            == .success(ControlProtocol.SendMessage(text: "hello")))
