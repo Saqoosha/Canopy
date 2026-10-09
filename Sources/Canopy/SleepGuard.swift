@@ -74,6 +74,8 @@ final class SleepGuard {
         timer = nil
         if Self.active === self { Self.active = nil }
         releaseAssertions()
+        // A notice in flight cannot hold this up: nothing will run once the process exits.
+        releaseNoticeInFlight = false
         // Only with the lid open: a stop is usually a restart, and turning lid-close sleep back
         // on with the lid closed sleeps the Mac before the next daemon can hold it again.
         if ClamshellSleep.lidClosed() == false { restoreClamshellSleepIfHarmless() }
@@ -82,10 +84,22 @@ final class SleepGuard {
     private func tick() {
         let working = sessions().filter { $0.shim?.holdsSystemAwake == true }.count
         let settings = CanopySettings.shared
+        // Read at most once per tick, so the decision and the battery alert see one charge.
+        var powerRead: PowerSource?
+        func power() -> PowerSource {
+            if let read = powerRead { return read }
+            let read = PowerSource.current()
+            powerRead = read
+            return read
+        }
         let decision = SleepGuardPolicy.decide(enabled: settings.preventSleepWhileWorking, workingSessions: working,
                                                stayReachable: controlsClamshell && settings.stayReachableRemotely,
                                                batteryFloor: settings.sleepBatteryFloorPercent,
-                                               power: PowerSource.current())
+                                               power: power())
+        // Before `release()`: a release notice must leave before lid-close sleep is re-enabled.
+        if hasLid, decision.hold || batteryAlerts.isWatching {
+            updateBatteryAlerts(decision: decision, power: power(), floor: settings.sleepBatteryFloorPercent)
+        }
         let held: Bool
         if decision.hold {
             held = acquire(reason: decision.reason)
@@ -98,6 +112,42 @@ final class SleepGuard {
         if line != lastLogged {
             lastLogged = line
             logger.notice("\(line, privacy: .public)")
+        }
+    }
+
+    private var batteryAlerts = BatteryAlertTracker()
+    /// A "going to sleep" notice is on its way: re-enabling lid-close sleep now would sleep the
+    /// Mac before it leaves, so the restore waits for the request to finish.
+    private var releaseNoticeInFlight = false
+
+    /// Tells the phone while a lid-closed Mac is held awake on battery: there is no screen to
+    /// show it, and it may be in a bag (issue #346).
+    private func updateBatteryAlerts(decision: SleepDecision, power: PowerSource, floor: Int) {
+        guard case .battery(let onBattery, let percent) = power else {
+            batteryAlerts.reset()
+            return
+        }
+        let lidClosed = ClamshellSleep.lidClosed() == true
+        // It sleeps only if lid-close sleep can be re-enabled now; with a display lit it stays up.
+        let willSleep = !decision.hold && onBattery && lidClosed && ClamshellSleep.litDisplayCount() == 0
+        guard let alert = batteryAlerts.update(watching: decision.hold && onBattery && lidClosed,
+                                               sleepingNow: willSleep,
+                                               percent: percent, belowFloor: decision.belowFloor,
+                                               now: Date()) else { return }
+        let settings = CanopySettings.shared
+        let name = MachineIdentity.resolvedDisplayName(setting: settings.machineDisplayName,
+                                                       fallback: MachineIdentity.defaultDisplayName())
+        let message = alert.message(machine: name, reason: decision.reason, floor: floor)
+        logger.notice("battery alert: \(message.body, privacy: .public)")
+        guard case .released = alert else {
+            RosterNotifier.postBattery(title: message.title, body: message.body)
+            return
+        }
+        releaseNoticeInFlight = true
+        RosterNotifier.postBattery(title: message.title, body: message.body) { [weak self] in
+            guard let self, self.timer != nil else { return }
+            self.releaseNoticeInFlight = false
+            self.tick()
         }
     }
 
@@ -180,7 +230,7 @@ final class SleepGuard {
     }
 
     private func restoreClamshellSleepIfHarmless() {
-        guard hasLid, clamshellMayBeDisabled else { return }
+        guard hasLid, clamshellMayBeDisabled, !releaseNoticeInFlight else { return }
         let lidClosed = ClamshellSleep.lidClosed()
         let lit = ClamshellSleep.litDisplayCount()
         guard SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: lidClosed, litDisplays: lit) else {
@@ -239,6 +289,67 @@ enum ClamshellSleep {
     }
 }
 
+/// When to tell the phone about a lid-closed Mac held awake on battery: on entering that
+/// state, at each 10% step below where it started, and once when it is let go to sleep there.
+struct BatteryAlertTracker: Equatable {
+    enum Alert: Equatable {
+        case started(percent: Int)
+        case dropped(percent: Int)
+        case released(percent: Int, belowFloor: Bool)
+
+        func message(machine: String, reason: String, floor: Int) -> (title: String, body: String) {
+            switch self {
+            case .started(let percent):
+                return ("\(machine) is awake with the lid closed",
+                        "On battery at \(percent)%: \(reason). It sleeps below \(floor)%.")
+            case .dropped(let percent):
+                return ("\(machine) battery \(percent)%",
+                        "Still awake with the lid closed: \(reason). It sleeps below \(floor)%.")
+            case .released(let percent, true):
+                return ("\(machine) is going to sleep",
+                        "Battery at \(percent)%, below \(floor)%. Canopy stopped keeping it awake.")
+            case .released(let percent, false):
+                return ("\(machine) is going to sleep",
+                        "Battery at \(percent)%: \(reason), so Canopy stopped keeping it awake.")
+            }
+        }
+    }
+
+    /// A lid closed again within this of the last "awake" notice does not send another.
+    static let restartCooldown: TimeInterval = 15 * 60
+
+    /// The 10% step last reported, or nil while not watching.
+    private(set) var lastStep: Int?
+    private var lastStartedAt: Date?
+    var isWatching: Bool { lastStep != nil }
+
+    mutating func reset() { lastStep = nil }
+
+    /// `sleepingNow`: the hold just ended with the lid closed on battery, so the Mac sleeps.
+    mutating func update(watching: Bool, sleepingNow: Bool, percent: Int, belowFloor: Bool, now: Date) -> Alert? {
+        if sleepingNow, isWatching {
+            lastStep = nil
+            // It really slept, so the next hold is news, not a lid flapping.
+            lastStartedAt = nil
+            return .released(percent: percent, belowFloor: belowFloor)
+        }
+        guard watching else {
+            lastStep = nil
+            return nil
+        }
+        let step = percent / 10 * 10
+        guard let last = lastStep else {
+            lastStep = step
+            if let started = lastStartedAt, now.timeIntervalSince(started) < Self.restartCooldown { return nil }
+            lastStartedAt = now
+            return .started(percent: percent)
+        }
+        guard step < last else { return nil }
+        lastStep = step
+        return .dropped(percent: percent)
+    }
+}
+
 /// The internal battery, kept apart from a read that failed: treating a failure as
 /// "no battery" would silently disable the floor on a laptop.
 enum PowerSource: Equatable {
@@ -294,16 +405,23 @@ enum SleepGuardPolicy {
     /// `stayReachable`: hold with no busy session too, so the phone or another Mac can reach it at any time.
     static func decide(enabled: Bool, workingSessions: Int, stayReachable: Bool = false,
                        batteryFloor: Int = defaultBatteryFloorPercent,
-                       power: @autoclosure () -> PowerSource) -> (hold: Bool, reason: String) {
-        guard enabled else { return (false, "turned off in Settings") }
-        guard workingSessions > 0 || stayReachable else { return (false, "no session is busy") }
+                       power: @autoclosure () -> PowerSource) -> SleepDecision {
+        guard enabled else { return SleepDecision(hold: false, reason: "turned off in Settings") }
+        guard workingSessions > 0 || stayReachable else { return SleepDecision(hold: false, reason: "no session is busy") }
         switch power() {
         case .unreadable:
-            return (false, "battery state is unreadable")
+            return SleepDecision(hold: false, reason: "battery state is unreadable")
         case .battery(onBattery: true, let percent) where percent < batteryFloor:
-            return (false, "on battery below \(batteryFloor)%")
+            return SleepDecision(hold: false, reason: "on battery below \(batteryFloor)%", belowFloor: true)
         case .battery, .noBattery:
-            return (true, workingSessions > 0 ? "a session is busy" : "staying reachable remotely")
+            return SleepDecision(hold: true, reason: workingSessions > 0 ? "a session is busy" : "staying reachable remotely")
         }
     }
+}
+
+struct SleepDecision: Equatable {
+    var hold: Bool
+    var reason: String
+    /// Released because the battery fell below the floor.
+    var belowFloor = false
 }

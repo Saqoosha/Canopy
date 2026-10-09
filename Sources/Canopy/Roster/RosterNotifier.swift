@@ -90,14 +90,9 @@ enum RosterNotifier {
                      answerable: Bool = true,
                      choices: [[String: Any]]? = nil,
                      eventId: String? = nil) {
-        guard let (machineId, url, secret) = resolvedTarget() else { return }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        guard let target = resolvedTarget() else { return }
         var payload: [String: Any] = [
-            "machine": machineId,
+            "machine": target.machineId,
             "sessionId": sessionId,
             "title": title,
             "body": body,
@@ -125,13 +120,39 @@ enum RosterNotifier {
                 payload["choices"] = choices
             }
         }
+        send(payload, to: target, label: "roster notify")
+    }
+
+    /// A machine-level notice with no session behind it (`kind: "battery"`). The relay
+    /// takes it without a `sessionId`. `completion` runs on the main actor once the request
+    /// has finished or failed, or at once when nothing would be sent.
+    static func postBattery(title: String, body: String, completion: (@MainActor () -> Void)? = nil) {
+        guard let target = resolvedTarget() else {
+            // Deferred: the caller is mid-tick, and running it now would re-enter that tick.
+            if let completion { Task { @MainActor in completion() } }
+            return
+        }
+        send(["machine": target.machineId, "kind": "battery", "title": title, "body": body],
+             to: target, label: "battery notify", completion: completion)
+    }
+
+    /// The one place a `/notify` request is built and sent.
+    private static func send(_ payload: [String: Any], to target: (machineId: String, url: URL, secret: String),
+                             label: String, completion: (@MainActor () -> Void)? = nil) {
+        var request = URLRequest(url: target.url)
+        request.httpMethod = "POST"
+        // Bounded, because a release notice holds lid-close sleep off until it finishes.
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(target.secret)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         URLSession.shared.dataTask(with: request) { _, response, error in
             if let error {
-                logger.notice("roster notify failed: \(error.localizedDescription, privacy: .public)")
+                logger.notice("\(label, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             } else if let code = (response as? HTTPURLResponse)?.statusCode, code != 200 {
-                logger.notice("roster notify returned \(code, privacy: .public)")
+                logger.notice("\(label, privacy: .public) returned \(code, privacy: .public)")
             }
+            if let completion { Task { @MainActor in completion() } }
         }.resume()
     }
 }

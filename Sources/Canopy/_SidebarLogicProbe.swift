@@ -7210,6 +7210,57 @@ enum SidebarLogicProbe {
             func restore(_ lid: Bool?, _ lit: Int?) -> Bool {
                 SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: lid, litDisplays: lit)
             }
+            var alerts = BatteryAlertTracker()
+            let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+            func step(_ watching: Bool, _ sleeping: Bool, _ percent: Int, floor: Bool = false,
+                      at offset: TimeInterval = 0) -> BatteryAlertTracker.Alert? {
+                alerts.update(watching: watching, sleepingNow: sleeping, percent: percent, belowFloor: floor,
+                              now: t0.addingTimeInterval(offset))
+            }
+            record("Battery alert: nothing while not watching", step(false, false, 80) == nil)
+            record("Battery alert: starts when watching begins", step(true, false, 78) == .started(percent: 78))
+            record("Battery alert: quiet within the same 10% step", step(true, false, 70) == nil)
+            record("Battery alert: fires on crossing into the next step", step(true, false, 69) == .dropped(percent: 69))
+            record("Battery alert: quiet when the charge rises", step(true, false, 75) == nil)
+            record("Battery alert: one notice when the floor lets it sleep",
+                   step(false, true, 19, floor: true) == .released(percent: 19, belowFloor: true))
+            record("Battery alert: no repeat release notice", step(false, true, 18, floor: true) == nil)
+            record("Battery alert: a hold ending for another reason also says it will sleep", {
+                var t = BatteryAlertTracker()
+                _ = t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false, now: t0)
+                return t.update(watching: false, sleepingNow: true, percent: 60, belowFloor: false, now: t0)
+                    == .released(percent: 60, belowFloor: false)
+            }())
+            record("Battery alert: opening the lid resets quietly", {
+                var t = BatteryAlertTracker()
+                _ = t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false, now: t0)
+                return t.update(watching: false, sleepingNow: false, percent: 60, belowFloor: false, now: t0) == nil
+                    && !t.isWatching
+            }())
+            record("Battery alert: closing the lid again within the cooldown does not repeat the start", {
+                var t = BatteryAlertTracker()
+                _ = t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false, now: t0)
+                _ = t.update(watching: false, sleepingNow: false, percent: 60, belowFloor: false, now: t0)
+                return t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false,
+                                now: t0.addingTimeInterval(BatteryAlertTracker.restartCooldown - 1)) == nil
+            }())
+            record("Battery alert: closing it again after the cooldown starts again", {
+                var t = BatteryAlertTracker()
+                _ = t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false, now: t0)
+                _ = t.update(watching: false, sleepingNow: false, percent: 60, belowFloor: false, now: t0)
+                return t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false,
+                                now: t0.addingTimeInterval(BatteryAlertTracker.restartCooldown)) == .started(percent: 60)
+            }())
+            record("Battery alert: a hold right after it slept starts again despite the cooldown", {
+                var t = BatteryAlertTracker()
+                _ = t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false, now: t0)
+                _ = t.update(watching: false, sleepingNow: true, percent: 60, belowFloor: false, now: t0)
+                return t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false,
+                                now: t0.addingTimeInterval(60)) == .started(percent: 60)
+            }())
+            record("SleepGuard reports a floor release as such",
+                   SleepGuardPolicy.decide(enabled: true, workingSessions: 1, batteryFloor: 20,
+                                           power: .battery(onBattery: true, percent: 19)).belowFloor)
             record("SleepGuard clamshell: restores with the lid open", restore(false, 1))
             record("SleepGuard clamshell: restores with the lid closed and nothing lit", restore(true, 0))
             record("SleepGuard clamshell: defers with the lid closed and a display lit", !restore(true, 1))
