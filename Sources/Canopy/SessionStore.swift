@@ -791,7 +791,7 @@ final class SessionStore {
     /// it (`ShimProcess.checkoutAfterRemoval`): run it on in the checkout, so
     /// the extension's workspace — file search, open_file, diffs — is a folder
     /// that exists. Same resume id; the transcript is already filed there.
-    /// A GUI pane follows through `session_state` (`applyDaemonSessions`).
+    /// A Mac pane re-attaches on `session_restarting`; one on an older daemon follows `session_state`.
     func moveToCheckout(shim: ShimProcess, checkout: URL) {
         guard let session = openSessions.first(where: { $0.shim === shim }),
               case .local = session.origin else {
@@ -1425,8 +1425,8 @@ final class SessionStore {
                 logger.notice("applyDaemonSessions: following a removed worktree to its checkout")
                 session.origin = .local(URL(fileURLWithPath: row.cwd))
                 session.project = row.project
-                // A daemon that announced the restart has already had this pane re-attach.
-                if paned.contains(session.id), session.connection.status == .reconnectFailed {
+                // A daemon that announces restarts re-attaches the pane itself, whichever socket is read first.
+                if paned.contains(session.id), !session.hostAnnouncesSessionRestarts {
                     restartSession(session.id, notifyDaemon: false)
                 }
             }
