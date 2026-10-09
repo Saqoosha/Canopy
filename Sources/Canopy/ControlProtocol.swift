@@ -59,7 +59,7 @@ enum ControlProtocol {
         ["type": "response", "id": id, "result": result]
     }
 
-    /// `code` is a stable machine-readable `errorCode` beside the human `error`; few verbs set one.
+    /// `code` is a stable machine-readable `errorCode` beside the human `error`, set only by some refusals.
     static func errorResponse(id: String, message: String, code: String? = nil) -> [String: Any] {
         var response: [String: Any] = ["type": "response", "id": id, "error": message]
         if let code { response["errorCode"] = code }
@@ -165,7 +165,7 @@ enum ControlProtocol {
     }
 
     /// `open_session` with `resumeSessionId`: continue a session that is not open, or name the
-    /// one that is. Everything but the id is optional and overrides what the session last ran with.
+    /// one that is. Everything but the id is optional.
     struct ResumeParams: Equatable {
         let sessionId: String
         /// Must be a folder the transcript is filed under; checked where the transcript is looked up.
@@ -188,12 +188,14 @@ enum ControlProtocol {
 
     /// Nil when the request does not ask for a resume (`open_session` then means a new session).
     static func parseResumeParams(_ params: [String: Any], allowBypass: Bool) -> Result<ResumeParams, ResumeError>? {
-        guard let raw = params["resumeSessionId"] else { return nil }
-        guard let sessionId = raw as? String, UUID(uuidString: sessionId) != nil else {
+        guard let raw = params["resumeSessionId"], !(raw is NSNull) else { return nil }
+        // Lowercased: the CLI's ids are, and lookups of open sessions and Recents compare exactly,
+        // while a case-insensitive volume would still find the transcript under another spelling.
+        guard let sessionId = (raw as? String)?.lowercased(), UUID(uuidString: sessionId) != nil else {
             return .failure(ResumeError("resumeSessionId is not a session id", code: "invalid_session_id"))
         }
         func nonEmpty(_ key: String) -> String? {
-            (params[key] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            (params[key] as? String).flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         }
         // A new worktree has no transcript, so there is nothing in it to continue.
         guard nonEmpty("worktreeBranch") == nil else {
@@ -267,6 +269,8 @@ enum ControlProtocol {
         /// Unix seconds, an ISO 8601 date-time, or a bare `yyyy-MM-dd` in this Mac's time zone
         /// (the start of that day for `since`, its end for `until`).
         static func date(_ raw: Any, endOfDay: Bool) -> Date? {
+            // A JSON boolean bridges to NSNumber too, and would read as 1970.
+            if let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
             if let seconds = raw as? Double { return Date(timeIntervalSince1970: seconds) }
             if let seconds = raw as? Int { return Date(timeIntervalSince1970: TimeInterval(seconds)) }
             guard let text = (raw as? String)?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }

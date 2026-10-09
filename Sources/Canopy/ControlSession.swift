@@ -293,6 +293,7 @@ final class ControlSession {
             case .failure(let error): return fail(request, error.message)
             }
             let includeOpen = request.params["includeOpen"] as? Bool == true
+            let recentLimit = min(limit, Self.maxRecentLimit)
             Task { @MainActor in
                 let entries: [SessionEntry]
                 if filter.needsEverySession {
@@ -307,14 +308,14 @@ final class ControlSession {
                     entries = store.recents
                 }
                 guard !stopped else { return }
-                reply(request, ["sessions": recentRows(entries, filter: filter, includeOpen: includeOpen, limit: limit)])
+                reply(request, ["sessions": recentRows(entries, filter: filter, includeOpen: includeOpen, limit: recentLimit)])
             }
         default:
             fail(request, "unknown scope")
         }
     }
 
-    /// `scope: "recent"`'s rows, newest activity first. A closed row carries `sessionId` (the id
+    /// `scope: "recent"`'s rows, newest activity first. Every row carries `sessionId` (the id
     /// `open_session`'s `resumeSessionId` takes, also sent as `resumeId`), `startedAt` and
     /// `firstPrompt` when its transcript records them. With `includeOpen`, open sessions are
     /// listed too, with their `key` and live state.
@@ -354,20 +355,30 @@ final class ControlSession {
         return rows.sorted { $0.at > $1.at }.prefix(limit).map(\.wire)
     }
 
-    /// Every session on the Mac, uncapped; one read at a time across connections. Headers are
-    /// cached by mtime (`ClaudeSessionHistory.cachedMetadata`), so only the first read is slow.
+    /// Every session on the Mac, uncapped; one read at a time across connections, and a result
+    /// reused for `everySessionMaxAge` so a client searching as someone types does not walk
+    /// every transcript per keystroke. Headers are cached by mtime, so only a first read is slow.
     private static var everySessionRead: Task<[SessionEntry], Never>?
+    private static var everySessionCache: (at: Date, entries: [SessionEntry])?
+    static let everySessionMaxAge: TimeInterval = 30
 
     private static func everySession() -> Task<[SessionEntry], Never> {
         if let running = everySessionRead { return running }
+        if let cache = everySessionCache, Date().timeIntervalSince(cache.at) < everySessionMaxAge {
+            return Task { cache.entries }
+        }
         let task = Task { @MainActor in
             let all = await Task.detached { ClaudeSessionHistory.loadAllSessions(keep: .max, scanLimit: .max) }.value
+            everySessionCache = (Date(), all)
             everySessionRead = nil
             return all
         }
         everySessionRead = task
         return task
     }
+
+    /// `scope: "recent"`'s ceiling on `limit`: each row can carry 500 characters of prompt.
+    static let maxRecentLimit = 500
 
     /// One rescan at a time across every control connection; asks during one share it.
     private static var recentsRefresh: Task<Void, Never>?
@@ -469,7 +480,9 @@ final class ControlSession {
                 }
                 return reply(request, result)
             }
-            // Open but not running (launch-restored, or its shim died): started as itself.
+            // Open but not running (launch-restored, or its shim died): started as itself. A dead
+            // shim is parked first, as `restart_session` does; `startHeadlessSession` refuses one.
+            if session.shim != nil { store.restartSession(session.id, mirrorsReattach: true) }
             guard let shim = store.startHeadlessSession(resumeId: session.resumeId) else {
                 return fail(request, MirrorOpenRequest.startFailed, code: "start_failed")
             }
@@ -490,11 +503,14 @@ final class ControlSession {
             case .failure(let failure): return fail(request, Self.message(for: failure), code: failure.code)
             }
             let sessionId = params.sessionId
-            // The read runs off the main actor, like `history`'s: a transcript can be tens of MB.
+            // The tail read runs off the main actor, like `history`'s: a transcript can be tens of MB.
             let path = ShimProcess.jsonlPath(sessionId: sessionId, workingDirectory: target.directory)
             let inherited = await Task.detached {
                 path.map(ClaudeSessionHistory.lastLaunchSettings(atPath:)) ?? .init()
             }.value
+            if path == nil || inherited.model == nil || inherited.permissionMode == nil {
+                logger.notice("control open_session: \(sessionId, privacy: .public) inherits model=\(inherited.model ?? "none", privacy: .public) mode=\(inherited.permissionMode?.rawValue ?? "none", privacy: .public) (transcript \(path == nil ? "not found" : "read", privacy: .public))")
+            }
             guard !stopped else { return }
             if store.openSession(for: [.resumeId(sessionId)]) != nil { return resumeSession(request, params) }
             let launch = ControlProtocol.resumedLaunch(inherited: inherited, requested: params, allowBypass: allowBypass())

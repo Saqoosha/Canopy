@@ -27,7 +27,7 @@ struct SessionEntry: Identifiable, Hashable {
     /// found (`GitWorktree.checkoutForRemovedWorktree`); `canOpen` is then true.
     /// Opening goes through `ClaudeSessionHistory.directoryToOpen`.
     var rescueCheckout: URL? = nil
-    /// When the session started (its first record), and the first thing a person typed in it.
+    /// When the session started (its first timestamped record), and the first thing a person typed in it.
     /// Filled by `loadAllSessions`; the control API's session list reports them.
     var startedAt: Date? = nil
     var firstPrompt: String? = nil
@@ -949,8 +949,8 @@ enum ClaudeSessionHistory {
         var permissionMode: PermissionMode?
     }
 
-    /// `lastLaunchSettings(in:)` over the transcript's tail. Both fields are on every turn, so
-    /// the tail holds them; a window that found neither is widened once before giving up.
+    /// `lastLaunchSettings(in:)` over the transcript's tail; a window missing either field is widened once.
+    /// `permissionMode` is only on typed-prompt records, so a long agentic turn can push it past 1 MB.
     static func lastLaunchSettings(atPath path: String) -> LaunchSettings {
         guard let handle = FileHandle(forReadingAtPath: path) else { return LaunchSettings() }
         defer { try? handle.close() }
@@ -966,14 +966,16 @@ enum ClaudeSessionHistory {
     }
 
     /// The pure half of `lastLaunchSettings(atPath:)`. A window that starts mid-file drops its
-    /// first line, which is a fragment; an unterminated last line is parsed, since it is whole
-    /// when the CLI died mid-write and a fragment never parses.
+    /// first line, which is a fragment; an unterminated last line is parsed: it may be a whole record
+    /// still missing its newline, and a fragment never parses.
     static func lastLaunchSettings(in data: Data, startsAtLineBoundary: Bool) -> LaunchSettings {
         var lines = data.split(separator: 0x0A, omittingEmptySubsequences: false)
         if !startsAtLineBoundary, !lines.isEmpty { lines.removeFirst() }
         var found = LaunchSettings()
+        // The last user record carrying a mode decides it, even one this build does not know.
+        var modeDecided = false
         for line in lines.reversed() {
-            if found.model != nil && found.permissionMode != nil { break }
+            if found.model != nil && modeDecided { break }
             guard !line.isEmpty, let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             switch json["type"] as? String {
             case "assistant" where found.model == nil:
@@ -981,8 +983,11 @@ enum ClaudeSessionHistory {
                    !model.isEmpty, model != "<synthetic>" {
                     found.model = model
                 }
-            case "user" where found.permissionMode == nil:
-                if let raw = json["permissionMode"] as? String { found.permissionMode = PermissionMode(rawValue: raw) }
+            case "user" where !modeDecided:
+                if let raw = json["permissionMode"] as? String {
+                    found.permissionMode = PermissionMode(rawValue: raw)
+                    modeDecided = true
+                }
             default:
                 break
             }
@@ -1416,10 +1421,10 @@ extension ClaudeSessionHistory {
         private var aiTitle: String?
         private var firstUserMessage: String?
         private var firstCwd: String?
-        /// The first record's `timestamp`: when the session started.
+        /// The first timestamped record's `timestamp`: when the session started.
         private var startedAt: Date?
-        /// The first prompt a person typed, longer than the title's cut. Meta records (hook
-        /// output, command caveats) and tool results are not prompts.
+        /// The first prompt a person typed within the header window, longer than the title's cut.
+        /// Meta records (hook output, command caveats) and tool results are not prompts.
         private var firstPrompt: String?
         static let firstPromptMaxLength = 500
         private var lastRelocatedCwd: String?
@@ -1511,21 +1516,25 @@ extension ClaudeSessionHistory {
                 }
             }
 
-            if firstPrompt == nil, json["isMeta"] as? Bool != true, let message = json["message"] as? [String: Any] {
-                let text: String
+            // `classifyUserRecord` is the prompt history's rule (meta, keep-alive, caveats, compaction).
+            if firstPrompt == nil, case .prompt = ClaudeSessionHistory.classifyUserRecord(json),
+               let message = json["message"] as? [String: Any] {
+                let texts: [String]
                 if let content = message["content"] as? String {
-                    text = content
+                    texts = [content]
                 } else if let blocks = message["content"] as? [[String: Any]] {
                     // A tool result is a user record too; only text blocks are what someone typed.
-                    text = blocks.filter { $0["type"] as? String == "text" }
-                        .compactMap { $0["text"] as? String }.joined(separator: " ")
+                    texts = blocks.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }
                 } else {
-                    text = ""
+                    texts = []
                 }
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                // `<command-name>`, `<local-command-stdout>`, `<system-reminder>`: the CLI's, not the person's.
-                if !trimmed.isEmpty, !trimmed.hasPrefix("<") {
-                    firstPrompt = String(trimmed.prefix(Self.firstPromptMaxLength))
+                // Per block: `<command-name>`, `<ide_opened_file>`, `<system-reminder>` are the CLI's or the
+                // IDE's, and can precede the person's text in the same record.
+                let typed = texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty && !$0.hasPrefix("<") }
+                    .joined(separator: " ")
+                if !typed.isEmpty {
+                    firstPrompt = String(typed.prefix(Self.firstPromptMaxLength))
                 }
             }
         }

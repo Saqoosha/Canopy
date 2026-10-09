@@ -1230,6 +1230,12 @@ final class SessionStore {
     /// transcript moved to its checkout). May move a removed worktree's transcript
     /// (`directoryToOpen`). Does not look at open sessions.
     func resolveClosedSession(sessionId: String, localCwd: String?) -> Result<(directory: URL, title: String?), ResumeFailure> {
+        Self.resolveClosedSession(sessionId: sessionId, localCwd: localCwd, recents: recents, knownCheckouts: rescueCandidates)
+    }
+
+    /// The store-free half, so the probe can hand it a Recents list.
+    static func resolveClosedSession(sessionId: String, localCwd: String?, recents: [SessionEntry],
+                                     knownCheckouts: [URL]) -> Result<(directory: URL, title: String?), ResumeFailure> {
         guard UUID(uuidString: sessionId) != nil else { return .failure(.invalidSessionId) }
         let listed = recents.first { $0.id == sessionId }
         if let localCwd, ClaudeSessionHistory.isFiled(sessionId: sessionId, under: URL(fileURLWithPath: localCwd)) {
@@ -1238,7 +1244,7 @@ final class SessionStore {
         if let listed {
             // One Recents lists and refuses (`canOpen`) stays refused.
             guard listed.canOpen,
-                  let directory = ClaudeSessionHistory.directoryToOpen(listed, knownCheckouts: rescueCandidates)
+                  let directory = ClaudeSessionHistory.directoryToOpen(listed, knownCheckouts: knownCheckouts)
             else { return .failure(.folderMissing) }
             return .success((directory, listed.title))
         }

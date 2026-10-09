@@ -76,7 +76,8 @@ default, or `recent`).
 the rows `open_session`'s `resumeSessionId` continues. Without filters it
 returns the newest sessions the daemon keeps (about 50). With any filter
 it reads every transcript on the Mac. The first such read takes a few
-seconds (about 5 s here); later ones reuse cached headers. Params:
+seconds; later ones reuse cached headers, and a result is reused for 30 s.
+`limit` is at most 500 here. Params:
 
 | Param | Meaning |
 |---|---|
@@ -90,9 +91,8 @@ A row adds these fields to the `open` scope's:
 | Field | Meaning |
 |---|---|
 | `sessionId` | The id to pass as `resumeSessionId`. Same value as `resumeId` |
-| `startedAt` | Unix seconds of the transcript's first record, when it has one |
-| `lastActiveAt` | Unix seconds of the transcript's last write |
-| `firstPrompt` | The first thing a person typed, cut at 500 characters. Hook output, slash-command markup and tool results are skipped |
+| `startedAt` | Unix seconds of the transcript's first timestamped record, when it has one |
+| `firstPrompt` | The first thing a person typed, when the transcript's header holds it; cut at 500 characters. Hook output, slash-command and IDE markup, and tool results are skipped |
 
 `title` is the session's title: the name it was given or generated,
 otherwise the start of its first message. Closed rows have `state`
@@ -136,10 +136,11 @@ The result is `{sessionId, key, cwd, alreadyOpen, permissionMode}`, plus
 `model` when one is set and `replyId` when `initialPrompt` was given. If the
 session is already open, nothing new is started: `alreadyOpen` is true and
 `key` names the open session. `cwd`, `model`, `effort` and `permissionMode`
-are ignored then. An open session that is not running is started as itself.
+are still validated but not applied then. An open session that is not
+running (launch-restored, or its process exited) is restarted as itself.
 An `initialPrompt` to a session that is already running goes through
 `send_message`'s queue, so the result also carries that verb's `disposition`
-(and `reason` / `reasonCode` when `queued` or `refused`).
+and `ok` (`reason` when queued; `reason` and `reasonCode` when refused).
 
 A refusal is an error response with an `errorCode` beside `error`:
 
@@ -147,7 +148,7 @@ A refusal is an error response with an `errorCode` beside `error`:
 |---|---|
 | `invalid_session_id` | `resumeSessionId` is not a session id (UUID) |
 | `no_transcript` | No transcript for this id on this Mac (an SSH remote session's is on the other machine) |
-| `folder_missing` | The session's folder, or the given `cwd`, is gone, and no checkout was found to reopen it in |
+| `folder_missing` | The session's folder, or the given `cwd`, is gone (or the transcript names none), and no checkout was found to reopen it in |
 | `cwd_mismatch` | The transcript is not filed under the given `cwd` |
 | `invalid_cwd` | `cwd` is not an absolute path |
 | `worktree_not_supported` | `worktreeBranch` was given |

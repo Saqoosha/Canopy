@@ -749,11 +749,6 @@ final class MirrorConnection: MirrorSink {
         logger.notice("[mirror-server] attached \(sessionId, privacy: .public)")
     }
 
-    /// A client's session id before it is joined into a path: the CLI's ids are UUIDs.
-    nonisolated static func isSessionIdShaped(_ id: String) -> Bool {
-        UUID(uuidString: id) != nil
-    }
-
     /// The request a page sends for its transcript, as captured from the extension webview (2.1.270).
     nonisolated static func prefetchRequest(sessionId: String, requestId: String) -> [String: Any] {
         ["type": "request", "requestId": requestId,

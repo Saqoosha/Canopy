@@ -1934,6 +1934,12 @@ enum SidebarLogicProbe {
                 record("control resume: a non-UUID id is invalid_session_id, never joined into a path",
                        resumeCode(["resumeSessionId": "../../etc/passwd"]) == "invalid_session_id"
                            && resumeCode(["resumeSessionId": 42]) == "invalid_session_id")
+                record("control resume: an uppercase id is lowercased, so it finds the open session's spelling",
+                       (try? ControlProtocol.parseResumeParams(["resumeSessionId": resumeId.uppercased()], allowBypass: false)?.get())?.sessionId == resumeId)
+                record("control resume: a null resumeSessionId is a plain open",
+                       ControlProtocol.parseResumeParams(["resumeSessionId": NSNull(), "cwd": controlDir.path], allowBypass: false) == nil)
+                record("control resume: a whitespace-only initialPrompt is no prompt",
+                       (try? ControlProtocol.parseResumeParams(["resumeSessionId": resumeId, "initialPrompt": "  \n "], allowBypass: false)?.get())?.initialPrompt == nil)
                 record("control resume: worktreeBranch is worktree_not_supported",
                        resumeCode(["resumeSessionId": resumeId, "worktreeBranch": "fix-x"]) == "worktree_not_supported")
                 record("control resume: a relative cwd is invalid_cwd, a missing one folder_missing",
@@ -1968,6 +1974,9 @@ enum SidebarLogicProbe {
                        ClaudeSessionHistory.lastLaunchSettings(in: Data(tail.utf8), startsAtLineBoundary: true)
                            == ClaudeSessionHistory.LaunchSettings(model: "claude-opus-5-5", permissionMode: .acceptEdits))
                 let fragment = "ermissionMode\":\"bypassPermissions\"}\n{\"type\":\"assistant\",\"message\":{\"model\":\"m1\"}}"
+                let unknownMode = "{\"type\":\"user\",\"permissionMode\":\"bypassPermissions\"}\n{\"type\":\"user\",\"permissionMode\":\"future-mode\"}\n"
+                record("control resume: the last recorded mode decides even when this build does not know it",
+                       ClaudeSessionHistory.lastLaunchSettings(in: Data(unknownMode.utf8), startsAtLineBoundary: true).permissionMode == nil)
                 record("control resume: a mid-file window drops its first line; an unterminated last line is read",
                        ClaudeSessionHistory.lastLaunchSettings(in: Data(("{\"type\":\"user\",\"permissionMode\":\"plan\"}\n" + fragment).utf8),
                                                                startsAtLineBoundary: false)
@@ -1988,6 +1997,17 @@ enum SidebarLogicProbe {
                     resolver.resolveClosedSession(sessionId: id, localCwd: localCwd).map(\.directory.path)
                 }
                 let liveId = UUID().uuidString.lowercased()
+                func listedResolve(_ entry: SessionEntry) -> Result<String, SessionStore.ResumeFailure> {
+                    SessionStore.resolveClosedSession(sessionId: entry.id, localCwd: nil, recents: [entry], knownCheckouts: [])
+                        .map(\.directory.path)
+                }
+                let listedId = UUID().uuidString.lowercased()
+                record("control resume: a Recents row that can open resolves to its folder, without a transcript scan",
+                       listedResolve(SessionEntry(id: listedId, title: "t", timestamp: Date(), projectDirectory: controlDir))
+                           == .success(controlDir.path))
+                record("control resume: a Recents row that cannot open stays refused",
+                       listedResolve(SessionEntry(id: listedId, title: "t", timestamp: Date(), projectDirectory: controlDir, canOpen: false))
+                           == .failure(.folderMissing))
                 let goneId = UUID().uuidString.lowercased()
                 plant(liveId, cwd: controlDir.path)
                 plant(goneId, cwd: controlDir.appendingPathComponent("removed-\(goneId)").path)
@@ -2030,6 +2050,9 @@ enum SidebarLogicProbe {
                        Calendar.current.component(.hour, from: dayStart) == 0
                            && Calendar.current.isDate(dayStart, inSameDayAs: dayEnd)
                            && dayEnd.timeIntervalSince(dayStart) > 86_399 && dayEnd.timeIntervalSince(dayStart) < 86_400.01)
+                record("control list: a JSON boolean is not a date",
+                       ListFilter.date(true as NSNumber, endOfDay: false) == nil
+                           && ListFilter.parse(["since": true]) == .failure(ControlProtocol.ControlError("since must be an ISO 8601 date or Unix seconds")))
                 record("control list: ISO 8601 and Unix seconds parse",
                        ListFilter.date("2026-10-09T13:32:57.356Z", endOfDay: false)?.timeIntervalSince1970 == 1_791_552_777.356
                            && ListFilter.date(1_791_552_777.0, endOfDay: false)?.timeIntervalSince1970 == 1_791_552_777)
@@ -2045,10 +2068,15 @@ enum SidebarLogicProbe {
                            && listMatch(title: "untitled", prompt: "please FIX the vdgs panel", last: inside)
                            && !listMatch(title: "VDGS only", last: inside))
                 record("control list: project matches the project name or the cwd",
-                       listMatch(project: "other", cwd: "/x/canopy-wt", last: inside)
+                       listMatch(project: "Canopy · main", cwd: "/elsewhere", last: inside)
+                           && listMatch(project: "other", cwd: "/x/canopy-wt", last: inside)
                            && !listMatch(project: "ghostline", cwd: "/r/ghostline", last: inside))
+                record("control list: query words may sit only in the project or only in the cwd",
+                       listMatch(title: "fix", project: "VDGS", cwd: "/r/canopy", last: inside)
+                           && listMatch(title: "fix", project: "canopy", cwd: "/r/vdgs-panel", last: inside))
                 record("control list: the period keeps a session active at any point inside it",
-                       listMatch(started: dayStart.addingTimeInterval(-86_400 * 3), last: inside)
+                       listMatch(started: inside, last: ListFilter.date("2026-10-09", endOfDay: false)!)
+                           && listMatch(started: dayStart.addingTimeInterval(-86_400 * 3), last: inside)
                            && !listMatch(last: dayStart.addingTimeInterval(-1))
                            && !listMatch(started: ListFilter.date("2026-10-06", endOfDay: false), last: ListFilter.date("2026-10-07", endOfDay: false)!))
                 var header = ClaudeSessionHistory.HeaderScanner()
@@ -2056,14 +2084,23 @@ enum SidebarLogicProbe {
                     #"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-09T08:45:34.484Z"}"#,
                     #"{"type":"user","isMeta":true,"timestamp":"2026-10-09T08:45:35.000Z","message":{"role":"user","content":"Caveat: hook output"}}"#,
                     #"{"type":"user","timestamp":"2026-10-09T08:45:36.000Z","message":{"role":"user","content":"<command-name>/model</command-name>"}}"#,
-                    #"{"type":"user","timestamp":"2026-10-09T08:45:37.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"ls output"}]}}"#,
+                    #"{"type":"user","timestamp":"2026-10-09T08:45:37.000Z","message":{"role":"user","content":[{"type":"tool_result","text":"ls output","content":"ls output"}]}}"#,
                     #"{"type":"user","timestamp":"2026-10-09T08:45:38.000Z","message":{"role":"user","content":[{"type":"text","text":"  Fix the VDGS panel  "}]}}"#,
                     #"{"type":"user","timestamp":"2026-10-09T08:46:00.000Z","message":{"role":"user","content":"second prompt"}}"#,
                 ] { header.consume(Data(line.utf8)) }
+                var ideHeader = ClaudeSessionHistory.HeaderScanner()
+                ideHeader.consume(Data(#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<ide_opened_file>a.swift</ide_opened_file>"},{"type":"text","text":"fix the layout bug"}]}}"#.utf8))
+                record("control list: an IDE block before the typed text does not hide the first prompt",
+                       ideHeader.result.firstPrompt == "fix the layout bug")
                 record("control list: startedAt is the first record's timestamp",
                        header.result.startedAt?.timeIntervalSince1970 == 1_791_535_534.484)
                 record("control list: firstPrompt skips meta, CLI markup and tool results, and is trimmed",
                        header.result.firstPrompt == "Fix the VDGS panel")
+                var longHeader = ClaudeSessionHistory.HeaderScanner()
+                let longPrompt = String(repeating: "x", count: ClaudeSessionHistory.HeaderScanner.firstPromptMaxLength + 7)
+                longHeader.consume(try! JSONSerialization.data(withJSONObject: ["type": "user", "message": ["role": "user", "content": longPrompt]]))
+                record("control list: firstPrompt is cut at its maximum length",
+                       longHeader.result.firstPrompt?.count == ClaudeSessionHistory.HeaderScanner.firstPromptMaxLength)
                 record("control resume: errorCode rides beside error only when given",
                        ControlProtocol.errorResponse(id: "1", message: "m", code: "no_transcript")["errorCode"] as? String == "no_transcript"
                            && ControlProtocol.errorResponse(id: "1", message: "m")["errorCode"] == nil)
@@ -2835,8 +2872,10 @@ enum SidebarLogicProbe {
                        && NewSessionOptions(permissionMode: .bypassPermissions).refusal(allowBypass: true) == nil
                        && NewSessionOptions(permissionMode: .plan).refusal(allowBypass: false) == nil)
             record("resume fallback: only a UUID-shaped id reaches the transcript scan",
-                   MirrorConnection.isSessionIdShaped("d249fc17-cfc3-4ab7-a2ab-976110f83c2f")
-                       && !MirrorConnection.isSessionIdShaped("../../etc/x") && !MirrorConnection.isSessionIdShaped(""))
+                   ["../../etc/x", ""].allSatisfy {
+                       if case .failure(.invalidSessionId) = SessionStore().resolveClosedSession(sessionId: $0, localCwd: nil) { return true }
+                       return false
+                   })
             // Canopy Server UI frames (daemon → Mac client).
             func throughJSON(_ wire: [String: Any]) -> [String: Any] {
                 guard let data = try? JSONSerialization.data(withJSONObject: wire),
