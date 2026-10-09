@@ -128,7 +128,8 @@ enum RosterNotifier {
     /// has finished or failed, or at once when nothing would be sent.
     static func postBattery(title: String, body: String, completion: (@MainActor () -> Void)? = nil) {
         guard let target = resolvedTarget() else {
-            completion?()
+            // Deferred: the caller is mid-tick, and running it now would re-enter that tick.
+            if let completion { Task { @MainActor in completion() } }
             return
         }
         send(["machine": target.machineId, "kind": "battery", "title": title, "body": body],

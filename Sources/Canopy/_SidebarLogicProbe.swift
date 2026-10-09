@@ -7251,6 +7251,13 @@ enum SidebarLogicProbe {
                 return t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false,
                                 now: t0.addingTimeInterval(BatteryAlertTracker.restartCooldown)) == .started(percent: 60)
             }())
+            record("Battery alert: a hold right after it slept starts again despite the cooldown", {
+                var t = BatteryAlertTracker()
+                _ = t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false, now: t0)
+                _ = t.update(watching: false, sleepingNow: true, percent: 60, belowFloor: false, now: t0)
+                return t.update(watching: true, sleepingNow: false, percent: 60, belowFloor: false,
+                                now: t0.addingTimeInterval(60)) == .started(percent: 60)
+            }())
             record("SleepGuard reports a floor release as such",
                    SleepGuardPolicy.decide(enabled: true, workingSessions: 1, batteryFloor: 20,
                                            power: .battery(onBattery: true, percent: 19)).belowFloor)

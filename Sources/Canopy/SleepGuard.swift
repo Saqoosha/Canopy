@@ -74,6 +74,8 @@ final class SleepGuard {
         timer = nil
         if Self.active === self { Self.active = nil }
         releaseAssertions()
+        // A notice in flight cannot hold this up: nothing will run once the process exits.
+        releaseNoticeInFlight = false
         // Only with the lid open: a stop is usually a restart, and turning lid-close sleep back
         // on with the lid closed sleeps the Mac before the next daemon can hold it again.
         if ClamshellSleep.lidClosed() == false { restoreClamshellSleepIfHarmless() }
@@ -126,8 +128,10 @@ final class SleepGuard {
             return
         }
         let lidClosed = ClamshellSleep.lidClosed() == true
+        // It sleeps only if lid-close sleep can be re-enabled now; with a display lit it stays up.
+        let willSleep = !decision.hold && onBattery && lidClosed && ClamshellSleep.litDisplayCount() == 0
         guard let alert = batteryAlerts.update(watching: decision.hold && onBattery && lidClosed,
-                                               sleepingNow: !decision.hold && onBattery && lidClosed,
+                                               sleepingNow: willSleep,
                                                percent: percent, belowFloor: decision.belowFloor,
                                                now: Date()) else { return }
         let settings = CanopySettings.shared
@@ -141,8 +145,9 @@ final class SleepGuard {
         }
         releaseNoticeInFlight = true
         RosterNotifier.postBattery(title: message.title, body: message.body) { [weak self] in
-            self?.releaseNoticeInFlight = false
-            self?.tick()
+            guard let self, self.timer != nil else { return }
+            self.releaseNoticeInFlight = false
+            self.tick()
         }
     }
 
@@ -324,6 +329,8 @@ struct BatteryAlertTracker: Equatable {
     mutating func update(watching: Bool, sleepingNow: Bool, percent: Int, belowFloor: Bool, now: Date) -> Alert? {
         if sleepingNow, isWatching {
             lastStep = nil
+            // It really slept, so the next hold is news, not a lid flapping.
+            lastStartedAt = nil
             return .released(percent: percent, belowFloor: belowFloor)
         }
         guard watching else {
