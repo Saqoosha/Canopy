@@ -84,23 +84,24 @@ private struct PendingUpdateDetail: View {
             }
         }
         // A row's blocker is up to a minute old; each pane's own flags are current.
-        func busyReason(_ target: (row: StaleExtensionSession, session: OpenSession)) -> String? {
+        let reasons = targets.map { target -> String? in
             let live = target.session.isThinking || target.session.isAsking || target.session.isWaiting
             return target.row.blocker ?? (live ? "working" : nil)
         }
-        let busy = targets.compactMap { target in busyReason(target).map { "\(target.row.title): \($0)" } }
+        let busy = zip(targets, reasons).compactMap { target, reason in reason.map { "\(target.row.title): \($0)" } }
         if !busy.isEmpty {
-            let idleCount = targets.count - busy.count
+            let idle = zip(targets, reasons).filter { $0.1 == nil }.map(\.0)
             let alert = NSAlert()
-            alert.messageText = "Restart \(targets.count) session\(targets.count == 1 ? "" : "s")?"
-            alert.informativeText = "Busy:\n" + busy.joined(separator: "\n")
-                + "\n\nRestarting stops their current work. Conversations are kept."
-            alert.addButton(withTitle: "Restart All")
-            if idleCount > 0 { alert.addButton(withTitle: "Restart Idle Only") }
+            alert.messageText = busy.count == 1 ? "1 session is busy" : "\(busy.count) sessions are busy"
+            alert.informativeText = busy.joined(separator: "\n")
+                + "\n\nRestarting a busy session stops its current work. Conversations are kept."
+            // Return must not abort busy work, so the safe choice comes first when there is one.
+            if !idle.isEmpty { alert.addButton(withTitle: "Restart \(idle.count) Idle Only") }
+            alert.addButton(withTitle: "Restart All \(targets.count)")
             alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-            switch alert.runModal() {
-            case .alertFirstButtonReturn: break
-            case .alertSecondButtonReturn where idleCount > 0: targets.removeAll { busyReason($0) != nil }
+            switch (alert.runModal(), idle.isEmpty) {
+            case (.alertFirstButtonReturn, false): targets = idle
+            case (.alertFirstButtonReturn, true), (.alertSecondButtonReturn, false): break
             default: return
             }
         }
