@@ -2640,8 +2640,8 @@ enum SidebarLogicProbe {
                 record("daemon hosted: a session whose shim runs in this process is not the daemon's", !own.isDaemonHosted)
             }
             do {
-                // A removed worktree's move to its checkout: the pane re-attaches here only for a
-                // daemon that does not announce restarts, whichever socket the GUI reads first.
+                // A removed worktree's move to its checkout: the pane re-attaches here unless the
+                // daemon announces restarts and the pane is still live to hear it.
                 OpenSession.localSessionsRunInDaemon = true
                 defer { OpenSession.localSessionsRunInDaemon = false }
                 let checkout = FileManager.default.temporaryDirectory
@@ -2649,7 +2649,7 @@ enum SidebarLogicProbe {
                 try? FileManager.default.createDirectory(at: checkout.appendingPathComponent(".git"),
                                                          withIntermediateDirectories: true)
                 defer { try? FileManager.default.removeItem(at: checkout) }
-                func follow(announced: Bool, paned: Bool) -> (followed: Bool, restarted: Bool) {
+                func follow(announced: Bool, paned: Bool, dropped: Bool = false) -> (followed: Bool, restarted: Bool) {
                     let store = SessionStore()
                     let gone = URL(fileURLWithPath: "/nonexistent/canopy-probe-\(UUID().uuidString)")
                     let s = OpenSession(origin: .local(gone), resumeId: "r", title: "T", project: "p",
@@ -2658,6 +2658,7 @@ enum SidebarLogicProbe {
                     s.hostAnnouncesSessionRestarts = announced
                     store._probeSeedOpenSessions([s])
                     if paned { store.openInFocusedPane(s.id) }
+                    if dropped { s.connection.status = .reconnectFailed }
                     let before = s.restartGeneration
                     store.applyDaemonSessions([.init(
                         key: "K", resumeId: "r", title: "T", project: "p", cwd: checkout.path, state: "idle",
@@ -2671,6 +2672,9 @@ enum SidebarLogicProbe {
                 let announced = follow(announced: true, paned: true)
                 record("checkout move: a pane on a daemon that announces restarts follows and leaves the re-attach to it",
                        announced.followed && !announced.restarted)
+                let dropped = follow(announced: true, paned: true, dropped: true)
+                record("checkout move: an already-dropped pane re-attaches even on a daemon that announces restarts",
+                       dropped.followed && dropped.restarted)
                 let unpaned = follow(announced: false, paned: false)
                 record("checkout move: an unpaned session follows without a restart",
                        unpaned.followed && !unpaned.restarted)

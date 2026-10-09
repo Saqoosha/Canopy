@@ -331,11 +331,10 @@ struct MirrorPaneView: NSViewRepresentable {
                         // Restarted in place (a removed worktree's move, an account switch, Restart):
                         // the new shim already runs, so re-attach without showing the drop.
                         logger.notice("[mirror-pane] session restarted on \(machineName, privacy: .public); re-attaching \(session.resumeId, privacy: .public)")
-                        session.hostAnnouncesSessionRestarts = true
+                        if isDaemon { session.hostAnnouncesSessionRestarts = true }
                         Task { @MainActor [weak session, weak bridge] in
                             // Skip when something else already re-attached this pane.
                             guard let session, let bridge, session.mirrorBridge === bridge else { return }
-                            if !isDaemon { session.pendingMirrorOpen = .resume }
                             SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
                         }
                     } else {

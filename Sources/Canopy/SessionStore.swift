@@ -1425,8 +1425,9 @@ final class SessionStore {
                 logger.notice("applyDaemonSessions: following a removed worktree to its checkout")
                 session.origin = .local(URL(fileURLWithPath: row.cwd))
                 session.project = row.project
-                // A daemon that announces restarts re-attaches the pane itself, whichever socket is read first.
-                if paned.contains(session.id), !session.hostAnnouncesSessionRestarts {
+                // An announcing daemon's `session_restarting` re-attaches a live pane; a dropped one has no bridge to hear it.
+                if paned.contains(session.id),
+                   !session.hostAnnouncesSessionRestarts || session.connection.status == .reconnectFailed {
                     restartSession(session.id, notifyDaemon: false)
                 }
             }
