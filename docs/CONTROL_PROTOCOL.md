@@ -76,7 +76,7 @@ default, or `recent`).
 the rows `open_session`'s `resumeSessionId` continues. Without filters it
 returns the newest sessions the daemon keeps (about 50). With any filter
 it reads every transcript on the Mac. The first such read takes a few
-seconds; later ones reuse cached headers, and a result is reused for 30 s.
+seconds; later ones reuse cached headers.
 `limit` is at most 500 here. Params:
 
 | Param | Meaning |
@@ -136,7 +136,7 @@ The result is `{sessionId, key, cwd, alreadyOpen, permissionMode}`, plus
 `model` when one is set and `replyId` when `initialPrompt` was given. If the
 session is already open, nothing new is started: `alreadyOpen` is true and
 `key` names the open session. `cwd`, `model`, `effort` and `permissionMode`
-are still validated but not applied then. An open session that is not
+are not applied then (they are still parsed, so a malformed one is refused). An open session that is not
 running (launch-restored, or its process exited) is restarted as itself.
 An `initialPrompt` to a session that is already running goes through
 `send_message`'s queue, so the result also carries that verb's `disposition`

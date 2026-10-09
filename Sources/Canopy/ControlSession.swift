@@ -247,7 +247,7 @@ final class ControlSession {
             result["key"] = session.id.uuidString
             result["sessionId"] = session.resumeId
             result["state"] = session.shim?.controlStateWire ?? "idle"
-        } else if let sessionId = request.params["sessionId"] as? String, UUID(uuidString: sessionId) != nil {
+        } else if let sessionId = (request.params["sessionId"] as? String)?.lowercased(), UUID(uuidString: sessionId) != nil {
             // A closed session is still readable by its id.
             path = ClaudeSessionHistory.scanForTranscript(sessionId: sessionId)
             result["sessionId"] = sessionId
@@ -355,21 +355,14 @@ final class ControlSession {
         return rows.sorted { $0.at > $1.at }.prefix(limit).map(\.wire)
     }
 
-    /// Every session on the Mac, uncapped; one read at a time across connections, and a result
-    /// reused for `everySessionMaxAge` so a client searching as someone types does not walk
-    /// every transcript per keystroke. Headers are cached by mtime, so only a first read is slow.
+    /// Every session on the Mac, uncapped; one read at a time across connections. Headers are
+    /// cached by mtime (`ClaudeSessionHistory.cachedMetadata`), so only a first read is slow.
     private static var everySessionRead: Task<[SessionEntry], Never>?
-    private static var everySessionCache: (at: Date, entries: [SessionEntry])?
-    static let everySessionMaxAge: TimeInterval = 30
 
     private static func everySession() -> Task<[SessionEntry], Never> {
         if let running = everySessionRead { return running }
-        if let cache = everySessionCache, Date().timeIntervalSince(cache.at) < everySessionMaxAge {
-            return Task { cache.entries }
-        }
         let task = Task { @MainActor in
             let all = await Task.detached { ClaudeSessionHistory.loadAllSessions(keep: .max, scanLimit: .max) }.value
-            everySessionCache = (Date(), all)
             everySessionRead = nil
             return all
         }
@@ -482,7 +475,11 @@ final class ControlSession {
             }
             // Open but not running (launch-restored, or its shim died): started as itself. A dead
             // shim is parked first, as `restart_session` does; `startHeadlessSession` refuses one.
-            if session.shim != nil { store.restartSession(session.id, mirrorsReattach: true) }
+            if let shim = session.shim {
+                // A stop in progress is not a crash to recover from.
+                guard !shim.isIntentionalStop else { return fail(request, "the session is stopping", code: "start_failed") }
+                store.restartSession(session.id, mirrorsReattach: true)
+            }
             guard let shim = store.startHeadlessSession(resumeId: session.resumeId) else {
                 return fail(request, MirrorOpenRequest.startFailed, code: "start_failed")
             }

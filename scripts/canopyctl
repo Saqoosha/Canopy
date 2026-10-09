@@ -156,8 +156,11 @@ def main(argv):
 
 
 def as_seconds(value):
-    """Digits are Unix seconds, which the daemon takes only as a JSON number."""
-    return int(value) if value and value.isdigit() else value
+    """A number is Unix seconds, which the daemon takes only as a JSON number."""
+    try:
+        return float(value) if value and "." in value else int(value)
+    except (TypeError, ValueError):
+        return value
 
 
 def print_session_table(sessions):
@@ -210,6 +213,8 @@ def add_session_flags(parser, require):
 def build(args):
     if args.cmd == "list":
         params = {}
+        if args.scope == "open" and args.query:
+            raise SystemExit("canopyctl: --query works only with --scope recent")
         if args.scope or args.query:
             params["scope"] = args.scope or "recent"
         if args.query:

@@ -1516,8 +1516,7 @@ extension ClaudeSessionHistory {
                 }
             }
 
-            // `classifyUserRecord` is the prompt history's rule (meta, keep-alive, caveats, compaction).
-            if firstPrompt == nil, case .prompt = ClaudeSessionHistory.classifyUserRecord(json),
+            if firstPrompt == nil, json["isMeta"] as? Bool != true, json["isCompactSummary"] as? Bool != true,
                let message = json["message"] as? [String: Any] {
                 let texts: [String]
                 if let content = message["content"] as? String {
@@ -1528,11 +1527,15 @@ extension ClaudeSessionHistory {
                 } else {
                     texts = []
                 }
-                // Per block: `<command-name>`, `<ide_opened_file>`, `<system-reminder>` are the CLI's or the
-                // IDE's, and can precede the person's text in the same record.
-                let typed = texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty && !$0.hasPrefix("<") }
-                    .joined(separator: " ")
+                // Per block, by the prompt history's rule (`classifyUserRecord`: keep-alive, caveats,
+                // CLI markup), plus any other leading tag (`<ide_opened_file>`): those blocks can
+                // precede the person's text in the same record.
+                let typed = texts.compactMap { text -> String? in
+                    let block: [String: Any] = ["type": "user", "message": ["role": "user", "content": text]]
+                    guard case .prompt(let trimmed) = ClaudeSessionHistory.classifyUserRecord(block),
+                          !trimmed.hasPrefix("<") else { return nil }
+                    return trimmed
+                }.joined(separator: " ")
                 if !typed.isEmpty {
                     firstPrompt = String(typed.prefix(Self.firstPromptMaxLength))
                 }

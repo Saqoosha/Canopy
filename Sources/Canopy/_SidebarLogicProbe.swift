@@ -2092,6 +2092,10 @@ enum SidebarLogicProbe {
                 ideHeader.consume(Data(#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<ide_opened_file>a.swift</ide_opened_file>"},{"type":"text","text":"fix the layout bug"}]}}"#.utf8))
                 record("control list: an IDE block before the typed text does not hide the first prompt",
                        ideHeader.result.firstPrompt == "fix the layout bug")
+                var reminderHeader = ClaudeSessionHistory.HeaderScanner()
+                reminderHeader.consume(Data(#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>ctx</system-reminder>"},{"type":"text","text":"Caveat: noise"},{"type":"text","text":"fix the layout bug"}]}}"#.utf8))
+                record("control list: CLI markup and caveat blocks are dropped per block, not with the whole record",
+                       reminderHeader.result.firstPrompt == "fix the layout bug")
                 record("control list: startedAt is the first record's timestamp",
                        header.result.startedAt?.timeIntervalSince1970 == 1_791_535_534.484)
                 record("control list: firstPrompt skips meta, CLI markup and tool results, and is trimmed",

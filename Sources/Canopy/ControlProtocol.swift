@@ -306,7 +306,8 @@ enum ControlProtocol {
     static func sessionRefs(_ params: [String: Any]) -> [SessionRef] {
         var refs: [SessionRef] = []
         if let key = params["key"] as? String, !key.isEmpty { refs.append(.key(key)) }
-        if let id = params["sessionId"] as? String, !id.isEmpty { refs.append(.resumeId(id)) }
+        // The CLI's ids are lowercase; an uppercase spelling names the same session.
+        if let id = params["sessionId"] as? String, !id.isEmpty { refs.append(.resumeId(id.lowercased())) }
         return refs
     }
 
