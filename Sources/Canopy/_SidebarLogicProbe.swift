@@ -3216,6 +3216,28 @@ enum SidebarLogicProbe {
                        && RemoteMirrorBridge.fullImagePath(forThumbnailURL: "canopy-asset://ext/img/") == nil)
         }
 
+        // Output rate (tok/s): thinking is excluded from the numerator because its
+        // time is never on the wire, and short requests keep the previous figure.
+        do {
+            func rate(_ out: Int, thinking: Int? = nil, saw: Bool = false, _ secs: TimeInterval) -> Int? {
+                var usage: [String: Any] = ["output_tokens": out]
+                if let thinking { usage["output_tokens_details"] = ["thinking_tokens": thinking] }
+                return ShimProcess.outputTokensPerSecond(usage: usage, sawThinking: saw, seconds: secs)
+            }
+            record("output rate: tokens over seconds, rounded", rate(301, 2) == 151)
+            record("output rate: thinking tokens are subtracted",
+                   rate(494, thinking: 34, saw: true, 3.31) == 139, "\(rate(494, thinking: 34, saw: true, 3.31) ?? -1)")
+            record("output rate: thought but no thinking count reported -> no reading",
+                   rate(494, saw: true, 3.31) == nil)
+            record("output rate: no thinking and no count is fine", rate(494, 3.31) == 149)
+            record("output rate: 20 tokens is enough, 19 is not", rate(20, 1) == 20 && rate(19, 1) == nil)
+            record("output rate: 20 tokens after thinking is enough, 19 is not",
+                   rate(120, thinking: 100, saw: true, 1) == 20 && rate(119, thinking: 100, saw: true, 1) == nil)
+            record("output rate: 0.5 s is enough, less is not", rate(100, 0.5) == 200 && rate(100, 0.49) == nil)
+            record("output rate: no output_tokens -> no reading",
+                   ShimProcess.outputTokensPerSecond(usage: [:], sawThinking: false, seconds: 2) == nil)
+        }
+
         // Mirror status frame: display-ready, so the phone carries none of
         // the threshold arithmetic. The fixture is the #106 one (1M / 64K),
         // where the frame's window must be the CLI's compact level and not
@@ -3281,6 +3303,17 @@ enum SidebarLogicProbe {
             MirrorStatusFrame.apply(["type": "asset_response", "contextUsed": 1, "contextMax": 2, "maxOutputTokens": 3], to: pane)
             record("status apply: another frame type changes nothing",
                    pane.contextUsed == 123_000)
+
+            // Output rate rides the same line: absent until measured, and a
+            // line without it clears the pane's (a fresh session).
+            record("status frame: no output rate, no key", empty["tokensPerSecond"] == nil)
+            data.outputTokensPerSecond = 142
+            let rated = MirrorStatusFrame.payload(from: data)
+            record("status frame: output rate rides along", rated["tokensPerSecond"] as? Int == 142)
+            MirrorStatusFrame.apply(rated, to: pane)
+            record("status apply: output rate lands", pane.outputTokensPerSecond == 142)
+            MirrorStatusFrame.apply(frame, to: pane)
+            record("status apply: a line without an output rate clears it", pane.outputTokensPerSecond == nil)
 
             // The publisher: one line at start, one per change, none for a
             // write that leaves the frame as it was, none after stop. The

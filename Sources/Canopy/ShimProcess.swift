@@ -2605,10 +2605,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// model rather than only the launch one.
     private var cliResolvedModel: String = ""
 
-    /// When the current API request's first `content_block_delta` arrived; nil between
-    /// requests. The status bar's output rate is measured from here, not from
-    /// `message_start`, so time-to-first-token (prefill, queueing) does not count against it.
+    /// When the current API request's first non-thinking `content_block_start` arrived;
+    /// nil between requests. The status bar's output rate is the request's non-thinking
+    /// output tokens over the time from here to `message_delta`.
+    ///
+    /// Thinking is excluded from both sides because its time is not on the wire. Thinking
+    /// is not displayed, so its block streams one empty `thinking_delta`, and the block's
+    /// start, its delta and `message_start` all land within a fraction of a second of the
+    /// text block — measured on Opus 5.5 at effort high, 281 thinking tokens "took" 0.5 s.
+    /// Counting them against any stream timestamp read 118 tok/s where the text streamed at
+    /// 102. What is left is the rate the user watches the answer arrive at.
     private var outputRateStart: Date?
+    private var outputRateSawThinking = false
 
     /// True once a canopy-bridge frame supplied the context window; the
     /// `result` branch then leaves `contextMax` to it.
@@ -6715,6 +6723,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// raised-hand, hourglass, or spinning subagent row — once the process
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
+        outputRateStart = nil
+        outputRateSawThinking = false
         turnTextBlocks = []
         turnPrompt = nil
         outstandingDialogRequests.removeAll()
@@ -8283,22 +8293,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 data.clearCompactIndicator()
                 requestUsageUpdate()
                 outputRateStart = nil
-            }
-
-            // Output rate: `message_delta` carries the request's cumulative
-            // `output_tokens`, so the rate is known once per request, at its end.
-            if eventType == "content_block_delta", outputRateStart == nil {
-                outputRateStart = Date()
-            }
-            if eventType == "message_delta",
-               let start = outputRateStart,
-               let usage = event["usage"] as? [String: Any],
-               let output = usage["output_tokens"] as? Int
-            {
-                outputRateStart = nil
-                if let rate = Self.outputTokensPerSecond(tokens: output, seconds: Date().timeIntervalSince(start)) {
-                    data.outputTokensPerSecond = rate
-                }
+                outputRateSawThinking = false
             }
 
             // Neither `message_start` block in this branch is gated on
@@ -8336,6 +8331,28 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     let cacheCreate = usage["cache_creation_input_tokens"] as? Int ?? 0
                     let cacheRead = usage["cache_read_input_tokens"] as? Int ?? 0
                     data.contextUsed = input + cacheCreate + cacheRead
+                }
+            }
+
+            // Output rate: `message_delta` carries the request's cumulative
+            // `output_tokens`, so the rate is known once per request, at its end.
+            if eventType == "content_block_start",
+               let blockType = (event["content_block"] as? [String: Any])?["type"] as? String
+            {
+                if blockType == "thinking" || blockType == "redacted_thinking" {
+                    outputRateSawThinking = true
+                } else if outputRateStart == nil {
+                    outputRateStart = Date()
+                }
+            }
+            if eventType == "message_delta", let start = outputRateStart {
+                outputRateStart = nil
+                if let usage = event["usage"] as? [String: Any],
+                   let rate = Self.outputTokensPerSecond(
+                       usage: usage, sawThinking: outputRateSawThinking,
+                       seconds: Date().timeIntervalSince(start))
+                {
+                    data.outputTokensPerSecond = rate
                 }
             }
 
@@ -8432,12 +8449,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Output tokens per second for one API request, rounded; nil when the
-    /// request is too short to give a meaningful rate. A one-line tool call
-    /// streams a handful of tokens in a few milliseconds, and showing that as
-    /// "900 tok/s" would replace a real reading with noise, so such a request
-    /// leaves the previous figure standing.
-    nonisolated static func outputTokensPerSecond(tokens: Int, seconds: TimeInterval) -> Int? {
+    /// Non-thinking output tokens per second for one API request, rounded, from its
+    /// `message_delta` usage; nil when there is nothing trustworthy to show. A request
+    /// under 20 tokens or 0.5 s (a one-line tool call streams in milliseconds) would read
+    /// as noise, so it leaves the previous figure standing. So does a request that thought
+    /// without reporting `output_tokens_details.thinking_tokens`: thinking time is never in
+    /// `seconds`, so counting those tokens would inflate the rate by however much it thought.
+    nonisolated static func outputTokensPerSecond(usage: [String: Any], sawThinking: Bool,
+                                                  seconds: TimeInterval) -> Int? {
+        guard let output = usage["output_tokens"] as? Int else { return nil }
+        let thinking = (usage["output_tokens_details"] as? [String: Any])?["thinking_tokens"] as? Int
+        if sawThinking, thinking == nil { return nil }
+        let tokens = output - (thinking ?? 0)
         guard tokens >= 20, seconds >= 0.5 else { return nil }
         return Int((Double(tokens) / seconds).rounded())
     }
