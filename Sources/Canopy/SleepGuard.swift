@@ -1,4 +1,6 @@
+import CoreGraphics
 import Foundation
+import IOKit
 import IOKit.ps
 import IOKit.pwr_mgt
 import os
@@ -12,9 +14,11 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SleepGuard"
 ///
 /// An idle-sleep assertion, the same as `caffeinate -i`: the display still sleeps,
 /// and the assertion dies with the process, so a crash cannot leave the Mac unable
-/// to sleep. It does NOT stop lid-close sleep on battery without an external display;
-/// that needs the system-wide `pmset disablesleep`, which is root-only and outlives
-/// the process.
+/// to sleep. The assertion does not stop lid-close sleep with no external display;
+/// the daemon's guard also disables that (`ClamshellSleep`), which is system-wide and
+/// outlives the process. Re-enabling it with the lid closed blanks any lit display and
+/// can sleep the Mac on the spot (measured), so it is re-enabled only once that is
+/// harmless (`SleepGuardPolicy.mayRestoreClamshellSleep`), retried every tick.
 ///
 /// Runs in every process that holds shims: the daemon for local sessions, the GUI
 /// for the ones it still runs in-process. A daemon-hosted pane has no shim in the
@@ -26,11 +30,20 @@ final class SleepGuard {
     private var assertion: IOPMAssertionID?
     private var lastLogged: String?
     private var acquireFailing = false
+    private let controlsClamshell: Bool
+    /// Read once: whether `AppleClamshellState` exists. A lid-less Mac has nothing to disable.
+    private var hasLid = false
+    /// The flag may be set: by this guard, or left by a daemon that died holding it.
+    private var clamshellMayBeDisabled = false
+    private var loggedClamshellDeferral = false
     /// The started guard; one per process.
     private static weak var active: SleepGuard?
 
-    init(sessions: @escaping () -> [OpenSession]) {
+    /// `controlsClamshell`: the daemon only. The flag is one per machine, and two
+    /// processes setting it would undo each other.
+    init(sessions: @escaping () -> [OpenSession], controlsClamshell: Bool = false) {
         self.sessions = sessions
+        self.controlsClamshell = controlsClamshell
     }
 
     /// Re-decide now rather than at the next tick: a turn started from the phone does not
@@ -44,6 +57,9 @@ final class SleepGuard {
     func start() {
         guard timer == nil else { return }
         Self.active = self
+        hasLid = controlsClamshell && ClamshellSleep.lidClosed() != nil
+        // A previous daemon that stopped or died while holding may have left the flag set.
+        clamshellMayBeDisabled = hasLid
         // `.common`, so a modal alert in the GUI does not freeze the release.
         let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
@@ -57,16 +73,23 @@ final class SleepGuard {
         timer?.invalidate()
         timer = nil
         if Self.active === self { Self.active = nil }
-        release()
+        releaseAssertions()
+        // Only with the lid open: a stop is usually a restart, and turning lid-close sleep back
+        // on with the lid closed sleeps the Mac before the next daemon can hold it again.
+        if ClamshellSleep.lidClosed() == false { restoreClamshellSleepIfHarmless() }
     }
 
     private func tick() {
         let working = sessions().filter { $0.shim?.holdsSystemAwake == true }.count
-        let decision = SleepGuardPolicy.decide(enabled: CanopySettings.shared.preventSleepWhileWorking,
-                                               workingSessions: working, power: PowerSource.current())
+        let settings = CanopySettings.shared
+        let decision = SleepGuardPolicy.decide(enabled: settings.preventSleepWhileWorking, workingSessions: working,
+                                               stayReachable: controlsClamshell && settings.stayReachableRemotely,
+                                               batteryFloor: settings.sleepBatteryFloorPercent,
+                                               power: PowerSource.current())
         let held: Bool
         if decision.hold {
-            held = acquire()
+            held = acquire(reason: decision.reason)
+            if held { holdClamshell() }
         } else {
             release()
             held = false
@@ -78,26 +101,141 @@ final class SleepGuard {
         }
     }
 
-    private func acquire() -> Bool {
-        guard assertion == nil else { return true }
+    /// The assertion's name; `AwakeStatus` finds it by this, so Debug and Release do not see each other's.
+    nonisolated static var assertionName: String {
+        "Canopy (\(Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy")): keeping the Mac awake"
+    }
+
+    private var assertionReason: String?
+
+    /// `reason` rides on the assertion's Details, which `AwakeStatus` shows as the tooltip.
+    private func acquire(reason: String) -> Bool {
+        if let id = assertion {
+            if reason != assertionReason {
+                for held in [id, systemAssertion].compactMap({ $0 }) {
+                    IOPMAssertionSetProperty(held, kIOPMAssertionDetailsKey as CFString, reason as CFString)
+                }
+                assertionReason = reason
+            }
+            return true
+        }
         var id: IOPMAssertionID = 0
-        let result = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
-                                                 IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                                 "Canopy: a Claude session is busy" as CFString, &id)
+        let result = IOPMAssertionCreateWithDescription(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                                                        Self.assertionName as CFString, reason as CFString,
+                                                        nil, nil, 0, nil, &id)
         guard result == kIOReturnSuccess else {
-            if !acquireFailing { logger.error("IOPMAssertionCreateWithName failed: 0x\(String(UInt32(bitPattern: result), radix: 16), privacy: .public)") }
+            if !acquireFailing { logger.error("IOPMAssertionCreateWithDescription failed: 0x\(String(UInt32(bitPattern: result), radix: 16), privacy: .public)") }
             acquireFailing = true
             return false
         }
         acquireFailing = false
         assertion = id
+        assertionReason = reason
         return true
     }
 
+    private var systemAssertion: IOPMAssertionID?
+    private var systemAssertionFailing = false
+
+    /// Re-applied every tick while holding: another daemon (a Debug build) starting or
+    /// releasing resets the shared flag, and so does powerd on a power-source change. The
+    /// PreventSystemSleep assertion covers that change onto AC: the Mac drops to dark wake
+    /// rather than sleep (measured). It has no effect on battery, and the opposite change
+    /// (unplugging with the lid closed) still sleeps; only a root `pmset disablesleep` stops that.
+    private func holdClamshell() {
+        guard hasLid else { return }
+        if systemAssertion == nil {
+            var id: IOPMAssertionID = 0
+            let result = IOPMAssertionCreateWithDescription(kIOPMAssertionTypePreventSystemSleep as CFString,
+                                                            Self.assertionName as CFString, assertionReason as CFString?,
+                                                            nil, nil, 0, nil, &id)
+            if result == kIOReturnSuccess {
+                systemAssertion = id
+                systemAssertionFailing = false
+            } else if !systemAssertionFailing {
+                systemAssertionFailing = true
+                logger.error("PreventSystemSleep assertion failed: 0x\(String(UInt32(bitPattern: result), radix: 16), privacy: .public)")
+            }
+        }
+        ClamshellSleep.setDisabled(true)
+        clamshellMayBeDisabled = true
+        loggedClamshellDeferral = false
+    }
+
     private func release() {
+        releaseAssertions()
+        restoreClamshellSleepIfHarmless()
+    }
+
+    private func releaseAssertions() {
+        systemAssertionFailing = false
+        if let id = systemAssertion {
+            IOPMAssertionRelease(id)
+            systemAssertion = nil
+        }
         guard let id = assertion else { return }
         IOPMAssertionRelease(id)
         assertion = nil
+        assertionReason = nil
+    }
+
+    private func restoreClamshellSleepIfHarmless() {
+        guard hasLid, clamshellMayBeDisabled else { return }
+        let lidClosed = ClamshellSleep.lidClosed()
+        let lit = ClamshellSleep.litDisplayCount()
+        guard SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: lidClosed, litDisplays: lit) else {
+            if !loggedClamshellDeferral {
+                loggedClamshellDeferral = true
+                logger.notice("lid-close sleep stays disabled until the lid opens or no display is lit (lid closed: \(String(describing: lidClosed), privacy: .public), lit: \(String(describing: lit), privacy: .public))")
+            }
+            return
+        }
+        if ClamshellSleep.setDisabled(false) {
+            clamshellMayBeDisabled = false
+            logger.notice("lid-close sleep re-enabled")
+        }
+    }
+}
+
+/// The kernel's lid-close sleep switch (`IOPMrootDomain`'s `kPMSetClamshellSleepState`,
+/// the call Amphetamine uses). Needs no root, but is machine-wide and is not reset when
+/// the caller dies.
+@MainActor
+enum ClamshellSleep {
+    private static var lastFailure: kern_return_t?
+
+    @discardableResult
+    static func setDisabled(_ disabled: Bool) -> Bool {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        defer { IOObjectRelease(service) }
+        var connection: io_connect_t = 0
+        var result = IOServiceOpen(service, mach_task_self_, 0, &connection)
+        if result == KERN_SUCCESS {
+            var input: [UInt64] = [disabled ? 1 : 0]
+            var outputCount: UInt32 = 0
+            result = IOConnectCallScalarMethod(connection, UInt32(kPMSetClamshellSleepState), &input, 1, nil, &outputCount)
+            IOServiceClose(connection)
+        }
+        if result != KERN_SUCCESS, result != lastFailure {
+            logger.error("clamshell sleep \(disabled ? "disable" : "enable", privacy: .public) failed: 0x\(String(UInt32(bitPattern: result), radix: 16), privacy: .public)")
+        }
+        lastFailure = result == KERN_SUCCESS ? nil : result
+        return result == KERN_SUCCESS
+    }
+
+    /// `AppleClamshellState`, or nil when absent (no lid) or unreadable.
+    static func lidClosed() -> Bool? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        defer { IOObjectRelease(service) }
+        return IORegistryEntryCreateCFProperty(service, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? Bool
+    }
+
+    /// Displays currently drawing, or nil when CoreGraphics will not say.
+    static func litDisplayCount() -> Int? {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success else { return nil }
+        return Int(count)
     }
 }
 
@@ -130,7 +268,8 @@ enum PowerSource: Equatable {
 enum SleepGuardPolicy {
     /// Below this, on battery, the Mac is allowed to sleep even with work running:
     /// a sleeping Mac resumes the turn later, a dead one loses it.
-    static let batteryFloorPercent = 20
+    static let defaultBatteryFloorPercent = 20
+    static let batteryFloorRange = 5...95
 
     /// A turn or a waiting question holds only this long after the session's last activity
     /// (a turn starting, or any CLI frame). Bounds both a question left overnight and a
@@ -145,17 +284,26 @@ enum SleepGuardPolicy {
         return (working || waitingOnHuman) && sinceActivity < staleAfter
     }
 
+    /// Re-enabling lid-close sleep with the lid closed blanks a lit display and may sleep the
+    /// Mac, so only when the lid is open or nothing is lit. An unreadable input counts as unsafe.
+    static func mayRestoreClamshellSleep(lidClosed: Bool?, litDisplays: Int?) -> Bool {
+        lidClosed == false || litDisplays == 0
+    }
+
     /// `power` is read only once a session is busy: it is an IOKit query, and the idle case is every tick.
-    static func decide(enabled: Bool, workingSessions: Int, power: @autoclosure () -> PowerSource) -> (hold: Bool, reason: String) {
+    /// `stayReachable`: hold with no busy session too, so the phone or another Mac can reach it at any time.
+    static func decide(enabled: Bool, workingSessions: Int, stayReachable: Bool = false,
+                       batteryFloor: Int = defaultBatteryFloorPercent,
+                       power: @autoclosure () -> PowerSource) -> (hold: Bool, reason: String) {
         guard enabled else { return (false, "turned off in Settings") }
-        guard workingSessions > 0 else { return (false, "no session is busy") }
+        guard workingSessions > 0 || stayReachable else { return (false, "no session is busy") }
         switch power() {
         case .unreadable:
             return (false, "battery state is unreadable")
-        case .battery(onBattery: true, let percent) where percent < batteryFloorPercent:
-            return (false, "on battery below \(batteryFloorPercent)%")
+        case .battery(onBattery: true, let percent) where percent < batteryFloor:
+            return (false, "on battery below \(batteryFloor)%")
         case .battery, .noBattery:
-            return (true, "a session is busy")
+            return (true, workingSessions > 0 ? "a session is busy" : "staying reachable remotely")
         }
     }
 }

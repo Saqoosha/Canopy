@@ -124,6 +124,7 @@ struct SidebarAccountSection: View {
                     .help("Bundled Claude Code extension version")
             }
             Spacer(minLength: 0)
+            AwakeIndicator()
             // Trailing, so every row's text shares one leading edge. Always
             // drawn; clicking it opens the source selector (see
             // `MacroPadIndicator`).

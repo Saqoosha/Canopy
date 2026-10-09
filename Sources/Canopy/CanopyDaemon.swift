@@ -238,7 +238,7 @@ final class DaemonDelegate {
         self.reaper = reaper
         reaper.start()
 
-        let sleepGuard = SleepGuard { [store] in store.openSessions }
+        let sleepGuard = SleepGuard(sessions: { [store] in store.openSessions }, controlsClamshell: true)
         self.sleepGuard = sleepGuard
         sleepGuard.start()
 

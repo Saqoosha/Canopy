@@ -127,6 +127,7 @@ private struct SettingsFooter: View {
 
 private struct GeneralSettingsTab: View {
     @Bindable private var settings = CanopySettings.shared
+    @State private var floorDraft: Double?
 
     var body: some View {
         Form {
@@ -150,8 +151,27 @@ private struct GeneralSettingsTab: View {
 
             Section {
                 Toggle("Prevent sleep while a session is working", isOn: $settings.preventSleepWhileWorking)
+                Toggle("Stay reachable remotely", isOn: $settings.stayReachableRemotely)
+                    .disabled(!settings.preventSleepWhileWorking)
+                LabeledContent("Allow sleep on battery below \(Int(floorDraft ?? Double(settings.sleepBatteryFloorPercent)))%") {
+                    // Saved on release: every save rewrites settings.json and wakes the daemon's reload.
+                    Slider(value: Binding(get: { floorDraft ?? Double(settings.sleepBatteryFloorPercent) },
+                                          set: { floorDraft = $0 }),
+                           in: Double(SleepGuardPolicy.batteryFloorRange.lowerBound)...Double(SleepGuardPolicy.batteryFloorRange.upperBound),
+                           step: 5) { editing in
+                        if !editing, let draft = floorDraft {
+                            settings.sleepBatteryFloorPercent = Int(draft)
+                            floorDraft = nil
+                        }
+                    }
+                }
+                .disabled(!settings.preventSleepWhileWorking)
+                .onDisappear {
+                    // A keyboard or VoiceOver adjustment never ends an edit.
+                    if let draft = floorDraft { settings.sleepBatteryFloorPercent = Int(draft); floorDraft = nil }
+                }
             } footer: {
-                SettingsFooter(text: "While a session is running a turn or is waiting for your answer, the Mac does not idle-sleep, so its network connection stays up and the phone can still reach it. A session with no activity for an hour stops counting; a local background task counts until it finishes. The display can still turn off. Not on battery below \(SleepGuardPolicy.batteryFloorPercent)%. Closing the lid on battery still sleeps.")
+                SettingsFooter(text: "While a session is running a turn or is waiting for your answer, the Mac stays awake, lid closed included, so its network connection stays up and the phone or another Mac can reach it. With \"Stay reachable\" on it stays awake even with nothing running. A session with no activity for an hour stops counting; a local background task counts until it finishes. The display can still sleep — use display sleep rather than the monitor's power button. Not on battery below the threshold. Do not put it in a bag while it is awake.")
             }
 
             Section {
