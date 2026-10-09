@@ -5095,7 +5095,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// `allowed_warning` → `allowed` for the 5-hour and weekly windows the sidebar
     /// shows: the extension keeps dismissals per webview, so N panes showed N copies.
-    /// `allowed` (not a drop) lets the extension clear a banner already up.
+    /// `allowed` (not a drop) lets the extension clear a banner already up. Applied
+    /// in `sendToWebView`, after the trackers have read the original frame.
     nonisolated static func quietingRateLimitWarning(_ message: [String: Any]) -> [String: Any] {
         guard message["type"] as? String == "from-extension",
               var nested = message["message"] as? [String: Any],
@@ -5105,7 +5106,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               var info = io["rate_limit_info"] as? [String: Any],
               info["status"] as? String == "allowed_warning",
               let type = info["rateLimitType"] as? String,
-              type == "five_hour" || type.hasPrefix("seven_day")
+              type == "five_hour" || type == "seven_day"
         else { return message }
         info["status"] = "allowed"
         io["rate_limit_info"] = info
