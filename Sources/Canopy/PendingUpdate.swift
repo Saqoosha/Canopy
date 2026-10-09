@@ -26,7 +26,7 @@ final class PendingUpdate {
         }
         if let ext = state.extensionState, !ext.stale.isEmpty {
             let n = ext.stale.count
-            return "Extension \(ext.installed) — \(n) session\(n == 1 ? "" : "s") on an older version"
+            return "\(n) session\(n == 1 ? "" : "s") on an older extension"
         }
         return nil
     }
