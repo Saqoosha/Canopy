@@ -6,6 +6,28 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>3.13.0</title>
+            <pubDate>Sat, 10 Oct 2026 01:29:27 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>181</sparkle:version>
+            <sparkle:shortVersionString>3.13.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Features
+- Control API: `open_session` takes `resumeSessionId` to continue a closed session — or one a daemon restart dropped — in the same conversation, with its full context. It reopens in the session's own folder and keeps its model and permission mode unless you override them. `initialPrompt` is sent as the next turn and returns a `replyId`. If the session is already open, its `key` is returned instead of opening it twice. Refusals carry an `errorCode` (`no_transcript`, `folder_missing`, `cwd_mismatch`, …).
+- Control API: `list_sessions` with `scope: "recent"` now lists past sessions with `sessionId`, `startedAt`, and the first prompt. Filter by `project`, a `since` / `until` period, or `query` words across the title, project, folder and first prompt; `includeOpen` adds open sessions. Filters search every session on the Mac, not just the newest 50.
+- `canopyctl`: new `resume <sessionId>` (or `open --resume`) and `sessions` (`--project`, `--query`, `--since`, `--until`, `--table`) commands.
+
+### Bug Fixes
+- The status bar's output rate no longer counts thinking tokens.
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.13.0/Canopy-3.13.0.dmg" length="6285132" type="application/octet-stream" sparkle:edSignature="G5XRl1c0dW90nx0ZyzbxwVloTELINHIylUdiGDFEO86BjYEo+EUPSupaCTfLCssmvvh0GDPbc1OKMjOSnXpNAA=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.13.0/Canopy181-180.delta" sparkle:deltaFrom="180" length="532798" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="gvXlrBZzi2TdnQKS/JV/f+0WeEoG5zwD/OIVVe2l7N1YQYThW04/ITHRRCnlGCWX10y9QugiJYSud0VRaGB2AA=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.13.0/Canopy181-178.delta" sparkle:deltaFrom="178" length="583038" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="QsIhyGM42b2+7StpoeXDsPQ70apSlRIisQ4rofNZMqOoOpv03RzgvEwcvwHa9h4zOHlxdUzBhnoEuoq/Zr7EDA=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>3.12.2</title>
             <pubDate>Fri, 09 Oct 2026 20:07:41 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -51,43 +73,6 @@
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.1/Canopy178-175.delta" sparkle:deltaFrom="175" length="664362" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="fDHWtL37D773PGSTpaybsLLCi3rH3IBn5x0FroiphMRmBMntaTJssnH3L1A0B5RodoFo69b+0Tf5hrR/pRB4Dw=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.1/Canopy178-174.delta" sparkle:deltaFrom="174" length="679170" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="kGE3BRMfv81/+8AMWZa3biambECSRBVGhPd1F3U+pKExDd9Q1fyJB2mhIc+35GBxVd8ju6F1zrbrZeAn1OmvDA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.1/Canopy178-173.delta" sparkle:deltaFrom="173" length="702574" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="KeXpQvn9NFQllAxx95qk1+qhhdXUzaG8OaeeDQxaX/cP3UzSm6c0EfvUkpbNFCXeCP0BzFpvbMeB9qZIANVSDg=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>3.12.0</title>
-            <pubDate>Fri, 09 Oct 2026 14:02:24 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>177</sparkle:version>
-            <sparkle:shortVersionString>3.12.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Features
-- **Keep the Mac awake with the lid closed.** While a session is busy, Canopy now also keeps a MacBook awake with its lid closed, on battery and without an external display. Plugging in with the lid closed no longer puts it to sleep either.
-- **Stay reachable remotely** (Settings → General, on by default): keeps the Mac awake even with nothing running, so the phone or another Mac can reach it at any time.
-- **Battery threshold slider**: choose the battery level (5–95 %, default 20 %) below which the Mac is allowed to sleep anyway.
-- **Awake indicator**: a cup icon in the sidebar footer while Canopy is keeping the Mac awake; hover it to see why.
-- **Battery notices on your phone**: while a lid-closed Mac is held awake on battery, Canopy Mobile is notified when that starts, at every 10 % drop, and when the Mac is about to sleep.
-- Control API: `listen` waits for session events (turns finishing, permission requests, questions, sessions opening and closing), and `history` returns a session's recent turns.
-
-### Changes
-- The "sessions on an older extension" popover has a single **Restart All** button instead of one per session, and warns before restarting busy sessions.
-
-### Bug Fixes
-- The extension's rate-limit warning banner no longer appears in every pane.
-- Panes on another Mac re-attach immediately when this Mac restarts a session in place, instead of showing a disconnected state.
-- The sidebar line about sessions on an older extension no longer gets cut off.
-
-### Notes
-- Use display sleep rather than the monitor's power button: powering off a connected display with the lid closed still lets the Mac sleep.
-- Unplugging power with the lid closed still lets the Mac sleep.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.0/Canopy-3.12.0.dmg" length="6248857" type="application/octet-stream" sparkle:edSignature="O6vpYARJGUAV5Ox31Zgq/P9vOYNmQ33yi3knSkd5HuL/iznG0kUK5HmzvwJO+uIJkiME5I+CMUvW5GWsxVLGAQ=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.0/Canopy177-176.delta" sparkle:deltaFrom="176" length="633910" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="X2rrxjwzUjK3UeW8C10IBOlNL4pXWEu4qy2ZNNvgc/gzFBgC0A8OQt3AgnB5Te1+ZET9eubJgb4yyaYGkqzADQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.0/Canopy177-175.delta" sparkle:deltaFrom="175" length="626326" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="5OSFhvC6TAagSyNdN3TtOS5cSWw31zeLz0xfamehF3trNjnY6vj2uujt35VrEpUqbejkwRQGO2+bXW+rBUJvAQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.0/Canopy177-174.delta" sparkle:deltaFrom="174" length="672334" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="91psa7XQwMbuNNofb+4lRVymnGORfD1LlSk0V/26o01dmdSZLdDVXLNlxB3g8BYmd4+0pvLuePizWfjwm2FHAQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.0/Canopy177-173.delta" sparkle:deltaFrom="173" length="694930" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="SR6Jums1/eo0rUAc/xEWRzWMy7pcxTnConFtqQIGbzkFemuIwPDhyYw88Ei0pPqoKaGVs6f5iZmzIlLMfxRyAQ=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.0/Canopy177-172.delta" sparkle:deltaFrom="172" length="757546" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="1bXWNHCbt2zdXI40gPJeSSWh9N+THqnAywc8pJ4tDUd0rjpty1uRXLzJcweF3n8+nakTJjQia9VYAu6mO/BEBg=="/>
             </sparkle:deltas>
         </item>
         <item>
