@@ -251,11 +251,14 @@ struct MacroPadIndicator: View {
 
     /// A palette-coloured symbol is not a template image, so the popup draws it as given.
     /// `AwakeIndicator` draws through this too, so the footer's two glyphs share one colour.
-    static func glyph(_ symbol: String, color: NSColor, pointSize: CGFloat = 9) -> NSImage {
+    static func glyph(_ symbol: String, color: NSColor, pointSize: CGFloat = 9, label: String) -> NSImage {
         let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
             .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config) ?? NSImage()
+        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(config) else {
+            logger.error("SF Symbol \(symbol, privacy: .public) did not resolve")
+            return NSImage()
+        }
         image.isTemplate = false
         return image
     }
@@ -271,7 +274,7 @@ struct MacroPadIndicator: View {
             MacroPadCommands()
         } label: {
             HStack(spacing: 4) {
-                Image(nsImage: Self.glyph(appearance.symbol, color: appearance.tint))
+                Image(nsImage: Self.glyph(appearance.symbol, color: appearance.tint, label: appearance.help))
                 if status.isDemo {
                     Text(appearance.demoLabel)
                         .font(.caption2)
@@ -400,7 +403,7 @@ struct MacroPadIndicator: View {
             // made no claim at all, which is what this case used to do.
             //
             // `square.slash`, not `square.grid.2x2.slash` — the latter is not
-            // a real SF Symbol and renders as a broken-image glyph. Caught by
+            // a real SF Symbol, and `glyph` draws nothing for it. Caught by
             // eye; the probe now resolves every symbol reachable through
             // `MacroPadStatus.demoCycle`, which today covers all six states,
             // so the next typo fails a test instead. See the probe for what

@@ -51,11 +51,13 @@ struct AwakeIndicator: View {
         // Started from `applicationDidFinishLaunching`, not a `.task` here.
         // Drawn like `MacroPadIndicator`'s glyph beside it, so the two match in colour.
         if let reason = status.reason {
-            Image(nsImage: MacroPadIndicator.glyph("cup.and.saucer.fill", color: .secondaryLabelColor, pointSize: 10))
+            Image(nsImage: MacroPadIndicator.glyph("cup.and.saucer.fill", color: .secondaryLabelColor, pointSize: 10,
+                                                  label: "Keeping the Mac awake"))
                 .help("Keeping the Mac awake: \(reason)")
         } else {
-            Image(nsImage: MacroPadIndicator.glyph("cup.and.saucer", color: .secondaryLabelColor, pointSize: 10))
-                .help("Not keeping the Mac awake: the Mac can sleep")
+            Image(nsImage: MacroPadIndicator.glyph("cup.and.saucer", color: .secondaryLabelColor, pointSize: 10,
+                                                  label: "Not keeping the Mac awake"))
+                .help("Not keeping the Mac awake")
         }
     }
 }

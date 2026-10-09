@@ -82,7 +82,8 @@ final class SleepGuard {
     }
 
     private func tick() {
-        let open = sessions()
+        // A crashed headless shim leaves a `.dormant` row the reaper never removes; it is not open.
+        let open = sessions().filter { $0.shim != nil }
         let working = open.filter { $0.shim?.holdsSystemAwake == true }.count
         let settings = CanopySettings.shared
         // Read at most once per tick, so the decision and the battery alert see one charge.
@@ -406,7 +407,7 @@ enum SleepGuardPolicy {
     /// `power` is read only once a session is busy: it is an IOKit query, and the idle case is every tick.
     /// `stayReachable`: hold with no busy session too, so the phone or another Mac can reach it,
     /// but only while a session is open: with none there is nothing to reach.
-    static func decide(enabled: Bool, workingSessions: Int, stayReachable: Bool = false, openSessions: Int = 0,
+    static func decide(enabled: Bool, workingSessions: Int, stayReachable: Bool, openSessions: Int,
                        batteryFloor: Int = defaultBatteryFloorPercent,
                        power: @autoclosure () -> PowerSource) -> SleepDecision {
         guard enabled else { return SleepDecision(hold: false, reason: "turned off in Settings") }
