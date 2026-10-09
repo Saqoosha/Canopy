@@ -4604,7 +4604,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if Self.isCanopyOwnedResponse(innerMessage) {
                 return
             }
-            sendToWebView(innerMessage)
+            sendToWebView(Self.quietingRateLimitWarning(innerMessage))
 
         case "show_document":
             if let content = msg["content"] as? String {
@@ -5091,6 +5091,33 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Rewrites a `rate_limit_event` whose status is `allowed_warning` to
+    /// `allowed` on its way to the webview, so the extension's "You've used
+    /// N% of your … limit" banner never shows. Every pane is its own webview
+    /// with its own in-memory dismissal set (extension 2.1.295), so with six
+    /// panes the same warning showed six times and closing one left five; the
+    /// sidebar's Usage section already carries the number. Rewritten rather
+    /// than dropped: `allowed` makes the extension clear any banner standing
+    /// from an earlier frame, which a drop would leave up — e.g. a 5-hour
+    /// `rejected` row after that window resets while the weekly one still
+    /// warns. `rejected` is untouched. The trackers run on the original frame.
+    nonisolated static func quietingRateLimitWarning(_ message: [String: Any]) -> [String: Any] {
+        guard message["type"] as? String == "from-extension",
+              var nested = message["message"] as? [String: Any],
+              nested["type"] as? String == "io_message",
+              var io = nested["message"] as? [String: Any],
+              io["type"] as? String == "rate_limit_event",
+              var info = io["rate_limit_info"] as? [String: Any],
+              info["status"] as? String == "allowed_warning"
+        else { return message }
+        info["status"] = "allowed"
+        io["rate_limit_info"] = info
+        nested["message"] = io
+        var out = message
+        out["message"] = nested
+        return out
     }
 
     private func sendToWebView(_ message: Any) {
