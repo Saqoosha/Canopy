@@ -791,7 +791,7 @@ final class SessionStore {
     /// it (`ShimProcess.checkoutAfterRemoval`): run it on in the checkout, so
     /// the extension's workspace — file search, open_file, diffs — is a folder
     /// that exists. Same resume id; the transcript is already filed there.
-    /// A GUI pane follows through `session_state` (`applyDaemonSessions`).
+    /// A Mac pane re-attaches on `session_restarting`; one on an older daemon follows `session_state`.
     func moveToCheckout(shim: ShimProcess, checkout: URL) {
         guard let session = openSessions.first(where: { $0.shim === shim }),
               case .local = session.origin else {
@@ -806,7 +806,7 @@ final class SessionStore {
         session.origin = .local(checkout)
         session.project = GitWorktree.projectDisplayName(for: checkout)
         let headless = session.runsShimHere
-        restartSession(session.id, notifyDaemon: false)
+        restartSession(session.id, notifyDaemon: false, mirrorsReattach: headless)
         if headless, startHeadlessSession(resumeId: session.resumeId) == nil {
             logger.error("moveToCheckout: the session did not restart")
         }
@@ -1425,7 +1425,11 @@ final class SessionStore {
                 logger.notice("applyDaemonSessions: following a removed worktree to its checkout")
                 session.origin = .local(URL(fileURLWithPath: row.cwd))
                 session.project = row.project
-                if paned.contains(session.id) { restartSession(session.id, notifyDaemon: false) }
+                // An announcing daemon's `session_restarting` re-attaches a live pane; a dropped one has no bridge to hear it.
+                if paned.contains(session.id),
+                   !session.hostAnnouncesSessionRestarts || session.connection.status == .reconnectFailed {
+                    restartSession(session.id, notifyDaemon: false)
+                }
             }
         }
         for row in plan.adds {
@@ -1907,14 +1911,19 @@ final class SessionStore {
     /// mounts a `SessionContainer` for it, so no shim would be built, and
     /// `.spawning` renders as the breathing "working" dot on a session that is
     /// running nothing. `startIfDormant(_:)` picks it up when a pane takes it.
-    func restartSession(_ id: UUID, notifyDaemon: Bool = true) {
+    /// `mirrorsReattach`: the caller starts the session again before returning, so its
+    /// mirror clients are told to re-attach rather than dropped (`ShimProcess.stop`).
+    func restartSession(_ id: UUID, notifyDaemon: Bool = true, mirrorsReattach: Bool = false) {
         guard let session = openSessions.first(where: { $0.id == id }) else { return }
         // The daemon restarts its shim first; re-attaching before it answers
         // would find the old shim stopping and be refused.
         if notifyDaemon, session.isDaemonHosted, let control = daemonControl, session.daemonKey != nil {
+            let bridge = session.mirrorBridge
             Task { [weak self] in
                 switch await control.request("restart_session", Self.daemonRefParams(session)) {
                 case .success:
+                    // The daemon's `session_restarting` may have re-attached the pane already.
+                    guard session.mirrorBridge === bridge else { return }
                     self?.restartSession(id, notifyDaemon: false)
                 case .failure(let failure):
                     logger.error("restart_session failed: \(String(describing: failure), privacy: .public)")
@@ -1969,7 +1978,7 @@ final class SessionStore {
         // held only by the outgoing coordinator, `terminationHandler` captures
         // it weakly, and `dismantleNSView` drops it — so it may deallocate
         // before the child dies and never run that path at all.
-        session.shim?.stop()
+        session.shim?.stop(mirrorsReattach: mirrorsReattach)
         session.shim = nil
         session.mirrorBridge?.close()
         session.mirrorBridge = nil
@@ -2026,7 +2035,8 @@ final class SessionStore {
     }
 
     /// Moves a session to another login and restarts it on the same conversation.
-    func switchAccount(_ id: UUID, to account: ClaudeAccount?) {
+    /// `mirrorsReattach` as for `restartSession`.
+    func switchAccount(_ id: UUID, to account: ClaudeAccount?, mirrorsReattach: Bool = false) {
         guard let session = openSessions.first(where: { $0.id == id }) else { return }
         guard session.claudeAccount?.id != account?.id else { return }
         logger.notice("switchAccount id=\(id.uuidString, privacy: .public) account=\(account?.name ?? "default", privacy: .public)")
@@ -2034,11 +2044,14 @@ final class SessionStore {
             // The daemon restarts the session on the new login; the row shows it only once that happened.
             var params = Self.daemonRefParams(session)
             params["accountId"] = account?.id ?? ""
+            let bridge = session.mirrorBridge
             Task { [weak self] in
                 switch await control.request("switch_account", params) {
                 case .success:
                     session.claudeAccount = account
                     session.accountAutoSwitch = nil
+                    // The daemon's `session_restarting` may have re-attached the pane already.
+                    guard session.mirrorBridge === bridge else { return }
                     self?.restartSession(id, notifyDaemon: false)
                 case .failure(let failure):
                     logger.error("switch_account failed: \(String(describing: failure), privacy: .public)")
@@ -2049,7 +2062,7 @@ final class SessionStore {
         }
         session.claudeAccount = account
         session.accountAutoSwitch = nil
-        restartSession(id)
+        restartSession(id, mirrorsReattach: mirrorsReattach)
     }
 
     // MARK: - Refresh

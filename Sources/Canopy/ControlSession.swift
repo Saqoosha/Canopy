@@ -426,7 +426,7 @@ final class ControlSession {
     /// row it starts the shim again itself.
     private func restartSession(_ request: ControlProtocol.Request) {
         guard let session = requestedSession(request) else { return }
-        store.restartSession(session.id)
+        store.restartSession(session.id, mirrorsReattach: true)
         let started = store.startHeadlessSession(resumeId: session.resumeId) != nil
         // Without this the footer keeps listing the session as on an older extension until the next minute's check.
         DaemonUpgradeCenter.shared.refreshExtensionState?()
@@ -445,7 +445,7 @@ final class ControlSession {
             fail(request, "no such account")
             return
         }
-        store.switchAccount(session.id, to: account)
+        store.switchAccount(session.id, to: account, mirrorsReattach: true)
         // Same account: nothing was stopped. Another: `restartSession` parked the row.
         let failed = session.shim == nil && store.startHeadlessSession(resumeId: session.resumeId) == nil
         DaemonUpgradeCenter.shared.refreshExtensionState?()

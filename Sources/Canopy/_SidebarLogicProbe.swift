@@ -2639,6 +2639,46 @@ enum SidebarLogicProbe {
                 own.runsShimHere = true
                 record("daemon hosted: a session whose shim runs in this process is not the daemon's", !own.isDaemonHosted)
             }
+            do {
+                // A removed worktree's move to its checkout: the pane re-attaches here unless the
+                // daemon announces restarts and the pane is still live to hear it.
+                OpenSession.localSessionsRunInDaemon = true
+                defer { OpenSession.localSessionsRunInDaemon = false }
+                let checkout = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("canopy-probe-checkout-\(UUID().uuidString)")
+                try? FileManager.default.createDirectory(at: checkout.appendingPathComponent(".git"),
+                                                         withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: checkout) }
+                func follow(announced: Bool, paned: Bool, dropped: Bool = false) -> (followed: Bool, restarted: Bool) {
+                    let store = SessionStore()
+                    let gone = URL(fileURLWithPath: "/nonexistent/canopy-probe-\(UUID().uuidString)")
+                    let s = OpenSession(origin: .local(gone), resumeId: "r", title: "T", project: "p",
+                                        resumeIdIsExistingTranscript: true)
+                    s.daemonKey = "K"
+                    s.hostAnnouncesSessionRestarts = announced
+                    store._probeSeedOpenSessions([s])
+                    if paned { store.openInFocusedPane(s.id) }
+                    if dropped { s.connection.status = .reconnectFailed }
+                    let before = s.restartGeneration
+                    store.applyDaemonSessions([.init(
+                        key: "K", resumeId: "r", title: "T", project: "p", cwd: checkout.path, state: "idle",
+                        running: true, clients: 1, lastActiveAt: 0, model: "", messageCount: 0,
+                        permissionMode: "default", accountId: nil)])
+                    return (s.origin.workingDirectory.path == checkout.path, s.restartGeneration != before)
+                }
+                let legacy = follow(announced: false, paned: true)
+                record("checkout move: a pane on a daemon that does not announce restarts follows and re-attaches",
+                       legacy.followed && legacy.restarted)
+                let announced = follow(announced: true, paned: true)
+                record("checkout move: a pane on a daemon that announces restarts follows and leaves the re-attach to it",
+                       announced.followed && !announced.restarted)
+                let dropped = follow(announced: true, paned: true, dropped: true)
+                record("checkout move: an already-dropped pane re-attaches even on a daemon that announces restarts",
+                       dropped.followed && dropped.restarted)
+                let unpaned = follow(announced: false, paned: false)
+                record("checkout move: an unpaned session follows without a restart",
+                       unpaned.followed && !unpaned.restarted)
+            }
             record("open gate: bypass is refused without this Mac's opt-in",
                    NewSessionOptions(permissionMode: .bypassPermissions).refusal(allowBypass: false) == "bypass permissions is off on this Mac"
                        && NewSessionOptions(permissionMode: .bypassPermissions).refusal(allowBypass: true) == nil

@@ -239,6 +239,8 @@ final class OpenSession: Identifiable, Hashable {
     /// from its Recents or folder list. Cleared once attached, so a Retry
     /// re-attaches rather than starting a second session.
     var pendingMirrorOpen: MirrorOpenRequest?
+    /// This Mac's daemon sent `session_restarting` for this session, so `applyDaemonSessions` leaves a live pane to it.
+    var hostAnnouncesSessionRestarts = false
     /// The other Mac's `OpenSession.id` for this mirror, from `attach_ok` —
     /// the id its roster publishes. `resumeId` alone stops matching once a
     /// new session's placeholder is replaced by the CLI's id over there.

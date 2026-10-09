@@ -327,6 +327,16 @@ struct MirrorPaneView: NSViewRepresentable {
                     if case .spawning = session.status {
                         onFailure(isDaemon ? "Could not reach this Mac's session service."
                                            : "Could not reach \(machineName). Is its live mirror on?", false)
+                    } else if bridge?.expectsSessionRestart == true {
+                        // Restarted in place (a removed worktree's move, an account switch, Restart):
+                        // the new shim already runs, so re-attach without showing the drop.
+                        logger.notice("[mirror-pane] session restarted on \(machineName, privacy: .public); re-attaching \(session.resumeId, privacy: .public)")
+                        if isDaemon { session.hostAnnouncesSessionRestarts = true }
+                        Task { @MainActor [weak session, weak bridge] in
+                            // Skip when something else already re-attached this pane.
+                            guard let session, let bridge, session.mirrorBridge === bridge else { return }
+                            SessionStore.shared?.restartSession(session.id, notifyDaemon: false)
+                        }
                     } else {
                         session.connection.status = .reconnectFailed
                         session.isThinking = false
