@@ -68,6 +68,17 @@ final class CanopySettings {
     var preventSleepWhileWorking: Bool = true {
         didSet { save() }
     }
+
+    /// Keep the Mac awake with no busy session too, lid closed included, so a message from
+    /// the phone or another Mac always arrives (`SleepGuardPolicy.decide`). Daemon only.
+    var stayReachableRemotely: Bool = true {
+        didSet { save() }
+    }
+
+    /// On battery below this, the Mac is allowed to sleep whatever is running.
+    var sleepBatteryFloorPercent: Int = SleepGuardPolicy.defaultBatteryFloorPercent {
+        didSet { save() }
+    }
     /// Which pad this Canopy drives: none, the local USB one, or a bridge on
     /// another Mac. Replaces the old `macroPadEnabled` boolean, which is read
     /// once at load for migration and then never written again.
@@ -203,6 +214,8 @@ final class CanopySettings {
         set(\.keepAliveEnabled, dict["canopy.keepAliveEnabled"] as? Bool)
         set(\.seedWorktreeArtifacts, dict["canopy.seedWorktreeArtifacts"] as? Bool)
         set(\.preventSleepWhileWorking, dict["canopy.preventSleepWhileWorking"] as? Bool)
+        set(\.stayReachableRemotely, dict["canopy.stayReachableRemotely"] as? Bool)
+        set(\.sleepBatteryFloorPercent, Self.batteryFloor(dict["canopy.sleepBatteryFloorPercent"]))
         set(\.defaultPermissionMode, (dict["canopy.defaultPermissionMode"] as? String).flatMap(PermissionMode.init(rawValue:)))
         set(\.machineDisplayName, dict["canopy.machineDisplayName"] as? String)
         set(\.rosterEnabled, dict["canopy.rosterEnabled"] as? Bool)
@@ -245,6 +258,12 @@ final class CanopySettings {
         }
         if let preventSleep = dict["canopy.preventSleepWhileWorking"] as? Bool {
             preventSleepWhileWorking = preventSleep
+        }
+        if let reachable = dict["canopy.stayReachableRemotely"] as? Bool {
+            stayReachableRemotely = reachable
+        }
+        if let floor = Self.batteryFloor(dict["canopy.sleepBatteryFloorPercent"]) {
+            sleepBatteryFloorPercent = floor
         }
         let storedSourceRaw = dict["canopy.macroPadSource"] as? String
         macroPadRemoteHost = (dict["canopy.macroPadRemoteHost"] as? String) ?? ""
@@ -315,6 +334,11 @@ final class CanopySettings {
         save()
     }
 
+    /// A hand-edited value outside the slider's range is clamped into it.
+    private static func batteryFloor(_ raw: Any?) -> Int? {
+        (raw as? Int).map { min(max($0, SleepGuardPolicy.batteryFloorRange.lowerBound), SleepGuardPolicy.batteryFloorRange.upperBound) }
+    }
+
     private func save() {
         guard !isLoading, Self.persistsChanges else { return }
         var dict = loadCurrentDict()
@@ -325,6 +349,8 @@ final class CanopySettings {
         dict["canopy.keepAliveEnabled"] = keepAliveEnabled
         dict["canopy.seedWorktreeArtifacts"] = seedWorktreeArtifacts
         dict["canopy.preventSleepWhileWorking"] = preventSleepWhileWorking
+        dict["canopy.stayReachableRemotely"] = stayReachableRemotely
+        dict["canopy.sleepBatteryFloorPercent"] = sleepBatteryFloorPercent
         dict["canopy.macroPadSource"] = macroPadSource.rawValue
         dict["canopy.macroPadRemoteHost"] = macroPadRemoteHost
         // Retire the pre-source key on the first save after migration.

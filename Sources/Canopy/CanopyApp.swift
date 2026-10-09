@@ -653,6 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeepAliveCoordinator.shared.start()
         // Sessions this process still runs itself (SSH remote, Debug without a daemon).
         sleepGuard.start()
+        AwakeStatus.shared.start()
         GPUProcessReaper.start()
         DaemonRegistration.ensureRegistered()
         // The sidebar's usage bars have no writer until a shim runs, so a
