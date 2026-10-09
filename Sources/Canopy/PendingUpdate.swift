@@ -32,14 +32,12 @@ final class PendingUpdate {
     }
 
     /// The popover's headline for a waiting build, in marketing versions. Builds stand in when a
-    /// version is unknown (a daemon built before the version fields sends none; the pending build
-    /// is then usually this GUI's own) or when both versions match, as two dev builds can.
-    nonisolated static func buildLine(_ state: UpgradeState, pending: String,
-                                      ownBuild: String? = DaemonUpgrade.launchedBuild,
-                                      ownVersion: String? = DaemonUpgrade.launchedVersion) -> String {
-        let pendingVersion = state.pendingVersion ?? (pending == ownBuild ? ownVersion : nil)
-        let (new, old): (String, String) = if let pendingVersion, let running = state.runningVersion, pendingVersion != running {
-            (pendingVersion, running)
+    /// version is missing (a daemon from before the version fields) or both versions match (dev builds).
+    nonisolated static func buildLine(_ state: UpgradeState) -> String? {
+        guard let pending = state.pendingBuild else { return nil }
+        let (new, old): (String, String) = if let version = state.pendingVersion, let running = state.runningVersion,
+                                              version != running {
+            (version, running)
         } else {
             ("build \(pending)", "build \(state.runningBuild)")
         }
@@ -129,8 +127,8 @@ private struct PendingUpdateDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let pending = state.pendingBuild {
-                Text(PendingUpdate.buildLine(state, pending: pending))
+            if let line = PendingUpdate.buildLine(state) {
+                Text(line)
                     .font(.headline)
                 ForEach(state.heldBy, id: \.key) { hold in
                     VStack(alignment: .leading, spacing: 1) {

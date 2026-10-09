@@ -12,18 +12,15 @@ enum DaemonUpgrade {
 
     /// The build now on disk, read fresh; `Bundle.main` caches the launch-time Info.plist.
     static func onDiskBuild(bundleURL: URL = Bundle.main.bundleURL) -> String? {
-        onDiskInfo(bundleURL: bundleURL)?["CFBundleVersion"] as? String
+        onDiskBuildAndVersion(bundleURL: bundleURL).build
     }
 
-    /// The marketing version now on disk, for display only.
-    static func onDiskVersion(bundleURL: URL = Bundle.main.bundleURL) -> String? {
-        onDiskInfo(bundleURL: bundleURL)?["CFBundleShortVersionString"] as? String
-    }
-
-    private static func onDiskInfo(bundleURL: URL) -> [String: Any]? {
+    /// Build and marketing version from one read, so the two cannot come from different bundles.
+    static func onDiskBuildAndVersion(bundleURL: URL = Bundle.main.bundleURL) -> (build: String?, version: String?) {
         let plist = bundleURL.appendingPathComponent("Contents/Info.plist")
-        guard let data = try? Data(contentsOf: plist) else { return nil }
-        return try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        guard let data = try? Data(contentsOf: plist),
+              let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return (nil, nil) }
+        return (dict["CFBundleVersion"] as? String, dict["CFBundleShortVersionString"] as? String)
     }
 
     /// Restart only for a readable, different build that was already on disk at the previous
