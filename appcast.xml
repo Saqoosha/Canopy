@@ -19,7 +19,6 @@
 
 ### Bug Fixes
 - The MacroPad indicator in the sidebar footer was drawn much darker than intended. It now matches the coffee cup beside it.
-- A session whose Claude process had crashed in the background could keep the Mac awake indefinitely under "Stay reachable remotely".
 ]]></description>
             <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.12.2/Canopy-3.12.2.dmg" length="6246993" type="application/octet-stream" sparkle:edSignature="zU6+G3A5zjy+AP8ddZe97zX01L+SSEWCNxYDNPU6B4VDP4NtfgSIMbb64AomZ56ybDzAMXgzLSjh9MQ7HzL2Ag=="/>
             <sparkle:deltas>
