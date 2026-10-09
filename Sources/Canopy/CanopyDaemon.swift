@@ -84,7 +84,7 @@ final class DaemonDelegate {
     /// sessions cleanly and exit non-zero so launchd starts the new build. Panes that got the
     /// notice re-attach and resume; anything else sees an ordinary drop.
     private func restartIfUpgraded() {
-        let onDisk = DaemonUpgrade.onDiskBuild()
+        let (onDisk, onDiskVersion) = DaemonUpgrade.onDiskBuildAndVersion()
         defer { previousOnDiskBuild = onDisk }
         let pending = onDisk.flatMap { $0 != DaemonUpgrade.launchedBuild ? $0 : nil }
         // `upgradeBlocker` can scan the transcript store, so holds are read only while a build waits.
@@ -93,7 +93,8 @@ final class DaemonDelegate {
         }
         let holds = blocked.map { UpgradeHold(key: $0.session.id.uuidString, title: $0.session.title, reason: $0.reason) }
         let underLaunchd = Self.underLaunchd
-        publishUpgradeState(pending: pending, holds: holds, underLaunchd: underLaunchd)
+        publishUpgradeState(pending: pending, pendingVersion: pending == nil ? nil : onDiskVersion, holds: holds,
+                            underLaunchd: underLaunchd)
         confirmedBuild = pending != nil && pending == previousOnDiskBuild ? pending : nil
         guard let onDisk = pending else {
             setWaitingForBuild(nil)
@@ -139,9 +140,11 @@ final class DaemonDelegate {
         })
     }
 
-    private func publishUpgradeState(pending: String?, holds: [UpgradeHold], underLaunchd: Bool) {
+    private func publishUpgradeState(pending: String?, pendingVersion: String?, holds: [UpgradeHold], underLaunchd: Bool) {
         let state = UpgradeState(runningBuild: DaemonUpgrade.launchedBuild ?? "?", pendingBuild: pending, heldBy: holds,
-                                 notUnderLaunchd: !underLaunchd, extensionState: extensionState())
+                                 notUnderLaunchd: !underLaunchd, extensionState: extensionState(),
+                                 runningVersion: DaemonUpgrade.launchedVersion,
+                                 pendingVersion: pendingVersion)
         if DaemonUpgradeCenter.shared.state != state { DaemonUpgradeCenter.shared.state = state }
     }
 

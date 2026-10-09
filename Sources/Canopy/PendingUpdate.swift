@@ -31,6 +31,19 @@ final class PendingUpdate {
         return nil
     }
 
+    /// The popover's headline for a waiting build, in marketing versions. Builds stand in when a
+    /// version is missing (a daemon from before the version fields) or both versions match (dev builds).
+    nonisolated static func buildLine(_ state: UpgradeState) -> String? {
+        guard let pending = state.pendingBuild else { return nil }
+        let (new, old): (String, String) = if let version = state.pendingVersion, let running = state.runningVersion,
+                                              version != running {
+            (version, running)
+        } else {
+            ("build \(pending)", "build \(state.runningBuild)")
+        }
+        return "Canopy \(new) is installed; the session service still runs \(old)."
+    }
+
     nonisolated static func confirmation(_ holds: [UpgradeHold]) -> String {
         let n = holds.count
         let names = holds.map(\.title).joined(separator: ", ")
@@ -114,8 +127,8 @@ private struct PendingUpdateDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let pending = state.pendingBuild {
-                Text("Build \(pending) is installed; the session service still runs \(state.runningBuild).")
+            if let line = PendingUpdate.buildLine(state) {
+                Text(line)
                     .font(.headline)
                 ForEach(state.heldBy, id: \.key) { hold in
                     VStack(alignment: .leading, spacing: 1) {
