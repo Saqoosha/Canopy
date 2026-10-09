@@ -1845,11 +1845,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return working ? "working" : "idle"
     }
 
-    func controlTurnSnapshot(replyId: String?) -> ControlTurnSnapshot? {
-        let state = Self.controlState(
+    /// The `state` the turn verbs (`session_status`, `latest_reply`, `wait_turn`) and `listen` events report.
+    var controlStateWire: String {
+        Self.controlState(
             askingQuestion: lastAssistantHadAskUserQuestion || !pendingAskUserQuestionRequestIds.isEmpty,
             permissionPending: !pendingPermissionRequestIds.subtracting(pendingAskUserQuestionRequestIds).isEmpty,
             working: isWorking)
+    }
+
+    func controlTurnSnapshot(replyId: String?) -> ControlTurnSnapshot? {
+        let state = controlStateWire
         // The first-turn id lives on the session, so a shim rebuilt before sending it still reports it queued.
         var queued = controlReplyIds
         if let firstTurn = boundSession?.pendingInitialPromptReplyId { queued.insert(firstTurn) }
@@ -6545,6 +6550,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if toolName == "AskUserQuestion" {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
+            if isNewPermissionRequest {
+                // Capped like `pending_requests`: the event outlives the request it describes.
+                let rendered = Self.renderedToolInput(request["inputs"])
+                ControlEventLog.shared.record(toolName == "AskUserQuestion" ? .asking : .permission,
+                                              session: boundSession, state: controlStateWire, requestId: requestId,
+                                              toolName: toolName, text: rendered.isEmpty ? nil : rendered,
+                                              textMaxBytes: Self.pendingRequestInputMaxBytes)
+            }
             // A raised hand is the one state where the notification is worth
             // more than the roster row: it is the only state that cannot
             // resolve itself. Gated on the insert actually inserting a NEW id,
@@ -6628,6 +6641,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// raised-hand, hourglass, or spinning subagent row — once the process
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
+        turnTextBlocks = []
         outstandingDialogRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
@@ -8023,6 +8037,24 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// The current turn's main-conversation text blocks, by message id, for `turn_done`.
+    private var turnTextBlocks: [(id: String, texts: [String])] = []
+
+    private func collectTurnText(_ ioMsg: [String: Any]) {
+        guard let frame = Self.mainTurnText(ioMsg) else { return }
+        turnTextBlocks = ControlEvent.appendingTurnText(turnTextBlocks, id: frame.id, texts: frame.texts)
+    }
+
+    /// The text blocks of a main-conversation `assistant` frame; nil for any other frame, a subagent's included.
+    nonisolated static func mainTurnText(_ ioMsg: [String: Any]) -> (id: String, texts: [String])? {
+        guard ioMsg["type"] as? String == "assistant",
+              ioMsg["parent_tool_use_id"] as? String == nil,
+              let message = ioMsg["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]] else { return nil }
+        let texts = content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+        return (message["id"] as? String ?? "", texts)
+    }
+
     /// Track CLI working state from io_message events flowing to webview.
     /// Message structure: {type:"from-extension", message:{type:"io_message", message:{type:"assistant"|"result"|...}}}
     private func trackWorkingState(_ message: [String: Any]) {
@@ -8039,6 +8071,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         switch ioType {
         case "assistant", "stream_event":
+            collectTurnText(ioMsg)
             detectAskUserQuestion(in: ioMsg)
             detectBackgroundTaskLaunch(in: ioMsg)
             detectTaskStopLaunch(in: ioMsg)
@@ -8051,6 +8084,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // turn must finish then too.
             let finalText = ioMsg["result"] as? String
             latestReplyText = finalText ?? ""
+            let finishedControlReply = controlTurnReplyId
             if let replyId = controlTurnReplyId {
                 controlFinishedReplyId = replyId
                 controlFinishedTexts[replyId] = finalText ?? ""
@@ -8083,6 +8117,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 lastAssistantHadAskUserQuestion = false
             }
             refreshAskingState()
+            // Every main-conversation turn, typed on the Mac, the phone or the control API.
+            let turn = ControlEvent.turnReply(blocks: turnTextBlocks.flatMap(\.texts), result: finalText ?? "")
+            turnTextBlocks = []
+            ControlEventLog.shared.record(.turnDone, session: boundSession, state: controlStateWire,
+                                          replyId: finishedControlReply, text: turn.text, addressedTo: turn.addressedTo)
         default:
             break
         }

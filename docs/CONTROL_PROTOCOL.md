@@ -84,6 +84,7 @@ was given. Pass that `replyId` to `wait_turn` to wait for the first answer.
 `stop_session` and `restart_session` take `key` and/or `sessionId`.
 
 `subscribe` asks for `session_state` pushes. Those lines are not responses.
+To wait for one event instead, use `listen` (below).
 
 `mkdir` creates a directory (`parent`, `name`) and returns `{path}`.
 
@@ -173,3 +174,89 @@ turn finished with none):
 `wait_turn` polls until `turnDone` or 60 seconds (0.5 s × 120), then returns
 the same object as `latest_reply`. The client's read timeout has to be
 longer than that; `canopyctl` uses 90 seconds.
+
+### `listen`
+
+Blocks until something happens in a session this daemon runs, then answers
+with that one event. This is how an agent learns about turns it did not
+start. The daemon records events from launch whether or not anyone is
+listening, in a ring of the last 1000, so a client that passes back its
+cursor with the same filter misses nothing between two `listen` calls. SSH
+remote sessions run in the GUI, not the daemon, and are not included.
+
+Params, all optional:
+
+| Param | Meaning |
+|---|---|
+| `events` | Array of event names to wait for. Default: every event except `addressed`. Unknown names are an error |
+| `key`, `sessionId` | Only events from that session. Without `since` it must be open (else `no such session`); with `since` a session that has since closed is still read from the log |
+| `addressedTo` | Only `addressed` turns whose reader contains this text (case-insensitive). Alone, it means `events: ["addressed"]`; with `events`, those must include `addressed` |
+| `since` | A `cursor` string from an earlier `listen`. The first matching event after it is returned at once. Omitted: only events after this request |
+| `timeout` | Seconds, default 300, at least 1, capped at 3600 |
+
+A param of the wrong type is an error; `null` is the same as leaving it out. One connection may hold 16 open
+`listen` requests; each is answered under its own `id`, and closing the
+connection cancels them.
+
+Events:
+
+| `event` | When |
+|---|---|
+| `turn_done` | A main-conversation turn ended, whoever started it (Mac, phone, control API) |
+| `addressed` | A filter, not a recorded kind: a `turn_done` whose reply names a reader (below). The returned `event` is `turn_done` with `addressedTo` |
+| `permission` | A tool permission request arrived |
+| `asking` | An AskUserQuestion arrived |
+| `session_opened`, `session_closed` | A session was added to or removed from the daemon's open list. `session_opened` carries the id the session had then; a new session's placeholder id is replaced after its first turn |
+| `gap` | Never requested. The cursor cannot be continued; resync with `list_sessions` |
+
+A reply is addressed when the first non-blank line of one of the turn's text
+blocks is `Written for: <name>` or `宛先: <name>` (markdown `#`, `>`, `*`,
+`_` around the line is ignored). Every text block counts, not only the last:
+a turn can go on after the addressed block (a Stop hook making the model
+continue does this), and `result` holds only the last one.
+
+Result when an event matched:
+
+```json
+{"cursor":"1a2b3c4d.42",
+ "event":{"event":"turn_done","seq":42,"key":"…","sessionId":"…","title":"…","at":1791476315.48,
+          "state":"idle","replyId":"…","text":"Written for: Engineer\n…","addressedTo":"Engineer"}}
+```
+
+`replyId` is present when the turn came from `send_message` or an
+`initialPrompt`. `text` on `turn_done` is the turn's reply: from the addressed
+block to the end when there is one, else the CLI's final `result` text, cut
+at 32,000 bytes with `textTruncated: true`. `permission` and `asking` carry
+`requestId`, `toolName`, and the rendered tool input as `text`, cut at about
+4 KB like `pending_requests`. `state`, on those three kinds only, is the
+session's state just after the event, as in `session_status`.
+
+Result on timeout:
+
+```json
+{"timedOut":true,"cursor":"1a2b3c4d.57"}
+```
+
+Pass `cursor` as the next `since` in both cases. The part before the dot
+changes each daemon launch; a cursor from an earlier launch returns
+`{"event":"gap","reason":"daemon_restarted"}` at once, and its `cursor`
+resumes at the oldest event the new daemon holds. `reason: "overflow"` means
+the ring wrapped past the cursor; `"unknown_cursor"` means the cursor is
+ahead of the log.
+
+`canopyctl listen` prints the response and exits 0 on an event, 3 on
+timeout, 4 when the socket could not be reached or dropped (a daemon
+restart), and 1 on any other error, a refused `hello` included (2 is
+argparse's usage error):
+
+```sh
+cursor=""
+while :; do
+  out=$(canopyctl listen --to Engineer --timeout 1800 ${cursor:+--since "$cursor"})
+  rc=$?
+  [ $rc -eq 4 ] && { sleep 5; continue; }   # keep the cursor and retry
+  [ $rc -eq 0 ] || [ $rc -eq 3 ] || break
+  cursor=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["cursor"])')
+  [ $rc -eq 0 ] && printf '%s\n' "$out"   # handle the event
+done
+```
