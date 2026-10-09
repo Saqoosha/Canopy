@@ -356,15 +356,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         logger.notice("[mirror] detached; \(self.mirrors.count) mirror(s) on this shim")
     }
 
+    /// Sent to a client that attached with `"restart": true` when its session is restarted in place
+    /// and already running again by the time the connection closes: re-attach now, do not offer Retry.
+    static let sessionRestartingFrameType = "session_restarting"
+
     /// A stopped shim ends its mirrors' connections, so a Mac attached to it sees a drop instead of typing into nothing.
     /// With `reason`, each client is told why first (#278) instead of seeing a bare network drop.
-    private func disconnectMirrors(reason: String? = nil) {
+    /// With `reattach`, a client that re-attaches by itself is told the session is restarting.
+    private func disconnectMirrors(reason: String? = nil, reattach: Bool = false) {
         // Nothing to dismiss: the shim is stopping or gone, and a write now would hit a closed pipe.
         pendingAlerts = PendingUIAlerts()
         for client in mirrors.values {
             guard let connection = client.sink as? MirrorConnection else { continue }
             if let reason {
                 connection.endFromServer(reason: reason)
+            } else if reattach, connection.reattachesAfterRestart {
+                connection.endForSessionRestart()
             } else {
                 connection.cancelFromServer()
             }
@@ -3636,10 +3643,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// `mirrorEndReason` tells attached clients the session ended rather than dropping them (#278),
     /// so a Mac that did not ask for the stop closes its pane instead of offering Retry.
-    /// Only for a stop that ends the session: a restart must stay a drop, which its clients re-attach after.
-    func stop(mirrorEndReason: String? = nil) {
+    /// Only for a stop that ends the session: a restart must stay a drop. `mirrorsReattach` is for a
+    /// restart whose caller starts the session again in the same main-actor turn, so a client told to
+    /// re-attach finds it running; without it the drop is bare and a Mac pane offers Retry.
+    func stop(mirrorEndReason: String? = nil, mirrorsReattach: Bool = false) {
         isIntentionalStop = true
-        disconnectMirrors(reason: mirrorEndReason)
+        disconnectMirrors(reason: mirrorEndReason, reattach: mirrorsReattach)
         // Clear the destination here too, whatever the connections' detaches
         // did. A crash still leaves the file; the key is per process, so a
         // stale one is never read again.

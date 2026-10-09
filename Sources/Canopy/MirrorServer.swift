@@ -487,6 +487,23 @@ final class MirrorConnection: MirrorSink {
         }
     }
 
+    /// Ends the connection with `ShimProcess.sessionRestartingFrameType` as its last line. Sent on
+    /// the send queue so it follows every frame already queued, and cancelled once it has left,
+    /// for `failAttach`'s reason; the 3 s cancel covers a peer that stops reading.
+    func endForSessionRestart() {
+        let data = (try? JSONSerialization.data(withJSONObject: ["type": ShimProcess.sessionRestartingFrameType])) ?? Data()
+        let compress = compressOutbound
+        queue.async { [connection] in
+            connection.send(content: MirrorWire.encode(line: data, compress: compress), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+        }
+        cleanup()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [connection] in
+            connection.cancel()
+        }
+    }
+
     func deliver(_ payload: [String: Any]) {
         sendJSONObject(payload)
     }

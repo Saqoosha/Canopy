@@ -19,6 +19,9 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     var onUIFrame: ((MirrorUIFrame) -> Void)?
     /// Set by the daemon's `daemon_restarting`: the next drop may re-attach on its own.
     private(set) var expectsRestart = false
+    /// Set by `ShimProcess.sessionRestartingFrameType`: the host restarted this session in place
+    /// and it is already running again, so the drop that follows re-attaches at once.
+    private(set) var expectsSessionRestart = false
     /// The origin session's account usage (`MirrorUsageFrame`), once it has any and on every
     /// change; never from a Mac that predates the frame.
     var onUsage: (([String: Any]) -> Void)?
@@ -332,6 +335,10 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if dict["type"] as? String == DaemonUpgrade.restartingFrameType {
             // The drop that follows is a planned restart onto a new build, not a stop.
             expectsRestart = true
+            return
+        }
+        if dict["type"] as? String == ShimProcess.sessionRestartingFrameType {
+            expectsSessionRestart = true
             return
         }
         if let frame = MirrorUIFrame(wire: dict) {
