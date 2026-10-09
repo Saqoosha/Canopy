@@ -2605,6 +2605,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// model rather than only the launch one.
     private var cliResolvedModel: String = ""
 
+    /// When the current API request's first `content_block_delta` arrived; nil between
+    /// requests. The status bar's output rate is measured from here, not from
+    /// `message_start`, so time-to-first-token (prefill, queueing) does not count against it.
+    private var outputRateStart: Date?
+
     /// True once a canopy-bridge frame supplied the context window; the
     /// `result` branch then leaves `contextMax` to it.
     private var contextMaxFromBridge = false
@@ -8277,6 +8282,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // Clear compact indicator on next API call (fresh context reported)
                 data.clearCompactIndicator()
                 requestUsageUpdate()
+                outputRateStart = nil
+            }
+
+            // Output rate: `message_delta` carries the request's cumulative
+            // `output_tokens`, so the rate is known once per request, at its end.
+            if eventType == "content_block_delta", outputRateStart == nil {
+                outputRateStart = Date()
+            }
+            if eventType == "message_delta",
+               let start = outputRateStart,
+               let usage = event["usage"] as? [String: Any],
+               let output = usage["output_tokens"] as? Int
+            {
+                outputRateStart = nil
+                if let rate = Self.outputTokensPerSecond(tokens: output, seconds: Date().timeIntervalSince(start)) {
+                    data.outputTokensPerSecond = rate
+                }
             }
 
             // Neither `message_start` block in this branch is gated on
@@ -8408,6 +8430,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         default:
             break
         }
+    }
+
+    /// Output tokens per second for one API request, rounded; nil when the
+    /// request is too short to give a meaningful rate. A one-line tool call
+    /// streams a handful of tokens in a few milliseconds, and showing that as
+    /// "900 tok/s" would replace a real reading with noise, so such a request
+    /// leaves the previous figure standing.
+    nonisolated static func outputTokensPerSecond(tokens: Int, seconds: TimeInterval) -> Int? {
+        guard tokens >= 20, seconds >= 0.5 else { return nil }
+        return Int((Double(tokens) / seconds).rounded())
     }
 
     /// True when an io_message belongs to the main conversation rather than a

@@ -41,6 +41,7 @@ struct StatusBarView: View {
         let hasBranch = !data.gitBranch.isEmpty
         let hasContext = data.contextMax > 0
         let hasMessages = w >= CollapseThreshold.dropSessionUsage && data.messageCount > 0
+        let hasRate = w >= CollapseThreshold.dropSessionUsage && data.outputTokensPerSecond != nil
         ZStack {
             Group {
                 if w < CollapseThreshold.popoverFallback {
@@ -94,9 +95,15 @@ struct StatusBarView: View {
                             .help(contextTooltip())
                         }
 
+                        // Output rate of the last API request
+                        if hasRate {
+                            if hasRemote || hasModel || hasBranch || hasContext { separator }
+                            outputRateBadge
+                        }
+
                         // Session usage (message count)
                         if hasMessages {
-                            if hasRemote || hasModel || hasBranch || hasContext { separator }
+                            if hasRemote || hasModel || hasBranch || hasContext || hasRate { separator }
                             sessionUsageBadge
                         }
 
@@ -161,6 +168,7 @@ struct StatusBarView: View {
                         }
                         .help(contextTooltip())
                     }
+                    if data.outputTokensPerSecond != nil { outputRateBadge }
                     if data.messageCount > 0 { sessionUsageBadge }
                 }
                 .padding(12)
@@ -240,6 +248,20 @@ struct StatusBarView: View {
 
     private var contextNumericLabel: some View {
         Text("\(data.formatTokens(data.contextUsed))/\(data.formatTokens(data.compactionWindow))")
+    }
+
+    @ViewBuilder
+    private var outputRateBadge: some View {
+        if let rate = data.outputTokensPerSecond {
+            HStack(spacing: 3) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 8))
+                Text("\(rate) tok/s")
+                    .monospacedDigit()
+            }
+            .foregroundStyle(.tertiary)
+            .help("Output speed of the last response: \(rate) tokens per second, from its first streamed token to its end")
+        }
     }
 
     private var sessionUsageBadge: some View {

@@ -23,6 +23,10 @@ final class StatusBarData {
     // Compact boundary indicator
     var didCompact: Bool = false
 
+    /// Output tokens per second of the last main-conversation API request long enough
+    /// to measure (`ShimProcess.outputTokensPerSecond`); nil until one finishes.
+    var outputTokensPerSecond: Int?
+
     /// Subagent activity rows for the current turn. Snapshot pushed from
     /// ShimProcess's SubagentTracker whenever it changes. Nothing renders
     /// it any more — the extension draws its own agents pill.
@@ -312,6 +316,7 @@ final class StatusBarData {
         gitBranch = ""
         vcsType = .unknown
         didCompact = false
+        outputTokensPerSecond = nil
         remoteHost = nil
         accountName = nil
         limitHit = nil
