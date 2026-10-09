@@ -2197,6 +2197,8 @@ enum SidebarLogicProbe {
                     assistantLine("working"),
                     toolResultLine,
                     assistantLine("subagent says hi", sidechain: true),
+                    jsonlLine(["type": "user", "parent_tool_use_id": "toolu_9",
+                               "message": ["content": [["type": "text", "text": "a subagent's own prompt"]]]]),
                     assistantLine("Written for: Engineer\ndone"),
                     userLine(KeepAliveGate.promptText, at: "t2"),
                     assistantLine("OK"),
@@ -2230,6 +2232,9 @@ enum SidebarLogicProbe {
                 var promptEvent = listenEvent(11, .turnDone)
                 promptEvent.prompt = "go"
                 record("listen wire: turn_done carries the prompt that started it", promptEvent.wire["prompt"] as? String == "go")
+                log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t",
+                           prompt: String(repeating: "p", count: ControlEvent.textMaxBytes + 1))
+                record("listen log: a cut prompt is flagged truncated", log.events.last?.wire["promptTruncated"] as? Bool == true)
                 record("listen params: a JSON null is the same as leaving the param out",
                        listenParse(["since": NSNull(), "addressedTo": NSNull(), "timeout": NSNull()])
                            == listenParse([:]))

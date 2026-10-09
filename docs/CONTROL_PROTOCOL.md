@@ -247,7 +247,7 @@ Result when an event matched:
 
 `prompt` on `turn_done` is what the person sent to start the turn, whether
 typed in a pane, on the phone or through the control API; it is absent on a
-turn no one started. `replyId` is present when the turn came from
+turn no one started, and cut at 32,000 bytes with `promptTruncated: true`. `replyId` is present when the turn came from
 `send_message` or an `initialPrompt`. `text` on `turn_done` is the turn's reply: from the addressed
 block to the end when there is one, else the CLI's final `result` text, cut
 at 32,000 bytes with `textTruncated: true`. `permission` and `asking` carry

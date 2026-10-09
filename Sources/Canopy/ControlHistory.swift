@@ -37,7 +37,7 @@ nonisolated enum ControlHistory {
         }
         for line in text.split(separator: "\n") {
             guard let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  json["isSidechain"] as? Bool != true else { continue }
+                  json["isSidechain"] as? Bool != true, json["parent_tool_use_id"] as? String == nil else { continue }
             if let kind = ClaudeSessionHistory.classifyUserRecord(json) {
                 switch kind {
                 case .continuation: continue

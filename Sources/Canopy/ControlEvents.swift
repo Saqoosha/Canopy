@@ -36,6 +36,7 @@ nonisolated struct ControlEvent: Equatable, Sendable {
     var addressedTo: String?
     /// On `turn_done`: what the person sent to start the turn, wherever they typed it.
     var prompt: String?
+    var promptTruncated = false
 
     var wire: [String: Any] {
         // A gap names no session and no event; its `state` slot carries the reason.
@@ -55,7 +56,10 @@ nonisolated struct ControlEvent: Equatable, Sendable {
             if textTruncated { out["textTruncated"] = true }
         }
         if let addressedTo { out["addressedTo"] = addressedTo }
-        if let prompt { out["prompt"] = prompt }
+        if let prompt {
+            out["prompt"] = prompt
+            if promptTruncated { out["promptTruncated"] = true }
+        }
         return out
     }
 
@@ -287,7 +291,10 @@ final class ControlEventLog {
         var event = ControlEvent(seq: latestSeq, kind: kind, key: key, sessionId: sessionId, title: title, at: Date(),
                                  state: state, replyId: replyId, requestId: requestId, toolName: toolName,
                                  addressedTo: addressedTo)
-        event.prompt = prompt.map { ShimProcess.truncatedNotificationBody($0, maxBytes: ControlEvent.textMaxBytes) }
+        if let prompt {
+            event.prompt = ShimProcess.truncatedNotificationBody(prompt, maxBytes: ControlEvent.textMaxBytes)
+            event.promptTruncated = prompt.utf8.count > ControlEvent.textMaxBytes
+        }
         if let text {
             event.text = ShimProcess.truncatedNotificationBody(text, maxBytes: textMaxBytes)
             event.textTruncated = text.utf8.count > textMaxBytes
