@@ -12579,6 +12579,8 @@ enum SidebarLogicProbe {
             record("limit warning: the rest of the frame is kept",
                    quietedInfo?["rateLimitType"] as? String == "seven_day"
                        && (quieted["message"] as? [String: Any])?["channelId"] as? String == "c")
+            record("limit warning: a bucket the sidebar has no row for keeps its warning",
+                   statusOut(ShimProcess.quietingRateLimitWarning(wrapped(["status": "allowed_warning", "rateLimitType": "overage"]))) == "allowed_warning")
             record("limit warning: rejected passes unchanged",
                    statusOut(ShimProcess.quietingRateLimitWarning(wrapped(["status": "rejected", "rateLimitType": "five_hour"]))) == "rejected")
             // The shim's latch: what `extractStatusData` writes for each signal.
