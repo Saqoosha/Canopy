@@ -99,6 +99,28 @@ final class SleepGuard {
             lastLogged = line
             logger.notice("\(line, privacy: .public)")
         }
+        if hasLid { updateBatteryAlerts(held: held, reason: decision.reason, floor: settings.sleepBatteryFloorPercent) }
+    }
+
+    private var batteryAlerts = BatteryAlertTracker()
+
+    /// Tells the phone while a lid-closed Mac is held awake on battery: there is no screen to
+    /// show it, and it may be in a bag (issue #346).
+    private func updateBatteryAlerts(held: Bool, reason: String, floor: Int) {
+        guard held || batteryAlerts.isWatching else { return }
+        guard case .battery(let onBattery, let percent) = PowerSource.current() else {
+            batteryAlerts.reset()
+            return
+        }
+        let watching = held && onBattery && ClamshellSleep.lidClosed() == true
+        guard let alert = batteryAlerts.update(watching: watching, percent: percent,
+                                               releasedByFloor: onBattery && percent < floor) else { return }
+        let settings = CanopySettings.shared
+        let name = MachineIdentity.resolvedDisplayName(setting: settings.machineDisplayName,
+                                                       fallback: MachineIdentity.defaultDisplayName())
+        let message = alert.message(machine: name, reason: reason, floor: floor)
+        logger.notice("battery alert: \(message.body, privacy: .public)")
+        RosterNotifier.postBattery(title: message.title, body: message.body, percent: percent)
     }
 
     /// The assertion's name; `AwakeStatus` finds it by this, so Debug and Release do not see each other's.
@@ -236,6 +258,55 @@ enum ClamshellSleep {
         var count: UInt32 = 0
         guard CGGetActiveDisplayList(0, nil, &count) == .success else { return nil }
         return Int(count)
+    }
+}
+
+/// When to tell the phone about a lid-closed Mac held awake on battery: on entering that
+/// state, at each 10% step below where it started, and once when the floor releases it.
+struct BatteryAlertTracker: Equatable {
+    enum Alert: Equatable {
+        case started(percent: Int)
+        case dropped(percent: Int)
+        case released(percent: Int)
+
+        func message(machine: String, reason: String, floor: Int) -> (title: String, body: String) {
+            switch self {
+            case .started(let percent):
+                return ("\(machine) is awake with the lid closed",
+                        "On battery at \(percent)%: \(reason). It sleeps below \(floor)%.")
+            case .dropped(let percent):
+                return ("\(machine) battery \(percent)%",
+                        "Still awake with the lid closed: \(reason). It sleeps below \(floor)%.")
+            case .released(let percent):
+                return ("\(machine) is going to sleep",
+                        "Battery at \(percent)%, below \(floor)%. Canopy stopped keeping it awake.")
+            }
+        }
+    }
+
+    /// The 10% step last reported, or nil while not watching.
+    private(set) var lastStep: Int?
+    var isWatching: Bool { lastStep != nil }
+
+    mutating func reset() { lastStep = nil }
+
+    mutating func update(watching: Bool, percent: Int, releasedByFloor: Bool) -> Alert? {
+        if releasedByFloor, isWatching {
+            lastStep = nil
+            return .released(percent: percent)
+        }
+        guard watching else {
+            lastStep = nil
+            return nil
+        }
+        let step = percent / 10 * 10
+        guard let last = lastStep else {
+            lastStep = step
+            return .started(percent: percent)
+        }
+        guard step < last else { return nil }
+        lastStep = step
+        return .dropped(percent: percent)
     }
 }
 

@@ -134,4 +134,24 @@ enum RosterNotifier {
             }
         }.resume()
     }
+
+    /// A machine-level notice with no session behind it (`kind: "battery"`). The relay
+    /// takes it without a `sessionId`, and the phone shows it without filing it in History.
+    static func postBattery(title: String, body: String, percent: Int) {
+        guard let (machineId, url, secret) = resolvedTarget() else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload: [String: Any] = ["machine": machineId, "kind": "battery", "title": title,
+                                      "body": body, "percent": percent]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error {
+                logger.notice("battery notify failed: \(error.localizedDescription, privacy: .public)")
+            } else if let code = (response as? HTTPURLResponse)?.statusCode, code != 200 {
+                logger.notice("battery notify returned \(code, privacy: .public)")
+            }
+        }.resume()
+    }
 }

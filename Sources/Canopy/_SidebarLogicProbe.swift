@@ -7210,6 +7210,20 @@ enum SidebarLogicProbe {
             func restore(_ lid: Bool?, _ lit: Int?) -> Bool {
                 SleepGuardPolicy.mayRestoreClamshellSleep(lidClosed: lid, litDisplays: lit)
             }
+            var alerts = BatteryAlertTracker()
+            record("Battery alert: nothing while not watching", alerts.update(watching: false, percent: 80, releasedByFloor: false) == nil)
+            record("Battery alert: starts when watching begins", alerts.update(watching: true, percent: 78, releasedByFloor: false) == .started(percent: 78))
+            record("Battery alert: quiet within the same 10% step", alerts.update(watching: true, percent: 70, releasedByFloor: false) == nil)
+            record("Battery alert: fires on crossing into the next step", alerts.update(watching: true, percent: 69, releasedByFloor: false) == .dropped(percent: 69))
+            record("Battery alert: quiet when the charge rises", alerts.update(watching: true, percent: 75, releasedByFloor: false) == nil)
+            record("Battery alert: one notice when the floor releases it", alerts.update(watching: false, percent: 19, releasedByFloor: true) == .released(percent: 19))
+            record("Battery alert: no repeat release notice", alerts.update(watching: false, percent: 18, releasedByFloor: true) == nil)
+            record("Battery alert: leaving the watch resets it", {
+                var t = BatteryAlertTracker()
+                _ = t.update(watching: true, percent: 50, releasedByFloor: false)
+                _ = t.update(watching: false, percent: 50, releasedByFloor: false)
+                return t.update(watching: true, percent: 50, releasedByFloor: false) == .started(percent: 50)
+            }())
             record("SleepGuard clamshell: restores with the lid open", restore(false, 1))
             record("SleepGuard clamshell: restores with the lid closed and nothing lit", restore(true, 0))
             record("SleepGuard clamshell: defers with the lid closed and a display lit", !restore(true, 1))
