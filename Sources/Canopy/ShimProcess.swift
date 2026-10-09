@@ -2607,7 +2607,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// True once a canopy-bridge frame supplied the context window; the
     /// `result` branch then leaves `contextMax` to it.
     private var contextMaxFromBridge = false
-    /// Set when the mod left the worktree ahead of a `git worktree remove`.
+    /// Set when the mod left the worktree ahead of a `git worktree remove`, or
+    /// when the spawn folder is gone and the transcript is filed in a checkout.
     private var checkoutAfterRemoval: URL?
 
     @MainActor
@@ -4406,22 +4407,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return (note, obj["ok"] as? Bool ?? false, obj["checkout"] as? String)
     }
 
-    /// Where a live session goes when its folder is gone and the mod never saw
-    /// the removal: the folder its transcript is filed under now, only when
-    /// that is an existing main checkout. A transcript still filed under the
-    /// removed folder is left for `ClaudeSessionHistory.directoryToOpen` to
-    /// move on the next open; `moveToCheckout` resumes from the checkout's folder.
-    nonisolated static func checkoutForVanishedFolder(
-        relocated: URL?,
-        isCheckout: (URL) -> Bool = { GitWorktree.isMainCheckout($0) }
-    ) -> URL? {
-        guard let relocated, isCheckout(relocated) else { return nil }
-        return relocated
-    }
-
     /// Posted with the shim as `object` and the checkout URL under `checkoutKey`
-    /// when a turn ends with this session's worktree removed after the mod left
-    /// it. `SessionStore` moves the session there.
+    /// when a turn ends with this session's worktree removed, after the mod left
+    /// it or elsewhere. `SessionStore` moves the session there.
     static let worktreeRemovedNotification = Notification.Name("ShimProcess.worktreeRemoved")
     static let checkoutKey = "checkout"
 
@@ -4555,20 +4543,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         logger.warning("[bridge] ui_log text failed to parse")
                     }
                     return
-                }
-                // The folder removed by something the mod did not see — another
-                // session or a terminal — after the session had left it (#295).
-                if checkoutAfterRemoval == nil, remoteHost == nil,
-                   nested["type"] as? String == "io_message",
-                   (nested["message"] as? [String: Any])?["type"] as? String == "result",
-                   !FileManager.default.fileExists(atPath: workingDirectory.path),
-                   let id = boundSession?.resumeId,
-                   let checkout = Self.checkoutForVanishedFolder(
-                       relocated: Self.jsonlPath(sessionId: id, workingDirectory: workingDirectory)
-                           .flatMap { Self.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: workingDirectory) })
-                {
-                    logger.notice("[worktree] the session's folder was removed elsewhere; its transcript is in the checkout")
-                    checkoutAfterRemoval = checkout
                 }
                 // Not mid-turn: restarting now would kill the removal itself.
                 if checkoutAfterRemoval != nil,
@@ -6650,7 +6624,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                     choices: toolName == "AskUserQuestion"
                                         ? Self.askChoices(from: request["inputs"])
                                         : nil,
-                                    sessionTitle: sessionTitle)
+                                    sessionTitle: generatedSessionTitle)
             }
             refreshAskingState()
             return
@@ -8365,12 +8339,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     jsonlPath: logPath, workingDirectory: dir
                 )
                 let vcsInfo = Self.detectVCSInfo(at: effective)
+                // Spawn folder removed elsewhere after the session left it (#295).
+                let checkout = !FileManager.default.fileExists(atPath: dir.path)
+                    && GitWorktree.isMainCheckout(effective)
+                    ? URL(fileURLWithPath: GitWorktree.realPath(of: effective)) : nil
                 DispatchQueue.main.async {
                     // Assign on the nil branch too — see the init-time refresh
                     // for why an early return here would strand a branch name
                     // the session has since left.
                     self?.statusBarData?.vcsType = vcsInfo?.type ?? .unknown
                     self?.statusBarData?.gitBranch = vcsInfo?.branch ?? ""
+                    if let checkout, let self, self.remoteHost == nil, self.checkoutAfterRemoval == nil {
+                        logger.notice("[worktree] the session's folder was removed elsewhere; moving it to the checkout")
+                        self.checkoutAfterRemoval = checkout
+                        self.moveToCheckoutWhenQuiet()
+                    }
                 }
             }
             // Refresh rate limits after each turn
@@ -8818,7 +8801,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 // not be. See `RosterNotifier.post`.
                                 bodyFull: finalText,
                                 eventId: eventIdForThisTurn,
-                                sessionTitle: sessionTitle)
+                                sessionTitle: generatedSessionTitle)
         }
 
         if webView == nil, !uiClients.isEmpty {

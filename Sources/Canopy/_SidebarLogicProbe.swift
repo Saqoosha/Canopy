@@ -5749,15 +5749,6 @@ enum SidebarLogicProbe {
                                                      exists: exists, isCheckout: isCheckout)
                        && !SessionStore.followsCheckoutMove(current: URL(fileURLWithPath: gone), rowCwd: "",
                                                             exists: exists, isCheckout: isCheckout))
-            // #295: a folder removed elsewhere moves only to a checkout its transcript is filed under.
-            let isCheckoutURL: (URL) -> Bool = { isCheckout($0.path) }
-            record("vanished folder: transcript filed in the checkout → move there",
-                   ShimProcess.checkoutForVanishedFolder(relocated: URL(fileURLWithPath: "/r/Canopy"),
-                                                         isCheckout: isCheckoutURL)?.path == "/r/Canopy")
-            record("vanished folder: transcript not moved, or moved somewhere not a checkout → stay",
-                   ShimProcess.checkoutForVanishedFolder(relocated: nil, isCheckout: isCheckoutURL) == nil
-                       && ShimProcess.checkoutForVanishedFolder(relocated: URL(fileURLWithPath: "/elsewhere"),
-                                                                isCheckout: isCheckoutURL) == nil)
             let wtRoot = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-wt-\(UUID().uuidString)")
             try? FileManager.default.createDirectory(at: wtRoot.appendingPathComponent("main/.git"), withIntermediateDirectories: true)
             try? FileManager.default.createDirectory(at: wtRoot.appendingPathComponent("linked"), withIntermediateDirectories: true)

@@ -113,10 +113,9 @@ enum RosterNotifier {
         if let resumeId, !resumeId.isEmpty {
             payload["resumeId"] = resumeId
         }
-        // The session's name, for the phone's History once the roster no longer
-        // lists the session (#293). `title` stays the banner title.
+        // The session's name for the phone's History (#293); never a fallback title.
         if let sessionTitle, !sessionTitle.isEmpty {
-            payload["sessionTitle"] = String(sessionTitle.prefix(SessionTitleGenerator.maxTitleLength))
+            payload["sessionTitle"] = sessionTitle
         }
         if let requestId {
             payload["requestId"] = requestId
