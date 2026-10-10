@@ -18,7 +18,7 @@ DEFAULT_SOCK = (
     / "Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.sock"
 )
 # wait_turn polls for 60s; the read has to outlast that. A listen also hears a
-# heartbeat every 30s, so 90s of silence there means the connection is dead.
+# heartbeat every 30s, so --follow treats 90s of silence as a dead connection.
 READ_TIMEOUT = 90.0
 # --follow: each listen's own timeout, and the reconnect backoff ceiling.
 FOLLOW_LISTEN_TIMEOUT = 300
@@ -172,6 +172,7 @@ def main(argv):
     if args.cmd == "wait" and body.get("turnDone") is not True:
         return 1
     if args.cmd == "listen" and args.cursor_file and body.get("cursor"):
+        sys.stdout.flush()
         write_cursor(args.cursor_file, body["cursor"])
     if args.cmd == "listen" and body.get("timedOut") is True:
         return 3
@@ -181,6 +182,16 @@ def main(argv):
 def follow(args):
     """listen in a loop. Exits 1 on a refused hello or an error response,
     130 on Ctrl-C; never on a timeout or a lost connection."""
+    try:
+        return follow_loop(args)
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        # The reader went away; the cursor was not advanced past what it got.
+        return 1
+
+
+def follow_loop(args):
     cursor = args.since or (read_cursor(args.cursor_file) if args.cursor_file else None)
     backoff = 1.0
     while True:
@@ -189,18 +200,16 @@ def follow(args):
         verb, params = build(args)
         try:
             result = transact(args.socket, verb, params, READ_TIMEOUT)
-        except KeyboardInterrupt:
-            return 130
         except HelloRefused as exc:
             print(f"canopyctl: {exc}", file=sys.stderr)
             return 1
+        except socket.timeout:
+            # A daemon without heartbeats is silent for a whole quiet listen: ask again at once.
+            backoff = 1.0
+            continue
         except (OSError, ValueError) as exc:
-            # socket.timeout is an OSError: 90s without even a heartbeat.
             print(f"canopyctl: {exc}; reconnecting in {backoff:.0f}s", file=sys.stderr)
-            try:
-                time.sleep(backoff)
-            except KeyboardInterrupt:
-                return 130
+            time.sleep(backoff)
             backoff = min(backoff * 2, FOLLOW_MAX_BACKOFF)
             continue
         backoff = 1.0
@@ -209,15 +218,15 @@ def follow(args):
             json.dump(result, sys.stdout, ensure_ascii=False)
             sys.stdout.write("\n")
             return 1
+        if body.get("timedOut") is not True:
+            json.dump(result, sys.stdout, ensure_ascii=False)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        # Only after the event is out, so a restarted follower never skips one.
         if body.get("cursor"):
             cursor = body["cursor"]
             if args.cursor_file:
                 write_cursor(args.cursor_file, cursor)
-        if body.get("timedOut") is True:
-            continue
-        json.dump(result, sys.stdout, ensure_ascii=False)
-        sys.stdout.write("\n")
-        sys.stdout.flush()
 
 
 def read_cursor(path):

@@ -2441,12 +2441,20 @@ enum SidebarLogicProbe {
                            && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "rate_limit")?.kind == "rate_limit"
                            && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "billing_error")?.kind == "billing"
                            && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "overloaded")?.kind == "overloaded"
-                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "cloud_credentials_expired")?.kind == "auth")
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "cloud_credential_error")?.kind == "auth"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "oauth_org_not_allowed")?.kind == "auth"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "account_on_hold")?.kind == "auth"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "verification_required")?.kind == "auth")
                 record("listen failure: a failed subtype is named even without is_error",
                        ControlEvent.TurnFailure.of(result: ["subtype": "error_max_turns"], assistantError: nil)
                            == ControlEvent.TurnFailure(kind: "max_turns", code: "error_max_turns")
                            && ControlEvent.TurnFailure.of(result: ["subtype": "error_during_execution"], assistantError: nil)?.kind == "execution"
                            && ControlEvent.TurnFailure.of(result: ["subtype": "error_max_budget_usd"], assistantError: nil)?.kind == "budget")
+                record("listen failure: the assistant error outranks an unknown failed subtype, which is otherwise the code",
+                       ControlEvent.TurnFailure.of(result: ["subtype": "error_foo"], assistantError: "rate_limit")
+                           == ControlEvent.TurnFailure(kind: "rate_limit", code: "rate_limit")
+                           && ControlEvent.TurnFailure.of(result: ["subtype": "error_foo"], assistantError: nil)
+                           == ControlEvent.TurnFailure(kind: "other", code: "error_foo"))
                 record("listen failure: a success is not a failure, even after an assistant error a retry recovered from",
                        ControlEvent.TurnFailure.of(result: ["is_error": false, "subtype": "success"], assistantError: "overloaded") == nil)
                 record("listen failure: an unknown cause is other, keeping the CLI's code",
@@ -2454,9 +2462,9 @@ enum SidebarLogicProbe {
                            == ControlEvent.TurnFailure(kind: "other", code: "model_not_found")
                            && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: nil)
                            == ControlEvent.TurnFailure(kind: "other", code: nil))
-                log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t", failure: .some(nil))
+                log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t", failure: nil)
                 let okWire = log.events.last?.wire ?? [:]
-                log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t", failure: .some(badKey))
+                log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t", failure: badKey)
                 let failWire = log.events.last?.wire ?? [:]
                 log.record(.asking, key: "probe-key", sessionId: "s", title: "t")
                 let askFailureWire = log.events.last?.wire ?? [:]

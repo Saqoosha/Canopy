@@ -51,7 +51,7 @@ nonisolated struct ControlEvent: Equatable, Sendable {
         case stopped
         /// The reaper stopped it: no client, idle past `SessionReaper.defaultIdleLimit`.
         case reaped
-        /// The daemon is shutting down (an update or a quit).
+        /// The daemon is shutting down (an update, Restart now, launchd, SIGTERM).
         case daemonRestart = "daemon_restart"
         /// Removed by a path that did not say why.
         case other
@@ -82,13 +82,13 @@ nonisolated struct ControlEvent: Equatable, Sendable {
             switch code {
             case "authentication_failed", "oauth_org_not_allowed", "account_on_hold", "verification_required":
                 return TurnFailure(kind: "auth", code: code)
-            case let c? where c.hasPrefix("cloud_credential"):
+            case "cloud_credential_error":
                 return TurnFailure(kind: "auth", code: code)
             case "rate_limit": return TurnFailure(kind: "rate_limit", code: code)
             case "billing_error": return TurnFailure(kind: "billing", code: code)
             case "overloaded": return TurnFailure(kind: "overloaded", code: code)
             case "server_error":
-                // No HTTP status: the request never got an answer (refused, reset, timed out).
+                // No HTTP status: no answer came back (measured: connection refused).
                 let status = result["api_error_status"] as? Int
                 return TurnFailure(kind: status == nil ? "network" : "server", code: code)
             default:
@@ -337,7 +337,7 @@ final class ControlEventLog {
 
     func record(_ kind: ControlEvent.Kind, session: OpenSession?, state: String? = nil, replyId: String? = nil,
                 requestId: String? = nil, toolName: String? = nil, text: String? = nil, addressedTo: String? = nil,
-                prompt: String? = nil, failure: ControlEvent.TurnFailure?? = nil,
+                prompt: String? = nil, failure: ControlEvent.TurnFailure? = nil,
                 textMaxBytes: Int = ControlEvent.textMaxBytes) {
         guard let session else {
             logger.notice("[control] \(kind.rawValue, privacy: .public) not recorded: no bound session")
@@ -350,14 +350,13 @@ final class ControlEventLog {
 
     func record(_ kind: ControlEvent.Kind, key: String, sessionId: String, title: String, state: String? = nil,
                 replyId: String? = nil, requestId: String? = nil, toolName: String? = nil, text: String? = nil,
-                addressedTo: String? = nil, prompt: String? = nil, failure: ControlEvent.TurnFailure?? = nil,
+                addressedTo: String? = nil, prompt: String? = nil, failure: ControlEvent.TurnFailure? = nil,
                 reason: ControlEvent.CloseReason? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
         latestSeq += 1
         var event = ControlEvent(seq: latestSeq, kind: kind, key: key, sessionId: sessionId, title: title, at: Date(),
                                  state: state, replyId: replyId, requestId: requestId, toolName: toolName,
                                  addressedTo: addressedTo)
-        // `failure`: outer nil = not a turn; inner nil = a turn that succeeded.
-        if let failure {
+        if kind == .turnDone {
             event.isError = failure != nil
             event.errorKind = failure?.kind
             event.errorCode = failure?.code
@@ -412,6 +411,8 @@ final class ControlEventLog {
     /// removes them, and the process exits before `observe` would run.
     func recordShutdown() {
         guard let store = trackedStore else { return }
+        // Opens and closes still queued for `observe` are recorded first, with their reasons.
+        observe()
         for session in store.openSessions {
             record(.sessionClosed, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
                    reason: .daemonRestart)

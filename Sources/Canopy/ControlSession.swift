@@ -24,7 +24,7 @@ final class ControlSession {
     /// tell a quiet daemon from a dead connection.
     private var heartbeat: Timer?
 
-    /// Well inside canopyctl's 90 s read timeout.
+    /// Well inside the 90 s read timeout `canopyctl listen --follow` uses.
     static let heartbeatInterval: TimeInterval = 30
 
     /// `ShimProcess` is not `@Observable`, so a client attaching or a shim

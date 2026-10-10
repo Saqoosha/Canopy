@@ -465,7 +465,7 @@ final class DaemonDelegate {
         sleepGuard?.stop()
         // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
-        // Before the shims stop, so a listener still connected hears why its session went.
+        // Recorded before the shims stop; a listener may not receive them before the process exits.
         ControlEventLog.shared.recordShutdown()
         // Shims first: a replacement daemon may take the socket the moment it is gone, and must
         // not resume a transcript whose old CLI is still alive.

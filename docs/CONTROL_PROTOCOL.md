@@ -339,20 +339,23 @@ session's state just after the event, as in `session_status`.
 `isError` is on every `turn_done`: `false` when the turn finished, `true`
 when it ended on an error. A failed turn also carries `errorKind` and, when
 the CLI named one, `errorCode` (the CLI's own value, kept for causes this
-table does not split out); `text` is then the CLI's error message:
+table does not split out). `text` is then the CLI's `result` text: the error
+message on an API error, empty for `max_turns`, `budget` and `execution`;
+an addressed block is never used and `addressedTo` is absent:
 
 | `errorKind` | Cause |
 |---|---|
-| `auth` | Login rejected, expired or not allowed (`authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credentials…`) |
+| `auth` | Login rejected, expired or not allowed (`authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credential_error`) |
 | `rate_limit` | A usage limit was hit |
 | `billing` | A billing problem on the account |
 | `overloaded` | The API was overloaded |
-| `network` | The request got no HTTP answer: refused, reset or timed out |
+| `network` | `server_error` with no HTTP status (measured: connection refused). A lost connection the CLI reports as `unknown` is `other` |
 | `server` | The API answered with a server error |
 | `max_turns`, `budget`, `execution` | The CLI's `error_max_turns`, `error_max_budget_usd`, `error_during_execution` |
-| `other` | Anything else, `model_not_found` and `invalid_request` included |
+| `other` | Anything else: `model_not_found`, `invalid_request`, `unknown`, `max_output_tokens` included |
 
-A failed turn is not retried. A session whose CLI dies mid-turn produces no
+The daemon does not retry a failed turn (the CLI retries some errors itself
+before failing it). A session whose CLI dies mid-turn produces no
 `turn_done` at all and stays open (dormant): it is not a `session_closed`.
 
 `reason` on `session_closed`:
@@ -380,7 +383,8 @@ ahead of the log.
 While a connection has a `listen` open, the daemon sends
 `{"type":"heartbeat","at":<seconds>}` on it every 30 s. It answers no
 request; a client ignores it except as proof the connection is alive, so 90 s
-with nothing at all means the connection is dead. Older daemons send none.
+with nothing at all means the connection is dead. Older daemons send none;
+`--follow` then asks again each time a quiet listen goes 90 s without a byte.
 
 `canopyctl listen --follow` keeps listening and prints one response line per
 event. It reconnects on its own, with the same cursor, when the daemon goes
@@ -388,7 +392,8 @@ away (waiting 1 s, doubling to 30 s), and never exits on a timeout; it exits
 1 on a refused `hello` or an error response and 130 on Ctrl-C. With
 `--cursor-file PATH` it starts from the cursor in that file (unless `--since`
 is given) and rewrites the file after every response, so a restarted
-follower picks up where it stopped. Without a starting cursor, events
+follower picks up where it stopped: the cursor is written only after the
+event line has been printed and flushed. Without a starting cursor, events
 before its first request are not seen. `--cursor-file` works without
 `--follow` too.
 
