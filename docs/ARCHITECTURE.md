@@ -41,7 +41,7 @@ One binary plays several roles. `CanopyMain` reads the arguments before anything
 | `--mirror-relay <host> <port> <socket>` | `MirrorRelay`: holds the Tailscale port for a daemon that is waiting to restart |
 | `--unregister-daemon` | Removes the LaunchAgent and exits |
 
-**GUI (`Canopy.app`).** Sidebar, up to 6 panes, launcher, settings, MacroPad. It holds no shim for this Mac's sessions. A pane whose `OpenSession.isDaemonHosted` is true is a `MirrorPaneView` that attaches to the daemon, the same view and the same route as a pane showing another Mac's session.
+**GUI (`Canopy.app`).** Sidebar, up to 6 panes, launcher, settings, MacroPad. It holds no shim for this Mac's local sessions; SSH remote sessions are the exception, described below. A pane whose `OpenSession.isDaemonHosted` is true is a `MirrorPaneView` that attaches to the daemon, the same view and the same route as a pane showing another Mac's session.
 
 **Daemon (`canopyd`).** Started by launchd as a LaunchAgent, so it runs inside the login session and can read the CLI's OAuth token from the login keychain. It builds no `NSApplication` and runs on `RunLoop.main`, so LaunchServices does not see a second instance of the app. It has the app's code identity, so a Full Disk Access grant covers both.
 

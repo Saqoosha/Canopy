@@ -356,7 +356,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <div class="proc">
         <span class="pid">GUI · Canopy.app</span>
         <h3>ウィンドウ</h3>
-        <p>サイドバー、最大 6 ペインの分割表示、ランチャー、設定、MacroPad。この Mac のセッションの shim は持たない。<code>OpenSession.isDaemonHosted</code> なペインは <code>MirrorPaneView</code> で attach する。別の Mac のセッションを開くペインと同じ経路。</p>
+        <p>サイドバー、最大 6 ペインの分割表示、ランチャー、設定、MacroPad。この Mac のローカルセッションの shim は持たない（SSH remote は例外で、shim は GUI に残る）。<code>OpenSession.isDaemonHosted</code> なペインは <code>MirrorPaneView</code> で attach する。別の Mac のセッションを開くペインと同じ経路。</p>
       </div>
       <div class="proc">
         <span class="pid">デーモン · canopyd</span>

@@ -56,16 +56,16 @@ Canopy のセッションサービスはローカルの Unix socket で待ち受
 # 最初のプロンプト付きでセッションを起動。sessionId、key、replyId を出力する
 scripts/canopyctl open --cwd ~/repos/my-project --initial-prompt "Run the tests and summarize the failures"
 
-# そのターンの返事を待つ
-scripts/canopyctl wait --key <key> --reply-id <replyId>
+# そのターンの返事を待つ (KEY と REPLY_ID は上で出力された key と replyId)
+scripts/canopyctl wait --key "$KEY" --reply-id "$REPLY_ID"
 
 # 次のターンを送る
-scripts/canopyctl send --key <key> --text "Fix the first failure"
+scripts/canopyctl send --key "$KEY" --text "Fix the first failure"
 
 # 何かが起きるまで待つ: ターンの終了、permission の要求、質問
-scripts/canopyctl listen --key <key>
+scripts/canopyctl listen --key "$KEY"
 
-# 過去のセッションを 1 行ずつ表示。続けるには `resume <sessionId>`
+# 過去のセッションを 1 行ずつ表示。続けるには `resume SESSION_ID`
 scripts/canopyctl sessions --project my-project --table
 ```
 

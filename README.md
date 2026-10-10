@@ -56,16 +56,16 @@ Canopy's session service listens on a local Unix socket, so a script or another 
 # Start a session with a first prompt; prints sessionId, key and replyId
 scripts/canopyctl open --cwd ~/repos/my-project --initial-prompt "Run the tests and summarize the failures"
 
-# Wait for that turn's answer
-scripts/canopyctl wait --key <key> --reply-id <replyId>
+# Wait for that turn's answer (KEY and REPLY_ID are the key and replyId printed above)
+scripts/canopyctl wait --key "$KEY" --reply-id "$REPLY_ID"
 
 # Send another turn
-scripts/canopyctl send --key <key> --text "Fix the first failure"
+scripts/canopyctl send --key "$KEY" --text "Fix the first failure"
 
 # Block until something happens: a turn ends, a permission request or a question arrives
-scripts/canopyctl listen --key <key>
+scripts/canopyctl listen --key "$KEY"
 
-# Past sessions, one line each; continue one with `resume <sessionId>`
+# Past sessions, one line each; continue one with `resume SESSION_ID`
 scripts/canopyctl sessions --project my-project --table
 ```
 
