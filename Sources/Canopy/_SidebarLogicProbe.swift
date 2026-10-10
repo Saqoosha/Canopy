@@ -2605,6 +2605,33 @@ enum SidebarLogicProbe {
                 held.heldOpen = true
                 record("reaper: a session the phone opened is kept however long nobody watches",
                        !SessionReaper.shouldReap(held, now: reapT0, limit: reapLimit))
+                record("reaper hold: the phone's is held; a control session only while a listen covers it",
+                       ShimProcess.reaperHolds(heldByPhone: true, openedByControl: false, watched: false)
+                           && ShimProcess.reaperHolds(heldByPhone: false, openedByControl: true, watched: true)
+                           && !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: true, watched: false)
+                           && !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: false, watched: true))
+                var listenWatch = ControlListenWatch()
+                let watchA = UUID(), watchAll = UUID()
+                record("listen watch: nothing is watched before any listen",
+                       !listenWatch.isWatched("k1", now: reapT0))
+                listenWatch.begin(watchA, key: "k1")
+                record("listen watch: an open listen covers its session and no other",
+                       listenWatch.isWatched("k1", now: reapT0 + 3600) && !listenWatch.isWatched("k2", now: reapT0))
+                listenWatch.end(watchA, now: reapT0)
+                record("listen watch: an ended listen still covers its session for the grace, and no longer",
+                       listenWatch.isWatched("k1", now: reapT0 + ControlListenWatch.grace)
+                           && !listenWatch.isWatched("k1", now: reapT0 + ControlListenWatch.grace + 1)
+                           && !listenWatch.isWatched("k2", now: reapT0 + 1))
+                listenWatch.begin(watchAll, key: nil)
+                record("listen watch: a listen naming no session covers every session",
+                       listenWatch.isWatched("k2", now: reapT0 + 3600))
+                listenWatch.end(watchAll, now: reapT0 + 3600)
+                listenWatch.touch(key: "k3", now: reapT0 + 3600)
+                record("listen watch: an answered-at-once listen counts, and ending an unknown token changes nothing",
+                       listenWatch.isWatched("k3", now: reapT0 + 3600 + ControlListenWatch.grace)
+                           && listenWatch.isWatched("k2", now: reapT0 + 3600 + ControlListenWatch.grace)
+                           && !listenWatch.isWatched("k2", now: reapT0 + 3600 + ControlListenWatch.grace + 1)
+                           && { var copy = listenWatch; copy.end(UUID(), now: reapT0 + 9999); return copy == listenWatch }())
                 // Held sessions across an upgrade restart: only held, local, resumable ones.
                 let heldDir = URL(fileURLWithPath: "/tmp/probe/held")
                 let heldA = OpenSession(origin: .local(heldDir), resumeId: "held-A", title: "A", project: "P",

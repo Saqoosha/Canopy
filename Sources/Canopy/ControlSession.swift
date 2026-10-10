@@ -207,10 +207,14 @@ final class ControlSession {
             }
         }
         let log = ControlEventLog.shared
+        // A filter left on a session id names a session that is no longer open: it watches nothing.
+        let watches = filter.sessionId == nil
         let id = request.id
         let start: ControlEventCursor
         switch log.scan(since: params.since, filter: filter) {
-        case .event(let event, let next): return replyEvent(id, event, cursor: next)
+        case .event(let event, let next):
+            if watches { log.watch.touch(key: filter.key, now: Date()) }
+            return replyEvent(id, event, cursor: next)
         case .wait(let next): start = next
         }
         let waiter = log.addWaiter { [weak self] in
@@ -231,6 +235,7 @@ final class ControlSession {
                 self.replyListen(id, ["timedOut": true, "cursor": entry.cursor.wire])
             }
         }
+        if watches { log.watch.begin(waiter, key: filter.key) }
         listens[id] = (waiter, start, timeout)
         updateHeartbeat()
         DispatchQueue.main.asyncAfter(deadline: .now() + params.timeout, execute: timeout)
@@ -287,6 +292,7 @@ final class ControlSession {
     private func endListen(_ id: String) {
         guard let entry = listens.removeValue(forKey: id) else { return }
         ControlEventLog.shared.removeWaiter(entry.waiter)
+        ControlEventLog.shared.watch.end(entry.waiter, now: Date())
         entry.timeout.cancel()
         updateHeartbeat()
     }
