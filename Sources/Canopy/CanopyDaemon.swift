@@ -297,6 +297,8 @@ final class DaemonDelegate {
         // Roster, keep-alive and recap toggles the GUI changed; read only, never written back.
         if let data, let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             CanopySettings.shared.reload(from: dict)
+            // A sleep toggle from the footer should not wait up to a further 10 s for the next tick.
+            SleepGuard.reevaluateActive()
         }
         applyTCP()
     }

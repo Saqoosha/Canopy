@@ -23,6 +23,15 @@ final class AwakeStatus {
         self.timer = timer
     }
 
+    /// Polls each second for a while, so a toggle shows the daemon's answer without a 10 s wait.
+    func refreshSoon(for seconds: Int = 8) {
+        for delay in 1...seconds {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay)) { [weak self] in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+        }
+    }
+
     private func refresh() {
         let next = Self.currentReason()
         if next != reason { reason = next }
@@ -58,10 +67,11 @@ struct AwakeIndicator: View {
     var body: some View {
         // Started from `applicationDidFinishLaunching`, not a `.task` here.
         let enabled = settings.preventSleepWhileWorking
-        let state = !enabled ? "Sleep prevention is off"
+        let state = !enabled ? "Sleep prevention is off, Stay reachable included"
             : status.reason.map { "Keeping the Mac awake: \($0)" } ?? "Not keeping the Mac awake"
         Button {
             settings.preventSleepWhileWorking.toggle()
+            status.refreshSoon()
         } label: {
             // Drawn like `MacroPadIndicator`'s glyph beside it, so the two match in colour.
             // `moon.zzz` at 8.5pt inks 10pt tall, like the cup at 10pt, so both sit on one centre line.
@@ -73,6 +83,8 @@ struct AwakeIndicator: View {
                 .offset(y: enabled ? 0 : -1)
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(enabled ? "On" : "Off")
         .help("\(state). Click to turn sleep prevention \(enabled ? "off" : "on").")
     }
 }
