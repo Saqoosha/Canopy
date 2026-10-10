@@ -403,10 +403,14 @@ final class ControlEventLog {
         let data: Data
         do {
             data = try Data(contentsOf: url)
-            try FileManager.default.removeItem(at: url)
         } catch {
             logger.error("[control] saved events not restored: \(error.localizedDescription, privacy: .public)")
             return
+        }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            logger.error("[control] saved events file not removed: \(error.localizedDescription, privacy: .public)")
         }
         do {
             guard adopt(try JSONDecoder().decode(Saved.self, from: data)) else {
@@ -529,10 +533,17 @@ final class ControlEventLog {
 
     func noteRestored(_ id: UUID) { restoredIds.insert(id) }
 
-    func forgetRestored(_ id: UUID) { restoredIds.remove(id) }
-
     /// A session the previous daemon said `resumes` for and this one could not bring back.
+    /// One close either way: if `observe` already reported it opened, the close it is about
+    /// to record takes the reason; otherwise the close is recorded here.
     func recordRestoreFailed(key: String, sessionId: String, title: String) {
+        if let id = UUID(uuidString: key) {
+            restoredIds.remove(id)
+            if known[id] != nil {
+                closeReasons[id] = .restoreFailed
+                return
+            }
+        }
         record(.sessionClosed, key: key, sessionId: sessionId, title: title,
                reason: ControlEvent.CloseReason.restoreFailed.rawValue)
     }

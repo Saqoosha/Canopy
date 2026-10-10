@@ -2518,9 +2518,12 @@ enum SidebarLogicProbe {
                 let savedBack = (try? Data(contentsOf: savedFile)).flatMap { try? JSONDecoder().decode(ControlEventLog.Saved.self, from: $0) }
                 record("listen persist: save writes an owner-only file that decodes to the ring",
                        savedMode == 0o600 && savedBack == savedLog)
+                // A file from another epoch, so adopting it would show.
+                try? JSONEncoder().encode(moved).write(to: savedFile)
                 log.restoreSaved(from: savedFile)
                 record("listen persist: restore refuses once events were recorded, and leaves the file",
-                       log.epoch == savedLog.epoch && FileManager.default.fileExists(atPath: savedFile.path))
+                       log.epoch == savedLog.epoch && log.latestSeq == savedLog.latestSeq
+                           && FileManager.default.fileExists(atPath: savedFile.path))
                 try? FileManager.default.removeItem(at: savedFile)
                 let shutdownStore = SessionStore()
                 let goingA = OpenSession(origin: .local(URL(fileURLWithPath: "/tmp/probe/sd")), resumeId: "sd-a", title: "A", project: "P")

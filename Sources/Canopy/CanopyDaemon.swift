@@ -454,7 +454,6 @@ final class DaemonDelegate {
                                                         resumeId: entry.resumeId, isExistingTranscript: true,
                                                         title: entry.title, options: options) else {
                 logger.error("held session \(entry.resumeId.prefix(8), privacy: .public) did not restart")
-                if let id = options.id { log.forgetRestored(id) }
                 log.recordRestoreFailed(key: entry.key, sessionId: entry.resumeId, title: entry.title)
                 continue
             }
