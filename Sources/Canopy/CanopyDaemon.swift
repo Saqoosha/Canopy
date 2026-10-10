@@ -479,6 +479,8 @@ final class DaemonDelegate {
             ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
         }
         held.save()
+        // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
+        if !carryingSessions { try? FileManager.default.removeItem(at: DaemonHeldSessions.fileURL) }
         // Recorded before the shims stop; a listener may not receive them before the process exits,
         // so the log is saved after the shims stop and the next daemon serves them.
         ControlEventLog.shared.recordShutdown(resuming: Set(held.entries.map(\.key)))
