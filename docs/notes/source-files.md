@@ -22,7 +22,7 @@ The per-file catalogue was dropped: open the file and read its doc comments. Onl
 
 - **Release registers the LaunchAgent on every GUI launch; Debug only with `CANOPY_REGISTER_DAEMON=1`** (`DaemonRegistration`). Debug and Release each own an agent, keyed by bundle id.
 - **The Mirror TCP port exists only while Mirror is on; Debug uses base+1** (`DaemonPaths`) — a Debug and a Release daemon on one Mac must not collide.
-- **The daemon is started as a plain `Process`, never `NSWorkspace.openApplication`** (`DaemonSupervisor`, `CanopyDaemon`) — LaunchServices would register it as a second instance of `sh.saqoo.Canopy`, breaking Dock relaunch and letting Sparkle quit it.
+- **`DaemonSupervisor` kickstarts launchd first; when it must spawn the daemon itself, it uses a plain `Process`, never `NSWorkspace.openApplication`** — LaunchServices would register it as a second instance of `sh.saqoo.Canopy`, breaking Dock relaunch and letting Sparkle quit it.
 - **A Debug build cannot reproduce the firewall drop that `MirrorRelay` works around** — the firewall matches the Debug bundle id to some other worktree copy and lets it through. A Debug E2E proves the relay switch-over only.
 - **`restart_now` (`DaemonUpgrade`) overrides the upgrade blockers and is accepted from local clients only** — a remote client's `restart: true` on attach does not block an upgrade.
 

@@ -11,7 +11,7 @@ Condensed from CLAUDE.md. Full original text: `git show 3b6a198:CLAUDE.md`. Firm
 - **Do not decide `fullPush`/`R` by argument; read firmware `code.py`** — the decision flipped three times on plausible reasoning.
 - **Send full-scale colours and let `B` dim** — pre-dimmed colours quantise and drift in hue.
 - **`working`/`background`/`unread` are tuned as a set; `idle` is white-balanced** — retune on hardware, never one in isolation (see `ledColor`).
-- **`SessionActivity.error` is effectively unreachable for local sessions** — `Detail.swift`'s `onCrash` closes the pane at once; left alone deliberately.
+- **`SessionActivity.error` is effectively unreachable for local sessions** — the crash closure `Detail.swift` passes to `SessionContainer` closes the pane at once; left alone deliberately.
 - **`makeFirstResponder` on the current first responder is a no-op** — so `MacroPadController.focusPane` also calls `SessionStore.focusFocusedPaneComposer()` unconditionally. The `ComposerFocusScript` selector `[role="textbox"][contenteditable]` needs both halves (either alone matches permission-box or Monaco inputs).
 - **Pad press activation under Arc needs `retireStaleCurrentEvent`** — a stale hot-key `currentEvent` makes `NSApp.activate` get rejected by the WindowServer.
 - **Unread clears only when all four hold** — last-interacted session (by UUID, not pane index), interaction newer than the mark (`markSeq`), recent presence (pad presses count; `CGEventSource` can't see them), and `isAppActive`. Each earlier subset failed on hardware; the ordering clause is what lets "send prompt, walk away" show green. The interaction stamp must not depend on a focus change.

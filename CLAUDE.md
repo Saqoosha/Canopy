@@ -28,7 +28,7 @@ This file holds only what applies to every task. Everything else lives in `docs/
 | SSH remote | `ssh-remote.md` |
 | Topic learnings | `learnings-<topic>.md`: shim-specific, multi-pane-layout, macropad, first-render-races, prompt-cache-keep-alive, phone-reply-queue, background-task-reconcile, session-relocation, launch-composer, worktree-launch, session-titles, peer-names, rate-limits-per-account, general |
 
-Also: `docs/architecture.html` (walkthrough, mirrored to `gh-pages`), `docs/DEVELOPMENT.md`, `docs/CONTROL_PROTOCOL.md`, design specs under `docs/superpowers/specs/`.
+Also: `docs/architecture.html` (walkthrough, mirrored to `gh-pages`), `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `docs/CONTROL_PROTOCOL.md`, design specs under `docs/superpowers/specs/`.
 
 **Where new knowledge goes.** A learning about one area goes into its `docs/notes/` file, not here. A measured number belongs on the code's doc comment; notes link to it rather than restating it. Add a line here only if it bites on any task. Correct a wrong claim by deleting it, not by appending a correction beside it.
 
@@ -56,7 +56,7 @@ CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/
 ```
 
 - CI asserts count floors (`EXPECTED_TESTS`, `EXPECTED_ASSERTIONS` in `ci.yml`). Removing tests costs an edit there. When a merge conflicts on a floor, build the merged tree and read the real count. Do not pick a side.
-- Every file under `test/` must appear in exactly one of `CI_TEST_FILES` / `EXCLUDED_TEST_FILES` / `NON_TEST_FILES`.
+- Every file under `test/` must appear in one of `CI_TEST_FILES` / `EXCLUDED_TEST_FILES` / `NON_TEST_FILES`.
 - A probe fixture derives production constants instead of retyping their values. It forces any live setting it depends on, and restores it in a `defer`.
 - The probe writes real UserDefaults keys and `~/.claude` fixtures. See `testing.md`.
 - A test proves something only if reverting the fix, one fix at a time, turns it red.
@@ -74,7 +74,7 @@ CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/
 - **Multi-pane layout.**
   - `preferredWidth` is a weight. Call `normalizePaneWeightsToVisualWidths()` before any code that treats it as pt.
   - Never put `.ignoresSafeArea(edges: .top)` on an ancestor of `WeightedPaneLayout`. It freezes the panes on resize.
-  - Pane-header clicks must be hit-tested in the NSEvent monitor; SwiftUI never receives them.
+  - Make pane-header controls hit-testable from the NSEvent monitor; on macOS 26 a `BackdropView` covers that band, so SwiftUI does not get the clicks.
 - **Subprocess stdin pipes need `F_SETNOSIGPIPE`.** Without it, SIGPIPE kills the app inside `write(2)`, and `do/catch` never runs.
 - **`WindowGroup` `.task` runs before the probe exits.** A task that reaches credentials, the network or another process needs a `CANOPY_RUN_LOGIC_PROBE` guard.
 - **Wire shapes.** Dump a message's shape at the point you hook it. A downstream consumer sees an already-unwrapped envelope.
