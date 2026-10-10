@@ -40,8 +40,8 @@ final class DaemonReaper {
             guard SessionReaper.shouldReap(inputs, now: now, limit: limit) else { continue }
             logger.notice("reaping \(session.resumeId, privacy: .public): quiet \(Int(now.timeIntervalSince(inputs.quietSince)))s with no client")
             // With no transcript there is nothing to resume, so its row may go.
-            if case .local(let dir) = session.origin,
-               session.resumeIdIsExistingTranscript || ClaudeSessionHistory.sessionFileExists(id: session.resumeId, directory: dir) {
+            let dir = session.origin.workingDirectory
+            if session.resumeIdIsExistingTranscript || ClaudeSessionHistory.sessionFileExists(id: session.resumeId, directory: dir) {
                 ReapedSessions.shared.insert(ControlProtocol.SessionRow(
                     key: session.id.uuidString, resumeId: session.resumeId, title: session.title,
                     project: session.project, cwd: dir.path, state: RosterSnapshot.wireState(for: .idle),

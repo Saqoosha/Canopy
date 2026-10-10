@@ -3065,7 +3065,7 @@ enum SidebarLogicProbe {
                 settings.reload(from: ["canopy.sessionIdleLimitMinutes": -5])
                 record("idle limit: a negative value reads as never", settings.sessionIdleLimitMinutes == 0)
                 settings.reload(from: ["canopy.sessionIdleLimitMinutes": Int.max])
-                record("idle limit: a huge value is clamped, not overflowed", settings.sessionIdleLimit == 30 * 24 * 3600)
+                record("idle limit: a huge value is clamped, not overflowed", settings.sessionIdleLimit == TimeInterval(CanopySettings.maxSessionIdleLimitMinutes * 60))
                 write(#"{"canopy.sessionIdleLimitMinutes":15}"#)
                 record("idle limit: loaded from the file", CanopySettings(filePath: file).sessionIdleLimitMinutes == 15)
             }

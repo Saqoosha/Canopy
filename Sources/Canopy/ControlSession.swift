@@ -561,6 +561,8 @@ final class ControlSession {
             return reply(request, ["ok": true])
         }
         guard let session = requestedSession(request) else { return }
+        // Resumed since its reap and named here by its new key: the old entry goes too.
+        ReapedSessions.shared.remove([.resumeId(session.resumeId.lowercased())])
         store.closeSession(session.id, keepingFailure: false, mirrorEndReason: MirrorOpenRequest.stoppedByClient)
         reply(request, ["ok": true])
     }

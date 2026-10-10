@@ -363,9 +363,12 @@ final class CanopySettings {
         (raw as? Int).map { min(max($0, SleepGuardPolicy.batteryFloorRange.lowerBound), SleepGuardPolicy.batteryFloorRange.upperBound) }
     }
 
-    /// A hand edit is clamped to 0 (never) through 30 days, so the seconds cannot overflow.
+    /// 30 days.
+    static let maxSessionIdleLimitMinutes = 30 * 24 * 60
+
+    /// A hand edit is clamped to 0 (never) through the maximum, so the seconds cannot overflow.
     private static func idleLimit(_ raw: Any?) -> Int? {
-        (raw as? Int).map { min(max($0, 0), 30 * 24 * 60) }
+        (raw as? Int).map { min(max($0, 0), maxSessionIdleLimitMinutes) }
     }
 
     private func save() {

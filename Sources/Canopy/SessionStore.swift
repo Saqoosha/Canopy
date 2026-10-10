@@ -1497,6 +1497,10 @@ final class SessionStore {
         // Stopped by the reaper to free memory: the row stays, with no key, and a click resumes it.
         for update in plan.stopped {
             guard let session = openSessions.first(where: { $0.id == update.id }) else { continue }
+            // Every push repeats the reaped rows; an assignment wakes observers even when equal.
+            let settled = session.status == .dormant && session.daemonKey == nil && session.resumeIdIsExistingTranscript
+                && session.resumeId == update.row.resumeId && !session.isThinking && !session.isAsking && !session.isWaiting
+            guard !settled else { continue }
             if session.status != .dormant { detachDaemonSession(session) }
             session.daemonKey = nil
             session.resumeId = update.row.resumeId
@@ -1505,7 +1509,9 @@ final class SessionStore {
             session.isAsking = false
             session.isWaiting = false
         }
-        for row in plan.stoppedAdds where !row.cwd.isEmpty { addDormant(row, key: nil) }
+        for row in plan.stoppedAdds where !row.cwd.isEmpty && !openSessions.contains(where: { $0.resumeId == row.resumeId }) {
+            addDormant(row, key: nil)
+        }
         for id in plan.removes {
             // Stopped elsewhere (another client, canopyctl): there is nothing left to attach to.
             closeSession(id, keepingFailure: false, removeRow: true)
