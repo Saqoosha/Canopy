@@ -433,9 +433,12 @@ final class DaemonDelegate {
         return .start
     }
 
-    /// The sessions the phone opened before an upgrade restart, resumed with no client attached.
+    /// The phone's and the control API's sessions from before the restart, with no client attached.
     private func restoreHeldSessions() {
-        guard let held = DaemonHeldSessions.consume() else { return }
+        let log = ControlEventLog.shared
+        guard let held = DaemonHeldSessions.consume(dropped: { stale in
+            for entry in stale.entries { log.recordRestoreFailed(key: entry.key, sessionId: entry.resumeId, title: entry.title) }
+        }) else { return }
         for entry in held.entries {
             // The setting may have been turned off since the session started.
             let mode = entry.permissionMode == .bypassPermissions && !config.allowBypass
@@ -445,16 +448,18 @@ final class DaemonDelegate {
                 provider: entry.providerId.flatMap { id in ModelProviderStore.load().first { $0.id == id } },
                 account: ClaudeAccountStore.account(id: entry.accountId))
             options.id = UUID(uuidString: entry.key)
-            if let id = options.id { ControlEventLog.shared.noteRestored(id) }
+            // Before the start: `observe` can run while the shim starts (measured).
+            if let id = options.id { log.noteRestored(id) }
             guard let shim = store.startHeadlessSession(directory: URL(fileURLWithPath: entry.directory),
                                                         resumeId: entry.resumeId, isExistingTranscript: true,
                                                         title: entry.title, options: options) else {
                 logger.error("held session \(entry.resumeId.prefix(8), privacy: .public) did not restart")
+                if let id = options.id { log.forgetRestored(id) }
+                log.recordRestoreFailed(key: entry.key, sessionId: entry.resumeId, title: entry.title)
                 continue
             }
-            // A file from before `openedByControl` existed held only the phone's sessions.
-            shim.boundSession?.heldOpenByPhone = entry.heldByPhone ?? true
-            shim.boundSession?.openedByControl = entry.openedByControl ?? false
+            shim.boundSession?.heldOpenByPhone = entry.holders.phone
+            shim.boundSession?.openedByControl = entry.holders.control
         }
         logger.notice("restored \(held.entries.count, privacy: .public) held session(s)")
     }

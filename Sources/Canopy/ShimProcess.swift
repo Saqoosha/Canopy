@@ -8927,6 +8927,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             exitCode = -1
         }
         logger.error("CLI subprocess died (code \(exitCode)), stopping shim")
+        // Before the reset clears the turn, and before `stop()` would call it `stopped`.
+        recordTurnInterrupted(.crashed)
         resetActivityState()
         stop()
         // Headless: `stop()` makes `handleProcessExit` return early, so free the row here.

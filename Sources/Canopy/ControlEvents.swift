@@ -20,7 +20,7 @@ nonisolated struct ControlEvent: Equatable, Sendable, Codable {
         case sessionOpened = "session_opened"
         case sessionClosed = "session_closed"
         /// Not recorded: what `listen` returns when the cursor cannot be
-        /// continued (daemon restart, log wrapped, or a cursor ahead of the log).
+        /// continued (a daemon start without a saved log, log wrapped, or a cursor ahead of the log).
         case gap
     }
 
@@ -49,7 +49,8 @@ nonisolated struct ControlEvent: Equatable, Sendable, Codable {
     /// `turn_interrupted`: `InterruptReason`. On `session_opened`: `restored`
     /// when the daemon brought it back after a restart.
     var reason: String?
-    /// On `session_closed` with `daemon_restart`: the daemon will reopen it, under the same key.
+    /// On `session_closed` with `daemon_restart`: the next daemon means to reopen it under the
+    /// same key; a `restore_failed` close follows if it cannot.
     var resumes: Bool?
 
     /// Why a turn ended without a `result`.
@@ -69,6 +70,8 @@ nonisolated struct ControlEvent: Equatable, Sendable, Codable {
         case reaped
         /// The daemon is shutting down (an update, Restart now, launchd, SIGTERM).
         case daemonRestart = "daemon_restart"
+        /// Reported by a restarted daemon for a session it said it would reopen and could not.
+        case restoreFailed = "restore_failed"
         /// Removed by a path that did not say why.
         case other
     }
@@ -196,9 +199,9 @@ nonisolated struct ControlEvent: Equatable, Sendable, Codable {
     static let textMaxBytes = 32_000
 }
 
-/// Position in the event log. The epoch changes every daemon launch, so a
-/// cursor from before a restart is recognised as stale instead of silently
-/// meaning a different event.
+/// Position in the event log. The epoch changes when a daemon starts without a
+/// saved log (after a crash), so a cursor from before is recognised as stale
+/// instead of silently meaning a different event.
 nonisolated struct ControlEventCursor: Equatable, Sendable {
     var epoch: String
     var seq: Int
@@ -372,9 +375,17 @@ final class ControlEventLog {
     func save(to url: URL = savedFileURL) {
         do {
             let data = try JSONEncoder().encode(Saved(epoch: epoch, latestSeq: latestSeq, events: events))
-            FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
-            try data.write(to: url, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            // Created 0600 and renamed into place: never readable by others, never half written.
+            let tmp = url.appendingPathExtension("tmp-\(getpid())")
+            guard FileManager.default.createFile(atPath: tmp.path, contents: data,
+                                                 attributes: [.posixPermissions: 0o600]) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            guard rename(tmp.path, url.path) == 0 else {
+                let code = errno
+                try? FileManager.default.removeItem(at: tmp)
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
             logger.notice("[control] saved \(self.events.count, privacy: .public) event(s) at \(self.epoch, privacy: .public).\(self.latestSeq, privacy: .public)")
         } catch {
             logger.error("[control] could not save events: \(error.localizedDescription, privacy: .public)")
@@ -384,10 +395,26 @@ final class ControlEventLog {
     /// At launch, before anything is recorded. Read and delete, so a log that
     /// crashes the daemon is not replayed; an unreadable one starts a new epoch.
     func restoreSaved(from url: URL = savedFileURL) {
-        guard latestSeq == 0, let data = try? Data(contentsOf: url) else { return }
-        try? FileManager.default.removeItem(at: url)
-        guard let saved = try? JSONDecoder().decode(Saved.self, from: data), adopt(saved) else {
-            logger.error("[control] saved events unreadable; starting epoch \(self.epoch, privacy: .public)")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard latestSeq == 0 else {
+            logger.error("[control] saved events not restored: events were recorded first")
+            return
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            logger.error("[control] saved events not restored: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        do {
+            guard adopt(try JSONDecoder().decode(Saved.self, from: data)) else {
+                logger.error("[control] saved events inconsistent; starting epoch \(self.epoch, privacy: .public)")
+                return
+            }
+        } catch {
+            logger.error("[control] saved events unreadable (\(error.localizedDescription, privacy: .public)); starting epoch \(self.epoch, privacy: .public)")
             return
         }
         logger.notice("[control] continued epoch \(self.epoch, privacy: .public) at seq \(self.latestSeq, privacy: .public)")
@@ -501,6 +528,14 @@ final class ControlEventLog {
     private var restoredIds: Set<UUID> = []
 
     func noteRestored(_ id: UUID) { restoredIds.insert(id) }
+
+    func forgetRestored(_ id: UUID) { restoredIds.remove(id) }
+
+    /// A session the previous daemon said `resumes` for and this one could not bring back.
+    func recordRestoreFailed(key: String, sessionId: String, title: String) {
+        record(.sessionClosed, key: key, sessionId: sessionId, title: title,
+               reason: ControlEvent.CloseReason.restoreFailed.rawValue)
+    }
 
     /// Records `session_opened` / `session_closed` for `store`'s open list.
     /// Idempotent; sessions already open when tracking starts are not reported.

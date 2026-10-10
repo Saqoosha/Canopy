@@ -8,7 +8,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "DaemonHeldS
 /// The daemon restores nothing else across a restart: a session with a client
 /// attached comes back when that client re-attaches with `open`. A held session
 /// may have no client at all, so nothing would ask for it. What comes back is the
-/// open row under its old key, its CLI resumed with `--resume`.
+/// open row under its old key with its shim running; the CLI resumes the
+/// transcript (`--resume`) on the next attach or `send_message`.
 struct DaemonHeldSessions: Codable, Equatable {
     struct Entry: Codable, Equatable {
         /// The old `OpenSession.id`, reused so a phone re-attaching by key finds the row.
@@ -25,6 +26,9 @@ struct DaemonHeldSessions: Codable, Equatable {
         /// Absent in a file written before control sessions were carried: those were all the phone's.
         var heldByPhone: Bool?
         var openedByControl: Bool?
+
+        /// Who holds it once restored; a file from before the flags held only the phone's.
+        var holders: (phone: Bool, control: Bool) { (heldByPhone ?? true, openedByControl ?? false) }
     }
 
     var entries: [Entry]
@@ -68,13 +72,16 @@ struct DaemonHeldSessions: Codable, Equatable {
 
     /// Read and delete. Deleted first, so a restore that crashes the daemon
     /// is not replayed on every launch.
-    static func consume(from url: URL = fileURL, now: Date = Date()) -> DaemonHeldSessions? {
+    /// `dropped` gets a file too old to restore, so its sessions can be reported.
+    static func consume(from url: URL = fileURL, now: Date = Date(),
+                        dropped: (DaemonHeldSessions) -> Void = { _ in }) -> DaemonHeldSessions? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         try? FileManager.default.removeItem(at: url)
         do {
             let held = try JSONDecoder().decode(DaemonHeldSessions.self, from: data)
             guard now.timeIntervalSince(held.savedAt) <= maxAge else {
                 logger.notice("dropped \(held.entries.count, privacy: .public) held session(s) saved \(Int(now.timeIntervalSince(held.savedAt)), privacy: .public)s ago")
+                dropped(held)
                 return nil
             }
             return held
