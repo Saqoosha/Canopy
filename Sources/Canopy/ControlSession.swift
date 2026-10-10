@@ -552,8 +552,8 @@ final class ControlSession {
     /// the session until the headless `launch_claude` assigns a channel.
     private func finishResume(_ request: ControlProtocol.Request, session: OpenSession, shim: ShimProcess,
                               prompt: String?, alreadyOpen: Bool) {
-        // Only a session the control API started; an already-open one keeps whoever holds it.
-        if !alreadyOpen { session.openedByControl = true }
+        // Reached only when this request started the shim; a session already running returns earlier.
+        session.openedByControl = true
         var result = resumeResult(session, alreadyOpen: alreadyOpen)
         if let prompt, let launchPrompt = LaunchPrompt.make(text: prompt, images: []) {
             let replyId = UUID().uuidString.lowercased()

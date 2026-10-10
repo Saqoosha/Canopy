@@ -404,8 +404,8 @@ saved nothing, and a cursor from it returns `gap` `daemon_restarted` as
 before. The saved log is owner-only (it holds prompts and replies) and is
 read once.
 
-Sessions `open_session` started (opened new, or resumed when not already
-open), and those the phone opened, come back under the same `key`:
+Sessions whose CLI `open_session` started (opened new, or resumed when not
+already running), and those the phone opened, come back under the same `key`:
 `session_closed` says `resumes: true`, and the new daemon records
 `session_opened` with `reason: "restored"`. Its shim is running; the CLI
 resumes the transcript (`--resume`) on the next attach or `send_message`. A
