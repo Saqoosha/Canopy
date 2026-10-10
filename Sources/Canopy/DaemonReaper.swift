@@ -35,6 +35,7 @@ final class DaemonReaper {
             let inputs = shim.reaperInputs
             guard SessionReaper.shouldReap(inputs, now: now, limit: limit) else { continue }
             logger.notice("reaping \(session.resumeId, privacy: .public): quiet \(Int(now.timeIntervalSince(inputs.quietSince)))s with no client")
+            ControlEventLog.shared.noteClosing(session.id, reason: .reaped)
             store.closeSession(session.id, keepingFailure: false)
         }
     }

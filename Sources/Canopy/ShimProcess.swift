@@ -6727,6 +6727,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         outputRateSawThinking = false
         turnTextBlocks = []
         turnPrompt = nil
+        turnAssistantError = nil
         outstandingDialogRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
@@ -8126,6 +8127,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var turnTextBlocks: [(id: String, texts: [String])] = []
     /// The prompt that started the current turn, for `turn_done`.
     private var turnPrompt: String?
+    /// The last main-conversation `assistant` frame's `error` this turn, for `turn_done`'s failure.
+    private var turnAssistantError: String?
 
     /// The prompt in a live `user` echo, the same rule `history` applies to the transcript.
     nonisolated static func livePrompt(_ ioMsg: [String: Any]) -> String? {
@@ -8136,6 +8139,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     private func collectTurnText(_ ioMsg: [String: Any]) {
         guard let frame = Self.mainTurnText(ioMsg) else { return }
+        if let error = ioMsg["error"] as? String { turnAssistantError = error }
         turnTextBlocks = ControlEvent.appendingTurnText(turnTextBlocks, id: frame.id, texts: frame.texts)
     }
 
@@ -8217,8 +8221,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             turnTextBlocks = []
             ControlEventLog.shared.record(.turnDone, session: boundSession, state: controlStateWire,
                                           replyId: finishedControlReply, text: turn.text, addressedTo: turn.addressedTo,
-                                          prompt: turnPrompt)
+                                          prompt: turnPrompt,
+                                          failure: .some(ControlEvent.TurnFailure.of(result: ioMsg,
+                                                                                     assistantError: turnAssistantError)))
             turnPrompt = nil
+            turnAssistantError = nil
         default:
             break
         }

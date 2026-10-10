@@ -37,6 +37,65 @@ nonisolated struct ControlEvent: Equatable, Sendable {
     /// On `turn_done`: what the person sent to start the turn, wherever they typed it.
     var prompt: String?
     var promptTruncated = false
+    /// On `turn_done`: whether the turn ended on an error. Nil on every other kind.
+    var isError: Bool?
+    /// On a failed `turn_done`: `TurnFailure.kind` and the CLI's own code for it.
+    var errorKind: String?
+    var errorCode: String?
+    /// On `session_closed`: why it left the open list (`CloseReason`).
+    var reason: String?
+
+    /// Why a session left the daemon's open list.
+    enum CloseReason: String, Sendable {
+        /// `stop_session` (the GUI's Stop goes through it too).
+        case stopped
+        /// The reaper stopped it: no client, idle past `SessionReaper.defaultIdleLimit`.
+        case reaped
+        /// The daemon is shutting down (an update or a quit).
+        case daemonRestart = "daemon_restart"
+        /// Removed by a path that did not say why.
+        case other
+    }
+
+    /// How a turn failed, read off its `result` frame and the turn's last
+    /// main-conversation `assistant` frame's `error`. The result's `subtype`
+    /// stays `success` on an API error (measured, CLI 2.1.287), so the
+    /// assistant frame is what names the cause there.
+    struct TurnFailure: Equatable, Sendable {
+        var kind: String
+        var code: String?
+
+        /// Nil when the turn did not fail.
+        static func of(result: [String: Any], assistantError: String?) -> TurnFailure? {
+            let subtype = result["subtype"] as? String
+            let failedSubtype = subtype.map { $0 != "success" } ?? false
+            guard result["is_error"] as? Bool == true || failedSubtype else { return nil }
+            if failedSubtype, let subtype {
+                switch subtype {
+                case "error_max_turns": return TurnFailure(kind: "max_turns", code: subtype)
+                case "error_max_budget_usd": return TurnFailure(kind: "budget", code: subtype)
+                case "error_during_execution": return TurnFailure(kind: "execution", code: subtype)
+                default: break
+                }
+            }
+            let code = assistantError ?? (failedSubtype ? subtype : nil)
+            switch code {
+            case "authentication_failed", "oauth_org_not_allowed", "account_on_hold", "verification_required":
+                return TurnFailure(kind: "auth", code: code)
+            case let c? where c.hasPrefix("cloud_credential"):
+                return TurnFailure(kind: "auth", code: code)
+            case "rate_limit": return TurnFailure(kind: "rate_limit", code: code)
+            case "billing_error": return TurnFailure(kind: "billing", code: code)
+            case "overloaded": return TurnFailure(kind: "overloaded", code: code)
+            case "server_error":
+                // No HTTP status: the request never got an answer (refused, reset, timed out).
+                let status = result["api_error_status"] as? Int
+                return TurnFailure(kind: status == nil ? "network" : "server", code: code)
+            default:
+                return TurnFailure(kind: "other", code: code)
+            }
+        }
+    }
 
     var wire: [String: Any] {
         // A gap names no session and no event; its `state` slot carries the reason.
@@ -60,6 +119,10 @@ nonisolated struct ControlEvent: Equatable, Sendable {
             out["prompt"] = prompt
             if promptTruncated { out["promptTruncated"] = true }
         }
+        if let isError { out["isError"] = isError }
+        if let errorKind { out["errorKind"] = errorKind }
+        if let errorCode { out["errorCode"] = errorCode }
+        if let reason { out["reason"] = reason }
         return out
     }
 
@@ -274,23 +337,32 @@ final class ControlEventLog {
 
     func record(_ kind: ControlEvent.Kind, session: OpenSession?, state: String? = nil, replyId: String? = nil,
                 requestId: String? = nil, toolName: String? = nil, text: String? = nil, addressedTo: String? = nil,
-                prompt: String? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
+                prompt: String? = nil, failure: ControlEvent.TurnFailure?? = nil,
+                textMaxBytes: Int = ControlEvent.textMaxBytes) {
         guard let session else {
             logger.notice("[control] \(kind.rawValue, privacy: .public) not recorded: no bound session")
             return
         }
         record(kind, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
                state: state, replyId: replyId, requestId: requestId, toolName: toolName, text: text,
-               addressedTo: addressedTo, prompt: prompt, textMaxBytes: textMaxBytes)
+               addressedTo: addressedTo, prompt: prompt, failure: failure, textMaxBytes: textMaxBytes)
     }
 
     func record(_ kind: ControlEvent.Kind, key: String, sessionId: String, title: String, state: String? = nil,
                 replyId: String? = nil, requestId: String? = nil, toolName: String? = nil, text: String? = nil,
-                addressedTo: String? = nil, prompt: String? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
+                addressedTo: String? = nil, prompt: String? = nil, failure: ControlEvent.TurnFailure?? = nil,
+                reason: ControlEvent.CloseReason? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
         latestSeq += 1
         var event = ControlEvent(seq: latestSeq, kind: kind, key: key, sessionId: sessionId, title: title, at: Date(),
                                  state: state, replyId: replyId, requestId: requestId, toolName: toolName,
                                  addressedTo: addressedTo)
+        // `failure`: outer nil = not a turn; inner nil = a turn that succeeded.
+        if let failure {
+            event.isError = failure != nil
+            event.errorKind = failure?.kind
+            event.errorCode = failure?.code
+        }
+        event.reason = reason?.rawValue
         if let prompt {
             event.prompt = ShimProcess.truncatedNotificationBody(prompt, maxBytes: ControlEvent.textMaxBytes)
             event.promptTruncated = prompt.utf8.count > ControlEvent.textMaxBytes
@@ -327,6 +399,26 @@ final class ControlEventLog {
 
     private weak var trackedStore: SessionStore?
     private var known: [UUID: Known] = [:]
+    /// Set just before a removal so `observe` can say why; consumed there.
+    private var closeReasons: [UUID: ControlEvent.CloseReason] = [:]
+
+    /// Names the reason for the next removal of `id` from the open list.
+    func noteClosing(_ id: UUID, reason: ControlEvent.CloseReason) {
+        guard trackedStore != nil else { return }
+        closeReasons[id] = reason
+    }
+
+    /// `session_closed` for every open session, now: at shutdown nothing
+    /// removes them, and the process exits before `observe` would run.
+    func recordShutdown() {
+        guard let store = trackedStore else { return }
+        for session in store.openSessions {
+            record(.sessionClosed, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
+                   reason: .daemonRestart)
+        }
+        known = [:]
+        trackedStore = nil
+    }
 
     /// Records `session_opened` / `session_closed` for `store`'s open list.
     /// Idempotent; sessions already open when tracking starts are not reported.
@@ -351,13 +443,17 @@ final class ControlEventLog {
             DispatchQueue.main.async { MainActor.assumeIsolated { ControlEventLog.shared.observe() } }
         }
         let opened = store.openSessions.filter { known[$0.id] == nil }
-        let closed = known.filter { now[$0.key] == nil }.values.sorted { $0.key < $1.key }
+        let closed = known.filter { now[$0.key] == nil }.sorted { $0.value.key < $1.value.key }
         known = now
         for session in opened {
             record(.sessionOpened, key: session.id.uuidString, sessionId: session.resumeId, title: session.title)
         }
-        for gone in closed {
-            record(.sessionClosed, key: gone.key, sessionId: gone.sessionId, title: gone.title)
+        for (id, gone) in closed {
+            record(.sessionClosed, key: gone.key, sessionId: gone.sessionId, title: gone.title,
+                   reason: closeReasons.removeValue(forKey: id) ?? .other)
         }
+        // Callers note a reason and remove in one main-actor turn, so by now every noted
+        // removal has been seen; one that did not happen must not label a later one.
+        closeReasons = [:]
     }
 }
