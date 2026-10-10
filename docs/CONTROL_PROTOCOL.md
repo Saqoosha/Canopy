@@ -307,6 +307,7 @@ Events:
 |---|---|
 | `turn_done` | A main-conversation turn ended, whoever started it (Mac, phone, control API) |
 | `addressed` | A filter, not a recorded kind: a `turn_done` whose reply names a reader (below). The returned `event` is `turn_done` with `addressedTo` |
+| `turn_interrupted` | A turn ended without a `result`: its CLI was stopped, died, or the daemon exited (below). Never resent |
 | `permission` | A tool permission request arrived |
 | `asking` | An AskUserQuestion arrived |
 | `session_opened`, `session_closed` | A session was added to or removed from the daemon's open list. `session_opened` carries the id the session had then; a new session's placeholder id is replaced after its first turn. `session_closed` carries `reason` (below) |
@@ -356,8 +357,18 @@ an API error and empty for `max_turns`, `budget` and `execution`:
 | `other` | Anything else: `model_not_found`, `invalid_request`, `unknown`, `max_output_tokens` included |
 
 The daemon does not retry a failed turn (the CLI retries some errors itself
-before failing it). A session whose CLI dies mid-turn produces no
-`turn_done` at all and stays open (dormant): it is not a `session_closed`.
+before failing it).
+
+`turn_interrupted` replaces the `turn_done` a turn will never get. It carries
+`reason`, and `replyId` / `prompt` as `turn_done` would, so a client can
+decide to send the prompt again; the daemon never does. `prompt` is absent
+when the CLI had not echoed it yet.
+
+| `reason` | Why |
+|---|---|
+| `stopped` | The CLI was stopped on purpose: `stop_session`, `restart_session`, an account switch |
+| `crashed` | The CLI exited on its own. The session stays open but not running (no `session_closed`); `open_session` with its `resumeSessionId` starts it again |
+| `daemon_restart` | The daemon is shutting down; followed by that session's `session_closed` |
 
 `reason` on `session_closed`:
 
@@ -365,7 +376,7 @@ before failing it). A session whose CLI dies mid-turn produces no
 |---|---|
 | `stopped` | `stop_session`, which the Mac's Stop also sends |
 | `reaped` | The reaper stopped it: no client attached and idle for 15 minutes |
-| `daemon_restart` | The daemon is shutting down (an update, Restart now, or a quit); recorded for every open session just before it exits |
+| `daemon_restart` | The daemon is shutting down (an update, Restart now, launchd, SIGTERM); recorded for every open session just before it exits. `resumes: true` when the next daemon will reopen it (below) |
 | `other` | Removed by a path that did not say why |
 
 Result on timeout:
@@ -380,6 +391,24 @@ changes each daemon launch; a cursor from an earlier launch returns
 resumes at the oldest event the new daemon holds. `reason: "overflow"` means
 the ring wrapped past the cursor; `"unknown_cursor"` means the cursor is
 ahead of the log.
+
+### Across a daemon restart
+
+A daemon that exits cleanly (an update, Restart now, launchd stopping it,
+SIGTERM) saves its event log and the next one continues it: same epoch, same
+seqs, so a cursor from before the restart goes on with no `gap`, and events
+recorded during the shutdown are still there to read. A daemon that crashed
+saved nothing, and a cursor from it returns `gap` `daemon_restarted` as
+before. The saved log is owner-only (it holds prompts and replies) and is
+read once.
+
+Sessions opened or resumed through `open_session`, and those the phone
+opened, come back under the same `key`, their CLI resumed with `--resume`:
+`session_closed` says `resumes: true`, and the new daemon records
+`session_opened` with `reason: "restored"`. A session opened less than a turn
+ago (no transcript yet) cannot be resumed and does not come back, nor does
+anything after more than 10 minutes down. Others, a Mac pane's included, come
+back when their client re-attaches.
 
 While a connection has a `listen` open, the daemon sends
 `{"type":"heartbeat","at":<seconds>}` on it every 30 s. It answers no

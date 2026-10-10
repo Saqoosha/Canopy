@@ -629,6 +629,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // outstanding AskUserQuestion asking state — the user already
             // responded, we're back to thinking.
             if isWorking && !oldValue {
+                turnInterruptRecorded = false
                 lastSessionActivityAt = Date()
                 SleepGuard.reevaluateActive()
                 lastAssistantHadAskUserQuestion = false
@@ -3662,6 +3663,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// restart whose caller starts the session again in the same main-actor turn, so a client told to
     /// re-attach finds it running; without it the drop is bare and a Mac pane offers Retry.
     func stop(mirrorEndReason: String? = nil, mirrorsReattach: Bool = false) {
+        if process?.isRunning == true { recordTurnInterrupted(.stopped) }
         isIntentionalStop = true
         disconnectMirrors(reason: mirrorEndReason, reattach: mirrorsReattach)
         // Clear the destination here too, whatever the connections' detaches
@@ -8129,6 +8131,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var turnPrompt: String?
     /// The last main-conversation `assistant` frame's `error` this turn, for `turn_done`'s failure.
     private var turnAssistantError: String?
+    /// This turn was already reported as `turn_interrupted`; cleared when the next turn starts.
+    private var turnInterruptRecorded = false
+
+    /// `turn_interrupted` for the turn in flight, once. A turn is in flight from
+    /// `isWorking` rising, or from a control send not yet echoed, to its `result`.
+    func recordTurnInterrupted(_ reason: ControlEvent.InterruptReason) {
+        guard isWorking || controlTurnReplyId != nil, !turnInterruptRecorded else { return }
+        turnInterruptRecorded = true
+        ControlEventLog.shared.record(.turnInterrupted, session: boundSession, replyId: controlTurnReplyId,
+                                      prompt: turnPrompt, reason: reason.rawValue)
+    }
 
     /// The prompt in a live `user` echo, the same rule `history` applies to the transcript.
     nonisolated static func livePrompt(_ ioMsg: [String: Any]) -> String? {
@@ -8964,6 +8977,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             Self.killProcessTree(descendantPids)
             descendantPids = []
         }
+
+        // Before the reset clears the turn it describes. A stop recorded its own.
+        if !isIntentionalStop { recordTurnInterrupted(.crashed) }
 
         // Even for intentional stops the bound session is about to be
         // dropped or replaced — clearing here keeps the sidebar consistent
