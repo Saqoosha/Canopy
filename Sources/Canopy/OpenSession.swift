@@ -267,6 +267,10 @@ final class OpenSession: Identifiable, Hashable {
     /// running with no client attached (`SessionReaper.Inputs.heldOpen`).
     var heldOpenByPhone = false
 
+    /// Opened or resumed through the control API's `open_session`: the daemon
+    /// reopens it after a restart (`DaemonHeldSessions`), like a phone's.
+    var openedByControl = false
+
     /// A `stop_session` for this session is in flight. The daemon drops the
     /// mirror connection before it replies, so the pane must read that drop
     /// as the stop it asked for rather than as a lost connection.

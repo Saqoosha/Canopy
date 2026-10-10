@@ -2473,10 +2473,34 @@ enum SidebarLogicProbe {
                            && failWire["isError"] as? Bool == true && failWire["errorKind"] as? String == "auth"
                            && failWire["errorCode"] as? String == "authentication_failed")
                 record("listen wire: isError is only on turn_done", askFailureWire["isError"] == nil)
-                log.record(.sessionClosed, key: "probe-key", sessionId: "s", title: "t", reason: .reaped)
+                log.record(.sessionClosed, key: "probe-key", sessionId: "s", title: "t", reason: ControlEvent.CloseReason.reaped.rawValue)
                 record("listen wire: session_closed carries its reason",
                        log.events.last?.wire["reason"] as? String == "reaped"
                            && ControlEvent.CloseReason.daemonRestart.rawValue == "daemon_restart")
+                log.record(.sessionClosed, key: "probe-key", sessionId: "s", title: "t",
+                           reason: ControlEvent.CloseReason.daemonRestart.rawValue, resumes: true)
+                record("listen wire: a closing the next daemon reopens says resumes",
+                       log.events.last?.wire["resumes"] as? Bool == true)
+                log.record(.turnInterrupted, key: "probe-key", sessionId: "s", title: "t", replyId: "r1", prompt: "go",
+                           reason: ControlEvent.InterruptReason.crashed.rawValue)
+                let interruptWire = log.events.last?.wire ?? [:]
+                record("listen wire: turn_interrupted carries its reason, the prompt and the replyId to resend by hand",
+                       interruptWire["event"] as? String == "turn_interrupted" && interruptWire["reason"] as? String == "crashed"
+                           && interruptWire["prompt"] as? String == "go" && interruptWire["replyId"] as? String == "r1"
+                           && listenParse(["events": ["turn_interrupted"]]) != nil)
+                let savedLog = ControlEventLog.Saved(epoch: log.epoch, latestSeq: log.latestSeq, events: log.events)
+                let reread = (try? JSONEncoder().encode(savedLog)).flatMap { try? JSONDecoder().decode(ControlEventLog.Saved.self, from: $0) }
+                record("listen persist: the saved ring round-trips through JSON", reread == savedLog && !savedLog.events.isEmpty)
+                let beforeAdopt = (log.epoch, log.latestSeq, log.events)
+                var holed = savedLog
+                holed.events.remove(at: holed.events.count / 2)
+                var behind = savedLog
+                behind.latestSeq += 1
+                record("listen persist: a ring with a hole, or not ending at latestSeq, is refused and changes nothing",
+                       !log.adopt(holed) && !log.adopt(behind)
+                           && log.epoch == beforeAdopt.0 && log.latestSeq == beforeAdopt.1 && log.events == beforeAdopt.2)
+                record("listen persist: a consistent ring is adopted, epoch and all",
+                       log.adopt(savedLog) && log.epoch == savedLog.epoch && log.latestSeq == savedLog.latestSeq)
                 record("listen params: a JSON null is the same as leaving the param out",
                        listenParse(["since": NSNull(), "addressedTo": NSNull(), "timeout": NSNull()])
                            == listenParse([:]))
@@ -2554,15 +2578,26 @@ enum SidebarLogicProbe {
                 let notHeld = OpenSession(origin: .local(heldDir), resumeId: "free", title: "F", project: "P")
                 let noTranscript = OpenSession(origin: .local(heldDir), resumeId: "fresh", title: "N", project: "P")
                 noTranscript.heldOpenByPhone = true
+                let byControl = OpenSession(origin: .local(heldDir), resumeId: "ctl", title: "C", project: "P")
+                byControl.openedByControl = true
                 let heldNow = Date()
-                let captured = DaemonHeldSessions.capture([heldA, notHeld, noTranscript], now: heldNow) { session, _ in
+                let captured = DaemonHeldSessions.capture([heldA, notHeld, noTranscript, byControl], now: heldNow) { session, _ in
                     session.resumeId != "fresh"
                 }
-                record("held restore: only held sessions with a transcript are captured",
+                record("held restore: held and control-opened sessions with a transcript are captured, each with its flag",
                        captured.entries == [.init(key: heldA.id.uuidString, resumeId: "held-A",
                                                   directory: "/tmp/probe/held", title: "A", model: "opus",
                                                   effort: "high", permissionMode: .plan, providerId: nil,
-                                                  accountId: nil)])
+                                                  accountId: nil, heldByPhone: true, openedByControl: false),
+                                            .init(key: byControl.id.uuidString, resumeId: "ctl",
+                                                  directory: "/tmp/probe/held", title: "C", model: nil,
+                                                  effort: nil, permissionMode: byControl.permissionMode, providerId: nil,
+                                                  accountId: nil, heldByPhone: false, openedByControl: true)])
+                let legacyHeld = try? JSONDecoder().decode(DaemonHeldSessions.Entry.self, from: Data("""
+                    {"key":"k","resumeId":"r","directory":"/d","title":"t","permissionMode":"plan"}
+                    """.utf8))
+                record("held restore: an entry written before the flags existed still decodes, flags absent",
+                       legacyHeld != nil && legacyHeld?.heldByPhone == nil && legacyHeld?.openedByControl == nil)
                 let heldFile = FileManager.default.temporaryDirectory
                     .appendingPathComponent("canopy-probe-held-\(UUID().uuidString).json")
                 captured.save(to: heldFile)

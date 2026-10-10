@@ -473,6 +473,7 @@ final class ControlSession {
             fail(request, MirrorOpenRequest.startFailed)
             return
         }
+        session.openedByControl = true
         // The prompt is stored on the session; nothing sends it until a
         // `launch_claude` assigns a channel. A control open has no webview.
         var result: [String: Any] = ["sessionId": sessionId, "key": session.id.uuidString, "cwd": directory.path]
@@ -551,6 +552,7 @@ final class ControlSession {
     /// the session until the headless `launch_claude` assigns a channel.
     private func finishResume(_ request: ControlProtocol.Request, session: OpenSession, shim: ShimProcess,
                               prompt: String?, alreadyOpen: Bool) {
+        session.openedByControl = true
         var result = resumeResult(session, alreadyOpen: alreadyOpen)
         if let prompt, let launchPrompt = LaunchPrompt.make(text: prompt, images: []) {
             let replyId = UUID().uuidString.lowercased()

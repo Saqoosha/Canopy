@@ -155,9 +155,6 @@ final class DaemonDelegate {
         logger.notice("restarting for build \(build, privacy: .public) (running \(DaemonUpgrade.launchedBuild ?? "?", privacy: .public))")
         upgradeTimer?.invalidate()
         configTimer?.invalidate()  // a reload in the next second would re-open the listeners
-        DaemonHeldSessions.capture(store.openSessions) { session, dir in
-            ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
-        }.save()
         server?.announceRestart()
         // Sends are asynchronous: give the notice a moment to leave before the process does.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
@@ -224,6 +221,8 @@ final class DaemonDelegate {
             FileHandle.standardError.write(Data("canopy daemon: local socket unavailable\n".utf8))
             exit(1)
         }
+        // After the socket is ours: a daemon that exits because another serves it must not eat the file.
+        ControlEventLog.shared.restoreSaved()
         reloadConfig()
         restoreHeldSessions()
         // The GUI changes these settings in another process; follow them.
@@ -446,13 +445,16 @@ final class DaemonDelegate {
                 provider: entry.providerId.flatMap { id in ModelProviderStore.load().first { $0.id == id } },
                 account: ClaudeAccountStore.account(id: entry.accountId))
             options.id = UUID(uuidString: entry.key)
+            if let id = options.id { ControlEventLog.shared.noteRestored(id) }
             guard let shim = store.startHeadlessSession(directory: URL(fileURLWithPath: entry.directory),
                                                         resumeId: entry.resumeId, isExistingTranscript: true,
                                                         title: entry.title, options: options) else {
                 logger.error("held session \(entry.resumeId.prefix(8), privacy: .public) did not restart")
                 continue
             }
-            shim.boundSession?.heldOpenByPhone = true
+            // A file from before `openedByControl` existed held only the phone's sessions.
+            shim.boundSession?.heldOpenByPhone = entry.heldByPhone ?? true
+            shim.boundSession?.openedByControl = entry.openedByControl ?? false
         }
         logger.notice("restored \(held.entries.count, privacy: .public) held session(s)")
     }
@@ -465,11 +467,19 @@ final class DaemonDelegate {
         sleepGuard?.stop()
         // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
-        // Recorded before the shims stop; a listener may not receive them before the process exits.
-        ControlEventLog.shared.recordShutdown()
+        // Every exit, not only an upgrade: a launchd restart or a SIGTERM loses the
+        // phone's and the control API's sessions the same way.
+        let held = DaemonHeldSessions.capture(store.openSessions) { session, dir in
+            ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
+        }
+        held.save()
+        // Recorded before the shims stop; a listener may not receive them before the process exits,
+        // so the log is saved after the shims stop and the next daemon serves them.
+        ControlEventLog.shared.recordShutdown(resuming: Set(held.entries.map(\.key)))
         // Shims first: a replacement daemon may take the socket the moment it is gone, and must
         // not resume a transcript whose old CLI is still alive.
         for session in store.openSessions { session.shim?.stop() }
+        ControlEventLog.shared.save()
         stopRelay()
         server?.stopTCP()
         server?.stopLocal()
