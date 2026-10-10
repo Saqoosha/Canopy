@@ -420,11 +420,13 @@ no session: every close says `resumes: false`.
 ### Idle sessions
 
 The reaper stops a session with no client attached once it has been idle for
-the limit in Settings (4 hours by default; "Never" turns it off). A session `open_session` started is kept while some `listen`
-covers it: one naming its `key` or `sessionId`, or one naming no session.
-It stays covered for 2 minutes after its last listen ends, so a client that
-re-sends `listen` after every event (`--follow`) covers it continuously, and
-one that exits lets it go after the usual limit.
+the limit in Settings (4 hours by default; "Never" turns it off). A session
+`open_session` started is kept while some `listen` covers it: one naming its
+`key` or `sessionId`, or one naming no session. It stays covered for 2
+minutes after its last listen ends, so a client that re-sends `listen` after
+every event (`--follow`) covers it continuously. Once no listen covers it,
+the usual rule applies again: a session already idle past the limit is
+stopped at the reaper's next pass.
 
 While a connection has a `listen` open, the daemon sends
 `{"type":"heartbeat","at":<seconds>}` on it every 30 s. It answers no

@@ -213,7 +213,7 @@ final class ControlSession {
         let start: ControlEventCursor
         switch log.scan(since: params.since, filter: filter) {
         case .event(let event, let next):
-            if watches { log.watch.touch(key: filter.key, now: Date()) }
+            if watches, event.kind != .gap { log.watch.touch(key: filter.key, now: Date()) }
             return replyEvent(id, event, cursor: next)
         case .wait(let next): start = next
         }
