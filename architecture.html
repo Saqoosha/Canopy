@@ -185,8 +185,8 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
   <header class="top">
     <div class="eyebrow">sh.saqoo.Canopy · architecture</div>
     <h1><span>Canopy</span> のしくみ</h1>
-    <p class="lede">Canopy は Claude Code の VS Code 拡張機能を、手を加えずに、VS Code なしで動かす。3.0 からは、Mac 上のセッションはすべてバックグラウンドのデーモンが持つ。Mac のアプリも、別の Mac も、iPhone も、そこに attach するクライアントになった。</p>
-    <div class="meta"><span>バージョン <b>3.1.0</b></span><span>更新 <b>2026-10-02</b></span><span>macOS <b>15+</b> · Swift 6 · Node <b>18+</b></span></div>
+    <p class="lede">Canopy は Claude Code の VS Code 拡張機能を、手を加えずに、VS Code なしで動かす。3.0 からは、Mac 上のセッションはすべてバックグラウンドのデーモンが持つ。Mac のアプリも、別の Mac も、iPhone も、スクリプトも、そこにつなぐクライアントになった。</p>
+    <div class="meta"><span>バージョン <b>3.14.0</b></span><span>更新 <b>2026-10-11</b></span><span>macOS <b>15+</b> · Swift 6 · Node <b>18+</b></span></div>
   </header>
 
   <nav class="toc" aria-label="目次">
@@ -195,9 +195,11 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <li><a href="#processes">プロセス</a></li>
       <li><a href="#message">メッセージの流れ</a></li>
       <li><a href="#wire">接続</a></li>
+      <li><a href="#control">スクリプトからの操作</a></li>
       <li><a href="#lifecycle">ライフサイクル</a></li>
       <li><a href="#state">状態の持ち主</a></li>
       <li><a href="#daemon">デーモンの運用</a></li>
+      <li><a href="#accounts">アカウントと使用量</a></li>
       <li><a href="#gui">Mac クライアント</a></li>
       <li><a href="#remote">ほかの経路</a></li>
       <li><a href="#files">ソースマップ</a></li>
@@ -265,8 +267,8 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
 
         <rect x="350" y="250" width="290" height="70" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
         <text x="366" y="276" class="t-title">ControlSession</text>
-        <text x="366" y="296" class="t-sub">一覧、起動、停止、改名、subscribe、</text>
-        <text x="366" y="311" class="t-sub">restart_now</text>
+        <text x="366" y="296" class="t-sub">一覧、起動、停止、send_message、</text>
+        <text x="366" y="311" class="t-sub">listen、subscribe、restart_now</text>
 
         <rect x="660" y="250" width="300" height="70" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
         <text x="676" y="276" class="t-title">RosterPublisher</text>
@@ -289,7 +291,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <text x="676" y="362" class="t-title">コーディネータ群</text>
         <text x="676" y="382" class="t-sub">keep-alive、recap、タイトル生成、</text>
         <text x="676" y="397" class="t-sub">背景タスクの照合、reaper、</text>
-        <text x="676" y="412" class="t-sub">アップグレード確認</text>
+        <text x="676" y="412" class="t-sub">アップグレード確認、sleep guard</text>
 
         <line x1="495" y1="428" x2="495" y2="490" stroke="#2B6895" stroke-width="1.6" marker-end="url(#arr)"/>
         <text x="503" y="465" class="t-edge">stdin / stdout NDJSON</text>
@@ -327,7 +329,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
           <div class="head"><span class="tag">LaunchAgent · Mac ごとに 1 つ</span><span class="name">canopyd</span><code>Canopy --daemon</code></div>
           <div class="inner">
             <div class="node"><span class="name">MirrorServer</span><span class="desc">attach、replay、asset</span></div>
-            <div class="node"><span class="name">ControlSession</span><span class="desc">一覧、起動、停止</span></div>
+            <div class="node"><span class="name">ControlSession</span><span class="desc">一覧、起動、停止、送信、listen</span></div>
             <div class="node"><span class="name">SessionStore</span><span class="desc">セッションの registry</span></div>
             <div class="node main"><span class="name">ShimProcess&nbsp;×&nbsp;N</span><span class="desc">全クライアントへ配る</span></div>
           </div>
@@ -342,14 +344,14 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
           <div class="node"><span class="name">claude CLI</span><span class="desc">stream-json の入出力</span></div>
         </div>
       </div>
-      <figcaption>青い矢印は Canopy 自身の NDJSON。琥珀色はプロセスの境界。relay が運ぶのは、マシンとセッションの一覧、スマホ向けのイベント（発言やツール行の文面を含む）、通知。webview のストリームと transcript の replay は relay を通らず、クライアントとデーモンの間を Unix socket か Tailscale で直接流れる。</figcaption>
+      <figcaption>青い矢印は Canopy 自身の NDJSON。琥珀色はプロセスの境界。relay が運ぶのは、マシンとセッションの一覧、スマホ向けのイベント（発言やツール行の文面を含む）、通知。webview のストリームと transcript の replay は relay を通らず、クライアントとデーモンの間を Unix socket か Tailscale で直接流れる。図にはないが、スクリプト（<code>scripts/canopyctl</code>）もこの Mac のアプリと同じ Unix socket につなぐ。</figcaption>
     </figure>
   </section>
 
   <section id="processes">
     <div class="kicker">Runtime</div>
     <h2>プロセス</h2>
-    <p class="col">1 つのバイナリが 2 役をこなす。<code>CanopyMain</code> は <code>NSApplication</code> に触る前に引数を見る。<code>--daemon</code> ならデーモン、<code>--unregister-daemon</code> なら LaunchAgent の登録解除、それ以外は SwiftUI アプリを起動する。</p>
+    <p class="col">1 つのバイナリが 2 役をこなす。<code>CanopyMain</code> は <code>NSApplication</code> に触る前に引数を見る。<code>--daemon</code> ならデーモン、<code>--mirror-relay</code> なら更新待ちのデーモンの代わりに Tailscale のポートを持つ中継、<code>--unregister-daemon</code> なら LaunchAgent の登録解除、それ以外は SwiftUI アプリを起動する。</p>
     <div class="procs">
       <div class="proc">
         <span class="pid">GUI · Canopy.app</span>
@@ -395,7 +397,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
           <li><span class="where">CLI</span>Anthropic の SSE イベントを <code>stream_event</code> 行として出し、続けて <code>assistant</code> と <code>result</code> を出す。</li>
           <li><span class="where">extension.js</span>それぞれを <code>io_message</code> に包んで自分の webview に post する。</li>
           <li><span class="where">node shim</span>stdout に書く。日本語の太字の修復（CJK emphasis repair）はここで、Node を出る前にかかる。</li>
-          <li><span class="where">ShimProcess</span>自分のトラッカー（ステータスバー、活動状態、背景タスク、レート制限）のために 1 回読み、attach 中の全クライアントへ送る。</li>
+          <li><span class="where">ShimProcess</span>自分のトラッカー（ステータスバー、活動状態、背景タスク、レート制限、control のイベント）のために 1 回読み、attach 中の全クライアントへ送る。</li>
           <li><span class="where">WKWebView</span>webview が描く。途中の変換は CJK の太字の修復だけ。拡張機能の UI が自分のメッセージを自分で描く。</li>
         </ol>
       </div>
@@ -410,17 +412,47 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <table>
         <thead><tr><th>接続</th><th>本数</th><th>最初の行</th><th>運ぶもの</th></tr></thead>
         <tbody>
-          <tr><td>control</td><td data-label="本数">クライアントごと、デーモンごとに 1 本</td><td data-label="最初の行"><code>hello {token, protocolVersion}</code></td><td data-label="運ぶもの">id 付きのリクエストと、それぞれ 1 つの <code>response</code>：<code>list_sessions</code>、<code>list_folders</code>、<code>browse_dir</code>、<code>mkdir</code>、<code>open_session</code>、<code>stop_session</code>、<code>rename_session</code>、<code>restart_session</code>、<code>switch_account</code>、<code>list_accounts</code>、<code>request_recap</code>、<code>mirror_status</code>、<code>restart_now</code> など。<code>subscribe</code> の後は <code>session_state</code> と <code>upgrade_state</code> の push。</td></tr>
-          <tr><td>session</td><td data-label="本数">attach 中のペインごとに 1 本</td><td data-label="最初の行"><code>attach</code></td><td data-label="運ぶもの">webview 自身の NDJSON を双方向に。attach 時の transcript の replay、要求に応じた webview の asset、ファイル転送、<code>open_url</code> や <code>notify</code> などサーバからクライアントへの指示。</td></tr>
+          <tr><td>control</td><td data-label="本数">クライアントごと、デーモンごとに 1 本</td><td data-label="最初の行"><code>hello {token, protocolVersion}</code></td><td data-label="運ぶもの">id 付きのリクエストと、それぞれ 1 つの <code>response</code>：<code>list_sessions</code>、<code>list_folders</code>、<code>browse_dir</code>、<code>mkdir</code>、<code>open_session</code>、<code>stop_session</code>、<code>rename_session</code>、<code>restart_session</code>、<code>switch_account</code>、<code>list_accounts</code>、<code>request_recap</code>、<code>mirror_status</code>、<code>restart_now</code>、セッションを動かす <code>send_message</code>、<code>wait_turn</code>、<code>listen</code>、<code>history</code> など。<code>subscribe</code> の後は <code>session_state</code> と <code>upgrade_state</code> の push。</td></tr>
+          <tr><td>session</td><td data-label="本数">attach 中のペインごとに 1 本</td><td data-label="最初の行"><code>attach</code></td><td data-label="運ぶもの">webview 自身の NDJSON を双方向に。attach 時の transcript の replay、要求に応じた webview の asset、ファイル転送、<code>canopy_ui</code>、<code>open_url</code>、<code>notify</code> などサーバからクライアントへの指示。</td></tr>
         </tbody>
       </table>
     </div>
     <ul class="plain">
       <li><b>認証</b>：local の socket はファイル権限（0600）で守る。TCP は Mirror のパスワードトークンが要り、設定で Mirror が On のときだけ開く。</li>
       <li><b>バージョン</b>：<code>ControlProtocol.version</code> は 1。合わなければ理由付きの <code>hello_error</code> を返して切る。</li>
-      <li><b>attach の capability</b>：クライアントは <code>attach</code> 行のフラグで追加機能を選ぶ。<code>status</code>、<code>usage</code>、<code>images</code>、<code>restart</code>、<code>compress: "br"</code>（4 KB 以上の行を Brotli で <code>Z &lt;n&gt; &lt;m&gt;</code> フレームにする）。</li>
+      <li><b>attach の capability</b>：クライアントは <code>attach</code> 行のフラグで追加機能を選ぶ。<code>status</code>、<code>usage</code>、<code>images</code>、<code>ui</code>、<code>restart</code>、<code>compress: "br"</code>（4 KB 以上の行を Brotli で <code>Z &lt;n&gt; &lt;m&gt;</code> フレームにする）。どれも opt-in なので古いクライアントは影響を受けない。</li>
+      <li><b>attach の再開</b>：<code>ShimProcess</code> は最近送ったフレームを <code>MirrorFrameRing</code> に残す。iOS に切断されたスマホは <code>since: {epoch, seq}</code> 付きで attach し直し、見逃した分だけを受け取る。ring より古い cursor は全体の replay に戻る。</li>
+      <li><b>UI の指示</b>：デーモンはペインを持たない。ファイルの表示、recap の行、エラーバナー、アラート、通知は <code>canopy_ui</code> フレームで Mac クライアントに頼む。フレームはデータだけで、JavaScript はクライアントが自分で組み立てる。</li>
       <li><b>socket のパス</b>：<code>~/Library/Application Support/Canopy/daemon-&lt;bundle id&gt;.sock</code>。Debug のデーモン（<code>sh.saqoo.Canopy.debug</code>）が Release の socket を奪わないため。103 バイトを超えたらユーザーごとの一時ディレクトリに置く。</li>
     </ul>
+  </section>
+
+  <section id="control">
+    <div class="kicker">Automation</div>
+    <h2>スクリプトからの操作</h2>
+    <p class="col">control 接続は、ローカルの自動化 API でもある。スクリプトや別のエージェントが、ペインを開かずにセッションを起動し、ターンを送り、結果を待てる。<code>scripts/canopyctl</code> は標準ライブラリだけの Python クライアント。パラメータと結果の一覧は <code>docs/CONTROL_PROTOCOL.md</code> にある。</p>
+    <div class="procs">
+      <div class="proc">
+        <span class="pid">open_session · send_message</span>
+        <h3>起動と送信</h3>
+        <p><code>open_session</code> は新しいセッションを起動する。<code>resumeSessionId</code> を付けると、閉じたセッションを続ける。ペインがないとき、デーモンは <code>init</code> と <code>launch_claude</code> を <code>canopy-headless</code> チャンネルで自分で送るので、webview なしでターンが走る。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">listen · wait_turn</span>
+        <h3>イベントの待ち受け</h3>
+        <p>デーモンは <code>turn_done</code>、<code>permission</code>、<code>asking</code>、<code>turn_interrupted</code>、<code>session_opened</code>、<code>session_closed</code> を、聞き手がいなくてもログに記録する。<code>listen</code> は cursor の次のイベントを待つので、つなぎ直しても取りこぼさない。続けられない cursor には <code>gap</code> を返す。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">history · session_status</span>
+        <h3>読み出し</h3>
+        <p><code>history</code> は transcript からターンを読むので、ペインやスマホで打ったターンも含む。<code>session_status</code> は待っている permission をツールの入力ごと返し、<code>pending_requests</code> はセッションが待っているものを並べる。</p>
+      </div>
+      <div class="proc">
+        <span class="pid">デーモン再起動</span>
+        <h3>再起動をまたぐ状態</h3>
+        <p>正常に終了したデーモンはイベントログを保存し、次のデーモンが同じ epoch と seq で続ける。control API やスマホが開いたセッションは、attach し直すクライアントがいないことがある。<code>DaemonHeldSessions</code> がそれらを同じ <code>key</code> で持ち越す。</p>
+      </div>
+    </div>
   </section>
 
   <section id="lifecycle">
@@ -430,7 +462,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
     <div class="lifecycle">
       <div class="state"><span class="chip run">実行中・attach あり</span><p>shim が動いていて、少なくとも 1 つのクライアントが見ている。keep-alive がプロンプトキャッシュを温めるのはこの状態のセッションだけ。</p></div>
       <div class="state"><span class="chip det">実行中・attach なし</span><p>Cmd+W で閉じるのはペインで、セッションではない。デーモンの中で走り続け、全クライアントの Open 一覧に残る。</p></div>
-      <div class="state"><span class="chip stop">停止</span><p>Stop Session か reaper で止まる。reaper の条件は、クライアントなし、作業中でも質問中でもなく、許可待ちも背景タスクもない状態が 15 分。行は Recents に戻る。</p></div>
+      <div class="state"><span class="chip stop">停止</span><p>Stop Session（Cmd+Opt+W、またはペインの X 横のメニュー）か reaper で止まる。reaper の条件は、クライアントなし、作業中でも質問中でもなく、許可待ちも背景タスクもない状態が Settings の「Stop idle sessions after」（既定 4 時間）続いたとき。reaper で止まった行は Open に残り、クリックで resume する。Stop Session で止めた行は Recents に戻る。</p></div>
       <div class="state"><span class="chip up">デーモン再起動</span><p>新しいビルドがディスクに来ても、失う作業がなくなるか、Restart now が押されるまで待つ。クライアントは attach し直し、セッションは transcript から再開する。</p></div>
     </div>
     <div class="note"><b>attach は resume を兼ねる。</b>デーモンが動かしていないセッションに <code>open</code> 付きの <code>attach</code> が来たら、デーモンはその場で resume する。だから「保存して終了」は shim の状態を持ち越さない。保存したセッションに attach し直せば resume される。</div>
@@ -447,6 +479,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
           <tr><td>Recents、フォルダ、タイトル</td><td data-label="持ち主">デーモン（Mac ごと）</td><td data-label="補足">クライアントが <code>list_sessions</code> / <code>list_folders</code> で聞く。relay には載せない</td></tr>
           <tr><td>セッションに効く設定</td><td data-label="持ち主">デーモン</td><td data-label="補足">既定の permission mode、keep-alive、recap、worktree の seed、アカウント、モデルプロバイダ</td></tr>
           <tr><td>レート制限</td><td data-label="持ち主">デーモン</td><td data-label="補足">アカウントごとに集めてクライアントに push</td></tr>
+          <tr><td><code>listen</code> のイベントログ</td><td data-label="持ち主">デーモン</td><td data-label="補足">正常終了のときに保存し、次のデーモンが続ける</td></tr>
           <tr><td>ペインの並びと幅、ウィンドウ、フィルタ、MacroPad</td><td data-label="持ち主">クライアント</td><td data-label="補足">各 Mac の GUI が自分のレイアウトを持つ</td></tr>
           <tr><td>マシン一覧、presence、開いているセッションの roster</td><td data-label="持ち主">relay</td><td data-label="補足">スマホ向けのイベント（発言の文面を含む）と通知の本文も relay を通る。webview のストリームと transcript の replay は通らない</td></tr>
         </tbody>
@@ -469,13 +502,43 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <div class="stack">
         <h3>アップデート</h3>
         <ul class="plain">
-          <li>Sparkle がアプリを差し替える。デーモンはディスク上の新しいビルドに気づき、再起動を止めているものを数える。たとえば走っているターン、答え待ちの質問、背景タスク、未送信のプロンプト、自分で attach し直せないクライアント。</li>
+          <li>Sparkle がアプリを差し替える。デーモンはディスク上の新しいビルドに気づき、再起動を止めているものを数える。たとえば走っているターン、答え待ちの質問、背景タスク、未送信のプロンプト、フォルダが消されたセッション、自分で attach し直せないクライアント。</li>
           <li>待っている間、Tailscale のポートは新しいビルドから起動した <code>Canopy --mirror-relay</code> が持ち、デーモンの relay ソケットへバイト列を中継する。差し替えられた古いデーモンには macOS のファイアウォールがパスを引けず、受信をすべて捨てるため。relay ソケットは TCP と同じくパスワードを要求する。</li>
           <li>止めるものがなくなったら、デーモンは <code>daemon_restarting</code> を送り、shim を止めて exit 1 する。launchd が新しいビルドを起動する。</li>
-          <li>サイドバーの下端に、待っている更新と、それを止めているセッションと、Restart now ボタンが出る。古い Claude Code 拡張機能のまま動いているセッションも並び、個別に Restart できる。</li>
+          <li>サイドバーの下端に、待っている更新（バージョン番号付き）と、それを止めているセッションと、Restart now ボタンが出る。別の Mac の mirror ペインは、listener が戻るのを待って attach し直す。</li>
         </ul>
       </div>
     </div>
+    <div class="two">
+      <div class="stack">
+        <h3>Claude Code 拡張機能の更新</h3>
+        <ul class="plain">
+          <li>Canopy は拡張機能を <code>~/Library/Application Support/Canopy/extensions/</code> に自分で持つ。<code>~/.vscode/extensions/</code> のものも見つける。いちばん新しいものを使う。</li>
+          <li><code>ExtensionUpdater</code> が VS Marketplace の最新版を確かめ、確認なしでインストールする。採用する前に <code>ExtensionCanary</code> が使い捨ての shim で activate し、例外を投げる版は採用しない。</li>
+          <li>走っているセッションは、起動したときの拡張機能のまま動く。サイドバーの下端に古い拡張機能のセッションが並び、Restart All でまとめて移す。</li>
+        </ul>
+      </div>
+      <div class="stack">
+        <h3>スリープの制御</h3>
+        <ul class="plain">
+          <li><code>SleepGuard</code> は、セッションが作業中の間、idle sleep を止める assertion を持つ。「Stay reachable remotely」が On なら、セッションが開いている間ずっと持つ。スマホや別の Mac から届くようにするため。</li>
+          <li>assertion だけでは蓋を閉じたときの sleep は止まらない。デーモンの guard はそれも無効にし、戻しても害がないときにだけ有効に戻す。</li>
+          <li>バッテリーが設定の下限を切ったら、何が走っていても sleep を許す。蓋を閉じたままバッテリーで起きている間は、スマホに残量を通知する。</li>
+          <li>サイドバー下端のカップが、Canopy が Mac を起こしているかを示す。クリックで設定を切り替える。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="accounts">
+    <div class="kicker">Accounts</div>
+    <h2>アカウントと使用量</h2>
+    <ul class="plain">
+      <li><b>複数のログイン</b>：2 つ目以降の Claude ログインは <code>ClaudeAccount</code>（名前と <code>CLAUDE_CONFIG_DIR</code>）。CLI は Keychain の項目をそのパスで引くので、ディレクトリごとに別のログインになる。<code>projects</code> を symlink で共有するので、別アカウントでも同じセッションを resume できる。</li>
+      <li><b>切り替え</b>：セッションはアカウントを切り替えられる（<code>switch_account</code>）。上限に達したセッションには、ほかのログインを勧めるバナーが出る。新しいセッションは、枠が残っているログインで始まる。</li>
+      <li><b>使用量</b>：レート制限はアカウントごとに持つ。<code>ClaudeUsageDirect</code> が <code>/api/oauth/usage</code> を読むので、セッションが 1 つもなくてもサイドバーにバーが出る。バーの色は、割合ではなくペースで決まる。</li>
+      <li><b>コンテキストの上限</b>：コンテキストメーターの分母は CLI 自身の値。Canopy は <code>Resources/canopy-bridge/</code> の Mod を <code>CLAUDE_CODE_PLUGIN_DIRS</code> で CLI に読ませる。Mod が出す <code>system/ui_log</code> フレームは <code>ShimProcess</code> が受け取り、webview には送らない。</li>
+    </ul>
   </section>
 
   <section id="gui">
@@ -495,12 +558,12 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <div class="proc">
         <span class="pid">Mac から Mac</span>
         <h3>別の Mac のデーモン</h3>
-        <p>サイドバーは relay から他の Mac のセッションを並べる。開くと、その Mac の canopyd に Tailscale 経由で <code>.mirror</code> ペインが attach する。transcript もファイルも CLI もその Mac に残る。</p>
+        <p>サイドバーは relay から他の Mac のセッションを並べる。開くと、その Mac の canopyd に Tailscale 経由で <code>.mirror</code> ペインが attach する。transcript もファイルも CLI もその Mac に残る。ランチャーからは、その Mac でプロンプト付きの新しいセッションを起動し、任意のフォルダを選び、閉じたセッションを開き、セッションを止められる。ペインでクリックしたファイルは mirror 接続で運ばれ、見ている Mac で開く。</p>
       </div>
       <div class="proc">
         <span class="pid">スマホ</span>
         <h3>Canopy Mobile</h3>
-        <p>relay で Mac を見つけ、Tailscale 越しに同じ control / session プロトコルを話す。通知は relay の push で届く。</p>
+        <p>relay で Mac を見つけ、Tailscale 越しに同じ control / session プロトコルを話す。通知は relay の push で届く。スマホが開いたセッションはペインなしで走り続け、更新の再起動のあとも再開する。</p>
       </div>
       <div class="proc">
         <span class="pid">Mac 以外のホスト</span>
@@ -527,12 +590,16 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <li><code>DaemonPaths</code>、<code>DaemonConfig</code></li>
         <li><code>DaemonUpgrade</code>、<code>DaemonUpgradeCenter</code>、<code>MirrorRelay</code></li>
         <li><code>SessionReaper</code>、<code>DaemonReaper</code></li>
+        <li><code>DaemonHeldSessions</code>、<code>SleepGuard</code></li>
       </ul></div>
       <div><h3>プロトコル</h3><ul>
         <li><code>ControlProtocol</code>、<code>ControlSession</code>、<code>ControlClient</code></li>
+        <li><code>ControlEvents</code>、<code>ControlHistory</code>、<code>PeerControl</code></li>
+        <li><code>scripts/canopyctl</code> control のクライアント</li>
         <li><code>MirrorServer</code>、<code>MirrorClient</code>、<code>MirrorWire</code></li>
         <li><code>MirrorSink</code>、<code>MirrorAccess</code>、<code>MirrorEndpoint</code></li>
-        <li><code>MirrorStatusFrame</code>、<code>MirrorFileTransfer</code></li>
+        <li><code>MirrorStatusFrame</code>、<code>MirrorUIFrame</code>、<code>MirrorFileTransfer</code></li>
+        <li><code>MirrorFrameRing</code>、<code>MirrorRecents</code></li>
         <li><code>NDJSONLineAssembler</code></li>
       </ul></div>
       <div><h3>セッション</h3><ul>
@@ -541,12 +608,14 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <li><code>KeepAlive*</code>、<code>Recap*</code>、<code>SessionTitle*</code></li>
         <li><code>ClaudeSessionHistory</code> JSONL の読み取り</li>
         <li><code>SharedRateLimitData</code>、<code>ClaudeAccount</code></li>
+        <li><code>CCExtension</code>、<code>ExtensionUpdater</code>、<code>ExtensionSafety</code></li>
       </ul></div>
       <div><h3>Mac クライアントの UI</h3><ul>
         <li><code>CanopyApp</code>、<code>Sidebar</code>、<code>Detail</code></li>
         <li><code>WeightedPaneLayout</code>、<code>PaneSlot</code>、<code>PaneDivider</code></li>
         <li><code>MirrorPaneView</code> attach するすべてのペイン</li>
         <li><code>LauncherView</code>、<code>StatusBarView</code></li>
+        <li><code>PendingUpdate</code>、<code>AwakeIndicator</code></li>
         <li><code>MacroPad/</code> USB キーパッド</li>
       </ul></div>
       <div><h3>relay とスマホ</h3><ul>
@@ -560,13 +629,14 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <li><code>window.js</code> webview のブリッジ</li>
         <li><code>workspace.js</code>、<code>context.js</code></li>
         <li><code>cjk-emphasis*.js</code> ストリームの修復</li>
+        <li><code>Resources/canopy-bridge/</code> CLI に読ませる Mod</li>
         <li><code>Resources/ssh-claude-wrapper.sh</code></li>
       </ul></div>
     </div>
   </section>
 
   <footer>
-    <span>設計記録：<code>docs/superpowers/specs/2026-09-29-canopy-server-design.md</code>、<code>2026-10-01-headless-daemon-design.md</code>、<code>2026-10-01-update-without-waiting-design.md</code></span>
-    <span>実測や落とし穴の記録は <code>CLAUDE.md</code> にある。</span>
+    <span>設計記録：<code>docs/superpowers/specs/2026-09-29-canopy-server-design.md</code>、<code>2026-10-01-headless-daemon-design.md</code>、<code>2026-10-01-update-without-waiting-design.md</code>、<code>2026-10-02-canopy-bridge-mod-design.md</code></span>
+    <span>control 接続の仕様は <code>docs/CONTROL_PROTOCOL.md</code>、実測や落とし穴の記録は <code>docs/notes/</code> にある。</span>
   </footer>
 </div>
