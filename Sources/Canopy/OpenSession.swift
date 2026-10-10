@@ -268,7 +268,8 @@ final class OpenSession: Identifiable, Hashable {
     var heldOpenByPhone = false
 
     /// Opened or resumed through the control API's `open_session`: the daemon
-    /// reopens it after a restart (`DaemonHeldSessions`), like a phone's.
+    /// reopens it after a restart (`DaemonHeldSessions`), like a phone's, and the
+    /// reaper leaves it while a `listen` covers it (`ShimProcess.reaperHolds`).
     var openedByControl = false
 
     /// A `stop_session` for this session is in flight. The daemon drops the

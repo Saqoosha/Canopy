@@ -101,6 +101,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// detaching, or the last turn ending, whichever is latest. Read by `DaemonReaper`.
     private(set) var quietSince = Date()
 
+    /// The phone holds its sessions until Stop; a control-opened one is held only
+    /// while a `listen` covers it, so a client that went away does not leave it running.
+    nonisolated static func reaperHolds(heldByPhone: Bool, openedByControl: Bool, watched: Bool) -> Bool {
+        heldByPhone || (openedByControl && watched)
+    }
+
     var reaperInputs: SessionReaper.Inputs {
         SessionReaper.Inputs(
             attachedClients: mirrors.count + (webView == nil ? 0 : 1),
@@ -108,7 +114,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                          asking: lastAssistantHadAskUserQuestion,
                                          backgroundTasks: pendingBackgroundTaskIds.count),
             quietSince: quietSince,
-            heldOpen: boundSession?.heldOpenByPhone ?? false)
+            heldOpen: Self.reaperHolds(heldByPhone: boundSession?.heldOpenByPhone ?? false,
+                                       openedByControl: boundSession?.openedByControl ?? false,
+                                       watched: boundSession.map {
+                                           ControlEventLog.shared.watch.isWatched($0.id.uuidString, now: Date())
+                                       } ?? false))
     }
 
     /// A remote client holds an upgrade only when it will not re-attach by itself;

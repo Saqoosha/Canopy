@@ -375,7 +375,7 @@ when the CLI had not echoed it yet.
 | `reason` | Why |
 |---|---|
 | `stopped` | `stop_session`, which the Mac's Stop also sends |
-| `reaped` | The reaper stopped it: no client attached and idle for 15 minutes |
+| `reaped` | The reaper stopped it: no client attached and idle past the limit (below). A session `open_session` started is not reaped while a `listen` covers it (below) |
 | `daemon_restart` | The daemon is shutting down (an update, Restart now, launchd, SIGTERM); recorded for every open session just before it exits. `resumes: true` when the next daemon will reopen it (below) |
 | `restore_failed` | Recorded by the next daemon for a session it said `resumes` for and could not reopen |
 | `other` | Removed by a path that did not say why |
@@ -404,7 +404,8 @@ saved nothing, and a cursor from it returns `gap` `daemon_restarted` as
 before. The saved log is owner-only (it holds prompts and replies) and is
 read once.
 
-Sessions whose CLI `open_session` started (opened new, or resumed when not
+When the exit is a restart (an update, Restart now, a failed local socket),
+sessions whose CLI `open_session` started (opened new, or resumed when not
 already running), and those the phone opened, come back under the same `key`:
 `session_closed` says `resumes: true`, and the new daemon records
 `session_opened` with `reason: "restored"`. Its shim is running; the CLI
@@ -413,7 +414,19 @@ session it cannot bring back (it fails to start, or the daemon was down more
 than 10 minutes) gets `session_closed` with `reason: "restore_failed"`. A
 session opened less than a turn ago (no transcript yet) cannot be resumed and
 says `resumes: false`. Others, a Mac pane's included, come back when their
-client re-attaches.
+client re-attaches. A daemon stopped with SIGTERM (bootout, logout) carries
+no session: every close says `resumes: false`.
+
+### Idle sessions
+
+The reaper stops a session with no client attached once it has been idle for
+the limit in Settings (4 hours by default; "Never" turns it off). A session
+`open_session` started is kept while some `listen` covers it: one naming its
+`key` or `sessionId`, or one naming no session. It stays covered for 2
+minutes after its last listen ends, so a client that re-sends `listen` after
+every event (`--follow`) covers it continuously. Once no listen covers it,
+the usual rule applies again: a session already idle past the limit is
+stopped at the reaper's next pass.
 
 While a connection has a `listen` open, the daemon sends
 `{"type":"heartbeat","at":<seconds>}` on it every 30 s. It answers no

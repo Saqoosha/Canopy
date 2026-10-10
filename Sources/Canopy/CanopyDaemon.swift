@@ -49,7 +49,8 @@ private nonisolated func installTerminationHandler(_ delegate: DaemonDelegate) {
     let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
     source.setEventHandler { [weak delegate] in
         MainActor.assumeIsolated {
-            delegate?.shutDown()
+            // A SIGTERM is a stop someone asked for (bootout, logout): nothing is carried.
+            delegate?.shutDown(carryingSessions: false)
             exit(0)
         }
     }
@@ -159,7 +160,7 @@ final class DaemonDelegate {
         // Sends are asynchronous: give the notice a moment to leave before the process does.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             MainActor.assumeIsolated {
-                self?.shutDown()
+                self?.shutDown(carryingSessions: true)
                 exit(1)
             }
         }
@@ -205,7 +206,7 @@ final class DaemonDelegate {
         server.bypassAllowed = { [weak self] in self?.config.allowBypass ?? false }
         // Exiting non-zero lets launchd (KeepAlive SuccessfulExit=false) start a fresh daemon.
         server.onLocalFailure = { [weak self] in
-            self?.shutDown()
+            self?.shutDown(carryingSessions: true)
             exit(1)
         }
         self.server = server
@@ -463,7 +464,10 @@ final class DaemonDelegate {
         logger.notice("restored \(held.entries.count, privacy: .public) held session(s)")
     }
 
-    func shutDown() {
+    /// `carryingSessions`: this exit is a restart (launchd starts the next daemon at once), so the
+    /// phone's and the control API's sessions are saved for it. A deliberate stop saves none: a
+    /// daemon started within `DaemonHeldSessions.maxAge` would resume CLIs nobody is waiting for.
+    func shutDown(carryingSessions: Bool) {
         upgradeTimer?.invalidate()
         configTimer?.invalidate()
         usageTimer?.invalidate()
@@ -471,12 +475,12 @@ final class DaemonDelegate {
         sleepGuard?.stop()
         // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
-        // Every exit, not only an upgrade: a launchd restart or a SIGTERM loses the
-        // phone's and the control API's sessions the same way.
-        let held = DaemonHeldSessions.capture(store.openSessions) { session, dir in
+        let held = DaemonHeldSessions.capture(carryingSessions ? store.openSessions : []) { session, dir in
             ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
         }
         held.save()
+        // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
+        if !carryingSessions { try? FileManager.default.removeItem(at: DaemonHeldSessions.fileURL) }
         // Recorded before the shims stop; a listener may not receive them before the process exits,
         // so the log is saved after the shims stop and the next daemon serves them.
         ControlEventLog.shared.recordShutdown(resuming: Set(held.entries.map(\.key)))

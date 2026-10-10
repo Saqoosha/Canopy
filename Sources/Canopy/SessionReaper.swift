@@ -15,9 +15,7 @@ enum SessionReaper {
         let isBusy: Bool
         /// The later of: the last client detaching, the last turn ending.
         let quietSince: Date
-        /// The phone opened it. The phone's list is its Open
-        /// block and has no pane to hold the session, so this stands in for one:
-        /// it runs until someone stops it, as a Mac pane's session does.
+        /// Something stands in for a pane (`ShimProcess.reaperHolds`): the phone, until Stop, or a `listen`.
         var heldOpen = false
     }
 

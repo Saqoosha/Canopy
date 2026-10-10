@@ -341,6 +341,38 @@ nonisolated enum ControlListenScan: Equatable, Sendable {
     }
 }
 
+/// Which sessions some `listen` is waiting on, so the reaper leaves a
+/// control-opened session alone while its client still listens. A follower
+/// re-sends its listen after every event, so a session stays watched for
+/// `grace` after its last listen ended.
+nonisolated struct ControlListenWatch: Equatable, Sendable {
+    /// Longer than the reaper's 60 s tick and a follower's 30 s backoff ceiling.
+    static let grace: TimeInterval = 120
+
+    /// Open listens by token; a nil key listens to every session.
+    private var open: [UUID: String?] = [:]
+    private var lastAll: Date?
+    private var last: [String: Date] = [:]
+
+    mutating func begin(_ token: UUID, key: String?) { open[token] = .some(key) }
+
+    mutating func end(_ token: UUID, now: Date) {
+        guard let key = open.removeValue(forKey: token) else { return }
+        touch(key: key, now: now)
+    }
+
+    /// A listen that was answered at once, or just ended.
+    mutating func touch(key: String?, now: Date) {
+        last = last.filter { now.timeIntervalSince($0.value) <= Self.grace }
+        if let key { last[key] = now } else { lastAll = now }
+    }
+
+    func isWatched(_ key: String, now: Date) -> Bool {
+        if open.values.contains(where: { $0 == nil || $0 == key }) { return true }
+        return [lastAll, last[key]].compactMap { $0 }.contains { now.timeIntervalSince($0) <= Self.grace }
+    }
+}
+
 /// The daemon's event log: a bounded ring every shim appends to, plus the
 /// waiters `listen` parks on it.
 @MainActor
@@ -490,6 +522,9 @@ final class ControlEventLog {
     }
 
     func removeWaiter(_ id: UUID) { waiters.removeValue(forKey: id) }
+
+    /// Fed by `ControlSession.listen`; read by the reaper through `ShimProcess.reaperInputs`.
+    var watch = ControlListenWatch()
 
     // MARK: - Session open / close
 
