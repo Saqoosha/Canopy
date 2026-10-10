@@ -6,18 +6,21 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ControlEven
 /// One thing a `listen` client can wait for. Recorded by the daemon whether or
 /// not anyone is listening, so a client that reconnects with its cursor still
 /// gets what happened in between.
-nonisolated struct ControlEvent: Equatable, Sendable {
-    enum Kind: String, CaseIterable, Sendable {
+nonisolated struct ControlEvent: Equatable, Sendable, Codable {
+    enum Kind: String, CaseIterable, Sendable, Codable {
         /// A main-conversation turn ended (`result`), whoever started it.
         case turnDone = "turn_done"
         /// A tool permission request arrived.
         case permission
         /// An AskUserQuestion arrived.
         case asking
+        /// A turn ended without a `result`: its CLI was stopped, died, or the daemon exited.
+        /// Never resent by the daemon.
+        case turnInterrupted = "turn_interrupted"
         case sessionOpened = "session_opened"
         case sessionClosed = "session_closed"
         /// Not recorded: what `listen` returns when the cursor cannot be
-        /// continued (daemon restart, log wrapped, or a cursor ahead of the log).
+        /// continued (a daemon start without a saved log, log wrapped, or a cursor ahead of the log).
         case gap
     }
 
@@ -42,8 +45,22 @@ nonisolated struct ControlEvent: Equatable, Sendable {
     /// On a failed `turn_done`: `TurnFailure.kind` and the CLI's own code for it.
     var errorKind: String?
     var errorCode: String?
-    /// On `session_closed`: why it left the open list (`CloseReason`).
+    /// On `session_closed`: why it left the open list (`CloseReason`). On
+    /// `turn_interrupted`: `InterruptReason`. On `session_opened`: `restored`
+    /// when the daemon brought it back after a restart.
     var reason: String?
+    /// On `session_closed` with `daemon_restart`: the next daemon means to reopen it under the
+    /// same key; a `restore_failed` close follows if it cannot.
+    var resumes: Bool?
+
+    /// Why a turn ended without a `result`.
+    enum InterruptReason: String, Sendable {
+        /// Its CLI was stopped on purpose: `stop_session`, `restart_session`, an account switch.
+        case stopped
+        /// Its CLI exited on its own.
+        case crashed
+        case daemonRestart = "daemon_restart"
+    }
 
     /// Why a session left the daemon's open list.
     enum CloseReason: String, Sendable {
@@ -53,6 +70,8 @@ nonisolated struct ControlEvent: Equatable, Sendable {
         case reaped
         /// The daemon is shutting down (an update, Restart now, launchd, SIGTERM).
         case daemonRestart = "daemon_restart"
+        /// Reported by a restarted daemon for a session it said it would reopen and could not.
+        case restoreFailed = "restore_failed"
         /// Removed by a path that did not say why.
         case other
     }
@@ -123,6 +142,7 @@ nonisolated struct ControlEvent: Equatable, Sendable {
         if let errorKind { out["errorKind"] = errorKind }
         if let errorCode { out["errorCode"] = errorCode }
         if let reason { out["reason"] = reason }
+        if let resumes { out["resumes"] = resumes }
         return out
     }
 
@@ -179,9 +199,9 @@ nonisolated struct ControlEvent: Equatable, Sendable {
     static let textMaxBytes = 32_000
 }
 
-/// Position in the event log. The epoch changes every daemon launch, so a
-/// cursor from before a restart is recognised as stale instead of silently
-/// meaning a different event.
+/// Position in the event log. The epoch changes when a daemon starts without a
+/// saved log (after a crash), so a cursor from before is recognised as stale
+/// instead of silently meaning a different event.
 nonisolated struct ControlEventCursor: Equatable, Sendable {
     var epoch: String
     var seq: Int
@@ -330,14 +350,96 @@ final class ControlEventLog {
 
     private init() {}
 
-    let epoch = String(UUID().uuidString.lowercased().prefix(8))
+    /// Kept across a clean restart (`save` / `restoreSaved`), so a cursor from
+    /// before it continues; a fresh one after a crash.
+    private(set) var epoch = String(UUID().uuidString.lowercased().prefix(8))
     private(set) var events: [ControlEvent] = []
     private(set) var latestSeq = 0
     private var waiters: [UUID: () -> Void] = [:]
 
+    /// What `save` writes: the whole ring, its epoch and last seq.
+    struct Saved: Codable, Equatable {
+        var epoch: String
+        var latestSeq: Int
+        var events: [ControlEvent]
+    }
+
+    static var savedFileURL: URL {
+        let bundleId = Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy"
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Canopy", isDirectory: true)
+            .appendingPathComponent("daemon-events-\(bundleId).json")
+    }
+
+    /// At shutdown. Owner-only: events hold prompts and replies.
+    func save(to url: URL = savedFileURL) {
+        do {
+            let data = try JSONEncoder().encode(Saved(epoch: epoch, latestSeq: latestSeq, events: events))
+            // Created 0600 and renamed into place: never readable by others, never half written.
+            let tmp = url.appendingPathExtension("tmp-\(getpid())")
+            guard FileManager.default.createFile(atPath: tmp.path, contents: data,
+                                                 attributes: [.posixPermissions: 0o600]) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            guard rename(tmp.path, url.path) == 0 else {
+                let code = errno
+                try? FileManager.default.removeItem(at: tmp)
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+            logger.notice("[control] saved \(self.events.count, privacy: .public) event(s) at \(self.epoch, privacy: .public).\(self.latestSeq, privacy: .public)")
+        } catch {
+            logger.error("[control] could not save events: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// At launch, before anything is recorded. Read and delete, so a log that
+    /// crashes the daemon is not replayed; an unreadable one starts a new epoch.
+    func restoreSaved(from url: URL = savedFileURL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard latestSeq == 0 else {
+            logger.error("[control] saved events not restored: events were recorded first")
+            return
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            logger.error("[control] saved events not restored: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            logger.error("[control] saved events file not removed: \(error.localizedDescription, privacy: .public)")
+        }
+        do {
+            guard adopt(try JSONDecoder().decode(Saved.self, from: data)) else {
+                logger.error("[control] saved events inconsistent; starting epoch \(self.epoch, privacy: .public)")
+                return
+            }
+        } catch {
+            logger.error("[control] saved events unreadable (\(error.localizedDescription, privacy: .public)); starting epoch \(self.epoch, privacy: .public)")
+            return
+        }
+        logger.notice("[control] continued epoch \(self.epoch, privacy: .public) at seq \(self.latestSeq, privacy: .public)")
+    }
+
+    /// False when `saved` breaks what `scan` relies on: seqs contiguous, the last one `latestSeq`.
+    @discardableResult
+    func adopt(_ saved: Saved) -> Bool {
+        let seqs = saved.events.map(\.seq)
+        guard !saved.epoch.isEmpty, saved.latestSeq >= 0,
+              zip(seqs, seqs.dropFirst()).allSatisfy({ $1 == $0 + 1 }),
+              (seqs.last ?? saved.latestSeq) == saved.latestSeq else { return false }
+        epoch = saved.epoch
+        latestSeq = saved.latestSeq
+        events = Array(saved.events.suffix(Self.capacity))
+        return true
+    }
+
     func record(_ kind: ControlEvent.Kind, session: OpenSession?, state: String? = nil, replyId: String? = nil,
                 requestId: String? = nil, toolName: String? = nil, text: String? = nil, addressedTo: String? = nil,
-                prompt: String? = nil, failure: ControlEvent.TurnFailure? = nil,
+                prompt: String? = nil, failure: ControlEvent.TurnFailure? = nil, reason: String? = nil,
                 textMaxBytes: Int = ControlEvent.textMaxBytes) {
         guard let session else {
             logger.notice("[control] \(kind.rawValue, privacy: .public) not recorded: no bound session")
@@ -345,13 +447,13 @@ final class ControlEventLog {
         }
         record(kind, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
                state: state, replyId: replyId, requestId: requestId, toolName: toolName, text: text,
-               addressedTo: addressedTo, prompt: prompt, failure: failure, textMaxBytes: textMaxBytes)
+               addressedTo: addressedTo, prompt: prompt, failure: failure, reason: reason, textMaxBytes: textMaxBytes)
     }
 
     func record(_ kind: ControlEvent.Kind, key: String, sessionId: String, title: String, state: String? = nil,
                 replyId: String? = nil, requestId: String? = nil, toolName: String? = nil, text: String? = nil,
                 addressedTo: String? = nil, prompt: String? = nil, failure: ControlEvent.TurnFailure? = nil,
-                reason: ControlEvent.CloseReason? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
+                reason: String? = nil, resumes: Bool? = nil, textMaxBytes: Int = ControlEvent.textMaxBytes) {
         latestSeq += 1
         var event = ControlEvent(seq: latestSeq, kind: kind, key: key, sessionId: sessionId, title: title, at: Date(),
                                  state: state, replyId: replyId, requestId: requestId, toolName: toolName,
@@ -361,7 +463,8 @@ final class ControlEventLog {
             event.errorKind = failure?.kind
             event.errorCode = failure?.code
         }
-        event.reason = reason?.rawValue
+        event.reason = reason
+        event.resumes = resumes
         if let prompt {
             event.prompt = ShimProcess.truncatedNotificationBody(prompt, maxBytes: ControlEvent.textMaxBytes)
             event.promptTruncated = prompt.utf8.count > ControlEvent.textMaxBytes
@@ -408,17 +511,41 @@ final class ControlEventLog {
     }
 
     /// `session_closed` for every open session, now: at shutdown nothing
-    /// removes them, and the process exits before `observe` would run.
-    func recordShutdown() {
+    /// removes them, and the process exits before `observe` would run. A turn
+    /// still running is reported as `turn_interrupted` first. `resuming` holds
+    /// the keys the next daemon will reopen (`DaemonHeldSessions`).
+    func recordShutdown(resuming: Set<String>) {
         guard let store = trackedStore else { return }
         // Opens and closes still queued for `observe` are recorded first, with their reasons.
         observe()
         for session in store.openSessions {
-            record(.sessionClosed, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
-                   reason: .daemonRestart)
+            session.shim?.recordTurnInterrupted(.daemonRestart)
+            let key = session.id.uuidString
+            record(.sessionClosed, key: key, sessionId: session.resumeId, title: session.title,
+                   reason: ControlEvent.CloseReason.daemonRestart.rawValue, resumes: resuming.contains(key))
         }
         known = [:]
         trackedStore = nil
+    }
+
+    /// Sessions reopened after a restart; their `session_opened` says `restored`.
+    private var restoredIds: Set<UUID> = []
+
+    func noteRestored(_ id: UUID) { restoredIds.insert(id) }
+
+    /// A session the previous daemon said `resumes` for and this one could not bring back.
+    /// One close either way: if `observe` already reported it opened, the close it is about
+    /// to record takes the reason; otherwise the close is recorded here.
+    func recordRestoreFailed(key: String, sessionId: String, title: String) {
+        if let id = UUID(uuidString: key) {
+            restoredIds.remove(id)
+            if known[id] != nil {
+                closeReasons[id] = .restoreFailed
+                return
+            }
+        }
+        record(.sessionClosed, key: key, sessionId: sessionId, title: title,
+               reason: ControlEvent.CloseReason.restoreFailed.rawValue)
     }
 
     /// Records `session_opened` / `session_closed` for `store`'s open list.
@@ -447,11 +574,12 @@ final class ControlEventLog {
         let closed = known.filter { now[$0.key] == nil }.sorted { $0.value.key < $1.value.key }
         known = now
         for session in opened {
-            record(.sessionOpened, key: session.id.uuidString, sessionId: session.resumeId, title: session.title)
+            record(.sessionOpened, key: session.id.uuidString, sessionId: session.resumeId, title: session.title,
+                   reason: restoredIds.remove(session.id) != nil ? "restored" : nil)
         }
         for (id, gone) in closed {
             record(.sessionClosed, key: gone.key, sessionId: gone.sessionId, title: gone.title,
-                   reason: closeReasons.removeValue(forKey: id) ?? .other)
+                   reason: (closeReasons.removeValue(forKey: id) ?? .other).rawValue)
         }
         // Callers note a reason and remove in one main-actor turn, so by now every noted
         // removal has been seen; one that did not happen must not label a later one.
