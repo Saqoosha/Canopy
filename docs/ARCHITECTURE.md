@@ -85,11 +85,13 @@ A client opens two kinds of connection to a daemon. Both are newline-delimited J
 - **Socket.** `~/Library/Application Support/Canopy/daemon-<bundle id>.sock`, mode 0600. The bundle id keeps a Debug daemon from taking the Release socket. A path over 103 bytes falls back to the per-user temporary directory (`DaemonPaths`).
 - **Authentication.** The local socket is protected by file mode and takes no token. The TCP listener needs the Mirror password token and exists only while Mirror is on in Settings › Sharing. Debug listens on the base port + 1.
 - **Version.** `ControlProtocol.version` is 1. A mismatch gets `hello_error` with a reason and the socket closes.
-- **Attach capabilities.** A client opts into extras with flags on the `attach` line: `status`, `usage`, `images`, `ui`, `restart`, `compress: "br"` (lines of 4 KB or more become Brotli `Z <n> <m>` frames). Every option is opt-in, so older clients are unaffected. `usage`, `images` and `ui` are honored for Mac clients only.
+- **Attach capabilities.** A client opts into extras with flags on the `attach` line, among them `status`, `usage`, `images`, `ui`, `files`, `restart`, `compress: "br"` (lines of 4 KB or more become Brotli `Z <n> <m>` frames). Every option is opt-in, so older clients are unaffected. `usage`, `images`, `ui` and `files` are honored for Mac clients only.
 - **Attach resume.** `ShimProcess` keeps recent outbound frames in a `MirrorFrameRing`. A phone that iOS disconnected re-attaches with `since: {epoch, seq}` and receives only what it missed; a cursor older than the ring's floor falls back to a full replay.
 - **UI frames.** The daemon has no pane, so it asks its Mac client to show things with `canopy_ui` frames (`MirrorUIFrame`): file contents in `ContentViewer`, the recap row, an error banner, an alert, a notification. The frames are data only; the client builds any JavaScript itself.
 
 ### Control verbs
+
+The verbs a client uses; GUI-internal ones are left out.
 
 | Group | Verbs |
 |---|---|
@@ -105,7 +107,7 @@ A client opens two kinds of connection to a daemon. Both are newline-delimited J
 
 The control connection is also a local automation API: a script, or another agent, can start a session, send it turns and wait for what happens, with no pane open. `scripts/canopyctl` is a stdlib-only Python client.
 
-- **Events.** The daemon records `turn_done`, `permission`, `asking`, `turn_interrupted`, `session_opened` and `session_closed` in an event log (`ControlEvents`) whether or not anyone listens. `listen` waits for the next event after a cursor, so a client that reconnects with its cursor misses nothing. A cursor that cannot be continued returns `gap`.
+- **Events.** The daemon records `turn_done`, `permission`, `asking`, `turn_interrupted`, `session_opened` and `session_closed` in an event log (`ControlEventLog`, in `ControlEvents.swift`) whether or not anyone listens. A `listen` can also filter for replies addressed to a name (`addressed`). `listen` waits for the next event after a cursor, so a client that reconnects with its cursor misses nothing. A cursor that cannot be continued returns `gap`.
 - **History.** `history` reads turns back from the session's transcript (`ControlHistory`), so turns typed in a pane or on the phone are included.
 - **Permissions.** `session_status` reports a pending permission with the raw tool input, and `pending_requests` lists what a session is waiting on.
 - **Across a restart.** A daemon that exits cleanly saves its event log and the next one continues it with the same epoch and seqs. Sessions that the control API or the phone opened may have no client to re-attach them, so `DaemonHeldSessions` carries them across a restart under the same `key`.
@@ -123,7 +125,7 @@ Closing a pane and stopping a session are different operations.
 | Daemon restart | Clients re-attach and sessions resume from their transcripts |
 
 - **Attach doubles as resume.** An `attach` with `open` for a session the daemon is not running resumes it on the spot. Opening an old session, returning to a stopped one and restoring panes after a relaunch all use this one path, so Save and Quit carries no shim state.
-- **Reaper.** `SessionReaper` stops a session that has no client, is not working or asking, and has no pending permission or background task, once that has lasted for Settings › General › "Stop idle sessions after" (4 hours by default; Never turns it off). A reaped session keeps its Open row and resumes on click; one stopped with Stop Session returns to Recents.
+- **Reaper.** `SessionReaper` stops a session that has no client, is not working or asking, and has no pending permission or background task, once that has lasted for Settings › General › "Stop idle sessions after" (4 hours by default; Never turns it off). Two kinds of session are held open without a client (`ShimProcess.reaperHolds`): one the phone opened, until Stop, and one the control API opened, while a `listen` covers it. A reaped session keeps its Open row and resumes on click; one stopped with Stop Session returns to Recents.
 - **Stopped elsewhere.** When a session is stopped from another client, the daemon tells the remaining clients it ended rather than dropping their connections, and the pane says where it was stopped.
 - **Removed folders.** A session whose working directory or worktree was deleted can still be reopened, and it holds a daemon upgrade because it could not be resumed afterwards.
 
@@ -148,7 +150,7 @@ Closing a pane and stopping a session are different operations.
 
 ### App updates
 
-- Sparkle replaces the app. The daemon notices the new build on disk and counts what holds a restart back (`DaemonUpgrade`): a running turn, a question waiting for an answer, a background task, an unsent prompt, a session whose folder was removed, a client that cannot re-attach on its own.
+- Sparkle replaces the app. The daemon notices the new build on disk and counts what holds a restart back (`DaemonUpgrade`, `ShimProcess.upgradeBlocker`). That includes a running turn, a question waiting for an answer, a background task, an unsent prompt, an in-flight keep-alive or recap, a waiting phone reply, a session whose folder was removed, and a client that cannot re-attach on its own.
 - While it waits, `Canopy --mirror-relay`, started from the new build, holds the Tailscale port and copies bytes to the daemon's relay socket. macOS's Application Firewall cannot resolve the path of the replaced daemon and drops all its inbound traffic. The relay socket requires the password like TCP does.
 - When nothing holds it, the daemon sends `daemon_restarting`, stops its shims and exits 1; launchd starts the new build. Mirror panes on other Macs wait for the listener and re-attach (`RestartReattach`).
 - The sidebar footer shows the waiting update with marketing versions, the sessions holding it, and Restart now (`PendingUpdate`).
@@ -168,10 +170,10 @@ Closing a pane and stopping a session are different operations.
 
 ## Accounts and Usage
 
-- A second Claude login is a `ClaudeAccount`: a name plus a `CLAUDE_CONFIG_DIR`. The CLI keys its Keychain item by that path, so each directory holds its own login. `ClaudeConfigDirSync` makes `projects` a symlink so a session can be resumed under another account.
+- A second Claude login is a `ClaudeAccount`: a name plus a `CLAUDE_CONFIG_DIR`. The CLI keys its Keychain item by that path, so each directory holds its own login. `ClaudeConfigDirSync` links every top-level entry of the base config dir into the account's dir (`projects`, `CLAUDE.md`, rules, hooks, skills) except `.claude.json` and `backups`, and copies the user-scope `mcpServers`. Accounts therefore share everything but the login, and a session can be resumed under another account.
 - A session can be switched between accounts (`switch_account`). When a session hits its limit, `AccountLimitBanner` offers the other logins, and a new session starts on a login with quota left.
-- Rate limits are tracked per account (`SharedRateLimitData`). `ClaudeUsageDirect` reads `/api/oauth/usage` so the sidebar bars exist before any session runs. Bars are colored by pace, not raw percent.
-- The context meter's denominator comes from the CLI itself: Canopy loads one Claude Code mod, `Resources/canopy-bridge/`, through `CLAUDE_CODE_PLUGIN_DIRS`. It reports the context window as a `system/ui_log` frame that `ShimProcess` consumes before anything else sees it.
+- Rate limits are tracked per account (`SharedRateLimitData`). `ClaudeUsageDirect` reads `/api/oauth/usage` so the sidebar bars exist before any session runs. Bars are colored by pace when the reset time is known, and by percent otherwise; an exhausted quota is always red.
+- The context meter's denominator comes from the CLI itself: Canopy loads one Claude Code mod, `Resources/canopy-bridge/`, through `CLAUDE_CODE_PLUGIN_DIRS`. It reports the context window, and the worktree the session is in, as `system/ui_log` frames that `ShimProcess` consumes before anything else sees them.
 - Custom model providers (`ModelProvider`) point a session at any Anthropic-compatible endpoint, with per-tier model mapping.
 
 ## Mac Client
@@ -186,7 +188,7 @@ Closing a pane and stopping a session are different operations.
 
 ## Other Routes
 
-**Another Mac's daemon.** The sidebar lists other Macs' sessions from the relay. Opening one attaches a `.mirror` pane to that Mac's canopyd over Tailscale; the transcript, files and CLI stay on that Mac. From the launcher this Mac can also start a new prompted session there, browse any folder on it (`RemoteDirectoryBrowser`, `browse_dir` / `mkdir`), open its closed sessions and recent folders (`MirrorRecents`), and stop its sessions (`PeerControl`). A file clicked in a mirror pane is shipped over the mirror connection and opened on the watching Mac (`MirrorFileTransfer`), an `open` the CLI runs is redirected to the watching machine (`OpenRedirect`), and an MCP OAuth page opens on the Mac that asked.
+**Another Mac's daemon.** The sidebar lists other Macs' sessions from the relay. Opening one attaches a `.mirror` pane to that Mac's canopyd over Tailscale; the transcript, files and CLI stay on that Mac. From the launcher this Mac can also start a new prompted session there, browse any folder on it (`RemoteDirectoryBrowser`, `browse_dir` / `mkdir`), open its closed sessions and recent folders (`MirrorRecents`), and stop its sessions (`PeerControl`). A file clicked in a mirror pane is shipped over the mirror connection and opened on the watching Mac (`MirrorFileTransfer.swift`), an `open` the CLI runs is redirected to the watching machine (`OpenRedirect`), and an MCP OAuth page opens on the Mac that asked.
 
 **Canopy Mobile.** Finds Macs through the relay and speaks the same control and session protocol over Tailscale. Notifications arrive as relay pushes with the session's name, and a reply (free text or an AskUserQuestion option) becomes a real user turn. Sessions the phone opened keep running without a pane and are resumed after an upgrade restart.
 
@@ -244,7 +246,7 @@ Bundled CSS files (canopy-overrides, prism-canopy) are read from `Bundle.main` a
 
 ### Layer 2: CC Extension Styles (`index.css`)
 
-The extension's own stylesheet, linked from its install directory (`~/.vscode/extensions/anthropic.claude-code-*/webview/index.css`). Loaded unmodified via `<link>` tag — no Canopy changes.
+The extension's own stylesheet, linked from its install directory (`<extension folder>/webview/index.css`). Loaded unmodified via `<link>` tag — no Canopy changes.
 
 ### Layer 3: Custom Overrides (`canopy-overrides.css`)
 
@@ -388,7 +390,11 @@ A new handler must also be added in `WebViewContainer.dismantleNSView`, the cach
 
 ### History replay
 
-`--resume` reconnects the CLI to a session but does not replay history to stdout. Canopy reads the JSONL transcript (`ClaudeSessionHistory`), walks the `parentUuid` chain back from the leaf, and delivers the messages with a synchronous `dispatchEvent(new MessageEvent(...))` so React batches them into one render. `window.postMessage` would render progressively. For an attached pane the daemon does the read and sends the replay on the session connection, fitted under `mirrorReplayMaxBytes`.
+`--resume` reconnects the CLI to a session but does not replay history to stdout. The extension reads the transcript itself and answers its webview's `get_session` request with the conversation. Canopy walks no transcript of its own for this; `ClaudeSessionHistory` lists sessions and locates transcripts.
+
+For a remote client the daemon reshapes that `get_session` response on its way out (`ShimProcess`): base64 images of `Read` results become `canopy-asset` URLs fetched on demand, and the replay is cut at a turn boundary to fit under `mirrorReplayMaxBytes`.
+
+A session can therefore resume and still draw an empty chat when the extension cannot read the transcript, as on SSH remote, where it is on the other machine.
 
 ## Known Limitations
 

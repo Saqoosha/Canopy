@@ -33,7 +33,7 @@ English | [日本語](README.ja.md)
 - **Custom model providers** — point a session at any Anthropic-compatible endpoint, with per-tier model mapping
 - **Session recap** — come back after being away and a summary of what happened sits above the composer
 - **Warm cache** — an idle session gets one small turn every 55 minutes so its prompt cache doesn't lapse
-- **Usage meters** — 5-hour and weekly rate-limit bars per account in the sidebar, colored by pace; per-pane context meter in the status bar
+- **Usage meters** — 5-hour and weekly rate-limit bars per account in the sidebar, colored by how fast the quota is being used; per-pane context meter in the status bar
 - **Stays awake while working** — the Mac does not idle-sleep while a session is busy, even with the lid closed; optionally it stays awake while any session is open so the phone can reach it, and it sleeps anyway below a battery floor
 - **Real-time streaming** — thinking, text, and tool use streamed live, with inline image previews for file reads and a live subagent activity list
 - **MacroPad** — optional USB key pad whose LEDs show each pane's activity and whose keys jump to it, so a session waiting on you is visible without looking at the screen. Drives over USB or over TCP from another Mac (firmware and printed case: [Canopy-MacroPad](https://github.com/Saqoosha/Canopy-MacroPad))
@@ -156,7 +156,7 @@ Sources/Canopy/
 
 Resources/
   vscode-shim/                 Node.js modules that shim the VSCode API
-  canopy-bridge/               Claude Code mod that reports the context window to Canopy
+  canopy-bridge/               Claude Code mod that reports the context window and worktree to Canopy
   ssh-claude-wrapper.sh        SSH remote wrapper script
   canopy-overrides.css         Custom styles: typography, code blocks, WKWebView fixes
   prism-canopy.css             Syntax highlighting theme (Prism.js, Claude Desktop colors)
