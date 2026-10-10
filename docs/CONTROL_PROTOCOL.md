@@ -339,9 +339,10 @@ session's state just after the event, as in `session_status`.
 `isError` is on every `turn_done`: `false` when the turn finished, `true`
 when it ended on an error. A failed turn also carries `errorKind` and, when
 the CLI named one, `errorCode` (the CLI's own value, kept for causes this
-table does not split out). `text` is then the CLI's `result` text: the error
-message on an API error, empty for `max_turns`, `budget` and `execution`;
-an addressed block is never used and `addressedTo` is absent:
+table does not split out). `text` follows the same rule as on a finished
+turn, so a failed turn can still be addressed: check `isError`. With no
+addressed block it is the CLI's `result` text, which is the error message on
+an API error and empty for `max_turns`, `budget` and `execution`:
 
 | `errorKind` | Cause |
 |---|---|

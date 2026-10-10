@@ -8218,10 +8218,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             refreshAskingState()
             // Every main-conversation turn, typed on the Mac, the phone or the control API.
             let failure = ControlEvent.TurnFailure.of(result: ioMsg, assistantError: turnAssistantError)
-            // A failed turn reports the CLI's error, never an earlier block addressed to someone.
-            let turn = failure == nil
-                ? ControlEvent.turnReply(blocks: turnTextBlocks.flatMap(\.texts), result: finalText ?? "")
-                : (text: finalText ?? "", addressedTo: nil)
+            let turn = ControlEvent.turnReply(blocks: turnTextBlocks.flatMap(\.texts), result: finalText ?? "")
             turnTextBlocks = []
             ControlEventLog.shared.record(.turnDone, session: boundSession, state: controlStateWire,
                                           replyId: finishedControlReply, text: turn.text, addressedTo: turn.addressedTo,

@@ -186,9 +186,6 @@ def follow(args):
         return follow_loop(args)
     except KeyboardInterrupt:
         return 130
-    except BrokenPipeError:
-        # The reader went away; the cursor was not advanced past what it got.
-        return 1
 
 
 def follow_loop(args):
@@ -205,6 +202,7 @@ def follow_loop(args):
             return 1
         except socket.timeout:
             # A daemon without heartbeats is silent for a whole quiet listen: ask again at once.
+            print(f"canopyctl: nothing for {READ_TIMEOUT:.0f}s; listening again", file=sys.stderr)
             backoff = 1.0
             continue
         except (OSError, ValueError) as exc:
@@ -435,4 +433,11 @@ def send_line(sock, obj):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        code = main(sys.argv[1:])
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader went away. Point stdout at /dev/null so the exit flush cannot fail again.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        code = 1
+    sys.exit(code)
