@@ -8694,7 +8694,7 @@ enum SidebarLogicProbe {
                 }
             }
             // `AwakeIndicator` draws through the same `glyph`.
-            for symbol in Set([true, false].flatMap({ e in [true, false].map { AwakeIndicator.symbol(enabled: e, holding: $0) } }))
+            for symbol in Set([true, false].flatMap({ e in [true, false].map { AwakeIndicator.symbol(enabled: e, holding: $0) } })).sorted()
             where MacroPadIndicator.glyph(symbol, color: .black, label: "probe").size == .zero {
                 unresolved.append(symbol)
             }
