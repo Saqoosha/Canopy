@@ -10,6 +10,9 @@ Canopy Mobile    ── TCP/Tailscale ┤
 canopyd (Canopy --daemon, LaunchAgent, no NSApplication)
   ├─ ControlSession / MirrorServer / RosterPublisher
   └─ ShimProcess × N ── NDJSON ── node vscode-shim + extension.js ── claude CLI
+
+SSH remote sessions are the exception: their ShimProcess stays in the GUI
+(`OpenSession.isDaemonHosted` is false for `.remote`), and the wrapper runs `ssh host claude`.
 ```
 
 ## Detail lives in `docs/notes/`

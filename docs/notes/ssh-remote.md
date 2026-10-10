@@ -1,6 +1,8 @@
 # SSH remote
 
-Condensed from CLAUDE.md. Full original text: `git show 3b6a198:CLAUDE.md`.
+Condensed from CLAUDE.md. Full original text: `git show 3b6a198:CLAUDE.md`. Read `docs/superpowers/specs/2026-09-09-ssh-remote-boundary.md` before changing SSH remote.
+
+- **Test against `studio`, never `mbp`** — `mbp` resolves through Tailscale back to this machine, so a "remote" test there is localhost with a shared `~/.claude`. Confirm the host with `IOPlatformUUID`.
 
 - **Pass the wrapper path only via `CANOPY_SSH_WRAPPER_PATH` (per-shim override)** — writing it to the shared settings file leaks across sessions and breaks `/resume`.
 - **"Continue session" needs both `RemoteSessionHistory` (picks the session over SSH) and `CANOPY_REMOTE_RESUME` (wrapper passes `--resume`)** — either alone silently starts a fresh conversation; reconnect (`doReconnect`) must pass the resume id too.
