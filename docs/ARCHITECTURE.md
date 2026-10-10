@@ -1,401 +1,218 @@
 # Architecture
 
-> **⚠ Stale (as of 1.12.0):** the body of this document predates two
-> migrations and is now wrong on both axes:
->
-> 1. **Pre-sidebar:** `WindowGroup > AppState.screen` switching between a
->    launcher and a session view, plus `WindowTitleSetter` (deleted in
->    PR #48), no longer reflects reality. The shipping shell is a single
->    window with `NavigationSplitView`; `SessionStore` + `OpenSession`
->    own the shim / WKWebView refs; `Detail.swift` swaps the active
->    session subview in place.
-> 2. **Pre-shim:** the System Overview diagram, the
->    `WebViewMessageHandler.swift` section, the `ClaudeProcess.swift`
->    section, and the Startup Sequence describe a Swift-side bridge
->    that talks directly to the Claude CLI. That layer was replaced
->    long ago by the Node.js vscode-shim subprocess. The real bridge
->    lives in `Sources/Canopy/ShimProcess.swift` plus the JS modules
->    under `Resources/vscode-shim/`. None of the files this doc names
->    (`WebViewMessageHandler.swift`, `ClaudeProcess.swift`) exist.
->
-> See `CLAUDE.md` and the spec at
-> `docs/superpowers/specs/2026-04-29-single-window-sidebar.md` for the
-> current model. The body below is preserved as historical reference;
-> a full rewrite is queued.
+Canopy runs the Claude Code VSCode extension without VSCode. Two ideas carry the design:
 
-Detailed technical architecture of Canopy, a macOS app that hosts the Claude Code VSCode extension's webview in a native WKWebView and bridges it to a real Claude CLI process.
+1. **Canopy does not reimplement Claude Code's protocol.** The extension's `extension.js` is loaded unmodified in a Node.js subprocess, with only the `vscode` module replaced by a shim. The UI is the extension's own React webview, shown in a `WKWebView`.
+2. **The process that owns a session is not the window that shows it.** Since 3.0 every session on a Mac lives in a background daemon, `canopyd`. The Mac app, another Mac, the phone and a script are all clients that attach to it.
+
+This document describes Canopy 3.14. A walkthrough with diagrams (in Japanese) is at `docs/architecture.html`. The script-facing wire is in `docs/CONTROL_PROTOCOL.md`. Hazards and measured numbers live in `docs/notes/` and on the code's doc comments; this file links to symbols rather than restating them.
 
 ## System Overview
 
 ```
-+------------------------------------------------------------------+
-|  CanopyApp (SwiftUI)                                             |
-|  WindowGroup > AppState (@Observable)                            |
-|    ├─ .launcher → LauncherView (dir picker, sessions, perms)     |
-|    └─ .session  → WebViewContainer (NSViewRepresentable)         |
-|                                                                  |
-|  +------------------------------------------------------------+  |
-|  |  WKWebView                                                 |  |
-|  |                                                            |  |
-|  |  Injected at document start:                               |  |
-|  |    1. Console capture (log/error/warn -> consoleLog)       |  |
-|  |    2. VSCodeStub (acquireVsCodeApi, IS_FULL_EDITOR, etc.)  |  |
-|  |                                                            |  |
-|  |  Loaded via loadFileURL(_canopy-<session-id>.html):        |  |
-|  |    - theme-light.css (456 --vscode-* CSS variables)        |  |
-|  |    - VSCode default webview CSS (@layer vscode-default)    |  |
-|  |    - --app-* bridge variables                              |  |
-|  |    - Timeline CSS fix                                      |  |
-|  |    - CC extension index.css + index.js                     |  |
-|  |                                                            |  |
-|  |  <body class="vscode-light">                               |  |
-|  |    <div id="root"></div>  (React mount point)              |  |
-|  +------+-------------------------------------------+---------+  |
-|         |                                           |            |
-|   WKScriptMessageHandler                  window.postMessage     |
-|   "vscodeHost"          "consoleLog"       (from-extension)      |
-|         |                    |                      ^            |
-|  +------v--------------------v----------------------+----------+  |
-|  |  WebViewMessageHandler                                      |  |
-|  |                                                             |  |
-|  |  Handles:                                                   |  |
-|  |    request    -> init, get_claude_state, get_asset_uris,    |  |
-|  |                  list_sessions, login, open_url, ...        |  |
-|  |    launch_claude -> spawn ClaudeProcess                     |  |
-|  |    io_message    -> forward user input to CLI stdin         |  |
-|  |    interrupt_claude -> SIGINT to CLI                        |  |
-|  |    close_channel   -> terminate CLI process                 |  |
-|  |                                                             |  |
-|  |  ConsoleLogHandler (separate handler for JS console bridge) |  |
-|  +------+-------------------------------------------+----------+  |
-|         |                                           ^            |
-|     stdin (NDJSON)                           stdout (NDJSON)     |
-|         |                                           |            |
-|  +------v-------------------------------------------+----------+  |
-|  |  ClaudeProcess                                              |  |
-|  |                                                             |  |
-|  |  Process:  claude -p --input-format stream-json             |  |
-|  |              --output-format stream-json --verbose           |  |
-|  |              --include-partial-messages                      |  |
-|  |              --permission-mode <mode>                        |  |
-|  |              --session-id <uuid> | --resume <session-id>     |  |
-|  |                                                             |  |
-|  |  NDJSON parser: line buffer -> JSON -> event routing        |  |
-|  |  Thread safety: serial DispatchQueue                        |  |
-|  +-------------------------------------------------------------+  |
-|                                                                  |
-|  +-------------------------------------------------------------+  |
-|  |  CCExtension (utility enum)                                 |  |
-|  |    extensionPath() -> ~/.vscode/extensions/anthropic.cc-*   |  |
-|  |    cliBinaryPath() -> ~/.local/bin/claude or fallbacks      |  |
-|  +-------------------------------------------------------------+  |
-+------------------------------------------------------------------+
+Canopy.app (this Mac)   Canopy.app (another Mac)   Canopy Mobile   canopyctl / scripts
+     │ Unix socket            │ TCP · Tailscale        │ TCP · Tailscale   │ Unix socket
+     └────────────────┬───────┴────────────────────────┴───────────────────┘
+                      ▼
+canopyd   (Canopy.app/Contents/MacOS/Canopy --daemon · one LaunchAgent per Mac · no NSApplication)
+  ├─ ControlSession    control connections: list, open, stop, send_message, listen, …
+  ├─ MirrorServer      session connections: attach, transcript replay, assets, file transfer
+  ├─ SessionStore      session registry: open sessions, Recents, titles, accounts, rate limits
+  ├─ coordinators      keep-alive, recap, title generation, reaper, upgrade check, sleep guard
+  ├─ RosterPublisher ──► Cloudflare relay (machine list, roster, phone events, push)
+  └─ ShimProcess × N   one per running session; fans output out to every attached client
+        │ stdin / stdout NDJSON
+        ▼
+     node vscode-shim      fakes require("vscode"): webview, workspace, secrets
+        └─ extension.js    the Claude Code extension, as shipped
+             └─ claude     CLI in stream-json mode (through a wrapper for SSH remote)
 ```
 
-## Component Descriptions
+The relay carries the machine list, the roster of open sessions, the phone's events (including message text) and notifications. The webview stream and transcript replays never pass through it: they flow directly between a client and the daemon, over the Unix socket or Tailscale.
 
-### CanopyApp.swift
+## Processes
 
-SwiftUI `@main` entry point. Creates a `WindowGroup` that switches between `LauncherView` (directory picker) and `WebViewContainer` (chat) based on `AppState.screen`. Menu commands: Cmd+N (new session → launcher), Cmd+O (open folder → launch directly). Window title shows the current directory name via `WindowTitleSetter` (NSViewRepresentable helper).
+One binary plays several roles. `CanopyMain` reads the arguments before anything touches `NSApplication`:
 
-### AppState.swift
+| Arguments | Role |
+|---|---|
+| none | The SwiftUI app (`CanopyApp`) |
+| `--daemon` | `CanopyDaemon.run()`: the session service |
+| `--mirror-relay <host> <port> <socket>` | `MirrorRelay`: holds the Tailscale port for a daemon that is waiting to restart |
+| `--unregister-daemon` | Removes the LaunchAgent and exits |
 
-`@Observable` class managing app-wide state:
-- `screen` (`.launcher` | `.session`) — `private(set)`, transitions via `launchSession`/`backToLauncher`
-- `workingDirectory` — selected project directory
-- `permissionMode` — `PermissionMode` enum (`.default`, `.acceptEdits`, `.plan`, `.bypassPermissions`)
-- `resumeSessionId` — session ID to resume (cleared after first use)
-- `webviewReloadToken` — `private(set)`, incremented to force WebViewContainer recreation via `.id()`
+**GUI (`Canopy.app`).** Sidebar, up to 6 panes, launcher, settings, MacroPad. It holds no shim for this Mac's sessions. A pane whose `OpenSession.isDaemonHosted` is true is a `MirrorPaneView` that attaches to the daemon, the same view and the same route as a pane showing another Mac's session.
 
-### LauncherView.swift
+**Daemon (`canopyd`).** Started by launchd as a LaunchAgent, so it runs inside the login session and can read the CLI's OAuth token from the login keychain. It builds no `NSApplication` and runs on `RunLoop.main`, so LaunchServices does not see a second instance of the app. It has the app's code identity, so a Full Disk Access grant covers both.
 
-SwiftUI welcome screen shown on app launch. Features:
-- Directory selection via `NSOpenPanel` or drag-and-drop
-- Permission mode picker bound to `AppState.permissionMode`
-- Start button (Cmd+Enter) launches session
-- Recent directories list (MRU, managed by `RecentDirectories`)
-- Recent sessions list (loaded from `ClaudeSessionHistory.loadAllSessions()`)
-- Search filter across directories and sessions
-- Click on recent directory → immediate launch; click on session → resume with history
+**Node (`vscode-shim`).** `Resources/vscode-shim/index.js` intercepts `require("vscode")` and activates `extension.js`. Unimplemented API members go through a Proxy that logs the access, so a new extension API fails loudly.
 
-### ClaudeSessionHistory.swift
+**CLI (`claude`).** Spawned by the extension with `-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages`. Canopy never passes `--bare`.
 
-Reads Claude Code session data from `~/.claude/projects/`:
-- `encodePath` — converts filesystem path to CLI's folder naming (replaces `/` and `.` with `-`)
-- `loadSessions(for:)` — lists JSONL files in a project folder, extracts title (first user message, up to 8KB) and modification date
-- `loadAllSessions()` — scans all project folders, reads `cwd` from JSONL metadata to get real paths (avoids lossy path decoding)
-- `extractCwd` — reads first 4KB of a JSONL file to find the `cwd` field
-- Filters out subagent files (`agent-*` prefix) and background scheduled-task sessions (`queue-operation` enqueue whose `content` contains `<scheduled-task`)
+**SSH remote is the exception.** Its `ShimProcess` stays in the GUI (`isDaemonHosted` is false for `.remote`), and the extension's `claudeProcessWrapper` points at `ssh-claude-wrapper.sh`, which runs `claude` on the host.
 
-### RecentDirectories.swift
+## Message Flow
 
-Caseless enum managing an MRU list of project directories in `UserDefaults`:
-- Max 20 entries, deduplication on add, existence check on load
-- API: `load()`, `add(_:)`, `remove(_:)`
+What happens when Return is pressed in a pane on this Mac. A pane on another Mac or the phone takes the same path; only the Unix socket becomes TCP over Tailscale.
 
-### CCExtension.swift
+Prompt, outbound:
 
-Static utility enum for finding Claude Code paths on disk:
+1. **WKWebView.** The extension's React UI calls `acquireVsCodeApi().postMessage`. Canopy's stub (`VSCodeStub`) turns that into a post to `webkit.messageHandlers.vscodeHost`.
+2. **GUI, `RemoteMirrorBridge`.** Sends the message as one NDJSON line on the pane's session connection.
+3. **`MirrorServer`.** The connection is already attached to one session; the line goes to that session's `ShimProcess`.
+4. **`ShimProcess` → node.** Written to the shim's stdin. `window.js` delivers it to the extension as a webview message.
+5. **`extension.js` → CLI.** The extension writes a stream-json user turn to the CLI's stdin.
 
-- `extensionPath()` -- Scans `~/.vscode/extensions/` for directories matching `anthropic.claude-code-*`, returns the latest version (sorted descending by directory name).
-- `cliBinaryPath()` -- Checks `~/.local/bin/claude`, `/usr/local/bin/claude`, and `/opt/homebrew/bin/claude` for an executable Claude CLI binary.
+Reply, inbound:
 
-### WebViewContainer.swift
+1. **CLI.** Emits Anthropic SSE events as `stream_event` lines, then `assistant` and `result`.
+2. **`extension.js`.** Wraps each one in `io_message` and posts it to its webview.
+3. **node shim.** Writes it to stdout. The repair of CJK bold markup (`cjk-emphasis*.js`) happens here, before the line leaves Node.
+4. **`ShimProcess`.** Reads the line once for its own trackers (status bar, activity state, background tasks, rate limits, control events) and sends it to every attached client.
+5. **WKWebView.** The extension's UI renders its own message. The CJK repair is the only transformation on the way.
 
-`NSViewRepresentable` that creates and configures the WKWebView. This is where the CC extension webview is assembled and loaded.
+A session with no pane still works. For a session opened by the control API or the phone, the daemon synthesizes `init` and `launch_claude` on the channel `canopy-headless`, so a turn runs without a webview and a later attach finds a cached init.
 
-**WKWebView configuration:**
-- `allowFileAccessFromFileURLs` enabled (required for loading extension JS/CSS from local filesystem)
-- `isInspectable = true` (enables Safari Web Inspector)
-- Two `WKUserScript` injections at document start:
-  1. Console capture script (bridges `console.log/error/warn` to Swift via `consoleLog` message handler)
-  2. VSCode API stub (from `VSCodeStub.swift`)
-- Two `WKScriptMessageHandler` registrations:
-  1. `vscodeHost` -- handled by `WebViewMessageHandler`
-  2. `consoleLog` -- handled by `ConsoleLogHandler`
+## Connections
 
-**HTML generation (`loadCCWebview`):**
+A client opens two kinds of connection to a daemon. Both are newline-delimited JSON.
 
-Writes one entry file per session — `_canopy-<session-id>.html` — to
-`~/Library/Application Support/Canopy/`, containing:
-1. Theme CSS variables (loaded from bundled `theme-light.css`)
-2. CC extension's `index.css` (linked via file URL)
-3. Custom CSS overrides: font families, `--app-*` bridge variables, timeline fix
-4. VSCode default webview CSS (`@layer vscode-default` -- scrollbar, code, link, kbd styles)
-5. `<body class="vscode-light">` with `<div id="root">` mount point
-6. CC extension's `index.js` (loaded as ES module)
+| Connection | Count | First line | Carries |
+|---|---|---|---|
+| control | One per client per daemon | `hello {protocolVersion, token?}` | Requests with an id, one `response` each. After `subscribe`: `session_state` and `upgrade_state` pushes |
+| session | One per attached pane | `attach` | The webview's own NDJSON in both directions, the transcript replay at attach, webview assets on request, file transfer, and server-to-client instructions (`canopy_ui`, `open_url`, `notify`) |
 
-The HTML file is loaded via `loadFileURL` (not `loadHTMLString`) with read access granted to the user's entire home directory. This is required because the webview needs to access both the HTML file in Application Support and the extension assets under `~/.vscode/extensions/`.
+- **Socket.** `~/Library/Application Support/Canopy/daemon-<bundle id>.sock`, mode 0600. The bundle id keeps a Debug daemon from taking the Release socket. A path over 103 bytes falls back to the per-user temporary directory (`DaemonPaths`).
+- **Authentication.** The local socket is protected by file mode and takes no token. The TCP listener needs the Mirror password token and exists only while Mirror is on in Settings › Sharing. Debug listens on the base port + 1.
+- **Version.** `ControlProtocol.version` is 1. A mismatch gets `hello_error` with a reason and the socket closes.
+- **Attach capabilities.** A client opts into extras with flags on the `attach` line: `status`, `usage`, `images`, `ui`, `restart`, `compress: "br"` (lines of 4 KB or more become Brotli `Z <n> <m>` frames). Every option is opt-in, so older clients are unaffected. `usage`, `images` and `ui` are honored for Mac clients only.
+- **Attach resume.** `ShimProcess` keeps recent outbound frames in a `MirrorFrameRing`. A phone that iOS disconnected re-attaches with `since: {epoch, seq}` and receives only what it missed; a cursor older than the ring's floor falls back to a full replay.
+- **UI frames.** The daemon has no pane, so it asks its Mac client to show things with `canopy_ui` frames (`MirrorUIFrame`): file contents in `ContentViewer`, the recap row, an error banner, an alert, a notification. The frames are data only; the client builds any JavaScript itself.
 
-**ConsoleLogHandler:**
+### Control verbs
 
-Receives JS console output bridged from the webview. Routes to `os_log` at appropriate levels (info for log, warning for warn, error for error). Truncates object serialization to 500 characters to avoid log flooding.
+| Group | Verbs |
+|---|---|
+| Sessions | `list_sessions` (`scope: open` or `recent`, with search filters), `open_session` (new, or `resumeSessionId` to continue a closed one), `stop_session`, `rename_session`, `restart_session`, `request_recap` |
+| Driving a session | `send_message`, `wait_turn`, `latest_reply`, `session_status`, `pending_requests`, `history`, `listen` |
+| Folders | `list_folders`, `browse_dir`, `mkdir` |
+| Accounts | `list_accounts`, `switch_account` |
+| Daemon | `subscribe`, `mirror_status`, `restart_now` (local clients only) |
 
-**Cleanup:**
+`docs/CONTROL_PROTOCOL.md` is the reference for parameters, results and error codes.
 
-`dismantleNSView` calls `terminateAll()` on the handler (killing any running CLI processes), then removes all script message handlers and user scripts to prevent retain cycles between WKWebView and the handler objects.
+## Control API
 
-### VSCodeStub.swift
+The control connection is also a local automation API: a script, or another agent, can start a session, send it turns and wait for what happens, with no pane open. `scripts/canopyctl` is a stdlib-only Python client.
 
-Provides the JavaScript and CSS that make the CC extension believe it is running inside VSCode:
+- **Events.** The daemon records `turn_done`, `permission`, `asking`, `turn_interrupted`, `session_opened` and `session_closed` in an event log (`ControlEvents`) whether or not anyone listens. `listen` waits for the next event after a cursor, so a client that reconnects with its cursor misses nothing. A cursor that cannot be continued returns `gap`.
+- **History.** `history` reads turns back from the session's transcript (`ControlHistory`), so turns typed in a pane or on the phone are included.
+- **Permissions.** `session_status` reports a pending permission with the raw tool input, and `pending_requests` lists what a session is waiting on.
+- **Across a restart.** A daemon that exits cleanly saves its event log and the next one continues it with the same epoch and seqs. Sessions that the control API or the phone opened may have no client to re-attach them, so `DaemonHeldSessions` carries them across a restart under the same `key`.
+- **Reaper.** A session `open_session` started is kept alive while a `listen` covers it. The daemon sends a `heartbeat` every 30 s on a connection with an open `listen`.
 
-**JavaScript stub:**
-- Sets `window.IS_SIDEBAR = false`, `window.IS_FULL_EDITOR = true`, `window.IS_SESSION_LIST_ONLY = false`
-- Implements `window.acquireVsCodeApi()` returning an object with:
-  - `postMessage(msg)` -- forwards to `window.webkit.messageHandlers.vscodeHost.postMessage(msg)`
-  - `getState()` -- returns null
-  - `setState(state)` -- returns state (no-op)
+## Session Lifecycle
 
-**Theme CSS:**
-- Loaded from the bundled `theme-light.css` resource file at runtime
-- Contains 456 `--vscode-*` CSS custom properties exported from VSCode's Default Light+ theme
-- Falls back to basic black-on-white if the resource file is missing
+Closing a pane and stopping a session are different operations.
 
-### WebViewMessageHandler.swift
+| State | Meaning |
+|---|---|
+| Running, attached | The shim runs and at least one client is watching. Keep-alive warms the prompt cache only for sessions in this state |
+| Running, detached | Cmd+W closes the pane, not the session. It keeps running in the daemon and stays in every client's Open list |
+| Stopped | By Stop Session (Cmd+Opt+W, or the menu beside the pane's X), or by the reaper |
+| Daemon restart | Clients re-attach and sessions resume from their transcripts |
 
-Central protocol handler. Implements `WKScriptMessageHandler` to receive messages from the webview and dispatches them by type.
+- **Attach doubles as resume.** An `attach` with `open` for a session the daemon is not running resumes it on the spot. Opening an old session, returning to a stopped one and restoring panes after a relaunch all use this one path, so Save and Quit carries no shim state.
+- **Reaper.** `SessionReaper` stops a session that has no client, is not working or asking, and has no pending permission or background task, once that has lasted for Settings › General › "Stop idle sessions after" (4 hours by default; Never turns it off). A reaped session keeps its Open row and resumes on click; one stopped with Stop Session returns to Recents.
+- **Stopped elsewhere.** When a session is stopped from another client, the daemon tells the remaining clients it ended rather than dropping their connections, and the pane says where it was stopped.
+- **Removed folders.** A session whose working directory or worktree was deleted can still be reopened, and it holds a daemon upgrade because it could not be resumed afterwards.
 
-**Message types handled:**
+## State Ownership
 
-| Type | Description |
-|------|-------------|
-| `request` | Request/response protocol (dispatched by `request.type`) |
-| `launch_claude` | Spawn a new Claude CLI process |
-| `io_message` | Forward user messages to CLI stdin |
-| `interrupt_claude` | Send SIGINT to active CLI process |
-| `close_channel` | Terminate CLI process and clean up |
+| State | Owner | Notes |
+|---|---|---|
+| Running sessions, shims, activity state | Daemon | `SessionStore.openSessions` inside canopyd |
+| Recents, folders, titles | Daemon, per Mac | Clients ask with `list_sessions` / `list_folders`. Never on the relay |
+| Settings that affect a session | Daemon | Default permission mode, keep-alive, recap, worktree seeding, accounts, model providers. Read from the shared `settings.json` |
+| Rate limits | Daemon | Collected per account and pushed to clients |
+| Event log for `listen` | Daemon | Saved on a clean exit |
+| Pane order and widths, window, filters, MacroPad | Client | Each Mac's GUI keeps its own layout |
+| Machine list, presence, roster of open sessions | Relay | Phone events and notification bodies also pass through it |
 
-**Request types:**
+## Daemon Operations
 
-| Request | Response | Notes |
-|---------|----------|-------|
-| `init` | `init_response` | App state: cwd, auth, platform, feature flags |
-| `get_claude_state` | `get_claude_state_response` | Model list, account info, PID |
-| `get_asset_uris` | `asset_uris_response` | SVG/PNG paths for UI assets (clawd, welcome art) |
-| `get_current_selection` | Selection response | Always null (no editor) |
-| `list_sessions_request` | `list_sessions_response` | Real sessions from `~/.claude/projects/` |
-| `request_usage_update` | `usage_update` | Always null |
-| `login` | `login_response` | Opens claude.ai/login in browser, re-fetches auth |
-| `open_url` | `open_url_response` | Opens URL in default browser via NSWorkspace |
-| `open_help` | `open_help_response` | Opens Claude Code docs |
-| `set_model` | Ack | No-op (not persisted) |
-| `set_thinking_level` | Ack | No-op (not persisted) |
-| `set_permission_mode` | Ack | Updates stored `PermissionMode` for subsequent launches |
-| `get_mcp_servers` | Empty list | MCP not implemented |
-| `list_plugins` | Empty list | Plugins not implemented |
-| `generate_session_title` | Static "Chat" | Title generation not implemented |
-| Various dismiss/config | Ack | No-op acknowledgments |
+### Registration and start
 
-**Authentication:**
-- On init, runs `claude auth status` as a subprocess and caches the JSON result
-- Auth info (email, subscription type, auth method) is included in `init_response` and `get_claude_state_response`
-- Login redirects to `claude.ai/login` and re-fetches auth after 5 seconds
+- A Release GUI checks the LaunchAgent (`SMAppService.agent`, plist inside the bundle) on every launch and registers it if missing. Debug registers only with `CANOPY_REGISTER_DAEMON=1`. Each build owns its own agent, keyed by bundle id.
+- Before a pane attaches, `DaemonSupervisor` checks the socket. If the agent is registered but silent, it runs `launchctl kickstart` and waits for the socket. If the agent is unregistered or awaiting approval, or launchd could not start it, the GUI starts `--daemon` itself as a plain `Process`, never through `NSWorkspace.openApplication`.
 
-**Channel management:**
-- Maintains a dictionary of active `ClaudeProcess` instances keyed by `channelId`
-- Cleans up old process before creating a new one for the same channel
-- Receives exit notifications from `ClaudeProcess` via `handleCLIProcessExited`
-- `terminateAll()` called during webview teardown to clean up all processes
+### App updates
 
-**Session history replay:**
-- When `launch_claude` is received with a resume session ID, `replaySessionHistory` runs before CLI launch
-- Reads the session JSONL file, parses all `user`/`assistant`/`system` messages into a UUID-keyed map
-- Walks the `parentUuid` chain backwards from the leaf node (naturally stops at `compact_boundary` where `parentUuid=nil`)
-- Filters out sidechains, meta messages, and team messages
-- Sends only `user`/`assistant` messages (system messages like `compact_boundary` are for chain structure only)
-- All messages are serialized into a single JSON array and dispatched via synchronous `dispatchEvent(new MessageEvent(...))` — not `postMessage` — so React batches all state updates into a single render (instant display)
+- Sparkle replaces the app. The daemon notices the new build on disk and counts what holds a restart back (`DaemonUpgrade`): a running turn, a question waiting for an answer, a background task, an unsent prompt, a session whose folder was removed, a client that cannot re-attach on its own.
+- While it waits, `Canopy --mirror-relay`, started from the new build, holds the Tailscale port and copies bytes to the daemon's relay socket. macOS's Application Firewall cannot resolve the path of the replaced daemon and drops all its inbound traffic. The relay socket requires the password like TCP does.
+- When nothing holds it, the daemon sends `daemon_restarting`, stops its shims and exits 1; launchd starts the new build. Mirror panes on other Macs wait for the listener and re-attach (`RestartReattach`).
+- The sidebar footer shows the waiting update with marketing versions, the sessions holding it, and Restart now (`PendingUpdate`).
 
-### ClaudeProcess.swift
+### Claude Code extension updates
 
-Manages the lifecycle of a single Claude CLI subprocess for one conversation channel.
+- Canopy keeps its own copies of the extension under `~/Library/Application Support/Canopy/extensions/` and also finds `~/.vscode/extensions/anthropic.claude-code-*` (`CCExtension`). The newest one wins.
+- `ExtensionUpdater` asks the VS Marketplace for the latest version and installs it without a prompt. Before adopting a download, `ExtensionCanary` activates it in a throwaway shim; a version that throws during `activate` is not adopted. Versions still in use by a running session are kept on disk.
+- Running sessions stay on the extension they started with. The sidebar footer lists sessions on an older extension and one Restart All moves them.
 
-**Process configuration:**
-```
-claude -p
-  --output-format stream-json
-  --input-format stream-json
-  --verbose
-  --include-partial-messages
-  --permission-mode <mode>
-  --session-id <uuid>
-```
+### Sleep
 
-Key flags:
-- `-p` -- Non-interactive / piped mode
-- `--include-partial-messages` -- Makes CLI output real Anthropic SSE events as `stream_event` NDJSON lines (without this flag, you only get batched `assistant` events)
-- `--session-id` -- Generated UUID for new sessions
-- `--resume` -- Resume an existing session by ID (used when replaying history)
+- `SleepGuard` holds an idle-sleep assertion while a session is busy (Settings › General › "Prevent sleep while a session is working"). With "Stay reachable remotely" it also holds while any session is open, so the phone and other Macs can still reach the Mac.
+- The daemon's guard additionally disables lid-close sleep, which the assertion alone does not prevent. `SleepGuardPolicy` decides when re-enabling it is harmless.
+- On battery below `sleepBatteryFloorPercent` the Mac is allowed to sleep whatever is running. While a lid-closed Mac is held awake on battery, the phone gets battery notifications.
+- The sidebar footer's cup shows whether Canopy is holding the Mac awake (`AwakeStatus`, read from the system's assertion list) and toggles the setting on click.
 
-**Thread safety:**
-- All mutable state access (line buffer, process writes) goes through a serial `DispatchQueue`
-- Class is marked `@unchecked Sendable` because thread safety is manually managed
+## Accounts and Usage
 
-**NDJSON parsing:**
-- `readabilityHandler` on stdout pipe receives raw data chunks
-- Data is appended to a line buffer and split on `\n` (0x0A) bytes
-- Each complete line is parsed as JSON
-- On process termination, remaining buffer is flushed
+- A second Claude login is a `ClaudeAccount`: a name plus a `CLAUDE_CONFIG_DIR`. The CLI keys its Keychain item by that path, so each directory holds its own login. `ClaudeConfigDirSync` makes `projects` a symlink so a session can be resumed under another account.
+- A session can be switched between accounts (`switch_account`). When a session hits its limit, `AccountLimitBanner` offers the other logins, and a new session starts on a login with quota left.
+- Rate limits are tracked per account (`SharedRateLimitData`). `ClaudeUsageDirect` reads `/api/oauth/usage` so the sidebar bars exist before any session runs. Bars are colored by pace, not raw percent.
+- The context meter's denominator comes from the CLI itself: Canopy loads one Claude Code mod, `Resources/canopy-bridge/`, through `CLAUDE_CODE_PLUGIN_DIRS`. It reports the context window as a `system/ui_log` frame that `ShimProcess` consumes before anything else sees it.
+- Custom model providers (`ModelProvider`) point a session at any Anthropic-compatible endpoint, with per-tier model mapping.
 
-**Event routing:**
+## Mac Client
 
-| CLI Event Type | Action |
-|---------------|--------|
-| `system` | Log init info (model name) |
-| `stream_event` | Forward to webview as `io_message` (done=false) |
-| `assistant` | Forward to webview as `io_message` (done=false) |
-| `user` | Forward to webview as `io_message` (done=false) -- tool results |
-| `result` | Forward to webview as `io_message` (done=true) |
-| `rate_limit_event` | Forward to webview as `io_message` (done=false) |
+- `SessionStore` is also the GUI's model: open rows, Recents, panes, the focused pane. Each pane is a `PaneSlot` whose width is a weight. `WeightedPaneLayout`, a custom SwiftUI `Layout`, divides the detail column by weight and returns the proposed width unchanged.
+- The sidebar's Open block is a map of the pane order: reading the highlighted rows top to bottom gives the panes left to right. Worktree sessions are grouped under their repository, and the sidebar has session search.
+- The sidebar dot and the MacroPad LED both read one classification, `SessionActivity`.
+- `DaemonSessionSync` reconciles the GUI's rows with the daemon's `session_state` pushes.
+- Each pane's webview loads a per-session entry file and receives Canopy's injected scripts: the `acquireVsCodeApi` stub, theme CSS, image previews, scroll preservation, composer focus, the recap row.
+- `GPUProcessReaper` kills WebKit GPU processes that WebKit has abandoned, which otherwise leave a page that never paints again.
+- The launcher takes a first prompt with dropped or pasted images (`LaunchPrompt`), can clone from GitHub, and can start the session in a new worktree.
 
-**Event forwarding format:**
-```json
-{
-  "type": "from-extension",
-  "message": {
-    "type": "io_message",
-    "channelId": "<channel-id>",
-    "message": { /* raw CLI event */ },
-    "done": false
-  }
-}
-```
+## Other Routes
 
-Events are serialized to JSON and sent to the webview via `window.postMessage()` JavaScript evaluation on the main thread.
+**Another Mac's daemon.** The sidebar lists other Macs' sessions from the relay. Opening one attaches a `.mirror` pane to that Mac's canopyd over Tailscale; the transcript, files and CLI stay on that Mac. From the launcher this Mac can also start a new prompted session there, browse any folder on it (`RemoteDirectoryBrowser`, `browse_dir` / `mkdir`), open its closed sessions and recent folders (`MirrorRecents`), and stop its sessions (`PeerControl`). A file clicked in a mirror pane is shipped over the mirror connection and opened on the watching Mac (`MirrorFileTransfer`), an `open` the CLI runs is redirected to the watching machine (`OpenRedirect`), and an MCP OAuth page opens on the Mac that asked.
 
-**stdin writes:**
-- User messages are converted from content block arrays to plain text strings before sending
-- Written as NDJSON (one JSON object per line) to the CLI's stdin pipe
-- Writes are dispatched to the serial queue and check that the process is still running
+**Canopy Mobile.** Finds Macs through the relay and speaks the same control and session protocol over Tailscale. Notifications arrive as relay pushes with the session's name, and a reply (free text or an AskUserQuestion option) becomes a real user turn. Sessions the phone opened keep running without a pane and are resumed after an upgrade restart.
 
-## Data Flow
+**SSH remote.** For hosts that cannot run the daemon: Linux, WSL, Windows. The shim runs on this Mac and the wrapper runs `claude` on the host. See `docs/notes/ssh-remote.md`.
 
-### Startup Sequence
+**Claude Code on the Web.** Cloud sessions are listed from `/v1/sessions` with the Keychain OAuth token and teleported into a local session through a short-lived shim (`RemoteSessionsBridge`).
 
-```
-1. CanopyApp creates WindowGroup with AppState
-2. LauncherView shown (AppState.screen == .launcher)
-   a. Load recent directories from UserDefaults
-   b. Load session history from ~/.claude/projects/ (background Task)
-   c. User picks directory, permission mode, and optionally a session to resume
-   d. launchSession() → AppState.screen = .session → SwiftUI recreates view
-3. WebViewContainer.makeNSView:
-   a. Create WKWebViewConfiguration
-   b. Inject console capture script (atDocumentStart)
-   c. Inject VSCode API stub (atDocumentStart)
-   d. Register message handlers (vscodeHost, consoleLog)
-   e. Enable file access from file URLs
-3. WebViewMessageHandler.init:
-   a. Spawn `claude auth status` subprocess
-   b. Parse and cache auth JSON
-4. loadCCWebview:
-   a. Find CC extension path
-   b. Generate HTML with theme CSS + extension JS/CSS
-   c. Write _canopy-<session-id>.html to ~/Library/Application Support/Canopy/
-   d. loadFileURL with read access to home directory
-5. Webview boots:
-   a. React app mounts in <div id="root">
-   b. acquireVsCodeApi() returns stub with postMessage bridge
-   c. Extension sends: init -> get_claude_state -> get_asset_uris -> list_sessions
-   d. Extension auto-launches claude (launch_claude message)
-6. Session history replay (if resuming):
-   a. Read JSONL file from ~/.claude/projects/{encoded-path}/
-   b. Parse messages, build UUID map
-   c. Walk parentUuid chain from leaf node
-   d. Batch dispatch via dispatchEvent (single render)
-7. ClaudeProcess spawned:
-   a. CLI binary found via CCExtension.cliBinaryPath()
-   b. Process started with stream-json flags
-   c. stdout/stderr readability handlers attached
-```
+**MacroPad.** An optional USB key pad, driven over serial or over TCP from another Mac. Firmware: <https://github.com/Saqoosha/Canopy-MacroPad>.
 
-### Chat Message Flow
+## Source Map
 
-```
-User types message in webview
-  |
-  v
-CC extension calls vscodeApi.postMessage({
-  type: "io_message",
-  channelId: "...",
-  message: { type: "user", message: { role: "user", content: [{type:"text",text:"Hello"}] } }
-})
-  |
-  v
-WKScriptMessageHandler receives in WebViewMessageHandler
-  |
-  v
-handleIOMessage extracts text from content blocks -> "Hello"
-  |
-  v
-ClaudeProcess.sendUserMessage writes to stdin:
-  {"type":"user","message":{"role":"user","content":"Hello"}}\n
-  |
-  v
-CLI processes and streams NDJSON to stdout:
-  {"type":"stream_event","event":{"type":"content_block_delta",...}}\n
-  {"type":"stream_event","event":{"type":"content_block_delta",...}}\n
-  ...
-  {"type":"result","subtype":"success",...}\n
-  |
-  v
-ClaudeProcess.appendData -> line buffer -> processLine
-  |
-  v
-sendIOMessage wraps each event:
-  { type: "from-extension", message: { type: "io_message", channelId, message, done } }
-  |
-  v
-evaluateJavaScript("window.postMessage(..., '*')")
-  |
-  v
-CC extension React UI renders streaming text, thinking, tool use
-```
+Under `Sources/Canopy/` unless noted. Open the file and read its doc comments for detail.
 
-### Tool Use Flow
+| Area | Files |
+|---|---|
+| Entry and daemon | `CanopyMain`, `CanopyDaemon`, `DaemonSupervisor`, `DaemonRegistration`, `DaemonPaths`, `DaemonConfig`, `DaemonUpgrade`, `DaemonUpgradeCenter`, `DaemonHeldSessions`, `MirrorRelay`, `SessionReaper`, `DaemonReaper`, `SleepGuard` |
+| Control protocol | `ControlProtocol`, `ControlSession`, `ControlClient`, `ControlEvents`, `ControlHistory`, `PeerControl`, `scripts/canopyctl` |
+| Session connections | `MirrorServer`, `MirrorClient`, `MirrorWire`, `MirrorSink`, `MirrorAccess`, `MirrorEndpoint`, `MirrorFrameRing`, `MirrorStatusFrame`, `MirrorUIFrame`, `MirrorFileTransfer`, `MirrorRecents`, `RestartReattach`, `NDJSONLineAssembler` |
+| Sessions | `ShimProcess`, `SessionStore`, `OpenSession`, `DaemonSessionSync`, `SessionActivity`, `KeepAlive*`, `Recap*`, `SessionTitle*`, `ClaudeSessionHistory`, `SubagentTracker`, `GitWorktree`, `PeerNameStore` |
+| Accounts and usage | `ClaudeAccount`, `ClaudeAccountInfo`, `KeychainAuth`, `SharedRateLimitData`, `ClaudeUsageDirect`, `AnthropicDirect`, `AccountLimitBanner`, `ModelProvider*` |
+| Extension | `CCExtension`, `ExtensionUpdater`, `ExtensionSafety`, `NodeDiscovery` |
+| Mac client UI | `CanopyApp`, `Sidebar*`, `Detail`, `SessionContainer`, `MirrorPaneView`, `WebViewContainer`, `WeightedPaneLayout`, `PaneSlot`, `PaneDivider`, `PaneHeader*`, `LauncherView`, `StatusBarView`, `SettingsView`, `PendingUpdate`, `AwakeIndicator`, `GPUProcessReaper`, `MacroPad/` |
+| Relay and phone | `Roster/RosterPublisher`, `Roster/RemoteRosterWatcher`, `Roster/RosterNotifier`, `Roster/RosterReply`, `Roster/SessionEvent`, `PhoneReplyQueue` |
+| Node side | `Resources/vscode-shim/` (`index.js` entry, `window.js` webview bridge, `workspace.js`, `context.js`, `cjk-emphasis*.js`, `keychain-login-guard.js`), `Resources/canopy-bridge/`, `Resources/ssh-claude-wrapper.sh`, `Resources/canopy-remote-open.sh` |
 
-Tool use events flow through the same pipeline. The CLI emits `stream_event` lines containing Anthropic API events like `content_block_start` (with `type: "tool_use"`), `content_block_delta` (with `type: "input_json_delta"`), and `content_block_stop`. These are forwarded to the webview unchanged.
-
-Tool results come back as `user` type events from the CLI (the CLI handles tool execution internally) and are also forwarded as `io_message` events.
+Design records: `docs/superpowers/specs/2026-09-29-canopy-server-design.md`, `2026-10-01-headless-daemon-design.md`, `2026-10-01-update-without-waiting-design.md`, `2026-10-02-canopy-bridge-mod-design.md`.
 
 ## CSS/Theme System
 
@@ -550,59 +367,32 @@ WebKit Bug 165004: `compositionend` fires before `keydown`, so `isComposing` is 
 
 The `<body>` element must have `class="vscode-light"` (or `vscode-dark` for dark themes). The CC extension CSS uses this class for theme-specific overrides.
 
-## WebView Setup Details
+## WebView Setup
 
-### Why loadFileURL Instead of loadHTMLString
+### Entry file
 
-`WKWebView.loadHTMLString` does not allow the webview to load local file resources (JS, CSS, images) via relative or absolute file URLs. The CC extension's `index.js` imports other modules and references assets using file paths, so `loadFileURL` is required.
+`WKWebView.loadHTMLString` cannot load local file resources, and the extension's `index.js` imports modules and assets by file path. So `WebViewContainer.loadCCWebview` writes an HTML file and loads it with `loadFileURL`, granting read access to a parent directory that covers both the entry file and the extension folder.
 
-The HTML is written to `~/Library/Application Support/Canopy/_canopy-<session-id>.html` — one file per session, keyed by the process-local session UUID — and loaded with `allowingReadAccessTo` set to the user's home directory. This grants the webview read access to both the HTML file and the extension directory under `~/.vscode/extensions/`.
+There is one entry file per session, `~/Library/Application Support/Canopy/_canopy-<OpenSession.id>.html`, never shared: `data-initial-session` is baked in and loads are asynchronous, so a shared file would render the wrong conversation. The file must outlive the load because `reload()` re-reads it. `purgeOwnEntryFiles()` deletes only this process's files, at quit, because Debug and Release share the directory.
 
-### Injected Scripts (atDocumentStart)
+### Script message handlers
 
-Two scripts are injected before any page content loads:
+| Handler | Purpose |
+|---|---|
+| `vscodeHost` | The extension's `postMessage`, routed to the shim (in-process pane) or the session connection (attached pane) |
+| `consoleLog` | JS console output, uncaught errors and unhandled rejections → unified log |
+| `canopyLink` | Link clicks, including local file links |
+| `InputWidthProbe.messageHandlerName` | Composer width measurement |
 
-1. **Console capture** -- Overrides `console.log`, `console.error`, `console.warn` to forward messages to Swift via the `consoleLog` message handler. Also captures `window.onerror` and `window.onunhandledrejection`.
+A new handler must also be added in `WebViewContainer.dismantleNSView`, the cached-webView reattach block, and `doReconnect` if it needs per-shim rewiring.
 
-2. **VSCode API stub** -- Defines `window.acquireVsCodeApi()` which the CC extension calls to get its messaging API. The stub bridges `postMessage` to `window.webkit.messageHandlers.vscodeHost.postMessage`.
+### History replay
 
-### Script Message Handlers
+`--resume` reconnects the CLI to a session but does not replay history to stdout. Canopy reads the JSONL transcript (`ClaudeSessionHistory`), walks the `parentUuid` chain back from the leaf, and delivers the messages with a synchronous `dispatchEvent(new MessageEvent(...))` so React batches them into one render. `window.postMessage` would render progressively. For an attached pane the daemon does the read and sends the replay on the session connection, fitted under `mirrorReplayMaxBytes`.
 
-| Handler Name | Class | Purpose |
-|-------------|-------|---------|
-| `vscodeHost` | `WebViewMessageHandler` | Protocol messages (init, auth, launch, IO) |
-| `consoleLog` | `ConsoleLogHandler` | JS console output -> os_log |
+## Known Limitations
 
-## Known Limitations and Workarounds
-
-### No loadHTMLString
-
-As described above, `loadHTMLString` cannot load local file resources. The workaround is writing an HTML file to disk and using `loadFileURL`.
-
-### Timeline CSS Fix
-
-The CC extension's CSS assumes a specific DOM nesting that differs slightly when rendered outside VSCode. The `::after` pseudo-elements used for timeline connecting lines need `bottom: -15px !important` to bridge a gap.
-
-### --bare Flag
-
-The `--bare` CLI flag skips keychain/OAuth authentication. It must NOT be used, as it breaks authentication.
-
-### Content Array to String Conversion
-
-The webview sends user messages with content as an array of blocks (`[{type:"text", text:"..."}]`), but the CLI's stream-json input expects content as a plain string. `WebViewMessageHandler` converts content arrays to joined text before forwarding.
-
-### Auth Timing
-
-Auth status is fetched asynchronously on init. If the webview's `init` request arrives before auth completes, the response will show unauthenticated state. The cached auth is available for subsequent `get_claude_state` requests.
-
-### Session Resume Does Not Replay CLI History
-
-The `--resume` CLI flag reconnects to a session but does not replay history to stdout. Canopy reads the JSONL file directly and replays messages to the webview via `dispatchEvent`. This is the same approach as the VSCode extension (which also reads JSONL directly rather than relying on CLI output).
-
-### dispatchEvent vs postMessage for History Replay
-
-`window.postMessage()` is asynchronous — each call creates a separate microtask, causing React to re-render after each message (progressive rendering). `window.dispatchEvent(new MessageEvent('message', {data}))` is synchronous — all handlers fire inline within the same JS task, allowing React to batch all state updates into a single render. This makes history replay appear instant.
-
-### No Dark Mode
-
-Only the light theme is currently supported. Adding dark mode requires exporting a second set of CSS variables from VSCode's dark theme and switching based on system appearance.
+- **Light theme only.** There is no dark mode.
+- **SSH remote** renders no transcript replay, and `@` mentions read local files.
+- **A Debug build cannot reproduce the firewall drop** that `MirrorRelay` works around; a Debug end-to-end run proves the relay switch-over only.
+- **Extension DOM class-name suffixes churn between versions.** New selectors should match by shape (role, rect, border-radius), not by an exact class name.

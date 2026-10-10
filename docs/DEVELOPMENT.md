@@ -7,26 +7,37 @@ Guide for developing and contributing to Canopy.
 ### Prerequisites
 
 - macOS 15.0+
-- Xcode with macOS 15+ SDK
+- Xcode 26 toolchain (Xcode 16.4 fails with actor-isolation errors; `SWIFT_VERSION: "6.0"` is the language mode, not the compiler)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - Node.js >= 18 (for vscode-shim; `mise`, `nvm`, or `nodejs.org`)
-- Claude Code VSCode extension installed (for webview assets)
+- Claude Code VSCode extension, either installed in VSCode or in Canopy's own folder (see "Claude Code extension not found" below)
 - Claude CLI installed and authenticated
 
 ### Building
 
 ```bash
-# Generate Xcode project from project.yml
-xcodegen generate
-
-# Build from command line
-xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
-
-# Run
+# Debug build signed with an Apple Development identity, so TCC grants persist across rebuilds
+./scripts/build_debug_stable.sh
 open build/Build/Products/Debug/Canopy.app
 ```
 
-Or open `Canopy.xcodeproj` in Xcode, select the Canopy scheme, and run (Cmd+R).
+Without that signing identity, use plain `xcodebuild`:
+
+```bash
+xcodegen generate
+xcodebuild -scheme Canopy -configuration Debug -derivedDataPath build build
+```
+
+Do not use ad-hoc signing (`CODE_SIGN_IDENTITY="-"`) for interactive development: it re-triggers the TCC prompts on every launch.
+
+`project.yml` is the source of truth and `Canopy.xcodeproj` is gitignored. Run `xcodegen generate` after editing `project.yml`; an Xcode GUI build does not regenerate it.
+
+### Debug beside Release
+
+The Debug build has its own bundle id, so it runs next to the installed app with its own daemon, socket and LaunchAgent. Two things are shared between the builds:
+
+- `~/Library/Application Support/Canopy/`, including `settings.json`
+- the `Logger` subsystem `sh.saqoo.Canopy`
 
 ### Project Configuration
 
@@ -91,32 +102,38 @@ To support dark mode:
 
 ### os_log (Unified Logging)
 
-All Swift-side logging uses `os.log.Logger` with subsystem `sh.saqoo.Canopy`. Each source file has its own category:
+All Swift-side logging uses `os.log.Logger` with subsystem `sh.saqoo.Canopy`. Most source files have their own category, named after the file; `grep -rhn 'category:' Sources/Canopy` lists them. The ones reached for most often:
 
 | Category | Source |
 |----------|--------|
-| `AppState` | Screen transitions, session launch |
-| `CCExtension` | Extension/CLI path discovery |
-| `ShimProcess` | Node.js subprocess, NDJSON bridge, auth/permission patching |
-| `NodeDiscovery` | Node.js binary discovery and validation |
+| `ShimProcess` | Node.js subprocess, NDJSON bridge, trackers |
+| `CanopyDaemon`, `DaemonSupervisor`, `DaemonRegistration` | Daemon start, registration, supervision |
+| `ControlSession`, `ControlClient`, `ControlEvents` | Control connections and the event log |
+| `MirrorServer`, `MirrorPane`, `MirrorRelay` | Session connections, attached panes, the update relay |
+| `SessionStore`, `SessionReaper` | Session registry, idle stops |
+| `SleepGuard` | Sleep assertions and lid-close handling |
+| `ExtensionUpdater`, `CCExtension` | Extension download, canary, path discovery |
 | `SessionHistory` | JSONL parsing, session listing |
-| `VSCodeStub` | Theme CSS loading |
 | `WebView` | WKWebView navigation events |
 
 **View logs in Terminal:**
 
 ```bash
 # Stream all Canopy logs
-log stream --predicate 'subsystem == "sh.saqoo.Canopy"' --info
+/usr/bin/log stream --predicate 'subsystem == "sh.saqoo.Canopy"' --info
 
 # Filter by category
-log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ClaudeProcess"' --info
+/usr/bin/log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ShimProcess"' --info
 
 # Search recent logs
-log show --predicate 'subsystem == "sh.saqoo.Canopy"' --info --last 5m
+/usr/bin/log show --predicate 'subsystem == "sh.saqoo.Canopy"' --info --last 5m
 ```
 
-The `--info` flag is required because `logger.info` messages are not shown by default.
+- Call `/usr/bin/log`: a bare `log` can hit a shell builtin.
+- The `--info` flag is required because `logger.info` messages are not shown by default. `info` is a short ring buffer, so anything read later must be logged at `notice`.
+- `debug` is never stored. `log show --debug` returns nothing; use `log stream --level debug`.
+- The GUI, the daemon, Debug and Release all log as process `Canopy` under one subsystem. Filter one process with `Canopy[<pid>`.
+- String interpolations show as `<private>` unless marked `privacy: .public`.
 
 Note: `print()` does not work when the app is launched via `open` command or Finder. Always use `Logger` for logging.
 
@@ -146,11 +163,22 @@ Uncaught errors and unhandled promise rejections are also captured.
 
 ```bash
 # Watch shim subprocess logs (Node.js stderr + message routing)
-log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ShimProcess"' --info
+/usr/bin/log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ShimProcess"' --info
 
 # Watch Node.js discovery
-log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "NodeDiscovery"' --info
+/usr/bin/log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "NodeDiscovery"' --info
 ```
+
+### Daemon
+
+This Mac's sessions run in the daemon, so most session logs come from the daemon process, not the GUI.
+
+- A Release GUI registers the LaunchAgent on every launch. A Debug GUI registers its own agent only with `CANOPY_REGISTER_DAEMON=1`; otherwise it starts `Canopy --daemon` itself as a child process.
+- The Debug socket is `~/Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.debug.sock`. Point the control client at it with `scripts/canopyctl --socket <path> ...`; the default is the Release socket.
+- The Mirror TCP port exists only while Mirror is on, and Debug uses the base port + 1.
+- The logic probe (`CANOPY_RUN_LOGIC_PROBE=1`) runs sessions in-process, without a daemon.
+
+See `docs/CONTROL_PROTOCOL.md` for the wire and `docs/notes/source-files.md` for daemon hazards.
 
 ### Debug Auto-Launch (currently inert)
 
@@ -202,10 +230,11 @@ Without this flag, the CLI only outputs batched `assistant` events (complete mes
 
 ### "Claude Code extension not found"
 
-The app looks for `~/.vscode/extensions/anthropic.claude-code-*`. Make sure:
-- VSCode is installed
-- The Claude Code extension is installed in VSCode
-- The extension directory exists (check with `ls ~/.vscode/extensions/ | grep claude`)
+The app looks for `anthropic.claude-code-*` in two places and uses the newest:
+- `~/Library/Application Support/Canopy/extensions/` (Canopy's own copies; `ExtensionUpdater` installs updates here)
+- `~/.vscode/extensions/`
+
+Check with `ls ~/Library/Application\ Support/Canopy/extensions ~/.vscode/extensions | grep claude`.
 
 ### "Claude CLI not found"
 
@@ -218,13 +247,13 @@ Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
 
 ### Auth shows unauthenticated
 
-Run `claude auth login` in Terminal first. Canopy reads auth status by running `claude auth status` as a subprocess.
+Run `claude auth login` in Terminal first. Canopy reads the CLI's OAuth item from the login Keychain (`KeychainAuth`); an item without `scopes` is treated as logged out. A session on an additional account reads the item for that account's `CLAUDE_CONFIG_DIR`.
 
 ### Webview is blank or shows errors
 
 1. Open Safari Web Inspector (Develop > Canopy) to check for JS errors
-2. Check os_log: `log stream --predicate 'subsystem == "sh.saqoo.Canopy"' --info`
-3. Verify the extension's webview files exist: `ls ~/.vscode/extensions/anthropic.claude-code-*/webview/`
+2. Check os_log: `/usr/bin/log stream --predicate 'subsystem == "sh.saqoo.Canopy"' --info`
+3. Verify the extension's webview files exist: `ls <extension folder>/webview/`
 
 ### Theme looks wrong
 
@@ -235,7 +264,7 @@ If CSS variables are missing or incorrect:
 
 ### CLI process hangs or doesn't respond
 
-Check shim stderr output: `log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ShimProcess"' --info`
+Check shim stderr output: `/usr/bin/log stream --predicate 'subsystem == "sh.saqoo.Canopy" AND category == "ShimProcess"' --info`
 
 The CLI may be waiting for authentication or hitting rate limits.
 
@@ -270,12 +299,17 @@ node Resources/vscode-shim/index.js \
 ### Running tests
 
 ```bash
-# Unit tests — fast, no external deps
-node --test test/shim-unit.test.js
+# Unit tests — fast, no external deps; the list CI runs
+node --test $(sed -n 's/.*CI_TEST_FILES: "\(.*\)"/\1/p' .github/workflows/ci.yml)
 
 # Integration tests — spawns real extension.js, needs CC extension installed
 node --test --test-timeout 120000 test/shim-integration.test.js
+
+# Swift logic probe, ~3 s
+CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy
 ```
+
+Every file under `test/` must appear in one of `CI_TEST_FILES`, `EXCLUDED_TEST_FILES` or `NON_TEST_FILES` in `.github/workflows/ci.yml`, and CI asserts count floors. See `docs/notes/testing.md`.
 
 ### Shim module structure
 
@@ -291,6 +325,8 @@ node --test --test-timeout 120000 test/shim-integration.test.js
 | `notifications.js` | show*Message with 60s timeout + response routing |
 | `env.js` | appName, machineId, clipboard, openExternal |
 | `stubs.js` | Proxy-based unknown API detection, module assembly |
+| `cjk-emphasis.js`, `cjk-emphasis-stream.js` | Repair of CJK bold markup in the outgoing stream |
+| `keychain-login-guard.js` | Reports a damaged Keychain login as logged out |
 
 ### Debugging the shim
 
