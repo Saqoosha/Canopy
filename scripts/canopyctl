@@ -9,6 +9,7 @@ import json
 import os
 import socket
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -16,8 +17,12 @@ DEFAULT_SOCK = (
     Path.home()
     / "Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.sock"
 )
-# wait_turn polls for 60s; the read has to outlast that.
+# wait_turn polls for 60s; the read has to outlast that. A listen also hears a
+# heartbeat every 30s, so --follow treats 90s of silence as a dead connection.
 READ_TIMEOUT = 90.0
+# --follow: each listen's own timeout, and the reconnect backoff ceiling.
+FOLLOW_LISTEN_TIMEOUT = 300
+FOLLOW_MAX_BACKOFF = 30.0
 LISTEN_EVENTS = {
     "turn_done",
     "permission",
@@ -125,8 +130,24 @@ def main(argv):
     listen_p.add_argument(
         "--timeout", type=float, default=300, help="seconds (max 3600)"
     )
+    listen_p.add_argument(
+        "--follow",
+        action="store_true",
+        help="keep listening: one JSON line per event, reconnecting with the "
+        "same cursor when the daemon goes away; --timeout is ignored",
+    )
+    listen_p.add_argument(
+        "--cursor-file",
+        dest="cursor_file",
+        help="read the starting cursor from this file (unless --since) and "
+        "write each new cursor back to it",
+    )
 
     args = parser.parse_args(argv)
+    if args.cmd == "listen" and args.follow:
+        return follow(args)
+    if args.cmd == "listen" and args.cursor_file and not args.since:
+        args.since = read_cursor(args.cursor_file)
     verb, params = build(args)
     read_timeout = READ_TIMEOUT
     if args.cmd == "listen":
@@ -150,9 +171,74 @@ def main(argv):
         return 1
     if args.cmd == "wait" and body.get("turnDone") is not True:
         return 1
+    if args.cmd == "listen" and args.cursor_file and body.get("cursor"):
+        sys.stdout.flush()
+        write_cursor(args.cursor_file, body["cursor"])
     if args.cmd == "listen" and body.get("timedOut") is True:
         return 3
     return 0
+
+
+def follow(args):
+    """listen in a loop. Exits 1 on a refused hello or an error response,
+    130 on Ctrl-C; never on a timeout or a lost connection."""
+    try:
+        return follow_loop(args)
+    except KeyboardInterrupt:
+        return 130
+
+
+def follow_loop(args):
+    cursor = args.since or (read_cursor(args.cursor_file) if args.cursor_file else None)
+    backoff = 1.0
+    while True:
+        args.since = cursor
+        args.timeout = FOLLOW_LISTEN_TIMEOUT
+        verb, params = build(args)
+        try:
+            result = transact(args.socket, verb, params, READ_TIMEOUT)
+        except HelloRefused as exc:
+            print(f"canopyctl: {exc}", file=sys.stderr)
+            return 1
+        except socket.timeout:
+            # A daemon without heartbeats is silent for a whole quiet listen: ask again at once.
+            print(f"canopyctl: nothing for {READ_TIMEOUT:.0f}s; listening again", file=sys.stderr)
+            backoff = 1.0
+            continue
+        except (OSError, ValueError) as exc:
+            print(f"canopyctl: {exc}; reconnecting in {backoff:.0f}s", file=sys.stderr)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, FOLLOW_MAX_BACKOFF)
+            continue
+        backoff = 1.0
+        body = result.get("result") if isinstance(result.get("result"), dict) else None
+        if "error" in result or body is None:
+            json.dump(result, sys.stdout, ensure_ascii=False)
+            sys.stdout.write("\n")
+            return 1
+        if body.get("timedOut") is not True:
+            json.dump(result, sys.stdout, ensure_ascii=False)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        # Only after the event is out, so a restarted follower never skips one.
+        if body.get("cursor"):
+            cursor = body["cursor"]
+            if args.cursor_file:
+                write_cursor(args.cursor_file, cursor)
+
+
+def read_cursor(path):
+    try:
+        return Path(path).read_text(encoding="utf-8").strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def write_cursor(path, cursor):
+    """Replaced whole, so a reader never sees half a cursor."""
+    tmp = f"{path}.tmp-{os.getpid()}"
+    Path(tmp).write_text(cursor + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def as_seconds(value):
@@ -347,4 +433,11 @@ def send_line(sock, obj):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        code = main(sys.argv[1:])
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader went away. Point stdout at /dev/null so the exit flush cannot fail again.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        code = 1
+    sys.exit(code)

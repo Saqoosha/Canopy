@@ -49,6 +49,7 @@ final class DaemonReaper {
                     model: session.statusBar.model, messageCount: session.statusBar.messageCount,
                     permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id))
             }
+            ControlEventLog.shared.noteClosing(session.id, reason: .reaped)
             store.closeSession(session.id, keepingFailure: false)
         }
     }

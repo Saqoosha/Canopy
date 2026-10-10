@@ -1470,9 +1470,8 @@ enum PaneWindowSizer {
     /// The single sidebar-width measurement shared by ALL consumers — the
     /// sizer (`applyForCurrentPanes`), the click monitor's hit-testing,
     /// quit-time frame normalization, and
-    /// `SessionStore.normalizePaneWeightsToVisualWidths`. Trusts any
-    /// laid-out split view verbatim: a measured 0 means the user really
-    /// collapsed the sidebar, and treating it as 280 would shift pane
+    /// `SessionStore.normalizePaneWeightsToVisualWidths`. Trusts a collapsed
+    /// sidebar as 0 — treating it as 280 would shift pane
     /// hit-tests right by the phantom sidebar (click pane N → focus pane
     /// N−1, Cmd+W closes the wrong pane) or inflate the sizer's window
     /// target by 280 pt per pane operation. The `split.frame.width > 0`
@@ -1484,11 +1483,15 @@ enum PaneWindowSizer {
     /// where the sizer distrusted a collapsed sidebar (assumed 280) while
     /// weight normalization trusted it made every pane add/close drift
     /// the window ~280 pt wider whenever the sidebar was collapsed.
+    ///
+    /// Collapse is read from `isHidden` / `isSubviewCollapsed`, not the frame:
+    /// a collapsed sidebar keeps its last width (measured, macOS 27).
     @MainActor
     static func measuredSidebarWidthTrustingCollapse(in window: NSWindow) -> CGFloat {
         guard let split = findSplitView(in: window), split.frame.width > 0,
               let sidebar = split.arrangedSubviews.first
         else { return assumedSidebarWidth }
+        if sidebar.isHidden || split.isSubviewCollapsed(sidebar) { return 0 }
         return sidebar.frame.width
     }
 

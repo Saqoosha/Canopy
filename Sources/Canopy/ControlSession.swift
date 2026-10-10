@@ -20,6 +20,12 @@ final class ControlSession {
     private var stopped = false
     /// Open `listen` requests on this connection, by request id.
     private var listens: [String: (waiter: UUID, cursor: ControlEventCursor, timeout: DispatchWorkItem)] = [:]
+    /// Runs while `listens` is not empty, so a client parked on a listen can
+    /// tell a quiet daemon from a dead connection.
+    private var heartbeat: Timer?
+
+    /// Well inside the 90 s read timeout `canopyctl listen --follow` uses.
+    static let heartbeatInterval: TimeInterval = 30
 
     /// `ShimProcess` is not `@Observable`, so a client attaching or a shim
     /// dying changes a row without waking the observation tracker. This
@@ -39,6 +45,8 @@ final class ControlSession {
         recheck?.invalidate()
         recheck = nil
         for id in Array(listens.keys) { endListen(id) }
+        heartbeat?.invalidate()
+        heartbeat = nil
     }
 
     func handle(_ dict: [String: Any]) {
@@ -224,6 +232,7 @@ final class ControlSession {
             }
         }
         listens[id] = (waiter, start, timeout)
+        updateHeartbeat()
         DispatchQueue.main.asyncAfter(deadline: .now() + params.timeout, execute: timeout)
     }
 
@@ -279,6 +288,21 @@ final class ControlSession {
         guard let entry = listens.removeValue(forKey: id) else { return }
         ControlEventLog.shared.removeWaiter(entry.waiter)
         entry.timeout.cancel()
+        updateHeartbeat()
+    }
+
+    private func updateHeartbeat() {
+        if listens.isEmpty || stopped {
+            heartbeat?.invalidate()
+            heartbeat = nil
+        } else if heartbeat == nil {
+            heartbeat = Timer.scheduledTimer(withTimeInterval: Self.heartbeatInterval, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, !self.stopped else { return }
+                    self.send(["type": "heartbeat", "at": Date().timeIntervalSince1970])
+                }
+            }
+        }
     }
 
     private func listSessions(_ request: ControlProtocol.Request) {
@@ -563,6 +587,7 @@ final class ControlSession {
         guard let session = requestedSession(request) else { return }
         // Resumed since its reap and named here by its new key: the old entry goes too.
         ReapedSessions.shared.remove([.resumeId(session.resumeId.lowercased())])
+        ControlEventLog.shared.noteClosing(session.id, reason: .stopped)
         store.closeSession(session.id, keepingFailure: false, mirrorEndReason: MirrorOpenRequest.stoppedByClient)
         reply(request, ["ok": true])
     }
