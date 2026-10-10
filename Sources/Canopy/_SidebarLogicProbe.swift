@@ -2499,8 +2499,40 @@ enum SidebarLogicProbe {
                 record("listen persist: a ring with a hole, or not ending at latestSeq, is refused and changes nothing",
                        !log.adopt(holed) && !log.adopt(behind)
                            && log.epoch == beforeAdopt.0 && log.latestSeq == beforeAdopt.1 && log.events == beforeAdopt.2)
-                record("listen persist: a consistent ring is adopted, epoch and all",
-                       log.adopt(savedLog) && log.epoch == savedLog.epoch && log.latestSeq == savedLog.latestSeq)
+                var moved = savedLog
+                moved.epoch = "probe-e2"
+                moved.latestSeq = savedLog.latestSeq + 5
+                moved.events = Array(savedLog.events.suffix(3).enumerated().map { index, event in
+                    var event = event
+                    event.seq = moved.latestSeq - 2 + index
+                    return event
+                })
+                record("listen persist: a consistent ring is adopted, epoch, seq and events all",
+                       log.adopt(moved) && log.epoch == "probe-e2" && log.latestSeq == moved.latestSeq
+                           && log.events == moved.events)
+                log.adopt(savedLog)
+                let savedFile = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("canopy-probe-events-\(UUID().uuidString).json")
+                log.save(to: savedFile)
+                let savedMode = (try? FileManager.default.attributesOfItem(atPath: savedFile.path))?[.posixPermissions] as? Int
+                let savedBack = (try? Data(contentsOf: savedFile)).flatMap { try? JSONDecoder().decode(ControlEventLog.Saved.self, from: $0) }
+                record("listen persist: save writes an owner-only file that decodes to the ring",
+                       savedMode == 0o600 && savedBack == savedLog)
+                log.restoreSaved(from: savedFile)
+                record("listen persist: restore refuses once events were recorded, and leaves the file",
+                       log.epoch == savedLog.epoch && FileManager.default.fileExists(atPath: savedFile.path))
+                try? FileManager.default.removeItem(at: savedFile)
+                let shutdownStore = SessionStore()
+                let goingA = OpenSession(origin: .local(URL(fileURLWithPath: "/tmp/probe/sd")), resumeId: "sd-a", title: "A", project: "P")
+                let goingB = OpenSession(origin: .local(URL(fileURLWithPath: "/tmp/probe/sd")), resumeId: "sd-b", title: "B", project: "P")
+                shutdownStore._probeSeedOpenSessions([goingA, goingB])
+                log.track(shutdownStore)
+                log.recordShutdown(resuming: [goingA.id.uuidString])
+                let shutdownCloses = log.events.suffix(2).map(\.wire)
+                record("listen shutdown: every open session closes with daemon_restart, resumes only for the carried ones",
+                       shutdownCloses.map { $0["key"] as? String } == [goingA.id.uuidString, goingB.id.uuidString]
+                           && shutdownCloses.allSatisfy { $0["reason"] as? String == "daemon_restart" }
+                           && shutdownCloses.map { $0["resumes"] as? Bool } == [true, false])
                 record("listen params: a JSON null is the same as leaving the param out",
                        listenParse(["since": NSNull(), "addressedTo": NSNull(), "timeout": NSNull()])
                            == listenParse([:]))
@@ -2598,6 +2630,9 @@ enum SidebarLogicProbe {
                     """.utf8))
                 record("held restore: an entry written before the flags existed still decodes, flags absent",
                        legacyHeld != nil && legacyHeld?.heldByPhone == nil && legacyHeld?.openedByControl == nil)
+                record("held restore: a legacy entry restores as the phone's, not the control API's",
+                       legacyHeld?.holders.phone == true && legacyHeld?.holders.control == false
+                           && captured.entries.last?.holders.phone == false && captured.entries.last?.holders.control == true)
                 let heldFile = FileManager.default.temporaryDirectory
                     .appendingPathComponent("canopy-probe-held-\(UUID().uuidString).json")
                 captured.save(to: heldFile)
@@ -2609,6 +2644,13 @@ enum SidebarLogicProbe {
                        DaemonHeldSessions.consume(from: heldFile,
                                                   now: heldNow + DaemonHeldSessions.maxAge + 1) == nil
                            && !FileManager.default.fileExists(atPath: heldFile.path))
+                captured.save(to: heldFile)
+                var droppedKeys: [String] = []
+                _ = DaemonHeldSessions.consume(from: heldFile, now: heldNow + DaemonHeldSessions.maxAge + 1) {
+                    droppedKeys = $0.entries.map(\.key)
+                }
+                record("held restore: a stale file's sessions are handed back so each can be reported",
+                       droppedKeys == captured.entries.map(\.key))
                 DaemonHeldSessions(entries: [], savedAt: heldNow).save(to: heldFile)
                 record("held restore: nothing held writes no file",
                        !FileManager.default.fileExists(atPath: heldFile.path))

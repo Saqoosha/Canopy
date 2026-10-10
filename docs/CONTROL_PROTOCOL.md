@@ -377,6 +377,7 @@ when the CLI had not echoed it yet.
 | `stopped` | `stop_session`, which the Mac's Stop also sends |
 | `reaped` | The reaper stopped it: no client attached and idle for 15 minutes |
 | `daemon_restart` | The daemon is shutting down (an update, Restart now, launchd, SIGTERM); recorded for every open session just before it exits. `resumes: true` when the next daemon will reopen it (below) |
+| `restore_failed` | Recorded by the next daemon for a session it said `resumes` for and could not reopen |
 | `other` | Removed by a path that did not say why |
 
 Result on timeout:
@@ -386,7 +387,8 @@ Result on timeout:
 ```
 
 Pass `cursor` as the next `since` in both cases. The part before the dot
-changes each daemon launch; a cursor from an earlier launch returns
+changes when a daemon starts without a saved log (after a crash; a clean
+restart keeps it, below); a cursor from an earlier epoch returns
 `{"event":"gap","reason":"daemon_restarted"}` at once, and its `cursor`
 resumes at the oldest event the new daemon holds. `reason: "overflow"` means
 the ring wrapped past the cursor; `"unknown_cursor"` means the cursor is
@@ -402,13 +404,16 @@ saved nothing, and a cursor from it returns `gap` `daemon_restarted` as
 before. The saved log is owner-only (it holds prompts and replies) and is
 read once.
 
-Sessions opened or resumed through `open_session`, and those the phone
-opened, come back under the same `key`, their CLI resumed with `--resume`:
+Sessions `open_session` started (opened new, or resumed when not already
+open), and those the phone opened, come back under the same `key`:
 `session_closed` says `resumes: true`, and the new daemon records
-`session_opened` with `reason: "restored"`. A session opened less than a turn
-ago (no transcript yet) cannot be resumed and does not come back, nor does
-anything after more than 10 minutes down. Others, a Mac pane's included, come
-back when their client re-attaches.
+`session_opened` with `reason: "restored"`. Its shim is running; the CLI
+resumes the transcript (`--resume`) on the next attach or `send_message`. A
+session it cannot bring back (it fails to start, or the daemon was down more
+than 10 minutes) gets `session_closed` with `reason: "restore_failed"`. A
+session opened less than a turn ago (no transcript yet) cannot be resumed and
+says `resumes: false`. Others, a Mac pane's included, come back when their
+client re-attaches.
 
 While a connection has a `listen` open, the daemon sends
 `{"type":"heartbeat","at":<seconds>}` on it every 30 s. It answers no
