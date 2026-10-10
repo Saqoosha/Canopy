@@ -39,8 +39,9 @@ final class ControlClient {
         }
     }
 
-    /// The rows, and whether every row in the push could be read.
-    var onSessionState: (([ControlProtocol.SessionRow], Bool) -> Void)?
+    /// The rows, whether every row in the push could be read, and the reaped
+    /// sessions whose rows stay (empty from a daemon that predates `reaped`).
+    var onSessionState: (([ControlProtocol.SessionRow], Bool, Set<String>) -> Void)?
     var onUpgradeState: ((UpgradeState) -> Void)?
 
     private let endpoint: MirrorEndpoint
@@ -216,7 +217,7 @@ final class ControlClient {
         case "session_state":
             let (rows, complete) = Self.parseSessionState(dict)
             if !complete { logger.error("incomplete session_state from the daemon; keeping rows it did not list") }
-            onSessionState?(rows, complete)
+            onSessionState?(rows, complete, Set(dict["reaped"] as? [String] ?? []))
         case DaemonUpgrade.stateFrameType:
             guard let wire = dict["state"] as? [String: Any], let state = UpgradeState(wire: wire) else {
                 logger.error("unreadable upgrade_state from the daemon")

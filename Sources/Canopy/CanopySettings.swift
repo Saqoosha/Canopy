@@ -79,6 +79,26 @@ final class CanopySettings {
     var sleepBatteryFloorPercent: Int = SleepGuardPolicy.defaultBatteryFloorPercent {
         didSet { save() }
     }
+
+    /// Minutes an idle session with no window on it keeps running before the daemon
+    /// stops it (`DaemonReaper`); 0 means never. Its row stays in Open either way.
+    var sessionIdleLimitMinutes: Int = CanopySettings.defaultSessionIdleLimitMinutes {
+        didSet { save() }
+    }
+    static let defaultSessionIdleLimitMinutes = 240
+    /// What Settings offers; a hand-edited value outside it still works.
+    static let sessionIdleLimitChoices = [15, 60, 240, 720, 0]
+
+    static func idleLimitLabel(_ minutes: Int) -> String {
+        if minutes <= 0 { return "Never" }
+        if minutes % 60 == 0 { return minutes == 60 ? "1 hour" : "\(minutes / 60) hours" }
+        return "\(minutes) minutes"
+    }
+
+    /// nil when sessions are never stopped.
+    var sessionIdleLimit: TimeInterval? {
+        sessionIdleLimitMinutes > 0 ? TimeInterval(sessionIdleLimitMinutes * 60) : nil
+    }
     /// Which pad this Canopy drives: none, the local USB one, or a bridge on
     /// another Mac. Replaces the old `macroPadEnabled` boolean, which is read
     /// once at load for migration and then never written again.
@@ -216,6 +236,7 @@ final class CanopySettings {
         set(\.preventSleepWhileWorking, dict["canopy.preventSleepWhileWorking"] as? Bool)
         set(\.stayReachableRemotely, dict["canopy.stayReachableRemotely"] as? Bool)
         set(\.sleepBatteryFloorPercent, Self.batteryFloor(dict["canopy.sleepBatteryFloorPercent"]))
+        set(\.sessionIdleLimitMinutes, Self.idleLimit(dict["canopy.sessionIdleLimitMinutes"]))
         set(\.defaultPermissionMode, (dict["canopy.defaultPermissionMode"] as? String).flatMap(PermissionMode.init(rawValue:)))
         set(\.machineDisplayName, dict["canopy.machineDisplayName"] as? String)
         set(\.rosterEnabled, dict["canopy.rosterEnabled"] as? Bool)
@@ -264,6 +285,9 @@ final class CanopySettings {
         }
         if let floor = Self.batteryFloor(dict["canopy.sleepBatteryFloorPercent"]) {
             sleepBatteryFloorPercent = floor
+        }
+        if let limit = Self.idleLimit(dict["canopy.sessionIdleLimitMinutes"]) {
+            sessionIdleLimitMinutes = limit
         }
         let storedSourceRaw = dict["canopy.macroPadSource"] as? String
         macroPadRemoteHost = (dict["canopy.macroPadRemoteHost"] as? String) ?? ""
@@ -339,6 +363,11 @@ final class CanopySettings {
         (raw as? Int).map { min(max($0, SleepGuardPolicy.batteryFloorRange.lowerBound), SleepGuardPolicy.batteryFloorRange.upperBound) }
     }
 
+    /// A negative hand edit reads as 0 (never).
+    private static func idleLimit(_ raw: Any?) -> Int? {
+        (raw as? Int).map { max($0, 0) }
+    }
+
     private func save() {
         guard !isLoading, Self.persistsChanges else { return }
         var dict = loadCurrentDict()
@@ -351,6 +380,7 @@ final class CanopySettings {
         dict["canopy.preventSleepWhileWorking"] = preventSleepWhileWorking
         dict["canopy.stayReachableRemotely"] = stayReachableRemotely
         dict["canopy.sleepBatteryFloorPercent"] = sleepBatteryFloorPercent
+        dict["canopy.sessionIdleLimitMinutes"] = sessionIdleLimitMinutes
         dict["canopy.macroPadSource"] = macroPadSource.rawValue
         dict["canopy.macroPadRemoteHost"] = macroPadRemoteHost
         // Retire the pre-source key on the first save after migration.

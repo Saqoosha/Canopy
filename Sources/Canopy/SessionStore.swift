@@ -1437,14 +1437,15 @@ final class SessionStore {
     }
 
     /// Brings the open local sessions in line with the daemon's list.
-    func applyDaemonSessions(_ rows: [ControlProtocol.SessionRow], complete: Bool = true) {
+    func applyDaemonSessions(_ rows: [ControlProtocol.SessionRow], complete: Bool = true, reaped: Set<String> = []) {
         let paned = Set(panes.compactMap { pane -> OpenSession.ID? in
             if case .session(let id) = pane.content { return id }
             return nil
         })
         let local = openSessions.filter(\.isDaemonHosted)
         let plan = DaemonSessionSync.plan(rows: rows, local: local.map {
-            .init(id: $0.id, key: $0.daemonKey, resumeId: $0.resumeId, isPaned: paned.contains($0.id))
+            .init(id: $0.id, key: $0.daemonKey, resumeId: $0.resumeId, isPaned: paned.contains($0.id),
+                  wasReaped: reaped.contains($0.resumeId))
         }, complete: complete)
         for update in plan.updates {
             guard let session = openSessions.first(where: { $0.id == update.id }) else { continue }
@@ -1490,8 +1491,17 @@ final class SessionStore {
             session.daemonKey = key
             openSessions.append(session)
         }
+        for id in plan.reaped {
+            // Stopped by the reaper to free memory: the row stays, and a click resumes it.
+            guard let session = openSessions.first(where: { $0.id == id }) else { continue }
+            session.daemonKey = nil
+            session.resumeIdIsExistingTranscript = true
+            session.isThinking = false
+            session.isAsking = false
+            session.isWaiting = false
+        }
         for id in plan.removes {
-            // Stopped elsewhere (another client, the reaper): there is nothing left to attach to.
+            // Stopped elsewhere (another client, canopyctl): there is nothing left to attach to.
             closeSession(id, keepingFailure: false, removeRow: true)
         }
     }

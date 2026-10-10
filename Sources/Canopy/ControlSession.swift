@@ -14,7 +14,7 @@ final class ControlSession {
     /// On this Mac's local socket (the GUI), not a TCP client with the mirror password.
     private let isLocal: Bool
     private var subscribed = false
-    private var lastPushed: [ControlProtocol.SessionRow]?
+    private var lastPushed: PushState?
     private var lastUpgradeState: UpgradeState?
     private var recheck: Timer?
     private var stopped = false
@@ -555,7 +555,10 @@ final class ControlSession {
     }
 
     private func stopSession(_ request: ControlProtocol.Request) {
+        // A Stop ends a reaped session's kept row too; a reaped one answers "no such session".
+        for case .resumeId(let id) in ControlProtocol.sessionRefs(request.params) { ReapedSessions.shared.remove(id) }
         guard let session = requestedSession(request) else { return }
+        ReapedSessions.shared.remove(session.resumeId)
         store.closeSession(session.id, keepingFailure: false, mirrorEndReason: MirrorOpenRequest.stoppedByClient)
         reply(request, ["ok": true])
     }
@@ -652,8 +655,20 @@ final class ControlSession {
         trackOpenSessions()
         if isLocal { trackUpgradeState() }  // only this Mac's GUI shows it
         recheck = Timer.scheduledTimer(withTimeInterval: Self.recheckInterval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.pushIfChanged(self?.openRows() ?? []) }
+            MainActor.assumeIsolated { if let self { self.pushIfChanged(self.pushState()) } }
         }
+    }
+
+    private struct PushState: Equatable {
+        let rows: [ControlProtocol.SessionRow]
+        /// Reaped sessions not running again, whose rows a GUI keeps (`ReapedSessions`).
+        let reaped: [String]
+    }
+
+    private func pushState() -> PushState {
+        let rows = openRows()
+        let running = Set(rows.map(\.resumeId))
+        return PushState(rows: rows, reaped: ReapedSessions.shared.ids.filter { !running.contains($0) })
     }
 
     private func openRows() -> [ControlProtocol.SessionRow] {
@@ -673,12 +688,12 @@ final class ControlSession {
     /// `AppDelegate.trackMirrorSettings`.
     private func trackOpenSessions() {
         guard !stopped else { return }
-        let rows = withObservationTracking {
-            openRows()
+        let state = withObservationTracking {
+            pushState()
         } onChange: { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.trackOpenSessions() } }
         }
-        pushIfChanged(rows)
+        pushIfChanged(state)
     }
 
     /// Re-armed from its own `onChange`, like `trackOpenSessions`.
@@ -694,10 +709,10 @@ final class ControlSession {
         send(["type": DaemonUpgrade.stateFrameType, "state": state.wire])
     }
 
-    private func pushIfChanged(_ rows: [ControlProtocol.SessionRow]) {
-        guard !stopped, rows != lastPushed else { return }
-        lastPushed = rows
-        send(["type": "session_state", "sessions": rows.map(\.wire)])
+    private func pushIfChanged(_ state: PushState) {
+        guard !stopped, state != lastPushed else { return }
+        lastPushed = state
+        send(["type": "session_state", "sessions": state.rows.map(\.wire), "reaped": state.reaped])
     }
 
     // MARK: - Replies

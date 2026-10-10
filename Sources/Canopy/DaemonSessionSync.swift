@@ -10,6 +10,8 @@ enum DaemonSessionSync {
         /// A paned session is never removed by a push: its pane shows the drop,
         /// and Retry resumes it if the daemon lost it (a restart, a stop elsewhere).
         let isPaned: Bool
+        /// The reaper stopped it (`ReapedSessions`): the row stays, dormant, and resumes on click.
+        var wasReaped = false
     }
 
     struct Update: Equatable {
@@ -21,6 +23,8 @@ enum DaemonSessionSync {
         var updates: [Update] = []
         var adds: [ControlProtocol.SessionRow] = []
         var removes: [UUID] = []
+        /// Unpaned, gone from the daemon, and reaped: kept as a stopped row.
+        var reaped: [UUID] = []
     }
 
     /// A row and a local session are the same when their keys match, or else when
@@ -47,7 +51,9 @@ enum DaemonSessionSync {
             }
         }
         if complete {
-            plan.removes = local.filter { !matched.contains($0.id) && !$0.isPaned }.map(\.id)
+            let gone = local.filter { !matched.contains($0.id) && !$0.isPaned }
+            plan.removes = gone.filter { !$0.wasReaped }.map(\.id)
+            plan.reaped = gone.filter(\.wasReaped).map(\.id)
         }
         return plan
     }

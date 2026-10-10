@@ -8,12 +8,10 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "DaemonReape
 @MainActor
 final class DaemonReaper {
     private let store: SessionStore
-    private let limit: TimeInterval
     private var timer: Timer?
 
-    init(store: SessionStore, limit: TimeInterval = SessionReaper.defaultIdleLimit) {
+    init(store: SessionStore) {
         self.store = store
-        self.limit = limit
     }
 
     func start() {
@@ -29,12 +27,19 @@ final class DaemonReaper {
     }
 
     private func tick() {
+        // Read per tick: the GUI changes it in settings.json, which the daemon re-reads.
+        guard let limit = CanopySettings.shared.sessionIdleLimit else { return }
         let now = Date()
         for session in store.openSessions {
             guard let shim = session.shim else { continue }
             let inputs = shim.reaperInputs
             guard SessionReaper.shouldReap(inputs, now: now, limit: limit) else { continue }
             logger.notice("reaping \(session.resumeId, privacy: .public): quiet \(Int(now.timeIntervalSince(inputs.quietSince)))s with no client")
+            // With no transcript there is nothing to resume, so its row may go.
+            if case .local(let dir) = session.origin,
+               session.resumeIdIsExistingTranscript || ClaudeSessionHistory.sessionFileExists(id: session.resumeId, directory: dir) {
+                ReapedSessions.shared.insert(session.resumeId)
+            }
             store.closeSession(session.id, keepingFailure: false)
         }
     }

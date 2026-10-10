@@ -457,7 +457,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         guard daemonControl == nil else { return }
         let client = ControlClient(endpoint: .unix(path: DaemonPaths.current), token: nil)
-        client.onSessionState = { [weak store] rows, complete in store?.applyDaemonSessions(rows, complete: complete) }
+        client.onSessionState = { [weak store] rows, complete, reaped in
+            store?.applyDaemonSessions(rows, complete: complete, reaped: reaped)
+        }
         client.onUpgradeState = { state in
             PendingUpdate.shared.state = state
             // A daemon running the build it was waiting for means the restart landed.

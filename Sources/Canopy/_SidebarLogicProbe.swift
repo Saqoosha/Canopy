@@ -2482,7 +2482,7 @@ enum SidebarLogicProbe {
                 func reapInputs(clients: Int, busy: Bool, quietFor: TimeInterval) -> SessionReaper.Inputs {
                     SessionReaper.Inputs(attachedClients: clients, isBusy: busy, quietSince: reapT0.addingTimeInterval(-quietFor))
                 }
-                record("reaper: the default limit is 15 minutes", reapLimit == 15 * 60)
+                record("reaper: the default limit is 4 hours", reapLimit == 4 * 3600)
                 record("reaper: quiet exactly the limit with no client is reaped",
                        SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: reapLimit), now: reapT0, limit: reapLimit))
                 record("reaper: one second short of the limit is kept",
@@ -2814,6 +2814,34 @@ enum SidebarLogicProbe {
                 let partial = DaemonSessionSync.plan(
                     rows: [], local: [.init(id: b, key: "K2", resumeId: "r2", isPaned: false)], complete: false)
                 record("daemon sync: a push with unreadable rows removes nothing", partial.removes.isEmpty)
+                let reapedKept = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: "K", resumeId: "r", isPaned: false, wasReaped: true),
+                                      .init(id: b, key: "K2", resumeId: "r2", isPaned: false)])
+                record("daemon sync: a reaped session is kept, a stopped one is removed",
+                       reapedKept.reaped == [a] && reapedKept.removes == [b])
+                let reapedBack = DaemonSessionSync.plan(
+                    rows: [row("KNEW", "r")], local: [.init(id: a, key: nil, resumeId: "r", isPaned: false, wasReaped: true)])
+                record("daemon sync: a reaped row the daemon runs again is updated, not added",
+                       reapedBack.updates.map(\.id) == [a] && reapedBack.adds.isEmpty && reapedBack.reaped.isEmpty)
+                let reapedPartial = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: nil, resumeId: "r", isPaned: false, wasReaped: true)], complete: false)
+                record("daemon sync: an unreadable push marks nothing reaped", reapedPartial.reaped.isEmpty)
+
+                let reapedList = ReapedSessions(defaults: nil)
+                for i in 0...ReapedSessions.capacity { reapedList.insert("s\(i)") }
+                record("reaped sessions: capped, oldest dropped",
+                       reapedList.ids.count == ReapedSessions.capacity && reapedList.ids.first == "s1")
+                reapedList.insert("s1")
+                record("reaped sessions: re-inserting moves it to the newest end",
+                       reapedList.ids.last == "s1" && reapedList.ids.count == ReapedSessions.capacity)
+                reapedList.remove("s1")
+                record("reaped sessions: remove", !reapedList.ids.contains("s1"))
+
+                record("idle limit: labels",
+                       CanopySettings.idleLimitLabel(15) == "15 minutes" && CanopySettings.idleLimitLabel(60) == "1 hour"
+                       && CanopySettings.idleLimitLabel(240) == "4 hours" && CanopySettings.idleLimitLabel(0) == "Never")
+                record("idle limit: the default is offered in Settings",
+                       CanopySettings.sessionIdleLimitChoices.contains(CanopySettings.defaultSessionIdleLimitMinutes))
             }
             do {
                 OpenSession.localSessionsRunInDaemon = true
