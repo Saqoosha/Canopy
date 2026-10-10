@@ -171,7 +171,19 @@ private struct GeneralSettingsTab: View {
                     if let draft = floorDraft { settings.sleepBatteryFloorPercent = Int(draft); floorDraft = nil }
                 }
             } footer: {
-                SettingsFooter(text: "While a session is running a turn or is waiting for your answer, the Mac stays awake, lid closed included, so its network connection stays up and the phone or another Mac can reach it. With \"Stay reachable\" on it stays awake while any session is open, even an idle one; an idle session with no window on it is stopped after 15 minutes. A session with no activity for an hour stops counting as busy; a local background task counts until it finishes. The display can still sleep — use display sleep rather than the monitor's power button. Not on battery below the threshold. Do not put it in a bag while it is awake.")
+                SettingsFooter(text: "While a session is running a turn or is waiting for your answer, the Mac stays awake, lid closed included, so its network connection stays up and the phone or another Mac can reach it. With \"Stay reachable\" on it stays awake while any session is open, even an idle one; an idle session with no window on it is stopped after the time set below, unless that is Never. A session with no activity for an hour stops counting as busy; a local background task counts until it finishes. The display can still sleep — use display sleep rather than the monitor's power button. Not on battery below the threshold. Do not put it in a bag while it is awake.")
+            }
+
+            Section {
+                Picker("Stop idle sessions after", selection: $settings.sessionIdleLimitMinutes) {
+                    let choices = CanopySettings.sessionIdleLimitChoices
+                    ForEach(choices.contains(settings.sessionIdleLimitMinutes)
+                            ? choices : choices + [settings.sessionIdleLimitMinutes], id: \.self) { minutes in
+                        Text(CanopySettings.idleLimitLabel(minutes)).tag(minutes)
+                    }
+                }
+            } footer: {
+                SettingsFooter(text: "A session with no window on it, not running a turn and not waiting for you, is stopped after this long to free its memory (about 300-400 MB each). Its row stays in Open; click it to resume. Stop Session removes the row.")
             }
 
             Section {

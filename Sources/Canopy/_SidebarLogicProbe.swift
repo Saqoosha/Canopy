@@ -2588,11 +2588,11 @@ enum SidebarLogicProbe {
             // Canopy Server reaper.
             do {
                 let reapT0 = Date(timeIntervalSince1970: 2_000_000)
-                let reapLimit = SessionReaper.defaultIdleLimit
+                let reapLimit = TimeInterval(CanopySettings.defaultSessionIdleLimitMinutes * 60)
                 func reapInputs(clients: Int, busy: Bool, quietFor: TimeInterval) -> SessionReaper.Inputs {
                     SessionReaper.Inputs(attachedClients: clients, isBusy: busy, quietSince: reapT0.addingTimeInterval(-quietFor))
                 }
-                record("reaper: the default limit is 15 minutes", reapLimit == 15 * 60)
+                record("reaper: the default limit is 4 hours", reapLimit == 4 * 3600)
                 record("reaper: quiet exactly the limit with no client is reaped",
                        SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: reapLimit), now: reapT0, limit: reapLimit))
                 record("reaper: one second short of the limit is kept",
@@ -2945,6 +2945,75 @@ enum SidebarLogicProbe {
                 let partial = DaemonSessionSync.plan(
                     rows: [], local: [.init(id: b, key: "K2", resumeId: "r2", isPaned: false)], complete: false)
                 record("daemon sync: a push with unreadable rows removes nothing", partial.removes.isEmpty)
+                let reapedKept = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: "K", resumeId: "r", isPaned: false),
+                                      .init(id: b, key: "K2", resumeId: "r2", isPaned: false)],
+                    reaped: [row("K", "r")])
+                record("daemon sync: a reaped session is kept, a stopped one is removed",
+                       reapedKept.stopped.map(\.id) == [a] && reapedKept.removes == [b] && reapedKept.stoppedAdds.isEmpty)
+                let reapedByKey = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: "K", resumeId: "placeholder", isPaned: false)],
+                    reaped: [row("K", "real")])
+                record("daemon sync: a reaped row matches by key when the GUI still holds a placeholder id",
+                       reapedByKey.stopped == [.init(id: a, row: row("K", "real"))] && reapedByKey.removes.isEmpty)
+                let reapedUnknown = DaemonSessionSync.plan(rows: [], local: [], reaped: [row("K", "r")])
+                record("daemon sync: a reaped session the GUI has no row for is added",
+                       reapedUnknown.stoppedAdds.map(\.resumeId) == ["r"] && reapedUnknown.adds.isEmpty)
+                let reapedBack = DaemonSessionSync.plan(
+                    rows: [row("KNEW", "r")], local: [.init(id: a, key: nil, resumeId: "r", isPaned: false)],
+                    reaped: [row("KOLD", "r")])
+                record("daemon sync: a reaped row the daemon runs again is updated, not kept as stopped",
+                       reapedBack.updates.map(\.id) == [a] && reapedBack.stopped.isEmpty && reapedBack.stoppedAdds.isEmpty)
+                let reapedPaned = DaemonSessionSync.plan(
+                    rows: [], local: [.init(id: a, key: nil, resumeId: "r", isPaned: true)], reaped: [row("K", "r")])
+                record("daemon sync: a pane re-attaching a reaped session is left to the pane",
+                       reapedPaned.stopped.isEmpty && reapedPaned.stoppedAdds.isEmpty && reapedPaned.removes.isEmpty)
+
+                let reapedList = ReapedSessions(defaults: nil)
+                reapedList.insert(row("K0", "s0"))
+                reapedList.insert(row("K0b", "s0"))
+                record("reaped sessions: re-inserting replaces", reapedList.rows.map(\.key) == ["K0b"])
+                for i in 1...ReapedSessions.capacity { reapedList.insert(row("K\(i)", "s\(i)")) }
+                record("reaped sessions: capped, oldest dropped",
+                       reapedList.rows.count == ReapedSessions.capacity && reapedList.rows.first?.resumeId == "s1")
+                record("reaped sessions: removed by key or by resumeId, and a miss says so",
+                       reapedList.remove([.key("K1")]) && reapedList.remove([.resumeId("s2")])
+                       && !reapedList.remove([.resumeId("s2")])
+                       && reapedList.rows.first?.resumeId == "s3")
+                let suite = "canopy-probe-reaped-\(UUID().uuidString)"
+                if let defaults = UserDefaults(suiteName: suite) {
+                    defer { defaults.removePersistentDomain(forName: suite) }
+                    ReapedSessions(defaults: defaults).insert(row("K", "r"))
+                    record("reaped sessions: persisted across instances",
+                           ReapedSessions(defaults: defaults).rows == [row("K", "r")])
+                }
+                record("reaped wire: absent is complete and empty, unreadable is incomplete",
+                       ControlClient.parseReaped([:]).complete && ControlClient.parseReaped([:]).rows.isEmpty
+                       && !ControlClient.parseReaped(["reaped": ["r"]]).complete
+                       && ControlClient.parseReaped(["reaped": [row("K", "r").wire]]).rows == [row("K", "r")])
+
+                OpenSession.localSessionsRunInDaemon = true
+                defer { OpenSession.localSessionsRunInDaemon = false }
+                let reapStore = SessionStore()
+                let kept = OpenSession(origin: .local(URL(fileURLWithPath: "/p")), resumeId: "placeholder", title: "T", project: "p")
+                kept.daemonKey = "K"
+                kept.isThinking = true
+                let stoppedElsewhere = OpenSession(origin: .local(URL(fileURLWithPath: "/p")), resumeId: "r2", title: "T", project: "p")
+                stoppedElsewhere.daemonKey = "K2"
+                reapStore._probeSeedOpenSessions([kept, stoppedElsewhere])
+                reapStore.applyDaemonSessions([], reaped: [row("K", "real"), row("K3", "r3")])
+                record("reaped apply: the row stays, the stopped one goes, an unknown one is added",
+                       reapStore.openSessions.map(\.resumeId) == ["real", "r3"])
+                record("reaped apply: the kept row resumes on click and shows no activity",
+                       kept.daemonKey == nil && kept.daemonOpenRequest == .resume && !kept.isThinking)
+                reapStore.applyDaemonSessions([], reaped: [])
+                record("reaped apply: a Stop elsewhere then removes the kept row", reapStore.openSessions.isEmpty)
+
+                record("idle limit: labels",
+                       CanopySettings.idleLimitLabel(15) == "15 minutes" && CanopySettings.idleLimitLabel(60) == "1 hour"
+                       && CanopySettings.idleLimitLabel(720) == "12 hours" && CanopySettings.idleLimitLabel(0) == "Never")
+                record("idle limit: the default is offered in Settings",
+                       CanopySettings.sessionIdleLimitChoices.contains(CanopySettings.defaultSessionIdleLimitMinutes))
             }
             do {
                 OpenSession.localSessionsRunInDaemon = true
@@ -3117,6 +3186,19 @@ enum SidebarLogicProbe {
                                        "canopy.defaultPermissionMode": "bypassPermissions"])
                 record("settings (daemon): reload clamps bypass away when the opt-in is off",
                        settings.defaultPermissionMode == .acceptEdits)
+                let defaultLimit = CanopySettings.defaultSessionIdleLimitMinutes
+                record("idle limit: unset in the file means the default",
+                       settings.sessionIdleLimitMinutes == defaultLimit && settings.sessionIdleLimit == TimeInterval(defaultLimit * 60))
+                settings.reload(from: ["canopy.sessionIdleLimitMinutes": 60])
+                record("idle limit: reload picks up the GUI's change", settings.sessionIdleLimit == 3600)
+                settings.reload(from: ["canopy.sessionIdleLimitMinutes": 0])
+                record("idle limit: 0 means never", settings.sessionIdleLimit == nil)
+                settings.reload(from: ["canopy.sessionIdleLimitMinutes": -5])
+                record("idle limit: a negative value reads as never", settings.sessionIdleLimitMinutes == 0)
+                settings.reload(from: ["canopy.sessionIdleLimitMinutes": Int.max])
+                record("idle limit: a huge value is clamped, not overflowed", settings.sessionIdleLimit == TimeInterval(CanopySettings.maxSessionIdleLimitMinutes * 60))
+                write(#"{"canopy.sessionIdleLimitMinutes":15}"#)
+                record("idle limit: loaded from the file", CanopySettings(filePath: file).sessionIdleLimitMinutes == 15)
             }
             record("roster relay: the GUI may, Debug or not",
                    RosterPublisher.relayAllowed(isDaemon: false, isDebug: true, env: [:])

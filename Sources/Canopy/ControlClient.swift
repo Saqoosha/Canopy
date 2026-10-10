@@ -39,8 +39,9 @@ final class ControlClient {
         }
     }
 
-    /// The rows, and whether every row in the push could be read.
-    var onSessionState: (([ControlProtocol.SessionRow], Bool) -> Void)?
+    /// The rows, whether every row in the push could be read, and the reaped
+    /// sessions whose rows stay (empty from a daemon that predates `reaped`).
+    var onSessionState: (([ControlProtocol.SessionRow], Bool, [ControlProtocol.SessionRow]) -> Void)?
     var onUpgradeState: ((UpgradeState) -> Void)?
 
     private let endpoint: MirrorEndpoint
@@ -214,9 +215,11 @@ final class ControlClient {
             resumeReadyWaiters(false)
             connection?.cancel()
         case "session_state":
-            let (rows, complete) = Self.parseSessionState(dict)
+            let (rows, rowsComplete) = Self.parseSessionState(dict)
+            let (reaped, reapedComplete) = Self.parseReaped(dict)
+            let complete = rowsComplete && reapedComplete
             if !complete { logger.error("incomplete session_state from the daemon; keeping rows it did not list") }
-            onSessionState?(rows, complete)
+            onSessionState?(rows, complete, reaped)
         case DaemonUpgrade.stateFrameType:
             guard let wire = dict["state"] as? [String: Any], let state = UpgradeState(wire: wire) else {
                 logger.error("unreadable upgrade_state from the daemon")
@@ -233,6 +236,14 @@ final class ControlClient {
     /// Incomplete when `sessions` is missing or a row is unreadable: absence then proves nothing.
     nonisolated static func parseSessionState(_ dict: [String: Any]) -> (rows: [ControlProtocol.SessionRow], complete: Bool) {
         guard let raw = dict["sessions"] as? [[String: Any]] else { return ([], false) }
+        let rows = raw.compactMap(ControlProtocol.SessionRow.init(wire:))
+        return (rows, rows.count == raw.count)
+    }
+
+    /// A daemon that predates `reaped` sends none, which is complete; an unreadable one is not.
+    nonisolated static func parseReaped(_ dict: [String: Any]) -> (rows: [ControlProtocol.SessionRow], complete: Bool) {
+        guard let value = dict["reaped"] else { return ([], true) }
+        guard let raw = value as? [[String: Any]] else { return ([], false) }
         let rows = raw.compactMap(ControlProtocol.SessionRow.init(wire:))
         return (rows, rows.count == raw.count)
     }
