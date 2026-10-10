@@ -309,7 +309,7 @@ Events:
 | `addressed` | A filter, not a recorded kind: a `turn_done` whose reply names a reader (below). The returned `event` is `turn_done` with `addressedTo` |
 | `permission` | A tool permission request arrived |
 | `asking` | An AskUserQuestion arrived |
-| `session_opened`, `session_closed` | A session was added to or removed from the daemon's open list. `session_opened` carries the id the session had then; a new session's placeholder id is replaced after its first turn |
+| `session_opened`, `session_closed` | A session was added to or removed from the daemon's open list. `session_opened` carries the id the session had then; a new session's placeholder id is replaced after its first turn. `session_closed` carries `reason` (below) |
 | `gap` | Never requested. The cursor cannot be continued; resync with `list_sessions` |
 
 A reply is addressed when the first non-blank line of one of the turn's text
@@ -336,6 +336,38 @@ at 32,000 bytes with `textTruncated: true`. `permission` and `asking` carry
 4 KB like `pending_requests`. `state`, on those three kinds only, is the
 session's state just after the event, as in `session_status`.
 
+`isError` is on every `turn_done`: `false` when the turn finished, `true`
+when it ended on an error. A failed turn also carries `errorKind` and, when
+the CLI named one, `errorCode` (the CLI's own value, kept for causes this
+table does not split out). `text` follows the same rule as on a finished
+turn, so a failed turn can still be addressed: check `isError`. With no
+addressed block it is the CLI's `result` text, which is the error message on
+an API error and empty for `max_turns`, `budget` and `execution`:
+
+| `errorKind` | Cause |
+|---|---|
+| `auth` | Login rejected, expired or not allowed (`authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credential_error`) |
+| `rate_limit` | A usage limit was hit |
+| `billing` | A billing problem on the account |
+| `overloaded` | The API was overloaded |
+| `network` | `server_error` with no HTTP status (measured: connection refused). A lost connection the CLI reports as `unknown` is `other` |
+| `server` | The API answered with a server error |
+| `max_turns`, `budget`, `execution` | The CLI's `error_max_turns`, `error_max_budget_usd`, `error_during_execution` |
+| `other` | Anything else: `model_not_found`, `invalid_request`, `unknown`, `max_output_tokens` included |
+
+The daemon does not retry a failed turn (the CLI retries some errors itself
+before failing it). A session whose CLI dies mid-turn produces no
+`turn_done` at all and stays open (dormant): it is not a `session_closed`.
+
+`reason` on `session_closed`:
+
+| `reason` | Why |
+|---|---|
+| `stopped` | `stop_session`, which the Mac's Stop also sends |
+| `reaped` | The reaper stopped it: no client attached and idle for 15 minutes |
+| `daemon_restart` | The daemon is shutting down (an update, Restart now, or a quit); recorded for every open session just before it exits |
+| `other` | Removed by a path that did not say why |
+
 Result on timeout:
 
 ```json
@@ -348,6 +380,28 @@ changes each daemon launch; a cursor from an earlier launch returns
 resumes at the oldest event the new daemon holds. `reason: "overflow"` means
 the ring wrapped past the cursor; `"unknown_cursor"` means the cursor is
 ahead of the log.
+
+While a connection has a `listen` open, the daemon sends
+`{"type":"heartbeat","at":<seconds>}` on it every 30 s. It answers no
+request; a client ignores it except as proof the connection is alive, so 90 s
+with nothing at all means the connection is dead. Older daemons send none;
+`--follow` then asks again each time a quiet listen goes 90 s without a byte.
+
+`canopyctl listen --follow` keeps listening and prints one response line per
+event. It reconnects on its own, with the same cursor, when the daemon goes
+away (waiting 1 s, doubling to 30 s), and never exits on a timeout; it exits
+1 on a refused `hello` or an error response and 130 on Ctrl-C. With
+`--cursor-file PATH` it starts from the cursor in that file (unless `--since`
+is given) and rewrites the file after every response, so a restarted
+follower picks up where it stopped: the cursor is written only after the
+event line has been printed and flushed. Without a starting cursor, events
+before its first request are not seen. `--cursor-file` works without
+`--follow` too.
+
+```sh
+canopyctl listen --follow --to Engineer --cursor-file ~/.engineer.cursor |
+  while read -r line; do printf '%s\n' "$line"; done   # handle each event
+```
 
 `canopyctl listen` prints the response and exits 0 on an event, 3 on
 timeout, 4 when the socket could not be reached or dropped (a daemon

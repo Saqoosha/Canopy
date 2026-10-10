@@ -2427,10 +2427,61 @@ enum SidebarLogicProbe {
                 log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t",
                            prompt: String(repeating: "p", count: ControlEvent.textMaxBytes + 1))
                 record("listen log: a cut prompt is flagged truncated", log.events.last?.wire["promptTruncated"] as? Bool == true)
+                // The result frames below are CLI 2.1.287's, captured (connection refused, a bad API key).
+                let refusedFailure = ControlEvent.TurnFailure.of(
+                    result: ["is_error": true, "subtype": "success", "api_error_status": NSNull()], assistantError: "server_error")
+                let badKey = ControlEvent.TurnFailure.of(
+                    result: ["is_error": true, "subtype": "success", "api_error_status": 401], assistantError: "authentication_failed")
+                record("listen failure: no HTTP status is network; a 5xx is server",
+                       refusedFailure == ControlEvent.TurnFailure(kind: "network", code: "server_error")
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true, "api_error_status": 529],
+                                                          assistantError: "server_error")?.kind == "server")
+                record("listen failure: auth, rate limit, billing and overload are named from the assistant error",
+                       badKey == ControlEvent.TurnFailure(kind: "auth", code: "authentication_failed")
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "rate_limit")?.kind == "rate_limit"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "billing_error")?.kind == "billing"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "overloaded")?.kind == "overloaded"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "cloud_credential_error")?.kind == "auth"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "oauth_org_not_allowed")?.kind == "auth"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "account_on_hold")?.kind == "auth"
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "verification_required")?.kind == "auth")
+                record("listen failure: a failed subtype is named even without is_error",
+                       ControlEvent.TurnFailure.of(result: ["subtype": "error_max_turns"], assistantError: nil)
+                           == ControlEvent.TurnFailure(kind: "max_turns", code: "error_max_turns")
+                           && ControlEvent.TurnFailure.of(result: ["subtype": "error_during_execution"], assistantError: nil)?.kind == "execution"
+                           && ControlEvent.TurnFailure.of(result: ["subtype": "error_max_budget_usd"], assistantError: nil)?.kind == "budget")
+                record("listen failure: the assistant error outranks an unknown failed subtype, which is otherwise the code",
+                       ControlEvent.TurnFailure.of(result: ["subtype": "error_foo"], assistantError: "rate_limit")
+                           == ControlEvent.TurnFailure(kind: "rate_limit", code: "rate_limit")
+                           && ControlEvent.TurnFailure.of(result: ["subtype": "error_foo"], assistantError: nil)
+                           == ControlEvent.TurnFailure(kind: "other", code: "error_foo"))
+                record("listen failure: a success is not a failure, even after an assistant error a retry recovered from",
+                       ControlEvent.TurnFailure.of(result: ["is_error": false, "subtype": "success"], assistantError: "overloaded") == nil)
+                record("listen failure: an unknown cause is other, keeping the CLI's code",
+                       ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: "model_not_found")
+                           == ControlEvent.TurnFailure(kind: "other", code: "model_not_found")
+                           && ControlEvent.TurnFailure.of(result: ["is_error": true], assistantError: nil)
+                           == ControlEvent.TurnFailure(kind: "other", code: nil))
+                log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t", failure: nil)
+                let okWire = log.events.last?.wire ?? [:]
+                log.record(.turnDone, key: "probe-key", sessionId: "s", title: "t", failure: badKey)
+                let failWire = log.events.last?.wire ?? [:]
+                log.record(.asking, key: "probe-key", sessionId: "s", title: "t")
+                let askFailureWire = log.events.last?.wire ?? [:]
+                record("listen wire: turn_done says isError false on success and names the failure otherwise",
+                       okWire["isError"] as? Bool == false && okWire["errorKind"] == nil
+                           && failWire["isError"] as? Bool == true && failWire["errorKind"] as? String == "auth"
+                           && failWire["errorCode"] as? String == "authentication_failed")
+                record("listen wire: isError is only on turn_done", askFailureWire["isError"] == nil)
+                log.record(.sessionClosed, key: "probe-key", sessionId: "s", title: "t", reason: .reaped)
+                record("listen wire: session_closed carries its reason",
+                       log.events.last?.wire["reason"] as? String == "reaped"
+                           && ControlEvent.CloseReason.daemonRestart.rawValue == "daemon_restart")
                 record("listen params: a JSON null is the same as leaving the param out",
                        listenParse(["since": NSNull(), "addressedTo": NSNull(), "timeout": NSNull()])
                            == listenParse([:]))
-                for index in 0..<ControlSession.maxOpenListens { listenRequest("cap-\(index)", ["events": ["asking"]]) }
+                // One past the cap, so the assertion does not depend on how many earlier listens are still open.
+                for index in 0...ControlSession.maxOpenListens { listenRequest("cap-\(index)", ["events": ["asking"]]) }
                 record("listen verb: open listens per connection are capped",
                        listenSent.contains { $0["error"] as? String == "too many open listens" })
                 listenControl.stop()

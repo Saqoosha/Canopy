@@ -6727,6 +6727,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         outputRateSawThinking = false
         turnTextBlocks = []
         turnPrompt = nil
+        turnAssistantError = nil
         outstandingDialogRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
@@ -8126,6 +8127,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var turnTextBlocks: [(id: String, texts: [String])] = []
     /// The prompt that started the current turn, for `turn_done`.
     private var turnPrompt: String?
+    /// The last main-conversation `assistant` frame's `error` this turn, for `turn_done`'s failure.
+    private var turnAssistantError: String?
 
     /// The prompt in a live `user` echo, the same rule `history` applies to the transcript.
     nonisolated static func livePrompt(_ ioMsg: [String: Any]) -> String? {
@@ -8136,6 +8139,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     private func collectTurnText(_ ioMsg: [String: Any]) {
         guard let frame = Self.mainTurnText(ioMsg) else { return }
+        turnAssistantError = ioMsg["error"] as? String
         turnTextBlocks = ControlEvent.appendingTurnText(turnTextBlocks, id: frame.id, texts: frame.texts)
     }
 
@@ -8213,12 +8217,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             refreshAskingState()
             // Every main-conversation turn, typed on the Mac, the phone or the control API.
+            let failure = ControlEvent.TurnFailure.of(result: ioMsg, assistantError: turnAssistantError)
             let turn = ControlEvent.turnReply(blocks: turnTextBlocks.flatMap(\.texts), result: finalText ?? "")
             turnTextBlocks = []
             ControlEventLog.shared.record(.turnDone, session: boundSession, state: controlStateWire,
                                           replyId: finishedControlReply, text: turn.text, addressedTo: turn.addressedTo,
-                                          prompt: turnPrompt)
+                                          prompt: turnPrompt, failure: failure)
             turnPrompt = nil
+            turnAssistantError = nil
         default:
             break
         }
