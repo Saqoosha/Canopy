@@ -23,6 +23,15 @@ final class AwakeStatus {
         self.timer = timer
     }
 
+    /// Polls each second for a while, so a toggle shows the daemon's answer without a 10 s wait.
+    func refreshSoon() {
+        for delay in 1...8 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay)) { [weak self] in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+        }
+    }
+
     private func refresh() {
         let next = Self.currentReason()
         if next != reason { reason = next }
@@ -42,22 +51,40 @@ final class AwakeStatus {
     }
 }
 
-/// A small glyph in the sidebar footer: filled while the Mac is held awake, an outline otherwise.
-/// One colour for both: the fill carries the state, so a paler outline would only be harder to see.
+/// A small glyph in the sidebar footer; clicking it turns "Prevent sleep while working" on or off.
+/// Filled cup while the Mac is held awake, outline while it is not, `moon.zzz` while turned off.
+/// One colour for all three: the shape carries the state, so a paler glyph would only be harder to see.
 struct AwakeIndicator: View {
     private let status = AwakeStatus.shared
+    private let settings = CanopySettings.shared
+
+    /// The glyph for a state; the setting wins over a held assertion the daemon has not released yet.
+    static func symbol(enabled: Bool, holding: Bool) -> String {
+        guard enabled else { return "moon.zzz" }
+        return holding ? "cup.and.saucer.fill" : "cup.and.saucer"
+    }
 
     var body: some View {
         // Started from `applicationDidFinishLaunching`, not a `.task` here.
-        // Drawn like `MacroPadIndicator`'s glyph beside it, so the two match in colour.
-        if let reason = status.reason {
-            Image(nsImage: MacroPadIndicator.glyph("cup.and.saucer.fill", color: .secondaryLabelColor, pointSize: 10,
-                                                  label: "Keeping the Mac awake"))
-                .help("Keeping the Mac awake: \(reason)")
-        } else {
-            Image(nsImage: MacroPadIndicator.glyph("cup.and.saucer", color: .secondaryLabelColor, pointSize: 10,
-                                                  label: "Not keeping the Mac awake"))
-                .help("Not keeping the Mac awake")
+        let enabled = settings.preventSleepWhileWorking
+        let state = !enabled ? "Sleep prevention is off (Stay reachable too)"
+            : status.reason.map { "Keeping the Mac awake: \($0)" } ?? "Not keeping the Mac awake"
+        Button {
+            settings.preventSleepWhileWorking.toggle()
+            status.refreshSoon()
+        } label: {
+            // Drawn like `MacroPadIndicator`'s glyph beside it, so the two match in colour.
+            // `moon.zzz` at 8.5pt inks 10pt tall, like the cup at 10pt, so both sit on one centre line.
+            Image(nsImage: MacroPadIndicator.glyph(Self.symbol(enabled: enabled, holding: status.reason != nil),
+                                                  color: .secondaryLabelColor, pointSize: enabled ? 10 : 8.5,
+                                                  label: "Sleep prevention"))
+                .frame(width: 15, height: 12)
+                // The crescent carries the moon's weight below its ink centre (the zzz pulls that up).
+                .offset(y: enabled ? 0 : -1)
         }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(enabled ? "On. \(state)" : "Off")
+        .help("\(state). Click to turn sleep prevention \(enabled ? "off" : "on").")
     }
 }
