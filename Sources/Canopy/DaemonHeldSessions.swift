@@ -3,12 +3,13 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "DaemonHeldSessions")
 
-/// Sessions the phone opened, carried across the daemon's upgrade restart.
+/// Sessions the phone or the control API opened, carried across a daemon restart.
 ///
 /// The daemon restores nothing else across a restart: a session with a client
 /// attached comes back when that client re-attaches with `open`. A held session
 /// may have no client at all, so nothing would ask for it. What comes back is the
-/// open row under its old key; its CLI starts when a client next attaches.
+/// open row under its old key with its shim running; the CLI resumes the
+/// transcript (`--resume`) on the next attach or `send_message`.
 struct DaemonHeldSessions: Codable, Equatable {
     struct Entry: Codable, Equatable {
         /// The old `OpenSession.id`, reused so a phone re-attaching by key finds the row.
@@ -22,6 +23,12 @@ struct DaemonHeldSessions: Codable, Equatable {
         /// Ids only: `ModelProvider.authToken` is a secret.
         var providerId: String?
         var accountId: String?
+        /// Absent in a file written before control sessions were carried: those were all the phone's.
+        var heldByPhone: Bool?
+        var openedByControl: Bool?
+
+        /// Who holds it once restored; a file from before the flags held only the phone's.
+        var holders: (phone: Bool, control: Bool) { (heldByPhone ?? true, openedByControl ?? false) }
     }
 
     var entries: [Entry]
@@ -31,17 +38,18 @@ struct DaemonHeldSessions: Codable, Equatable {
     /// later could run a second CLI on a transcript the app has since resumed itself.
     static let maxAge: TimeInterval = 10 * 60
 
-    /// Held, local, and resumable. `hasTranscript` is a parameter so the probe
-    /// does not touch the disk; a session with no transcript yet cannot be resumed.
+    /// Held or control-opened, local, and resumable. `hasTranscript` is a parameter so the
+    /// probe does not touch the disk; a session with no transcript yet cannot be resumed.
     static func capture(_ sessions: [OpenSession], now: Date = Date(),
                         hasTranscript: (OpenSession, URL) -> Bool) -> DaemonHeldSessions {
         DaemonHeldSessions(entries: sessions.compactMap { session in
-            guard session.heldOpenByPhone, case .local(let dir) = session.origin,
+            guard session.heldOpenByPhone || session.openedByControl, case .local(let dir) = session.origin,
                   hasTranscript(session, dir) else { return nil }
             return Entry(key: session.id.uuidString, resumeId: session.resumeId, directory: dir.path,
                          title: session.title, model: session.model, effort: session.effortLevel,
                          permissionMode: session.permissionMode, providerId: session.customApi?.id,
-                         accountId: session.claudeAccount?.id)
+                         accountId: session.claudeAccount?.id, heldByPhone: session.heldOpenByPhone,
+                         openedByControl: session.openedByControl)
         }, savedAt: now)
     }
 
@@ -64,13 +72,16 @@ struct DaemonHeldSessions: Codable, Equatable {
 
     /// Read and delete. Deleted first, so a restore that crashes the daemon
     /// is not replayed on every launch.
-    static func consume(from url: URL = fileURL, now: Date = Date()) -> DaemonHeldSessions? {
+    /// `dropped` gets a file too old to restore, so its sessions can be reported.
+    static func consume(from url: URL = fileURL, now: Date = Date(),
+                        dropped: (DaemonHeldSessions) -> Void = { _ in }) -> DaemonHeldSessions? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         try? FileManager.default.removeItem(at: url)
         do {
             let held = try JSONDecoder().decode(DaemonHeldSessions.self, from: data)
             guard now.timeIntervalSince(held.savedAt) <= maxAge else {
                 logger.notice("dropped \(held.entries.count, privacy: .public) held session(s) saved \(Int(now.timeIntervalSince(held.savedAt)), privacy: .public)s ago")
+                dropped(held)
                 return nil
             }
             return held

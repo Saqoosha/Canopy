@@ -28,6 +28,7 @@ LISTEN_EVENTS = {
     "permission",
     "asking",
     "addressed",
+    "turn_interrupted",
     "session_opened",
     "session_closed",
 }
