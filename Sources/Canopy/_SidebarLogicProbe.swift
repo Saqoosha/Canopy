@@ -7402,6 +7402,10 @@ enum SidebarLogicProbe {
             }
             record("SleepGuard stay-reachable holds with no busy session", reach(true, .battery(onBattery: false, percent: 50)))
             record("SleepGuard stay-reachable does not hold with no session open", !reach(true, .noBattery, open: 0))
+            record("awake indicator: turned off shows the off glyph even while an assertion lingers",
+                   AwakeIndicator.symbol(enabled: false, holding: true) == "moon.zzz")
+            record("awake indicator: fill follows the hold while on",
+                   AwakeIndicator.symbol(enabled: true, holding: true) != AwakeIndicator.symbol(enabled: true, holding: false))
             record("SleepGuard stay-reachable says why it let go with no session open",
                    SleepGuardPolicy.decide(enabled: true, workingSessions: 0, stayReachable: true,
                                            openSessions: 0, power: .noBattery).reason == "no session is open")
@@ -8690,7 +8694,7 @@ enum SidebarLogicProbe {
                 }
             }
             // `AwakeIndicator` draws through the same `glyph`.
-            for symbol in ["cup.and.saucer", "cup.and.saucer.fill"]
+            for symbol in [true, false].flatMap({ e in [true, false].map { AwakeIndicator.symbol(enabled: e, holding: $0) } })
             where MacroPadIndicator.glyph(symbol, color: .black, label: "probe").size == .zero {
                 unresolved.append(symbol)
             }
