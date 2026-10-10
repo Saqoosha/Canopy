@@ -555,10 +555,12 @@ final class ControlSession {
     }
 
     private func stopSession(_ request: ControlProtocol.Request) {
-        // A Stop ends a reaped session's kept row too; a reaped one answers "no such session".
-        for case .resumeId(let id) in ControlProtocol.sessionRefs(request.params) { ReapedSessions.shared.remove(id) }
+        // A Stop also ends a reaped session's kept row; that one is no longer open here.
+        let refs = ControlProtocol.sessionRefs(request.params)
+        if ReapedSessions.shared.remove(refs), store.openSession(for: refs) == nil {
+            return reply(request, ["ok": true])
+        }
         guard let session = requestedSession(request) else { return }
-        ReapedSessions.shared.remove(session.resumeId)
         store.closeSession(session.id, keepingFailure: false, mirrorEndReason: MirrorOpenRequest.stoppedByClient)
         reply(request, ["ok": true])
     }
@@ -661,14 +663,14 @@ final class ControlSession {
 
     private struct PushState: Equatable {
         let rows: [ControlProtocol.SessionRow]
-        /// Reaped sessions not running again, whose rows a GUI keeps (`ReapedSessions`).
-        let reaped: [String]
+        /// Reaped sessions not open again, whose rows a GUI keeps (`ReapedSessions`).
+        let reaped: [ControlProtocol.SessionRow]
     }
 
     private func pushState() -> PushState {
         let rows = openRows()
-        let running = Set(rows.map(\.resumeId))
-        return PushState(rows: rows, reaped: ReapedSessions.shared.ids.filter { !running.contains($0) })
+        let open = Set(rows.map(\.resumeId))
+        return PushState(rows: rows, reaped: ReapedSessions.shared.rows.filter { !open.contains($0.resumeId) })
     }
 
     private func openRows() -> [ControlProtocol.SessionRow] {
@@ -712,7 +714,7 @@ final class ControlSession {
     private func pushIfChanged(_ state: PushState) {
         guard !stopped, state != lastPushed else { return }
         lastPushed = state
-        send(["type": "session_state", "sessions": state.rows.map(\.wire), "reaped": state.reaped])
+        send(["type": "session_state", "sessions": state.rows.map(\.wire), "reaped": state.reaped.map(\.wire)])
     }
 
     // MARK: - Replies

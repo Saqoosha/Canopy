@@ -92,12 +92,12 @@ final class CanopySettings {
     static func idleLimitLabel(_ minutes: Int) -> String {
         if minutes <= 0 { return "Never" }
         if minutes % 60 == 0 { return minutes == 60 ? "1 hour" : "\(minutes / 60) hours" }
-        return "\(minutes) minutes"
+        return minutes == 1 ? "1 minute" : "\(minutes) minutes"
     }
 
     /// nil when sessions are never stopped.
     var sessionIdleLimit: TimeInterval? {
-        sessionIdleLimitMinutes > 0 ? TimeInterval(sessionIdleLimitMinutes * 60) : nil
+        sessionIdleLimitMinutes > 0 ? TimeInterval(sessionIdleLimitMinutes) * 60 : nil
     }
     /// Which pad this Canopy drives: none, the local USB one, or a bridge on
     /// another Mac. Replaces the old `macroPadEnabled` boolean, which is read
@@ -363,9 +363,9 @@ final class CanopySettings {
         (raw as? Int).map { min(max($0, SleepGuardPolicy.batteryFloorRange.lowerBound), SleepGuardPolicy.batteryFloorRange.upperBound) }
     }
 
-    /// A negative hand edit reads as 0 (never).
+    /// A hand edit is clamped to 0 (never) through 30 days, so the seconds cannot overflow.
     private static func idleLimit(_ raw: Any?) -> Int? {
-        (raw as? Int).map { max($0, 0) }
+        (raw as? Int).map { min(max($0, 0), 30 * 24 * 60) }
     }
 
     private func save() {

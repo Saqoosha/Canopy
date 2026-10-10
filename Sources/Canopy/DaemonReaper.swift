@@ -27,6 +27,10 @@ final class DaemonReaper {
     }
 
     private func tick() {
+        // A reaped session that runs again is an ordinary open session.
+        for session in store.openSessions where session.shim?.isLive == true {
+            ReapedSessions.shared.remove([.key(session.id.uuidString), .resumeId(session.resumeId.lowercased())])
+        }
         // Read per tick: the GUI changes it in settings.json, which the daemon re-reads.
         guard let limit = CanopySettings.shared.sessionIdleLimit else { return }
         let now = Date()
@@ -38,7 +42,12 @@ final class DaemonReaper {
             // With no transcript there is nothing to resume, so its row may go.
             if case .local(let dir) = session.origin,
                session.resumeIdIsExistingTranscript || ClaudeSessionHistory.sessionFileExists(id: session.resumeId, directory: dir) {
-                ReapedSessions.shared.insert(session.resumeId)
+                ReapedSessions.shared.insert(ControlProtocol.SessionRow(
+                    key: session.id.uuidString, resumeId: session.resumeId, title: session.title,
+                    project: session.project, cwd: dir.path, state: RosterSnapshot.wireState(for: .idle),
+                    running: false, clients: 0, lastActiveAt: session.lastActiveAt.timeIntervalSince1970,
+                    model: session.statusBar.model, messageCount: session.statusBar.messageCount,
+                    permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id))
             }
             store.closeSession(session.id, keepingFailure: false)
         }
