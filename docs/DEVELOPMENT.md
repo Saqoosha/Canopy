@@ -180,23 +180,6 @@ This Mac's sessions run in the daemon, so most session logs come from the daemon
 
 See `docs/CONTROL_PROTOCOL.md` for the wire and `docs/notes/source-files.md` for daemon hazards.
 
-### Debug Auto-Launch (currently inert)
-
-This was meant to skip the launcher and start a session automatically. **It does
-nothing today.** `AppState` reads `debugAutoLaunchDir` into a property and nothing
-consumes it — `grep -rn debugAutoLaunch Sources/` returns the declaration and that one
-read — so no route skips the launcher, and nothing clears the key either.
-
-```bash
-defaults write sh.saqoo.Canopy.debug debugAutoLaunchDir /path/to/dir
-open build/Build/Products/Debug/Canopy.app
-```
-
-The domain is recorded for whenever a consumer is restored: it is
-`sh.saqoo.Canopy.debug`, not `sh.saqoo.Canopy`, because `AppState.init()` reads
-`UserDefaults.standard`, which follows the bundle ID, and Debug's is pinned separately
-in `project.yml`.
-
 ## Key Design Decisions
 
 ### Why WKWebView Instead of Electron/Tauri

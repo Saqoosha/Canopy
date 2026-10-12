@@ -64,14 +64,9 @@ final class AppState {
     var settledTitle: String?
     var remoteHost: String?
     var customApi: ModelProvider?
-    var debugAutoLaunchDir: String?
     /// Incremented to force SwiftUI to recreate the WebViewContainer (via .id() modifier),
     /// ensuring a fresh WKWebView for each session.
     private(set) var webviewReloadToken = 0
-
-    init() {
-        debugAutoLaunchDir = UserDefaults.standard.string(forKey: "debugAutoLaunchDir")
-    }
 
     /// `openInNewPane`: nil means "sample the modifier now", which is right for
     /// every caller that runs in the same turn as the click. A caller that
