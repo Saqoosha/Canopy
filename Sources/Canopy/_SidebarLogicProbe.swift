@@ -43,35 +43,32 @@ enum SidebarLogicProbe {
             else  { fail += 1; lines.append("  FAIL \(name) — \(detail)") }
         }
 
-        // Webview entry directories: a crashed run's directory is swept, a live
-        // writer's is kept, and a recycled pid does not keep a dead one alive.
+        // Webview entry directories: only a directory whose lock is free is swept.
         do {
-            let me = getpid()
-            record("entry dir: this process owns a directory made now",
-                   WebViewContainer.isEntryOwnerAlive(pid: me, directoryCreated: Date()))
-            record("entry dir: a pid that started after the directory is not its writer",
-                   !WebViewContainer.isEntryOwnerAlive(pid: me, directoryCreated: .distantPast))
+            let fm = FileManager.default
+            let own = WebViewContainer.ownEntryDirectory
+            record("entry dir: this process holds its own directory's lock",
+                   fm.fileExists(atPath: own.appendingPathComponent(".lock").path)
+                       && WebViewContainer.takeEntryLock(in: own, create: false) == nil)
 
-            let exited = Process()
-            exited.executableURL = URL(fileURLWithPath: "/usr/bin/true")
-            try? exited.run()
-            exited.waitUntilExit()
-            let deadPid = exited.processIdentifier
-
-            let root = FileManager.default.temporaryDirectory
-                .appendingPathComponent("canopy-entry-probe-\(UUID().uuidString)")
-            defer { try? FileManager.default.removeItem(at: root) }
-            let live = root.appendingPathComponent(String(me))
-            let dead = root.appendingPathComponent(String(deadPid))
-            let foreign = root.appendingPathComponent("not-a-pid")
-            for dir in [live, dead, foreign] {
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let root = fm.temporaryDirectory.appendingPathComponent("canopy-entry-probe-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            let live = root.appendingPathComponent("live")
+            let dead = root.appendingPathComponent("dead")
+            let unlocked = root.appendingPathComponent("no-lock-yet")
+            for dir in [live, dead, unlocked] {
+                try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
+            let liveLock = WebViewContainer.takeEntryLock(in: live, create: true)
+            defer { if let liveLock { close(liveLock) } }
+            // A writer that exited: the kernel released its lock the same way close does.
+            if let deadLock = WebViewContainer.takeEntryLock(in: dead, create: true) { close(deadLock) }
+
             let removed = WebViewContainer.sweepDeadEntryDirectories(in: root)
-            let exists = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
-            record("entry dir: sweep removes only the exited writer's directory",
-                   removed == 1 && exists(live) && !exists(dead) && exists(foreign),
-                   "removed=\(removed) live=\(exists(live)) dead=\(exists(dead)) foreign=\(exists(foreign))")
+            let exists = { (url: URL) in fm.fileExists(atPath: url.path) }
+            record("entry dir: sweep removes only the directory whose lock is free",
+                   liveLock != nil && removed == 1 && exists(live) && !exists(dead) && exists(unlocked),
+                   "liveLock=\(liveLock != nil) removed=\(removed) live=\(exists(live)) dead=\(exists(dead)) unlocked=\(exists(unlocked))")
         }
 
         // Peer-name pinning. Every one of these is a way a renamed session
