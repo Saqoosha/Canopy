@@ -3158,11 +3158,12 @@ enum SidebarLogicProbe {
                  "message": ["type": "request", "channelId": channel, "requestId": "q-\(kind)",
                              "request": ["type": kind, "available": false] as [String: Any]] as [String: Any]]
             }
+            func innerOf(_ frame: [String: Any]) -> [String: Any] { frame["message"] as? [String: Any] ?? [:] }
             func channelOf(_ frame: [String: Any]) -> String? { (frame["message"] as? [String: Any])?["channelId"] as? String }
             record("launch state: engine_surface_state and engine_hooks_kept are kept, a dialog request is not",
-                   ShimProcess.launchStateKind(launchState("engine_surface_state", channel: "live")) == "engine_surface_state"
-                       && ShimProcess.launchStateKind(launchState("engine_hooks_kept", channel: "")) == "engine_hooks_kept"
-                       && ShimProcess.launchStateKind(launchState("tool_permission_request", channel: "live")) == nil)
+                   ShimProcess.launchStateKind(innerOf(launchState("engine_surface_state", channel: "live"))) == "engine_surface_state"
+                       && ShimProcess.launchStateKind(innerOf(launchState("engine_hooks_kept", channel: ""))) == "engine_hooks_kept"
+                       && ShimProcess.launchStateKind(innerOf(launchState("tool_permission_request", channel: "live"))) == nil)
             let replayed = ShimProcess.launchStateReplay(
                 ["engine_surface_state": launchState("engine_surface_state", channel: "live"),
                  "engine_hooks_kept": launchState("engine_hooks_kept", channel: "")],

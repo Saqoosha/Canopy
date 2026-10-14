@@ -241,9 +241,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The webview answers neither, so a re-send leaves no response to route.
     nonisolated static let launchStateRequestKinds: Set<String> = ["engine_surface_state", "engine_hooks_kept"]
 
-    /// The `launchStateRequestKinds` kind of a `from-extension` frame, or nil.
-    nonisolated static func launchStateKind(_ payload: [String: Any]) -> String? {
-        guard let inner = payload["message"] as? [String: Any], inner["type"] as? String == "request",
+    /// The `launchStateRequestKinds` kind of a `from-extension` frame's inner message, or nil.
+    nonisolated static func launchStateKind(_ inner: [String: Any]) -> String? {
+        guard inner["type"] as? String == "request",
               let kind = (inner["request"] as? [String: Any])?["type"] as? String,
               launchStateRequestKinds.contains(kind)
         else { return nil }
@@ -253,8 +253,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The kept launch-state frames for a webview joining `live` on its own channel `own`.
     /// A frame scoped to a channel other than `live` belongs to an earlier launch and is left out.
     nonisolated static func launchStateReplay(_ kept: [String: [String: Any]], live: String, to own: String) -> [[String: Any]] {
-        kept.keys.sorted().compactMap { kind in
-            guard let frame = kept[kind] else { return nil }
+        kept.sorted { $0.key < $1.key }.compactMap { _, frame in
             let channel = (frame["message"] as? [String: Any])?["channelId"] as? String ?? ""
             if channel.isEmpty { return frame }
             return channel == live ? retargeted(frame, from: live, to: own) : nil
@@ -5227,7 +5226,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 outstandingDialogRequests[requestId] = payload
             } else if inner["type"] as? String == "cancel_request", let target = inner["targetRequestId"] as? String {
                 outstandingDialogRequests[target] = nil
-            } else if let kind = Self.launchStateKind(payload) {
+            } else if let kind = Self.launchStateKind(inner) {
                 launchStateRequests[kind] = payload
             }
         }
