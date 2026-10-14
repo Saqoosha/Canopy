@@ -232,6 +232,35 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `tool_permission_request` and `user_dialog_request` frames still awaiting an answer, re-sent to a client that launches late.
     private var outstandingDialogRequests: [String: [String: Any]] = [:]
 
+    /// The latest frame of each `launchStateRequestKinds` kind, re-sent to a client that launches late.
+    private var launchStateRequests: [String: [String: Any]] = [:]
+
+    /// Extension→webview requests sent once around launch, with no way for a webview to ask again.
+    /// `engine_surface_state` (2.1.299) says whether a channel serves mods drawing; a webview that
+    /// never gets it hides every transcript row until a 20 s timeout ("Waiting for your plugins…").
+    /// The webview answers neither, so a re-send leaves no response to route.
+    nonisolated static let launchStateRequestKinds: Set<String> = ["engine_surface_state", "engine_hooks_kept"]
+
+    /// The `launchStateRequestKinds` kind of a `from-extension` frame, or nil.
+    nonisolated static func launchStateKind(_ payload: [String: Any]) -> String? {
+        guard let inner = payload["message"] as? [String: Any], inner["type"] as? String == "request",
+              let kind = (inner["request"] as? [String: Any])?["type"] as? String,
+              launchStateRequestKinds.contains(kind)
+        else { return nil }
+        return kind
+    }
+
+    /// The kept launch-state frames for a webview joining `live` on its own channel `own`.
+    /// A frame scoped to a channel other than `live` belongs to an earlier launch and is left out.
+    nonisolated static func launchStateReplay(_ kept: [String: [String: Any]], live: String, to own: String) -> [[String: Any]] {
+        kept.keys.sorted().compactMap { kind in
+            guard let frame = kept[kind] else { return nil }
+            let channel = (frame["message"] as? [String: Any])?["channelId"] as? String ?? ""
+            if channel.isEmpty { return frame }
+            return channel == live ? retargeted(frame, from: live, to: own) : nil
+        }
+    }
+
     /// The primary webview's own minted channel. Equal to `channelId` while
     /// the primary owns the live channel; differs once a mirror's launch was
     /// the one forwarded, in which case the primary is translated like a
@@ -420,7 +449,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Swaps the inner frame's top-level `channelId` from the live one to the target's own.
-    private static func retargeted(_ payload: [String: Any], from primary: String?, to mirrorChannel: String?) -> [String: Any] {
+    nonisolated private static func retargeted(_ payload: [String: Any], from primary: String?, to mirrorChannel: String?) -> [String: Any] {
         guard let primary, let mirrorChannel,
               var inner = payload["message"] as? [String: Any],
               inner["channelId"] as? String == primary
@@ -3907,6 +3936,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     for request in outstandingDialogRequests.values {
                         post(Self.retargeted(request, from: live, to: cid), to: sender)
                     }
+                    for frame in Self.launchStateReplay(launchStateRequests, live: live, to: cid) {
+                        post(frame, to: sender)
+                    }
                 }
                 return
             }
@@ -5195,6 +5227,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 outstandingDialogRequests[requestId] = payload
             } else if inner["type"] as? String == "cancel_request", let target = inner["targetRequestId"] as? String {
                 outstandingDialogRequests[target] = nil
+            } else if let kind = Self.launchStateKind(payload) {
+                launchStateRequests[kind] = payload
             }
         }
 
@@ -6741,6 +6775,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         turnPrompt = nil
         turnAssistantError = nil
         outstandingDialogRequests.removeAll()
+        launchStateRequests.removeAll()
         pendingPermissionRequestIds.removeAll()
         pendingPermissionRequestInputs.removeAll()
         pendingPermissionRequestToolNames.removeAll()
