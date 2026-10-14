@@ -3153,6 +3153,26 @@ enum SidebarLogicProbe {
             record("ui target: no requester, the local Mac, else any Mac",
                    ShimProcess.uiTarget(requester: nil, clients: [phone, mac, local]) == 2
                        && ShimProcess.uiTarget(requester: nil, clients: [phone, mac]) == 1)
+            func launchState(_ kind: String, channel: String) -> [String: Any] {
+                ["type": "from-extension",
+                 "message": ["type": "request", "channelId": channel, "requestId": "q-\(kind)",
+                             "request": ["type": kind, "available": false] as [String: Any]] as [String: Any]]
+            }
+            func innerOf(_ frame: [String: Any]) -> [String: Any] { frame["message"] as? [String: Any] ?? [:] }
+            func channelOf(_ frame: [String: Any]) -> String? { (frame["message"] as? [String: Any])?["channelId"] as? String }
+            record("launch state: engine_surface_state and engine_hooks_kept are kept, a dialog request is not",
+                   ShimProcess.launchStateKind(innerOf(launchState("engine_surface_state", channel: "live"))) == "engine_surface_state"
+                       && ShimProcess.launchStateKind(innerOf(launchState("engine_hooks_kept", channel: ""))) == "engine_hooks_kept"
+                       && ShimProcess.launchStateKind(innerOf(launchState("tool_permission_request", channel: "live"))) == nil)
+            let replayed = ShimProcess.launchStateReplay(
+                ["engine_surface_state": launchState("engine_surface_state", channel: "live"),
+                 "engine_hooks_kept": launchState("engine_hooks_kept", channel: "")],
+                live: "live", to: "mine")
+            record("launch state: a late client gets the surface state on its own channel, the kept word unscoped",
+                   replayed.count == 2 && replayed.compactMap(channelOf).sorted() == ["", "mine"])
+            record("launch state: a surface state from an earlier launch's channel is not re-sent",
+                   ShimProcess.launchStateReplay(["engine_surface_state": launchState("engine_surface_state", channel: "old")],
+                                                 live: "live", to: "mine").isEmpty)
             var pending = PendingUIAlerts<Int>()
             pending.record(requestId: "a", client: 1, buttons: ["Yes"])
             pending.record(requestId: "b", client: 2, buttons: ["Yes"])
