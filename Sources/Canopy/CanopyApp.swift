@@ -657,6 +657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sleepGuard.start()
         AwakeStatus.shared.start()
         GPUProcessReaper.start()
+        Task.detached(priority: .utility) { WebViewContainer.sweepDeadEntryDirectories() }
         DaemonRegistration.ensureRegistered()
         // The sidebar's usage bars have no writer until a shim runs, so a
         // launch that opens on the launcher showed none (see

@@ -1,3 +1,4 @@
+import Darwin
 import SwiftUI
 import WebKit
 import os.log
@@ -653,10 +654,9 @@ struct WebViewContainer: NSViewRepresentable {
             extPath.appendingPathComponent($0).absoluteString
         }
 
-        // Write HTML to Application Support
-        let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Canopy")
-        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+        // Write HTML into this process's own entry directory (see `ownEntryDirectory`).
+        let entryDir = ownEntryDirectory
+        try? FileManager.default.createDirectory(at: entryDir, withIntermediateDirectories: true)
         // One entry file PER SESSION, never a shared `_canopy.html`.
         //
         // `data-initial-session` — the only thing that tells the CC extension's
@@ -671,7 +671,7 @@ struct WebViewContainer: NSViewRepresentable {
         // The file must OUTLIVE the load, not be deleted after it:
         // `webViewWebContentProcessDidTerminate` recovers by calling
         // `webView.reload()`, which re-reads this exact URL.
-        let htmlFile = appSupportDir.appendingPathComponent(entryFileName)
+        let htmlFile = entryDir.appendingPathComponent(entryFileName)
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
         } catch {
@@ -683,7 +683,6 @@ struct WebViewContainer: NSViewRepresentable {
             )
             return
         }
-        Self.noteEntryFileWritten(htmlFile)
         // Allow read access to home directory (covers Application Support HTML and extension resources)
         let commonParent = FileManager.default.homeDirectoryForCurrentUser
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
@@ -732,9 +731,8 @@ struct WebViewContainer: NSViewRepresentable {
 
     // MARK: - Webview entry files
 
-    /// Private on purpose: nothing may sweep by this prefix. A glob sweep is
-    /// the design that deleted a concurrently-running instance's live files,
-    /// and `purgeOwnEntryFiles` replaced it.
+    /// Private on purpose: nothing may sweep by this prefix (see
+    /// `entryRootDirectory`).
     private static let entryFilePrefix = "_canopy-"
 
     /// Per-session name for the webview's HTML entry point. Keyed by the
@@ -749,47 +747,83 @@ struct WebViewContainer: NSViewRepresentable {
         "\(entryFilePrefix)\(session?.id.uuidString ?? UUID().uuidString).html"
     }
 
-    /// Entry files THIS process has written. The only thing `purgeOwnEntryFiles`
-    /// is allowed to delete.
-    @MainActor private static var ownedEntryFiles: Set<URL> = []
-
-    @MainActor static func noteEntryFileWritten(_ url: URL) {
-        ownedEntryFiles.insert(url)
-    }
-
-    /// Delete the entry files this process wrote. Call this **at quit only**,
-    /// and note the two separate reasons it is scoped this narrowly.
+    /// Parent of every process's entry directory.
     ///
-    /// *Quit, not launch:* quit is the only moment the owned set is complete.
-    /// At `applicationDidFinishLaunching` this process has written no entry file
-    /// yet, so a launch-time sweep is a no-op that reclaims nothing — measured
-    /// on a restore launch: the delegate callback's own log line precedes
-    /// `applyRestoreSnapshot` by ~180 ms, and PR #149 defers that apply past the
-    /// first render, so at delegate time `panes` is empty and no shim is up.
-    /// Before #149 the hazard was the reverse and much worse — the strip was
-    /// already restored by then, so a launch-time sweep deleted files that were
-    /// mid-load and every pane rendered blank white.
-    ///
-    /// *Own files, not the whole directory:* `~/Library/Application Support/Canopy`
-    /// is named after the app, not the bundle id, so a Debug build
-    /// (`sh.saqoo.Canopy.debug`) and the installed Release share it. A sweep by
-    /// glob therefore deletes the OTHER instance's live entry files — and since
+    /// `~/Library/Application Support/Canopy` is named after the app, not the
+    /// bundle id, so a Debug build (`sh.saqoo.Canopy.debug`) and the installed
+    /// Release share it. Nothing may therefore delete entry files by glob or by
+    /// age: that deletes the OTHER instance's live files, and since
     /// `webViewWebContentProcessDidTerminate` recovers by re-reading that exact
     /// URL, the damage lands much later and nowhere near the cause.
-    ///
-    /// Cost of the narrow scope: a crashed run leaves its files behind for good,
-    /// since nothing else will ever claim them. They are inert and small, and a
-    /// heuristic sweep by age would re-open the cross-instance hazard on any
-    /// session that outlives the cutoff.
+    nonisolated static let entryRootDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Canopy/webview-entries")
+
+    /// `webview-entries/<pid>/`: every entry file this process writes. Naming the
+    /// directory after the writer is what lets a later launch tell a crashed
+    /// run's leftovers from a live instance's files (`sweepDeadEntryDirectories`).
+    nonisolated static var ownEntryDirectory: URL {
+        entryRootDirectory.appendingPathComponent(String(getpid()), isDirectory: true)
+    }
+
+    /// Delete this process's entry directory. Call this **at quit only**: a
+    /// running webview's `webViewWebContentProcessDidTerminate` recovery
+    /// re-reads its entry file.
     @MainActor static func purgeOwnEntryFiles() {
-        let owned = ownedEntryFiles
-        ownedEntryFiles.removeAll()
-        for url in owned {
-            try? FileManager.default.removeItem(at: url)
+        do {
+            try FileManager.default.removeItem(at: ownEntryDirectory)
+            logger.info("Purged this process's webview entry directory")
+        } catch CocoaError.fileNoSuchFile {
+            // No webview was ever opened.
+        } catch {
+            logger.error("Failed to purge \(ownEntryDirectory.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        if !owned.isEmpty {
-            logger.info("Purged \(owned.count) webview entry file(s) written by this process")
+    }
+
+    /// Delete the entry directories whose writer has exited, which quit-time
+    /// purging never reaches: a crash, a kill, or a stopped Debug run. Before
+    /// this, those files stayed for good (259 files, 44 MB measured on
+    /// 2026-10-15). Safe at any time, since a live writer's directory is kept.
+    ///
+    /// Files written straight into `Application Support/Canopy` by builds that
+    /// predate this directory are left alone: an older build still running
+    /// would be reading them, and nothing here can tell which.
+    @discardableResult
+    nonisolated static func sweepDeadEntryDirectories(in root: URL = entryRootDirectory) -> Int {
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.creationDateKey]) else { return 0 }
+        var removed = 0
+        for dir in dirs {
+            guard let pid = pid_t(dir.lastPathComponent),
+                  let created = (try? dir.resourceValues(forKeys: [.creationDateKey]))?.creationDate,
+                  !isEntryOwnerAlive(pid: pid, directoryCreated: created) else { continue }
+            do {
+                try fm.removeItem(at: dir)
+                removed += 1
+            } catch {
+                logger.error("Failed to sweep \(dir.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
+        if removed > 0 {
+            logger.notice("Swept \(removed) webview entry director(ies) left by exited processes")
+        }
+        return removed
+    }
+
+    /// Whether `pid` is still the Canopy process that created an entry
+    /// directory at `directoryCreated`. The start-time check catches a recycled
+    /// pid: a process that started after the directory existed cannot be its
+    /// writer. `pbi_start_tvsec` truncates to the second, which only errs
+    /// towards keeping the directory.
+    nonisolated static func isEntryOwnerAlive(pid: pid_t, directoryCreated: Date) -> Bool {
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return false }
+        let executable = String(decoding: path.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
+        guard (executable as NSString).lastPathComponent == "Canopy" else { return false }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return false }
+        return Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec)) <= directoryCreated
     }
 
     // MARK: - Bundle Resource Reading

@@ -43,6 +43,37 @@ enum SidebarLogicProbe {
             else  { fail += 1; lines.append("  FAIL \(name) — \(detail)") }
         }
 
+        // Webview entry directories: a crashed run's directory is swept, a live
+        // writer's is kept, and a recycled pid does not keep a dead one alive.
+        do {
+            let me = getpid()
+            record("entry dir: this process owns a directory made now",
+                   WebViewContainer.isEntryOwnerAlive(pid: me, directoryCreated: Date()))
+            record("entry dir: a pid that started after the directory is not its writer",
+                   !WebViewContainer.isEntryOwnerAlive(pid: me, directoryCreated: .distantPast))
+
+            let exited = Process()
+            exited.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+            try? exited.run()
+            exited.waitUntilExit()
+            let deadPid = exited.processIdentifier
+
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("canopy-entry-probe-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let live = root.appendingPathComponent(String(me))
+            let dead = root.appendingPathComponent(String(deadPid))
+            let foreign = root.appendingPathComponent("not-a-pid")
+            for dir in [live, dead, foreign] {
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            let removed = WebViewContainer.sweepDeadEntryDirectories(in: root)
+            let exists = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
+            record("entry dir: sweep removes only the exited writer's directory",
+                   removed == 1 && exists(live) && !exists(dead) && exists(foreign),
+                   "removed=\(removed) live=\(exists(live)) dead=\(exists(dead)) foreign=\(exists(foreign))")
+        }
+
         // Peer-name pinning. Every one of these is a way a renamed session
         // silently loses its name, so each states which failure it pins.
         do {
