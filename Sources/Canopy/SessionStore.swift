@@ -1198,25 +1198,23 @@ final class SessionStore {
         return session
     }
 
-    /// `openConversationTab` for a pane on another Mac. Its login and provider are that Mac's choice.
+    /// `openConversationTab` for a pane on another Mac. That Mac's defaults apply, as when opening
+    /// from its Recents: this Mac does not know the source's mode or model there.
     private func openMirrorConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession,
                                            machineId: String, hostCwd: String?) -> OpenSession? {
         let machineName = source.statusBar.mirrorMachine ?? machineId
+        guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return nil }
         if let forked = tab.sessionId {
-            let options = NewSessionOptions(model: source.model, effort: source.effortLevel,
-                                            permissionMode: source.permissionMode)
             return attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: forked,
                                     title: Self.forkTitle(of: source.title), project: source.project,
-                                    open: .resumeWith(options: options), target: .newPane,
-                                    composerPrefill: tab.initialPrompt)
+                                    open: .resume, target: .newPane, composerPrefill: tab.initialPrompt)
         }
         guard let hostCwd else {
             logger.error("openConversationTab: no folder known for \(machineId, privacy: .public); nothing opened")
             return nil
         }
-        let options = NewSessionOptions(model: source.model, effort: source.effortLevel)
         return attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: UUID().uuidString,
-                                title: "Untitled", project: source.project, open: .new(cwd: hostCwd, options: options),
+                                title: "Untitled", project: source.project, open: .new(cwd: hostCwd, options: .init()),
                                 target: .newPane, composerPrefill: tab.initialPrompt)
     }
 
