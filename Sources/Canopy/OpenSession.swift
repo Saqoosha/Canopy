@@ -290,14 +290,17 @@ final class OpenSession: Identifiable, Hashable {
         guard isDaemonHosted else { return nil }
         // Sent even with a key: a daemon that restarted no longer holds it, and
         // the server ignores `open` when it does.
-        let options = NewSessionOptions(
+        if resumeIdIsExistingTranscript { return resumeKeepsOwnSettings ? .resumeWith(options: launchOptions) : .resume }
+        guard daemonKey == nil else { return nil }
+        return .new(cwd: origin.workingDirectory.path, options: launchOptions)
+    }
+
+    private var launchOptions: NewSessionOptions {
+        NewSessionOptions(
             model: model, effort: effortLevel, permissionMode: permissionMode,
             promptText: pendingInitialPrompt.flatMap { $0.text.isEmpty ? nil : $0.text },
             promptImages: pendingInitialPrompt?.images.map(\.wire) ?? [],
             settledTitle: pendingSettledTitle, providerId: customApi?.id, accountId: claudeAccount?.id)
-        if resumeIdIsExistingTranscript { return resumeKeepsOwnSettings ? .resumeWith(options: options) : .resume }
-        guard daemonKey == nil else { return nil }
-        return .new(cwd: origin.workingDirectory.path, options: options)
     }
 
     /// Set for a fork: resume with this session's login, model and permissions, not the daemon's defaults.

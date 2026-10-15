@@ -147,6 +147,10 @@ enum SidebarLogicProbe {
             let priorTitles = SessionTitleStore._probeSnapshot()
             let priorDaemon = OpenSession.localSessionsRunInDaemon
             OpenSession.localSessionsRunInDaemon = true
+            // The source's mode differs from the default, so inheriting it cannot pass for the default.
+            // (Setting the default instead would rewrite the settings.json the installed app shares.)
+            let defaultMode = CanopySettings.shared.defaultPermissionMode
+            let sourceMode: PermissionMode = defaultMode == .plan ? .acceptEdits : .plan
             defer {
                 defaults.set(priorRecents, forKey: recentsKey)
                 defaults.set(priorLast, forKey: lastKey)
@@ -155,7 +159,7 @@ enum SidebarLogicProbe {
             }
             let account = ClaudeAccount(id: "acct-fork", name: "Probe", configDir: "/tmp/probe-fork-acct")
             let source = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: UUID().uuidString,
-                                     title: "Src", project: "p", status: .live, permissionMode: .plan, model: "m",
+                                     title: "Src", project: "p", status: .live, permissionMode: sourceMode, model: "m",
                                      claudeAccount: account)
             let store = SessionStore()
             store._probeSeedOpenSessions([source])
@@ -170,7 +174,7 @@ enum SidebarLogicProbe {
                 }
             })
             let fork = store.openConversationTab(.init(requestId: "q", sessionId: forkId, initialPrompt: "edit me"), from: source)
-            let expected = NewSessionOptions(model: "m", permissionMode: .plan, accountId: "acct-fork")
+            let expected = NewSessionOptions(model: "m", permissionMode: sourceMode, accountId: "acct-fork")
             let atMount = box.value
             record("tabs: a fork's prefill and login are set before its pane mounts",
                    atMount?.prefill == "edit me" && atMount?.account == "acct-fork",
@@ -178,13 +182,14 @@ enum SidebarLogicProbe {
             record("tabs: a fork resumes with the source's settings, not the daemon's defaults",
                    atMount?.open == .resumeWith(options: expected), "\(String(describing: atMount?.open))")
             record("tabs: a fork is titled after its source",
-                   fork?.title == "Src (fork)" && SessionTitleStore.title(forSessionId: forkId) == "Src (fork)")
-            record("tabs: an id that is already open opens nothing",
+                   fork.title == "Src (fork)" && SessionTitleStore.title(forSessionId: forkId) == "Src (fork)")
+            let count = store.openSessions.count
+            record("tabs: an id that is already open is shown, not opened again",
                    store.openConversationTab(.init(requestId: "q", sessionId: source.resumeId, initialPrompt: nil),
-                                             from: source) == nil)
+                                             from: source) === source && store.openSessions.count == count)
             let fresh = store.openConversationTab(.init(requestId: "q", sessionId: nil, initialPrompt: nil), from: source)
             record("tabs: a new conversation starts in the default permission mode",
-                   fresh?.permissionMode == CanopySettings.shared.defaultPermissionMode)
+                   fresh.permissionMode == defaultMode)
         }
 
         // Peer-name pinning. Every one of these is a way a renamed session

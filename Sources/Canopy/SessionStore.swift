@@ -1155,12 +1155,13 @@ final class SessionStore {
     /// A pane's fork or new conversation (`ConversationTabRouting`), opened in a new pane
     /// with the same folder, login and model. A fork keeps the source's permission mode,
     /// as the extension does; a new conversation starts in the default one, as it did in place.
-    /// Nil for an id that is already open: only a freshly forked one is expected.
+    /// An id that is already open is shown, not opened again or retitled.
     @discardableResult
-    func openConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession) -> OpenSession? {
-        if let forked = tab.sessionId, openSessions.contains(where: { $0.resumeId == forked }) {
-            logger.error("openConversationTab: \(forked, privacy: .public) is already open; nothing opened")
-            return nil
+    func openConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession) -> OpenSession {
+        if let forked = tab.sessionId, let existing = openSessions.first(where: { $0.resumeId == forked }) {
+            logger.notice("openConversationTab: \(forked, privacy: .public) is already open; showing it")
+            select(.session(existing.id))
+            return existing
         }
         let forkTitle = tab.sessionId.map { _ in Self.forkTitle(of: source.title) }
         // With no stored title the shim would retitle it from the same prompts as the source.

@@ -595,10 +595,11 @@ final class MirrorConnection: MirrorSink {
         switch request {
         case .resume, .resumeWith:
             var options = SessionStore.HeadlessOptions()
-            if case .resumeWith(let given) = request {
+            if case .resumeWith(var given) = request {
+                // A plain resume has no such check, so a fork falls back to the default mode instead of failing.
                 if let refusal = given.refusal(allowBypass: server?.bypassAllowed() ?? false) {
-                    logger.error("[mirror-server] open refused: \(refusal, privacy: .public)")
-                    return .failure(OpenFailure(refusal))
+                    logger.notice("[mirror-server] resume keeps its settings but not its mode: \(refusal, privacy: .public)")
+                    given.permissionMode = nil
                 }
                 options = SessionStore.HeadlessOptions(given)
             }
