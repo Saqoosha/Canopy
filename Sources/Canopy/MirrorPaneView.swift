@@ -269,12 +269,12 @@ struct MirrorPaneView: NSViewRepresentable {
             defer { session?.composerPrefill = nil }
             return session?.composerPrefill
         }
-        // Only this Mac's daemon: a fork's transcript is written where the session runs.
-        // Other panes keep forking in place.
-        if session.isDaemonHosted {
-            bridge.onNewConversationTab = { [weak session] tab in
+        // This Mac's daemon, or another Mac's: a fork's transcript is where the session runs,
+        // and both can be asked to resume it. SSH-remote panes keep forking in place.
+        if session.isDaemonHosted || session.origin.mirrorTarget != nil {
+            bridge.onNewConversationTab = { [weak session, weak bridge] tab in
                 guard let session else { return }
-                SessionStore.shared?.openConversationTab(tab, from: session)
+                SessionStore.shared?.openConversationTab(tab, from: session, hostCwd: bridge?.hostCwd)
             }
         }
         bridge.onUIFrame = { [weak bridge, weak webView] frame in

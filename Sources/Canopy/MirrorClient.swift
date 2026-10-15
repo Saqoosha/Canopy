@@ -20,6 +20,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     /// Set: the page is told `openNewInTab`, and its new-tab and `rename_tab`
     /// requests are answered here (`ConversationTabRouting`).
     var onNewConversationTab: ((ConversationTabRouting.NewTab) -> Void)?
+    /// The session host's folder, from the page's host state (`ConversationTabRouting.hostCwd`).
+    private(set) var hostCwd: String?
     /// Takes the composer text for the page this bridge loads (`data-initial-prompt`).
     var takeComposerPrefill: (() -> String?)?
     /// Set by the daemon's `daemon_restarting`: the next drop may re-attach on its own.
@@ -360,7 +362,12 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             logger.error("[mirror-client] unreadable \(MirrorUIFrame.type, privacy: .public) frame dropped")
             return
         }
-        webView?.deliver(onNewConversationTab == nil ? dict : ConversationTabRouting.patchingOpenNewInTab(dict))
+        guard onNewConversationTab != nil else {
+            webView?.deliver(dict)
+            return
+        }
+        if let cwd = ConversationTabRouting.hostCwd(dict) { hostCwd = cwd }
+        webView?.deliver(ConversationTabRouting.patchingOpenNewInTab(dict))
     }
 
     /// Answers an alert the session forwarded.
