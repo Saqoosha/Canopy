@@ -1205,9 +1205,12 @@ final class SessionStore {
         let machineName = source.statusBar.mirrorMachine ?? machineId
         guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return nil }
         if let forked = tab.sessionId {
+            let title = Self.forkTitle(of: source.title)
+            // The title alone, so that Mac names the row and keeps it; an older Mac resumes without it.
             return attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: forked,
-                                    title: Self.forkTitle(of: source.title), project: source.project,
-                                    open: .resume, target: .newPane, composerPrefill: tab.initialPrompt)
+                                    title: title, project: source.project,
+                                    open: .resumeWith(options: NewSessionOptions(settledTitle: title)),
+                                    target: .newPane, composerPrefill: tab.initialPrompt)
         }
         guard let hostCwd else {
             logger.error("openConversationTab: no folder known for \(machineId, privacy: .public); nothing opened")
