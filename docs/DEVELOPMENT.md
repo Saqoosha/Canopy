@@ -196,7 +196,7 @@ The CC extension already has a complete React UI designed for VSCode's webview p
 ### Why Home Directory Read Access
 
 The `allowingReadAccessTo` parameter is set to the user's home directory because the webview needs to read from two separate locations:
-- `~/Library/Application Support/Canopy/_canopy-<session-id>.html` (the per-session entry point)
+- `~/Library/Application Support/Canopy/webview-entries/<pid>-<uuid>/_canopy-<session-id>.html` (the per-session entry point)
 - `~/.vscode/extensions/anthropic.claude-code-*/webview/` (JS, CSS, assets)
 
 A more restrictive path would not cover both locations.

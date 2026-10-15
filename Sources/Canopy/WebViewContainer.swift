@@ -1,3 +1,4 @@
+import Darwin
 import SwiftUI
 import WebKit
 import os.log
@@ -653,10 +654,7 @@ struct WebViewContainer: NSViewRepresentable {
             extPath.appendingPathComponent($0).absoluteString
         }
 
-        // Write HTML to Application Support
-        let appSupportDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Canopy")
-        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+        let entryDir = ensureEntryDirectory(named: ownEntryName)
         // One entry file PER SESSION, never a shared `_canopy.html`.
         //
         // `data-initial-session` — the only thing that tells the CC extension's
@@ -671,7 +669,7 @@ struct WebViewContainer: NSViewRepresentable {
         // The file must OUTLIVE the load, not be deleted after it:
         // `webViewWebContentProcessDidTerminate` recovers by calling
         // `webView.reload()`, which re-reads this exact URL.
-        let htmlFile = appSupportDir.appendingPathComponent(entryFileName)
+        let htmlFile = entryDir.appendingPathComponent(entryFileName)
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
         } catch {
@@ -683,7 +681,6 @@ struct WebViewContainer: NSViewRepresentable {
             )
             return
         }
-        Self.noteEntryFileWritten(htmlFile)
         // Allow read access to home directory (covers Application Support HTML and extension resources)
         let commonParent = FileManager.default.homeDirectoryForCurrentUser
         webView.loadFileURL(htmlFile, allowingReadAccessTo: commonParent)
@@ -732,9 +729,8 @@ struct WebViewContainer: NSViewRepresentable {
 
     // MARK: - Webview entry files
 
-    /// Private on purpose: nothing may sweep by this prefix. A glob sweep is
-    /// the design that deleted a concurrently-running instance's live files,
-    /// and `purgeOwnEntryFiles` replaced it.
+    /// Private on purpose: nothing may sweep by this prefix (see
+    /// `entryRootDirectory`).
     private static let entryFilePrefix = "_canopy-"
 
     /// Per-session name for the webview's HTML entry point. Keyed by the
@@ -749,47 +745,108 @@ struct WebViewContainer: NSViewRepresentable {
         "\(entryFilePrefix)\(session?.id.uuidString ?? UUID().uuidString).html"
     }
 
-    /// Entry files THIS process has written. The only thing `purgeOwnEntryFiles`
-    /// is allowed to delete.
-    @MainActor private static var ownedEntryFiles: Set<URL> = []
+    /// Parent of every process's entry directory. Debug and Release share
+    /// `Application Support/Canopy`, so nothing may delete entry files by glob
+    /// or by age: that deletes the other instance's live files, and its
+    /// `webViewWebContentProcessDidTerminate` reload fails much later.
+    nonisolated static let entryRootDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Canopy/webview-entries")
 
-    @MainActor static func noteEntryFileWritten(_ url: URL) {
-        ownedEntryFiles.insert(url)
+    /// This process's entry directory is `webview-entries/<pid>-<uuid>/`, and
+    /// `<pid>-<uuid>.lock` beside it stays flock-held until the process exits,
+    /// however it exits. A lock another process can take marks a dead writer.
+    nonisolated static let ownEntryName = "\(getpid())-\(UUID().uuidString)"
+
+    /// Makes `root/<name>/`, locking `root/<name>.lock` first so the directory
+    /// never exists without its lock. Re-run on every load, so a directory
+    /// deleted under a running app comes back.
+    @discardableResult
+    nonisolated static func ensureEntryDirectory(named name: String, in root: URL = entryRootDirectory) -> URL {
+        let fm = FileManager.default
+        let dir = root.appendingPathComponent(name, isDirectory: true)
+        let lock = root.appendingPathComponent(name + ".lock")
+        do {
+            if !fm.fileExists(atPath: lock.path) {
+                try fm.createDirectory(at: root, withIntermediateDirectories: true)
+                // Never closed: the lock must live as long as the process.
+                _ = takeEntryLock(at: lock, create: true)
+            }
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            logger.error("Failed to create \(dir.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        return dir
     }
 
-    /// Delete the entry files this process wrote. Call this **at quit only**,
-    /// and note the two separate reasons it is scoped this narrowly.
-    ///
-    /// *Quit, not launch:* quit is the only moment the owned set is complete.
-    /// At `applicationDidFinishLaunching` this process has written no entry file
-    /// yet, so a launch-time sweep is a no-op that reclaims nothing — measured
-    /// on a restore launch: the delegate callback's own log line precedes
-    /// `applyRestoreSnapshot` by ~180 ms, and PR #149 defers that apply past the
-    /// first render, so at delegate time `panes` is empty and no shim is up.
-    /// Before #149 the hazard was the reverse and much worse — the strip was
-    /// already restored by then, so a launch-time sweep deleted files that were
-    /// mid-load and every pane rendered blank white.
-    ///
-    /// *Own files, not the whole directory:* `~/Library/Application Support/Canopy`
-    /// is named after the app, not the bundle id, so a Debug build
-    /// (`sh.saqoo.Canopy.debug`) and the installed Release share it. A sweep by
-    /// glob therefore deletes the OTHER instance's live entry files — and since
-    /// `webViewWebContentProcessDidTerminate` recovers by re-reading that exact
-    /// URL, the damage lands much later and nowhere near the cause.
-    ///
-    /// Cost of the narrow scope: a crashed run leaves its files behind for good,
-    /// since nothing else will ever claim them. They are inert and small, and a
-    /// heuristic sweep by age would re-open the cross-instance hazard on any
-    /// session that outlives the cutoff.
+    /// Opens `lock` holding an exclusive flock, or nil when another open file
+    /// holds it (this process's own included) or it is missing.
+    nonisolated static func takeEntryLock(at lock: URL, create: Bool) -> Int32? {
+        let flags = O_RDONLY | O_CLOEXEC | O_EXLOCK | O_NONBLOCK | (create ? O_CREAT : 0)
+        let fd = open(lock.path, flags, 0o644)
+        let err = errno
+        if fd < 0 && create {
+            logger.error("Failed to lock \(lock.path, privacy: .public): errno \(err)")
+        }
+        return fd >= 0 ? fd : nil
+    }
+
+    /// Delete this process's entry directory. Call this **at quit only**: a
+    /// running webview's `webViewWebContentProcessDidTerminate` recovery
+    /// re-reads its entry file.
     @MainActor static func purgeOwnEntryFiles() {
-        let owned = ownedEntryFiles
-        ownedEntryFiles.removeAll()
-        for url in owned {
-            try? FileManager.default.removeItem(at: url)
+        removeIfPresent(entryRootDirectory.appendingPathComponent(ownEntryName))
+        removeIfPresent(entryRootDirectory.appendingPathComponent(ownEntryName + ".lock"))
+    }
+
+    /// Delete what exited processes left (a crash, a kill, a stopped Debug
+    /// run), which the quit-time purge never reaches: a directory whose lock
+    /// this call can take, or one with no lock at all, since its writer makes
+    /// the lock first. Files older builds wrote straight into
+    /// `Application Support/Canopy` are not touched: a running older build may
+    /// still read them.
+    @discardableResult
+    nonisolated static func sweepDeadEntryDirectories(in root: URL = entryRootDirectory) -> Int {
+        let fm = FileManager.default
+        let entries: [URL]
+        do {
+            entries = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        } catch CocoaError.fileReadNoSuchFile {
+            return 0
+        } catch {
+            logger.error("Failed to list \(root.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return 0
         }
-        if !owned.isEmpty {
-            logger.info("Purged \(owned.count) webview entry file(s) written by this process")
+        var removed = 0
+        for entry in entries {
+            let name = entry.lastPathComponent
+            if name.hasSuffix(".lock") {
+                guard let fd = takeEntryLock(at: entry, create: false) else { continue }
+                defer { close(fd) }
+                // Unlink the lock only once its directory is gone, so a failed
+                // removal is retried by the next sweep.
+                let dir = root.appendingPathComponent(String(name.dropLast(".lock".count)))
+                if removeIfPresent(dir), removeIfPresent(entry) { removed += 1 }
+            } else if !fm.fileExists(atPath: entry.path + ".lock"), removeIfPresent(entry) {
+                removed += 1
+            }
         }
+        if removed > 0 {
+            logger.notice("Swept \(removed) webview entry director(ies) left by exited processes")
+        }
+        return removed
+    }
+
+    /// True when `url` is gone afterwards, including when it was already gone.
+    @discardableResult
+    nonisolated private static func removeIfPresent(_ url: URL) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch CocoaError.fileNoSuchFile {
+        } catch {
+            logger.error("Failed to remove \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+        return true
     }
 
     // MARK: - Bundle Resource Reading

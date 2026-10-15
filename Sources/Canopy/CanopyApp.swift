@@ -31,8 +31,7 @@ struct CanopyApp: App {
             // The old reason given — that the delegate callback runs before
             // SwiftUI builds the scene — is FALSE and has been deleted rather
             // than annotated: it fires after the first render (measured while
-            // debugging the entry-file sweep, see
-            // `WebViewContainer.purgeOwnEntryFiles`). What is true is that
+            // debugging the entry-file sweep, PR #149). What is true is that
             // this is the point where the store is unambiguously alive and in
             // hand, with no `SessionStore.shared` lookup. Fires once per
             // window; `startMacroPad` is idempotent.
@@ -657,6 +656,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sleepGuard.start()
         AwakeStatus.shared.start()
         GPUProcessReaper.start()
+        Task.detached(priority: .utility) { WebViewContainer.sweepDeadEntryDirectories() }
         DaemonRegistration.ensureRegistered()
         // The sidebar's usage bars have no writer until a shim runs, so a
         // launch that opens on the launcher showed none (see
