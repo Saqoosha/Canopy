@@ -184,6 +184,8 @@ final class OpenSession: Identifiable, Hashable {
     var pendingInitialPrompt: LaunchPrompt?
     /// Control reply id `open_session` minted for that prompt; lives here so a reconnected shim still finds it.
     var pendingInitialPromptReplyId: String?
+    /// Text placed in the composer on the page's first load, not sent: a fork's edited message.
+    var composerPrefill: String?
     /// Title generated in the same call as this session's worktree branch
     /// name (`WorktreeBranchNamer`), waiting for the shim to adopt it as final.
     ///

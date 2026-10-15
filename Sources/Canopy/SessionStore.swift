@@ -990,7 +990,9 @@ final class SessionStore {
         target: PaneTarget = .focused,
         initialPrompt: LaunchPrompt? = nil,
         settledTitle: String? = nil,
-        fromLauncherPane launcherPane: PaneSlot.ID? = nil
+        fromLauncherPane launcherPane: PaneSlot.ID? = nil,
+        composerPrefill: String? = nil,
+        accountOf accountSource: OpenSession? = nil
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -1017,7 +1019,7 @@ final class SessionStore {
         // which carries the recorded value rather than asserting one.
 
         // A remote CLI signs in on the other machine, so no login is picked.
-        let accountChoice = remoteHost == nil ? launchAccountChoice(customApi: customApi) : nil
+        let accountChoice = remoteHost == nil && accountSource == nil ? launchAccountChoice(customApi: customApi) : nil
         let session = OpenSession(
             origin: origin,
             resumeId: resumeId ?? UUID().uuidString,
@@ -1028,7 +1030,7 @@ final class SessionStore {
             model: model,
             effortLevel: effortLevel,
             customApi: customApi,
-            claudeAccount: accountChoice?.account,
+            claudeAccount: accountSource?.claudeAccount ?? accountChoice?.account,
             resumeIdIsExistingTranscript: resumeId != nil
         )
         // Parked on the session rather than passed to `ShimProcess`, because
@@ -1037,7 +1039,9 @@ final class SessionStore {
         // announces itself.
         session.pendingInitialPrompt = initialPrompt
         session.pendingSettledTitle = settledTitle
-        session.accountAutoSwitch = accountChoice?.autoSwitch
+        session.accountAutoSwitch = accountSource?.accountAutoSwitch ?? accountChoice?.autoSwitch
+        // Before the pane below mounts: its page is built from it.
+        session.composerPrefill = composerPrefill
         // The launcher's prompt has exactly one hop left after this — a shim
         // that does not exist yet reads it once the CLI announces itself. This
         // line is what splits "the prompt never got here" from "it got here and
@@ -1144,6 +1148,31 @@ final class SessionStore {
             customApi: ModelProviderStore.selectedProvider(),
             target: target
         )
+    }
+
+    /// A pane's fork or new conversation (`ConversationTabRouting`), opened in a new pane
+    /// beside it with the same folder, login, model and permissions.
+    @discardableResult
+    func openConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession) -> OpenSession {
+        // The new id has no stored title, so the shim would generate the source's own name again.
+        if let forked = tab.sessionId {
+            SessionTitleStore.save(title: "\(source.title) (fork)", forSessionId: forked)
+        }
+        let session = openNew(
+            directory: source.origin.workingDirectory,
+            resumeId: tab.sessionId,
+            // The extension titles the fork's transcript the same way.
+            sessionTitle: tab.sessionId == nil ? nil : "\(source.title) (fork)",
+            model: source.model,
+            effortLevel: source.effortLevel,
+            permissionMode: source.permissionMode,
+            customApi: source.customApi,
+            target: .newPane,
+            composerPrefill: tab.initialPrompt,
+            accountOf: source
+        )
+        logger.notice("openConversationTab: \(tab.sessionId == nil ? "new" : "fork", privacy: .public), prefill \(tab.initialPrompt?.count ?? 0, privacy: .public) chars")
+        return session
     }
 
     /// Options for a new headless session (control `open_session`, or an attach's `open`).

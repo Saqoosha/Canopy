@@ -264,6 +264,15 @@ struct MirrorPaneView: NSViewRepresentable {
         bridge.onFileFrame = { [weak session] frame in
             session?.fileTransfer.handle(frame)
         }
+        bridge.composerPrefill = session.composerPrefill
+        session.composerPrefill = nil
+        // Only this Mac's daemon: a fork's transcript is written where the session runs.
+        if session.isDaemonHosted {
+            bridge.onNewConversationTab = { [weak session] tab in
+                guard let session else { return }
+                SessionStore.shared?.openConversationTab(tab, from: session)
+            }
+        }
         bridge.onUIFrame = { [weak bridge, weak webView] frame in
             switch frame {
             case .showContent(let title, let content, let startLine, let endLine):
