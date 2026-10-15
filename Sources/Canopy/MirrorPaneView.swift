@@ -264,6 +264,19 @@ struct MirrorPaneView: NSViewRepresentable {
         bridge.onFileFrame = { [weak session] frame in
             session?.fileTransfer.handle(frame)
         }
+        // Taken at load, so an attach that fails first does not lose it.
+        bridge.takeComposerPrefill = { [weak session] in
+            defer { session?.composerPrefill = nil }
+            return session?.composerPrefill
+        }
+        // Only this Mac's daemon: a fork's transcript is written where the session runs.
+        // Other panes keep forking in place.
+        if session.isDaemonHosted {
+            bridge.onNewConversationTab = { [weak session] tab in
+                guard let session else { return }
+                SessionStore.shared?.openConversationTab(tab, from: session)
+            }
+        }
         bridge.onUIFrame = { [weak bridge, weak webView] frame in
             switch frame {
             case .showContent(let title, let content, let startLine, let endLine):

@@ -184,6 +184,8 @@ final class OpenSession: Identifiable, Hashable {
     var pendingInitialPrompt: LaunchPrompt?
     /// Control reply id `open_session` minted for that prompt; lives here so a reconnected shim still finds it.
     var pendingInitialPromptReplyId: String?
+    /// Text placed in the composer on the page's first load, not sent: a fork's edited message.
+    var composerPrefill: String?
     /// Title generated in the same call as this session's worktree branch
     /// name (`WorktreeBranchNamer`), waiting for the shim to adopt it as final.
     ///
@@ -288,14 +290,21 @@ final class OpenSession: Identifiable, Hashable {
         guard isDaemonHosted else { return nil }
         // Sent even with a key: a daemon that restarted no longer holds it, and
         // the server ignores `open` when it does.
-        if resumeIdIsExistingTranscript { return .resume }
+        if resumeIdIsExistingTranscript { return resumeKeepsOwnSettings ? .resumeWith(options: launchOptions) : .resume }
         guard daemonKey == nil else { return nil }
-        return .new(cwd: origin.workingDirectory.path, options: NewSessionOptions(
+        return .new(cwd: origin.workingDirectory.path, options: launchOptions)
+    }
+
+    private var launchOptions: NewSessionOptions {
+        NewSessionOptions(
             model: model, effort: effortLevel, permissionMode: permissionMode,
             promptText: pendingInitialPrompt.flatMap { $0.text.isEmpty ? nil : $0.text },
             promptImages: pendingInitialPrompt?.images.map(\.wire) ?? [],
-            settledTitle: pendingSettledTitle, providerId: customApi?.id, accountId: claudeAccount?.id))
+            settledTitle: pendingSettledTitle, providerId: customApi?.id, accountId: claudeAccount?.id)
     }
+
+    /// Set for a fork: resume with this session's login, model and permissions, not the daemon's defaults.
+    var resumeKeepsOwnSettings = false
 
     /// Bumped by `SessionStore.restartSession(_:)`, and read only through
     /// `mountIdentity`.

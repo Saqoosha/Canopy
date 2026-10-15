@@ -79,6 +79,119 @@ enum SidebarLogicProbe {
                    "deadRun=\(deadRun) removed=\(removed) live=\(exists(live)) dead=\(exists(dead)) deadLock=\(exists(deadLock)) orphan=\(exists(orphan))")
         }
 
+        // Conversation tabs: a fork opens a pane instead of replacing this one.
+        do {
+            let initFrame: [String: Any] = ["type": "from-extension", "message": [
+                "type": "response", "requestId": "r1",
+                "response": ["type": "init_response", "state": ["openNewInTab": false, "defaultCwd": "/x"]]]]
+            let patched = ((ConversationTabRouting.patchingOpenNewInTab(initFrame)["message"] as? [String: Any])?["response"]
+                           as? [String: Any])?["state"] as? [String: Any]
+            record("tabs: init_response reports openNewInTab and keeps the rest",
+                   patched?["openNewInTab"] as? Bool == true && patched?["defaultCwd"] as? String == "/x")
+            let updateFrame: [String: Any] = ["type": "from-extension", "message": [
+                "type": "request", "channelId": "", "requestId": "r2",
+                "request": ["type": "update_state", "state": ["openNewInTab": false], "config": [:] as [String: Any]]]]
+            let updated = ((ConversationTabRouting.patchingOpenNewInTab(updateFrame)["message"] as? [String: Any])?["request"]
+                           as? [String: Any])?["state"] as? [String: Any]
+            record("tabs: update_state reports openNewInTab", updated?["openNewInTab"] as? Bool == true)
+            let other: [String: Any] = ["type": "from-extension", "message": [
+                "type": "response", "requestId": "r3", "response": ["type": "get_claude_state_response", "state": ["a": 1]]]]
+            record("tabs: other responses pass untouched",
+                   NSDictionary(dictionary: ConversationTabRouting.patchingOpenNewInTab(other)).isEqual(to: other))
+
+            let fork: [String: Any] = ["type": "request", "requestId": "q1", "request": [
+                "type": "new_conversation_tab", "sessionId": "6F1C4D0E-6C2B-4D6B-9C59-2C1B2B8E8A11", "initialPrompt": "edit me"]]
+            record("tabs: a fork request is read",
+                   ConversationTabRouting.newTab(fork) == .init(requestId: "q1", sessionId: "6F1C4D0E-6C2B-4D6B-9C59-2C1B2B8E8A11",
+                                                                initialPrompt: "edit me"))
+            let rename: [String: Any] = ["type": "request", "requestId": "q2", "request": ["type": "rename_tab", "title": "t"]]
+            record("tabs: rename_tab is answered here but opens nothing",
+                   ConversationTabRouting.answeredRequest(rename)?.kind == "rename_tab" && ConversationTabRouting.newTab(rename) == nil)
+            let forkConv: [String: Any] = ["type": "request", "requestId": "q3", "request": ["type": "fork_conversation"]]
+            record("tabs: fork_conversation still goes to the session", ConversationTabRouting.answeredRequest(forkConv) == nil)
+            let reply = ConversationTabRouting.response(kind: "new_conversation_tab", requestId: "q1")
+            let inner = reply["message"] as? [String: Any]
+            record("tabs: the answer is the extension's response shape",
+                   inner?["requestId"] as? String == "q1"
+                       && (inner?["response"] as? [String: Any])?["type"] as? String == "new_conversation_tab_response")
+            record("tabs: a prefill cannot break out of its attribute",
+                   WebViewContainer.htmlAttributeEscaped("a\"><script>&") == "a&quot;&gt;&lt;script&gt;&amp;")
+            let badId: [String: Any] = ["type": "request", "requestId": "q4", "request": [
+                "type": "new_conversation_tab", "sessionId": "x\" onload=\"y"]]
+            record("tabs: an id that is not a UUID opens nothing, as in the extension",
+                   ConversationTabRouting.answeredRequest(badId) != nil && ConversationTabRouting.newTab(badId) == nil)
+            let page = WebViewContainer.entryHTML(resumeSessionId: nil, includeKeychainAuth: false,
+                                                  initialPrompt: "a\"b") { $0 }
+            record("tabs: the entry page carries the prefill, escaped",
+                   page.contains("data-initial-prompt=\"a&quot;b\"")
+                       && !WebViewContainer.entryHTML(resumeSessionId: nil, includeKeychainAuth: false) { $0 }
+                           .contains("data-initial-prompt"))
+            record("tabs: a fork of a fork keeps one suffix",
+                   SessionStore.forkTitle(of: "A") == "A (fork)" && SessionStore.forkTitle(of: "A (fork)") == "A (fork)")
+
+            let opts = NewSessionOptions(model: "m", permissionMode: .plan, accountId: "acct")
+            let resumeWith = MirrorOpenRequest(wire: MirrorOpenRequest.resumeWith(options: opts).wire)
+            record("tabs: a resume with settings survives the wire, under the old kind",
+                   resumeWith == .resumeWith(options: opts)
+                       && MirrorOpenRequest.resumeWith(options: opts).wire["kind"] as? String == "resume"
+                       && MirrorOpenRequest(wire: MirrorOpenRequest.resume.wire) == .resume)
+        }
+
+        // A fork from a store: its settings must be on the session before the pane mounts,
+        // which happens inside `openNew` (the pane strip's first change stands in for it).
+        do {
+            let defaults = UserDefaults.standard
+            let recentsKey = "recentDirectories", lastKey = "canopy.lastActiveResumeId.v1"
+            let priorRecents = defaults.stringArray(forKey: recentsKey)
+            let priorLast = defaults.string(forKey: lastKey)
+            let priorTitles = SessionTitleStore._probeSnapshot()
+            let priorDaemon = OpenSession.localSessionsRunInDaemon
+            OpenSession.localSessionsRunInDaemon = true
+            // The source's mode differs from the default, so inheriting it cannot pass for the default.
+            // (Setting the default instead would rewrite the settings.json the installed app shares.)
+            let defaultMode = CanopySettings.shared.defaultPermissionMode
+            let sourceMode: PermissionMode = defaultMode == .plan ? .acceptEdits : .plan
+            defer {
+                defaults.set(priorRecents, forKey: recentsKey)
+                defaults.set(priorLast, forKey: lastKey)
+                SessionTitleStore._probeRestore(priorTitles)
+                OpenSession.localSessionsRunInDaemon = priorDaemon
+            }
+            let account = ClaudeAccount(id: "acct-fork", name: "Probe", configDir: "/tmp/probe-fork-acct")
+            let source = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: UUID().uuidString,
+                                     title: "Src", project: "p", status: .live, permissionMode: sourceMode, model: "m",
+                                     claudeAccount: account)
+            let store = SessionStore()
+            store._probeSeedOpenSessions([source])
+            store.openInFocusedPane(source.id)
+            let forkId = UUID().uuidString
+            final class AtMount: @unchecked Sendable { var value: (prefill: String?, account: String?, open: MirrorOpenRequest?)? }
+            let box = AtMount()
+            withObservationTracking({ _ = store.panes }, onChange: {
+                MainActor.assumeIsolated {
+                    let s = store.openSessions.last
+                    box.value = (s?.composerPrefill, s?.claudeAccount?.id, s?.daemonOpenRequest)
+                }
+            })
+            let fork = store.openConversationTab(.init(requestId: "q", sessionId: forkId, initialPrompt: "edit me"), from: source)
+            let expected = NewSessionOptions(model: "m", permissionMode: sourceMode, accountId: "acct-fork")
+            let atMount = box.value
+            record("tabs: a fork's prefill and login are set before its pane mounts",
+                   atMount?.prefill == "edit me" && atMount?.account == "acct-fork",
+                   "\(String(describing: atMount))")
+            record("tabs: a fork resumes with the source's settings, not the daemon's defaults",
+                   atMount?.open == .resumeWith(options: expected), "\(String(describing: atMount?.open))")
+            record("tabs: a fork is titled after its source",
+                   fork.title == "Src (fork)" && SessionTitleStore.title(forSessionId: forkId) == "Src (fork)")
+            let count = store.openSessions.count
+            record("tabs: an id that is already open is shown, not opened again",
+                   store.openConversationTab(.init(requestId: "q", sessionId: source.resumeId, initialPrompt: nil),
+                                             from: source) === source && store.openSessions.count == count)
+            let fresh = store.openConversationTab(.init(requestId: "q", sessionId: nil, initialPrompt: nil), from: source)
+            record("tabs: a new conversation starts in the default permission mode",
+                   fresh.permissionMode == defaultMode)
+        }
+
         // Peer-name pinning. Every one of these is a way a renamed session
         // silently loses its name, so each states which failure it pins.
         do {

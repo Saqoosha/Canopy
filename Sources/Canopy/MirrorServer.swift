@@ -593,7 +593,16 @@ final class MirrorConnection: MirrorSink {
                                        localCwd: String? = nil) -> Result<ShimProcess, OpenFailure> {
         let shim: ShimProcess?
         switch request {
-        case .resume:
+        case .resume, .resumeWith:
+            var options = SessionStore.HeadlessOptions()
+            if case .resumeWith(var given) = request {
+                // A plain resume has no such check, so a fork falls back to the default mode instead of failing.
+                if let refusal = given.refusal(allowBypass: server?.bypassAllowed() ?? false) {
+                    logger.notice("[mirror-server] resume keeps its settings but not its mode: \(refusal, privacy: .public)")
+                    given.permissionMode = nil
+                }
+                options = SessionStore.HeadlessOptions(given)
+            }
             if store.openSessions.contains(where: { $0.resumeId == sessionId }) {
                 // Open but dormant: it already knows its own folder.
                 shim = store.startHeadlessSession(resumeId: sessionId)
@@ -603,7 +612,8 @@ final class MirrorConnection: MirrorSink {
                 switch store.resolveClosedSession(sessionId: sessionId, localCwd: localCwd) {
                 case .success(let target):
                     shim = store.startHeadlessSession(directory: target.directory, resumeId: sessionId,
-                                                      isExistingTranscript: true, title: target.title)
+                                                      isExistingTranscript: true, title: target.title,
+                                                      options: options)
                 case .failure(let failure):
                     logger.error("[mirror-server] open refused: \(sessionId, privacy: .public) is not a session here (\(failure.code, privacy: .public))")
                     return .failure(OpenFailure(MirrorOpenRequest.notOpenable))

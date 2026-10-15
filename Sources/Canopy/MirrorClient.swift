@@ -17,6 +17,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     var onFileFrame: (([String: Any]) -> Void)?
     /// UI a daemon session asks this pane to show (`MirrorUIFrame`).
     var onUIFrame: ((MirrorUIFrame) -> Void)?
+    /// Set: the page is told `openNewInTab`, and its new-tab and `rename_tab`
+    /// requests are answered here (`ConversationTabRouting`).
+    var onNewConversationTab: ((ConversationTabRouting.NewTab) -> Void)?
+    /// Takes the composer text for the page this bridge loads (`data-initial-prompt`).
+    var takeComposerPrefill: (() -> String?)?
     /// Set by the daemon's `daemon_restarting`: the next drop may re-attach on its own.
     private(set) var expectsRestart = false
     /// Set by `ShimProcess.sessionRestartingFrameType`: the host restarted this session in place
@@ -188,6 +193,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         didReceive message: WKScriptMessage
     ) {
         guard let dict = message.body as? [String: Any] else { return }
+        if let onNewConversationTab, let (kind, requestId) = ConversationTabRouting.answeredRequest(dict) {
+            webView?.deliver(ConversationTabRouting.response(kind: kind, requestId: requestId))
+            if let tab = ConversationTabRouting.newTab(dict) { onNewConversationTab(tab) }
+            return
+        }
         sendJSONObject(dict)
     }
 
@@ -223,7 +233,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if !sendsToken { attach["token"] = nil }
         // `open`: start this session over there if nothing is running it yet (a Recents or folder row).
         if let openRequest { attach["open"] = openRequest.wire }
-        if openRequest == .resume, let resumeCwd { attach["cwd"] = resumeCwd }
+        if let openRequest, openRequest.isResume, let resumeCwd { attach["cwd"] = resumeCwd }
         sendJSONObject(attach)
         scheduleReceive()
     }
@@ -298,7 +308,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 let resolvedId = (dict["sessionId"] as? String).flatMap { UUID(uuidString: $0) != nil ? $0 : nil } ?? sessionId
                 WebViewContainer.loadCCWebview(webView, resumeSessionId: resolvedId,
                                                entryFileName: WebViewContainer.entryFileName(for: nil),
-                                               extensionPath: local)
+                                               extensionPath: local, initialPrompt: takeComposerPrefill?())
             }
             deliverOutcome(.attached)
             return
@@ -350,7 +360,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
             logger.error("[mirror-client] unreadable \(MirrorUIFrame.type, privacy: .public) frame dropped")
             return
         }
-        webView?.deliver(dict)
+        webView?.deliver(onNewConversationTab == nil ? dict : ConversationTabRouting.patchingOpenNewInTab(dict))
     }
 
     /// Answers an alert the session forwarded.

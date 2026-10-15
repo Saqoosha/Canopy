@@ -990,7 +990,9 @@ final class SessionStore {
         target: PaneTarget = .focused,
         initialPrompt: LaunchPrompt? = nil,
         settledTitle: String? = nil,
-        fromLauncherPane launcherPane: PaneSlot.ID? = nil
+        fromLauncherPane launcherPane: PaneSlot.ID? = nil,
+        composerPrefill: String? = nil,
+        settingsOf accountSource: OpenSession? = nil
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -1017,7 +1019,7 @@ final class SessionStore {
         // which carries the recorded value rather than asserting one.
 
         // A remote CLI signs in on the other machine, so no login is picked.
-        let accountChoice = remoteHost == nil ? launchAccountChoice(customApi: customApi) : nil
+        let accountChoice = remoteHost == nil && accountSource == nil ? launchAccountChoice(customApi: customApi) : nil
         let session = OpenSession(
             origin: origin,
             resumeId: resumeId ?? UUID().uuidString,
@@ -1028,7 +1030,7 @@ final class SessionStore {
             model: model,
             effortLevel: effortLevel,
             customApi: customApi,
-            claudeAccount: accountChoice?.account,
+            claudeAccount: accountSource?.claudeAccount ?? accountChoice?.account,
             resumeIdIsExistingTranscript: resumeId != nil
         )
         // Parked on the session rather than passed to `ShimProcess`, because
@@ -1037,7 +1039,11 @@ final class SessionStore {
         // announces itself.
         session.pendingInitialPrompt = initialPrompt
         session.pendingSettledTitle = settledTitle
-        session.accountAutoSwitch = accountChoice?.autoSwitch
+        session.accountAutoSwitch = accountSource?.accountAutoSwitch ?? accountChoice?.autoSwitch
+        // A daemon resume otherwise starts with the daemon's defaults, not these.
+        session.resumeKeepsOwnSettings = accountSource != nil
+        // Before the pane below mounts: its page is built from it.
+        session.composerPrefill = composerPrefill
         // The launcher's prompt has exactly one hop left after this — a shim
         // that does not exist yet reads it once the CLI announces itself. This
         // line is what splits "the prompt never got here" from "it got here and
@@ -1144,6 +1150,44 @@ final class SessionStore {
             customApi: ModelProviderStore.selectedProvider(),
             target: target
         )
+    }
+
+    /// A pane's fork or new conversation (`ConversationTabRouting`), opened in a new pane
+    /// with the same folder, login and model. A fork keeps the source's permission mode,
+    /// as the extension does; a new conversation starts in the default one, as it did in place.
+    /// An id that is already open is shown, not opened again or retitled.
+    @discardableResult
+    func openConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession) -> OpenSession {
+        if let forked = tab.sessionId, let existing = openSessions.first(where: { $0.resumeId == forked }) {
+            logger.notice("openConversationTab: \(forked, privacy: .public) is already open; showing it")
+            select(.session(existing.id))
+            return existing
+        }
+        let forkTitle = tab.sessionId.map { _ in Self.forkTitle(of: source.title) }
+        // With no stored title the shim would retitle it from the same prompts as the source.
+        if let forked = tab.sessionId, let forkTitle,
+           !SessionTitleStore.save(title: forkTitle, forSessionId: forked) {
+            logger.error("openConversationTab: fork title not saved; the shim may retitle it")
+        }
+        let session = openNew(
+            directory: source.origin.workingDirectory,
+            resumeId: tab.sessionId,
+            sessionTitle: forkTitle,
+            model: source.model,
+            effortLevel: source.effortLevel,
+            permissionMode: tab.sessionId == nil ? CanopySettings.shared.defaultPermissionMode : source.permissionMode,
+            customApi: source.customApi,
+            target: .newPane,
+            composerPrefill: tab.initialPrompt,
+            settingsOf: source
+        )
+        logger.notice("openConversationTab: \(tab.sessionId == nil ? "new" : "fork", privacy: .public), prefill \(tab.initialPrompt?.count ?? 0, privacy: .public) chars")
+        return session
+    }
+
+    /// `title (fork)`, once: a fork of a fork keeps one suffix.
+    nonisolated static func forkTitle(of title: String) -> String {
+        title.hasSuffix(" (fork)") ? title : "\(title) (fork)"
     }
 
     /// Options for a new headless session (control `open_session`, or an attach's `open`).
