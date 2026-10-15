@@ -131,6 +131,9 @@ struct NewSessionOptions: Equatable {
 enum MirrorOpenRequest: Equatable {
     /// Resume a closed session; the server takes its folder from its own Recents.
     case resume
+    /// `resume` started with these options instead of the server's defaults (a fork).
+    /// Same `kind` on the wire, so a server that predates it resumes with its defaults.
+    case resumeWith(options: NewSessionOptions)
     /// A new session in `cwd` on the other Mac, under the attach's session id
     /// as a placeholder the CLI's own id later replaces.
     case new(cwd: String, options: NewSessionOptions)
@@ -142,16 +145,29 @@ enum MirrorOpenRequest: Equatable {
     /// "The session on <Mac> stopped: " (`SessionStore.mirrorEndedMessage`).
     static let stoppedByClient = "Stop Session was used."
 
+    var isResume: Bool {
+        switch self {
+        case .resume, .resumeWith: true
+        case .new: false
+        }
+    }
+
     var wire: [String: Any] {
         switch self {
         case .resume: ["kind": "resume"]
+        case .resumeWith(let options): ["kind": "resume", "options": options.wire]
         case .new(let cwd, let options): ["kind": "new", "cwd": cwd, "options": options.wire]
         }
     }
 
     init?(wire: [String: Any]?) {
         switch wire?["kind"] as? String {
-        case "resume": self = .resume
+        case "resume":
+            if let options = wire?["options"] as? [String: Any] {
+                self = .resumeWith(options: NewSessionOptions(wire: options))
+            } else {
+                self = .resume
+            }
         case "new":
             guard let cwd = wire?["cwd"] as? String, cwd.hasPrefix("/") else { return nil }
             self = .new(cwd: cwd, options: NewSessionOptions(wire: wire?["options"] as? [String: Any]))

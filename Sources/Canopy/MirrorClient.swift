@@ -17,11 +17,11 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     var onFileFrame: (([String: Any]) -> Void)?
     /// UI a daemon session asks this pane to show (`MirrorUIFrame`).
     var onUIFrame: ((MirrorUIFrame) -> Void)?
-    /// Set: the page's fork and new-conversation requests come here instead of
-    /// replacing its conversation (`ConversationTabRouting`).
+    /// Set: the page is told `openNewInTab`, and its new-tab and `rename_tab`
+    /// requests are answered here (`ConversationTabRouting`).
     var onNewConversationTab: ((ConversationTabRouting.NewTab) -> Void)?
-    /// Composer text for the page's first load (`data-initial-prompt`).
-    var composerPrefill: String?
+    /// Takes the composer text for the page this bridge loads (`data-initial-prompt`).
+    var takeComposerPrefill: (() -> String?)?
     /// Set by the daemon's `daemon_restarting`: the next drop may re-attach on its own.
     private(set) var expectsRestart = false
     /// Set by `ShimProcess.sessionRestartingFrameType`: the host restarted this session in place
@@ -233,7 +233,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         if !sendsToken { attach["token"] = nil }
         // `open`: start this session over there if nothing is running it yet (a Recents or folder row).
         if let openRequest { attach["open"] = openRequest.wire }
-        if openRequest == .resume, let resumeCwd { attach["cwd"] = resumeCwd }
+        if let openRequest, openRequest.isResume, let resumeCwd { attach["cwd"] = resumeCwd }
         sendJSONObject(attach)
         scheduleReceive()
     }
@@ -308,7 +308,7 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
                 let resolvedId = (dict["sessionId"] as? String).flatMap { UUID(uuidString: $0) != nil ? $0 : nil } ?? sessionId
                 WebViewContainer.loadCCWebview(webView, resumeSessionId: resolvedId,
                                                entryFileName: WebViewContainer.entryFileName(for: nil),
-                                               extensionPath: local, initialPrompt: composerPrefill)
+                                               extensionPath: local, initialPrompt: takeComposerPrefill?())
             }
             deliverOutcome(.attached)
             return

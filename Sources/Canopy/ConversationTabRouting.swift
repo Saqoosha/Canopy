@@ -4,15 +4,16 @@ import Foundation
 ///
 /// The webview forks a conversation in place unless the host reports
 /// `openNewInTab`, which the extension sets only for an editor panel. With it
-/// on, a fork (and a new conversation) arrives as `new_conversation_tab`, which
-/// the extension would answer by building a hidden panel inside the shim. The
-/// flag also makes the webview send `rename_tab`, which Canopy's title handling
-/// must not start seeing. So a pane that opts in forces the flag on frames into
-/// the page and answers both requests itself, before they reach the session.
+/// on, a fork arrives as `new_conversation_tab`, and so does every other way to
+/// start a conversation (the New session button included); the extension would
+/// open each in a panel inside the shim that no pane shows. The flag also makes
+/// the webview send `rename_tab`, whose title the shim would put on the row. So
+/// a pane that opts in sets the flag in the host state sent to the page and
+/// answers both requests itself, before they reach the session.
 enum ConversationTabRouting {
     struct NewTab: Equatable {
         let requestId: String
-        /// The forked session; nil for a fresh conversation.
+        /// The forked session, a UUID; nil for a fresh conversation.
         let sessionId: String?
         /// Text for the new conversation's composer, not sent.
         let initialPrompt: String?
@@ -56,7 +57,9 @@ enum ConversationTabRouting {
     static func newTab(_ dict: [String: Any]) -> NewTab? {
         guard let (kind, requestId) = answeredRequest(dict), kind == "new_conversation_tab",
               let request = dict["request"] as? [String: Any] else { return nil }
-        let sessionId = (request["sessionId"] as? String).flatMap { UUID(uuidString: $0) != nil ? $0 : nil }
+        // The extension itself opens nothing for an id that is not a UUID.
+        let sessionId = request["sessionId"] as? String
+        if let sessionId, UUID(uuidString: sessionId) == nil { return nil }
         let prompt = (request["initialPrompt"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         return NewTab(requestId: requestId, sessionId: sessionId, initialPrompt: prompt)
     }

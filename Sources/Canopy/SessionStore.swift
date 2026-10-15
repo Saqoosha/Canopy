@@ -992,7 +992,7 @@ final class SessionStore {
         settledTitle: String? = nil,
         fromLauncherPane launcherPane: PaneSlot.ID? = nil,
         composerPrefill: String? = nil,
-        accountOf accountSource: OpenSession? = nil
+        settingsOf accountSource: OpenSession? = nil
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -1040,6 +1040,8 @@ final class SessionStore {
         session.pendingInitialPrompt = initialPrompt
         session.pendingSettledTitle = settledTitle
         session.accountAutoSwitch = accountSource?.accountAutoSwitch ?? accountChoice?.autoSwitch
+        // A daemon resume otherwise starts with the daemon's defaults, not these.
+        session.resumeKeepsOwnSettings = accountSource != nil
         // Before the pane below mounts: its page is built from it.
         session.composerPrefill = composerPrefill
         // The launcher's prompt has exactly one hop left after this — a shim
@@ -1151,28 +1153,40 @@ final class SessionStore {
     }
 
     /// A pane's fork or new conversation (`ConversationTabRouting`), opened in a new pane
-    /// beside it with the same folder, login, model and permissions.
+    /// with the same folder, login and model. A fork keeps the source's permission mode,
+    /// as the extension does; a new conversation starts in the default one, as it did in place.
+    /// Nil for an id that is already open: only a freshly forked one is expected.
     @discardableResult
-    func openConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession) -> OpenSession {
-        // The new id has no stored title, so the shim would generate the source's own name again.
-        if let forked = tab.sessionId {
-            SessionTitleStore.save(title: "\(source.title) (fork)", forSessionId: forked)
+    func openConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession) -> OpenSession? {
+        if let forked = tab.sessionId, openSessions.contains(where: { $0.resumeId == forked }) {
+            logger.error("openConversationTab: \(forked, privacy: .public) is already open; nothing opened")
+            return nil
+        }
+        let forkTitle = tab.sessionId.map { _ in Self.forkTitle(of: source.title) }
+        // With no stored title the shim would retitle it from the same prompts as the source.
+        if let forked = tab.sessionId, let forkTitle,
+           !SessionTitleStore.save(title: forkTitle, forSessionId: forked) {
+            logger.error("openConversationTab: fork title not saved; the shim may retitle it")
         }
         let session = openNew(
             directory: source.origin.workingDirectory,
             resumeId: tab.sessionId,
-            // The extension titles the fork's transcript the same way.
-            sessionTitle: tab.sessionId == nil ? nil : "\(source.title) (fork)",
+            sessionTitle: forkTitle,
             model: source.model,
             effortLevel: source.effortLevel,
-            permissionMode: source.permissionMode,
+            permissionMode: tab.sessionId == nil ? CanopySettings.shared.defaultPermissionMode : source.permissionMode,
             customApi: source.customApi,
             target: .newPane,
             composerPrefill: tab.initialPrompt,
-            accountOf: source
+            settingsOf: source
         )
         logger.notice("openConversationTab: \(tab.sessionId == nil ? "new" : "fork", privacy: .public), prefill \(tab.initialPrompt?.count ?? 0, privacy: .public) chars")
         return session
+    }
+
+    /// `title (fork)`, once: a fork of a fork keeps one suffix.
+    nonisolated static func forkTitle(of title: String) -> String {
+        title.hasSuffix(" (fork)") ? title : "\(title) (fork)"
     }
 
     /// Options for a new headless session (control `open_session`, or an attach's `open`).

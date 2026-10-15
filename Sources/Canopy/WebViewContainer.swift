@@ -631,10 +631,7 @@ struct WebViewContainer: NSViewRepresentable {
         Self.loadCCWebview(webView, resumeSessionId: resumeSessionId,
                            entryFileName: Self.entryFileName(for: boundSession),
                            includeKeychainAuth: boundSession?.claudeAccount == nil,
-                           extensionPath: boundSession?.shim?.extensionDirectory,
-                           initialPrompt: boundSession?.composerPrefill)
-        // Once: a later remount must not put it back.
-        boundSession?.composerPrefill = nil
+                           extensionPath: boundSession?.shim?.extensionDirectory)
     }
 
     /// Writes the entry HTML for `resumeSessionId` under `entryFileName` and
