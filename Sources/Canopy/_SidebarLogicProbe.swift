@@ -126,6 +126,10 @@ enum SidebarLogicProbe {
                    page.contains("data-initial-prompt=\"a&quot;b\"")
                        && !WebViewContainer.entryHTML(resumeSessionId: nil, includeKeychainAuth: false) { $0 }
                            .contains("data-initial-prompt"))
+            record("tabs: the host folder is read from the page's host state",
+                   ConversationTabRouting.hostCwd(initFrame) == "/x"
+                       && ConversationTabRouting.hostCwd(updateFrame) == nil
+                       && ConversationTabRouting.hostCwd(other) == nil)
             record("tabs: a fork of a fork keeps one suffix",
                    SessionStore.forkTitle(of: "A") == "A (fork)" && SessionStore.forkTitle(of: "A (fork)") == "A (fork)")
 
@@ -182,14 +186,14 @@ enum SidebarLogicProbe {
             record("tabs: a fork resumes with the source's settings, not the daemon's defaults",
                    atMount?.open == .resumeWith(options: expected), "\(String(describing: atMount?.open))")
             record("tabs: a fork is titled after its source",
-                   fork.title == "Src (fork)" && SessionTitleStore.title(forSessionId: forkId) == "Src (fork)")
+                   fork?.title == "Src (fork)" && SessionTitleStore.title(forSessionId: forkId) == "Src (fork)")
             let count = store.openSessions.count
             record("tabs: an id that is already open is shown, not opened again",
                    store.openConversationTab(.init(requestId: "q", sessionId: source.resumeId, initialPrompt: nil),
                                              from: source) === source && store.openSessions.count == count)
             let fresh = store.openConversationTab(.init(requestId: "q", sessionId: nil, initialPrompt: nil), from: source)
             record("tabs: a new conversation starts in the default permission mode",
-                   fresh.permissionMode == defaultMode)
+                   fresh?.permissionMode == defaultMode)
         }
 
         // Peer-name pinning. Every one of these is a way a renamed session

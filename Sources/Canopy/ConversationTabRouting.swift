@@ -44,6 +44,18 @@ enum ConversationTabRouting {
         return out
     }
 
+    /// The host's folder (`defaultCwd`) in the state `frame` carries, or nil: on a
+    /// mirror pane, the only place this Mac learns the other Mac's folder.
+    static func hostCwd(_ frame: [String: Any]) -> String? {
+        guard frame["type"] as? String == "from-extension",
+              let message = frame["message"] as? [String: Any],
+              let body = (message["response"] ?? message["request"]) as? [String: Any],
+              ["init_response", "update_state"].contains(body["type"] as? String ?? ""),
+              let cwd = (body["state"] as? [String: Any])?["defaultCwd"] as? String,
+              cwd.hasPrefix("/") else { return nil }
+        return cwd
+    }
+
     /// The kind and id of a webview→host request answered here, or nil.
     static func answeredRequest(_ dict: [String: Any]) -> (kind: String, requestId: String)? {
         guard dict["type"] as? String == "request",

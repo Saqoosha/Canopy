@@ -380,10 +380,12 @@ final class SessionStore {
         }
     }
 
+    @discardableResult
     private func attachMirrorPane(machineId: String, machineName: String, resumeId: String, title: String,
-                                  project: String, open: MirrorOpenRequest?, target: PaneTarget) {
+                                  project: String, open: MirrorOpenRequest?, target: PaneTarget,
+                                  composerPrefill: String? = nil) -> OpenSession? {
         guard let address = CanopySettings.shared.mirrorPeers[machineId],
-              let hostPort = MirrorAccess.parseHostPort(address) else { return }
+              let hostPort = MirrorAccess.parseHostPort(address) else { return nil }
         let session = OpenSession(
             origin: .mirror(machineId: machineId, host: hostPort.host, port: hostPort.port),
             resumeId: resumeId,
@@ -394,9 +396,12 @@ final class SessionStore {
         )
         session.statusBar.mirrorMachine = machineName
         session.pendingMirrorOpen = open
+        // Before the pane mounts: its page is built from it.
+        session.composerPrefill = composerPrefill
         openSessions.append(session)
         focusOrPane(session.id, target: target)
         logger.notice("attachMirrorPane: attaching \(resumeId, privacy: .public) on \(machineId, privacy: .public) open=\(open.map { $0.wire["kind"] as? String ?? "?" } ?? "nil", privacy: .public)")
+        return session
     }
 
     /// Other Macs' closed sessions and recent folders, by machine id, as their
@@ -1155,13 +1160,21 @@ final class SessionStore {
     /// A pane's fork or new conversation (`ConversationTabRouting`), opened in a new pane
     /// with the same folder, login and model. A fork keeps the source's permission mode,
     /// as the extension does; a new conversation starts in the default one, as it did in place.
-    /// An id that is already open is shown, not opened again or retitled.
+    /// An id that is already open is shown, not opened again or retitled. A source on another
+    /// Mac is asked to resume the fork, or start the new one in `hostCwd`; nil when that is unknown.
     @discardableResult
-    func openConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession) -> OpenSession {
-        if let forked = tab.sessionId, let existing = openSessions.first(where: { $0.resumeId == forked }) {
+    func openConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession,
+                             hostCwd: String? = nil) -> OpenSession? {
+        let machine = source.origin.mirrorTarget?.machineId
+        if let forked = tab.sessionId, let existing = openSessions.first(where: {
+            $0.resumeId == forked && $0.origin.mirrorTarget?.machineId == machine
+        }) {
             logger.notice("openConversationTab: \(forked, privacy: .public) is already open; showing it")
             select(.session(existing.id))
             return existing
+        }
+        if let machine {
+            return openMirrorConversationTab(tab, from: source, machineId: machine, hostCwd: hostCwd)
         }
         let forkTitle = tab.sessionId.map { _ in Self.forkTitle(of: source.title) }
         // With no stored title the shim would retitle it from the same prompts as the source.
@@ -1183,6 +1196,29 @@ final class SessionStore {
         )
         logger.notice("openConversationTab: \(tab.sessionId == nil ? "new" : "fork", privacy: .public), prefill \(tab.initialPrompt?.count ?? 0, privacy: .public) chars")
         return session
+    }
+
+    /// `openConversationTab` for a pane on another Mac. That Mac's defaults apply, as when opening
+    /// from its Recents: this Mac does not know the source's mode or model there.
+    private func openMirrorConversationTab(_ tab: ConversationTabRouting.NewTab, from source: OpenSession,
+                                           machineId: String, hostCwd: String?) -> OpenSession? {
+        let machineName = source.statusBar.mirrorMachine ?? machineId
+        guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return nil }
+        if let forked = tab.sessionId {
+            let title = Self.forkTitle(of: source.title)
+            // The title alone, so that Mac names the row and keeps it; an older Mac resumes without it.
+            return attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: forked,
+                                    title: title, project: source.project,
+                                    open: .resumeWith(options: NewSessionOptions(settledTitle: title)),
+                                    target: .newPane, composerPrefill: tab.initialPrompt)
+        }
+        guard let hostCwd else {
+            logger.error("openConversationTab: no folder known for \(machineId, privacy: .public); nothing opened")
+            return nil
+        }
+        return attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: UUID().uuidString,
+                                title: "Untitled", project: source.project, open: .new(cwd: hostCwd, options: .init()),
+                                target: .newPane, composerPrefill: tab.initialPrompt)
     }
 
     /// `title (fork)`, once: a fork of a fork keeps one suffix.
