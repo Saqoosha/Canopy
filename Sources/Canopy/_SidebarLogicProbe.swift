@@ -43,32 +43,40 @@ enum SidebarLogicProbe {
             else  { fail += 1; lines.append("  FAIL \(name) — \(detail)") }
         }
 
-        // Webview entry directories: only a directory whose lock is free is swept.
+        // Webview entry directories, checked from a second process with lockf(1):
+        // a live writer's directory survives the sweep, and what an exited
+        // writer or a lockless leftover leaves is removed.
         do {
             let fm = FileManager.default
-            let own = WebViewContainer.ownEntryDirectory
-            record("entry dir: this process holds its own directory's lock",
-                   fm.fileExists(atPath: own.appendingPathComponent(".lock").path)
-                       && WebViewContainer.takeEntryLock(in: own, create: false) == nil)
-
             let root = fm.temporaryDirectory.appendingPathComponent("canopy-entry-probe-\(UUID().uuidString)")
             defer { try? fm.removeItem(at: root) }
-            let live = root.appendingPathComponent("live")
-            let dead = root.appendingPathComponent("dead")
-            let unlocked = root.appendingPathComponent("no-lock-yet")
-            for dir in [live, dead, unlocked] {
-                try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            func lockf(_ args: [String]) -> Int32 {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/lockf")
+                p.arguments = args
+                do { try p.run() } catch { return -1 }
+                p.waitUntilExit()
+                return p.terminationStatus
             }
-            let liveLock = WebViewContainer.takeEntryLock(in: live, create: true)
-            defer { if let liveLock { close(liveLock) } }
-            // A writer that exited: the kernel released its lock the same way close does.
-            if let deadLock = WebViewContainer.takeEntryLock(in: dead, create: true) { close(deadLock) }
+            let live = WebViewContainer.ensureEntryDirectory(named: "live", in: root)
+            let liveLock = root.appendingPathComponent("live.lock")
+            let otherProcess = lockf(["-t", "0", liveLock.path, "/usr/bin/true"])
+            record("entry dir: another process cannot take a live writer's lock",
+                   otherProcess > 0, "lockf exit \(otherProcess)")
+
+            // An exited writer: lockf takes the lock, makes the directory, exits.
+            let dead = root.appendingPathComponent("dead")
+            let deadLock = root.appendingPathComponent("dead.lock")
+            let deadRun = lockf(["-k", deadLock.path, "/bin/mkdir", dead.path])
+            let orphan = root.appendingPathComponent("orphan")
+            try? fm.createDirectory(at: orphan, withIntermediateDirectories: true)
 
             let removed = WebViewContainer.sweepDeadEntryDirectories(in: root)
             let exists = { (url: URL) in fm.fileExists(atPath: url.path) }
-            record("entry dir: sweep removes only the directory whose lock is free",
-                   liveLock != nil && removed == 1 && exists(live) && !exists(dead) && exists(unlocked),
-                   "liveLock=\(liveLock != nil) removed=\(removed) live=\(exists(live)) dead=\(exists(dead)) unlocked=\(exists(unlocked))")
+            record("entry dir: sweep keeps the live writer and removes the dead and lockless ones",
+                   deadRun == 0 && removed == 2 && exists(live) && exists(liveLock)
+                       && !exists(dead) && !exists(deadLock) && !exists(orphan),
+                   "deadRun=\(deadRun) removed=\(removed) live=\(exists(live)) dead=\(exists(dead)) deadLock=\(exists(deadLock)) orphan=\(exists(orphan))")
         }
 
         // Peer-name pinning. Every one of these is a way a renamed session

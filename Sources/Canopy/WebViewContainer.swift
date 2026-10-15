@@ -654,7 +654,7 @@ struct WebViewContainer: NSViewRepresentable {
             extPath.appendingPathComponent($0).absoluteString
         }
 
-        let entryDir = ownEntryDirectory
+        let entryDir = ensureEntryDirectory(named: ownEntryName)
         // One entry file PER SESSION, never a shared `_canopy.html`.
         //
         // `data-initial-session` — the only thing that tells the CC extension's
@@ -752,29 +752,41 @@ struct WebViewContainer: NSViewRepresentable {
     nonisolated static let entryRootDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Canopy/webview-entries")
 
-    /// `webview-entries/<pid>-<uuid>/`, made on first use. Its `.lock` stays
-    /// flock-held until this process exits, however it exits, so a lock that
-    /// another process can take marks a dead writer.
-    nonisolated static let ownEntryDirectory: URL = {
-        let dir = entryRootDirectory.appendingPathComponent(
-            "\(getpid())-\(UUID().uuidString)", isDirectory: true)
+    /// This process's entry directory is `webview-entries/<pid>-<uuid>/`, and
+    /// `<pid>-<uuid>.lock` beside it stays flock-held until the process exits,
+    /// however it exits. A lock another process can take marks a dead writer.
+    nonisolated static let ownEntryName = "\(getpid())-\(UUID().uuidString)"
+
+    /// Makes `root/<name>/`, locking `root/<name>.lock` first so the directory
+    /// never exists without its lock. Re-run on every load, so a directory
+    /// deleted under a running app comes back.
+    @discardableResult
+    nonisolated static func ensureEntryDirectory(named name: String, in root: URL = entryRootDirectory) -> URL {
+        let fm = FileManager.default
+        let dir = root.appendingPathComponent(name, isDirectory: true)
+        let lock = root.appendingPathComponent(name + ".lock")
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if !fm.fileExists(atPath: lock.path) {
+                try fm.createDirectory(at: root, withIntermediateDirectories: true)
+                // Never closed: the lock must live as long as the process.
+                _ = takeEntryLock(at: lock, create: true)
+            }
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
             logger.error("Failed to create \(dir.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        // The descriptor is never closed: the lock must live as long as the process.
-        if takeEntryLock(in: dir, create: true) == nil {
-            logger.error("Failed to lock \(dir.path, privacy: .public): errno \(errno)")
-        }
         return dir
-    }()
+    }
 
-    /// Opens `dir/.lock` holding an exclusive flock, or nil when another open
-    /// file holds it (this process's own included) or the file is missing.
-    nonisolated static func takeEntryLock(in dir: URL, create: Bool) -> Int32? {
+    /// Opens `lock` holding an exclusive flock, or nil when another open file
+    /// holds it (this process's own included) or it is missing.
+    nonisolated static func takeEntryLock(at lock: URL, create: Bool) -> Int32? {
         let flags = O_RDONLY | O_CLOEXEC | O_EXLOCK | O_NONBLOCK | (create ? O_CREAT : 0)
-        let fd = open(dir.appendingPathComponent(".lock").path, flags, 0o644)
+        let fd = open(lock.path, flags, 0o644)
+        let err = errno
+        if fd < 0 && create {
+            logger.error("Failed to lock \(lock.path, privacy: .public): errno \(err)")
+        }
         return fd >= 0 ? fd : nil
     }
 
@@ -782,25 +794,22 @@ struct WebViewContainer: NSViewRepresentable {
     /// running webview's `webViewWebContentProcessDidTerminate` recovery
     /// re-reads its entry file.
     @MainActor static func purgeOwnEntryFiles() {
-        do {
-            try FileManager.default.removeItem(at: ownEntryDirectory)
-        } catch {
-            logger.error("Failed to purge \(ownEntryDirectory.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
-        }
+        removeIfPresent(entryRootDirectory.appendingPathComponent(ownEntryName))
+        removeIfPresent(entryRootDirectory.appendingPathComponent(ownEntryName + ".lock"))
     }
 
-    /// Delete the entry directories of exited processes (a crash, a kill, a
-    /// stopped Debug run), which the quit-time purge never reaches. A directory
-    /// is removed only while this call holds its lock; one with no `.lock` yet
-    /// belongs to a writer between creating it and locking it, and is kept.
-    /// Files older builds wrote straight into `Application Support/Canopy` are
-    /// not touched: a running older build may still read them.
+    /// Delete what exited processes left (a crash, a kill, a stopped Debug
+    /// run), which the quit-time purge never reaches: a directory whose lock
+    /// this call can take, or one with no lock at all, since its writer makes
+    /// the lock first. Files older builds wrote straight into
+    /// `Application Support/Canopy` are not touched: a running older build may
+    /// still read them.
     @discardableResult
     nonisolated static func sweepDeadEntryDirectories(in root: URL = entryRootDirectory) -> Int {
         let fm = FileManager.default
-        let dirs: [URL]
+        let entries: [URL]
         do {
-            dirs = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            entries = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
         } catch CocoaError.fileReadNoSuchFile {
             return 0
         } catch {
@@ -808,20 +817,36 @@ struct WebViewContainer: NSViewRepresentable {
             return 0
         }
         var removed = 0
-        for dir in dirs {
-            guard let fd = takeEntryLock(in: dir, create: false) else { continue }
-            defer { close(fd) }
-            do {
-                try fm.removeItem(at: dir)
+        for entry in entries {
+            let name = entry.lastPathComponent
+            if name.hasSuffix(".lock") {
+                guard let fd = takeEntryLock(at: entry, create: false) else { continue }
+                defer { close(fd) }
+                // Unlink the lock only once its directory is gone, so a failed
+                // removal is retried by the next sweep.
+                let dir = root.appendingPathComponent(String(name.dropLast(".lock".count)))
+                if removeIfPresent(dir), removeIfPresent(entry) { removed += 1 }
+            } else if !fm.fileExists(atPath: entry.path + ".lock"), removeIfPresent(entry) {
                 removed += 1
-            } catch {
-                logger.error("Failed to sweep \(dir.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
         if removed > 0 {
             logger.notice("Swept \(removed) webview entry director(ies) left by exited processes")
         }
         return removed
+    }
+
+    /// True when `url` is gone afterwards, including when it was already gone.
+    @discardableResult
+    nonisolated private static func removeIfPresent(_ url: URL) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch CocoaError.fileNoSuchFile {
+        } catch {
+            logger.error("Failed to remove \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+        return true
     }
 
     // MARK: - Bundle Resource Reading
