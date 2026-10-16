@@ -8376,15 +8376,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // stays true and the bar renders a frozen, plausible-looking
             // number instead of failing visibly. See issue #106.
             //
-            // The `data.model` write below feeds the status bar's model label
-            // only. #108 deliberately does NOT read it for the context-meter
-            // lookup — see `mainModelUsage` — so this branch and the `result`
-            // branch stay independent, and the frozen-number reasoning above
+            // #108 deliberately does NOT read the `data.model` write below
+            // for the context-meter lookup — see `mainModelUsage` — so this
+            // branch and the `result` branch stay independent, and the frozen-number reasoning above
             // still describes what a guard here would actually cause.
             if eventType == "message_start",
                let msg = event["message"] as? [String: Any]
             {
-                // Model name (raw ID; StatusBarView formats it for display)
+                // Model name (raw ID)
                 if let model = msg["model"] as? String {
                     data.model = model
                 }
