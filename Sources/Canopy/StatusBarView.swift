@@ -14,7 +14,7 @@ struct StatusBarView: View {
         static let branchIcon: CGFloat = 500
         /// Below this, drop the numeric "132K/923K" and keep just the bar + %.
         static let dropContextNumeric: CGFloat = 440
-        /// Below this, show only the model badge + a "…" popover with all items.
+        /// Below this, show only a "…" popover with all items.
         static let popoverFallback: CGFloat = 300
     }
 
@@ -32,12 +32,8 @@ struct StatusBarView: View {
         let w = data.chatInputWidth ?? .infinity  // no probe yet → assume wide
         // Compute what's visible up front so each leading separator can
         // check "was anything actually rendered to my left?" instead of
-        // trusting a hard-coded predecessor. Fixes two related bugs
-        // (double separators when e.g. remote is present but model is
-        // empty, and orphan leading separator when model is empty and
-        // branch is the first visible item).
+        // trusting a hard-coded predecessor.
         let hasRemote = data.remoteHost != nil || data.mirrorMachine != nil || data.accountName != nil
-        let hasModel = !data.model.isEmpty
         let hasBranch = !data.gitBranch.isEmpty
         let hasContext = data.contextMax > 0
         let hasMessages = w >= CollapseThreshold.dropSessionUsage && data.messageCount > 0
@@ -64,15 +60,9 @@ struct StatusBarView: View {
                                 .help("Live mirror: \(mirror)")
                         }
 
-                        // Model (extension version moved to sidebar footer).
-                        if hasModel {
-                            if hasRemote { separator }
-                            modelBadgeBlock
-                        }
-
                         // VCS branch
                         if hasBranch {
-                            if hasRemote || hasModel { separator }
+                            if hasRemote { separator }
                             if w >= CollapseThreshold.branchIcon {
                                 branchPill
                             } else {
@@ -85,7 +75,7 @@ struct StatusBarView: View {
                         // and bar, and so hovering the numeric label also surfaces
                         // contextTooltip() (not just the bar).
                         if hasContext {
-                            if hasRemote || hasModel || hasBranch { separator }
+                            if hasRemote || hasBranch { separator }
                             HStack(spacing: 5) {
                                 if w >= CollapseThreshold.dropContextNumeric {
                                     contextNumericLabel
@@ -97,13 +87,13 @@ struct StatusBarView: View {
 
                         // Output rate of the last API request
                         if hasRate {
-                            if hasRemote || hasModel || hasBranch || hasContext { separator }
+                            if hasRemote || hasBranch || hasContext { separator }
                             outputRateBadge
                         }
 
                         // Session usage (message count)
                         if hasMessages {
-                            if hasRemote || hasModel || hasBranch || hasContext || hasRate { separator }
+                            if hasRemote || hasBranch || hasContext || hasRate { separator }
                             sessionUsageBadge
                         }
 
@@ -139,7 +129,6 @@ struct StatusBarView: View {
     private var popoverBar: some View {
         HStack(spacing: 4) {
             Spacer(minLength: 0)
-            modelBadgeBlock
             Button { showPopover.toggle() } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -178,14 +167,6 @@ struct StatusBarView: View {
     }
 
     // MARK: - Extracted blocks (shared by full bar + popover)
-
-    @ViewBuilder
-    private var modelBadgeBlock: some View {
-        if !data.model.isEmpty {
-            pill(shortModelName(data.model), color: .purple)
-                .help(data.model)
-        }
-    }
 
     private var branchPill: some View {
         let vcsEmoji = data.vcsType == .jj ? "🥋" : "🌿"
@@ -388,34 +369,6 @@ struct StatusBarView: View {
         case .warn: .orange
         case .alert: .red
         }
-    }
-
-    private func shortModelName(_ model: String) -> String {
-        // "claude-sonnet-4-5-20250514" → "Sonnet 4.5"
-        // "claude-opus-4-6" → "Opus 4.6"
-        // "claude-opus-4-7[1m]" → "Opus 4.7 (1M)"
-        let (base, variantSuffix) = ModelNameFormatter.splitVariant(model)
-        let lower = base.lowercased()
-        for (family, label) in [("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
-            if lower.contains(family) {
-                if let v = extractVersion(from: lower, family: family) { return "\(label) \(v)\(variantSuffix)" }
-                return "\(label)\(variantSuffix)"
-            }
-        }
-        // Unknown family: preserve variant suffix so raw "[1m]" doesn't leak through.
-        return base + variantSuffix
-    }
-
-    private func extractVersion(from model: String, family: String) -> String? {
-        // "claude-sonnet-4-5-20250514" → after "sonnet-" grab "4-5", convert to "4.5"
-        guard let range = model.range(of: "\(family)-") else { return nil }
-        let after = model[range.upperBound...]
-        var digits: [String] = []
-        for part in after.split(separator: "-") {
-            if part.allSatisfy(\.isNumber), part.count <= 2 { digits.append(String(part)) }
-            else { break }
-        }
-        return digits.isEmpty ? nil : digits.joined(separator: ".")
     }
 
 }
