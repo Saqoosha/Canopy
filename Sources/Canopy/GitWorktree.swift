@@ -715,24 +715,20 @@ enum GitWorktree {
         return name
     }
 
-    /// The main checkout a directory's repository lives in — for a linked
-    /// worktree, the checkout it was added from, wherever the worktree sits.
-    /// Read off `--git-common-dir` rather than the path shape, so it holds for
-    /// every layout `worktreeParts` knows and for ones it does not. Nil when
-    /// `dir` is not in a linked worktree (a main checkout or a subfolder of one
-    /// has its own git dir as the common dir), or when the common dir is not a
-    /// `.git` folder (a bare repository has no checkout to name).
-    static func mainCheckoutRoot(for dir: URL, timeout: TimeInterval = 5) -> URL? {
+    /// The git dir a repository's main checkout and every worktree added from
+    /// it share (`--git-common-dir`), symlinks resolved. Two directories with
+    /// the same one are in the same repository, wherever each worktree sits.
+    /// Nil outside a repository.
+    static func commonDir(for dir: URL, timeout: TimeInterval = 5) -> URL? {
         guard let result = try? runCommand(
             "/usr/bin/git",
-            ["-C", dir.path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+            ["-C", dir.path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
             timeout: timeout,
             wantsStdout: true
         ), result.status == 0 else { return nil }
-        let lines = String(decoding: result.stdout, as: UTF8.self)
-            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard lines.count == 2 else { return nil }
-        return checkout(gitDir: lines[0], commonDir: lines[1])
+        let path = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
     }
 
     /// The checkout a linked worktree's git dir hangs off, or nil when the two
