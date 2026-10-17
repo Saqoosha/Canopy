@@ -6372,6 +6372,25 @@ enum SidebarLogicProbe {
                    GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/r/Canopy"),
                                                       revParse: "/r/Canopy\n/r/Canopy/.git\n/r/Canopy/.git\n") == nil)
 
+            let porcelain = "worktree /r/Canopy\nHEAD abc\nbranch refs/heads/main\n\nworktree /h/wt/fix\nHEAD def\ndetached\n\nworktree /h/wt/other\nHEAD 123\nbranch refs/heads/other\n\n"
+            let parsed = GitWorktree.checkouts(worktreeListPorcelain: porcelain)
+            record("worktree list: main checkout first, then the linked worktrees",
+                   parsed.main == "/r/Canopy" && parsed.linked == ["/h/wt/fix", "/h/wt/other"], "got=\(parsed)")
+            let bare = GitWorktree.checkouts(worktreeListPorcelain: "worktree /r/bare.git\nbare\n\nworktree /h/wt/b\nHEAD 1\ndetached\n")
+            record("worktree list: a bare repository has no main checkout",
+                   bare.main == nil && bare.linked == ["/h/wt/b"], "got=\(bare)")
+            func allowed(_ path: String, from wd: String) -> Bool {
+                GitWorktree.isOpenFileAllowed(path: path, workingDirectory: wd, checkouts: parsed)
+            }
+            record("open file: main checkout → a file in its worktree", allowed("/h/wt/fix/docs/plan.md", from: "/r/Canopy"))
+            record("open file: worktree → a sibling worktree", allowed("/h/wt/other/a.md", from: "/h/wt/fix"))
+            record("open file: worktree subfolder → a nested repo in main's build/",
+                   allowed("/r/Canopy/build/SourcePackages/checkouts/Sparkle/README.md", from: "/h/wt/fix/Sources"))
+            record("open file: a main checkout subfolder gets only itself",
+                   !allowed("/r/Canopy/README.md", from: "/r/Canopy/Sources") && allowed("/r/Canopy/Sources/a.swift", from: "/r/Canopy/Sources"))
+            record("open file: outside every checkout is blocked", !allowed("/h/.ssh/config", from: "/r/Canopy"))
+            record("open file: a name that only shares a root's prefix is blocked", !allowed("/h/wt/fix-evil/x", from: "/r/Canopy"))
+
             // The move itself (restart, re-attach) needs a live shim and a
             // daemon; measured against the Debug daemon, not the GUI pane.
             let gone = "/h/.claude/worktrees/Canopy/fix"

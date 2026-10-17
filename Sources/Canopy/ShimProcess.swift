@@ -4791,17 +4791,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ])
     }
 
-    /// Whether `handleOpenFile` may open `resolved`: under the working directory, or anywhere
-    /// in the same repository — its main checkout or any worktree of it, in either direction
-    /// (git only on a miss).
+    /// Whether `handleOpenFile` may open `resolved`; the rule is `GitWorktree.isOpenFileAllowed`
+    /// (git only on a miss, and only in the working directory).
     private func isOpenFileAllowed(_ resolved: URL) -> Bool {
         let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        if resolved.path.hasPrefix(wd.path + "/") || resolved.path == wd.path { return true }
-        guard remoteHost == nil,
-              let mine = GitWorktree.commonDir(for: wd),
-              let theirs = GitWorktree.commonDir(for: resolved.deletingLastPathComponent())
-        else { return false }
-        return mine == theirs
+        let none: (main: String?, linked: [String]) = (nil, [])
+        if GitWorktree.isOpenFileAllowed(path: resolved.path, workingDirectory: wd.path, checkouts: none) { return true }
+        guard remoteHost == nil else { return false }
+        return GitWorktree.isOpenFileAllowed(path: resolved.path, workingDirectory: wd.path,
+                                             checkouts: GitWorktree.checkouts(for: wd))
     }
 
     /// Handle open_file request from webview. By default shows the file in ContentViewer

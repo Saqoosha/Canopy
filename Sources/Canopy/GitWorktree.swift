@@ -715,20 +715,42 @@ enum GitWorktree {
         return name
     }
 
-    /// The git dir a repository's main checkout and every worktree added from
-    /// it share (`--git-common-dir`), symlinks resolved. Two directories with
-    /// the same one are in the same repository, wherever each worktree sits.
-    /// Nil outside a repository.
-    static func commonDir(for dir: URL, timeout: TimeInterval = 5) -> URL? {
+    /// The checkouts of the repository `dir` is in, as `git worktree list` records
+    /// them: the main checkout (nil for a bare repository) and every linked worktree.
+    /// Empty outside a repository.
+    static func checkouts(for dir: URL, timeout: TimeInterval = 5) -> (main: String?, linked: [String]) {
         guard let result = try? runCommand(
             "/usr/bin/git",
-            ["-C", dir.path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ["-C", dir.path, "worktree", "list", "--porcelain"],
             timeout: timeout,
             wantsStdout: true
-        ), result.status == 0 else { return nil }
-        let path = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty else { return nil }
-        return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+        ), result.status == 0 else { return (nil, []) }
+        return checkouts(worktreeListPorcelain: String(decoding: result.stdout, as: UTF8.self))
+    }
+
+    /// The parsing half, given `git worktree list --porcelain` output. Paths are symlink-resolved.
+    static func checkouts(worktreeListPorcelain: String) -> (main: String?, linked: [String]) {
+        var paths: [String?] = []
+        for block in worktreeListPorcelain.components(separatedBy: "\n\n") {
+            let lines = block.split(separator: "\n").map(String.init)
+            guard let line = lines.first(where: { $0.hasPrefix("worktree ") }) else { continue }
+            let path = URL(fileURLWithPath: String(line.dropFirst("worktree ".count)))
+                .standardizedFileURL.resolvingSymlinksInPath().path
+            paths.append(lines.contains("bare") ? nil : path)
+        }
+        guard let first = paths.first else { return (nil, []) }
+        return (first, paths.dropFirst().compactMap { $0 })
+    }
+
+    /// Whether a file link may open `path` from a session in `workingDirectory`: under the
+    /// working directory, or — when the session sits at the main checkout's root or inside a
+    /// linked worktree — under any checkout of the repository. All paths symlink-resolved.
+    static func isOpenFileAllowed(path: String, workingDirectory wd: String,
+                                  checkouts: (main: String?, linked: [String])) -> Bool {
+        func isUnder(_ root: String, _ p: String) -> Bool { p == root || p.hasPrefix(root + "/") }
+        if isUnder(wd, path) { return true }
+        guard wd == checkouts.main || checkouts.linked.contains(where: { isUnder($0, wd) }) else { return false }
+        return ([checkouts.main].compactMap { $0 } + checkouts.linked).contains { isUnder($0, path) }
     }
 
     /// The checkout a linked worktree's git dir hangs off, or nil when the two
@@ -740,9 +762,9 @@ enum GitWorktree {
         return common.deletingLastPathComponent()
     }
 
-    /// `mainCheckoutRoot`, but only when `dir` is the linked worktree's own top
-    /// level: EnterWorktree refuses any other path, and a subfolder left in the
-    /// checkout would edit the checkout.
+    /// The main checkout a linked worktree was added from, but only when `dir` is
+    /// the linked worktree's own top level: EnterWorktree refuses any other path,
+    /// and a subfolder left in the checkout would edit the checkout.
     static func checkoutOfWorktreeRoot(_ dir: URL, timeout: TimeInterval = 5) -> URL? {
         guard let result = try? runCommand(
             "/usr/bin/git",
