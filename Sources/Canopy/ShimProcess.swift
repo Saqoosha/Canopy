@@ -4791,18 +4791,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ])
     }
 
-    /// Whether `handleOpenFile` may open `resolved`: under the working directory, or under
-    /// its main checkout when the working directory is a linked worktree (git only on a miss).
+    /// Whether `handleOpenFile` may open `resolved`; the rule is `GitWorktree.isOpenFileAllowed`
+    /// (git only on a miss, and only in the working directory).
     private func isOpenFileAllowed(_ resolved: URL) -> Bool {
-        func isUnder(_ root: URL) -> Bool {
-            resolved.path.hasPrefix(root.path + "/") || resolved.path == root.path
-        }
         let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        if isUnder(wd) { return true }
-        guard remoteHost == nil,
-              let main = GitWorktree.mainCheckoutRoot(for: wd)?.standardizedFileURL.resolvingSymlinksInPath()
-        else { return false }
-        return isUnder(main)
+        func allowed(_ checkouts: GitWorktree.Checkouts) -> Bool {
+            GitWorktree.isOpenFileAllowed(path: resolved.path, workingDirectory: wd.path, checkouts: checkouts)
+        }
+        if allowed(.empty) { return true }
+        guard remoteHost == nil else { return false }
+        return allowed(GitWorktree.checkouts(for: wd))
     }
 
     /// Handle open_file request from webview. By default shows the file in ContentViewer
@@ -4831,9 +4829,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             } else {
                 url = workingDirectory.appendingPathComponent(filePath)
             }
-            // Resolve symlinks and ensure the file is under the working directory — or, for a
-            // session in a worktree, under the main checkout it came from, where gitignored
-            // outputs like `build/` live (prevent path traversal)
+            // Resolve symlinks and ensure the file is in this session's repository (prevent path traversal)
             let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
             guard isOpenFileAllowed(resolved) else {
                 logger.warning("handleOpenFile: path traversal blocked: \(resolved.path, privacy: .public)")

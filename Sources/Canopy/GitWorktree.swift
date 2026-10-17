@@ -715,24 +715,52 @@ enum GitWorktree {
         return name
     }
 
-    /// The main checkout a directory's repository lives in — for a linked
-    /// worktree, the checkout it was added from, wherever the worktree sits.
-    /// Read off `--git-common-dir` rather than the path shape, so it holds for
-    /// every layout `worktreeParts` knows and for ones it does not. Nil when
-    /// `dir` is not in a linked worktree (a main checkout or a subfolder of one
-    /// has its own git dir as the common dir), or when the common dir is not a
-    /// `.git` folder (a bare repository has no checkout to name).
-    static func mainCheckoutRoot(for dir: URL, timeout: TimeInterval = 5) -> URL? {
+    /// A repository's checkouts as `git worktree list` records them: the main checkout
+    /// (nil for a bare repository) and every linked worktree whose directory still exists.
+    struct Checkouts: Equatable {
+        var main: String?
+        var linked: [String]
+        static let empty = Checkouts(main: nil, linked: [])
+    }
+
+    /// The checkouts of the repository `dir` is in. Empty outside a repository.
+    static func checkouts(for dir: URL, timeout: TimeInterval = 5) -> Checkouts {
         guard let result = try? runCommand(
             "/usr/bin/git",
-            ["-C", dir.path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+            ["-C", dir.path, "worktree", "list", "--porcelain", "-z"],
             timeout: timeout,
             wantsStdout: true
-        ), result.status == 0 else { return nil }
-        let lines = String(decoding: result.stdout, as: UTF8.self)
-            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard lines.count == 2 else { return nil }
-        return checkout(gitDir: lines[0], commonDir: lines[1])
+        ), result.status == 0 else { return .empty }
+        return checkouts(worktreeListPorcelainZ: String(decoding: result.stdout, as: UTF8.self))
+    }
+
+    /// The parsing half, given `git worktree list --porcelain -z` output: NUL-terminated
+    /// fields, an empty field between entries. `-z` because without it a path is not quoted,
+    /// so a newline in one cuts it short. Paths are symlink-resolved.
+    static func checkouts(worktreeListPorcelainZ output: String) -> Checkouts {
+        var paths: [String?] = []
+        var fields: [String] = []
+        for field in output.split(separator: "\0", omittingEmptySubsequences: false).map(String.init) + [""] {
+            guard field.isEmpty else { fields.append(field); continue }
+            defer { fields = [] }
+            guard let line = fields.first(where: { $0.hasPrefix("worktree ") }) else { continue }
+            let path = URL(fileURLWithPath: String(line.dropFirst("worktree ".count)))
+                .standardizedFileURL.resolvingSymlinksInPath().path
+            let gone = fields.contains { $0 == "bare" || $0 == "prunable" || $0.hasPrefix("prunable ") }
+            paths.append(gone ? nil : path)
+        }
+        guard let first = paths.first else { return .empty }
+        return Checkouts(main: first, linked: paths.dropFirst().compactMap { $0 })
+    }
+
+    /// Whether a file link may open `path` from a session in `workingDirectory`: under the
+    /// working directory, or — when the session sits at the main checkout's root or inside a
+    /// linked worktree — under any checkout of the repository. All paths symlink-resolved.
+    static func isOpenFileAllowed(path: String, workingDirectory wd: String, checkouts: Checkouts) -> Bool {
+        func isUnder(_ root: String, _ p: String) -> Bool { p == root || p.hasPrefix(root + "/") }
+        if isUnder(wd, path) { return true }
+        guard wd == checkouts.main || checkouts.linked.contains(where: { isUnder($0, wd) }) else { return false }
+        return ([checkouts.main].compactMap { $0 } + checkouts.linked).contains { isUnder($0, path) }
     }
 
     /// The checkout a linked worktree's git dir hangs off, or nil when the two
@@ -744,9 +772,9 @@ enum GitWorktree {
         return common.deletingLastPathComponent()
     }
 
-    /// `mainCheckoutRoot`, but only when `dir` is the linked worktree's own top
-    /// level: EnterWorktree refuses any other path, and a subfolder left in the
-    /// checkout would edit the checkout.
+    /// The main checkout a linked worktree was added from, but only when `dir` is
+    /// the linked worktree's own top level: EnterWorktree refuses any other path,
+    /// and a subfolder left in the checkout would edit the checkout.
     static func checkoutOfWorktreeRoot(_ dir: URL, timeout: TimeInterval = 5) -> URL? {
         guard let result = try? runCommand(
             "/usr/bin/git",

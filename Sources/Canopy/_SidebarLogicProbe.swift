@@ -6372,6 +6372,29 @@ enum SidebarLogicProbe {
                    GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/r/Canopy"),
                                                       revParse: "/r/Canopy\n/r/Canopy/.git\n/r/Canopy/.git\n") == nil)
 
+            let porcelain = "worktree /r/Canopy\0HEAD abc\0branch refs/heads/main\0\0worktree /h/wt/fix\0HEAD def\0detached\0\0"
+                + "worktree /h/wt/a\nb\0HEAD 9\0detached\0\0worktree /h/wt/gone\0HEAD 8\0detached\0prunable gitdir file points to non-existent location\0\0"
+                + "worktree /h/wt/other\0HEAD 123\0branch refs/heads/other\0\0"
+            let parsed = GitWorktree.checkouts(worktreeListPorcelainZ: porcelain)
+            record("worktree list: main checkout first, then live linked worktrees, a newline kept and a prunable one dropped",
+                   parsed == GitWorktree.Checkouts(main: "/r/Canopy", linked: ["/h/wt/fix", "/h/wt/a\nb", "/h/wt/other"]), "got=\(parsed)")
+            let bare = GitWorktree.checkouts(worktreeListPorcelainZ: "worktree /r/bare.git\0bare\0\0worktree /h/wt/b\0HEAD 1\0detached\0\0")
+            record("worktree list: a bare repository has no main checkout",
+                   bare == GitWorktree.Checkouts(main: nil, linked: ["/h/wt/b"]), "got=\(bare)")
+            func allowed(_ path: String, from wd: String) -> Bool {
+                GitWorktree.isOpenFileAllowed(path: path, workingDirectory: wd, checkouts: parsed)
+            }
+            record("open file: main checkout → a file in its worktree", allowed("/h/wt/fix/docs/plan.md", from: "/r/Canopy"))
+            record("open file: worktree → a sibling worktree", allowed("/h/wt/other/a.md", from: "/h/wt/fix"))
+            record("open file: worktree subfolder → a nested repo in main's build/",
+                   allowed("/r/Canopy/build/SourcePackages/checkouts/Sparkle/README.md", from: "/h/wt/fix/Sources"))
+            record("open file: a main checkout subfolder gets only itself",
+                   !allowed("/r/Canopy/README.md", from: "/r/Canopy/Sources") && allowed("/r/Canopy/Sources/a.swift", from: "/r/Canopy/Sources"))
+            record("open file: outside every checkout is blocked", !allowed("/h/.ssh/config", from: "/r/Canopy"))
+            record("open file: a name that only shares a root's prefix is blocked", !allowed("/h/wt/fix-evil/x", from: "/r/Canopy"))
+            record("open file: a pruned worktree's path is blocked", !allowed("/h/wt/gone/x", from: "/r/Canopy"))
+            record("open file: the cut-off half of a newline path is blocked", !allowed("/h/wt/a/x", from: "/r/Canopy"))
+
             // The move itself (restart, re-attach) needs a live shim and a
             // daemon; measured against the Debug daemon, not the GUI pane.
             let gone = "/h/.claude/worktrees/Canopy/fix"
