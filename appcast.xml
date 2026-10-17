@@ -15,7 +15,6 @@
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <description sparkle:format="markdown"><![CDATA[### Bug Fixes
 - Clicking a file link in a session opened in a repository's main checkout now opens files in that repository's worktrees, with a plain click or Cmd-click. Previously the click was silently ignored.
-- Links from a worktree session into files under the main checkout's build folders open again, including files inside nested package checkouts.
 ]]></description>
             <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.15.3/Canopy-3.15.3.dmg" length="6360930" type="application/octet-stream" sparkle:edSignature="pb/r0O0FJrnmS/sIlfahqi9p7t673IqYkHi132dJ1dqNk+t9Ej7ZnkdkgY4GNxUzua5zyCcfDonqlTnx77lFDw=="/>
             <sparkle:deltas>
