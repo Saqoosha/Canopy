@@ -4795,11 +4795,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// (git only on a miss, and only in the working directory).
     private func isOpenFileAllowed(_ resolved: URL) -> Bool {
         let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        let none: (main: String?, linked: [String]) = (nil, [])
-        if GitWorktree.isOpenFileAllowed(path: resolved.path, workingDirectory: wd.path, checkouts: none) { return true }
+        func allowed(_ checkouts: GitWorktree.Checkouts) -> Bool {
+            GitWorktree.isOpenFileAllowed(path: resolved.path, workingDirectory: wd.path, checkouts: checkouts)
+        }
+        if allowed(.empty) { return true }
         guard remoteHost == nil else { return false }
-        return GitWorktree.isOpenFileAllowed(path: resolved.path, workingDirectory: wd.path,
-                                             checkouts: GitWorktree.checkouts(for: wd))
+        return allowed(GitWorktree.checkouts(for: wd))
     }
 
     /// Handle open_file request from webview. By default shows the file in ContentViewer

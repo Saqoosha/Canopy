@@ -715,38 +715,48 @@ enum GitWorktree {
         return name
     }
 
-    /// The checkouts of the repository `dir` is in, as `git worktree list` records
-    /// them: the main checkout (nil for a bare repository) and every linked worktree.
-    /// Empty outside a repository.
-    static func checkouts(for dir: URL, timeout: TimeInterval = 5) -> (main: String?, linked: [String]) {
-        guard let result = try? runCommand(
-            "/usr/bin/git",
-            ["-C", dir.path, "worktree", "list", "--porcelain"],
-            timeout: timeout,
-            wantsStdout: true
-        ), result.status == 0 else { return (nil, []) }
-        return checkouts(worktreeListPorcelain: String(decoding: result.stdout, as: UTF8.self))
+    /// A repository's checkouts as `git worktree list` records them: the main checkout
+    /// (nil for a bare repository) and every linked worktree whose directory still exists.
+    struct Checkouts: Equatable {
+        var main: String?
+        var linked: [String]
+        static let empty = Checkouts(main: nil, linked: [])
     }
 
-    /// The parsing half, given `git worktree list --porcelain` output. Paths are symlink-resolved.
-    static func checkouts(worktreeListPorcelain: String) -> (main: String?, linked: [String]) {
+    /// The checkouts of the repository `dir` is in. Empty outside a repository.
+    static func checkouts(for dir: URL, timeout: TimeInterval = 5) -> Checkouts {
+        guard let result = try? runCommand(
+            "/usr/bin/git",
+            ["-C", dir.path, "worktree", "list", "--porcelain", "-z"],
+            timeout: timeout,
+            wantsStdout: true
+        ), result.status == 0 else { return .empty }
+        return checkouts(worktreeListPorcelainZ: String(decoding: result.stdout, as: UTF8.self))
+    }
+
+    /// The parsing half, given `git worktree list --porcelain -z` output: NUL-terminated
+    /// fields, an empty field between entries. `-z` because without it a path is not quoted,
+    /// so a newline in one cuts it short. Paths are symlink-resolved.
+    static func checkouts(worktreeListPorcelainZ output: String) -> Checkouts {
         var paths: [String?] = []
-        for block in worktreeListPorcelain.components(separatedBy: "\n\n") {
-            let lines = block.split(separator: "\n").map(String.init)
-            guard let line = lines.first(where: { $0.hasPrefix("worktree ") }) else { continue }
+        var fields: [String] = []
+        for field in output.split(separator: "\0", omittingEmptySubsequences: false).map(String.init) + [""] {
+            guard field.isEmpty else { fields.append(field); continue }
+            defer { fields = [] }
+            guard let line = fields.first(where: { $0.hasPrefix("worktree ") }) else { continue }
             let path = URL(fileURLWithPath: String(line.dropFirst("worktree ".count)))
                 .standardizedFileURL.resolvingSymlinksInPath().path
-            paths.append(lines.contains("bare") ? nil : path)
+            let gone = fields.contains { $0 == "bare" || $0 == "prunable" || $0.hasPrefix("prunable ") }
+            paths.append(gone ? nil : path)
         }
-        guard let first = paths.first else { return (nil, []) }
-        return (first, paths.dropFirst().compactMap { $0 })
+        guard let first = paths.first else { return .empty }
+        return Checkouts(main: first, linked: paths.dropFirst().compactMap { $0 })
     }
 
     /// Whether a file link may open `path` from a session in `workingDirectory`: under the
     /// working directory, or — when the session sits at the main checkout's root or inside a
     /// linked worktree — under any checkout of the repository. All paths symlink-resolved.
-    static func isOpenFileAllowed(path: String, workingDirectory wd: String,
-                                  checkouts: (main: String?, linked: [String])) -> Bool {
+    static func isOpenFileAllowed(path: String, workingDirectory wd: String, checkouts: Checkouts) -> Bool {
         func isUnder(_ root: String, _ p: String) -> Bool { p == root || p.hasPrefix(root + "/") }
         if isUnder(wd, path) { return true }
         guard wd == checkouts.main || checkouts.linked.contains(where: { isUnder($0, wd) }) else { return false }
