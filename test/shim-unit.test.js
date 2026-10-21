@@ -1320,6 +1320,16 @@ describe("output channel", () => {
     assert.equal(lastDocument().content, `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\nnext\n`);
   });
 
+  it("drops a short line whole, not cut, when the incomplete tail fills the cap", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    ch.append("status: ok\n" + "z".repeat(OUTPUT_CHANNEL_MAX_BYTES - 4));
+    ch.show();
+    assert.equal(
+      lastDocument().content,
+      `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n${"z".repeat(OUTPUT_CHANNEL_MAX_BYTES - 4)}`,
+    );
+  });
+
   it("keeps a valid UTF-8 tail when one write is larger than the cap", () => {
     assert.equal(OUTPUT_CHANNEL_MAX_BYTES % 4, 0);
     const emoji = "😀";

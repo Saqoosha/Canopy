@@ -80,16 +80,23 @@ function tailUtf8(text, maxBytes) {
 }
 
 function createOutputRing(maxLines, maxBytes) {
-  // Complete lines, without their terminating newline. `bytes` counts those
-  // newlines too. The incomplete tail lives in `partial` and is not in `bytes`.
+  // Complete lines, without their terminating newline; one longer than the cap
+  // keeps only its tail. `bytes` counts those newlines too. The incomplete
+  // tail lives in `partial` and is not in `bytes`.
   const lines = [];
   let partial = "";
   let bytes = 0;
   let dropped = false;
 
   function pushLine(line) {
+    let size = Buffer.byteLength(line);
+    if (size > maxBytes - 1) {
+      line = tailUtf8(line, maxBytes - 1);
+      size = Buffer.byteLength(line);
+      dropped = true;
+    }
     lines.push(line);
-    bytes += Buffer.byteLength(line) + 1;
+    bytes += size + 1;
   }
 
   function trim() {
@@ -101,20 +108,12 @@ function createOutputRing(maxLines, maxBytes) {
     }
     const partialBytes = Buffer.byteLength(partial);
     while (drop < lines.length && remaining + partialBytes > maxBytes) {
-      const budget = maxBytes - partialBytes - 1;
-      if (drop === lines.length - 1 && budget > 0) {
-        // The newest complete line alone is over the cap: keep its tail.
-        lines[drop] = tailUtf8(lines[drop], budget);
-        remaining = Buffer.byteLength(lines[drop]) + 1;
-        dropped = true;
-        break;
-      }
       remaining -= Buffer.byteLength(lines[drop]) + 1;
       drop++;
     }
-    bytes = remaining;
     if (drop > 0) {
       lines.splice(0, drop);
+      bytes = remaining;
       dropped = true;
     }
     if (partialBytes > maxBytes) {
