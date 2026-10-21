@@ -1304,11 +1304,20 @@ describe("output channel", () => {
     assert.equal(lastDocument().content, "x\n");
   });
 
-  it("still notes the drop when a single line was larger than the cap", () => {
+  it("keeps the tail of a single complete line larger than the cap", () => {
     const ch = win.createOutputChannel("Claude Code");
-    ch.appendLine("x".repeat(OUTPUT_CHANNEL_MAX_BYTES + 10));
+    ch.appendLine("before");
+    ch.appendLine("x".repeat(OUTPUT_CHANNEL_MAX_BYTES + 10) + "END");
     ch.show();
-    assert.equal(lastDocument().content, `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n`);
+    const doc = lastDocument();
+    assert.ok(doc.content.startsWith(`${OUTPUT_CHANNEL_TRUNCATION_NOTE}\nxxx`));
+    assert.ok(doc.content.endsWith("END\n"));
+    const body = doc.content.slice(OUTPUT_CHANNEL_TRUNCATION_NOTE.length + 1);
+    assert.equal(Buffer.byteLength(body), OUTPUT_CHANNEL_MAX_BYTES);
+
+    ch.appendLine("next");
+    ch.show();
+    assert.equal(lastDocument().content, `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\nnext\n`);
   });
 
   it("keeps a valid UTF-8 tail when one write is larger than the cap", () => {

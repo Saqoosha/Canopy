@@ -101,12 +101,20 @@ function createOutputRing(maxLines, maxBytes) {
     }
     const partialBytes = Buffer.byteLength(partial);
     while (drop < lines.length && remaining + partialBytes > maxBytes) {
+      const budget = maxBytes - partialBytes - 1;
+      if (drop === lines.length - 1 && budget > 0) {
+        // The newest complete line alone is over the cap: keep its tail.
+        lines[drop] = tailUtf8(lines[drop], budget);
+        remaining = Buffer.byteLength(lines[drop]) + 1;
+        dropped = true;
+        break;
+      }
       remaining -= Buffer.byteLength(lines[drop]) + 1;
       drop++;
     }
+    bytes = remaining;
     if (drop > 0) {
       lines.splice(0, drop);
-      bytes = remaining;
       dropped = true;
     }
     if (partialBytes > maxBytes) {
