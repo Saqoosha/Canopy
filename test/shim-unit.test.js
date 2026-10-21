@@ -1048,7 +1048,12 @@ describe("workspace", () => {
 // ===========================================================================
 // window.js + notifications.js tests
 // ===========================================================================
-const { createWindow } = require("../Resources/vscode-shim/window.js");
+const {
+  createWindow,
+  OUTPUT_CHANNEL_MAX_LINES,
+  OUTPUT_CHANNEL_MAX_BYTES,
+  OUTPUT_CHANNEL_TRUNCATION_NOTE,
+} = require("../Resources/vscode-shim/window.js");
 const { createNotificationHandler } = require("../Resources/vscode-shim/notifications.js");
 
 describe("window webview bridge", () => {
@@ -1138,6 +1143,212 @@ describe("window webview bridge", () => {
     assert.equal(parsed.name, "my-term");
     assert.equal(term.name, "my-term");
     assert.equal(typeof term.dispose, "function");
+  });
+});
+
+describe("output channel", () => {
+  let win, stdout, stderr, restore;
+
+  beforeEach(() => {
+    stdout = [];
+    stderr = [];
+    _setWriter((data) => { stdout.push(data); });
+    restore = captureStderr((chunk) => { stderr.push(chunk); });
+    win = createWindow();
+  });
+
+  afterEach(() => {
+    restore();
+  });
+
+  function lastDocument() {
+    assert.ok(stdout.length > 0);
+    return JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+  }
+
+  it("show() opens appended text as show_document and does not write until then", () => {
+    const ch = win.createOutputChannel("build");
+    ch.append("hel");
+    ch.appendLine("lo");
+    ch.appendLine("");
+    ch.append("no-nl");
+    assert.equal(stdout.length, 0);
+
+    ch.show(true);
+    ch.show(1, true);
+
+    assert.equal(stdout.length, 2);
+    const doc = lastDocument();
+    assert.equal(doc.type, "show_document");
+    assert.equal(doc.fileName, "build");
+    assert.equal(doc.languageId, "plaintext");
+    assert.equal(doc.content, "hello\n\nno-nl");
+    assert.equal(stderr.join(""), doc.content);
+    assert.equal(JSON.parse(stdout[0].replace(/\n$/, "")).content, doc.content);
+  });
+
+  it("log methods, append, and appendLine share one transcript with stderr", () => {
+    const ch = win.createOutputChannel("Claude Code", { log: true });
+    ch.trace("t");
+    ch.debug("d", 2);
+    ch.info("i");
+    ch.warn("w");
+    ch.error("e");
+    ch.append("x");
+    ch.appendLine("y");
+    ch.show();
+
+    const expected =
+      "[Claude Code] TRACE: t\n" +
+      "[Claude Code] DEBUG: d 2\n" +
+      "[Claude Code] INFO: i\n" +
+      "[Claude Code] WARN: w\n" +
+      "[Claude Code] ERROR: e\n" +
+      "xy\n";
+    const doc = lastDocument();
+    assert.equal(doc.fileName, "Claude Code");
+    assert.equal(doc.content, expected);
+    assert.equal(stderr.join(""), expected);
+    assert.equal(ch.logLevel, 2);
+  });
+
+  it("replace swaps the document and clear empties it, without erasing stderr", () => {
+    const ch = win.createOutputChannel("Claude Code", { log: true });
+    ch.info("old");
+    ch.replace("replaced");
+    ch.show();
+    assert.equal(lastDocument().content, "replaced");
+    assert.equal(stderr.join(""), "[Claude Code] INFO: old\nreplaced");
+
+    const written = stderr.length;
+    ch.clear();
+    assert.equal(stderr.length, written);
+    ch.show();
+    assert.equal(lastDocument().content, "");
+
+    ch.appendLine("after");
+    ch.show();
+    assert.equal(lastDocument().content, "after\n");
+    assert.equal(stderr.join(""), "[Claude Code] INFO: old\nreplacedafter\n");
+  });
+
+  it("keeps a separate transcript per channel", () => {
+    const a = win.createOutputChannel("A");
+    const b = win.createOutputChannel("B", { log: true });
+    a.appendLine("from-a");
+    b.info("from-b");
+    a.show();
+    b.show();
+
+    const docs = stdout.map((line) => JSON.parse(line.replace(/\n$/, "")));
+    assert.deepEqual(
+      docs.map((doc) => [doc.fileName, doc.content]),
+      [["A", "from-a\n"], ["B", "[B] INFO: from-b\n"]],
+    );
+  });
+
+  it("keeps only the most recent lines and says when older ones were dropped", () => {
+    const ch = win.createOutputChannel("Claude Code", { log: true });
+    const total = OUTPUT_CHANNEL_MAX_LINES + 5;
+    for (let i = 0; i < total; i++) ch.appendLine(`L${i}`);
+    ch.show();
+
+    const doc = lastDocument();
+    const firstKept = total - OUTPUT_CHANNEL_MAX_LINES;
+    assert.ok(doc.content.startsWith(`${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n`));
+    assert.equal(doc.content.includes("L0\n"), false);
+    assert.equal(doc.content.includes(`L${firstKept - 1}\n`), false);
+    assert.ok(doc.content.includes(`L${firstKept}\n`));
+    assert.ok(doc.content.endsWith(`L${total - 1}\n`));
+    const body = doc.content.slice(OUTPUT_CHANNEL_TRUNCATION_NOTE.length + 1);
+    assert.equal(body.split("\n").length, OUTPUT_CHANNEL_MAX_LINES + 1);
+    assert.ok(stderr.join("").includes("L0\n"));
+
+    ch.replace("only");
+    ch.show();
+    assert.equal(lastDocument().content, "only");
+  });
+
+  it("drops the oldest lines once the buffered bytes pass the cap", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    const bulk = "y".repeat(Math.floor(OUTPUT_CHANNEL_MAX_BYTES / 2) + 1);
+    ch.appendLine(`FIRST${bulk}`);
+    ch.appendLine(`SECOND${bulk}`);
+    ch.appendLine("THIRD-tail");
+    ch.show();
+
+    const doc = lastDocument();
+    const body = doc.content.startsWith(`${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n`)
+      ? doc.content.slice(OUTPUT_CHANNEL_TRUNCATION_NOTE.length + 1)
+      : doc.content;
+    assert.equal(doc.content.includes("FIRST"), false);
+    assert.ok(doc.content.includes("SECOND"));
+    assert.ok(doc.content.includes("THIRD-tail\n"));
+    assert.ok(Buffer.byteLength(body) <= OUTPUT_CHANNEL_MAX_BYTES);
+    assert.ok(stderr.join("").includes("FIRST"));
+  });
+
+  it("splits one write that holds several lines", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    ch.append("a\nb\nc\n");
+    ch.show();
+    assert.equal(lastDocument().content, "a\nb\nc\n");
+  });
+
+  it("clear() forgets that older lines were dropped", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    for (let i = 0; i <= OUTPUT_CHANNEL_MAX_LINES; i++) ch.appendLine(`L${i}`);
+    ch.clear();
+    ch.appendLine("x");
+    ch.show();
+    assert.equal(lastDocument().content, "x\n");
+  });
+
+  it("keeps the tail of a single complete line larger than the cap", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    ch.appendLine("before");
+    ch.appendLine("x".repeat(OUTPUT_CHANNEL_MAX_BYTES + 10) + "END");
+    ch.show();
+    const doc = lastDocument();
+    assert.ok(doc.content.startsWith(`${OUTPUT_CHANNEL_TRUNCATION_NOTE}\nxxx`));
+    assert.ok(doc.content.endsWith("END\n"));
+    const body = doc.content.slice(OUTPUT_CHANNEL_TRUNCATION_NOTE.length + 1);
+    assert.equal(Buffer.byteLength(body), OUTPUT_CHANNEL_MAX_BYTES);
+
+    ch.appendLine("next");
+    ch.show();
+    assert.equal(lastDocument().content, `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\nnext\n`);
+  });
+
+  it("drops a short line whole, not cut, when the incomplete tail fills the cap", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    ch.append("status: ok\n" + "z".repeat(OUTPUT_CHANNEL_MAX_BYTES - 4));
+    ch.show();
+    assert.equal(
+      lastDocument().content,
+      `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n${"z".repeat(OUTPUT_CHANNEL_MAX_BYTES - 4)}`,
+    );
+  });
+
+  it("keeps a valid UTF-8 tail when one write is larger than the cap", () => {
+    assert.equal(OUTPUT_CHANNEL_MAX_BYTES % 4, 0);
+    const emoji = "😀";
+    // One byte over the cap, aligned so the longest raw suffix starts on the
+    // trailing half of an emoji. See tailUtf8.
+    const huge = emoji.repeat(OUTPUT_CHANNEL_MAX_BYTES / 4) + "Z";
+    const ch = win.createOutputChannel("Claude Code");
+    ch.append(huge);
+    ch.show();
+
+    const doc = lastDocument();
+    assert.ok(doc.content.startsWith(`${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n`));
+    const body = doc.content.slice(OUTPUT_CHANNEL_TRUNCATION_NOTE.length + 1);
+    assert.equal(body.startsWith(emoji), true);
+    assert.equal(body.endsWith("Z"), true);
+    assert.ok(Buffer.byteLength(body) <= OUTPUT_CHANNEL_MAX_BYTES);
+    const head = body.charCodeAt(0);
+    assert.ok(head < 0xDC00 || head > 0xDFFF);
+    assert.ok(stderr.join("").startsWith(emoji));
   });
 });
 

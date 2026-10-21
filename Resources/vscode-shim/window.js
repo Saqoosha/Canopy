@@ -44,6 +44,120 @@ function getEmphasisRepairer() {
   return emphasisRepairer;
 }
 
+// Recent output kept so OutputChannel.show() can open it. The Claude Code
+// extension's "View output logs" link sends open_output_panel, and the
+// extension handles that by calling show() on its LogOutputChannel. A no-op
+// here is a dead click.
+//
+// stderr still receives every write, unchanged, and os_log reads that. This
+// buffer is a second copy of the tail, not a new log. The byte cap stays under
+// MirrorUIFrame.maxInlineContentBytes, because inlineContent keeps the head
+// and would drop the newest lines.
+const OUTPUT_CHANNEL_MAX_LINES = 4000;
+const OUTPUT_CHANNEL_MAX_BYTES = 1_500_000;
+const OUTPUT_CHANNEL_TRUNCATION_NOTE =
+  "(earlier output dropped; showing the most recent lines)";
+
+// Longest suffix of `text` whose UTF-8 length is at most `maxBytes`.
+// Buffer.byteLength counts a lone surrogate as U+FFFD (3 bytes), so the
+// shortest suffix under the cap can begin on the trailing half of an emoji.
+// Drop that half: JSON.stringify writes it as \udcXX, which JSONSerialization
+// rejects, so the whole show_document line would be dropped.
+function tailUtf8(text, maxBytes) {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (Buffer.byteLength(text.slice(mid)) > maxBytes) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo < text.length) {
+    const unit = text.charCodeAt(lo);
+    if (unit >= 0xDC00 && unit <= 0xDFFF) lo += 1;
+  }
+  return text.slice(lo);
+}
+
+function createOutputRing(maxLines, maxBytes) {
+  // Complete lines, without their terminating newline; one longer than the cap
+  // keeps only its tail. `bytes` counts those newlines too. The incomplete
+  // tail lives in `partial` and is not in `bytes`.
+  const lines = [];
+  let partial = "";
+  let bytes = 0;
+  let dropped = false;
+
+  function pushLine(line) {
+    let size = Buffer.byteLength(line);
+    if (size > maxBytes - 1) {
+      line = tailUtf8(line, maxBytes - 1);
+      size = Buffer.byteLength(line);
+      dropped = true;
+    }
+    lines.push(line);
+    bytes += size + 1;
+  }
+
+  function trim() {
+    let drop = 0;
+    let remaining = bytes;
+    if (lines.length > maxLines) {
+      drop = lines.length - maxLines;
+      for (let i = 0; i < drop; i++) remaining -= Buffer.byteLength(lines[i]) + 1;
+    }
+    const partialBytes = Buffer.byteLength(partial);
+    while (drop < lines.length && remaining + partialBytes > maxBytes) {
+      remaining -= Buffer.byteLength(lines[drop]) + 1;
+      drop++;
+    }
+    if (drop > 0) {
+      lines.splice(0, drop);
+      bytes = remaining;
+      dropped = true;
+    }
+    if (partialBytes > maxBytes) {
+      partial = tailUtf8(partial, maxBytes);
+      dropped = true;
+    }
+  }
+
+  return {
+    append(value) {
+      const text = String(value);
+      if (text.length === 0) return;
+      const parts = text.split("\n");
+      partial += parts[0];
+      for (let i = 1; i < parts.length; i++) {
+        pushLine(partial);
+        partial = parts[i];
+      }
+      trim();
+    },
+    replace(value) {
+      lines.length = 0;
+      partial = "";
+      bytes = 0;
+      dropped = false;
+      this.append(value);
+    },
+    clear() {
+      lines.length = 0;
+      partial = "";
+      bytes = 0;
+      dropped = false;
+    },
+    text() {
+      let body;
+      if (lines.length === 0) body = partial;
+      else if (partial.length === 0) body = lines.join("\n") + "\n";
+      else body = `${lines.join("\n")}\n${partial}`;
+      if (!dropped) return body;
+      return `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n${body}`;
+    },
+  };
+}
+
 function createWindow() {
   const notifications = createNotificationHandler();
   const providers = new Map(); // viewType → provider
@@ -204,43 +318,55 @@ function createWindow() {
     createOutputChannel(name, optionsOrLangId) {
       const isLog =
         typeof optionsOrLangId === "object" && optionsOrLangId !== null && optionsOrLangId.log === true;
+      const buffer = createOutputRing(OUTPUT_CHANNEL_MAX_LINES, OUTPUT_CHANNEL_MAX_BYTES);
+
+      // stderr is what os_log reads; the ring is the copy show() opens.
+      function emit(value) {
+        process.stderr.write(value);
+        buffer.append(value);
+      }
 
       const base = {
         name,
         append(value) {
-          process.stderr.write(value);
+          emit(value);
         },
         appendLine(value) {
-          process.stderr.write(value + "\n");
+          emit(value + "\n");
         },
-        clear() {},
-        show() {},
+        clear() {
+          buffer.clear();
+        },
+        // preserveFocus / ViewColumn are ignored: the host opens a document,
+        // it does not have an output panel to reveal beside an editor.
+        show() {
+          writeStdout({
+            type: "show_document",
+            content: buffer.text(),
+            fileName: name,
+            languageId: "plaintext",
+          });
+        },
         hide() {},
         dispose() {},
         replace(value) {
           process.stderr.write(value);
+          buffer.replace(value);
         },
       };
 
       if (isLog) {
-        // LogOutputChannel — adds info/warn/error/debug/trace methods
+        // LogOutputChannel. Every level is recorded; logLevel is not consulted.
         base.logLevel = 2; // Info
         base.onDidChangeLogLevel = noopEvent;
-        base.trace = (...args) => {
-          process.stderr.write(`[${name}] TRACE: ${args.map(String).join(" ")}\n`);
+        const logAt = (level, args) => {
+          emit(`[${name}] ${level}: ${args.map(String).join(" ")}\n`);
         };
-        base.debug = (...args) => {
-          process.stderr.write(`[${name}] DEBUG: ${args.map(String).join(" ")}\n`);
-        };
-        base.info = (...args) => {
-          process.stderr.write(`[${name}] INFO: ${args.map(String).join(" ")}\n`);
-        };
-        base.warn = (...args) => {
-          process.stderr.write(`[${name}] WARN: ${args.map(String).join(" ")}\n`);
-        };
-        base.error = (...args) => {
-          process.stderr.write(`[${name}] ERROR: ${args.map(String).join(" ")}\n`);
-        };
+        base.trace = (...args) => logAt("TRACE", args);
+        base.debug = (...args) => logAt("DEBUG", args);
+        base.info = (...args) => logAt("INFO", args);
+        base.warn = (...args) => logAt("WARN", args);
+        base.error = (...args) => logAt("ERROR", args);
       }
 
       return base;
@@ -321,4 +447,9 @@ function createWindow() {
   return window;
 }
 
-module.exports = { createWindow };
+module.exports = {
+  createWindow,
+  OUTPUT_CHANNEL_MAX_LINES,
+  OUTPUT_CHANNEL_MAX_BYTES,
+  OUTPUT_CHANNEL_TRUNCATION_NOTE,
+};
