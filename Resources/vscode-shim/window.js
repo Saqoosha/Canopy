@@ -47,15 +47,12 @@ function getEmphasisRepairer() {
 // Recent output kept so OutputChannel.show() can open it. The Claude Code
 // extension's "View output logs" link sends open_output_panel, and the
 // extension handles that by calling show() on its LogOutputChannel. A no-op
-// here is a dead click — v2.1.305 leads the initialize_timeout error with
-// that link. The host already turns show_document into ContentViewer, and a
-// daemon session forwards the same message to the Mac client.
+// here is a dead click.
 //
 // stderr still receives every write, unchanged, and os_log reads that. This
-// buffer is a second copy of the tail, not a new log. A few thousand lines
-// covers a failed launch; a long session must not keep everything, because
-// the document is one NDJSON line and MirrorUIFrame.maxInlineContentBytes is
-// 2 MiB (JSON escaping can grow a line 6× toward the 16 MiB line limit).
+// buffer is a second copy of the tail, not a new log. The byte cap stays under
+// MirrorUIFrame.maxInlineContentBytes, because inlineContent keeps the head
+// and would drop the newest lines.
 const OUTPUT_CHANNEL_MAX_LINES = 4000;
 const OUTPUT_CHANNEL_MAX_BYTES = 1_500_000;
 const OUTPUT_CHANNEL_TRUNCATION_NOTE =
@@ -64,8 +61,8 @@ const OUTPUT_CHANNEL_TRUNCATION_NOTE =
 // Longest suffix of `text` whose UTF-8 length is at most `maxBytes`.
 // Buffer.byteLength counts a lone surrogate as U+FFFD (3 bytes), so the
 // shortest suffix under the cap can begin on the trailing half of an emoji.
-// Drop that half: the document is shown as text, and a split pair would
-// render as a replacement character on the first line of the viewer.
+// Drop that half: JSON.stringify writes it as \udcXX, which JSONSerialization
+// rejects, so the whole show_document line would be dropped.
 function tailUtf8(text, maxBytes) {
   if (Buffer.byteLength(text) <= maxBytes) return text;
   let lo = 0;
@@ -148,7 +145,7 @@ function createOutputRing(maxLines, maxBytes) {
       if (lines.length === 0) body = partial;
       else if (partial.length === 0) body = lines.join("\n") + "\n";
       else body = `${lines.join("\n")}\n${partial}`;
-      if (!dropped || body.length === 0) return body;
+      if (!dropped) return body;
       return `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n${body}`;
     },
   };
@@ -316,8 +313,7 @@ function createWindow() {
         typeof optionsOrLangId === "object" && optionsOrLangId !== null && optionsOrLangId.log === true;
       const buffer = createOutputRing(OUTPUT_CHANNEL_MAX_LINES, OUTPUT_CHANNEL_MAX_BYTES);
 
-      // Same bytes to stderr and the ring. stderr is what os_log reads;
-      // writing only one of them is how the viewer would drift from the log.
+      // stderr is what os_log reads; the ring is the copy show() opens.
       function emit(value) {
         process.stderr.write(value);
         buffer.append(value);
@@ -353,8 +349,7 @@ function createWindow() {
       };
 
       if (isLog) {
-        // LogOutputChannel. Every level is recorded: logLevel is not
-        // consulted, and a startup failure is diagnosed from debug lines.
+        // LogOutputChannel. Every level is recorded; logLevel is not consulted.
         base.logLevel = 2; // Info
         base.onDidChangeLogLevel = noopEvent;
         const logAt = (level, args) => {

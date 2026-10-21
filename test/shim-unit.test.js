@@ -1288,6 +1288,29 @@ describe("output channel", () => {
     assert.ok(stderr.join("").includes("FIRST"));
   });
 
+  it("splits one write that holds several lines", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    ch.append("a\nb\nc\n");
+    ch.show();
+    assert.equal(lastDocument().content, "a\nb\nc\n");
+  });
+
+  it("clear() forgets that older lines were dropped", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    for (let i = 0; i <= OUTPUT_CHANNEL_MAX_LINES; i++) ch.appendLine(`L${i}`);
+    ch.clear();
+    ch.appendLine("x");
+    ch.show();
+    assert.equal(lastDocument().content, "x\n");
+  });
+
+  it("still notes the drop when a single line was larger than the cap", () => {
+    const ch = win.createOutputChannel("Claude Code");
+    ch.appendLine("x".repeat(OUTPUT_CHANNEL_MAX_BYTES + 10));
+    ch.show();
+    assert.equal(lastDocument().content, `${OUTPUT_CHANNEL_TRUNCATION_NOTE}\n`);
+  });
+
   it("keeps a valid UTF-8 tail when one write is larger than the cap", () => {
     assert.equal(OUTPUT_CHANNEL_MAX_BYTES % 4, 0);
     const emoji = "😀";
