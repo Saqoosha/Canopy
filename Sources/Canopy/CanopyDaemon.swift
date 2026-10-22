@@ -142,19 +142,25 @@ final class DaemonDelegate {
         })
     }
 
-    /// Re-reads the extension state whenever a session opens, closes or is renamed, so the
-    /// footer does not list a closed session or an old title until the next minute's check.
+    private struct ExtensionRowInputs: Equatable {
+        let id: UUID
+        let title: String
+        let shim: ObjectIdentifier?
+    }
+    private var extensionRowInputs: [ExtensionRowInputs] = []
+
+    /// Re-reads the extension state when a session closes, is renamed, or loses or replaces its
+    /// shim, rather than leaving the footer stale until the next minute's check.
     private func observeSessionsForExtensionState() {
-        withObservationTracking {
-            _ = store.openSessions.map { ($0.id, $0.title) }
+        let inputs = withObservationTracking {
+            store.openSessions.map { ExtensionRowInputs(id: $0.id, title: $0.title, shim: $0.shim.map(ObjectIdentifier.init)) }
         } onChange: { [weak self] in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    DaemonUpgradeCenter.shared.refreshExtensionState?()
-                    self?.observeSessionsForExtensionState()
-                }
-            }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.observeSessionsForExtensionState() } }
         }
+        // A rewrite of an unchanged title also fires, and the refresh reads the extension folder from disk.
+        guard inputs != extensionRowInputs else { return }
+        extensionRowInputs = inputs
+        DaemonUpgradeCenter.shared.refreshExtensionState?()
     }
 
     private func publishUpgradeState(pending: String?, pendingVersion: String?, holds: [UpgradeHold], underLaunchd: Bool) {
