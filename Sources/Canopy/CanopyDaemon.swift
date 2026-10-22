@@ -145,7 +145,7 @@ final class DaemonDelegate {
     private struct ExtensionRowInputs: Equatable {
         let id: UUID
         let title: String
-        let shim: ObjectIdentifier?
+        let shim: ObjectIdentifier
     }
     private var extensionRowInputs: [ExtensionRowInputs] = []
 
@@ -153,7 +153,9 @@ final class DaemonDelegate {
     /// shim, rather than leaving the footer stale until the next minute's check.
     private func observeSessionsForExtensionState() {
         let inputs = withObservationTracking {
-            store.openSessions.map { ExtensionRowInputs(id: $0.id, title: $0.title, shim: $0.shim.map(ObjectIdentifier.init)) }
+            store.openSessions.compactMap { session in
+                session.shim.map { ExtensionRowInputs(id: session.id, title: session.title, shim: ObjectIdentifier($0)) }
+            }
         } onChange: { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.observeSessionsForExtensionState() } }
         }
