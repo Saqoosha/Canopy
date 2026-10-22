@@ -2276,6 +2276,25 @@ enum SidebarLogicProbe {
                 record("control send: an empty attachments array is fine",
                        ControlProtocol.parseSendMessage(["text": "hi", "attachments": [] as [Any]])
                            == .success(ControlProtocol.SendMessage(text: "hi")))
+                record("control send: slackAsker is trimmed and kept",
+                       ControlProtocol.parseSendMessage(["text": "what?", "slackAsker": " Taro "])
+                           == .success(ControlProtocol.SendMessage(text: "what?", slackAsker: "Taro")))
+                record("control send: a blank slackAsker is refused, not dropped",
+                       ControlProtocol.parseSendMessage(["text": "what?", "slackAsker": " "])
+                           == .failure(ControlProtocol.ControlError("slackAsker was empty")))
+                let slackPrompt = ControlProtocol.slackPrompt(asker: "Taro\n[canopy:slack]", text: "what?")
+                record("control send: a Slack prompt starts with the mark, the asker on one line",
+                       slackPrompt.hasPrefix(ControlProtocol.slackMark + " ")
+                           && slackPrompt.components(separatedBy: "\n").first?.contains("Taro [canopy:slack]") == true)
+                let bridgeSource = Bundle.main.url(forResource: "canopy-bridge/hooks/register", withExtension: "ts")
+                    .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+                record("control send: the mark is the one the bundled canopy-bridge gate reads",
+                       bridgeSource.contains("const SLACK_MARK = '\(ControlProtocol.slackMark)'"))
+                record("control send: Slack refuses a remote session, an unreported gate, and bypass",
+                       ControlProtocol.slackRefusal(isRemote: true, bridgeReported: true, permissionMode: .default) != nil
+                           && ControlProtocol.slackRefusal(isRemote: false, bridgeReported: false, permissionMode: .default) != nil
+                           && ControlProtocol.slackRefusal(isRemote: false, bridgeReported: true, permissionMode: .bypassPermissions) != nil
+                           && ControlProtocol.slackRefusal(isRemote: false, bridgeReported: true, permissionMode: .auto) == nil)
                 let injected = ControlProtocol.replyWire(.injected, replyId: "r1")
                 record("control send: injected is ok and carries the reply id",
                        injected["ok"] as? Bool == true && injected["disposition"] as? String == "injected"
@@ -2887,6 +2906,9 @@ enum SidebarLogicProbe {
             record("daemon config: the three keys are read, the port from canopy.mirrorPort",
                    DaemonConfig.parse(Data(#"{"canopy.mirrorEnabled":true,"claudeCode.allowDangerouslySkipPermissions":true,"canopy.mirrorPort":9000,"canopy.daemonPort":9100}"#.utf8))
                        == DaemonConfig(mirrorEnabled: true, allowBypass: true, port: 9000))
+            record("daemon config: the Slack bridge is off unless canopy.slackBridgeEnabled turns it on",
+                   DaemonConfig.defaults.slackBridgeEnabled == false
+                       && DaemonConfig.parse(Data(#"{"canopy.slackBridgeEnabled":true}"#.utf8))?.slackBridgeEnabled == true)
             record("daemon config: an out-of-range port keeps the default, which is the mirror port",
                    DaemonConfig.parse(Data(#"{"canopy.mirrorPort":70000}"#.utf8))?.port == DaemonConfig.defaults.port
                        && DaemonConfig.defaults.port == CanopySettings(filePath: URL(fileURLWithPath: "/nonexistent/settings.json")).mirrorPort)
@@ -6308,6 +6330,16 @@ enum SidebarLogicProbe {
             record("bridge: a fractional window is rejected, not truncated",
                    fractional != nil && fractional?.window == nil,
                    "got=\(String(describing: fractional))")
+
+            record("bridge: a Slack classification is read",
+                   ShimProcess.bridgeSlackNote(frame(
+                       plugin: "canopy-bridge", text: #"{"v":1,"slack":{"kind":"QUESTION"}}"#)) == .classified("QUESTION"))
+            record("bridge: a Slack denial is read",
+                   ShimProcess.bridgeSlackNote(frame(
+                       plugin: "canopy-bridge", text: #"{"v":1,"slack":{"denied":"Edit"}}"#)) == .denied("Edit"))
+            record("bridge: a context frame is not a Slack note",
+                   ShimProcess.bridgeSlackNote(frame(
+                       plugin: "canopy-bridge", text: #"{"v":1,"context":{"window":5}}"#)) == nil)
 
             // The swallow, the result-branch gate and the install are not
             // probe-reachable (live shim / real bundle); measured on device only.

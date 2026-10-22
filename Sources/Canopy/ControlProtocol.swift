@@ -379,6 +379,26 @@ enum ControlProtocol {
 
     struct SendMessage: Equatable {
         var text: String
+        /// Who asked, when the text is a question from a bound Slack thread.
+        var slackAsker: String? = nil
+    }
+
+    /// The canopy-bridge mod gates a turn whose prompt starts with this
+    /// (`SLACK_MARK` in `Resources/canopy-bridge/hooks/register.ts`).
+    static let slackMark = "[canopy:slack]"
+
+    static func slackPrompt(asker: String, text: String) -> String {
+        let name = asker.components(separatedBy: .newlines).joined(separator: " ")
+        return "\(slackMark) A question from \(name) in a Slack thread:\n\n\(text)"
+    }
+
+    /// Why a Slack question may not reach this session, or nil. Each case is a
+    /// session the mod's read-only gate may not cover, and the asker is not the owner.
+    static func slackRefusal(isRemote: Bool, bridgeReported: Bool, permissionMode: PermissionMode) -> String? {
+        if isRemote { return "an SSH remote session does not load the canopy-bridge gate" }
+        if !bridgeReported { return "the canopy-bridge gate has not reported from this session yet" }
+        if permissionMode == .bypassPermissions { return "the session is in bypassPermissions" }
+        return nil
     }
 
     /// `send_message`: `text` is required (trimmed; blank is refused). A
@@ -390,7 +410,10 @@ enum ControlProtocol {
         if let attachments = params["attachments"] as? [Any], !attachments.isEmpty {
             return .failure(ControlError("attachments are not supported"))
         }
-        return .success(SendMessage(text: text))
+        guard params["slackAsker"] != nil else { return .success(SendMessage(text: text)) }
+        let asker = (params["slackAsker"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if asker.isEmpty { return .failure(ControlError("slackAsker was empty")) }
+        return .success(SendMessage(text: text, slackAsker: asker))
     }
 
     static func replyWire(_ disposition: ShimProcess.PhoneReplyDisposition, replyId: String) -> [String: Any] {

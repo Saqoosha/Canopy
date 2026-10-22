@@ -66,6 +66,7 @@ final class DaemonDelegate {
     private var sleepGuard: SleepGuard?
     private var rosterPublisher: RosterPublisher?
     private var config = DaemonConfig.defaults
+    private var slackBridge: SlackBridge?
     private var configModified: Date?
     private var unreadableModified: Date?
     private var usageTimer: Timer?
@@ -301,6 +302,19 @@ final class DaemonDelegate {
             SleepGuard.reevaluateActive()
         }
         applyTCP()
+        applySlackBridge()
+    }
+
+    /// Starts or stops the link to the Saqoolaude Worker to match `config`.
+    private func applySlackBridge() {
+        if config.slackBridgeEnabled, slackBridge == nil {
+            let bridge = SlackBridge(store: store)
+            slackBridge = bridge
+            bridge.start()
+        } else if !config.slackBridgeEnabled, let bridge = slackBridge {
+            bridge.stop()
+            slackBridge = nil
+        }
     }
 
     /// Opens, moves or closes the Tailscale listener to match `config`.

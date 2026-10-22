@@ -89,6 +89,11 @@ def main(argv):
     send_p = sub.add_parser("send", help="send_message")
     add_session_flags(send_p, require=True)
     send_p.add_argument("--text", required=True)
+    send_p.add_argument(
+        "--slack-asker",
+        dest="slack_asker",
+        help="ask as this person from a bound Slack thread: the turn is held to reads",
+    )
 
     for name, help_text in (
         ("status", "session_status"),
@@ -358,6 +363,8 @@ def build(args):
         return "listen", params
     if args.cmd == "send":
         params["text"] = args.text
+        if args.slack_asker is not None:
+            params["slackAsker"] = args.slack_asker
         return "send_message", params
     if args.cmd == "stop":
         return "stop_session", params

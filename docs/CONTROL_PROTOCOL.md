@@ -182,6 +182,15 @@ Params: `key` and/or `sessionId`, required `text` (trimmed; blank is
 `"The message was empty"`). A non-empty `attachments` array is refused
 (`"attachments are not supported"`). Omit attachments.
 
+Optional `slackAsker`: the name of someone who asked `text` in a bound Slack
+thread. The daemon prefixes the text with `[canopy:slack]` and the asker, and
+the canopy-bridge mod then holds that turn to reads inside the session's folder
+(see `docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md`). A
+blank `slackAsker` is `"slackAsker was empty"`. The message is refused with
+`errorCode` `slack_refused` when the gate may not cover the session: an SSH
+remote session, one whose canopy-bridge mod has not reported yet, or one in
+`bypassPermissions`.
+
 Result:
 
 ```json
