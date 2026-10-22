@@ -10,7 +10,7 @@ struct DaemonConfig: Equatable {
     /// every existing pairing (other Macs, the phone) reaches the daemon unchanged.
     var port: Int
     /// `canopy.slackBridgeEnabled`: this Mac answers Slack threads bound to its sessions.
-    /// Off by default because the Worker keeps one Mac connected; a second one would replace it.
+    /// Off by default. The Worker keeps one socket per Mac name, so several Macs can each turn it on.
     var slackBridgeEnabled = false
 
     static let defaults = DaemonConfig(mirrorEnabled: false, allowBypass: false, port: 8770)

@@ -21,7 +21,7 @@ Slack thread ──event──▶ Saqoolaude Worker ──WebSocket──▶ can
 
 - **紐付け**: ペインメニューの「Connect to Slack Thread…」で permalink を貼る。紐付けは Worker の DO が `channel:threadTs` ごとに持つ。中身は session key と、質問できる人。Canopy の側からしか作れない（control の動詞はローカルのクライアント限定）。
 - **受け付けないセッション**: SSH remote のセッション、門番の `ready` がまだ届いていないセッション、bypass モードのセッション。この 3 つは、紐付けるときも、質問が来たときも拒否する。
-- **転送**: `canopy.slackBridgeEnabled` が有効な Mac の daemon が、Worker へ WebSocket を張る。認証には Saqoolaude MCP の固定キーを使い、MCP と同じ helper で読む。Worker は 1 本の接続しか持たないので、別の Mac がつなぐと前の接続は閉じられ、閉じられた側は再接続しない。
+- **転送**: `canopy.slackBridgeEnabled` が有効な Mac の daemon が、Worker へ WebSocket を張る。認証には Saqoolaude MCP の固定キーを使い、MCP と同じ helper で読む。daemon はホスト名を `?mac=` に付けて接続し、Worker は Mac の名前ごとに 1 本の接続を持つ。紐付けは作った Mac を覚えていて、質問はその Mac に届く。同じ名前の daemon が二重につないだときだけ、前の接続が閉じられる（閉じられた側は再接続しない）。
 - **受信**: 紐付けたスレッドで bot をメンションしたメッセージだけを受け取る。同じイベントが重なって届いたら 1 回として扱う。
 - **注入**: Worker は、前回の質問以降のスレッドの発言を集める。daemon はそれに印と質問者の名前を付けて、`send_message` と同じ経路でセッションに注入する。同じセッションへの質問は、1 つずつ順番に処理する。
 - **返信**: ターンの最後の発言を下書きにして、Saqoosha に DM で送る。✅ ならスレッドに投稿し、❌ なら破棄する。全員への通知の記法（`<!channel>` など）は、文字に置き換える。35 分たっても答えが無い質問は、Worker の側で打ち切る。

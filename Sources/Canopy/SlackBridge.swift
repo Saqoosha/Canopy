@@ -14,6 +14,20 @@ final class SlackBridge {
     static private(set) var current: SlackBridge?
 
     static let endpoint = URL(string: "wss://saqoolaude.whatever-co.workers.dev/canopy/connect")!
+
+    /// The name this Mac connects under. The Worker keeps one socket per name and sends each
+    /// binding's questions to the Mac that made it, so two Macs no longer replace each other.
+    nonisolated static func macName(_ raw: String) -> String {
+        let kept = raw.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) && $0.isASCII || "._-".unicodeScalars.contains($0) }
+        let name = String(String.UnicodeScalarView(kept)).prefix(64)
+        return name.isEmpty ? "default" : String(name)
+    }
+
+    static func connectURL(mac: String) -> URL {
+        var parts = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
+        parts.queryItems = [URLQueryItem(name: "mac", value: macName(mac))]
+        return parts.url!
+    }
     /// Prints `{"Authorization":"Bearer …"}`. The saqoolaude MCP registration runs the same
     /// helper, so this process never writes the key anywhere.
     nonisolated static let headersHelper = FileManager.default.homeDirectoryForCurrentUser
@@ -21,7 +35,7 @@ final class SlackBridge {
     static let answerTimeout: TimeInterval = 30 * 60
     /// Under `ControlClient.requestTimeout`, so the GUI hears which hop failed.
     static let requestTimeout: Duration = .seconds(10)
-    /// The Worker closes the older socket with this when another Mac connects.
+    /// The Worker closes the older socket with this when a Mac of the same name connects.
     static let replacedCloseCode = 4000
     private static let maxBackoff: TimeInterval = 60
 
@@ -76,7 +90,7 @@ final class SlackBridge {
                 scheduleReconnect()
                 return
             }
-            var request = URLRequest(url: Self.endpoint)
+            var request = URLRequest(url: Self.connectURL(mac: ProcessInfo.processInfo.hostName))
             request.setValue(authorization, forHTTPHeaderField: "Authorization")
             let task = URLSession.shared.webSocketTask(with: request)
             self.task = task
@@ -172,8 +186,8 @@ final class SlackBridge {
         let closeCode = task.closeCode.rawValue
         dropConnection()
         if closeCode == Self.replacedCloseCode {
-            lastProblem = "another Mac took over the Slack bridge"
-            logger.error("another Mac connected to the Saqoolaude Worker; this one stops (turn canopy.slackBridgeEnabled off on one of them)")
+            lastProblem = "another daemon with this Mac's name took over the Slack bridge"
+            logger.error("another daemon connected under this Mac's name; this one stops")
             return
         }
         if let status, status != 101 {

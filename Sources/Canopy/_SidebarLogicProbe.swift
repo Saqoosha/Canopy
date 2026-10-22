@@ -2299,6 +2299,11 @@ enum SidebarLogicProbe {
                                .hasPrefix("\(ControlProtocol.slackMark) \(ControlProtocol.slackOwnerHeader)")
                            && !ControlProtocol.slackPrompt(asker: "Saqoosha (the owner)", text: "q")
                                .contains(ControlProtocol.slackOwnerHeader))
+                record("slack bridge: the Mac connects under a name the Worker can tag",
+                       SlackBridge.macName("Saqoosha's MacBook Pro.local") == "SaqooshasMacBookPro.local"
+                           && SlackBridge.macName("日本語") == "default"
+                           && SlackBridge.macName(String(repeating: "a", count: 80)).count == 64
+                           && SlackBridge.connectURL(mac: "studio.local").query == "mac=studio.local")
                 record("slack chip: a binding becomes its thread link; one missing a field becomes none",
                        SessionStore.slackThreadURL(["channel": "C033F6U7147", "threadTs": "1792647732.676569"])?.absoluteString
                            == "https://slack.com/archives/C033F6U7147/p1792647732676569"
