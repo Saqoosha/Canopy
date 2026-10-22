@@ -44,8 +44,8 @@ const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
 
 function liftsGate(e) {
   if (e.isMeta || e.turnId) return false
-  // A CLI too old to stamp the origin keeps the earlier rule, so the owner can still edit.
-  return e.origin === undefined || PERSON_ORIGINS.has(e.origin.kind)
+  // An unstamped origin keeps the gate. Every CLI Canopy bundles (2.1.301-2.1.307) stamps `sdk`.
+  return PERSON_ORIGINS.has(e.origin?.kind)
 }
 
 function slackLog($, slack) {

@@ -192,18 +192,6 @@ the canopy-bridge mod then holds the session to read-only tools (see
 remote session, one whose gate has not reported `ready`, or one in
 `bypassPermissions`.
 
-### `slack_bind`, `slack_unbind`, `slack_bindings`
-
-Local clients only. The daemon relays each to the Saqoolaude Worker through
-`SlackBridge`, which runs only when `canopy.slackBridgeEnabled` is true.
-
-- `slack_bind`: `key` and/or `sessionId`, `permalink` (a Slack thread link),
-  optional `ttlDays` (1-30, default 7). Refused for the sessions `send_message`
-  would refuse a Slack question. Result: `channel`, `threadTs`, `expiresAt` (ms).
-- `slack_unbind`: `channel`, `threadTs`.
-- `slack_bindings`: result `items`, each with `channel`, `threadTs`,
-  `sessionKey`, `sessionLabel`, `expiresAt`, `askers`.
-
 Result:
 
 ```json
@@ -225,6 +213,19 @@ A `refused` result also carries `reasonCode`, for deciding whether to retry:
 
 A busy session is not refused; the message is `queued`. Blank `text` never
 reaches this table: it is an `error` response before anything is queued.
+
+### `slack_bind`, `slack_unbind`, `slack_bindings`
+
+Local clients only. The daemon relays each to the Saqoolaude Worker through
+`SlackBridge`, which runs only when `canopy.slackBridgeEnabled` is true.
+A refusal is an `error` response with no `errorCode`.
+
+- `slack_bind`: `key` and/or `sessionId`, `permalink` (a Slack thread link),
+  optional `ttlDays` (1-30, default 7). Refused for the sessions `send_message`
+  would refuse a Slack question. Result: `channel`, `threadTs`, `expiresAt` (ms).
+- `slack_unbind`: `channel`, `threadTs`.
+- `slack_bindings`: result `items`, each with `channel`, `threadTs`,
+  `sessionKey`, `sessionLabel`, `expiresAt`, `askers`.
 
 ### `pending_requests`
 

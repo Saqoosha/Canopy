@@ -76,6 +76,8 @@ test('the gate stays through a folded-in prompt, a hidden one, a slash command a
   expect(denied(await write())).toBe(true)
   await $.prompt.submit({ text: 'task done', origin: { kind: 'task-notification' } })
   expect(denied(await write())).toBe(true)
+  await $.prompt.submit({ text: 'from nowhere' })
+  expect(denied(await write())).toBe(true)
   await $.prompt.submit({ text: 'fix it', origin: { kind: 'sdk' } })
   expect(denied(await write())).toBe(false)
 })
@@ -116,7 +118,7 @@ test('a plain prompt from the person lifts the gate', async ($, on) => {
   engine(on)
   await $.prompt.submit({ text: slack })
   expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' }))).toBe(true)
-  await $.prompt.submit({ text: 'append ok to notes.txt' })
+  await $.prompt.submit({ text: 'append ok to notes.txt', origin: { kind: 'sdk' } })
   expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' }))).toBe(false)
 })
 
