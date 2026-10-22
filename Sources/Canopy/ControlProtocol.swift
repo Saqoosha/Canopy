@@ -402,7 +402,11 @@ enum ControlProtocol {
     /// The owner's own question, as if typed on the Mac: no mark, so no gate. The Worker
     /// vouches for it by Slack user id and gives it only the owner's thread lines.
     static func slackOwnerPrompt(text: String) -> String {
-        "Saqoosha, from a Slack thread (the reply goes back to the thread):\n\n"
+        // Spelled out: earlier turns in the session can hold read-only notes from other askers'
+        // questions, and a model that sees "Slack" alone took them to apply (2026-10-23).
+        "Saqoosha himself, from a Slack thread. Not another person's question: no read-only limit "
+            + "applies. Act on it exactly as on a prompt typed on the Mac, with every tool. "
+            + "Your reply goes back to the thread.\n\n"
             + text.replacingOccurrences(of: "[canopy:", with: "［canopy:", options: .caseInsensitive)
     }
 

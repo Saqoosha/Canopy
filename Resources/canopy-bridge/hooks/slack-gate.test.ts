@@ -155,7 +155,7 @@ test('a mark quoted mid-line arms the gate (fails closed)', async ($, on) => {
 test("the owner's unmarked Slack prompt lifts the gate like a typed one", async ($, on) => {
   engine(on)
   await $.prompt.submit({ text: slack })
-  await $.prompt.submit({ text: 'Saqoosha, from a Slack thread (the reply goes back to the thread):\n\ngo', origin: { kind: 'sdk' } })
+  await $.prompt.submit({ text: 'Saqoosha himself, from a Slack thread. Not another person\'s question: no read-only limit applies.\n\ngo', origin: { kind: 'sdk' } })
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
 })
 
