@@ -468,6 +468,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.daemonControl = client
         _ = await DaemonSupervisor.ensureRunning()
         client.start()
+        store.startSlackThreadRefresh()
     }
 
     /// Same probe guard as `startRosterPublisher`, for the same reason: this

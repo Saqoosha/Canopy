@@ -54,6 +54,13 @@ enum PaneHeaderMenu {
                 store?.restartSession(openId)
             })
             if store.canBindSlackThread(session) {
+                let threads = store.slackThreads(for: session)
+                for (number, thread) in threads.enumerated() {
+                    let title = threads.count == 1 ? "Open Slack Thread" : "Open Slack Thread \(number + 1)"
+                    menu.addItem(ClosureMenuItem(title: title) {
+                        NSWorkspace.shared.open(thread)
+                    })
+                }
                 menu.addItem(ClosureMenuItem(title: "Connect to Slack Thread…") { [weak store] in
                     store?.promptSlackThreadBinding(openId)
                 })

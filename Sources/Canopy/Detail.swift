@@ -104,6 +104,7 @@ struct Detail: View {
                             title: session.title.isEmpty ? "Untitled" : session.title,
                             project: session.projectLabel,
                             peerName: PeerNameStore.shared.name(forResumeId: session.resumeId),
+                            slackBound: !store.slackThreads(for: session).isEmpty,
                             showCloseButton: store.paneShowsCloseButton(at: index),
                             leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,
                             onClose: { store.closePane(at: index) }

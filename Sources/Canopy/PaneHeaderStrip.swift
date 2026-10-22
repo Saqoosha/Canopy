@@ -73,6 +73,9 @@ struct PaneHeaderStrip: View {
     /// that method's third precondition. The bound is unchanged in kind; it
     /// is only tighter by the width of a chip.
     var peerName: String? = nil
+    /// The session answers a bound Slack thread. Drawn only: header clicks belong to the
+    /// pane's click monitor; the pane menu's "Open Slack Thread" opens it.
+    var slackBound = false
     let showCloseButton: Bool
     /// Extra leading inset the *leftmost* pane header takes so its title stays
     /// clear of the traffic-light cluster + collapsed-sidebar toggle. Panes at
@@ -155,6 +158,10 @@ struct PaneHeaderStrip: View {
                     if let peerName {
                         PeerNameChip(name: peerName)
                             .layoutPriority(-1)
+                    }
+                    if slackBound {
+                        PeerNameChip(name: "Slack")
+                            .help("Answers questions from a bound Slack thread")
                     }
                 }
                 if !project.isEmpty {

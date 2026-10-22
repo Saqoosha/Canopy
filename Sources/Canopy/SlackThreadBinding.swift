@@ -40,6 +40,7 @@ extension SessionStore {
             switch await control.request("slack_bind", params) {
             case .success:
                 logger.notice("bound session \(id.uuidString, privacy: .public) to a Slack thread")
+                await self?.refreshSlackThreads()
             case .failure(let failure):
                 self?.noteSessionFailure(title: session.title,
                                          message: "Could not connect to the Slack thread (\(Self.describe(failure))).", status: -2)
@@ -69,7 +70,49 @@ extension SessionStore {
                 }
             }
             logger.notice("unbound \(items.count, privacy: .public) Slack thread(s) from \(id.uuidString, privacy: .public)")
+            await self?.refreshSlackThreads()
         }
+    }
+
+    /// The thread a session is bound to, if any.
+    func slackThreads(for session: OpenSession) -> [URL] {
+        session.daemonKey.flatMap { slackThreadsByDaemonKey[$0] } ?? []
+    }
+
+    /// Re-reads the bindings now, then once a minute: a binding can also end on the Worker
+    /// (expiry) or from another client, which the GUI hears about no other way.
+    func startSlackThreadRefresh() {
+        guard !slackThreadRefreshStarted else { return }
+        slackThreadRefreshStarted = true
+        Task { [weak self] in
+            while let self {
+                await self.refreshSlackThreads()
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    func refreshSlackThreads() async {
+        // At launch and after a reconnect the client is not ready yet, and a request then
+        // fails at once; without this wait the chip stays missing until the next minute.
+        guard let control = daemonControl, await control.waitUntilReady() else { return }
+        guard case .success(let result) = await control.request("slack_bindings", [:]) else {
+            // The bridge is off or the Worker is unreachable: show no chip rather than a stale one.
+            if !slackThreadsByDaemonKey.isEmpty { slackThreadsByDaemonKey = [:] }
+            return
+        }
+        var threads: [String: [URL]] = [:]
+        for item in result["items"] as? [[String: Any]] ?? [] {
+            guard let key = item["sessionKey"] as? String, let url = Self.slackThreadURL(item) else { continue }
+            threads[key, default: []].append(url)
+        }
+        if threads != slackThreadsByDaemonKey { slackThreadsByDaemonKey = threads }
+    }
+
+    /// `slack.com/archives/<channel>/p<ts without the dot>` redirects to the signed-in workspace.
+    nonisolated static func slackThreadURL(_ item: [String: Any]) -> URL? {
+        guard let channel = item["channel"] as? String, let threadTs = item["threadTs"] as? String else { return nil }
+        return URL(string: "https://slack.com/archives/\(channel)/p\(threadTs.replacingOccurrences(of: ".", with: ""))")
     }
 
     private nonisolated static func describe(_ failure: ControlClient.Failure) -> String {
