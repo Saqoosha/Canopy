@@ -42,8 +42,7 @@ extension SessionStore {
                 logger.notice("bound session \(id.uuidString, privacy: .public) to a Slack thread")
                 await self?.refreshSlackThreads()
             case .failure(let failure):
-                self?.noteSessionFailure(title: session.title,
-                                         message: "Could not connect to the Slack thread (\(Self.describe(failure))).", status: -2)
+                Self.showSlackFailure("Could not connect to the Slack thread (\(Self.describe(failure))).")
             }
         }
     }
@@ -56,8 +55,7 @@ extension SessionStore {
             let listed = await control.request("slack_bindings", [:])
             guard case .success(let result) = listed else {
                 if case .failure(let failure) = listed {
-                    self?.noteSessionFailure(title: session.title,
-                                             message: "Could not read the Slack connections (\(Self.describe(failure))).", status: -2)
+                    Self.showSlackFailure("Could not read the Slack connections (\(Self.describe(failure))).")
                 }
                 return
             }
@@ -65,8 +63,7 @@ extension SessionStore {
             for item in items {
                 guard let channel = item["channel"] as? String, let threadTs = item["threadTs"] as? String else { continue }
                 if case .failure(let failure) = await control.request("slack_unbind", ["channel": channel, "threadTs": threadTs]) {
-                    self?.noteSessionFailure(title: session.title,
-                                             message: "Could not disconnect the Slack thread (\(Self.describe(failure))).", status: -2)
+                    Self.showSlackFailure("Could not disconnect the Slack thread (\(Self.describe(failure))).")
                 }
             }
             logger.notice("unbound \(items.count, privacy: .public) Slack thread(s) from \(id.uuidString, privacy: .public)")
@@ -113,6 +110,16 @@ extension SessionStore {
     nonisolated static func slackThreadURL(_ item: [String: Any]) -> URL? {
         guard let channel = item["channel"] as? String, let threadTs = item["threadTs"] as? String else { return nil }
         return URL(string: "https://slack.com/archives/\(channel)/p\(threadTs.replacingOccurrences(of: ".", with: ""))")
+    }
+
+    /// The user just asked for this, so the failure is shown at once rather than in the
+    /// launcher's failure banner, which a bind from the pane menu never looks at.
+    private static func showSlackFailure(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Slack"
+        alert.informativeText = message
+        alert.runModal()
     }
 
     private nonisolated static func describe(_ failure: ControlClient.Failure) -> String {
