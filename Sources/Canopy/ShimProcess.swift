@@ -2660,8 +2660,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// True once a canopy-bridge frame supplied the context window; the
     /// `result` branch then leaves `contextMax` to it.
     private var contextMaxFromBridge = false
-    /// True once any canopy-bridge frame arrived: the mod, and its Slack gate, loaded.
-    private(set) var bridgeModReported = false
+    /// True once the canopy-bridge mod reported its Slack gate (`SlackNote.ready`).
+    private(set) var slackGateReady = false
     /// Set when the mod left the worktree ahead of a `git worktree remove`, or
     /// when the spawn folder is gone and the transcript is filed in a checkout.
     private var checkoutAfterRemoval: URL?
@@ -4489,6 +4489,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// The Slack gate's report on the turn answering a Slack question.
     enum SlackNote: Equatable {
+        /// The gate is loaded; sent at session start.
+        case ready
         /// Layer 1's verdict; the gate sends it once, as the question is submitted.
         case classified(String)
         /// A tool layer 2 refused.
@@ -4502,13 +4504,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
               obj["v"] as? Int == 1,
               let slack = obj["slack"] as? [String: Any]
         else { return nil }
+        if slack["ready"] as? Bool == true { return .ready }
         if let kind = slack["kind"] as? String { return .classified(kind) }
         if let tool = slack["denied"] as? String { return .denied(tool) }
         return nil
     }
 
     /// What the gate reported since the latest Slack question was classified, for the draft
-    /// the owner approves. A second question queued behind the first resets it.
+    /// the owner approves. `SlackBridge` sends one question per session at a time.
     private(set) var slackTurnNotes: (kind: String?, denied: [String]) = (nil, [])
 
     /// Posted with the shim as `object` and the checkout URL under `checkoutKey`
@@ -4625,7 +4628,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                    let frame = nested["message"] as? [String: Any],
                    Self.isBridgeFrame(frame)
                 {
-                    bridgeModReported = true
                     if let measure = Self.bridgeContextMeasure(frame) {
                         if let window = measure.window {
                             if !contextMaxFromBridge {
@@ -4646,6 +4648,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         }
                     } else if let note = Self.bridgeSlackNote(frame) {
                         switch note {
+                        case .ready:
+                            slackGateReady = true
                         case .classified(let kind):
                             slackTurnNotes = (kind, [])
                             logger.notice("[slack] \(self.keepAliveLogLabel, privacy: .public): question classified \(kind, privacy: .public)")

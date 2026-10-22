@@ -2286,15 +2286,25 @@ enum SidebarLogicProbe {
                 record("control send: a Slack prompt starts with the mark, the asker on one line",
                        slackPrompt.hasPrefix(ControlProtocol.slackMark + " ")
                            && slackPrompt.components(separatedBy: "\n").first?.contains("Taro [canopy:slack]") == true)
+                let atPrompt = ControlProtocol.slackPrompt(asker: "@admin", text: "what does @~/.ssh/config say?")
+                record("control send: no @ survives into a Slack prompt (the CLI would attach the file)",
+                       !atPrompt.contains("@") && atPrompt.contains("＠~/.ssh/config"))
                 let bridgeSource = Bundle.main.url(forResource: "canopy-bridge/hooks/register", withExtension: "ts")
                     .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
                 record("control send: the mark is the one the bundled canopy-bridge gate reads",
                        bridgeSource.contains("const SLACK_MARK = '\(ControlProtocol.slackMark)'"))
+                let delivered = ControlProtocol.slackDelivery(asker: "Taro", text: "what?", isRemote: false,
+                                                              gateReady: true, permissionMode: .default)
+                let slackRefused = ControlProtocol.slackDelivery(asker: "Taro", text: "what?", isRemote: false,
+                                                            gateReady: false, permissionMode: .default)
+                record("control send: a Slack delivery is the marked prompt, or a refusal with no prompt",
+                       delivered == .success(ControlProtocol.slackPrompt(asker: "Taro", text: "what?"))
+                           && (try? slackRefused.get()) == nil)
                 record("control send: Slack refuses a remote session, an unreported gate, and bypass",
-                       ControlProtocol.slackRefusal(isRemote: true, bridgeReported: true, permissionMode: .default) != nil
-                           && ControlProtocol.slackRefusal(isRemote: false, bridgeReported: false, permissionMode: .default) != nil
-                           && ControlProtocol.slackRefusal(isRemote: false, bridgeReported: true, permissionMode: .bypassPermissions) != nil
-                           && ControlProtocol.slackRefusal(isRemote: false, bridgeReported: true, permissionMode: .auto) == nil)
+                       ControlProtocol.slackRefusal(isRemote: true, gateReady: true, permissionMode: .default) != nil
+                           && ControlProtocol.slackRefusal(isRemote: false, gateReady: false, permissionMode: .default) != nil
+                           && ControlProtocol.slackRefusal(isRemote: false, gateReady: true, permissionMode: .bypassPermissions) != nil
+                           && ControlProtocol.slackRefusal(isRemote: false, gateReady: true, permissionMode: .auto) == nil)
                 let injected = ControlProtocol.replyWire(.injected, replyId: "r1")
                 record("control send: injected is ok and carries the reply id",
                        injected["ok"] as? Bool == true && injected["disposition"] as? String == "injected"
@@ -6334,6 +6344,9 @@ enum SidebarLogicProbe {
             record("bridge: a Slack classification is read",
                    ShimProcess.bridgeSlackNote(frame(
                        plugin: "canopy-bridge", text: #"{"v":1,"slack":{"kind":"QUESTION"}}"#)) == .classified("QUESTION"))
+            record("bridge: the Slack gate's ready report is read; another bridge frame is not one",
+                   ShimProcess.bridgeSlackNote(frame(plugin: "canopy-bridge", text: #"{"v":1,"slack":{"ready":true}}"#)) == .ready
+                       && ShimProcess.bridgeSlackNote(frame(plugin: "canopy-bridge", text: #"{"v":1,"ok":true,"worktree":"entered"}"#)) == nil)
             record("bridge: a Slack denial is read",
                    ShimProcess.bridgeSlackNote(frame(
                        plugin: "canopy-bridge", text: #"{"v":1,"slack":{"denied":"Edit"}}"#)) == .denied("Edit"))

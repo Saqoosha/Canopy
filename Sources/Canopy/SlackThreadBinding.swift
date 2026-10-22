@@ -3,7 +3,7 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SlackThreadBinding")
 
-/// The pane menu's "Connect to Slack thread…": binds a daemon session to a Slack thread so
+/// The pane menu's Slack items: binds a daemon session to a Slack thread so
 /// people there can ask it read-only questions. The daemon's `SlackBridge` carries the request
 /// to the Worker. Why: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
 @MainActor
@@ -47,7 +47,7 @@ extension SessionStore {
         }
     }
 
-    /// Removes every binding the Worker holds for this session.
+    /// Removes the bindings the Worker holds for this session's current daemon key.
     func unbindSlackThreads(_ id: UUID) {
         guard let session = openSessions.first(where: { $0.id == id }), let control = daemonControl,
               let key = session.daemonKey else { return }

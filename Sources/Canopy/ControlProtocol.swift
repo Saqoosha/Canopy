@@ -387,16 +387,31 @@ enum ControlProtocol {
     /// (`SLACK_MARK` in `Resources/canopy-bridge/hooks/register.ts`).
     static let slackMark = "[canopy:slack]"
 
+    /// The CLI attaches the file an `@path` names without any tool call, so the read-only gate
+    /// never sees it. A full-width ＠ reads the same to the model and attaches nothing.
     static func slackPrompt(asker: String, text: String) -> String {
-        let name = asker.components(separatedBy: .newlines).joined(separator: " ")
-        return "\(slackMark) A question from \(name) in a Slack thread:\n\n\(text)"
+        func inert(_ s: String) -> String { s.replacingOccurrences(of: "@", with: "＠") }
+        let name = inert(asker.components(separatedBy: .newlines).joined(separator: " "))
+        return "\(slackMark) A question from “\(name)” in a Slack thread:\n\n\(inert(text))"
     }
 
-    /// Why a Slack question may not reach this session, or nil. Each case is a
-    /// session the mod's read-only gate may not cover, and the asker is not the owner.
-    static func slackRefusal(isRemote: Bool, bridgeReported: Bool, permissionMode: PermissionMode) -> String? {
-        if isRemote { return "an SSH remote session does not load the canopy-bridge gate" }
-        if !bridgeReported { return "the canopy-bridge gate has not reported from this session yet" }
+    static let slackRemoteRefusal = "an SSH remote session does not load the canopy-bridge gate"
+
+    /// The marked prompt for a Slack question, or why it may not be delivered. Both senders
+    /// (`send_message` with `slackAsker`, and `SlackBridge`) go through this one decision.
+    static func slackDelivery(asker: String, text: String, isRemote: Bool, gateReady: Bool,
+                              permissionMode: PermissionMode) -> Result<String, ControlError> {
+        if let why = slackRefusal(isRemote: isRemote, gateReady: gateReady, permissionMode: permissionMode) {
+            return .failure(ControlError(why))
+        }
+        return .success(slackPrompt(asker: asker, text: text))
+    }
+
+    /// Why a Slack question may not reach this session, or nil: each case is a
+    /// session the mod's read-only gate may not cover.
+    static func slackRefusal(isRemote: Bool, gateReady: Bool, permissionMode: PermissionMode) -> String? {
+        if isRemote { return slackRemoteRefusal }
+        if !gateReady { return "the canopy-bridge gate has not reported from this session" }
         if permissionMode == .bypassPermissions { return "the session is in bypassPermissions" }
         return nil
     }

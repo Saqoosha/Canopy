@@ -15,12 +15,14 @@ final class SlackBridge {
 
     static let endpoint = URL(string: "wss://saqoolaude.whatever-co.workers.dev/canopy/connect")!
     /// Prints `{"Authorization":"Bearer …"}`. The saqoolaude MCP registration runs the same
-    /// helper, so the key stays in 1Password and this process never stores it.
-    static let headersHelper = FileManager.default.homeDirectoryForCurrentUser
+    /// helper, so this process never writes the key anywhere.
+    nonisolated static let headersHelper = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/scripts/saqoolaude-mcp-headers.sh")
-    /// A question still unanswered after this is answered as timed out.
     static let answerTimeout: TimeInterval = 30 * 60
-    static let requestTimeout: Duration = .seconds(15)
+    /// Under `ControlClient.requestTimeout`, so the GUI hears which hop failed.
+    static let requestTimeout: Duration = .seconds(10)
+    /// The Worker closes the older socket with this when another Mac connects.
+    static let replacedCloseCode = 4000
     private static let maxBackoff: TimeInterval = 60
 
     private let store: SessionStore
@@ -29,6 +31,13 @@ final class SlackBridge {
     private var pingTimer: Timer?
     private var waiters: [String: CheckedContinuation<Result<[String: Any], ControlProtocol.ControlError>, Never>] = [:]
     private var stopped = false
+    /// Why the bridge is not connected, for the GUI's bind request.
+    private var lastProblem = "not connected to the Saqoolaude Worker"
+    /// Answers produced while disconnected, sent once a socket is up again.
+    private var outbox: [[String: Any]] = []
+    /// One question per session at a time; later ones wait here, so each answer carries its own gate notes.
+    private var busySessions: Set<String> = []
+    private var waitingAsks: [String: [[String: Any]]] = [:]
 
     init(store: SessionStore) {
         self.store = store
@@ -43,7 +52,7 @@ final class SlackBridge {
         stopped = true
         if Self.current === self { Self.current = nil }
         dropConnection()
-        logger.notice("Slack bridge stopped")
+        logger.notice("Slack bridge stopped; \(self.busySessions.count, privacy: .public) question(s) left unanswered")
     }
 
     // MARK: - Connection
@@ -51,14 +60,19 @@ final class SlackBridge {
     private func connect() {
         guard !stopped else { return }
         guard FileManager.default.isExecutableFile(atPath: Self.headersHelper.path) else {
-            logger.notice("no saqoolaude headers helper; the Slack bridge stays off")
+            lastProblem = "the saqoolaude headers helper is missing"
+            logger.error("no saqoolaude headers helper at \(Self.headersHelper.path, privacy: .public)")
+            scheduleReconnect(after: Self.maxBackoff)
             return
         }
         Task {
-            let authorization = await Self.authorizationHeader()
+            let header = await Self.authorizationHeader()
             guard !stopped else { return }
-            guard let authorization else {
-                logger.error("the saqoolaude headers helper gave no Authorization header")
+            guard case .success(let authorization) = header else {
+                if case .failure(let why) = header {
+                    lastProblem = why.message
+                    logger.error("no Authorization header: \(why.message, privacy: .public)")
+                }
                 scheduleReconnect()
                 return
             }
@@ -70,33 +84,64 @@ final class SlackBridge {
             logger.notice("connecting to the Saqoolaude Worker")
             startPing(task)
             receive(task)
+            let pending = outbox
+            outbox.removeAll()
+            for message in pending { sendAnswer(message) }
         }
     }
 
-    /// Runs the helper off the main thread. Its 1Password mount blocks while the app is locked,
-    /// so a run that has not finished in 10 s is ended. The output is parsed here and never logged.
-    private nonisolated static func authorizationHeader() async -> String? {
+    /// Runs the helper in its own process group off the main thread. Its 1Password mount
+    /// blocks while the app is locked, so after 10 s the whole group is killed: killing the
+    /// shell alone would leave its blocked reader behind. The output is never logged.
+    private nonisolated static func authorizationHeader() async -> Result<String, ControlProtocol.ControlError> {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/bin/sh")
-                process.arguments = [headersHelper.path]
-                let out = Pipe()
-                process.standardOutput = out
-                process.standardError = FileHandle.nullDevice
-                do { try process.run() } catch {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killer)
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                killer.cancel()
-                let headers = (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
-                continuation.resume(returning: process.terminationStatus == 0 ? headers?["Authorization"] : nil)
+                continuation.resume(returning: runHeadersHelper())
             }
         }
+    }
+
+    private nonisolated static func runHeadersHelper() -> Result<String, ControlProtocol.ControlError> {
+        var fds: [Int32] = [0, 0]
+        guard pipe(&fds) == 0 else { return .failure(.init("pipe failed (errno \(errno))")) }
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO)
+        posix_spawn_file_actions_addclose(&actions, fds[0])
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
+        posix_spawnattr_setpgroup(&attr, 0)
+        let args = ["/bin/sh", headersHelper.path].map { strdup($0) }
+        defer {
+            args.forEach { free($0) }
+            posix_spawn_file_actions_destroy(&actions)
+            posix_spawnattr_destroy(&attr)
+        }
+        var pid: pid_t = 0
+        let spawned = posix_spawn(&pid, "/bin/sh", &actions, &attr, args + [nil], environ)
+        close(fds[1])
+        guard spawned == 0 else {
+            close(fds[0])
+            return .failure(.init("could not start the headers helper (errno \(spawned))"))
+        }
+        let killer = DispatchWorkItem { kill(-pid, SIGKILL) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killer)
+        let data = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true).readDataToEndOfFile()
+        var status: Int32 = 0
+        waitpid(pid, &status, 0)
+        let timedOut = killer.isCancelled == false && (status & 0x7f) == SIGKILL
+        killer.cancel()
+        if timedOut { return .failure(.init("the headers helper timed out (is 1Password locked?)")) }
+        guard (status & 0x7f) == 0, (status >> 8) & 0xff == 0 else {
+            return .failure(.init("the headers helper failed (status \(status))"))
+        }
+        guard let headers = (try? JSONSerialization.jsonObject(with: data)) as? [String: String],
+              let authorization = headers["Authorization"] else {
+            return .failure(.init("the headers helper printed no Authorization header"))
+        }
+        return .success(authorization)
     }
 
     /// The async `receive` resumes on the main actor, so no completion closure runs off main
@@ -109,9 +154,7 @@ final class SlackBridge {
                     message = try await task.receive()
                 } catch {
                     guard let self, self.task === task else { return }
-                    logger.notice("Worker connection ended: \(error.localizedDescription, privacy: .public)")
-                    self.dropConnection()
-                    self.scheduleReconnect()
+                    self.connectionEnded(task, error)
                     return
                 }
                 guard let self, self.task === task else { return }
@@ -121,7 +164,25 @@ final class SlackBridge {
         }
     }
 
-    /// Cloudflare drops an idle WebSocket; a ping every 30 s keeps it, and a failed one ends it.
+    private func connectionEnded(_ task: URLSessionWebSocketTask, _ error: Error) {
+        let status = (task.response as? HTTPURLResponse)?.statusCode
+        dropConnection()
+        if task.closeCode.rawValue == Self.replacedCloseCode {
+            lastProblem = "another Mac took over the Slack bridge"
+            logger.error("another Mac connected to the Saqoolaude Worker; this one stops (turn canopy.slackBridgeEnabled off on one of them)")
+            return
+        }
+        if let status, status != 101 {
+            lastProblem = "the Saqoolaude Worker refused the connection (HTTP \(status))"
+            logger.error("the Saqoolaude Worker answered HTTP \(status, privacy: .public)")
+        } else {
+            lastProblem = "not connected to the Saqoolaude Worker"
+            logger.notice("Worker connection ended: \(error.localizedDescription, privacy: .public)")
+        }
+        scheduleReconnect()
+    }
+
+    /// A ping every 30 s finds a dead link; a failed one ends the socket.
     private func startPing(_ task: URLSessionWebSocketTask) {
         pingTimer?.invalidate()
         pingTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in Self.ping(task) }
@@ -144,8 +205,8 @@ final class SlackBridge {
         waiters.removeAll()
     }
 
-    private func scheduleReconnect() {
-        let delay = backoff
+    private func scheduleReconnect(after delay: TimeInterval? = nil) {
+        let delay = delay ?? backoff
         backoff = min(backoff * 2, Self.maxBackoff)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             MainActor.assumeIsolated {
@@ -155,15 +216,33 @@ final class SlackBridge {
         }
     }
 
+    private static func encode(_ message: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     private func send(_ message: [String: Any]) -> Bool {
-        guard let task, let data = try? JSONSerialization.data(withJSONObject: message),
-              let text = String(data: data, encoding: .utf8) else { return false }
+        guard let task, let text = Self.encode(message) else { return false }
         Task {
             do { try await task.send(.string(text)) } catch {
-                logger.error("send to the Worker failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("send \(message["type"] as? String ?? "?", privacy: .public) to the Worker failed: \(error.localizedDescription, privacy: .public)")
             }
         }
         return true
+    }
+
+    /// An answer is kept until a socket takes it: one that fails to send goes back in the outbox.
+    private func sendAnswer(_ message: [String: Any]) {
+        guard let task, let text = Self.encode(message) else {
+            outbox.append(message)
+            return
+        }
+        Task { [weak self] in
+            do { try await task.send(.string(text)) } catch {
+                logger.notice("[slack] answer \(message["askId"] as? String ?? "?", privacy: .public) kept for the next connection")
+                self?.outbox.append(message)
+            }
+        }
     }
 
     // MARK: - Requests from this Mac (bind, unbind, list)
@@ -174,7 +253,7 @@ final class SlackBridge {
         var message = params
         message["type"] = type
         message["requestId"] = requestId
-        guard send(message) else { return .failure(ControlProtocol.ControlError("not connected to the Saqoolaude Worker")) }
+        guard send(message) else { return .failure(ControlProtocol.ControlError(lastProblem)) }
         return await withCheckedContinuation { continuation in
             waiters[requestId] = continuation
             Task { [weak self] in
@@ -193,7 +272,7 @@ final class SlackBridge {
             return
         }
         if type == "ask" {
-            handleAsk(message)
+            enqueueAsk(message)
             return
         }
         guard let requestId = message["requestId"] as? String, let waiter = waiters.removeValue(forKey: requestId) else {
@@ -209,51 +288,79 @@ final class SlackBridge {
 
     // MARK: - Questions from Slack
 
-    private func handleAsk(_ message: [String: Any]) {
-        guard let askId = message["askId"] as? String,
-              let sessionKey = message["sessionKey"] as? String,
-              let asker = message["asker"] as? String,
-              let text = message["text"] as? String else {
-            logger.error("ask frame missing a field")
+    private func enqueueAsk(_ message: [String: Any]) {
+        guard let askId = message["askId"] as? String else {
+            logger.error("ask frame without an askId")
             return
         }
+        guard let sessionKey = message["sessionKey"] as? String,
+              message["asker"] is String, message["text"] is String else {
+            answer(askId, refusal: "the question arrived incomplete")
+            return
+        }
+        if busySessions.contains(sessionKey) {
+            waitingAsks[sessionKey, default: []].append(message)
+            logger.notice("[slack] question \(askId, privacy: .public) waits for the session's previous one")
+            return
+        }
+        busySessions.insert(sessionKey)
+        handleAsk(askId: askId, sessionKey: sessionKey, asker: message["asker"] as! String, text: message["text"] as! String)
+    }
+
+    private func finishAsk(_ sessionKey: String) {
+        busySessions.remove(sessionKey)
+        guard var queue = waitingAsks[sessionKey], !queue.isEmpty else { return }
+        let next = queue.removeFirst()
+        waitingAsks[sessionKey] = queue.isEmpty ? nil : queue
+        enqueueAsk(next)
+    }
+
+    private func handleAsk(askId: String, sessionKey: String, asker: String, text: String) {
         guard let session = store.openSession(for: [.key(sessionKey)]), let shim = session.shim else {
-            answer(askId, refusal: "the session is not open on Saqoosha's Mac")
+            answer(askId, refusal: "the session is not open on Saqoosha's Mac", session: sessionKey)
             return
         }
-        if let why = ControlProtocol.slackRefusal(isRemote: shim.remoteHost != nil,
-                                                  bridgeReported: shim.bridgeModReported,
-                                                  permissionMode: shim.permissionMode) {
-            answer(askId, refusal: why)
+        let prompt: String
+        switch ControlProtocol.slackDelivery(asker: asker, text: text, isRemote: shim.remoteHost != nil,
+                                             gateReady: shim.slackGateReady, permissionMode: shim.permissionMode) {
+        case .failure(let why):
+            answer(askId, refusal: why.message, session: sessionKey)
             return
+        case .success(let marked):
+            prompt = marked
         }
-        let wire = ControlSession.submitControlMessage(ControlProtocol.slackPrompt(asker: asker, text: text), to: shim)
+        let wire = ControlSession.submitControlMessage(prompt, to: shim)
         guard wire["ok"] as? Bool == true, let replyId = wire["replyId"] as? String else {
-            answer(askId, refusal: wire["reason"] as? String ?? "the session refused the question")
+            answer(askId, refusal: wire["reason"] as? String ?? "the session refused the question", session: sessionKey)
             return
         }
         logger.notice("[slack] \(shim.keepAliveLogLabel, privacy: .public): question \(askId, privacy: .public) delivered (\(wire["disposition"] as? String ?? "?", privacy: .public))")
         waitForAnswer(askId: askId, sessionKey: sessionKey, replyId: replyId, deadline: Date().addingTimeInterval(Self.answerTimeout))
     }
 
-    /// Polls like `wait_turn`, re-resolving the session each tick: a restart gives it a new shim.
+    /// Polls like `wait_turn`. A restarted session no longer knows the reply id, which ends the wait.
     private func waitForAnswer(askId: String, sessionKey: String, replyId: String, deadline: Date) {
+        guard !stopped else { return }
         guard let shim = store.openSession(for: [.key(sessionKey)])?.shim,
               let snap = shim.controlTurnSnapshot(replyId: replyId) else {
-            answer(askId, refusal: "the session closed before it answered")
+            answer(askId, refusal: "the session closed or restarted before it answered", session: sessionKey)
             return
         }
         if snap.turnDone {
+            let reply = (snap.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !reply.isEmpty else {
+                answer(askId, refusal: "the session finished without a reply", session: sessionKey)
+                return
+            }
             let notes = shim.slackTurnNotes
-            answer(askId, text: snap.text ?? "", kind: notes.kind, denied: notes.denied)
-            return
-        }
-        if snap.state == "asking" || snap.state == "permission" {
-            answer(askId, refusal: "the session is waiting for Saqoosha on the Mac")
+            var message: [String: Any] = ["type": "answer", "askId": askId, "ok": true, "text": reply, "denied": notes.denied]
+            if let kind = notes.kind { message["kind"] = kind }
+            sendAnswer(message)
+            finishAsk(sessionKey)
             return
         }
         if Date() > deadline {
-            answer(askId, refusal: "the session did not answer within 30 minutes")
+            answer(askId, refusal: "the session did not answer within \(Int(Self.answerTimeout / 60)) minutes", session: sessionKey)
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
@@ -263,16 +370,9 @@ final class SlackBridge {
         }
     }
 
-    private func answer(_ askId: String, text: String, kind: String?, denied: [String]) {
-        var message: [String: Any] = ["type": "answer", "askId": askId, "ok": true, "text": text, "denied": denied]
-        if let kind { message["kind"] = kind }
-        if !send(message) { logger.error("[slack] answer \(askId, privacy: .public) lost: not connected") }
-    }
-
-    private func answer(_ askId: String, refusal: String) {
+    private func answer(_ askId: String, refusal: String, session sessionKey: String? = nil) {
         logger.notice("[slack] question \(askId, privacy: .public) refused: \(refusal, privacy: .public)")
-        if !send(["type": "answer", "askId": askId, "ok": false, "reason": refusal]) {
-            logger.error("[slack] refusal \(askId, privacy: .public) lost: not connected")
-        }
+        sendAnswer(["type": "answer", "askId": askId, "ok": false, "reason": refusal])
+        if let sessionKey { finishAsk(sessionKey) }
     }
 }

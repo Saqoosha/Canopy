@@ -110,13 +110,11 @@ final class ControlSession {
                 reply(request, Self.submitControlMessage(message.text, to: shim))
                 return
             }
-            if let why = ControlProtocol.slackRefusal(isRemote: shim.remoteHost != nil,
-                                                      bridgeReported: shim.bridgeModReported,
-                                                      permissionMode: shim.permissionMode) {
-                fail(request, why, code: "slack_refused")
-                return
+            switch ControlProtocol.slackDelivery(asker: asker, text: message.text, isRemote: shim.remoteHost != nil,
+                                                 gateReady: shim.slackGateReady, permissionMode: shim.permissionMode) {
+            case .failure(let why): fail(request, why.message, code: "slack_refused")
+            case .success(let prompt): reply(request, Self.submitControlMessage(prompt, to: shim))
             }
-            reply(request, Self.submitControlMessage(ControlProtocol.slackPrompt(asker: asker, text: message.text), to: shim))
         }
     }
 
@@ -134,19 +132,23 @@ final class ControlSession {
         return ControlProtocol.replyWire(disposition, replyId: replyId)
     }
 
-    /// Binding a session to a Slack thread lets other people ask it questions, so only this Mac's
-    /// GUI may do it. The Worker holds the bindings; `SlackBridge` relays the request.
+    /// Binding a session to a Slack thread lets other people ask it questions, so only a local
+    /// client may do it. The Worker holds the bindings; `SlackBridge` relays the request.
     private func slackRequest(_ request: ControlProtocol.Request) {
         guard isLocal else { return fail(request, "local clients only") }
-        guard let bridge = SlackBridge.current else { return fail(request, "the Slack bridge is not running in the daemon") }
+        guard let bridge = SlackBridge.current else {
+            return fail(request, "the Slack bridge is off on this Mac (set canopy.slackBridgeEnabled to true in settings.json)")
+        }
         let type: String
         var params: [String: Any] = [:]
         switch request.verb {
         case "slack_bind":
             guard let session = requestedSession(request) else { return }
             guard let shim = session.shim else { return fail(request, "not running") }
-            guard shim.remoteHost == nil else {
-                return fail(request, ControlProtocol.slackRefusal(isRemote: true, bridgeReported: true, permissionMode: .default)!)
+            // The same refusal every question would get, said once at bind time.
+            if let why = ControlProtocol.slackRefusal(isRemote: shim.remoteHost != nil, gateReady: shim.slackGateReady,
+                                                      permissionMode: shim.permissionMode) {
+                return fail(request, why)
             }
             guard let permalink = request.params["permalink"] as? String, !permalink.isEmpty else {
                 return fail(request, "permalink is required")
