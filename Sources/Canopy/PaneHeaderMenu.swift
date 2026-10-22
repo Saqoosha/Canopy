@@ -53,6 +53,14 @@ enum PaneHeaderMenu {
             menu.addItem(ClosureMenuItem(title: "Restart session") { [weak store] in
                 store?.restartSession(openId)
             })
+            if store.canBindSlackThread(session) {
+                menu.addItem(ClosureMenuItem(title: "Connect to Slack Thread…") { [weak store] in
+                    store?.promptSlackThreadBinding(openId)
+                })
+                menu.addItem(ClosureMenuItem(title: "Disconnect Slack Threads") { [weak store] in
+                    store?.unbindSlackThreads(openId)
+                })
+            }
             if session.origin.remoteHost == nil,
                session.origin.mirrorTarget == nil {
                 let accounts = ClaudeAccountStore.load()

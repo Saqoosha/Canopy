@@ -66,6 +66,7 @@ final class DaemonDelegate {
     private var sleepGuard: SleepGuard?
     private var rosterPublisher: RosterPublisher?
     private var config = DaemonConfig.defaults
+    private var slackBridge: SlackBridge?
     private var configModified: Date?
     private var unreadableModified: Date?
     private var usageTimer: Timer?
@@ -301,6 +302,25 @@ final class DaemonDelegate {
             SleepGuard.reevaluateActive()
         }
         applyTCP()
+        applySlackBridge()
+    }
+
+    /// Starts or stops the link to the Saqoolaude Worker to match `config`.
+    private func applySlackBridge() {
+        var wanted = config.slackBridgeEnabled
+        #if DEBUG
+        // settings.json is shared with the installed Release build; two daemons would keep
+        // replacing each other's Worker connection. A Debug daemon joins only when asked.
+        wanted = wanted && ProcessInfo.processInfo.environment["CANOPY_DEBUG_SLACK_BRIDGE"] == "1"
+        #endif
+        if wanted, slackBridge == nil {
+            let bridge = SlackBridge(store: store)
+            slackBridge = bridge
+            bridge.start()
+        } else if !wanted, let bridge = slackBridge {
+            bridge.stop()
+            slackBridge = nil
+        }
     }
 
     /// Opens, moves or closes the Tailscale listener to match `config`.

@@ -9,6 +9,9 @@ struct DaemonConfig: Equatable {
     /// The Tailscale port: `canopy.mirrorPort`, the one the GUI used to listen on, so
     /// every existing pairing (other Macs, the phone) reaches the daemon unchanged.
     var port: Int
+    /// `canopy.slackBridgeEnabled`: this Mac answers Slack threads bound to its sessions.
+    /// Off by default because the Worker keeps one Mac connected; a second one would replace it.
+    var slackBridgeEnabled = false
 
     static let defaults = DaemonConfig(mirrorEnabled: false, allowBypass: false, port: 8770)
 
@@ -22,6 +25,7 @@ struct DaemonConfig: Equatable {
         if let on = dict["canopy.mirrorEnabled"] as? Bool { config.mirrorEnabled = on }
         if let allow = dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool { config.allowBypass = allow }
         if let port = dict["canopy.mirrorPort"] as? Int, (1...65535).contains(port) { config.port = port }
+        if let on = dict["canopy.slackBridgeEnabled"] as? Bool { config.slackBridgeEnabled = on }
         return config
     }
 }

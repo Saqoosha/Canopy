@@ -89,6 +89,7 @@ final class ControlSession {
         case "pending_requests": pendingRequests(request)
         case "listen": listen(request)
         case "history": history(request)
+        case "slack_bind", "slack_unbind", "slack_bindings": slackRequest(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -105,12 +106,21 @@ final class ControlSession {
                 reply(request, ControlProtocol.replyWire(Self.notRunningRefusal, replyId: UUID().uuidString.lowercased()))
                 return
             }
-            reply(request, submitControlMessage(message.text, to: shim))
+            guard let asker = message.slackAsker else {
+                reply(request, Self.submitControlMessage(message.text, to: shim))
+                return
+            }
+            switch ControlProtocol.slackDelivery(asker: asker, text: message.text, isRemote: shim.remoteHost != nil,
+                                                 gateReady: shim.slackGateReady, permissionMode: shim.permissionMode) {
+            case .failure(let why): fail(request, why.message, code: "slack_refused")
+            case .success(let prompt): reply(request, Self.submitControlMessage(prompt, to: shim))
+            }
         }
     }
 
-    /// `send_message`'s delivery, also used by a resume that names a session already running.
-    private func submitControlMessage(_ text: String, to shim: ShimProcess) -> [String: Any] {
+    /// `send_message`'s delivery, also used by a resume that names a session already running
+    /// and by `SlackBridge`.
+    static func submitControlMessage(_ text: String, to shim: ShimProcess) -> [String: Any] {
         let replyId = UUID().uuidString.lowercased()
         // No-op when a client already holds a channel; opens one when the session has none.
         shim.launchHeadlessChannel()
@@ -120,6 +130,51 @@ final class ControlSession {
             shim.forgetControlReply(replyId)
         }
         return ControlProtocol.replyWire(disposition, replyId: replyId)
+    }
+
+    /// Binding a session to a Slack thread lets other people ask it questions, so only a local
+    /// client may do it. The Worker holds the bindings; `SlackBridge` relays the request.
+    private func slackRequest(_ request: ControlProtocol.Request) {
+        guard isLocal else { return fail(request, "local clients only") }
+        guard let bridge = SlackBridge.current else {
+            return fail(request, "the Slack bridge is off on this Mac (set canopy.slackBridgeEnabled to true in settings.json)")
+        }
+        let type: String
+        var params: [String: Any] = [:]
+        switch request.verb {
+        case "slack_bind":
+            guard let session = requestedSession(request) else { return }
+            guard let shim = session.shim else { return fail(request, "not running") }
+            // The same refusal every question would get, said once at bind time.
+            if let why = ControlProtocol.slackRefusal(isRemote: shim.remoteHost != nil, gateReady: shim.slackGateReady,
+                                                      permissionMode: shim.permissionMode) {
+                return fail(request, why)
+            }
+            guard let permalink = request.params["permalink"] as? String, !permalink.isEmpty else {
+                return fail(request, "permalink is required")
+            }
+            type = "bind"
+            params = ["permalink": permalink, "sessionKey": session.id.uuidString, "sessionLabel": session.title]
+            if let days = request.params["ttlDays"] as? Int { params["ttlDays"] = days }
+        case "slack_unbind":
+            guard let channel = request.params["channel"] as? String, let threadTs = request.params["threadTs"] as? String else {
+                return fail(request, "channel and threadTs are required")
+            }
+            type = "unbind"
+            params = ["channel": channel, "threadTs": threadTs]
+        default:
+            type = "list"
+        }
+        Task { [weak self] in
+            switch await bridge.request(type, params) {
+            case .success(var result):
+                result.removeValue(forKey: "type")
+                result.removeValue(forKey: "requestId")
+                self?.reply(request, result)
+            case .failure(let error):
+                self?.fail(request, error.message)
+            }
+        }
     }
 
     private func sessionStatus(_ request: ControlProtocol.Request) {
@@ -500,7 +555,7 @@ final class ControlSession {
             if let shim = session.shim, shim.isLive {
                 var result = resumeResult(session, alreadyOpen: true)
                 if let prompt = params.initialPrompt {
-                    result.merge(submitControlMessage(prompt, to: shim)) { _, new in new }
+                    result.merge(Self.submitControlMessage(prompt, to: shim)) { _, new in new }
                 }
                 return reply(request, result)
             }

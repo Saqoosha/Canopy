@@ -379,6 +379,41 @@ enum ControlProtocol {
 
     struct SendMessage: Equatable {
         var text: String
+        /// Who asked, when the text is a question from a bound Slack thread.
+        var slackAsker: String? = nil
+    }
+
+    /// The canopy-bridge mod gates a turn whose prompt starts with this
+    /// (`SLACK_MARK` in `Resources/canopy-bridge/hooks/register.ts`).
+    static let slackMark = "[canopy:slack]"
+
+    /// The CLI attaches the file an `@path` names without any tool call, so the read-only gate
+    /// never sees it. A full-width ＠ reads the same to the model and attaches nothing.
+    static func slackPrompt(asker: String, text: String) -> String {
+        func inert(_ s: String) -> String { s.replacingOccurrences(of: "@", with: "＠") }
+        let name = inert(asker.components(separatedBy: .newlines).joined(separator: " "))
+        return "\(slackMark) A question from “\(name)” in a Slack thread:\n\n\(inert(text))"
+    }
+
+    static let slackRemoteRefusal = "an SSH remote session does not load the canopy-bridge gate"
+
+    /// The marked prompt for a Slack question, or why it may not be delivered. Both senders
+    /// (`send_message` with `slackAsker`, and `SlackBridge`) go through this one decision.
+    static func slackDelivery(asker: String, text: String, isRemote: Bool, gateReady: Bool,
+                              permissionMode: PermissionMode) -> Result<String, ControlError> {
+        if let why = slackRefusal(isRemote: isRemote, gateReady: gateReady, permissionMode: permissionMode) {
+            return .failure(ControlError(why))
+        }
+        return .success(slackPrompt(asker: asker, text: text))
+    }
+
+    /// Why a Slack question may not reach this session, or nil: each case is a
+    /// session the mod's read-only gate may not cover.
+    static func slackRefusal(isRemote: Bool, gateReady: Bool, permissionMode: PermissionMode) -> String? {
+        if isRemote { return slackRemoteRefusal }
+        if !gateReady { return "the canopy-bridge gate has not reported from this session" }
+        if permissionMode == .bypassPermissions { return "the session is in bypassPermissions" }
+        return nil
     }
 
     /// `send_message`: `text` is required (trimmed; blank is refused). A
@@ -390,7 +425,10 @@ enum ControlProtocol {
         if let attachments = params["attachments"] as? [Any], !attachments.isEmpty {
             return .failure(ControlError("attachments are not supported"))
         }
-        return .success(SendMessage(text: text))
+        guard params["slackAsker"] != nil else { return .success(SendMessage(text: text)) }
+        let asker = (params["slackAsker"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if asker.isEmpty { return .failure(ControlError("slackAsker was empty")) }
+        return .success(SendMessage(text: text, slackAsker: asker))
     }
 
     static func replyWire(_ disposition: ShimProcess.PhoneReplyDisposition, replyId: String) -> [String: Any] {

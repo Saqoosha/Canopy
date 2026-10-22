@@ -182,6 +182,16 @@ Params: `key` and/or `sessionId`, required `text` (trimmed; blank is
 `"The message was empty"`). A non-empty `attachments` array is refused
 (`"attachments are not supported"`). Omit attachments.
 
+Optional `slackAsker`: the name of someone who asked `text` in a bound Slack
+thread. The daemon prefixes the text with `[canopy:slack]` and the asker, turns
+every `@` into `＠` (an `@path` would attach the file without a tool call), and
+the canopy-bridge mod then holds the session to read-only tools (see
+`docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md`). A blank
+`slackAsker` is `"slackAsker was empty"`. The message is refused with
+`errorCode` `slack_refused` when the gate may not cover the session: an SSH
+remote session, one whose gate has not reported `ready`, or one in
+`bypassPermissions`.
+
 Result:
 
 ```json
@@ -203,6 +213,19 @@ A `refused` result also carries `reasonCode`, for deciding whether to retry:
 
 A busy session is not refused; the message is `queued`. Blank `text` never
 reaches this table: it is an `error` response before anything is queued.
+
+### `slack_bind`, `slack_unbind`, `slack_bindings`
+
+Local clients only. The daemon relays each to the Saqoolaude Worker through
+`SlackBridge`, which runs only when `canopy.slackBridgeEnabled` is true.
+A refusal is an `error` response with no `errorCode`.
+
+- `slack_bind`: `key` and/or `sessionId`, `permalink` (a Slack thread link),
+  optional `ttlDays` (1-30, default 7). Refused for the sessions `send_message`
+  would refuse a Slack question. Result: `channel`, `threadTs`, `expiresAt` (ms).
+- `slack_unbind`: `channel`, `threadTs`.
+- `slack_bindings`: result `items`, each with `channel`, `threadTs`,
+  `sessionKey`, `sessionLabel`, `expiresAt`, `askers`.
 
 ### `pending_requests`
 
