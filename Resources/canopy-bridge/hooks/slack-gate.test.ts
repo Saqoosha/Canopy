@@ -106,6 +106,12 @@ test('a session rooted at the home folder reads nothing from Slack', async ($, o
   expect(denied(await $.tool.call({ tool: 'Read', file_path: `${HOME}/notes.txt` }))).toBe(true)
 })
 
+test('a session rooted inside ~/.ssh reads nothing from Slack', async ($, on) => {
+  engine(on, { cwd: `${HOME}/.ssh` })
+  await $.prompt.submit({ text: slack })
+  expect(denied(await $.tool.call({ tool: 'Read', file_path: `${HOME}/.ssh/config` }))).toBe(true)
+})
+
 test('a plain prompt from the person lifts the gate', async ($, on) => {
   engine(on)
   await $.prompt.submit({ text: slack })

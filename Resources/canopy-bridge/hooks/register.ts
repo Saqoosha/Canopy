@@ -61,6 +61,7 @@ const SECRET_NAME = new RegExp('(^|/)(' + [
   '[^/]*credential[^/]*', '[^/]*secret[^/]*', '[^/]*token[^/]*', 'service-account[^/]*', '\\.mcp\\.json',
   'hosts\\.yml', '\\.docker/config\\.json', '\\.kube/config', '\\.ssh', '\\.aws', '\\.gnupg', '1p-mounts', '[^/]*_history',
 ].join('|') + ')(/|$)', 'i')
+const SECRET_DIR = /(^|\/)(\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.config\/gh|1p-mounts|\.password-store)(\/|$)/i
 
 // `path` made absolute against `base`, with `~`, `.` and `..` resolved.
 function absolute(base, raw, home) {
@@ -93,8 +94,10 @@ async function slackDenial($, e) {
   if (!SLACK_READS.has(e.tool)) return `${e.tool} is not available while answering from Slack`
   const home = await env($, 'HOME')
   const cwd = await resolved($, await $.session.cwd())
-  // A session rooted at the home folder or above would expose every dotfile.
+  // A session rooted at the home folder or above would expose every dotfile, and one rooted
+  // inside a credential folder (~/.ssh, ~/.aws) would expose it by relative names.
   if (cwd === '/' || inside(cwd, home) !== undefined) return `the session's folder ${cwd} is too wide to read from Slack`
+  if (SECRET_DIR.test(cwd)) return `the session's folder ${cwd} holds credentials`
   const asked = absolute(cwd, e.file_path ?? '', home)
   const target = await resolved($, asked)
   const below = inside(cwd, target)

@@ -307,11 +307,17 @@ final class DaemonDelegate {
 
     /// Starts or stops the link to the Saqoolaude Worker to match `config`.
     private func applySlackBridge() {
-        if config.slackBridgeEnabled, slackBridge == nil {
+        var wanted = config.slackBridgeEnabled
+        #if DEBUG
+        // settings.json is shared with the installed Release build; two daemons would keep
+        // replacing each other's Worker connection. A Debug daemon joins only when asked.
+        wanted = wanted && ProcessInfo.processInfo.environment["CANOPY_DEBUG_SLACK_BRIDGE"] == "1"
+        #endif
+        if wanted, slackBridge == nil {
             let bridge = SlackBridge(store: store)
             slackBridge = bridge
             bridge.start()
-        } else if !config.slackBridgeEnabled, let bridge = slackBridge {
+        } else if !wanted, let bridge = slackBridge {
             bridge.stop()
             slackBridge = nil
         }

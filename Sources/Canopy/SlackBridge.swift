@@ -113,7 +113,9 @@ final class SlackBridge {
         posix_spawnattr_init(&attr)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
         posix_spawnattr_setpgroup(&attr, 0)
-        let args = ["/bin/sh", headersHelper.path].map { strdup($0) }
+        // Typed apart: the CI compiler infers the literal's element type from strdup's parameter.
+        let argv: [String] = ["/bin/sh", headersHelper.path]
+        let args: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
         defer {
             args.forEach { free($0) }
             posix_spawn_file_actions_destroy(&actions)
