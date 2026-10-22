@@ -387,24 +387,33 @@ enum ControlProtocol {
     /// (`SLACK_MARK` in `Resources/canopy-bridge/hooks/register.ts`).
     static let slackMark = "[canopy:slack]"
 
-    /// The CLI attaches the file an `@path` names without any tool call, so the read-only gate
-    /// never sees it. A full-width ＠ reads the same to the model and attaches nothing.
-    static func slackPrompt(asker: String, text: String) -> String {
-        func inert(_ s: String) -> String { s.replacingOccurrences(of: "@", with: "＠") }
+    /// `fromOwner` comes from the Worker, which compares Slack's user id with the owner's, so a
+    /// display name cannot claim it. It changes the mod's note to the model, never the gate.
+    static func slackPrompt(asker: String, text: String, fromOwner: Bool = false) -> String {
+        // `@` too: the CLI would attach the file an `@path` names, past the gate. `[canopy:` so
+        // Slack text can never write the mark or the owner header the mod trusts.
+        func inert(_ s: String) -> String {
+            s.replacingOccurrences(of: "@", with: "＠")
+                .replacingOccurrences(of: "[canopy:", with: "［canopy:", options: .caseInsensitive)
+        }
         let name = inert(asker.components(separatedBy: .newlines).joined(separator: " "))
-        return "\(slackMark) A question from “\(name)” in a Slack thread:\n\n\(inert(text))"
+        let header = fromOwner ? slackOwnerHeader : "A question from “\(name)” in a Slack thread:"
+        return "\(slackMark) \(header)\n\n\(inert(text))"
     }
+
+    /// `OWNER_HEADER` in `Resources/canopy-bridge/hooks/register.ts`.
+    static let slackOwnerHeader = "A question from Saqoosha (the owner) in a Slack thread:"
 
     static let slackRemoteRefusal = "an SSH remote session does not load the canopy-bridge gate"
 
     /// The marked prompt for a Slack question, or why it may not be delivered. Both senders
     /// (`send_message` with `slackAsker`, and `SlackBridge`) go through this one decision.
-    static func slackDelivery(asker: String, text: String, isRemote: Bool, gateReady: Bool,
+    static func slackDelivery(asker: String, text: String, fromOwner: Bool = false, isRemote: Bool, gateReady: Bool,
                               permissionMode: PermissionMode) -> Result<String, ControlError> {
         if let why = slackRefusal(isRemote: isRemote, gateReady: gateReady, permissionMode: permissionMode) {
             return .failure(ControlError(why))
         }
-        return .success(slackPrompt(asker: asker, text: text))
+        return .success(slackPrompt(asker: asker, text: text, fromOwner: fromOwner))
     }
 
     /// Why a Slack question may not reach this session, or nil: each case is a

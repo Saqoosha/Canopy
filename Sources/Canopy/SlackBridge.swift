@@ -314,7 +314,8 @@ final class SlackBridge {
             return
         }
         busySessions.insert(sessionKey)
-        handleAsk(askId: askId, sessionKey: sessionKey, asker: message["asker"] as! String, text: message["text"] as! String)
+        handleAsk(askId: askId, sessionKey: sessionKey, asker: message["asker"] as! String, text: message["text"] as! String,
+                  fromOwner: message["owner"] as? Bool == true)
     }
 
     private func finishAsk(_ sessionKey: String) {
@@ -325,13 +326,13 @@ final class SlackBridge {
         enqueueAsk(next)
     }
 
-    private func handleAsk(askId: String, sessionKey: String, asker: String, text: String) {
+    private func handleAsk(askId: String, sessionKey: String, asker: String, text: String, fromOwner: Bool) {
         guard let session = store.openSession(for: [.key(sessionKey)]), let shim = session.shim else {
             answer(askId, refusal: "the session is not open on Saqoosha's Mac", session: sessionKey)
             return
         }
         let prompt: String
-        switch ControlProtocol.slackDelivery(asker: asker, text: text, isRemote: shim.remoteHost != nil,
+        switch ControlProtocol.slackDelivery(asker: asker, text: text, fromOwner: fromOwner, isRemote: shim.remoteHost != nil,
                                              gateReady: shim.slackGateReady, permissionMode: shim.permissionMode) {
         case .failure(let why):
             answer(askId, refusal: why.message, session: sessionKey)
