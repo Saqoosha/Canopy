@@ -52,17 +52,15 @@ function slackLog($, slack) {
   $.ui.log(JSON.stringify({ v: 1, slack }))
 }
 
-const SLACK_READS = new Set(['Read', 'Grep', 'Glob'])
+// Read alone: the bundled CLI has no Grep or Glob (it searches through Bash), and a glob
+// check that mirrors ripgrep's parser exactly is not worth carrying for tools that are absent.
+const SLACK_READS = new Set(['Read'])
 const SECRET_NAME = new RegExp('(^|/)(' + [
   '\\.env[^/]*', '[^/]*\\.env', '\\.dev\\.vars', '[^/]*\\.(pem|key|p8|p12|pfx|keychain|kdbx)',
   'id_[a-z0-9_]+', '\\.netrc', '\\.npmrc', '\\.pypirc', '\\.git-credentials', '\\.git/config',
   '[^/]*credential[^/]*', '[^/]*secret[^/]*', '[^/]*token[^/]*', 'service-account[^/]*', '\\.mcp\\.json',
   'hosts\\.yml', '\\.docker/config\\.json', '\\.kube/config', '\\.ssh', '\\.aws', '\\.gnupg', '1p-mounts', '[^/]*_history',
 ].join('|') + ')(/|$)', 'i')
-// Names a Grep `glob` must not reach; a glob matching any of them is refused.
-const SECRET_SAMPLES = ['.env', '.env.local', 'x.pem', 'x.key', 'id_rsa', '.netrc', '.npmrc', '.git-credentials', 'credentials.json', 'secrets.yml', 'config']
-// Handed to a Grep with no glob of its own, so a folder-wide search skips credential files.
-const SECRET_EXCLUDE = '!{.env*,*.pem,*.key,*.p12,*.pfx,*.keychain,id_*,.netrc,.npmrc,.git-credentials,*credential*,*secret*}'
 
 // `path` made absolute against `base`, with `~`, `.` and `..` resolved.
 function absolute(base, raw, home) {
@@ -77,30 +75,9 @@ function absolute(base, raw, home) {
   return '/' + parts.join('/')
 }
 
-// The folder or file a read reaches; for Glob, the pattern's part before its first wildcard.
-function readTarget(e, cwd, home) {
-  if (e.tool === 'Read') return absolute(cwd, e.file_path ?? '', home)
-  const base = absolute(cwd, e.path ?? '.', home)
-  if (e.tool === 'Grep') return base
-  const fixed = (e.pattern ?? '').split(/[*?[{]/)[0]
-  return absolute(base, fixed.slice(0, fixed.lastIndexOf('/') + 1) || '.', home)
-}
-
-// A glob as a regex over a file's path: `**/` (any folders, none included), `*`, `?`, `{a,b}`, `[...]`.
-function globRegex(glob) {
-  let out = ''
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i]
-    if (glob.startsWith('**/', i)) { out += '(?:.*/)?'; i += 2 }
-    else if (c === '*') out += glob[i + 1] === '*' ? (i++, '.*') : '[^/]*'
-    else if (c === '?') out += '[^/]'
-    else if (c === '{') out += '(?:'
-    else if (c === '}') out += ')'
-    else if (c === ',') out += '|'
-    else if (c === '[') { const end = glob.indexOf(']', i); out += end > i ? glob.slice(i, end + 1) : '\\['; if (end > i) i = end }
-    else out += c.replace(/[.+^$()|\\]/g, '\\$&')
-  }
-  return new RegExp(`(^|/)${out}$`, 'i')
+// The part of `path` below `dir`, or undefined when it is not inside.
+function inside(dir, path) {
+  return path === dir ? '' : path.startsWith(dir + '/') ? path.slice(dir.length + 1) : undefined
 }
 
 // Symlinks resolved, so a link inside the folder cannot reach outside it. A path
@@ -114,21 +91,18 @@ async function resolved($, path) {
 // verdict can be talked round by the Slack text, so none decides what runs.
 async function slackDenial($, e) {
   if (!SLACK_READS.has(e.tool)) return `${e.tool} is not available while answering from Slack`
-  // Only the part before the first wildcard is checked below, so a `..` after it would escape.
-  if (e.tool === 'Glob' && /(^|\/)\.\.(\/|$)/.test(e.pattern ?? '')) return 'a Glob pattern may not climb with ..'
   const home = await env($, 'HOME')
   const cwd = await resolved($, await $.session.cwd())
   // A session rooted at the home folder or above would expose every dotfile.
-  if (cwd === '/' || home === cwd || home.startsWith(cwd + '/')) return `the session's folder ${cwd} is too wide to read from Slack`
-  // The name asked for and the file it resolves to: a link named `notes` can point at a key.
-  const asked = readTarget(e, cwd, home)
+  if (cwd === '/' || inside(cwd, home) !== undefined) return `the session's folder ${cwd} is too wide to read from Slack`
+  const asked = absolute(cwd, e.file_path ?? '', home)
   const target = await resolved($, asked)
-  if (SECRET_NAME.test(asked) || SECRET_NAME.test(target)) return `${asked} looks like a credential file`
-  if (target !== cwd && !target.startsWith(cwd + '/')) return `${target} is outside the session's folder`
-  if (e.tool === 'Grep' && e.glob) {
-    const re = globRegex(e.glob.replace(/^!/, ''))
-    if (e.glob.startsWith('!') || SECRET_SAMPLES.some(name => re.test(name))) return `the glob ${e.glob} can reach credential files`
-  }
+  const below = inside(cwd, target)
+  if (below === undefined) return `${target} is outside the session's folder`
+  // Names below the folder only, so a project kept under ~/repos/token-service still reads.
+  // Both the name asked for and the file it resolves to: a link named `notes` can point at a key.
+  const askedBelow = inside(cwd, asked) ?? asked.split('/').pop()
+  if (SECRET_NAME.test(below) || SECRET_NAME.test(askedBelow)) return `${asked} looks like a credential file`
   return undefined
 }
 
@@ -187,7 +161,8 @@ export function register(on) {
   // Classify a Slack question and hand the verdict to the model as a note only it reads.
   on('prompt.submit', async ($, e, next) => {
     if (e.command) return next(e)
-    if (typeof e.text !== 'string' || !e.text.startsWith(SLACK_MARK)) {
+    // Anywhere, not just first: queued prompts can reach the CLI joined into one.
+    if (typeof e.text !== 'string' || !e.text.includes(SLACK_MARK)) {
       if (liftsGate(e)) slackQuestion = undefined
       return next(e)
     }
@@ -222,7 +197,7 @@ export function register(on) {
       slackLog($, { denied: e.tool })
       return { deny: `Answering a Slack question is read-only: ${why}. Tell the asker this needs Saqoosha.` }
     }
-    return next(e.tool === 'Grep' && !e.glob ? { ...e, glob: SECRET_EXCLUDE } : e)
+    return next(e)
   })
 
   // A removal leaves the transcript in the worktree's project folder; leaving

@@ -30,13 +30,13 @@ test('a Slack question lets reads inside the folder through and nothing else', a
   engine(on)
   await $.prompt.submit({ text: slack })
   expect(denied(await $.tool.call({ tool: 'Read', file_path: `${CWD}/notes.txt` }))).toBe(false)
-  expect(denied(await $.tool.call({ tool: 'Glob', pattern: 'src/**/*.ts' }))).toBe(false)
+  expect(denied(await $.tool.call({ tool: 'Read', file_path: 'src/app.ts' }))).toBe(false)
+  expect(denied(await $.tool.call({ tool: 'Glob', pattern: 'src/**/*.ts' }))).toBe(true)
+  expect(denied(await $.tool.call({ tool: 'Grep', pattern: 'TOKEN' }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Read', file_path: `${CWD}/.env` }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Read', file_path: `${CWD}/secrets/prod.yml` }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Read', file_path: `${CWD}/../other/doc.md` }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Read', file_path: '~/.config/gh/hosts.yml' }))).toBe(true)
-  expect(denied(await $.tool.call({ tool: 'Glob', pattern: '/Users/**/*.txt' }))).toBe(true)
-  expect(denied(await $.tool.call({ tool: 'Glob', pattern: 'x/*/../../../etc/*' }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Read', file_path: `${CWD}/link` }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Edit', file_path: `${CWD}/notes.txt`, old_string: 'a', new_string: 'b' }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' }))).toBe(true)
@@ -87,17 +87,17 @@ test('a name that is a link to a key is refused by the name asked for', async ($
     expect(denied(await $.tool.call({ tool: 'Read', file_path: `${CWD}/${name}` }))).toBe(true)
 })
 
-test('a folder-wide Grep skips credential files, and a glob that reaches them is refused', async ($, on) => {
-  const { seen } = engine(on)
+test('a mark inside joined queued prompts still arms the gate', async ($, on) => {
+  engine(on)
+  await $.prompt.submit({ text: `fix X\n${slack}` })
+  expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' }))).toBe(true)
+})
+
+test('credential names are judged below the folder, so a project path containing one still reads', async ($, on) => {
+  engine(on, { cwd: `${HOME}/repos/token-service` })
   await $.prompt.submit({ text: slack })
-  expect(denied(await $.tool.call({ tool: 'Grep', pattern: 'TOKEN' }))).toBe(false)
-  expect(seen.at(-1).glob).toMatch(/^!\{.*\.env\*/)
-  expect(denied(await $.tool.call({ tool: 'Grep', pattern: 'x', glob: '*.ts' }))).toBe(false)
-  expect(seen.at(-1).glob).toBe('*.ts')
-  expect(denied(await $.tool.call({ tool: 'Grep', pattern: 'KEY', glob: '**/.env*' }))).toBe(true)
-  expect(denied(await $.tool.call({ tool: 'Grep', pattern: 'KEY', glob: '*env*' }))).toBe(true)
-  expect(denied(await $.tool.call({ tool: 'Grep', pattern: 'KEY', glob: '{.env,x}' }))).toBe(true)
-  expect(denied(await $.tool.call({ tool: 'Grep', pattern: 'KEY', glob: '!*.md' }))).toBe(true)
+  expect(denied(await $.tool.call({ tool: 'Read', file_path: `${HOME}/repos/token-service/README.md` }))).toBe(false)
+  expect(denied(await $.tool.call({ tool: 'Read', file_path: `${HOME}/repos/token-service/.env` }))).toBe(true)
 })
 
 test('a session rooted at the home folder reads nothing from Slack', async ($, on) => {

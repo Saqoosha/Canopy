@@ -165,9 +165,11 @@ final class SlackBridge {
     }
 
     private func connectionEnded(_ task: URLSessionWebSocketTask, _ error: Error) {
+        // Both read before `dropConnection`, whose cancel would overwrite the close code.
         let status = (task.response as? HTTPURLResponse)?.statusCode
+        let closeCode = task.closeCode.rawValue
         dropConnection()
-        if task.closeCode.rawValue == Self.replacedCloseCode {
+        if closeCode == Self.replacedCloseCode {
             lastProblem = "another Mac took over the Slack bridge"
             logger.error("another Mac connected to the Saqoolaude Worker; this one stops (turn canopy.slackBridgeEnabled off on one of them)")
             return
@@ -239,8 +241,14 @@ final class SlackBridge {
         }
         Task { [weak self] in
             do { try await task.send(.string(text)) } catch {
-                logger.notice("[slack] answer \(message["askId"] as? String ?? "?", privacy: .public) kept for the next connection")
-                self?.outbox.append(message)
+                guard let self else { return }
+                // A newer socket may already have flushed the outbox; send there instead of waiting.
+                if let current = self.task, current !== task {
+                    self.sendAnswer(message)
+                } else {
+                    logger.notice("[slack] answer \(message["askId"] as? String ?? "?", privacy: .public) kept for the next connection")
+                    self.outbox.append(message)
+                }
             }
         }
     }

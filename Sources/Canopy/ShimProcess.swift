@@ -6804,6 +6804,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// raised-hand, hourglass, or spinning subagent row — once the process
     /// is gone no protocol message will ever clear those sets organically.
     private func resetActivityState() {
+        // The next CLI must report its gate again before a Slack question reaches it.
+        slackGateReady = false
         outputRateStart = nil
         outputRateSawThinking = false
         turnTextBlocks = []
