@@ -142,6 +142,29 @@ final class DaemonDelegate {
         })
     }
 
+    private struct ExtensionRowInputs: Equatable {
+        let id: UUID
+        let title: String
+        let shim: ObjectIdentifier
+    }
+    private var extensionRowInputs: [ExtensionRowInputs] = []
+
+    /// Re-reads the extension state when a session closes, is renamed, or loses or replaces its
+    /// shim, rather than leaving the footer stale until the next minute's check.
+    private func observeSessionsForExtensionState() {
+        let inputs = withObservationTracking {
+            store.openSessions.compactMap { session in
+                session.shim.map { ExtensionRowInputs(id: session.id, title: session.title, shim: ObjectIdentifier($0)) }
+            }
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.observeSessionsForExtensionState() } }
+        }
+        // A rewrite of an unchanged title also fires, and the refresh reads the extension folder from disk.
+        guard inputs != extensionRowInputs else { return }
+        extensionRowInputs = inputs
+        DaemonUpgradeCenter.shared.refreshExtensionState?()
+    }
+
     private func publishUpgradeState(pending: String?, pendingVersion: String?, holds: [UpgradeHold], underLaunchd: Bool) {
         let state = UpgradeState(runningBuild: DaemonUpgrade.launchedBuild ?? "?", pendingBuild: pending, heldBy: holds,
                                  notUnderLaunchd: !underLaunchd, extensionState: extensionState(),
@@ -185,6 +208,7 @@ final class DaemonDelegate {
             next.extensionState = self.extensionState()
             if next != state { DaemonUpgradeCenter.shared.state = next }
         }
+        observeSessionsForExtensionState()
         DaemonUpgradeCenter.shared.restartNow = { [weak self] in
             let state = DaemonUpgradeCenter.shared.state
             if let refusal = DaemonUpgrade.restartNowRefusal(pendingBuild: state?.pendingBuild,
