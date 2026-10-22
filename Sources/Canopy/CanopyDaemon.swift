@@ -142,6 +142,21 @@ final class DaemonDelegate {
         })
     }
 
+    /// Re-reads the extension state whenever a session opens, closes or is renamed, so the
+    /// footer does not list a closed session or an old title until the next minute's check.
+    private func observeSessionsForExtensionState() {
+        withObservationTracking {
+            _ = store.openSessions.map { ($0.id, $0.title) }
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    DaemonUpgradeCenter.shared.refreshExtensionState?()
+                    self?.observeSessionsForExtensionState()
+                }
+            }
+        }
+    }
+
     private func publishUpgradeState(pending: String?, pendingVersion: String?, holds: [UpgradeHold], underLaunchd: Bool) {
         let state = UpgradeState(runningBuild: DaemonUpgrade.launchedBuild ?? "?", pendingBuild: pending, heldBy: holds,
                                  notUnderLaunchd: !underLaunchd, extensionState: extensionState(),
@@ -185,6 +200,7 @@ final class DaemonDelegate {
             next.extensionState = self.extensionState()
             if next != state { DaemonUpgradeCenter.shared.state = next }
         }
+        observeSessionsForExtensionState()
         DaemonUpgradeCenter.shared.restartNow = { [weak self] in
             let state = DaemonUpgradeCenter.shared.state
             if let refusal = DaemonUpgrade.restartNowRefusal(pendingBuild: state?.pendingBuild,
