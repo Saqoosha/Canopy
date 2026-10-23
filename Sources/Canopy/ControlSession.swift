@@ -154,7 +154,8 @@ final class ControlSession {
                 return fail(request, "permalink is required")
             }
             type = "bind"
-            params = ["permalink": permalink, "sessionKey": session.id.uuidString, "sessionLabel": session.title]
+            params = ["permalink": permalink, "sessionKey": ControlProtocol.slackSessionKey(resumeId: session.resumeId, key: session.id.uuidString),
+                      "sessionLabel": session.title]
             if let days = request.params["ttlDays"] as? Int { params["ttlDays"] = days }
         case "slack_unbind":
             guard let channel = request.params["channel"] as? String, let threadTs = request.params["threadTs"] as? String else {
