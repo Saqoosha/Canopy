@@ -2299,6 +2299,11 @@ enum SidebarLogicProbe {
                            && ControlProtocol.slackDelivery(asker: "Saqoosha", text: "go", fromOwner: true, isRemote: true,
                                                             gateReady: false, permissionMode: .bypassPermissions)
                                == .success(ownerPrompt.replacingOccurrences(of: "go\n［canopy:slack] x", with: "go")))
+                record("slack bind: a binding names its session by resume id, which a restart keeps",
+                       ControlProtocol.slackSessionKey(resumeId: "e0d6a419-5042-4637-9ea2-0019fe51f959", key: "8881EB15-F0A1")
+                           == "e0d6a419-5042-4637-9ea2-0019fe51f959"
+                           && ControlProtocol.slackSessionKey(resumeId: "", key: "8881EB15-F0A1") == "8881EB15-F0A1"
+                           && ControlProtocol.slackSessionRefs("ABC") == [.resumeId("abc"), .key("ABC")])
                 record("slack bridge: the Mac connects under a name the Worker can tag",
                        SlackBridge.macName("Saqoosha's MacBook Pro.local") == "SaqooshasMacBookPro.local"
                            && SlackBridge.macName("日本語") == "default"

@@ -50,7 +50,8 @@ extension SessionStore {
     /// Removes the bindings the Worker holds for this session's current daemon key.
     func unbindSlackThreads(_ id: UUID) {
         guard let session = openSessions.first(where: { $0.id == id }), let control = daemonControl,
-              let key = session.daemonKey else { return }
+              session.daemonKey != nil else { return }
+        let keys = Self.slackKeys(for: session)
         Task { [weak self] in
             let listed = await control.request("slack_bindings", [:])
             guard case .success(let result) = listed else {
@@ -59,7 +60,7 @@ extension SessionStore {
                 }
                 return
             }
-            let items = (result["items"] as? [[String: Any]] ?? []).filter { $0["sessionKey"] as? String == key }
+            let items = (result["items"] as? [[String: Any]] ?? []).filter { keys.contains($0["sessionKey"] as? String ?? "") }
             for item in items {
                 guard let channel = item["channel"] as? String, let threadTs = item["threadTs"] as? String else { continue }
                 if case .failure(let failure) = await control.request("slack_unbind", ["channel": channel, "threadTs": threadTs]) {
@@ -73,7 +74,13 @@ extension SessionStore {
 
     /// The thread a session is bound to, if any.
     func slackThreads(for session: OpenSession) -> [URL] {
-        session.daemonKey.flatMap { slackThreadsByDaemonKey[$0] } ?? []
+        Self.slackKeys(for: session).flatMap { slackThreadsBySessionKey[$0] ?? [] }
+    }
+
+    /// A binding names its session by resume id, or by daemon key if made before 3.16.6.
+    private static func slackKeys(for session: OpenSession) -> [String] {
+        [session.resumeId.lowercased(), session.resumeId, session.daemonKey].compactMap { $0 }.filter { !$0.isEmpty }
+            .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
     }
 
     /// Re-reads the bindings now, then once a minute: a binding can also end on the Worker
@@ -95,7 +102,7 @@ extension SessionStore {
         guard let control = daemonControl, await control.waitUntilReady() else { return }
         guard case .success(let result) = await control.request("slack_bindings", [:]) else {
             // The bridge is off or the Worker is unreachable: show no chip rather than a stale one.
-            if !slackThreadsByDaemonKey.isEmpty { slackThreadsByDaemonKey = [:] }
+            if !slackThreadsBySessionKey.isEmpty { slackThreadsBySessionKey = [:] }
             return
         }
         var threads: [String: [URL]] = [:]
@@ -103,7 +110,7 @@ extension SessionStore {
             guard let key = item["sessionKey"] as? String, let url = Self.slackThreadURL(item) else { continue }
             threads[key, default: []].append(url)
         }
-        if threads != slackThreadsByDaemonKey { slackThreadsByDaemonKey = threads }
+        if threads != slackThreadsBySessionKey { slackThreadsBySessionKey = threads }
     }
 
     /// `slack.com/archives/<channel>/p<ts without the dot>` redirects to the signed-in workspace.

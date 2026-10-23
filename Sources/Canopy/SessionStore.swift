@@ -1377,9 +1377,9 @@ final class SessionStore {
     /// This Mac's daemon, once `CanopyApp` has connected to it.
     var daemonControl: ControlClient?
 
-    /// Slack threads bound to sessions, by the session's daemon key. Drives the pane
-    /// header's Slack chip; `refreshSlackThreads()` fills it.
-    var slackThreadsByDaemonKey: [String: [URL]] = [:]
+    /// Slack threads bound to sessions, by the key the binding names (resume id, or an older
+    /// binding's daemon key). Drives the pane header's Slack chip; `refreshSlackThreads()` fills it.
+    var slackThreadsBySessionKey: [String: [URL]] = [:]
     var slackThreadRefreshStarted = false
 
     /// Whether `stopSession` ends the session for every client, rather than only closing it here.

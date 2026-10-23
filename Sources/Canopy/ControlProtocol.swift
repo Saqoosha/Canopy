@@ -410,6 +410,19 @@ enum ControlProtocol {
             + text.replacingOccurrences(of: "[canopy:", with: "［canopy:", options: .caseInsensitive)
     }
 
+    /// What a Slack binding records for its session: the conversation's resume id, which a
+    /// restart or an app update keeps, unlike the daemon's per-open key. The key is the fallback
+    /// for a session whose CLI has not reported its id yet.
+    static func slackSessionKey(resumeId: String, key: String) -> String {
+        resumeId.isEmpty ? key : resumeId
+    }
+
+    /// How to find a binding's session: by resume id, or by the daemon key bindings made
+    /// before 3.16.6 recorded.
+    static func slackSessionRefs(_ sessionKey: String) -> [SessionRef] {
+        [.resumeId(sessionKey.lowercased()), .key(sessionKey)]
+    }
+
     static let slackRemoteRefusal = "an SSH remote session does not load the canopy-bridge gate"
 
     /// The prompt for a Slack question, or why it may not be delivered. Both senders

@@ -341,7 +341,7 @@ final class SlackBridge {
     }
 
     private func handleAsk(askId: String, sessionKey: String, asker: String, text: String, fromOwner: Bool) {
-        guard let session = store.openSession(for: [.key(sessionKey)]), let shim = session.shim else {
+        guard let session = store.openSession(for: ControlProtocol.slackSessionRefs(sessionKey)), let shim = session.shim else {
             answer(askId, refusal: "the session is not open on Saqoosha's Mac", session: sessionKey)
             return
         }
@@ -366,7 +366,7 @@ final class SlackBridge {
     /// Polls like `wait_turn`. A restarted session no longer knows the reply id, which ends the wait.
     private func waitForAnswer(askId: String, sessionKey: String, replyId: String, deadline: Date) {
         guard !stopped else { return }
-        guard let shim = store.openSession(for: [.key(sessionKey)])?.shim,
+        guard let shim = store.openSession(for: ControlProtocol.slackSessionRefs(sessionKey))?.shim,
               let snap = shim.controlTurnSnapshot(replyId: replyId) else {
             answer(askId, refusal: "the session closed or restarted before it answered", session: sessionKey)
             return
