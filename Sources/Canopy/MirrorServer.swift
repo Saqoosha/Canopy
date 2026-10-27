@@ -669,9 +669,19 @@ final class MirrorConnection: MirrorSink {
             // A session found but not running is restarted as itself, under its current id;
             // opening under the client's id could start a duplicate or miss a replaced placeholder.
             if named != nil { request = .resume }
+            // Queued on the connection before the start can hold this thread, so the client waits longer.
+            if dict["pending"] as? Bool == true { sendJSONObject(["type": MirrorOpenRequest.pendingType]) }
             switch startRequestedSession(request, sessionId: named?.resumeId ?? sessionId,
                                          localCwd: trustsPeer ? dict["cwd"] as? String : nil) {
             case .success(let shim):
+                // The client gave up or closed its pane during the start; a session nobody asked for would stay open.
+                // Only for a client that sent `pending` (a Mac pane); other clients keep what they started, as before.
+                if named == nil, dict["pending"] as? Bool == true, Self.hasEnded(connection), let started = shim.boundSession {
+                    logger.notice("[mirror-server] \(sessionId, privacy: .public) started after its client left; closing it")
+                    store.closeSession(started.id, keepingFailure: false)
+                    cleanup()
+                    return
+                }
                 existing = shim
                 // A Mac pane holds its session; the phone has no pane, and no way to stop one.
                 if Self.appliesPhoneReplayRewrites(client: dict["client"] as? String) {
@@ -863,6 +873,14 @@ final class MirrorConnection: MirrorSink {
             connection.cancel()
         })
         cleanup()
+    }
+
+    /// Read straight from the connection: its `cleanup` hop waits for the main thread a start may still hold.
+    nonisolated static func hasEnded(_ connection: NWConnection) -> Bool {
+        switch connection.state {
+        case .failed, .cancelled: true
+        default: false
+        }
     }
 
     private func failAttach(_ message: String) {
