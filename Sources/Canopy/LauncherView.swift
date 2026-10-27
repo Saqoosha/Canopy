@@ -231,7 +231,7 @@ struct LauncherView: View {
     /// folder, so the worktree chip can switch to an existing one.
     @State private var checkouts: GitWorktree.Checkouts = .empty
     /// The main checkout "No worktree" returns to: `checkouts.main` when it is
-    /// a working tree, nil when git names only a git dir (bare, submodule).
+    /// a working tree, nil when git names only a git dir (bare, separate git dir).
     @State private var mainCheckout: String?
     /// `selectedDirectory` as `checkouts` spells it, resolved once per folder
     /// rather than on every body evaluation.
@@ -480,7 +480,7 @@ struct LauncherView: View {
             async let checkoutsRead = Task.detached(priority: .userInitiated) { () -> (GitWorktree.Checkouts, String?) in
                 let found = GitWorktree.checkouts(for: dir)
                 let main = found.main.flatMap {
-                    GitWorktree.isMainCheckout(URL(fileURLWithPath: $0)) ? $0 : nil
+                    GitWorktree.hasDotGit(URL(fileURLWithPath: $0)) ? $0 : nil
                 }
                 return (found, main)
             }.value
@@ -778,6 +778,7 @@ struct LauncherView: View {
             refreshBranchName()
             return
         }
+        startInWorktree = false
         selectedDirectory = URL(fileURLWithPath: GitWorktree.realPath(of: URL(fileURLWithPath: path)), isDirectory: true)
     }
 
@@ -791,11 +792,10 @@ struct LauncherView: View {
     private var worktreeChip: some View {
         Menu {
             checkRow("No worktree", checked: !startInWorktree && !isInLinkedWorktree) {
-                startInWorktree = false
                 // From a linked worktree "no worktree" means the main checkout:
                 // keeping the worktree folder left the chip and the choice
                 // disagreeing.
-                if isInLinkedWorktree, let mainCheckout { selectCheckout(mainCheckout) }
+                if isInLinkedWorktree, let mainCheckout { selectCheckout(mainCheckout) } else { startInWorktree = false }
             }
             // With no main checkout to return to (bare repository) the row would do nothing.
             .disabled(isInLinkedWorktree && mainCheckout == nil && !startInWorktree)
@@ -815,7 +815,6 @@ struct LauncherView: View {
                 Section("Existing worktrees") {
                     ForEach(checkouts.linked, id: \.self) { path in
                         checkRow(worktreeTitle(path), checked: !startInWorktree && path == selectedLinkedWorktree) {
-                            startInWorktree = false
                             selectCheckout(path)
                         }
                     }

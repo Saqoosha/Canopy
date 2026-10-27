@@ -6442,11 +6442,24 @@ enum SidebarLogicProbe {
                    GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/r/Canopy"),
                                                       revParse: "/r/Canopy\n/r/Canopy/.git\n/r/Canopy/.git\n") == nil)
 
+            let workingTrees: Set<String> = ["/r/Canopy", "/h/.dotfiles", "/r/foo.git", "/r/Sep"]
+            let mainCheckouts: Set<String> = ["/r/Canopy", "/h/.dotfiles", "/r/foo.git"]
             func repository(_ firstEntry: String) -> (name: String, checkout: String?) {
                 let r = GitWorktree.worktreeRepository(for: URL(fileURLWithPath: "/h/wt/x/fix"),
-                                                       worktreeListPorcelainZ: firstEntry + "\0\0worktree /h/wt/x/fix\0detached\0\0")
+                                                       worktreeListPorcelainZ: firstEntry + "\0\0worktree /h/wt/x/fix\0detached\0\0",
+                                                       isWorkingTree: workingTrees.contains, isCheckout: mainCheckouts.contains)
                 return (r.name, r.checkout?.path)
             }
+            record("worktree repository: a dot-named checkout keeps its own name and checkout",
+                   repository("worktree /h/.dotfiles\0HEAD abc") == (".dotfiles", "/h/.dotfiles"))
+            record("worktree repository: a checkout folder named foo.git keeps its own name and checkout",
+                   repository("worktree /r/foo.git\0HEAD abc") == ("foo.git", "/r/foo.git"))
+            record("worktree repository: a bare repository with no .git suffix names itself, with no checkout",
+                   repository("worktree /r/myrepo\0bare") == ("myrepo", nil))
+            record("worktree repository: a separate git dir with no suffix is not recorded as a checkout",
+                   repository("worktree /r/gitdirs/proj\0HEAD abc") == ("proj", nil))
+            record("worktree repository: a separate-git-dir working tree names itself, with no checkout",
+                   repository("worktree /r/Sep\0HEAD abc") == ("Sep", nil))
             record("worktree repository: a main checkout names it and is its checkout",
                    repository("worktree /r/Canopy\0HEAD abc") == ("Canopy", "/r/Canopy"))
             record("worktree repository: a bare x.git names x, with no checkout",
@@ -6458,7 +6471,8 @@ enum SidebarLogicProbe {
             record("worktree repository: a separate git dir names the store, with no checkout",
                    repository("worktree /r/store.git\0HEAD abc") == ("store", nil))
             record("worktree repository: a failed read keeps the folder's own name",
-                   GitWorktree.worktreeRepository(for: URL(fileURLWithPath: "/h/wt/x/fix"), worktreeListPorcelainZ: "").name == "fix")
+                   GitWorktree.worktreeRepository(for: URL(fileURLWithPath: "/h/wt/x/fix"), worktreeListPorcelainZ: "",
+                                                  isWorkingTree: { _ in true }, isCheckout: { _ in true }).name == "fix")
             do {
                 // Real git, so the read itself is pinned, not just its parser.
                 let tmp = FileManager.default.temporaryDirectory
@@ -6467,17 +6481,18 @@ enum SidebarLogicProbe {
                 let repo = tmp.appendingPathComponent("Repo", isDirectory: true)
                 let linked = tmp.appendingPathComponent("wt/fix", isDirectory: true)
                 try? FileManager.default.createDirectory(at: repo.appendingPathComponent("sub"), withIntermediateDirectories: true)
-                for args in [["init", "-q"],
-                             ["-c", "user.name=p", "-c", "user.email=p@p", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "i"],
-                             ["worktree", "add", "-q", "-b", "fix", linked.path]] {
+                func git(_ dir: URL, _ args: [String]) {
                     let git = Process()
                     git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                    git.arguments = ["-C", repo.path] + args
+                    git.arguments = ["-C", dir.path, "-c", "protocol.file.allow=always"] + args
                     git.standardOutput = FileHandle.nullDevice
                     git.standardError = FileHandle.nullDevice
                     try? git.run()
                     git.waitUntilExit()
                 }
+                git(repo, ["init", "-q"])
+                git(repo, ["-c", "user.name=p", "-c", "user.email=p@p", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "i"])
+                git(repo, ["worktree", "add", "-q", "-b", "fix", linked.path])
                 let root = tmp.appendingPathComponent("root", isDirectory: true)
                 func filed(_ dir: URL) -> String {
                     GitWorktree.worktreePath(repo: dir, branch: "a/b", root: root).path
@@ -6487,6 +6502,41 @@ enum SidebarLogicProbe {
                        filed(linked) == expected && filed(repo) == expected
                        && filed(repo.appendingPathComponent("sub")) == expected,
                        "\(filed(linked)) | \(filed(repo)) | \(filed(repo.appendingPathComponent("sub")))")
+
+                // The layouts whose first `worktree list` entry is a git dir, as git really prints them.
+                git(tmp, ["clone", "-q", "--bare", repo.path, "x.git"])
+                git(tmp.appendingPathComponent("x.git"), ["worktree", "add", "-q", tmp.appendingPathComponent("xwt").path])
+                try? FileManager.default.createDirectory(at: tmp.appendingPathComponent("proj"), withIntermediateDirectories: true)
+                git(tmp, ["clone", "-q", "--bare", repo.path, "proj/.bare"])
+                try? "gitdir: ./.bare\n".write(to: tmp.appendingPathComponent("proj/.git"), atomically: true, encoding: .utf8)
+                git(tmp.appendingPathComponent("proj"), ["worktree", "add", "-q", "main2"])
+                git(tmp, ["init", "-q", "Sup"])
+                git(tmp.appendingPathComponent("Sup"), ["submodule", "add", "-q", repo.path, "mod"])
+                func named(_ dir: String) -> String {
+                    let r = GitWorktree.worktreeRepository(for: tmp.appendingPathComponent(dir))
+                    return "\(r.name):\(r.checkout == nil ? "nil" : "checkout")"
+                }
+                let layouts = [named("xwt"), named("proj/main2"), named("Sup/mod")]
+                record("worktree repository: real git names bare, .bare and submodule repositories, with no checkout",
+                       layouts == ["x:nil", "proj:nil", "mod:nil"], layouts.joined(separator: " | "))
+
+                // Creation records its origin under the key a rescue looks up (the CLI's real path).
+                let suite = "ProbeWorktreeOrigins-\(UUID().uuidString)"
+                let defaults = UserDefaults(suiteName: suite)!
+                defer { defaults.removePersistentDomain(forName: suite) }
+                let created = try? GitWorktree.createWorktree(repo: linked, branch: "made", root: root, defaults: defaults)
+                let cliCwd = created.map { URL(fileURLWithPath: GitWorktree.realPath(of: $0)) }
+                let rescued = cliCwd.flatMap {
+                    GitWorktree.checkoutForRemovedWorktree($0, knownCheckouts: [],
+                                                           recordedOrigin: { GitWorktree.recordedOrigin(of: $0, defaults: defaults) })
+                }
+                record("worktree origin: a worktree made from a linked worktree rescues into the main checkout",
+                       rescued?.path == GitWorktree.realPath(of: repo), "created=\(created?.path ?? "nil") rescued=\(rescued?.path ?? "nil")")
+
+                // Another repository of the same name already holds the folder.
+                try? FileManager.default.createDirectory(at: root.appendingPathComponent("Repo/taken"), withIntermediateDirectories: true)
+                record("worktree branch: a destination folder already taken gets a suffix",
+                       GitWorktree.uniqueBranchName("taken", in: repo, root: root) == "taken-2")
             }
 
             let porcelain = "worktree /r/Canopy\0HEAD abc\0branch refs/heads/main\0\0worktree /h/wt/fix\0HEAD def\0detached\0\0"
@@ -6590,21 +6640,21 @@ enum SidebarLogicProbe {
                                     projectDirectory: managed, canOpen: false, logPath: "/x.jsonl")
             let alive = SessionEntry(id: UUID().uuidString, title: "t", timestamp: Date(),
                                      projectDirectory: URL(fileURLWithPath: "/r/Canopy"), logPath: "/y.jsonl")
-            let marked = ClaudeSessionHistory.withRescueCheckouts([gone, alive], knownCheckouts: [], isCheckout: isCheckout)
+            let marked = ClaudeSessionHistory.withRescueCheckouts([gone, alive], knownCheckouts: [], isCheckout: isCheckout, recordedOrigin: { _ in nil })
             record("rescue: a removed worktree's row becomes openable through another row's checkout",
                    marked[0].canOpen && marked[0].rescueCheckout?.path == "/r/Canopy" && marked[1].rescueCheckout == nil)
             record("rescue: a recent directory alone can name the checkout",
                    ClaudeSessionHistory.withRescueCheckouts([gone], knownCheckouts: [URL(fileURLWithPath: "/r/Canopy")],
-                                                            isCheckout: isCheckout)[0].rescueCheckout?.path == "/r/Canopy")
+                                                            isCheckout: isCheckout, recordedOrigin: { _ in nil })[0].rescueCheckout?.path == "/r/Canopy")
             let liveWorktree = SessionEntry(id: UUID().uuidString, title: "t", timestamp: Date(),
                                             projectDirectory: managed, canOpen: true, logPath: "/z.jsonl")
             record("rescue: a worktree that still exists gets no rescue checkout",
                    ClaudeSessionHistory.withRescueCheckouts([liveWorktree, alive], knownCheckouts: [],
-                                                            isCheckout: isCheckout)[0].rescueCheckout == nil)
+                                                            isCheckout: isCheckout, recordedOrigin: { _ in nil })[0].rescueCheckout == nil)
             var noLog = gone
             noLog.logPath = nil
             record("rescue: a row with no transcript path stays closed",
-                   !ClaudeSessionHistory.withRescueCheckouts([noLog, alive], knownCheckouts: [], isCheckout: isCheckout)[0].canOpen)
+                   !ClaudeSessionHistory.withRescueCheckouts([noLog, alive], knownCheckouts: [], isCheckout: isCheckout, recordedOrigin: { _ in nil })[0].canOpen)
 
             // The move itself, on real files: a scratch checkout, and a transcript in a
             // throwaway folder under ~/.claude/projects standing in for the worktree's.
