@@ -18,17 +18,15 @@ const { writeStdout } = require("./protocol.js");
 // `onDidChangeTelemetryEnabled` is called during activate — a missing
 // function throws and the shim exits before `ready`. The shim does not
 // live-reload configuration (same as `onDidChangeConfiguration`), so the
-// event is not fired for the life of the process; the value is whatever
-// the settings layers said at startup. A hand edit of
-// `telemetry.telemetryLevel` (or the legacy `telemetry.enableTelemetry` /
-// `telemetry.enableCrashReporter`) in Canopy's settings.json or the
-// workspace `.vscode/settings.json` is picked up on the next session.
+// event is not fired for the life of the process. These keys are
+// application-scoped in VS Code, so index.js reads them from Canopy's
+// settings.json only; a workspace `.vscode/settings.json` value is ignored.
+// A hand edit is picked up on the next session.
 function isTelemetryEnabledFromConfiguration(get) {
   if (get("telemetry.enableTelemetry") === false) return false;
   if (get("telemetry.enableCrashReporter") === false) return false;
   const level = get("telemetry.telemetryLevel");
-  const resolved = level === undefined ? "all" : level;
-  return resolved === "all";
+  return (level ?? "all") === "all";
 }
 
 function createEnv({ machineIdPath, remoteName, isTelemetryEnabled = true }) {

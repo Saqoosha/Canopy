@@ -206,13 +206,15 @@ async function main() {
     canopySettingsPath: args.settingsPath,
   });
   const window = createWindow();
-  // Same settings layers as getConfiguration. Default is VS Code's
-  // ("all" → isTelemetryEnabled true). See isTelemetryEnabledFromConfiguration.
-  const configuration = workspace.getConfiguration();
+  // Canopy settings only: telemetry keys are application-scoped in VS Code.
+  let canopySettings = {};
+  try {
+    canopySettings = JSON.parse(fs.readFileSync(args.settingsPath, "utf-8"));
+  } catch {}
   const env = createEnv({
     machineIdPath: path.join(storagePath, "machineId"),
     remoteName: undefined,
-    isTelemetryEnabled: isTelemetryEnabledFromConfiguration((key) => configuration.get(key)),
+    isTelemetryEnabled: isTelemetryEnabledFromConfiguration((key) => canopySettings?.[key]),
   });
 
   // Assemble vscode shim

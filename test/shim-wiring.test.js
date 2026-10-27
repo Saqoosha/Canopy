@@ -202,16 +202,8 @@ test("index.js maps telemetry.telemetryLevel 'error' to isTelemetryEnabled false
     assert.equal(probe.subscribed, true);
 });
 
-test("index.js reads telemetry.telemetryLevel from the workspace settings file", () => {
+test("index.js ignores a workspace telemetry level, as VS Code does for application-scoped keys", () => {
     const probe = probeTelemetry({ workspaceSettings: { "telemetry.telemetryLevel": "off" } });
-    assert.equal(probe.isTelemetryEnabled, false);
-});
-
-test("Canopy settings win over the workspace telemetry level", () => {
-    const probe = probeTelemetry({
-        canopySettings: { "telemetry.telemetryLevel": "all" },
-        workspaceSettings: { "telemetry.telemetryLevel": "off" },
-    });
     assert.equal(probe.isTelemetryEnabled, true);
 });
 

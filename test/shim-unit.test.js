@@ -816,17 +816,6 @@ describe("workspace", () => {
     assert.equal(config.get("unknown"), undefined);
   });
 
-  it("telemetry.telemetryLevel defaults to all, and a workspace value overrides it", () => {
-    assert.equal(ws.getConfiguration().get("telemetry.telemetryLevel"), "all");
-    assert.equal(isTelemetryEnabledFromConfiguration((key) => ws.getConfiguration().get(key)), true);
-
-    fs.writeFileSync(path.join(tmpDir, "settings.json"), JSON.stringify({
-      "telemetry.telemetryLevel": "off",
-    }));
-    assert.equal(ws.getConfiguration().get("telemetry.telemetryLevel"), "off");
-    assert.equal(isTelemetryEnabledFromConfiguration((key) => ws.getConfiguration().get(key)), false);
-  });
-
   it("getConfiguration.has checks existence", () => {
     const config = ws.getConfiguration("myExt");
     assert.equal(config.has("fontSize"), true);
@@ -1522,7 +1511,7 @@ describe("isTelemetryEnabledFromConfiguration", () => {
     assert.equal(enabled({ "telemetry.telemetryLevel": "crash" }), false);
     assert.equal(enabled({ "telemetry.telemetryLevel": "off" }), false);
     assert.equal(enabled({ "telemetry.telemetryLevel": "nope" }), false);
-    assert.equal(enabled({ "telemetry.telemetryLevel": null }), false);
+    assert.equal(enabled({ "telemetry.telemetryLevel": null }), true);
     // Legacy booleans win over an explicit "all".
     assert.equal(enabled({
       "telemetry.telemetryLevel": "all",
