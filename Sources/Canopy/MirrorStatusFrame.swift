@@ -12,8 +12,8 @@ import Observation
 /// - Raw (`contextMax`, `maxOutputTokens`, `contextUsed`) for another Mac's mirror pane, whose
 ///   `StatusBarData` is the same type and recomputes the rest itself (`apply(_:to:)`).
 ///
-/// No model or message count: the phone does not draw them (its page's composer names the
-/// model), and the roster already carries both for the Mac pane.
+/// No model: the phone does not draw it (its page's composer names the model), and the
+/// roster already carries it for the Mac pane.
 enum MirrorStatusFrame {
     static func payload(from data: StatusBarData) -> [String: Any] {
         var payload: [String: Any] = [
@@ -35,8 +35,8 @@ enum MirrorStatusFrame {
     }
 
     /// Writes the raw fields of a received line into a mirror pane's `StatusBarData`, which then
-    /// reads as the origin's bar does on the same Canopy version. `model` and `messageCount` are
-    /// the roster's and are left alone; a line without the raw fields changes nothing.
+    /// reads as the origin's bar does on the same Canopy version. `model` is the
+    /// roster's and is left alone; a line without the raw fields changes nothing.
     static func apply(_ frame: [String: Any], to data: StatusBarData) {
         guard frame["type"] as? String == "status",
               let used = frame["contextUsed"] as? Int,

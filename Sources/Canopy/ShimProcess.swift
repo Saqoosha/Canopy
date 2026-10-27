@@ -2754,7 +2754,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         } else {
             rateLimitBinding = .resolved(nil)
         }
-        // Set CLI version, VCS branch, initial message count, and remote host
         statusBarData?.cliVersion = extensionVersion ?? CCExtension.extensionVersion() ?? ""
         statusBarData?.remoteHost = remoteHost
         statusBarData?.accountName = self.claudeAccount?.name
@@ -2774,11 +2773,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // every spawn — a brand-new session has no transcript, so the encoded
         // candidates always miss and the scan always runs. Note this is the only
         // lookup in this initializer that was moved: `Self.jsonlPath` for the
-        // historic-tool-use-id snapshot, `loadUserPrompts` and `countMessages`
-        // are all still synchronous on main and all three now reach the same
-        // scan, so a brand-new session pays it three times on main (~5 ms each
-        // here). Moving this one off removes a fourth; it does not make the
-        // other three cheap.
+        // historic-tool-use-id snapshot and `loadUserPrompts` are both still
+        // synchronous on main and both reach the same scan, so a brand-new
+        // session pays it twice on main (~5 ms each here). Moving this one off
+        // removes a third; it does not make the other two cheap.
         let sid = resumeSessionId
         let isLocal = remoteHost == nil
         nonisolated(unsafe) let barData = statusBarData
@@ -2809,10 +2807,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         UserDefaults.standard.removeObject(forKey: "statusBar.contextMax.\(workingDirectory.path)")
         UserDefaults.standard.removeObject(forKey: "statusBar.maxOutputTokens.\(workingDirectory.path)")
         if let sessionId = resumeSessionId {
-            statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
-                sessionId: sessionId, directory: workingDirectory,
-                allowRelocationScan: remoteHost == nil
-            )
             // Snapshot every historic `toolu_…` id in the existing JSONL so
             // `detectBackgroundTaskLaunch` can skip CLI replays of already-
             // logged assistant messages instead of tracking their bg ids as
@@ -7222,8 +7216,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// that costs *here* is the background-task reconcile losing the file it
     /// scans for completion markers, and `init`'s `historicToolUseIds` / recap
     /// seed losing the file it snapshots — both silently. (Title generation
-    /// and the message count break the same way but resolve independently;
-    /// they take the fallback at their own call sites.) The measurement, and
+    /// breaks the same way but resolves independently; it takes the fallback
+    /// at its own call site.) The measurement, and
     /// why the session id is the only usable key, are on
     /// `ClaudeSessionHistory.scanForTranscript`.
     static func jsonlPath(sessionId: String, workingDirectory: URL) -> String? {
@@ -8518,11 +8512,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             requestUsageUpdate()
 
         case "user":
-            data.messageCount += 1
             requestUsageUpdate()
 
         case "assistant":
-            data.messageCount += 1
             requestUsageUpdate()
             // Update contextUsed to include output_tokens (matches CC popup: input + cache_creation + cache_read + output)
             if Self.isMainConversationMessage(ioMsg),
@@ -8577,8 +8569,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The key is absent on some frames and present-but-JSON-`null` on others,
     /// and `null` bridges to `NSNull` rather than `nil` — hence two checks.
     ///
-    /// `messageCount` and `requestUsageUpdate()` are left outside the guard:
-    /// they count all traffic, subagent included.
+    /// `requestUsageUpdate()` is left outside the guard: it runs on all
+    /// traffic, subagent included.
     ///
     /// Static so `_SidebarLogicProbe` can test the predicate without spawning
     /// a shim.
