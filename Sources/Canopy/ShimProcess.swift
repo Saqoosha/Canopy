@@ -2754,7 +2754,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         } else {
             rateLimitBinding = .resolved(nil)
         }
-        // Set CLI version, VCS branch, and remote host
         statusBarData?.cliVersion = extensionVersion ?? CCExtension.extensionVersion() ?? ""
         statusBarData?.remoteHost = remoteHost
         statusBarData?.accountName = self.claudeAccount?.name
