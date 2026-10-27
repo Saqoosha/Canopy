@@ -460,7 +460,6 @@ final class SessionStore {
             session.isAsking = activity == .asking
             session.isWaiting = activity == .background
             session.statusBar.model = pane.model
-            session.statusBar.messageCount = pane.messageCount
             // A new session started from here carries a placeholder id until
             // the origin's CLI names it; follow the origin so Retry re-attaches.
             if let resumeId = pane.resumeId, resumeId != session.resumeId, pane.sessionId == session.mirrorHostSessionId {
@@ -1551,7 +1550,6 @@ final class SessionStore {
             if let mode = PermissionMode(rawValue: row.permissionMode), mode != session.permissionMode {
                 session.permissionMode = mode
             }
-            session.statusBar.messageCount = row.messageCount
             if case .local(let dir) = session.origin,
                Self.followsCheckoutMove(current: dir, rowCwd: row.cwd) {
                 logger.notice("applyDaemonSessions: following a removed worktree to its checkout")

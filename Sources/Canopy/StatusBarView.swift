@@ -9,7 +9,7 @@ struct StatusBarView: View {
     /// retune after a manual narrow-pane smoke test.
     fileprivate enum CollapseThreshold {
         /// Below this, drop the output-rate badge.
-        static let dropSessionUsage: CGFloat = 620
+        static let dropOutputRate: CGFloat = 620
         /// Below this, collapse branch to icon-only with tooltip.
         static let branchIcon: CGFloat = 500
         /// Below this, drop the numeric "132K/923K" and keep just the bar + %.
@@ -36,7 +36,7 @@ struct StatusBarView: View {
         let hasRemote = data.remoteHost != nil || data.mirrorMachine != nil || data.accountName != nil
         let hasBranch = !data.gitBranch.isEmpty
         let hasContext = data.contextMax > 0
-        let hasRate = w >= CollapseThreshold.dropSessionUsage && data.outputTokensPerSecond != nil
+        let hasRate = w >= CollapseThreshold.dropOutputRate && data.outputTokensPerSecond != nil
         ZStack {
             Group {
                 if w < CollapseThreshold.popoverFallback {
@@ -357,7 +357,7 @@ struct StatusBarView: View {
 
 #if DEBUG
 private let _validateCollapseThresholds: Void = {
-    assert(StatusBarView.CollapseThreshold.dropSessionUsage
+    assert(StatusBarView.CollapseThreshold.dropOutputRate
          > StatusBarView.CollapseThreshold.branchIcon
          && StatusBarView.CollapseThreshold.branchIcon
          > StatusBarView.CollapseThreshold.dropContextNumeric

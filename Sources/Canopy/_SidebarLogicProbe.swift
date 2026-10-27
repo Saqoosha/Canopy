@@ -1559,7 +1559,7 @@ enum SidebarLogicProbe {
         // on another machine. Not merely wasted work: a teleported session, or
         // one that used to run locally, leaves a LOCAL transcript under the
         // same id, and without the gate a remote session would seed its titles
-        // and its message count from that copy.
+        // from that copy.
         let remoteId = UUID().uuidString
         let remoteFrozen = URL(fileURLWithPath: "/tmp/probe/remote-\(remoteId)")
         let remoteProjectDir = FileManager.default.homeDirectoryForCurrentUser
@@ -3812,8 +3812,8 @@ enum SidebarLogicProbe {
             store.noteRemoteState(machineId: "M2", snapshot: snapshot)
             record("attach: asking on the wire raises isAsking on the mirror session",
                    existing.isAsking && !existing.isThinking && !existing.isWaiting)
-            record("attach: the status bar takes the roster's model and message count",
-                   existing.statusBar.model == "opus" && existing.statusBar.messageCount == 7)
+            record("attach: the status bar takes the roster's model",
+                   existing.statusBar.model == "opus")
             record("attach: a local session is untouched by a remote snapshot",
                    other.isAsking)
             record("attach: a mirror on another machine is untouched",
@@ -3916,7 +3916,6 @@ enum SidebarLogicProbe {
             data.contextMax = 1_000_000
             data.maxOutputTokens = 64_000
             data.contextUsed = 123_000
-            data.messageCount = 86
             data.gitBranch = "mbp-session-view-sync"
             data.vcsType = .jj
             data.remoteHost = "studio"
@@ -3939,7 +3938,6 @@ enum SidebarLogicProbe {
             // A Mac pane applies the raw fields and its own StatusBarData reads as the origin's.
             let pane = StatusBarData()
             pane.model = "opus"
-            pane.messageCount = 7
             pane.mirrorMachine = "studio"
             MirrorStatusFrame.apply(frame, to: pane)
             record("status apply: the pane's meter matches the origin's",
@@ -3947,8 +3945,8 @@ enum SidebarLogicProbe {
                    "window=\(pane.compactionWindow) pct=\(pane.contextPct)")
             record("status apply: branch, vcs and remote host land",
                    pane.gitBranch == "mbp-session-view-sync" && pane.vcsType == .jj && pane.remoteHost == "studio")
-            record("status apply: the roster's model, count and machine are left alone",
-                   pane.model == "opus" && pane.messageCount == 7 && pane.mirrorMachine == "studio")
+            record("status apply: the roster's model and machine are left alone",
+                   pane.model == "opus" && pane.mirrorMachine == "studio")
             var noRemote = frame
             noRemote["remoteHost"] = nil
             noRemote["branch"] = ""
@@ -3996,7 +3994,7 @@ enum SidebarLogicProbe {
             record("status publisher: a change sends one more line",
                    sent.count == 2 && sent.last?["contextUsed"] as? Int == 300, "\(sent.count)")
             live.contextUsed = 300
-            live.messageCount = 3
+            live.model = "sonnet"
             pump()
             record("status publisher: writes that leave the frame unchanged send nothing",
                    sent.count == 2, "\(sent.count)")

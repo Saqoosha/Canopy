@@ -46,7 +46,7 @@ final class DaemonReaper {
                     key: session.id.uuidString, resumeId: session.resumeId, title: session.title,
                     project: session.project, cwd: dir.path, state: RosterSnapshot.wireState(for: .idle),
                     running: false, clients: 0, lastActiveAt: session.lastActiveAt.timeIntervalSince1970,
-                    model: session.statusBar.model, messageCount: session.statusBar.messageCount,
+                    model: session.statusBar.model, messageCount: 0,
                     permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id))
             }
             ControlEventLog.shared.noteClosing(session.id, reason: .reaped)

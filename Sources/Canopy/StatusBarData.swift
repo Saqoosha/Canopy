@@ -8,7 +8,6 @@ final class StatusBarData {
     var contextUsed: Int = 0
     var contextMax: Int = 0
     var maxOutputTokens: Int = 0
-    var messageCount: Int = 0
     var gitBranch: String = ""
     var vcsType: VCSType = .unknown
     var remoteHost: String?
@@ -312,7 +311,6 @@ final class StatusBarData {
         contextUsed = 0
         contextMax = 0
         maxOutputTokens = 0
-        messageCount = 0
         gitBranch = ""
         vcsType = .unknown
         didCompact = false

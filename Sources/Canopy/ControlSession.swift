@@ -773,7 +773,7 @@ final class ControlSession {
                 project: session.project, cwd: session.origin.workingDirectory.path,
                 state: RosterSnapshot.wireState(for: activity), running: session.shim?.isLive == true,
                 clients: session.shim?.mirrorCount ?? 0, lastActiveAt: session.lastActiveAt.timeIntervalSince1970,
-                model: session.statusBar.model, messageCount: session.statusBar.messageCount,
+                model: session.statusBar.model, messageCount: 0,
                 permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id)
         }
     }

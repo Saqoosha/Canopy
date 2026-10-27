@@ -2754,7 +2754,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         } else {
             rateLimitBinding = .resolved(nil)
         }
-        // Set CLI version, VCS branch, initial message count, and remote host
+        // Set CLI version, VCS branch, and remote host
         statusBarData?.cliVersion = extensionVersion ?? CCExtension.extensionVersion() ?? ""
         statusBarData?.remoteHost = remoteHost
         statusBarData?.accountName = self.claudeAccount?.name
@@ -7217,8 +7217,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// that costs *here* is the background-task reconcile losing the file it
     /// scans for completion markers, and `init`'s `historicToolUseIds` / recap
     /// seed losing the file it snapshots — both silently. (Title generation
-    /// and the message count break the same way but resolve independently;
-    /// they take the fallback at their own call sites.) The measurement, and
+    /// breaks the same way but resolves independently; it takes the fallback
+    /// at its own call site.) The measurement, and
     /// why the session id is the only usable key, are on
     /// `ClaudeSessionHistory.scanForTranscript`.
     static func jsonlPath(sessionId: String, workingDirectory: URL) -> String? {
@@ -8513,11 +8513,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             requestUsageUpdate()
 
         case "user":
-            data.messageCount += 1
             requestUsageUpdate()
 
         case "assistant":
-            data.messageCount += 1
             requestUsageUpdate()
             // Update contextUsed to include output_tokens (matches CC popup: input + cache_creation + cache_read + output)
             if Self.isMainConversationMessage(ioMsg),
@@ -8572,8 +8570,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The key is absent on some frames and present-but-JSON-`null` on others,
     /// and `null` bridges to `NSNull` rather than `nil` — hence two checks.
     ///
-    /// `messageCount` and `requestUsageUpdate()` are left outside the guard:
-    /// they count all traffic, subagent included.
+    /// `requestUsageUpdate()` is left outside the guard: it runs on all
+    /// traffic, subagent included.
     ///
     /// Static so `_SidebarLogicProbe` can test the predicate without spawning
     /// a shim.
