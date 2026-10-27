@@ -6461,7 +6461,7 @@ enum SidebarLogicProbe {
                 let linked = tmp.appendingPathComponent("wt/fix", isDirectory: true)
                 try? FileManager.default.createDirectory(at: repo.appendingPathComponent("sub"), withIntermediateDirectories: true)
                 for args in [["init", "-q"],
-                             ["-c", "user.name=p", "-c", "user.email=p@p", "commit", "-q", "--allow-empty", "-m", "i"],
+                             ["-c", "user.name=p", "-c", "user.email=p@p", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "i"],
                              ["worktree", "add", "-q", "-b", "fix", linked.path]] {
                     let git = Process()
                     git.executableURL = URL(fileURLWithPath: "/usr/bin/git")

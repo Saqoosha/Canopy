@@ -646,9 +646,8 @@ enum GitWorktree {
         return branch
     }
 
-    /// The folder name a new worktree is filed under: the main checkout's, even
-    /// when `repo` is a linked worktree or a subfolder, so
-    /// `checkoutForRemovedWorktree` can find the checkout again by that name.
+    /// The folder name a new worktree is filed under: the repository's, not the
+    /// linked worktree's or subfolder's, so `checkoutForRemovedWorktree` can match it.
     static func worktreeRepoName(for repo: URL, timeout: TimeInterval = 5) -> String {
         let result = try? runCommand(
             "/usr/bin/git",
@@ -672,8 +671,8 @@ enum GitWorktree {
     }
 
     /// Where `createWorktree` puts a worktree: `<root>/<repo name>/<branch>`.
-    static func worktreePath(repo: URL, branch: String, root: URL = worktreesRoot, timeout: TimeInterval = 5) -> URL {
-        root.appendingPathComponent(worktreeRepoName(for: repo, timeout: timeout), isDirectory: true)
+    static func worktreePath(repo: URL, branch: String, root: URL = worktreesRoot) -> URL {
+        root.appendingPathComponent(worktreeRepoName(for: repo), isDirectory: true)
             .appendingPathComponent(branch.replacingOccurrences(of: "/", with: "-"), isDirectory: true)
     }
 
@@ -685,7 +684,7 @@ enum GitWorktree {
         baseRef: String? = nil,
         timeout: TimeInterval = 120
     ) throws -> URL {
-        let worktreeURL = worktreePath(repo: repo, branch: branch, timeout: timeout)
+        let worktreeURL = worktreePath(repo: repo, branch: branch)
         let worktreesParent = worktreeURL.deletingLastPathComponent()
 
         try FileManager.default.createDirectory(at: worktreesParent, withIntermediateDirectories: true)
