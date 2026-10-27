@@ -6442,6 +6442,14 @@ enum SidebarLogicProbe {
                    GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/r/Canopy"),
                                                       revParse: "/r/Canopy\n/r/Canopy/.git\n/r/Canopy/.git\n") == nil)
 
+            record("worktree repo name: a linked worktree files under its main checkout's name",
+                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/Canopy/fix"), commonDir: "/r/Canopy/.git\n") == "Canopy")
+            record("worktree repo name: a subfolder of the main checkout files under the checkout's name",
+                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/r/Canopy/Sources"), commonDir: "/r/Canopy/.git\n") == "Canopy")
+            record("worktree repo name: a bare repository or a failed read keeps the folder's own name",
+                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/x/fix"), commonDir: "/r/x.git\n") == "fix"
+                   && GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/x/fix"), commonDir: "") == "fix")
+
             let porcelain = "worktree /r/Canopy\0HEAD abc\0branch refs/heads/main\0\0worktree /h/wt/fix\0HEAD def\0detached\0\0"
                 + "worktree /h/wt/a\nb\0HEAD 9\0detached\0\0worktree /h/wt/gone\0HEAD 8\0detached\0prunable gitdir file points to non-existent location\0\0"
                 + "worktree /h/wt/other\0HEAD 123\0branch refs/heads/other\0\0"

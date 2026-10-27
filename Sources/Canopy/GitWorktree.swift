@@ -646,6 +646,28 @@ enum GitWorktree {
         return branch
     }
 
+    /// The folder name a new worktree is filed under: the main checkout's, even
+    /// when `repo` is a linked worktree or a subfolder, so
+    /// `checkoutForRemovedWorktree` can find the checkout again by that name.
+    static func worktreeRepoName(for repo: URL, timeout: TimeInterval = 5) -> String {
+        let result = try? runCommand(
+            "/usr/bin/git",
+            ["-C", repo.path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            timeout: timeout,
+            wantsStdout: true
+        )
+        let commonDir = result.flatMap { $0.status == 0 ? String(decoding: $0.stdout, as: UTF8.self) : nil } ?? ""
+        return worktreeRepoName(for: repo, commonDir: commonDir)
+    }
+
+    /// The parsing half, given `rev-parse --git-common-dir` output. A common
+    /// dir that is not a `.git` folder (bare repository) keeps `repo`'s own name.
+    static func worktreeRepoName(for repo: URL, commonDir: String) -> String {
+        let common = URL(fileURLWithPath: commonDir.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !commonDir.isEmpty, common.lastPathComponent == ".git" else { return repo.lastPathComponent }
+        return common.deletingLastPathComponent().lastPathComponent
+    }
+
     /// `baseRef` nil keeps git's own default, which is the repository's HEAD —
     /// see `defaultBaseRef` for why callers should almost never want that.
     static func createWorktree(
@@ -654,7 +676,7 @@ enum GitWorktree {
         baseRef: String? = nil,
         timeout: TimeInterval = 120
     ) throws -> URL {
-        let repoName = repo.lastPathComponent
+        let repoName = worktreeRepoName(for: repo)
         let branchComponent = branch.replacingOccurrences(of: "/", with: "-")
         let worktreesParent = worktreesRoot.appendingPathComponent(repoName, isDirectory: true)
         let worktreeURL = worktreesParent.appendingPathComponent(branchComponent, isDirectory: true)
