@@ -182,8 +182,8 @@ Params: `key` and/or `sessionId`, required `text` (trimmed; blank is
 `"The message was empty"`). A non-empty `attachments` array is refused
 (`"attachments are not supported"`). Omit attachments.
 
-Optional `slackAsker`: the name of someone who asked `text` in a bound Slack
-thread. The daemon prefixes the text with `[canopy:slack]` and the asker, turns
+Optional `slackAsker`: the name of someone who wrote `text` as a reply in a
+bound Slack thread. The daemon prefixes the text with `[canopy:slack]` and the asker, turns
 every `@` into `＠` (an `@path` would attach the file without a tool call), and
 the canopy-bridge mod then holds the session to read-only tools (see
 `docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md`). A blank
@@ -222,10 +222,10 @@ A refusal is an `error` response with no `errorCode`.
 
 - `slack_bind`: `key` and/or `sessionId`, `permalink` (a Slack thread link),
   optional `ttlDays` (1-30, default 7). Refused for the sessions `send_message`
-  would refuse a Slack question. Result: `channel`, `threadTs`, `expiresAt` (ms).
+  would refuse a Slack reply. Result: `channel`, `threadTs`, `expiresAt` (ms).
 - `slack_unbind`: `channel`, `threadTs`.
 - `slack_bindings`: result `items`, each with `channel`, `threadTs`,
-  `sessionKey`, `sessionLabel`, `expiresAt`, `askers`.
+  `sessionKey`, `sessionLabel`, `expiresAt`.
 
 ### `pending_requests`
 

@@ -4487,11 +4487,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return (note, obj["ok"] as? Bool ?? false, obj["checkout"] as? String)
     }
 
-    /// The Slack gate's report on the turn answering a Slack question.
+    /// The Slack gate's report on the turn reading a Slack reply.
     enum SlackNote: Equatable {
         /// The gate is loaded; sent at session start.
         case ready
-        /// Layer 1's verdict; the gate sends it once, as the question is submitted.
+        /// Layer 1's verdict; the gate sends it once, as the reply is submitted.
         case classified(String)
         /// A tool layer 2 refused.
         case denied(String)
@@ -4509,10 +4509,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if let tool = slack["denied"] as? String { return .denied(tool) }
         return nil
     }
-
-    /// What the gate reported since the latest Slack question was classified, for the draft
-    /// the owner approves. `SlackBridge` sends one question per session at a time.
-    private(set) var slackTurnNotes: (kind: String?, denied: [String]) = (nil, [])
 
     /// Posted with the shim as `object` and the checkout URL under `checkoutKey`
     /// when a turn ends with this session's worktree removed, after the mod left
@@ -4651,10 +4647,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         case .ready:
                             slackGateReady = true
                         case .classified(let kind):
-                            slackTurnNotes = (kind, [])
-                            logger.notice("[slack] \(self.keepAliveLogLabel, privacy: .public): question classified \(kind, privacy: .public)")
+                            logger.notice("[slack] \(self.keepAliveLogLabel, privacy: .public): reply classified \(kind, privacy: .public)")
                         case .denied(let tool):
-                            slackTurnNotes.denied.append(tool)
                             logger.notice("[slack] \(self.keepAliveLogLabel, privacy: .public): denied \(tool, privacy: .public)")
                         }
                     } else {

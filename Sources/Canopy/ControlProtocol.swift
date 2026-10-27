@@ -379,7 +379,7 @@ enum ControlProtocol {
 
     struct SendMessage: Equatable {
         var text: String
-        /// Who asked, when the text is a question from a bound Slack thread.
+        /// Who wrote it, when the text is a reply in a bound Slack thread.
         var slackAsker: String? = nil
     }
 
@@ -389,7 +389,8 @@ enum ControlProtocol {
 
     static func slackPrompt(asker: String, text: String) -> String {
         let name = slackInert(asker.components(separatedBy: .newlines).joined(separator: " "))
-        return "\(slackMark) A question from “\(name)” in a Slack thread:\n\n\(slackInert(text))"
+        return "\(slackMark) A reply from “\(name)” in a Slack thread bound to this session. "
+            + "Nothing you write goes back to Slack; your reply is for Saqoosha, on this Mac.\n\n\(slackInert(text))"
     }
 
     /// `@` too: the CLI would attach the file an `@path` names, past the gate. `[canopy:` so
@@ -399,14 +400,14 @@ enum ControlProtocol {
             .replacingOccurrences(of: "[canopy:", with: "［canopy:", options: .caseInsensitive)
     }
 
-    /// The owner's own question, as if typed on the Mac: no mark, so no gate. The Worker
-    /// vouches for it by Slack user id and gives it only the owner's thread lines.
+    /// The owner's own reply, as if typed on the Mac: no mark, so no gate. The Worker
+    /// vouches for it by Slack user id.
     static func slackOwnerPrompt(text: String) -> String {
-        // Spelled out: earlier turns in the session can hold read-only notes from other askers'
-        // questions, and a model that sees "Slack" alone took them to apply (2026-10-23).
-        "Saqoosha himself, from a Slack thread. Not another person's question: no read-only limit "
-            + "applies. Act on it exactly as on a prompt typed on the Mac, with every tool. "
-            + "Your reply goes back to the thread.\n\n"
+        // Spelled out: earlier turns in the session can hold read-only notes from other people's
+        // replies, and a model that sees "Slack" alone took them to apply (2026-10-23).
+        "Saqoosha himself, replying in a Slack thread bound to this session. Not another person's "
+            + "message: no read-only limit applies. Act on it exactly as on a prompt typed on the Mac, "
+            + "with every tool. Nothing you write goes back to Slack.\n\n"
             + text.replacingOccurrences(of: "[canopy:", with: "［canopy:", options: .caseInsensitive)
     }
 
@@ -425,9 +426,9 @@ enum ControlProtocol {
 
     static let slackRemoteRefusal = "an SSH remote session does not load the canopy-bridge gate"
 
-    /// The prompt for a Slack question, or why it may not be delivered. Both senders
+    /// The prompt for a Slack reply, or why it may not be delivered. Both senders
     /// (`send_message` with `slackAsker`, and `SlackBridge`) go through this one decision.
-    /// The owner's question skips the gate checks: it is not gated.
+    /// The owner's reply skips the gate checks: it is not gated.
     static func slackDelivery(asker: String, text: String, fromOwner: Bool = false, isRemote: Bool, gateReady: Bool,
                               permissionMode: PermissionMode) -> Result<String, ControlError> {
         if fromOwner { return .success(slackOwnerPrompt(text: text)) }
@@ -437,7 +438,7 @@ enum ControlProtocol {
         return .success(slackPrompt(asker: asker, text: text))
     }
 
-    /// Why a Slack question may not reach this session, or nil: each case is a
+    /// Why a Slack reply may not reach this session, or nil: each case is a
     /// session the mod's read-only gate may not cover.
     static func slackRefusal(isRemote: Bool, gateReady: Bool, permissionMode: PermissionMode) -> String? {
         if isRemote { return slackRemoteRefusal }
