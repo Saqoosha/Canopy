@@ -506,4 +506,4 @@ function createWorkspace({ cwd, settingsPath, extensionPackageJson, canopySettin
   };
 }
 
-module.exports = { createWorkspace };
+module.exports = { createWorkspace, loadJson };

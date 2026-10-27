@@ -1399,7 +1399,7 @@ describe("notifications", () => {
 // ===========================================================================
 // env.js tests
 // ===========================================================================
-const { createEnv } = require("../Resources/vscode-shim/env.js");
+const { createEnv, isTelemetryEnabledFromConfiguration } = require("../Resources/vscode-shim/env.js");
 
 describe("env", () => {
   let tmpDir;
@@ -1474,6 +1474,59 @@ describe("env", () => {
     assert.equal(env.language, "en");
     assert.equal(env.appRoot, "");
     assert.equal(typeof env.shell, "string");
+    // Omitted flag is VS Code's default: telemetry on. undefined is falsy
+    // and would make CC 2.1.311 set DISABLE_TELEMETRY.
+    assert.equal(env.isTelemetryEnabled, true);
+  });
+
+  it("isTelemetryEnabled can be turned off", () => {
+    const env = createEnv({
+      machineIdPath: path.join(tmpDir, "machineId"),
+      isTelemetryEnabled: false,
+    });
+    assert.equal(env.isTelemetryEnabled, false);
+  });
+
+  it("onDidChangeTelemetryEnabled returns a disposable and does not fire on subscribe", () => {
+    const env = createEnv({ machineIdPath: path.join(tmpDir, "machineId") });
+    let calls = 0;
+    const sub = env.onDidChangeTelemetryEnabled(() => { calls += 1; });
+    assert.equal(calls, 0);
+    assert.equal(typeof sub.dispose, "function");
+    sub.dispose();
+    sub.dispose();
+  });
+});
+
+describe("isTelemetryEnabledFromConfiguration", () => {
+  function getFrom(settings) {
+    return (key) => (Object.prototype.hasOwnProperty.call(settings, key) ? settings[key] : undefined);
+  }
+
+  it("matches VS Code: usage only, default all, legacy false forces off", () => {
+    const enabled = (settings) => isTelemetryEnabledFromConfiguration(getFrom(settings));
+    assert.equal(enabled({}), true);
+    assert.equal(enabled({ "telemetry.telemetryLevel": "all" }), true);
+    assert.equal(enabled({ "telemetry.telemetryLevel": "error" }), false);
+    assert.equal(enabled({ "telemetry.telemetryLevel": "crash" }), false);
+    assert.equal(enabled({ "telemetry.telemetryLevel": "off" }), false);
+    assert.equal(enabled({ "telemetry.telemetryLevel": "nope" }), false);
+    assert.equal(enabled({ "telemetry.telemetryLevel": null }), true);
+    // Legacy booleans win over an explicit "all".
+    assert.equal(enabled({
+      "telemetry.telemetryLevel": "all",
+      "telemetry.enableTelemetry": false,
+    }), false);
+    assert.equal(enabled({
+      "telemetry.telemetryLevel": "all",
+      "telemetry.enableCrashReporter": false,
+    }), false);
+    // Only an explicit false forces off. A string or true leaves the level in charge.
+    assert.equal(enabled({
+      "telemetry.telemetryLevel": "all",
+      "telemetry.enableTelemetry": "false",
+    }), true);
+    assert.equal(enabled({ "telemetry.enableTelemetry": true }), true);
   });
 });
 
