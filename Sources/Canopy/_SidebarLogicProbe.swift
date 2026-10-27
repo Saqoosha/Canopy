@@ -6442,6 +6442,46 @@ enum SidebarLogicProbe {
                    GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/r/Canopy"),
                                                       revParse: "/r/Canopy\n/r/Canopy/.git\n/r/Canopy/.git\n") == nil)
 
+            record("worktree repo name: a linked worktree files under its main checkout's name",
+                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/Canopy/fix"), commonDir: "/r/Canopy/.git\n") == "Canopy")
+            record("worktree repo name: a subfolder of the main checkout files under the checkout's name",
+                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/r/Canopy/Sources"), commonDir: "/r/Canopy/.git\n") == "Canopy")
+            record("worktree repo name: a bare repository files under its name without .git",
+                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/x/fix"), commonDir: "/r/x.git\n") == "x")
+            record("worktree repo name: a failed or blank read keeps the folder's own name",
+                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/x/fix"), commonDir: "") == "fix"
+                   && GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/x/fix"), commonDir: "\n") == "fix")
+            do {
+                // Real git, so the rev-parse flags are pinned too: without
+                // --path-format=absolute the main checkout's root reads ".git".
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("ProbeWtName-\(UUID().uuidString)", isDirectory: true)
+                defer { try? FileManager.default.removeItem(at: tmp) }
+                let repo = tmp.appendingPathComponent("Repo", isDirectory: true)
+                let linked = tmp.appendingPathComponent("wt/fix", isDirectory: true)
+                try? FileManager.default.createDirectory(at: repo.appendingPathComponent("sub"), withIntermediateDirectories: true)
+                for args in [["init", "-q"],
+                             ["-c", "user.name=p", "-c", "user.email=p@p", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "i"],
+                             ["worktree", "add", "-q", "-b", "fix", linked.path]] {
+                    let git = Process()
+                    git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                    git.arguments = ["-C", repo.path] + args
+                    git.standardOutput = FileHandle.nullDevice
+                    git.standardError = FileHandle.nullDevice
+                    try? git.run()
+                    git.waitUntilExit()
+                }
+                let root = tmp.appendingPathComponent("root", isDirectory: true)
+                func filed(_ dir: URL) -> String {
+                    GitWorktree.worktreePath(repo: dir, branch: "a/b", root: root).path
+                }
+                let expected = root.appendingPathComponent("Repo/a-b").path
+                record("worktree path: real git files a linked worktree, the checkout root and a subfolder under the checkout's name",
+                       filed(linked) == expected && filed(repo) == expected
+                       && filed(repo.appendingPathComponent("sub")) == expected,
+                       "\(filed(linked)) | \(filed(repo)) | \(filed(repo.appendingPathComponent("sub")))")
+            }
+
             let porcelain = "worktree /r/Canopy\0HEAD abc\0branch refs/heads/main\0\0worktree /h/wt/fix\0HEAD def\0detached\0\0"
                 + "worktree /h/wt/a\nb\0HEAD 9\0detached\0\0worktree /h/wt/gone\0HEAD 8\0detached\0prunable gitdir file points to non-existent location\0\0"
                 + "worktree /h/wt/other\0HEAD 123\0branch refs/heads/other\0\0"

@@ -646,6 +646,36 @@ enum GitWorktree {
         return branch
     }
 
+    /// The folder name a new worktree is filed under: the repository's, not the
+    /// linked worktree's or subfolder's, so `checkoutForRemovedWorktree` can match it.
+    static func worktreeRepoName(for repo: URL, timeout: TimeInterval = 5) -> String {
+        let result = try? runCommand(
+            "/usr/bin/git",
+            ["-C", repo.path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            timeout: timeout,
+            wantsStdout: true
+        )
+        let commonDir = result.flatMap { $0.status == 0 ? String(decoding: $0.stdout, as: UTF8.self) : nil } ?? ""
+        return worktreeRepoName(for: repo, commonDir: commonDir)
+    }
+
+    /// The parsing half, given `rev-parse --git-common-dir` output. A common
+    /// dir named `<name>.git` (bare repository) gives `<name>`; any other keeps `repo`'s own name.
+    static func worktreeRepoName(for repo: URL, commonDir: String) -> String {
+        let trimmed = commonDir.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return repo.lastPathComponent }
+        let common = URL(fileURLWithPath: trimmed)
+        if common.lastPathComponent == ".git" { return common.deletingLastPathComponent().lastPathComponent }
+        if common.pathExtension == "git" { return common.deletingPathExtension().lastPathComponent }
+        return repo.lastPathComponent
+    }
+
+    /// Where `createWorktree` puts a worktree: `<root>/<repo name>/<branch>`.
+    static func worktreePath(repo: URL, branch: String, root: URL = worktreesRoot) -> URL {
+        root.appendingPathComponent(worktreeRepoName(for: repo), isDirectory: true)
+            .appendingPathComponent(branch.replacingOccurrences(of: "/", with: "-"), isDirectory: true)
+    }
+
     /// `baseRef` nil keeps git's own default, which is the repository's HEAD —
     /// see `defaultBaseRef` for why callers should almost never want that.
     static func createWorktree(
@@ -654,10 +684,8 @@ enum GitWorktree {
         baseRef: String? = nil,
         timeout: TimeInterval = 120
     ) throws -> URL {
-        let repoName = repo.lastPathComponent
-        let branchComponent = branch.replacingOccurrences(of: "/", with: "-")
-        let worktreesParent = worktreesRoot.appendingPathComponent(repoName, isDirectory: true)
-        let worktreeURL = worktreesParent.appendingPathComponent(branchComponent, isDirectory: true)
+        let worktreeURL = worktreePath(repo: repo, branch: branch)
+        let worktreesParent = worktreeURL.deletingLastPathComponent()
 
         try FileManager.default.createDirectory(at: worktreesParent, withIntermediateDirectories: true)
 
