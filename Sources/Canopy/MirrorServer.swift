@@ -675,9 +675,11 @@ final class MirrorConnection: MirrorSink {
                                          localCwd: trustsPeer ? dict["cwd"] as? String : nil) {
             case .success(let shim):
                 // The client gave up or closed its pane during the start; a session nobody asked for would stay open.
-                if named == nil, Self.hasEnded(connection), let started = shim.boundSession {
+                // Only for a client that sent `pending` (a Mac pane); other clients keep what they started, as before.
+                if named == nil, dict["pending"] as? Bool == true, Self.hasEnded(connection), let started = shim.boundSession {
                     logger.notice("[mirror-server] \(sessionId, privacy: .public) started after its client left; closing it")
                     store.closeSession(started.id, keepingFailure: false)
+                    cleanup()
                     return
                 }
                 existing = shim
