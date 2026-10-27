@@ -1576,16 +1576,12 @@ enum SidebarLogicProbe {
                ClaudeSessionHistory.loadUserPrompts(
                    sessionId: remoteId, directory: remoteFrozen, allowRelocationScan: false
                ).isEmpty)
-        record("relocate: a remote session does not count a local transcript",
-               ClaudeSessionHistory.countMessages(
-                   sessionId: remoteId, directory: remoteFrozen, allowRelocationScan: false
-               ) == 0)
-        // …and the same fixture DOES resolve with the scan allowed, so the two
+        // …and the same fixture DOES resolve with the scan allowed, so the one
         // above cannot be passing merely because the fixture is unreadable.
         record("relocate: the same fixture resolves with the scan allowed",
-               ClaudeSessionHistory.countMessages(
+               ClaudeSessionHistory.loadUserPrompts(
                    sessionId: remoteId, directory: remoteFrozen, allowRelocationScan: true
-               ) == 2)
+               ) == ["local leftovers"])
         try? FileManager.default.removeItem(at: remoteTranscript)
         try? FileManager.default.removeItem(at: remoteProjectDir)
 
@@ -1715,8 +1711,6 @@ enum SidebarLogicProbe {
                    sessionId: scanId, directory: scanFrozen
                ) == ["the first prompt"],
                "got \(ClaudeSessionHistory.loadUserPrompts(sessionId: scanId, directory: scanFrozen))")
-        record("relocate: the message count survives the move",
-               ClaudeSessionHistory.countMessages(sessionId: scanId, directory: scanFrozen) == 2)
 
         try? FileManager.default.removeItem(at: scanTranscript)
         try? FileManager.default.removeItem(at: scanProjectDir)

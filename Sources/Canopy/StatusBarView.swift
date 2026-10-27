@@ -8,7 +8,7 @@ struct StatusBarView: View {
     /// status-bar items collapse. Defaults are educated first guesses;
     /// retune after a manual narrow-pane smoke test.
     fileprivate enum CollapseThreshold {
-        /// Below this, drop the session-usage counter (message count).
+        /// Below this, drop the output-rate badge.
         static let dropSessionUsage: CGFloat = 620
         /// Below this, collapse branch to icon-only with tooltip.
         static let branchIcon: CGFloat = 500
@@ -36,7 +36,6 @@ struct StatusBarView: View {
         let hasRemote = data.remoteHost != nil || data.mirrorMachine != nil || data.accountName != nil
         let hasBranch = !data.gitBranch.isEmpty
         let hasContext = data.contextMax > 0
-        let hasMessages = w >= CollapseThreshold.dropSessionUsage && data.messageCount > 0
         let hasRate = w >= CollapseThreshold.dropSessionUsage && data.outputTokensPerSecond != nil
         ZStack {
             Group {
@@ -89,12 +88,6 @@ struct StatusBarView: View {
                         if hasRate {
                             if hasRemote || hasBranch || hasContext { separator }
                             outputRateBadge
-                        }
-
-                        // Session usage (message count)
-                        if hasMessages {
-                            if hasRemote || hasBranch || hasContext || hasRate { separator }
-                            sessionUsageBadge
                         }
 
                         Spacer()
@@ -158,7 +151,6 @@ struct StatusBarView: View {
                         .help(contextTooltip())
                     }
                     if data.outputTokensPerSecond != nil { outputRateBadge }
-                    if data.messageCount > 0 { sessionUsageBadge }
                 }
                 .padding(12)
             }
@@ -243,16 +235,6 @@ struct StatusBarView: View {
             .foregroundStyle(.tertiary)
             .help("Output speed of the last measured response: \(rate) tokens per second, thinking excluded")
         }
-    }
-
-    private var sessionUsageBadge: some View {
-        HStack(spacing: 3) {
-            Image(systemName: "bubble.left.fill")
-                .font(.system(size: 8))
-            Text("\(data.messageCount)")
-        }
-        .foregroundStyle(.tertiary)
-        .help("Messages in session: \(Self.numberFormatter.string(from: NSNumber(value: data.messageCount)) ?? "\(data.messageCount)")")
     }
 
     // MARK: - Components

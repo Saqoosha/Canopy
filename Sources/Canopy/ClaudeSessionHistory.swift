@@ -184,13 +184,12 @@ enum ClaudeSessionHistory {
     /// folder was left holding only `memory/` (which was all it had left to
     /// hold; a folder with several sessions keeps the ones that did not move).
     /// Every `encodedFolderCandidates` entry for the ORIGINAL directory then
-    /// misses, and each of the four lookups that reach here failed on its own,
+    /// misses, and each of the three lookups that reach here failed on its own,
     /// silently: launch restore (`sessionFileExists`) dropped the session as
     /// unresumable; `ShimProcess.jsonlPath` starved the background-task
     /// reconcile of the file it scans for completion markers and the
     /// init-time `historicToolUseIds` / recap seed of the file it snapshots;
-    /// `loadUserPrompts` seeded title generation from an empty history; and
-    /// `countMessages` reported zero.
+    /// and `loadUserPrompts` seeded title generation from an empty history.
     ///
     /// The population is every entry under `~/.claude/projects`, wider than
     /// `loadAllSessions`, which additionally skips the folder named `-`, skips
@@ -699,43 +698,6 @@ enum ClaudeSessionHistory {
             logger.error("Failed to read sessions: \(error.localizedDescription, privacy: .public)")
             return []
         }
-    }
-
-    /// Count user + assistant messages in a session transcript file.
-    /// `allowRelocationScan`: see `loadUserPrompts`. A remote session must
-    /// not count a local transcript that happens to share its id.
-    static func countMessages(
-        sessionId: String, directory: URL, allowRelocationScan: Bool = true
-    ) -> Int {
-        let fm = FileManager.default
-        var filePath: String?
-        for encoded in encodedFolderCandidates(for: directory.path) {
-            let candidate = claudeDir
-                .appendingPathComponent(encoded)
-                .appendingPathComponent("\(sessionId).jsonl").path
-            if fm.fileExists(atPath: candidate) {
-                filePath = candidate
-                break
-            }
-        }
-        // Relocation fallback — see `scanForTranscript`.
-        // Without it a relocated session's status bar reports 0 messages.
-        let resolved = filePath
-            ?? (allowRelocationScan ? scanForTranscript(sessionId: sessionId) : nil)
-        guard let filePath = resolved, let handle = FileHandle(forReadingAtPath: filePath) else { return 0 }
-        defer { try? handle.close() }
-
-        var count = 0
-        let data = handle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return 0 }
-        for line in text.split(separator: "\n") {
-            guard let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let type = json["type"] as? String
-            else { continue }
-            if type == "user" || type == "assistant" { count += 1 }
-        }
-        return count
     }
 
     /// User-typed prompts from a session JSONL, for seeding title-generation

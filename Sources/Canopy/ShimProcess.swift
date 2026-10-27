@@ -2774,11 +2774,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // every spawn — a brand-new session has no transcript, so the encoded
         // candidates always miss and the scan always runs. Note this is the only
         // lookup in this initializer that was moved: `Self.jsonlPath` for the
-        // historic-tool-use-id snapshot, `loadUserPrompts` and `countMessages`
-        // are all still synchronous on main and all three now reach the same
-        // scan, so a brand-new session pays it three times on main (~5 ms each
-        // here). Moving this one off removes a fourth; it does not make the
-        // other three cheap.
+        // historic-tool-use-id snapshot and `loadUserPrompts` are both still
+        // synchronous on main and both reach the same scan, so a brand-new
+        // session pays it twice on main (~5 ms each here). Moving this one off
+        // removes a third; it does not make the other two cheap.
         let sid = resumeSessionId
         let isLocal = remoteHost == nil
         nonisolated(unsafe) let barData = statusBarData
@@ -2809,10 +2808,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         UserDefaults.standard.removeObject(forKey: "statusBar.contextMax.\(workingDirectory.path)")
         UserDefaults.standard.removeObject(forKey: "statusBar.maxOutputTokens.\(workingDirectory.path)")
         if let sessionId = resumeSessionId {
-            statusBarData?.messageCount = ClaudeSessionHistory.countMessages(
-                sessionId: sessionId, directory: workingDirectory,
-                allowRelocationScan: remoteHost == nil
-            )
             // Snapshot every historic `toolu_…` id in the existing JSONL so
             // `detectBackgroundTaskLaunch` can skip CLI replays of already-
             // logged assistant messages instead of tracking their bg ids as
