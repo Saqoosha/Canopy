@@ -230,6 +230,12 @@ struct LauncherView: View {
     /// Every checkout of the selected folder's repository, refreshed with the
     /// folder, so the worktree chip can switch to an existing one.
     @State private var checkouts: GitWorktree.Checkouts = .empty
+    /// The main checkout "No worktree" returns to: `checkouts.main` when it is
+    /// a working tree, nil when git names only a git dir (bare, separate git dir).
+    @State private var mainCheckout: String?
+    /// `selectedDirectory` as `checkouts` spells it, resolved once per folder
+    /// rather than on every body evaluation.
+    @State private var selectedCheckoutPath: String?
     /// Presents the SSH host / remote path fields.
     ///
     /// Collapsing the old form's two SSH cards into the location chip left the
@@ -439,6 +445,8 @@ struct LauncherView: View {
     }
 
     private func refreshBranchName() {
+        selectedCheckoutPath = selectedDirectory?.standardizedFileURL.resolvingSymlinksInPath().path
+        mainCheckout = nil
         guard let dir = selectedDirectory, GitWorktree.isGitRepo(dir) else {
             currentBranchName = nil
             baseRef = nil
@@ -469,15 +477,20 @@ struct LauncherView: View {
             async let candidatesRead = Task.detached(priority: .userInitiated) {
                 GitWorktree.baseCandidates(for: dir)
             }.value
-            async let checkoutsRead = Task.detached(priority: .userInitiated) {
-                GitWorktree.checkouts(for: dir)
+            async let checkoutsRead = Task.detached(priority: .userInitiated) { () -> (GitWorktree.Checkouts, String?) in
+                let found = GitWorktree.checkouts(for: dir)
+                let main = found.main.flatMap {
+                    GitWorktree.isGitRepo(URL(fileURLWithPath: $0)) ? $0 : nil
+                }
+                return (found, main)
             }.value
             let (base, candidates, found) = await (baseRead, candidatesRead, checkoutsRead)
             if selectedDirectory == dir {
                 baseRef = base?.0
                 baseRefLabel = base?.1
                 baseCandidates = candidates
-                checkouts = found
+                checkouts = found.0
+                mainCheckout = found.1
             }
             let name = await Task.detached(priority: .userInitiated) {
                 // The same reader the status bar uses, so the launcher cannot
@@ -742,40 +755,56 @@ struct LauncherView: View {
         pickedBaseRef?.ref ?? baseRef
     }
 
-    /// The selected folder as `git worktree list` spells it (symlink-resolved),
-    /// so it compares against `checkouts`.
-    private var selectedCheckoutPath: String? {
-        selectedDirectory?.standardizedFileURL.resolvingSymlinksInPath().path
-    }
-
-    /// The linked worktree the selected folder is in, subfolders included.
+    /// The linked worktree the selected folder is in, subfolders included; the
+    /// innermost one when worktrees nest.
     private var selectedLinkedWorktree: String? {
         guard let path = selectedCheckoutPath else { return nil }
-        return checkouts.linked.first { path == $0 || path.hasPrefix($0 + "/") }
+        return checkouts.linked
+            .filter { path == $0 || path.hasPrefix($0 + "/") }
+            .max { $0.count < $1.count }
+    }
+
+    /// A worktree's folder name, with its parent's when another one shares it.
+    private func worktreeTitle(_ path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        let shared = checkouts.linked.filter { ($0 as NSString).lastPathComponent == name }.count > 1
+        return shared ? "\(((path as NSString).deletingLastPathComponent as NSString).lastPathComponent)/\(name)" : name
+    }
+
+    /// Switches the folder to `path` as the CLI spells it (`realpath`), or, when
+    /// the worktree has gone since the list was read, re-reads the list instead.
+    private func selectCheckout(_ path: String) {
+        guard FileManager.default.fileExists(atPath: path) else {
+            refreshBranchName()
+            return
+        }
+        startInWorktree = false
+        selectedDirectory = URL(fileURLWithPath: GitWorktree.realPath(of: URL(fileURLWithPath: path)), isDirectory: true)
+    }
+
+    /// A menu row with the system checkmark, without an empty SF Symbol name.
+    private func checkRow(_ title: String, checked: Bool, action: @escaping () -> Void) -> some View {
+        Toggle(title, isOn: Binding(get: { checked }, set: { _ in action() }))
     }
 
     private var isInLinkedWorktree: Bool { selectedLinkedWorktree != nil }
 
     private var worktreeChip: some View {
         Menu {
-            Button {
-                startInWorktree = false
+            checkRow("No worktree", checked: !startInWorktree && !isInLinkedWorktree) {
                 // From a linked worktree "no worktree" means the main checkout:
                 // keeping the worktree folder left the chip and the choice
                 // disagreeing.
-                if isInLinkedWorktree, let main = checkouts.main {
-                    selectedDirectory = URL(fileURLWithPath: main, isDirectory: true)
-                }
-            } label: {
-                Label("No worktree", systemImage: startInWorktree || isInLinkedWorktree ? "" : "checkmark")
+                startInWorktree = false
+                if isInLinkedWorktree, let mainCheckout { selectCheckout(mainCheckout) }
             }
-            Button {
+            // With no main checkout to return to (bare repository) the row would do nothing.
+            .disabled(isInLinkedWorktree && mainCheckout == nil && !startInWorktree)
+            // Just "New worktree": naming from the prompt is the only way it
+            // happens now that the hand-typed field is gone, so saying so
+            // described the mechanism rather than the choice.
+            checkRow("New worktree", checked: startInWorktree) {
                 startInWorktree = true
-            } label: {
-                // Just "New worktree": naming from the prompt is the only
-                // way it happens now that the hand-typed field is gone, so
-                // saying so described the mechanism rather than the choice.
-                Label("New worktree", systemImage: startInWorktree ? "checkmark" : "")
             }
             // The base list used to hang off this menu, which split the
             // question in two: the chip that SHOWED the branch could not change
@@ -786,14 +815,8 @@ struct LauncherView: View {
                 // just a checkout to work in, so nothing new is cut.
                 Section("Existing worktrees") {
                     ForEach(checkouts.linked, id: \.self) { path in
-                        Button {
-                            startInWorktree = false
-                            selectedDirectory = URL(fileURLWithPath: path, isDirectory: true)
-                        } label: {
-                            Label(
-                                (path as NSString).lastPathComponent,
-                                systemImage: !startInWorktree && path == selectedLinkedWorktree ? "checkmark" : ""
-                            )
+                        checkRow(worktreeTitle(path), checked: !startInWorktree && path == selectedLinkedWorktree) {
+                            selectCheckout(path)
                         }
                     }
                 }

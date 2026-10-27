@@ -136,15 +136,27 @@ enum GitWorktree {
     static func checkoutForRemovedWorktree(
         _ dir: URL, knownCheckouts: [URL],
         isCheckout: (URL) -> Bool = { isMainCheckout($0) },
-        realPath: (URL) -> String = { realPath(of: $0) }
+        realPath: (URL) -> String = { realPath(of: $0) },
+        recordedOrigin: (URL) -> String? = { recordedOrigin(of: $0) }
     ) -> URL? {
+        // A recorded origin wins over any namesake; a repository with no checkout has none to reopen in.
+        if let recorded = recordedOrigin(dir) {
+            if recorded.isEmpty { return nil }
+            let checkout = URL(fileURLWithPath: recorded)
+            if isCheckout(checkout) { return URL(fileURLWithPath: realPath(checkout)) }
+            // Moved or re-cloned: fall back to the name, as before origins were recorded.
+            logger.notice("rescue: recorded checkout \(recorded, privacy: .private) of \(dir.path, privacy: .private) is no longer a checkout")
+        }
         let standardized = dir.standardizedFileURL
         let parent = standardized.deletingLastPathComponent()
         let parentName = parent.lastPathComponent
         let candidates: [URL]
         if parent.deletingLastPathComponent().path == worktreesRoot.path {
             let repo = parentName
-            candidates = knownCheckouts.filter { $0.standardizedFileURL.lastPathComponent == repo }
+            candidates = knownCheckouts.filter {
+                $0.standardizedFileURL.lastPathComponent == repo
+                    || URL(fileURLWithPath: realPath($0)).lastPathComponent == repo
+            }
         } else if parentName.hasSuffix("-worktrees"), parentName.count > "-worktrees".count {
             candidates = [parent.deletingLastPathComponent()
                 .appendingPathComponent(String(parentName.dropLast("-worktrees".count)))]
@@ -637,43 +649,70 @@ enum GitWorktree {
     /// Bounded rather than looping forever: past `limit` the repo has that many
     /// branches on one slug and the caller is better off failing visibly than
     /// silently creating `foo-97`.
-    static func uniqueBranchName(_ branch: String, in repo: URL, limit: Int = 20) -> String {
-        guard refExists(branch, in: repo) else { return branch }
+    static func uniqueBranchName(_ branch: String, in repo: URL, limit: Int = 20, root: URL = worktreesRoot) -> String {
+        // The folder too: another repository of the same name files under the same parent.
+        let name = worktreeRepository(for: repo).name
+        func isTaken(_ candidate: String) -> Bool {
+            refExists(candidate, in: repo)
+                || FileManager.default.fileExists(atPath: worktreePath(repoName: name, branch: candidate, root: root).path)
+        }
+        guard isTaken(branch) else { return branch }
         for suffix in 2 ... limit {
             let candidate = "\(branch)-\(suffix)"
-            if !refExists(candidate, in: repo) { return candidate }
+            if !isTaken(candidate) { return candidate }
         }
         return branch
     }
 
-    /// The folder name a new worktree is filed under: the repository's, not the
-    /// linked worktree's or subfolder's, so `checkoutForRemovedWorktree` can match it.
-    static func worktreeRepoName(for repo: URL, timeout: TimeInterval = 5) -> String {
-        let result = try? runCommand(
-            "/usr/bin/git",
-            ["-C", repo.path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            timeout: timeout,
-            wantsStdout: true
-        )
-        let commonDir = result.flatMap { $0.status == 0 ? String(decoding: $0.stdout, as: UTF8.self) : nil } ?? ""
-        return worktreeRepoName(for: repo, commonDir: commonDir)
+    /// The repository a new worktree is filed under: its name, and its main checkout
+    /// when it has one, so `checkoutForRemovedWorktree` can find the checkout again.
+    static func worktreeRepository(for repo: URL, timeout: TimeInterval = 5) -> (name: String, checkout: URL?) {
+        worktreeRepository(for: repo, worktreeListPorcelainZ: worktreeListPorcelainZ(for: repo, timeout: timeout) ?? "",
+                           isWorkingTree: { isGitRepo(URL(fileURLWithPath: $0)) }, isCheckout: { isMainCheckout(URL(fileURLWithPath: $0)) })
     }
 
-    /// The parsing half, given `rev-parse --git-common-dir` output. A common
-    /// dir named `<name>.git` (bare repository) gives `<name>`; any other keeps `repo`'s own name.
-    static func worktreeRepoName(for repo: URL, commonDir: String) -> String {
-        let trimmed = commonDir.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return repo.lastPathComponent }
-        let common = URL(fileURLWithPath: trimmed)
-        if common.lastPathComponent == ".git" { return common.deletingLastPathComponent().lastPathComponent }
-        if common.pathExtension == "git" { return common.deletingPathExtension().lastPathComponent }
-        return repo.lastPathComponent
+
+    /// The parsing half. The first entry is the main checkout, or a git dir when git
+    /// knows no working tree for it (measured): a bare `x.git` or `.bare`, a
+    /// `--separate-git-dir` store, a submodule's `.git/modules/<name>`.
+    static func worktreeRepository(
+        for repo: URL, worktreeListPorcelainZ output: String,
+        isWorkingTree: (String) -> Bool, isCheckout: (String) -> Bool
+    ) -> (name: String, checkout: URL?) {
+        guard let main = worktreeEntries(output).first else { return (repo.lastPathComponent, nil) }
+        let url = URL(fileURLWithPath: main.path)
+        if !main.bare, isWorkingTree(main.path) { return (url.lastPathComponent, isCheckout(main.path) ? url : nil) }
+        if main.path.contains("/.git/modules/") { return (url.lastPathComponent, nil) }
+        if url.pathExtension == "git" { return (url.deletingPathExtension().lastPathComponent, nil) }
+        if url.lastPathComponent.hasPrefix(".") { return (url.deletingLastPathComponent().lastPathComponent, nil) }
+        return (url.lastPathComponent, nil)
     }
 
     /// Where `createWorktree` puts a worktree: `<root>/<repo name>/<branch>`.
-    static func worktreePath(repo: URL, branch: String, root: URL = worktreesRoot) -> URL {
-        root.appendingPathComponent(worktreeRepoName(for: repo), isDirectory: true)
+    static func worktreePath(repoName: String, branch: String, root: URL = worktreesRoot) -> URL {
+        root.appendingPathComponent(repoName, isDirectory: true)
             .appendingPathComponent(branch.replacingOccurrences(of: "/", with: "-"), isDirectory: true)
+    }
+
+    static func worktreePath(repo: URL, branch: String, root: URL = worktreesRoot) -> URL {
+        worktreePath(repoName: worktreeRepository(for: repo).name, branch: branch, root: root)
+    }
+
+    // MARK: - Worktree origins
+
+    /// One key per worktree, so the GUI and the daemon never rewrite each other's records.
+    private static func originKey(_ worktreePath: String) -> String { "canopy.worktreeOrigin:" + worktreePath }
+
+    /// Records the main checkout a worktree was cut from ("" when it has none,
+    /// e.g. a bare repository), so a removed worktree reopens there rather than in
+    /// any checkout that shares its name. Keyed by real path, as the CLI records the cwd.
+    static func recordOrigin(worktree: URL, checkout: URL?, defaults: UserDefaults = .standard) {
+        defaults.set(checkout.map { realPath(of: $0) } ?? "", forKey: originKey(realPath(of: worktree)))
+    }
+
+    static func recordedOrigin(of worktree: URL, defaults: UserDefaults = .standard) -> String? {
+        defaults.string(forKey: originKey(worktree.standardizedFileURL.path))
+            ?? defaults.string(forKey: originKey(realPath(of: worktree)))
     }
 
     /// `baseRef` nil keeps git's own default, which is the repository's HEAD —
@@ -682,9 +721,12 @@ enum GitWorktree {
         repo: URL,
         branch: String,
         baseRef: String? = nil,
-        timeout: TimeInterval = 120
+        timeout: TimeInterval = 120,
+        root: URL = worktreesRoot,
+        defaults: UserDefaults = .standard
     ) throws -> URL {
-        let worktreeURL = worktreePath(repo: repo, branch: branch)
+        let repository = worktreeRepository(for: repo)
+        let worktreeURL = worktreePath(repoName: repository.name, branch: branch, root: root)
         let worktreesParent = worktreeURL.deletingLastPathComponent()
 
         try FileManager.default.createDirectory(at: worktreesParent, withIntermediateDirectories: true)
@@ -711,6 +753,7 @@ enum GitWorktree {
                 userInfo: [NSLocalizedDescriptionKey: message]
             )
         }
+        recordOrigin(worktree: worktreeURL, checkout: repository.checkout, defaults: defaults)
         logger.notice(
             "Created worktree at \(worktreeURL.path, privacy: .private) on branch \(branch, privacy: .public) from \(baseRef ?? "HEAD", privacy: .public)"
         )
@@ -753,20 +796,42 @@ enum GitWorktree {
 
     /// The checkouts of the repository `dir` is in. Empty outside a repository.
     static func checkouts(for dir: URL, timeout: TimeInterval = 5) -> Checkouts {
-        guard let result = try? runCommand(
-            "/usr/bin/git",
-            ["-C", dir.path, "worktree", "list", "--porcelain", "-z"],
-            timeout: timeout,
-            wantsStdout: true
-        ), result.status == 0 else { return .empty }
-        return checkouts(worktreeListPorcelainZ: String(decoding: result.stdout, as: UTF8.self))
+        worktreeListPorcelainZ(for: dir, timeout: timeout).map { checkouts(worktreeListPorcelainZ: $0) } ?? .empty
+    }
+
+    /// `git worktree list --porcelain -z` output, or nil (logged) when the read fails.
+    static func worktreeListPorcelainZ(for dir: URL, timeout: TimeInterval = 5) -> String? {
+        do {
+            let result = try runCommand(
+                "/usr/bin/git",
+                ["-C", dir.path, "worktree", "list", "--porcelain", "-z"],
+                timeout: timeout,
+                wantsStdout: true
+            )
+            guard result.status == 0 else {
+                // Not a repository is an answer, not a failure: file-link checks ask from any folder.
+                if result.stderr.contains("not a git repository") { return nil }
+                logger.notice("worktree list failed (status \(result.status)) in \(dir.path, privacy: .private): \(result.stderr, privacy: .private)")
+                return nil
+            }
+            return String(decoding: result.stdout, as: UTF8.self)
+        } catch {
+            logger.notice("worktree list failed in \(dir.path, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     /// The parsing half, given `git worktree list --porcelain -z` output: NUL-terminated
     /// fields, an empty field between entries. `-z` because without it a path is not quoted,
     /// so a newline in one cuts it short. Paths are symlink-resolved.
     static func checkouts(worktreeListPorcelainZ output: String) -> Checkouts {
-        var paths: [String?] = []
+        let paths = worktreeEntries(output).map { $0.bare || $0.prunable ? nil : $0.path }
+        guard let first = paths.first else { return .empty }
+        return Checkouts(main: first, linked: paths.dropFirst().compactMap { $0 })
+    }
+
+    private static func worktreeEntries(_ output: String) -> [(path: String, bare: Bool, prunable: Bool)] {
+        var entries: [(path: String, bare: Bool, prunable: Bool)] = []
         var fields: [String] = []
         for field in output.split(separator: "\0", omittingEmptySubsequences: false).map(String.init) + [""] {
             guard field.isEmpty else { fields.append(field); continue }
@@ -774,11 +839,10 @@ enum GitWorktree {
             guard let line = fields.first(where: { $0.hasPrefix("worktree ") }) else { continue }
             let path = URL(fileURLWithPath: String(line.dropFirst("worktree ".count)))
                 .standardizedFileURL.resolvingSymlinksInPath().path
-            let gone = fields.contains { $0 == "bare" || $0 == "prunable" || $0.hasPrefix("prunable ") }
-            paths.append(gone ? nil : path)
+            entries.append((path, fields.contains("bare"),
+                            fields.contains { $0 == "prunable" || $0.hasPrefix("prunable ") }))
         }
-        guard let first = paths.first else { return .empty }
-        return Checkouts(main: first, linked: paths.dropFirst().compactMap { $0 })
+        return entries
     }
 
     /// Whether a file link may open `path` from a session in `workingDirectory`: under the

@@ -446,13 +446,23 @@ enum ClaudeSessionHistory {
     /// A row needs its `logPath`: that is the file `directoryToOpen` moves.
     static func withRescueCheckouts(
         _ entries: [SessionEntry], knownCheckouts extra: [URL],
-        isCheckout: (URL) -> Bool = { GitWorktree.isMainCheckout($0) }
+        isCheckout: (URL) -> Bool = { GitWorktree.isMainCheckout($0) },
+        recordedOrigin: (URL) -> String? = { GitWorktree.recordedOrigin(of: $0) }
     ) -> [SessionEntry] {
         let known = entries.filter(\.canOpen).map(\.projectDirectory) + extra
+        // Each known checkout's real path once per list, not once per removed row.
+        var realPaths: [URL: String] = [:]
+        let cachedRealPath: (URL) -> String = { url in
+            if let cached = realPaths[url] { return cached }
+            let resolved = GitWorktree.realPath(of: url)
+            realPaths[url] = resolved
+            return resolved
+        }
         return entries.map { entry in
             guard !entry.canOpen, entry.logPath != nil,
                   let checkout = GitWorktree.checkoutForRemovedWorktree(
-                      entry.projectDirectory, knownCheckouts: known, isCheckout: isCheckout)
+                      entry.projectDirectory, knownCheckouts: known, isCheckout: isCheckout,
+                      realPath: cachedRealPath, recordedOrigin: recordedOrigin)
             else { return entry }
             var rescued = entry
             rescued.rescueCheckout = checkout
