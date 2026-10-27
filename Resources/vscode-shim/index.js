@@ -108,7 +108,7 @@ const { createExtensionContext } = require("./context.js");
 const { createCommands } = require("./commands.js");
 const { createWorkspace } = require("./workspace.js");
 const { createWindow } = require("./window.js");
-const { createEnv } = require("./env.js");
+const { createEnv, isTelemetryEnabledFromConfiguration } = require("./env.js");
 const { assembleVscodeModule } = require("./stubs.js");
 
 // ---------------------------------------------------------------------------
@@ -206,9 +206,13 @@ async function main() {
     canopySettingsPath: args.settingsPath,
   });
   const window = createWindow();
+  // Same settings layers as getConfiguration. Default is VS Code's
+  // ("all" → isTelemetryEnabled true). See isTelemetryEnabledFromConfiguration.
+  const configuration = workspace.getConfiguration();
   const env = createEnv({
     machineIdPath: path.join(storagePath, "machineId"),
     remoteName: undefined,
+    isTelemetryEnabled: isTelemetryEnabledFromConfiguration((key) => configuration.get(key)),
   });
 
   // Assemble vscode shim

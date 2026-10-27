@@ -250,6 +250,9 @@ const VSCODE_BUILTIN_DEFAULTS = {
     "**/*.code-search": true,
   },
   "search.useIgnoreFiles": true,
+  // VS Code's default. Read by `isTelemetryEnabledFromConfiguration` (env.js),
+  // not by the extension: CC 2.1.311 only consults `env.isTelemetryEnabled`.
+  "telemetry.telemetryLevel": "all",
 };
 
 function createConfiguration(settingsPath, extensionPackageJson, canopySettingsPath) {

@@ -127,6 +127,94 @@ test("CANOPY_CLI_CWD moves only the CLI spawn, not the extension's other childre
     }
 });
 
+/**
+ * CC 2.1.311 reads `vscode.env.isTelemetryEnabled` and subscribes to
+ * `onDidChangeTelemetryEnabled` during activate. A unit test of
+ * `isTelemetryEnabledFromConfiguration` stays green if `index.js` stops
+ * passing the value into `createEnv` — the default is telemetry on, which
+ * is also what an omitted flag produces — so the "off" cases have to go
+ * through the real process.
+ */
+function plantTelemetryExtension(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({
+        name: "telemetry-probe", version: "0.0.0", main: "extension.js",
+    }));
+    fs.writeFileSync(path.join(dir, "extension.js"),
+        "const vscode = require('vscode');\n"
+        + "exports.activate = (context) => {\n"
+        + "  const sub = vscode.env.onDidChangeTelemetryEnabled(() => {});\n"
+        + "  context.workspaceState.update('telemetryProbe', {\n"
+        + "    isTelemetryEnabled: vscode.env.isTelemetryEnabled,\n"
+        + "    subscribed: !!sub && typeof sub.dispose === 'function',\n"
+        + "  });\n"
+        + "};\n");
+}
+
+function probeTelemetry({ canopySettings, workspaceSettings } = {}) {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-telemetry-cwd-"));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-telemetry-home-"));
+    const extensionPath = path.join(home, "ext");
+    plantTelemetryExtension(extensionPath);
+    const settingsPath = path.join(home, "settings.json");
+    if (canopySettings) fs.writeFileSync(settingsPath, JSON.stringify(canopySettings));
+    if (workspaceSettings) {
+        fs.mkdirSync(path.join(cwd, ".vscode"), { recursive: true });
+        fs.writeFileSync(path.join(cwd, ".vscode", "settings.json"), JSON.stringify(workspaceSettings));
+    }
+    const result = spawnSync(process.execPath, [
+        SHIM,
+        "--extension-path", extensionPath,
+        "--cwd", cwd,
+        "--settings-path", settingsPath,
+    ], {
+        input: "",
+        encoding: "utf-8",
+        env: { ...process.env, HOME: home },
+        timeout: 30000,
+    });
+    try {
+        if (result.status !== 0 || /Activation error/.test(result.stderr || "")) {
+            assert.fail(`telemetry probe failed to activate: status=${result.status} stderr=${result.stderr}`);
+        }
+        const storagePath = path.join(home, "Library", "Application Support", "Canopy");
+        const stateFile = workspaceStateFile(storagePath, cwd);
+        assert.ok(fs.existsSync(stateFile), `no state file at ${stateFile}`);
+        return JSON.parse(fs.readFileSync(stateFile, "utf-8")).telemetryProbe;
+    } finally {
+        fs.rmSync(cwd, { recursive: true, force: true });
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+}
+
+test("index.js leaves telemetry on when the setting is unset, and the change event is subscribable", () => {
+    const probe = probeTelemetry();
+    assert.equal(probe.isTelemetryEnabled, true);
+    assert.equal(probe.subscribed, true);
+});
+
+test("index.js maps telemetry.telemetryLevel 'error' to isTelemetryEnabled false", () => {
+    // "error" is not "off", but VS Code's isTelemetryEnabled is USAGE only.
+    // A wire that treated every level other than "off" as enabled stays green
+    // on an "off" fixture and still ships DISABLE_TELEMETRY for the wrong reason.
+    const probe = probeTelemetry({ canopySettings: { "telemetry.telemetryLevel": "error" } });
+    assert.equal(probe.isTelemetryEnabled, false);
+    assert.equal(probe.subscribed, true);
+});
+
+test("index.js reads telemetry.telemetryLevel from the workspace settings file", () => {
+    const probe = probeTelemetry({ workspaceSettings: { "telemetry.telemetryLevel": "off" } });
+    assert.equal(probe.isTelemetryEnabled, false);
+});
+
+test("Canopy settings win over the workspace telemetry level", () => {
+    const probe = probeTelemetry({
+        canopySettings: { "telemetry.telemetryLevel": "all" },
+        workspaceSettings: { "telemetry.telemetryLevel": "off" },
+    });
+    assert.equal(probe.isTelemetryEnabled, true);
+});
+
 test("index.js passes CANOPY_SSH_HOST through, so a remote session gets its own file", () => {
     const cwd = "/tmp/canopy-wiring-workspace";
     const { home, storagePath } = runShim({ cwd, env: { CANOPY_SSH_HOST: "wiring-host" } });
