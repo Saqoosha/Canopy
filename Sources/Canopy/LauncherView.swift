@@ -450,8 +450,8 @@ struct LauncherView: View {
         }
         // Cleared synchronously, so the window between picking a folder and its
         // reads finishing cannot serve the PREVIOUS folder's data. That has to
-        // include `currentBranchName`: it is written last, after a third
-        // detached read, and the branch chip reads it directly — so leaving it
+        // include `currentBranchName`: it is written last, after the other
+        // detached reads, and the branch chip reads it directly — so leaving it
         // out meant the chip confidently named folder A's branch while folder
         // B was selected, which is the exact bug this clear exists to stop,
         // one field short.
@@ -462,16 +462,17 @@ struct LauncherView: View {
         pickedBaseRef = nil
         checkouts = .empty
         Task {
-            let base = await Task.detached(priority: .userInitiated) { () -> (String, String)? in
+            async let baseRead = Task.detached(priority: .userInitiated) { () -> (String, String)? in
                 guard let ref = GitWorktree.defaultBaseRef(for: dir) else { return nil }
                 return (ref, GitWorktree.displayBaseRef(ref, for: dir))
             }.value
-            let candidates = await Task.detached(priority: .userInitiated) {
+            async let candidatesRead = Task.detached(priority: .userInitiated) {
                 GitWorktree.baseCandidates(for: dir)
             }.value
-            let found = await Task.detached(priority: .userInitiated) {
+            async let checkoutsRead = Task.detached(priority: .userInitiated) {
                 GitWorktree.checkouts(for: dir)
             }.value
+            let (base, candidates, found) = await (baseRead, candidatesRead, checkoutsRead)
             if selectedDirectory == dir {
                 baseRef = base?.0
                 baseRefLabel = base?.1
@@ -747,9 +748,13 @@ struct LauncherView: View {
         selectedDirectory?.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
-    private var isInLinkedWorktree: Bool {
-        selectedCheckoutPath.map(checkouts.linked.contains) ?? false
+    /// The linked worktree the selected folder is in, subfolders included.
+    private var selectedLinkedWorktree: String? {
+        guard let path = selectedCheckoutPath else { return nil }
+        return checkouts.linked.first { path == $0 || path.hasPrefix($0 + "/") }
     }
+
+    private var isInLinkedWorktree: Bool { selectedLinkedWorktree != nil }
 
     private var worktreeChip: some View {
         Menu {
@@ -787,7 +792,7 @@ struct LauncherView: View {
                         } label: {
                             Label(
                                 (path as NSString).lastPathComponent,
-                                systemImage: !startInWorktree && path == selectedCheckoutPath ? "checkmark" : ""
+                                systemImage: !startInWorktree && path == selectedLinkedWorktree ? "checkmark" : ""
                             )
                         }
                     }
