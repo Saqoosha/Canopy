@@ -106,7 +106,7 @@ if (process.env.CANOPY_CLI_CWD) {
 const { writeStdout, startStdinReader } = require("./protocol.js");
 const { createExtensionContext } = require("./context.js");
 const { createCommands } = require("./commands.js");
-const { createWorkspace } = require("./workspace.js");
+const { createWorkspace, loadJson } = require("./workspace.js");
 const { createWindow } = require("./window.js");
 const { createEnv, isTelemetryEnabledFromConfiguration } = require("./env.js");
 const { assembleVscodeModule } = require("./stubs.js");
@@ -207,10 +207,7 @@ async function main() {
   });
   const window = createWindow();
   // Canopy settings only: telemetry keys are application-scoped in VS Code.
-  let canopySettings = {};
-  try {
-    canopySettings = JSON.parse(fs.readFileSync(args.settingsPath, "utf-8"));
-  } catch {}
+  const canopySettings = args.settingsPath ? loadJson(args.settingsPath) : {};
   const env = createEnv({
     machineIdPath: path.join(storagePath, "machineId"),
     remoteName: undefined,
