@@ -674,6 +674,12 @@ final class MirrorConnection: MirrorSink {
             switch startRequestedSession(request, sessionId: named?.resumeId ?? sessionId,
                                          localCwd: trustsPeer ? dict["cwd"] as? String : nil) {
             case .success(let shim):
+                // The client gave up or closed its pane during the start; a session nobody asked for would stay open.
+                if named == nil, Self.hasEnded(connection), let started = shim.boundSession {
+                    logger.notice("[mirror-server] \(sessionId, privacy: .public) started after its client left; closing it")
+                    store.closeSession(started.id, keepingFailure: false)
+                    return
+                }
                 existing = shim
                 // A Mac pane holds its session; the phone has no pane, and no way to stop one.
                 if Self.appliesPhoneReplayRewrites(client: dict["client"] as? String) {
@@ -865,6 +871,14 @@ final class MirrorConnection: MirrorSink {
             connection.cancel()
         })
         cleanup()
+    }
+
+    /// Read straight from the connection: its `cleanup` hop waits for the main thread a start may still hold.
+    nonisolated static func hasEnded(_ connection: NWConnection) -> Bool {
+        switch connection.state {
+        case .failed, .cancelled: true
+        default: false
+        }
     }
 
     private func failAttach(_ message: String) {

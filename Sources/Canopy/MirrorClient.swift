@@ -29,8 +29,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
     /// Set by `ShimProcess.sessionRestartingFrameType`: the host restarted this session in place
     /// and it is already running again, so the drop that follows re-attaches at once.
     private(set) var expectsSessionRestart = false
-    /// The drop was this client giving up on `attach_ok`, not the connection failing.
-    private(set) var attachTimedOut = false
+    /// The host said it is starting the session, so a drop after this one is not "could not reach".
+    private(set) var sawAttachPending = false
     /// Bumped on every re-arm, so only the latest deadline can fire.
     private var attachDeadlineGeneration = 0
     /// The origin session's account usage (`MirrorUsageFrame`), once it has any and on every
@@ -137,9 +137,8 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, generation == self.attachDeadlineGeneration,
-                      !self.attachedDelivered, !self.closed else { return }
+                      !self.attachedDelivered, !self.terminalDelivered, !self.closed else { return }
                 logger.error("[mirror-attach] no attach_ok within \(seconds) s; giving up")
-                self.attachTimedOut = true
                 self.connection.cancel()
                 self.deliverOutcome(.dropped)
             }
@@ -332,7 +331,10 @@ final class RemoteMirrorBridge: NSObject, WKScriptMessageHandler {
         }
         if dict["type"] as? String == MirrorOpenRequest.pendingType {
             // The host is starting the session; that can outlast the connect deadline.
-            if !attachedDelivered { armAttachDeadline(seconds: 120) }
+            if !attachedDelivered, !terminalDelivered, !sawAttachPending {
+                sawAttachPending = true
+                armAttachDeadline(seconds: 120)
+            }
             return
         }
         if let type = dict["type"] as? String, type == "attach_error" {
