@@ -669,6 +669,8 @@ final class MirrorConnection: MirrorSink {
             // A session found but not running is restarted as itself, under its current id;
             // opening under the client's id could start a duplicate or miss a replaced placeholder.
             if named != nil { request = .resume }
+            // Queued on the connection before the start can hold this thread, so the client waits longer.
+            if dict["pending"] as? Bool == true { sendJSONObject(["type": MirrorOpenRequest.pendingType]) }
             switch startRequestedSession(request, sessionId: named?.resumeId ?? sessionId,
                                          localCwd: trustsPeer ? dict["cwd"] as? String : nil) {
             case .success(let shim):

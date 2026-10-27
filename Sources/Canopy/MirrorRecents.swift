@@ -144,6 +144,8 @@ enum MirrorOpenRequest: Equatable {
     /// `attach_error` for every client of a session `stop_session` ended; read after
     /// "The session on <Mac> stopped: " (`SessionStore.mirrorEndedMessage`).
     static let stoppedByClient = "Stop Session was used."
+    /// Sent before the server starts the session, to a client whose attach set `"pending": true`.
+    static let pendingType = "attach_pending"
 
     var isResume: Bool {
         switch self {

@@ -338,8 +338,13 @@ struct MirrorPaneView: NSViewRepresentable {
                 let showDrop = { [weak session, weak bridge] in
                     guard let session else { return }
                     if case .spawning = session.status {
-                        onFailure(isDaemon ? "Could not reach this Mac's session service."
-                                           : "Could not reach \(machineName). Is its live mirror on?", false)
+                        if bridge?.attachTimedOut == true {
+                            onFailure(isDaemon ? "This Mac's session service did not open the session in time."
+                                               : "\(machineName) did not open the session in time.", false)
+                        } else {
+                            onFailure(isDaemon ? "Could not reach this Mac's session service."
+                                               : "Could not reach \(machineName). Is its live mirror on?", false)
+                        }
                     } else if bridge?.expectsSessionRestart == true {
                         // Restarted in place (a removed worktree's move, an account switch, Restart):
                         // the new shim already runs, so re-attach without showing the drop.
