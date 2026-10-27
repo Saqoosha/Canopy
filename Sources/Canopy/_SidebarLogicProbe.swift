@@ -6442,18 +6442,25 @@ enum SidebarLogicProbe {
                    GitWorktree.checkoutOfWorktreeRoot(URL(fileURLWithPath: "/r/Canopy"),
                                                       revParse: "/r/Canopy\n/r/Canopy/.git\n/r/Canopy/.git\n") == nil)
 
-            record("worktree repo name: a linked worktree files under its main checkout's name",
-                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/Canopy/fix"), commonDir: "/r/Canopy/.git\n") == "Canopy")
-            record("worktree repo name: a subfolder of the main checkout files under the checkout's name",
-                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/r/Canopy/Sources"), commonDir: "/r/Canopy/.git\n") == "Canopy")
-            record("worktree repo name: a bare repository files under its name without .git",
-                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/x/fix"), commonDir: "/r/x.git\n") == "x")
-            record("worktree repo name: a failed or blank read keeps the folder's own name",
-                   GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/x/fix"), commonDir: "") == "fix"
-                   && GitWorktree.worktreeRepoName(for: URL(fileURLWithPath: "/h/wt/x/fix"), commonDir: "\n") == "fix")
+            func repository(_ firstEntry: String) -> (name: String, checkout: String?) {
+                let r = GitWorktree.worktreeRepository(for: URL(fileURLWithPath: "/h/wt/x/fix"),
+                                                       worktreeListPorcelainZ: firstEntry + "\0\0worktree /h/wt/x/fix\0detached\0\0")
+                return (r.name, r.checkout?.path)
+            }
+            record("worktree repository: a main checkout names it and is its checkout",
+                   repository("worktree /r/Canopy\0HEAD abc") == ("Canopy", "/r/Canopy"))
+            record("worktree repository: a bare x.git names x, with no checkout",
+                   repository("worktree /r/x.git\0bare") == ("x", nil))
+            record("worktree repository: a .bare dir names its parent, with no checkout",
+                   repository("worktree /r/proj/.bare\0bare") == ("proj", nil))
+            record("worktree repository: a submodule's git dir names the module, with no checkout",
+                   repository("worktree /r/sup/.git/modules/mod\0HEAD abc") == ("mod", nil))
+            record("worktree repository: a separate git dir names the store, with no checkout",
+                   repository("worktree /r/store.git\0HEAD abc") == ("store", nil))
+            record("worktree repository: a failed read keeps the folder's own name",
+                   GitWorktree.worktreeRepository(for: URL(fileURLWithPath: "/h/wt/x/fix"), worktreeListPorcelainZ: "").name == "fix")
             do {
-                // Real git, so the rev-parse flags are pinned too: without
-                // --path-format=absolute the main checkout's root reads ".git".
+                // Real git, so the read itself is pinned, not just its parser.
                 let tmp = FileManager.default.temporaryDirectory
                     .appendingPathComponent("ProbeWtName-\(UUID().uuidString)", isDirectory: true)
                 defer { try? FileManager.default.removeItem(at: tmp) }
@@ -6538,12 +6545,29 @@ enum SidebarLogicProbe {
         // MARK: - Removed-worktree rescue
         do {
             let managed = GitWorktree.worktreesRoot.appendingPathComponent("Canopy/fix-login")
-            let checkouts: Set<String> = ["/r/Canopy", "/d/Canopy", "/r/Other", "/p/app", "/q/repo"]
+            let checkouts: Set<String> = ["/r/Canopy", "/d/Canopy", "/r/Other", "/p/app", "/q/repo", "/alias/Link"]
             let isCheckout: (URL) -> Bool = { checkouts.contains($0.standardizedFileURL.path) }
             let sameDisk: (URL) -> String = { $0.path == "/d/Canopy" ? "/r/Canopy" : $0.path }
-            func rescue(_ dir: URL, _ known: [String], realPath: @escaping (URL) -> String = { $0.path }) -> String? {
+            func rescue(_ dir: URL, _ known: [String], realPath: @escaping (URL) -> String = { $0.path },
+                        recorded: String? = nil) -> String? {
                 GitWorktree.checkoutForRemovedWorktree(dir, knownCheckouts: known.map { URL(fileURLWithPath: $0) },
-                                                       isCheckout: isCheckout, realPath: realPath)?.path
+                                                       isCheckout: isCheckout, realPath: realPath,
+                                                       recordedOrigin: { _ in recorded })?.path
+            }
+            record("rescue: a recorded origin wins over the one checkout of that name",
+                   rescue(managed, ["/r/Canopy"], recorded: "/d/Canopy") == "/d/Canopy")
+            record("rescue: a recorded origin that is no longer a checkout → no namesake instead",
+                   rescue(managed, ["/r/Canopy"], recorded: "/gone/Canopy") == nil)
+            record("rescue: a known checkout opened through a symlink matches by its real name",
+                   rescue(managed, ["/alias/Link"], realPath: { $0.path == "/alias/Link" ? "/r/Canopy" : $0.path }) == "/r/Canopy")
+            do {
+                let suite = "ProbeWorktreeOrigins-\(UUID().uuidString)"
+                let defaults = UserDefaults(suiteName: suite)!
+                defer { defaults.removePersistentDomain(forName: suite) }
+                GitWorktree.recordOrigin(worktree: URL(fileURLWithPath: "/h/wt/Canopy/a/../fix"),
+                                         checkout: URL(fileURLWithPath: "/nonexistent/Canopy"), defaults: defaults)
+                record("rescue: a recorded origin reads back under the worktree's standardized path",
+                       GitWorktree.recordedOrigin(of: URL(fileURLWithPath: "/h/wt/Canopy/fix"), defaults: defaults) == "/nonexistent/Canopy")
             }
             record("rescue: a managed worktree finds the one checkout of its repo's name",
                    rescue(managed, ["/r/Other", "/r/Canopy"]) == "/r/Canopy")
