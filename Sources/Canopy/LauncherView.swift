@@ -227,6 +227,9 @@ struct LauncherView: View {
     @State private var pickedBaseRef: GitWorktree.BaseCandidate?
     /// Branches offered by the picker, refreshed with the folder.
     @State private var baseCandidates: [GitWorktree.BaseCandidate] = []
+    /// Every checkout of the selected folder's repository, refreshed with the
+    /// folder, so the worktree chip can switch to an existing one.
+    @State private var checkouts: GitWorktree.Checkouts = .empty
     /// Presents the SSH host / remote path fields.
     ///
     /// Collapsing the old form's two SSH cards into the location chip left the
@@ -442,12 +445,13 @@ struct LauncherView: View {
             baseRefLabel = nil
             baseCandidates = []
             pickedBaseRef = nil
+            checkouts = .empty
             return
         }
         // Cleared synchronously, so the window between picking a folder and its
         // reads finishing cannot serve the PREVIOUS folder's data. That has to
-        // include `currentBranchName`: it is written last, after a third
-        // detached read, and the branch chip reads it directly — so leaving it
+        // include `currentBranchName`: it is written last, after the other
+        // detached reads, and the branch chip reads it directly — so leaving it
         // out meant the chip confidently named folder A's branch while folder
         // B was selected, which is the exact bug this clear exists to stop,
         // one field short.
@@ -456,18 +460,24 @@ struct LauncherView: View {
         baseRefLabel = nil
         baseCandidates = []
         pickedBaseRef = nil
+        checkouts = .empty
         Task {
-            let base = await Task.detached(priority: .userInitiated) { () -> (String, String)? in
+            async let baseRead = Task.detached(priority: .userInitiated) { () -> (String, String)? in
                 guard let ref = GitWorktree.defaultBaseRef(for: dir) else { return nil }
                 return (ref, GitWorktree.displayBaseRef(ref, for: dir))
             }.value
-            let candidates = await Task.detached(priority: .userInitiated) {
+            async let candidatesRead = Task.detached(priority: .userInitiated) {
                 GitWorktree.baseCandidates(for: dir)
             }.value
+            async let checkoutsRead = Task.detached(priority: .userInitiated) {
+                GitWorktree.checkouts(for: dir)
+            }.value
+            let (base, candidates, found) = await (baseRead, candidatesRead, checkoutsRead)
             if selectedDirectory == dir {
                 baseRef = base?.0
                 baseRefLabel = base?.1
                 baseCandidates = candidates
+                checkouts = found
             }
             let name = await Task.detached(priority: .userInitiated) {
                 // The same reader the status bar uses, so the launcher cannot
@@ -732,12 +742,32 @@ struct LauncherView: View {
         pickedBaseRef?.ref ?? baseRef
     }
 
+    /// The selected folder as `git worktree list` spells it (symlink-resolved),
+    /// so it compares against `checkouts`.
+    private var selectedCheckoutPath: String? {
+        selectedDirectory?.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// The linked worktree the selected folder is in, subfolders included.
+    private var selectedLinkedWorktree: String? {
+        guard let path = selectedCheckoutPath else { return nil }
+        return checkouts.linked.first { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
+    private var isInLinkedWorktree: Bool { selectedLinkedWorktree != nil }
+
     private var worktreeChip: some View {
         Menu {
             Button {
                 startInWorktree = false
+                // From a linked worktree "no worktree" means the main checkout:
+                // keeping the worktree folder left the chip and the choice
+                // disagreeing.
+                if isInLinkedWorktree, let main = checkouts.main {
+                    selectedDirectory = URL(fileURLWithPath: main, isDirectory: true)
+                }
             } label: {
-                Label("Work in this folder", systemImage: startInWorktree ? "" : "checkmark")
+                Label("No worktree", systemImage: startInWorktree || isInLinkedWorktree ? "" : "checkmark")
             }
             Button {
                 startInWorktree = true
@@ -751,12 +781,31 @@ struct LauncherView: View {
             // question in two: the chip that SHOWED the branch could not change
             // it, and the chip that changed it did not show it. It lives on the
             // branch chip now.
+            if !checkouts.linked.isEmpty {
+                // Picking one IS picking its folder: an existing worktree is
+                // just a checkout to work in, so nothing new is cut.
+                Section("Existing worktrees") {
+                    ForEach(checkouts.linked, id: \.self) { path in
+                        Button {
+                            startInWorktree = false
+                            selectedDirectory = URL(fileURLWithPath: path, isDirectory: true)
+                        } label: {
+                            Label(
+                                (path as NSString).lastPathComponent,
+                                systemImage: !startInWorktree && path == selectedLinkedWorktree ? "checkmark" : ""
+                            )
+                        }
+                    }
+                }
+            }
         } label: {
-            ChipLabel(
-                icon: startInWorktree ? "square.on.square.dashed" : "square",
-                text: startInWorktree ? "New worktree" : "No worktree",
-                muted: !startInWorktree
-            )
+            if startInWorktree {
+                ChipLabel(icon: "square.on.square.dashed", text: "New worktree")
+            } else if isInLinkedWorktree {
+                ChipLabel(icon: "square.on.square", text: "Existing worktree")
+            } else {
+                ChipLabel(icon: "square", text: "No worktree", muted: true)
+            }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
