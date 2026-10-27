@@ -6606,8 +6606,10 @@ enum SidebarLogicProbe {
             }
             record("rescue: a recorded origin wins over the one checkout of that name",
                    rescue(managed, ["/r/Canopy"], recorded: "/d/Canopy") == "/d/Canopy")
-            record("rescue: a recorded origin that is no longer a checkout → no namesake instead",
-                   rescue(managed, ["/r/Canopy"], recorded: "/gone/Canopy") == nil)
+            record("rescue: a recorded origin that is no longer a checkout falls back to the one namesake",
+                   rescue(managed, ["/r/Canopy"], recorded: "/gone/Canopy") == "/r/Canopy")
+            record("rescue: a worktree recorded with no checkout (bare repository) → no namesake",
+                   rescue(managed, ["/r/Canopy"], recorded: "") == nil)
             record("rescue: a known checkout opened through a symlink matches by its real name",
                    rescue(managed, ["/alias/Link"], realPath: { $0.path == "/alias/Link" ? "/r/Canopy" : $0.path }) == "/r/Canopy")
             do {

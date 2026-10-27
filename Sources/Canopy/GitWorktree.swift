@@ -139,14 +139,13 @@ enum GitWorktree {
         realPath: (URL) -> String = { realPath(of: $0) },
         recordedOrigin: (URL) -> String? = { recordedOrigin(of: $0) }
     ) -> URL? {
-        // A recorded origin is the answer, or there is none: never a namesake instead.
+        // A recorded origin wins over any namesake; a repository with no checkout has none to reopen in.
         if let recorded = recordedOrigin(dir) {
+            if recorded.isEmpty { return nil }
             let checkout = URL(fileURLWithPath: recorded)
-            guard isCheckout(checkout) else {
-                logger.notice("rescue: recorded checkout \(recorded, privacy: .private) of \(dir.path, privacy: .private) is no longer a checkout")
-                return nil
-            }
-            return URL(fileURLWithPath: realPath(checkout))
+            if isCheckout(checkout) { return URL(fileURLWithPath: realPath(checkout)) }
+            // Moved or re-cloned: fall back to the name, as before origins were recorded.
+            logger.notice("rescue: recorded checkout \(recorded, privacy: .private) of \(dir.path, privacy: .private) is no longer a checkout")
         }
         let standardized = dir.standardizedFileURL
         let parent = standardized.deletingLastPathComponent()
@@ -669,13 +668,9 @@ enum GitWorktree {
     /// when it has one, so `checkoutForRemovedWorktree` can find the checkout again.
     static func worktreeRepository(for repo: URL, timeout: TimeInterval = 5) -> (name: String, checkout: URL?) {
         worktreeRepository(for: repo, worktreeListPorcelainZ: worktreeListPorcelainZ(for: repo, timeout: timeout) ?? "",
-                           isWorkingTree: { hasDotGit(URL(fileURLWithPath: $0)) }, isCheckout: { isMainCheckout(URL(fileURLWithPath: $0)) })
+                           isWorkingTree: { isGitRepo(URL(fileURLWithPath: $0)) }, isCheckout: { isMainCheckout(URL(fileURLWithPath: $0)) })
     }
 
-    /// A working tree holds `.git`, as a folder (main checkout) or a file (linked, separate git dir).
-    static func hasDotGit(_ dir: URL) -> Bool {
-        FileManager.default.fileExists(atPath: dir.appendingPathComponent(".git").path)
-    }
 
     /// The parsing half. The first entry is the main checkout, or a git dir when git
     /// knows no working tree for it (measured): a bare `x.git` or `.bare`, a
@@ -708,12 +703,11 @@ enum GitWorktree {
     /// One key per worktree, so the GUI and the daemon never rewrite each other's records.
     private static func originKey(_ worktreePath: String) -> String { "canopy.worktreeOrigin:" + worktreePath }
 
-    /// Records the main checkout a worktree was cut from (nil clears a stale one),
-    /// so a removed worktree reopens there rather than in any checkout that shares
-    /// its name. Keyed by real path, which is how the CLI records the cwd.
+    /// Records the main checkout a worktree was cut from ("" when it has none,
+    /// e.g. a bare repository), so a removed worktree reopens there rather than in
+    /// any checkout that shares its name. Keyed by real path, as the CLI records the cwd.
     static func recordOrigin(worktree: URL, checkout: URL?, defaults: UserDefaults = .standard) {
-        let key = originKey(realPath(of: worktree))
-        if let checkout { defaults.set(realPath(of: checkout), forKey: key) } else { defaults.removeObject(forKey: key) }
+        defaults.set(checkout.map { realPath(of: $0) } ?? "", forKey: originKey(realPath(of: worktree)))
     }
 
     static func recordedOrigin(of worktree: URL, defaults: UserDefaults = .standard) -> String? {

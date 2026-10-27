@@ -480,7 +480,7 @@ struct LauncherView: View {
             async let checkoutsRead = Task.detached(priority: .userInitiated) { () -> (GitWorktree.Checkouts, String?) in
                 let found = GitWorktree.checkouts(for: dir)
                 let main = found.main.flatMap {
-                    GitWorktree.hasDotGit(URL(fileURLWithPath: $0)) ? $0 : nil
+                    GitWorktree.isGitRepo(URL(fileURLWithPath: $0)) ? $0 : nil
                 }
                 return (found, main)
             }.value
@@ -795,7 +795,8 @@ struct LauncherView: View {
                 // From a linked worktree "no worktree" means the main checkout:
                 // keeping the worktree folder left the chip and the choice
                 // disagreeing.
-                if isInLinkedWorktree, let mainCheckout { selectCheckout(mainCheckout) } else { startInWorktree = false }
+                startInWorktree = false
+                if isInLinkedWorktree, let mainCheckout { selectCheckout(mainCheckout) }
             }
             // With no main checkout to return to (bare repository) the row would do nothing.
             .disabled(isInLinkedWorktree && mainCheckout == nil && !startInWorktree)
