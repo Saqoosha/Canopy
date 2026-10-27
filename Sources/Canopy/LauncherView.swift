@@ -1397,6 +1397,7 @@ struct LauncherView: View {
             }
                 .hidden()
                 .accessibilityHidden(true)
+                .fixedSize()  // measured at its own width, not the 1pt below
                 .frame(width: 1)  // reserve its height only, never its width
             extensionUpdateBanner
         }
@@ -1476,10 +1477,7 @@ struct LauncherView: View {
         .font(.system(size: 12))
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        // Sized by what is in it, up to `bannerMaxWidth`, and as tall as the
-        // wrapped text needs at that width. `frame(maxWidth:)` + `fixedSize`
-        // measured the height at one line and then wrapped at 480pt, so a
-        // long failure message spilled out of the card.
+        // Sized by what is in it, up to `bannerMaxWidth` and the column width.
         .modifier(FitWidthUpTo(maxWidth: Self.bannerMaxWidth))
         // Matched to the composer's own corner and hairline rather than left
         // as a filled 8pt card: at full saturation it was the loudest thing on
@@ -2329,21 +2327,22 @@ extension URL {
     }
 }
 
-/// Content width up to `maxWidth`, ignoring the proposal like the `fixedSize`
-/// it replaces, with the height measured at that width so wrapped text fits.
+/// Content width, capped by `maxWidth` and the proposed width, with the height
+/// measured at that width so wrapped text stays inside.
 private struct FitWidthUpTo: ViewModifier {
     let maxWidth: CGFloat
 
     func body(content: Content) -> some View {
-        Layout(maxWidth: maxWidth) { content }
+        FitWidthLayout(maxWidth: maxWidth) { content }
     }
 
-    private struct Layout: SwiftUI.Layout {
+    private struct FitWidthLayout: Layout {
         let maxWidth: CGFloat
 
         func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
             guard let subview = subviews.first else { return .zero }
-            let width = min(subview.sizeThatFits(.unspecified).width, maxWidth)
+            let ideal = subview.sizeThatFits(.unspecified).width.rounded(.up)
+            let width = min(ideal, maxWidth, proposal.width ?? .infinity)
             let height = subview.sizeThatFits(ProposedViewSize(width: width, height: nil)).height
             return CGSize(width: width, height: height)
         }
