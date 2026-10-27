@@ -9,7 +9,7 @@ struct DaemonConfig: Equatable {
     /// The Tailscale port: `canopy.mirrorPort`, the one the GUI used to listen on, so
     /// every existing pairing (other Macs, the phone) reaches the daemon unchanged.
     var port: Int
-    /// `canopy.slackBridgeEnabled`: this Mac answers Slack threads bound to its sessions.
+    /// `canopy.slackBridgeEnabled`: replies in Slack threads bound to this Mac's sessions reach them.
     /// Off by default. The Worker keeps one socket per Mac name, so several Macs can each turn it on.
     var slackBridgeEnabled = false
 

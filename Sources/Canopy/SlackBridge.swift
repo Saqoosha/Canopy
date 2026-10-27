@@ -3,10 +3,11 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SlackBridge")
 
-/// The daemon's link to the Saqoolaude Worker. Questions asked in a bound Slack
-/// thread arrive as `ask`; each goes into its session through the same queue as
-/// `send_message` with `slackAsker`, and the turn's last reply goes back as
-/// `answer`. Why, and the wire: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
+/// The daemon's link to the Saqoolaude Worker. Each reply in a bound Slack thread
+/// arrives as `reply` and goes into its session through the same queue as
+/// `send_message` with `slackAsker`. Nothing goes back to the thread; a reply that
+/// could not be delivered goes back as `reply_failed`, which the Worker DMs to the
+/// owner. Why, and the wire: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
 ///
 /// The daemon dials out, so nothing on this Mac listens for the Worker.
 @MainActor
@@ -16,7 +17,7 @@ final class SlackBridge {
     static let endpoint = URL(string: "wss://saqoolaude.whatever-co.workers.dev/canopy/connect")!
 
     /// The name this Mac connects under. The Worker keeps one socket per name and sends each
-    /// binding's questions to the Mac that made it, so two Macs no longer replace each other.
+    /// binding's replies to the Mac that made it, so two Macs no longer replace each other.
     nonisolated static func macName(_ raw: String) -> String {
         let kept = raw.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) && $0.isASCII || "._-".unicodeScalars.contains($0) }
         let name = String(String.UnicodeScalarView(kept)).prefix(64)
@@ -32,7 +33,6 @@ final class SlackBridge {
     /// helper, so this process never writes the key anywhere.
     nonisolated static let headersHelper = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/scripts/saqoolaude-mcp-headers.sh")
-    static let answerTimeout: TimeInterval = 30 * 60
     /// Under `ControlClient.requestTimeout`, so the GUI hears which hop failed.
     static let requestTimeout: Duration = .seconds(10)
     /// The Worker closes the older socket with this when a Mac of the same name connects.
@@ -47,11 +47,6 @@ final class SlackBridge {
     private var stopped = false
     /// Why the bridge is not connected, for the GUI's bind request.
     private var lastProblem = "not connected to the Saqoolaude Worker"
-    /// Answers produced while disconnected, sent once a socket is up again.
-    private var outbox: [[String: Any]] = []
-    /// One question per session at a time; later ones wait here, so each answer carries its own gate notes.
-    private var busySessions: Set<String> = []
-    private var waitingAsks: [String: [[String: Any]]] = [:]
 
     init(store: SessionStore) {
         self.store = store
@@ -66,7 +61,7 @@ final class SlackBridge {
         stopped = true
         if Self.current === self { Self.current = nil }
         dropConnection()
-        logger.notice("Slack bridge stopped; \(self.busySessions.count, privacy: .public) question(s) left unanswered")
+        logger.notice("Slack bridge stopped")
     }
 
     // MARK: - Connection
@@ -98,9 +93,6 @@ final class SlackBridge {
             logger.notice("connecting to the Saqoolaude Worker")
             startPing(task)
             receive(task)
-            let pending = outbox
-            outbox.removeAll()
-            for message in pending { sendAnswer(message) }
         }
     }
 
@@ -249,26 +241,6 @@ final class SlackBridge {
         return true
     }
 
-    /// An answer is kept until a socket takes it: one that fails to send goes back in the outbox.
-    private func sendAnswer(_ message: [String: Any]) {
-        guard let task, let text = Self.encode(message) else {
-            outbox.append(message)
-            return
-        }
-        Task { [weak self] in
-            do { try await task.send(.string(text)) } catch {
-                guard let self else { return }
-                // A newer socket may already have flushed the outbox; send there instead of waiting.
-                if let current = self.task, current !== task {
-                    self.sendAnswer(message)
-                } else {
-                    logger.notice("[slack] answer \(message["askId"] as? String ?? "?", privacy: .public) kept for the next connection")
-                    self.outbox.append(message)
-                }
-            }
-        }
-    }
-
     // MARK: - Requests from this Mac (bind, unbind, list)
 
     /// One request to the Worker and its one reply (`bound`, `unbound`, `bindings` or `error`).
@@ -295,8 +267,8 @@ final class SlackBridge {
             logger.error("unreadable frame from the Worker")
             return
         }
-        if type == "ask" {
-            enqueueAsk(message)
+        if type == "reply" {
+            deliver(message)
             return
         }
         guard let requestId = message["requestId"] as? String, let waiter = waiters.removeValue(forKey: requestId) else {
@@ -310,94 +282,36 @@ final class SlackBridge {
         }
     }
 
-    // MARK: - Questions from Slack
+    // MARK: - Replies from Slack
 
-    private func enqueueAsk(_ message: [String: Any]) {
-        guard let askId = message["askId"] as? String else {
-            logger.error("ask frame without an askId")
+    private func deliver(_ message: [String: Any]) {
+        guard let replyId = message["replyId"] as? String,
+              let sessionKey = message["sessionKey"] as? String,
+              let author = message["author"] as? String,
+              let text = message["text"] as? String else {
+            logger.error("reply frame missing a field")
             return
         }
-        guard let sessionKey = message["sessionKey"] as? String,
-              message["asker"] is String, message["text"] is String else {
-            answer(askId, refusal: "the question arrived incomplete")
-            return
+        func failed(_ reason: String) {
+            logger.notice("[slack] reply \(replyId, privacy: .public) not delivered: \(reason, privacy: .public)")
+            var back: [String: Any] = ["type": "reply_failed", "replyId": replyId, "reason": reason]
+            for field in ["channel", "threadTs", "user"] { back[field] = message[field] }
+            _ = send(back)
         }
-        if busySessions.contains(sessionKey) {
-            waitingAsks[sessionKey, default: []].append(message)
-            logger.notice("[slack] question \(askId, privacy: .public) waits for the session's previous one")
-            return
-        }
-        busySessions.insert(sessionKey)
-        handleAsk(askId: askId, sessionKey: sessionKey, asker: message["asker"] as! String, text: message["text"] as! String,
-                  fromOwner: message["owner"] as? Bool == true)
-    }
-
-    private func finishAsk(_ sessionKey: String) {
-        busySessions.remove(sessionKey)
-        guard var queue = waitingAsks[sessionKey], !queue.isEmpty else { return }
-        let next = queue.removeFirst()
-        waitingAsks[sessionKey] = queue.isEmpty ? nil : queue
-        enqueueAsk(next)
-    }
-
-    private func handleAsk(askId: String, sessionKey: String, asker: String, text: String, fromOwner: Bool) {
         guard let session = store.openSession(for: ControlProtocol.slackSessionRefs(sessionKey)), let shim = session.shim else {
-            answer(askId, refusal: "the session is not open on Saqoosha's Mac", session: sessionKey)
-            return
+            return failed("the session is not open on Saqoosha's Mac")
         }
-        let prompt: String
-        switch ControlProtocol.slackDelivery(asker: asker, text: text, fromOwner: fromOwner, isRemote: shim.remoteHost != nil,
-                                             gateReady: shim.slackGateReady, permissionMode: shim.permissionMode) {
+        switch ControlProtocol.slackDelivery(asker: author, text: text, fromOwner: message["owner"] as? Bool == true,
+                                             isRemote: shim.remoteHost != nil, gateReady: shim.slackGateReady,
+                                             permissionMode: shim.permissionMode) {
         case .failure(let why):
-            answer(askId, refusal: why.message, session: sessionKey)
-            return
-        case .success(let marked):
-            prompt = marked
-        }
-        let wire = ControlSession.submitControlMessage(prompt, to: shim)
-        guard wire["ok"] as? Bool == true, let replyId = wire["replyId"] as? String else {
-            answer(askId, refusal: wire["reason"] as? String ?? "the session refused the question", session: sessionKey)
-            return
-        }
-        logger.notice("[slack] \(shim.keepAliveLogLabel, privacy: .public): question \(askId, privacy: .public) delivered (\(wire["disposition"] as? String ?? "?", privacy: .public))")
-        waitForAnswer(askId: askId, sessionKey: sessionKey, replyId: replyId, deadline: Date().addingTimeInterval(Self.answerTimeout))
-    }
-
-    /// Polls like `wait_turn`. A restarted session no longer knows the reply id, which ends the wait.
-    private func waitForAnswer(askId: String, sessionKey: String, replyId: String, deadline: Date) {
-        guard !stopped else { return }
-        guard let shim = store.openSession(for: ControlProtocol.slackSessionRefs(sessionKey))?.shim,
-              let snap = shim.controlTurnSnapshot(replyId: replyId) else {
-            answer(askId, refusal: "the session closed or restarted before it answered", session: sessionKey)
-            return
-        }
-        if snap.turnDone {
-            let reply = (snap.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !reply.isEmpty else {
-                answer(askId, refusal: "the session finished without a reply", session: sessionKey)
-                return
+            failed(why.message)
+        case .success(let prompt):
+            let wire = ControlSession.submitControlMessage(prompt, to: shim)
+            guard wire["ok"] as? Bool == true else {
+                return failed(wire["reason"] as? String ?? "the session refused the reply")
             }
-            let notes = shim.slackTurnNotes
-            var message: [String: Any] = ["type": "answer", "askId": askId, "ok": true, "text": reply, "denied": notes.denied]
-            if let kind = notes.kind { message["kind"] = kind }
-            sendAnswer(message)
-            finishAsk(sessionKey)
-            return
+            logger.notice("[slack] \(shim.keepAliveLogLabel, privacy: .public): reply \(replyId, privacy: .public) delivered (\(wire["disposition"] as? String ?? "?", privacy: .public))")
         }
-        if Date() > deadline {
-            answer(askId, refusal: "the session did not answer within \(Int(Self.answerTimeout / 60)) minutes", session: sessionKey)
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            MainActor.assumeIsolated {
-                self?.waitForAnswer(askId: askId, sessionKey: sessionKey, replyId: replyId, deadline: deadline)
-            }
-        }
-    }
-
-    private func answer(_ askId: String, refusal: String, session sessionKey: String? = nil) {
-        logger.notice("[slack] question \(askId, privacy: .public) refused: \(refusal, privacy: .public)")
-        sendAnswer(["type": "answer", "askId": askId, "ok": false, "reason": refusal])
-        if let sessionKey { finishAsk(sessionKey) }
     }
 }

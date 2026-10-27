@@ -4,7 +4,7 @@ import os
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SlackThreadBinding")
 
 /// The pane menu's Slack items: binds a daemon session to a Slack thread so
-/// people there can ask it read-only questions. The daemon's `SlackBridge` carries the request
+/// every reply there reaches the session. The daemon's `SlackBridge` carries the request
 /// to the Worker. Why: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
 @MainActor
 extension SessionStore {
@@ -17,8 +17,8 @@ extension SessionStore {
         guard let session = openSessions.first(where: { $0.id == id }), canBindSlackThread(session) else { return }
         let alert = NSAlert()
         alert.messageText = "Connect “\(session.title)” to a Slack thread"
-        alert.informativeText = "People in the thread can ask this session questions with @Saqoolaude. "
-            + "It answers by reading only, and each answer reaches the thread after you approve it in Slack."
+        alert.informativeText = "Every reply in the thread reaches this session. Nothing is posted back. "
+            + "Replies from other people run read-only; yours run like a prompt typed here."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
         field.placeholderString = "https://….slack.com/archives/C…/p…"
         alert.accessoryView = field

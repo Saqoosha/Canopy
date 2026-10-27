@@ -132,7 +132,7 @@ final class ControlSession {
         return ControlProtocol.replyWire(disposition, replyId: replyId)
     }
 
-    /// Binding a session to a Slack thread lets other people ask it questions, so only a local
+    /// Binding a session to a Slack thread lets other people's replies reach it, so only a local
     /// client may do it. The Worker holds the bindings; `SlackBridge` relays the request.
     private func slackRequest(_ request: ControlProtocol.Request) {
         guard isLocal else { return fail(request, "local clients only") }
