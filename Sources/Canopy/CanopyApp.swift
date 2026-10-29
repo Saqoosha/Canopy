@@ -433,7 +433,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = MacroPadController(store: store)
         macroPad = controller
         controller.start()
+        let badge = DockBadge(store: store)
+        dockBadge = badge
+        badge.start()
     }
+
+    /// Started alongside `macroPad`, whose unread bookkeeping it reads.
+    private var dockBadge: DockBadge?
 
     /// Publishes this Mac's panes to the roster relay. Created once, on the
     /// first window's `.task`, the same way and for the same reason as
@@ -1248,7 +1254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().delegate = ForegroundNotificationPresenter.shared
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if let error {
                 logger.error("Notification permission error: \(error.localizedDescription)")
             }
