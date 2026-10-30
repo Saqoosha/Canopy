@@ -3,7 +3,8 @@
 Condensed from CLAUDE.md. Full original text: `git show 3b6a198:CLAUDE.md`.
 
 - **Do not re-add recent-folder or session-history lists to the launcher** — the sidebar already lists them.
-- **Put chip styling on the `Menu` (`.chipStyle()`), not its `label:`** — the AppKit cell silently drops background, border and extra images; leave `.menuIndicator` visible.
+- **Menu chips use `chipMenu()` (plain-button menu style), not `.borderlessButton`** — that style hands the label to an AppKit cell that drops background, border and extra images and repaints it in the primary color, so `ChipLabel(muted:)` never showed. `ChipLabel` draws the pill and chevron itself when it labels a menu.
+- **Menu rows that mark a choice use `CheckItem` (a `Toggle`)** — `Label(_, systemImage: "checkmark")` in a menu draws no image.
 - **Chips wrap (`ChipFlowLayout`), never scroll** — a ScrollView slices the last chip in narrow multi-pane launchers.
 - **The branch chip must use `ShimProcess.detectVCSInfo`** — repos are jj-colocated, so a git-only read shows `detached`.
 - **Centre with `composerCenteringInset`, not `.defaultScrollAnchor(.center)`** — a half-point offset makes every control unclickable. Click harnesses need whole-point coordinates.
