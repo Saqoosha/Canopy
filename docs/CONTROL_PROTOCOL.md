@@ -111,8 +111,14 @@ as the session's first turn. When no pane is attached the daemon synthesizes
 `init` then `launch_claude` on channel `canopy-headless`, so the turn runs
 without a webview and a later attach still has a cached init.
 
+`worktreeBranch` creates a worktree of `cwd` on that branch and opens the
+session there. The repo's ignored files (build artifacts, `node_modules`) are
+copied in first, as the launcher does, unless Settings turns that off.
+
 The result is `{sessionId, key, cwd}`, plus `replyId` when `initialPrompt`
 was given. Pass that `replyId` to `wait_turn` to wait for the first answer.
+`seedWarning` is added when the ignored files could not all be copied into
+the worktree, or could not be listed (then none were).
 
 #### Continuing a session
 

@@ -877,6 +877,15 @@ enum GitWorktree {
         return checkoutOfWorktreeRoot(dir, revParse: String(decoding: result.stdout, as: UTF8.self))
     }
 
+    /// The checkout root containing `dir`, or nil when `dir` is not in a work tree.
+    static func topLevel(of dir: URL, timeout: TimeInterval = 5) -> URL? {
+        guard let result = try? runCommand("/usr/bin/git", ["-C", dir.path, "rev-parse", "--show-toplevel"],
+                                           timeout: timeout, wantsStdout: true),
+              result.status == 0 else { return nil }
+        let path = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .newlines)
+        return path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
+    }
+
     /// The parsing half, given `rev-parse --show-toplevel --git-dir --git-common-dir` output.
     static func checkoutOfWorktreeRoot(_ dir: URL, revParse: String) -> URL? {
         let lines = revParse.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
