@@ -79,8 +79,12 @@ extension SessionStore {
         Task { [weak self] in
             guard let self else { return }
             switch await self.slackRequest(route, "slack_bind", params) {
-            case .success:
+            case .success(let result):
                 logger.notice("bound session \(id.uuidString, privacy: .public) to a Slack thread")
+                // Shown now: the refresh below may wait on a slow peer.
+                if let url = Self.slackThreadURL(result), !(self.slackThreadsBySessionKey[session.resumeId]?.contains(url) ?? false) {
+                    self.slackThreadsBySessionKey[session.resumeId, default: []].append(url)
+                }
                 await self.refreshSlackThreads()
             case .failure(let failure):
                 Self.showSlackFailure("Could not connect to the Slack thread (\(failure.message)).")
@@ -143,20 +147,40 @@ extension SessionStore {
     /// whose bridge is off or unreachable contributes nothing: no chip rather than a stale one.
     func refreshSlackThreads() async {
         var routes: [SlackRoute] = []
-        // At launch and after a reconnect the client is not ready yet, and a request then
-        // fails at once; without this wait the chip stays missing until the next minute.
-        if let control = daemonControl, await control.waitUntilReady() { routes.append(.local) }
+        if let control = daemonControl {
+            // At launch and after a reconnect the client is not ready yet, and a request then
+            // fails at once; without this wait the chip stays missing until the next minute.
+            guard await control.waitUntilReady() else { return }
+            routes.append(.local)
+        }
         let peers = Set(openSessions.compactMap { $0.mirrorHostSessionId != nil ? $0.origin.mirrorTarget?.machineId : nil })
         routes += peers.sorted().map { .peer(machineId: $0) }
+        // Concurrently, so one unreachable peer does not hold back every other chip.
+        let lookups = routes.map { route in Task { await self.slackThreadItems(route) } }
         var threads: [String: [URL]] = [:]
-        for route in routes {
-            guard case .success(let result) = await slackRequest(route, "slack_bindings", [:]) else { continue }
-            for item in result["items"] as? [[String: Any]] ?? [] {
-                guard let key = item["sessionKey"] as? String, let url = Self.slackThreadURL(item) else { continue }
-                threads[key, default: []].append(url)
+        for lookup in lookups {
+            // A binding made before the Worker recorded its Mac is listed to every Mac.
+            for item in await lookup.value where !(threads[item.key]?.contains(item.url) ?? false) {
+                threads[item.key, default: []].append(item.url)
             }
         }
         if threads != slackThreadsBySessionKey { slackThreadsBySessionKey = threads }
+    }
+
+    private struct SlackThreadItem: Sendable {
+        let key: String
+        let url: URL
+    }
+
+    /// One route's bindings, or none when it fails.
+    private func slackThreadItems(_ route: SlackRoute) async -> [SlackThreadItem] {
+        guard case .success(let result) = await slackRequest(route, "slack_bindings", [:]) else { return [] }
+        var items: [SlackThreadItem] = []
+        for item in result["items"] as? [[String: Any]] ?? [] {
+            guard let key = item["sessionKey"] as? String, let url = Self.slackThreadURL(item) else { continue }
+            items.append(SlackThreadItem(key: key, url: url))
+        }
+        return items
     }
 
     /// `slack.com/archives/<channel>/p<ts without the dot>` redirects to the signed-in workspace.

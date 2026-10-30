@@ -3748,6 +3748,20 @@ enum SidebarLogicProbe {
             record("stop: an attached mirror can be stopped on its Mac", SessionStore.canStop(attached))
             record("stop: a mirror not yet attached cannot, its id over there is unknown", !SessionStore.canStop(pending))
             record("stop: an SSH remote session only closes", !SessionStore.canStop(ssh))
+            let slackStore = SessionStore()
+            record("slack: an attached mirror can bind a thread on its Mac, a pending mirror or SSH remote cannot",
+                   slackStore.canBindSlackThread(attached) && !slackStore.canBindSlackThread(pending)
+                       && !slackStore.canBindSlackThread(ssh))
+            // A TCP peer (mirror pane, phone) reaches the bridge check; restart_now stays local-only.
+            var tcpSent: [[String: Any]] = []
+            let tcpControl = ControlSession(store: SessionStore(), isLocal: false, allowBypass: { false }) { tcpSent.append($0) }
+            for (id, verb) in [("S1", "slack_bindings"), ("S2", "slack_bind"), ("S3", "slack_unbind"), ("S4", "restart_now")] {
+                tcpControl.handle(["type": "request", "id": id, "verb": verb, "params": [:] as [String: Any]])
+            }
+            func tcpError(_ id: String) -> String? { tcpSent.first { $0["id"] as? String == id }?["error"] as? String }
+            record("slack: a TCP client's Slack verbs are not refused as local-only",
+                   ["S1", "S2", "S3"].allSatisfy { tcpError($0)?.hasPrefix("the Slack bridge is off") == true })
+            record("slack: restart_now still refuses a TCP client", tcpError("S4") == "local clients only")
             record("stop: a wrong password reads like the attach's",
                    PeerControl.Failure.unreachable(refusal: "unauthorized").message(machineName: "studio")
                        == SessionStore.mirrorFailureMessage(reason: "unauthorized", machineName: "studio"))

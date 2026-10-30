@@ -133,9 +133,9 @@ final class ControlSession {
     }
 
     /// Binding a session to a Slack thread lets other people's replies reach it, read-only behind
-    /// the gate. A TCP peer may do it too (a mirror pane, the phone): its token already lets it
-    /// `send_message` with every tool, which is more. The Worker holds the bindings; `SlackBridge`
-    /// relays the request.
+    /// the gate. A TCP peer may bind too (a mirror pane, the phone); its token already allows
+    /// `send_message` with every tool. A binding outlives a password reset until its TTL.
+    /// The Worker holds the bindings; `SlackBridge` relays the request.
     private func slackRequest(_ request: ControlProtocol.Request) {
         guard let bridge = SlackBridge.current else {
             return fail(request, "the Slack bridge is off on this Mac (set canopy.slackBridgeEnabled to true in settings.json)")
