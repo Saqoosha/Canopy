@@ -3752,6 +3752,12 @@ enum SidebarLogicProbe {
             record("slack: an attached mirror can bind a thread on its Mac, a pending mirror or SSH remote cannot",
                    slackStore.canBindSlackThread(attached) && !slackStore.canBindSlackThread(pending)
                        && !slackStore.canBindSlackThread(ssh))
+            let thread = URL(string: "https://slack.com/archives/C1/p1")!
+            slackStore.slackThreadsBySessionKey = ["ra": [thread]]
+            record("slack: this Mac's binding of a resume id is not shown on a mirror with the same id",
+                   slackStore.slackThreads(for: attached).isEmpty)
+            slackStore.slackThreadsBySessionKey = ["M\nra": [thread]]
+            record("slack: the mirror's own Mac's binding is", slackStore.slackThreads(for: attached) == [thread])
             // A TCP peer (mirror pane, phone) reaches the bridge check; restart_now stays local-only.
             var tcpSent: [[String: Any]] = []
             let tcpControl = ControlSession(store: SessionStore(), isLocal: false, allowBypass: { false }) { tcpSent.append($0) }

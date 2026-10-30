@@ -1377,7 +1377,8 @@ final class SessionStore {
     var daemonControl: ControlClient?
 
     /// Slack threads bound to sessions, by the key the binding names (resume id, or an older
-    /// binding's daemon key). Drives the pane header's Slack chip; `refreshSlackThreads()` fills it.
+    /// binding's daemon key), prefixed with the Mac for a mirror's (`slackCacheKey`). Drives the pane
+    /// header's Slack chip; `refreshSlackThreads()` fills it.
     var slackThreadsBySessionKey: [String: [URL]] = [:]
     var slackThreadRefreshStarted = false
 

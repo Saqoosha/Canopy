@@ -116,7 +116,16 @@ extension SessionStore {
 
     /// The thread a session is bound to, if any.
     func slackThreads(for session: OpenSession) -> [URL] {
-        Self.slackKeys(for: session).flatMap { slackThreadsBySessionKey[$0] ?? [] }
+        let route = slackRoute(session)
+        return Self.slackKeys(for: session).flatMap { slackThreadsBySessionKey[Self.slackCacheKey(route, $0)] ?? [] }
+    }
+
+    /// A resume id can exist on two Macs (a relocated session), so the cache keeps each Mac's apart.
+    private static func slackCacheKey(_ route: SlackRoute, _ sessionKey: String) -> String {
+        switch route {
+        case .local: sessionKey
+        case .peer(let machineId): "\(machineId)\n\(sessionKey)"
+        }
     }
 
     /// A binding names its session by resume id, or by daemon key if made before 3.16.6.
@@ -152,10 +161,7 @@ extension SessionStore {
         let lookups = routes.map { route in Task { await self.slackThreadItems(route) } }
         var threads: [String: [URL]] = [:]
         for lookup in lookups {
-            // A binding made before the Worker recorded its Mac is listed to every Mac.
-            for item in await lookup.value where !(threads[item.key]?.contains(item.url) ?? false) {
-                threads[item.key, default: []].append(item.url)
-            }
+            for item in await lookup.value { threads[item.key, default: []].append(item.url) }
         }
         if threads != slackThreadsBySessionKey { slackThreadsBySessionKey = threads }
     }
@@ -171,7 +177,7 @@ extension SessionStore {
         var items: [SlackThreadItem] = []
         for item in result["items"] as? [[String: Any]] ?? [] {
             guard let key = item["sessionKey"] as? String, let url = Self.slackThreadURL(item) else { continue }
-            items.append(SlackThreadItem(key: key, url: url))
+            items.append(SlackThreadItem(key: Self.slackCacheKey(route, key), url: url))
         }
         return items
     }
