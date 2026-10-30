@@ -816,16 +816,11 @@ struct LauncherView: View {
         selectedDirectory = URL(fileURLWithPath: GitWorktree.realPath(of: URL(fileURLWithPath: path)), isDirectory: true)
     }
 
-    /// A menu row with the system checkmark, without an empty SF Symbol name.
-    private func checkRow(_ title: String, checked: Bool, action: @escaping () -> Void) -> some View {
-        Toggle(title, isOn: Binding(get: { checked }, set: { _ in action() }))
-    }
-
     private var isInLinkedWorktree: Bool { selectedLinkedWorktree != nil }
 
     private var worktreeChip: some View {
         Menu {
-            checkRow("No worktree", checked: !startInWorktree && !isInLinkedWorktree) {
+            CheckItem(title: "No worktree", checked: !startInWorktree && !isInLinkedWorktree) {
                 // From a linked worktree "no worktree" means the main checkout:
                 // keeping the worktree folder left the chip and the choice
                 // disagreeing.
@@ -837,7 +832,7 @@ struct LauncherView: View {
             // Just "New worktree": naming from the prompt is the only way it
             // happens now that the hand-typed field is gone, so saying so
             // described the mechanism rather than the choice.
-            checkRow("New worktree", checked: startInWorktree) {
+            CheckItem(title: "New worktree", checked: startInWorktree) {
                 startInWorktree = true
             }
             // The base list used to hang off this menu, which split the
@@ -849,7 +844,7 @@ struct LauncherView: View {
                 // just a checkout to work in, so nothing new is cut.
                 Section("Existing worktrees") {
                     ForEach(checkouts.linked, id: \.self) { path in
-                        checkRow(worktreeTitle(path), checked: !startInWorktree && path == selectedLinkedWorktree) {
+                        CheckItem(title: worktreeTitle(path), checked: !startInWorktree && path == selectedLinkedWorktree) {
                             selectCheckout(path)
                         }
                     }
@@ -1269,7 +1264,7 @@ struct LauncherView: View {
                     if isAnthropicProvider { effortChip }
                     permissionChip
                 }
-                Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 sendButton
             }
             .padding(.horizontal, 10)
@@ -2090,7 +2085,6 @@ struct LauncherView: View {
     private func loadData() {
         ModelProviderStore.migrateIfNeeded()
         providers = ModelProviderStore.load()
-        if !providers.contains(where: { $0.id == selectedProviderId }) { selectedProviderId = "" }
         recentDirectories = RecentDirectories.load()
         savedHosts = SSHHostStore.hosts()
         // No `loadAllSessions()` here any more. Its only consumer was the
