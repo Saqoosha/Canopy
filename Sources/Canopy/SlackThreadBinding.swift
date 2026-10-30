@@ -79,12 +79,8 @@ extension SessionStore {
         Task { [weak self] in
             guard let self else { return }
             switch await self.slackRequest(route, "slack_bind", params) {
-            case .success(let result):
+            case .success:
                 logger.notice("bound session \(id.uuidString, privacy: .public) to a Slack thread")
-                // Shown now: the refresh below may wait on a slow peer.
-                if let url = Self.slackThreadURL(result), !(self.slackThreadsBySessionKey[session.resumeId]?.contains(url) ?? false) {
-                    self.slackThreadsBySessionKey[session.resumeId, default: []].append(url)
-                }
                 await self.refreshSlackThreads()
             case .failure(let failure):
                 Self.showSlackFailure("Could not connect to the Slack thread (\(failure.message)).")
@@ -147,12 +143,9 @@ extension SessionStore {
     /// whose bridge is off or unreachable contributes nothing: no chip rather than a stale one.
     func refreshSlackThreads() async {
         var routes: [SlackRoute] = []
-        if let control = daemonControl {
-            // At launch and after a reconnect the client is not ready yet, and a request then
-            // fails at once; without this wait the chip stays missing until the next minute.
-            guard await control.waitUntilReady() else { return }
-            routes.append(.local)
-        }
+        // At launch and after a reconnect the client is not ready yet, and a request then
+        // fails at once; without this wait the chip stays missing until the next minute.
+        if let control = daemonControl, await control.waitUntilReady() { routes.append(.local) }
         let peers = Set(openSessions.compactMap { $0.mirrorHostSessionId != nil ? $0.origin.mirrorTarget?.machineId : nil })
         routes += peers.sorted().map { .peer(machineId: $0) }
         // Concurrently, so one unreachable peer does not hold back every other chip.
