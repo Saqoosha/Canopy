@@ -20,7 +20,7 @@ Slack thread ──event──▶ Saqoolaude Worker ──WebSocket──▶ can
                           (CanopyBridge DO)   (canopyd から外向きに張る)  (電話の返信と同じキュー)
 ```
 
-- **紐付け**: ペインメニューの「Connect to Slack Thread…」で permalink を貼る。紐付けは Worker の DO が `channel:threadTs` ごとに持つ。中身は session key、セッション名、期限、紐付けた Mac。Canopy の側からしか作れない（control の動詞はローカルのクライアント限定）。
+- **紐付け**: ペインメニューの「Connect to Slack Thread…」で permalink を貼る。紐付けは Worker の DO が `channel:threadTs` ごとに持つ。中身は session key、セッション名、期限、紐付けた Mac。Canopy の側からしか作れない。control の動詞は、別の Mac のミラーペインと電話（トークン認証の TCP）からも使える。そのトークンは `send_message` で全ツールのプロンプトを送れるので、紐付けを許しても権限は増えない（2026-10-30）。
 - **受け付けないセッション**: SSH remote のセッション、門番の `ready` がまだ届いていないセッション、bypass モードのセッション。この 3 つは、紐付けるときも、他人の返信が来たときも拒否する（本人の返信は門番を通らないので、この確認もしない）。
 - **転送**: `canopy.slackBridgeEnabled` が有効な Mac の daemon が、Worker へ WebSocket を張る。認証には Saqoolaude MCP の固定キーを使い、MCP と同じ helper で読む。daemon はホスト名を `?mac=` に付けて接続し、Worker は Mac の名前ごとに 1 本の接続を持つ。紐付けは作った Mac を覚えていて、返信はその Mac に届く。同じ名前の daemon が二重につないだときだけ、前の接続が閉じられる（閉じられた側は再接続しない）。
 - **受信**: 紐付けたスレッドの返信をすべて受け取る。メンションは要らない。bot の発言とスレッドの親メッセージは除く。同じイベントが重なって届いたら 1 回として扱う。

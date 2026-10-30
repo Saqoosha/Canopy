@@ -5,12 +5,51 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "SlackThread
 
 /// The pane menu's Slack items: binds a daemon session to a Slack thread so
 /// every reply there reaches the session. The daemon's `SlackBridge` carries the request
-/// to the Worker. Why: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
+/// to the Worker; a mirror's request goes to the daemon on its own Mac, which runs the
+/// session and its gate. Why: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
 @MainActor
 extension SessionStore {
-    /// Only a session this Mac's daemon runs: the gate and the bridge live there.
+    /// A session this Mac's daemon runs, or a mirror of one on another Mac: the gate and the
+    /// bridge live with the daemon. A mirror only once attached, as for `canStop`.
     func canBindSlackThread(_ session: OpenSession) -> Bool {
-        session.isDaemonHosted && session.daemonKey != nil && daemonControl != nil
+        if session.origin.mirrorTarget != nil { return session.mirrorHostSessionId != nil }
+        return session.isDaemonHosted && session.daemonKey != nil && daemonControl != nil
+    }
+
+    /// Where a session's Slack verbs go: this Mac's daemon, or the mirror's own Mac.
+    private enum SlackRoute: Hashable {
+        case local
+        case peer(machineId: String)
+    }
+
+    private func slackRoute(_ session: OpenSession) -> SlackRoute {
+        if let target = session.origin.mirrorTarget { return .peer(machineId: target.machineId) }
+        return .local
+    }
+
+    /// The daemon's name for the session: a mirror's `key` is its own Mac's id for it.
+    private static func slackRefParams(_ session: OpenSession) -> [String: Any] {
+        guard session.origin.mirrorTarget != nil else { return daemonRefParams(session) }
+        var params: [String: Any] = ["sessionId": session.resumeId]
+        if let key = session.mirrorHostSessionId { params["key"] = key }
+        return params
+    }
+
+    /// Sends a Slack verb along the route; the failure is a phrase for an alert.
+    private func slackRequest(_ route: SlackRoute, _ verb: String, _ params: [String: Any]) async -> Result<[String: Any], SlackFailure> {
+        switch route {
+        case .local:
+            guard let control = daemonControl else { return .failure(SlackFailure("this Mac's session service is not connected")) }
+            return await control.request(verb, params).mapError { SlackFailure(Self.describe($0)) }
+        case .peer(let machineId):
+            let name = remoteRosters[machineId]?.displayName ?? machineId
+            return await PeerControl.request(machineId: machineId, verb, params).mapError { SlackFailure($0.message(machineName: name)) }
+        }
+    }
+
+    private struct SlackFailure: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
     }
 
     func promptSlackThreadBinding(_ id: UUID) {
@@ -32,43 +71,46 @@ extension SessionStore {
     }
 
     func bindSlackThread(_ id: UUID, permalink: String, ttlDays: Int = 7) {
-        guard let session = openSessions.first(where: { $0.id == id }), let control = daemonControl else { return }
-        var params = Self.daemonRefParams(session)
+        guard let session = openSessions.first(where: { $0.id == id }), canBindSlackThread(session) else { return }
+        let route = slackRoute(session)
+        var params = Self.slackRefParams(session)
         params["permalink"] = permalink
         params["ttlDays"] = ttlDays
         Task { [weak self] in
-            switch await control.request("slack_bind", params) {
+            guard let self else { return }
+            switch await self.slackRequest(route, "slack_bind", params) {
             case .success:
                 logger.notice("bound session \(id.uuidString, privacy: .public) to a Slack thread")
-                await self?.refreshSlackThreads()
+                await self.refreshSlackThreads()
             case .failure(let failure):
-                Self.showSlackFailure("Could not connect to the Slack thread (\(Self.describe(failure))).")
+                Self.showSlackFailure("Could not connect to the Slack thread (\(failure.message)).")
             }
         }
     }
 
-    /// Removes the bindings the Worker holds for this session's current daemon key.
+    /// Removes the bindings the Worker holds for this session.
     func unbindSlackThreads(_ id: UUID) {
-        guard let session = openSessions.first(where: { $0.id == id }), let control = daemonControl,
-              session.daemonKey != nil else { return }
+        guard let session = openSessions.first(where: { $0.id == id }), canBindSlackThread(session) else { return }
+        let route = slackRoute(session)
         let keys = Self.slackKeys(for: session)
         Task { [weak self] in
-            let listed = await control.request("slack_bindings", [:])
+            guard let self else { return }
+            let listed = await self.slackRequest(route, "slack_bindings", [:])
             guard case .success(let result) = listed else {
                 if case .failure(let failure) = listed {
-                    Self.showSlackFailure("Could not read the Slack connections (\(Self.describe(failure))).")
+                    Self.showSlackFailure("Could not read the Slack connections (\(failure.message)).")
                 }
                 return
             }
             let items = (result["items"] as? [[String: Any]] ?? []).filter { keys.contains($0["sessionKey"] as? String ?? "") }
             for item in items {
                 guard let channel = item["channel"] as? String, let threadTs = item["threadTs"] as? String else { continue }
-                if case .failure(let failure) = await control.request("slack_unbind", ["channel": channel, "threadTs": threadTs]) {
-                    Self.showSlackFailure("Could not disconnect the Slack thread (\(Self.describe(failure))).")
+                if case .failure(let failure) = await self.slackRequest(route, "slack_unbind", ["channel": channel, "threadTs": threadTs]) {
+                    Self.showSlackFailure("Could not disconnect the Slack thread (\(failure.message)).")
                 }
             }
             logger.notice("unbound \(items.count, privacy: .public) Slack thread(s) from \(id.uuidString, privacy: .public)")
-            await self?.refreshSlackThreads()
+            await self.refreshSlackThreads()
         }
     }
 
@@ -79,7 +121,8 @@ extension SessionStore {
 
     /// A binding names its session by resume id, or by daemon key if made before 3.16.6.
     private static func slackKeys(for session: OpenSession) -> [String] {
-        [session.resumeId.lowercased(), session.resumeId, session.daemonKey].compactMap { $0 }.filter { !$0.isEmpty }
+        [session.resumeId.lowercased(), session.resumeId, session.daemonKey, session.mirrorHostSessionId]
+            .compactMap { $0 }.filter { !$0.isEmpty }
             .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
     }
 
@@ -96,19 +139,22 @@ extension SessionStore {
         }
     }
 
+    /// Reads this Mac's bindings and those of every Mac a mirror pane is attached to. A Mac
+    /// whose bridge is off or unreachable contributes nothing: no chip rather than a stale one.
     func refreshSlackThreads() async {
+        var routes: [SlackRoute] = []
         // At launch and after a reconnect the client is not ready yet, and a request then
         // fails at once; without this wait the chip stays missing until the next minute.
-        guard let control = daemonControl, await control.waitUntilReady() else { return }
-        guard case .success(let result) = await control.request("slack_bindings", [:]) else {
-            // The bridge is off or the Worker is unreachable: show no chip rather than a stale one.
-            if !slackThreadsBySessionKey.isEmpty { slackThreadsBySessionKey = [:] }
-            return
-        }
+        if let control = daemonControl, await control.waitUntilReady() { routes.append(.local) }
+        let peers = Set(openSessions.compactMap { $0.mirrorHostSessionId != nil ? $0.origin.mirrorTarget?.machineId : nil })
+        routes += peers.sorted().map { .peer(machineId: $0) }
         var threads: [String: [URL]] = [:]
-        for item in result["items"] as? [[String: Any]] ?? [] {
-            guard let key = item["sessionKey"] as? String, let url = Self.slackThreadURL(item) else { continue }
-            threads[key, default: []].append(url)
+        for route in routes {
+            guard case .success(let result) = await slackRequest(route, "slack_bindings", [:]) else { continue }
+            for item in result["items"] as? [[String: Any]] ?? [] {
+                guard let key = item["sessionKey"] as? String, let url = Self.slackThreadURL(item) else { continue }
+                threads[key, default: []].append(url)
+            }
         }
         if threads != slackThreadsBySessionKey { slackThreadsBySessionKey = threads }
     }

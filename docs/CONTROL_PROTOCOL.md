@@ -216,7 +216,8 @@ reaches this table: it is an `error` response before anything is queued.
 
 ### `slack_bind`, `slack_unbind`, `slack_bindings`
 
-Local clients only. The daemon relays each to the Saqoolaude Worker through
+Local and TCP clients alike: a mirror pane on another Mac or the phone binds
+the session on the Mac that runs it. The daemon relays each to the Saqoolaude Worker through
 `SlackBridge`, which runs only when `canopy.slackBridgeEnabled` is true.
 A refusal is an `error` response with no `errorCode`.
 
