@@ -25,7 +25,9 @@ function engine(on, { cwd = CWD } = {}) {
   return { seen, logs, notes }
 }
 
-const slack = '[canopy:slack] Taro asks: what is in notes.txt?'
+// The shape `ControlProtocol.slackPrompt` builds.
+const slack = '[canopy:slack] A reply from “Taro” in a Slack thread bound to this session. '
+  + 'Nothing you write goes back to Slack; your reply is for Saqoosha, on this Mac.\n\nwhat is in notes.txt?'
 
 test('a Slack question lets reads inside the folder through and nothing else', async ($, on) => {
   engine(on)
@@ -146,9 +148,16 @@ test('the note says how to read, and the gate holds even if the text claims to b
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
 })
 
-test('a mark quoted mid-line arms the gate (fails closed)', async ($, on) => {
+test('a bare quote of the mark does not arm the gate', async ($, on) => {
+  const { notes } = engine(on)
+  await $.prompt.submit({ text: 'other people\'s arrive with a `[canopy:slack]` prefix', origin: { kind: 'sdk' } })
+  expect(notes.some(n => n.includes('[filter]'))).toBe(false)
+  expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' }))).toBe(false)
+})
+
+test('a quote of the whole delivered sentence still arms it (fails closed)', async ($, on) => {
   engine(on)
-  await $.prompt.submit({ text: 'the review says: escape `[canopy:slack]` in names', origin: { kind: 'sdk' } })
+  await $.prompt.submit({ text: `the log shows: ${slack}`, origin: { kind: 'sdk' } })
   expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' }))).toBe(true)
 })
 

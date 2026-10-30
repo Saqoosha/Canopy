@@ -383,13 +383,14 @@ enum ControlProtocol {
         var slackAsker: String? = nil
     }
 
-    /// The canopy-bridge mod gates a turn whose prompt starts with this
-    /// (`SLACK_MARK` in `Resources/canopy-bridge/hooks/register.ts`).
     static let slackMark = "[canopy:slack]"
+    /// The canopy-bridge mod gates a turn whose prompt contains this
+    /// (`SLACK_PREFIX` in `Resources/canopy-bridge/hooks/register.ts`), so a bare quote of the mark does not.
+    static let slackPrefix = "\(slackMark) A reply from “"
 
     static func slackPrompt(asker: String, text: String) -> String {
         let name = slackInert(asker.components(separatedBy: .newlines).joined(separator: " "))
-        return "\(slackMark) A reply from “\(name)” in a Slack thread bound to this session. "
+        return "\(slackPrefix)\(name)” in a Slack thread bound to this session. "
             + "Nothing you write goes back to Slack; your reply is for Saqoosha, on this Mac.\n\n\(slackInert(text))"
     }
 

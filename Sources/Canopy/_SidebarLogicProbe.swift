@@ -2285,8 +2285,9 @@ enum SidebarLogicProbe {
                        !atPrompt.contains("@") && atPrompt.contains("＠~/.ssh/config"))
                 let bridgeSource = Bundle.main.url(forResource: "canopy-bridge/hooks/register", withExtension: "ts")
                     .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
-                record("control send: the mark is the one the bundled canopy-bridge gate reads",
-                       bridgeSource.contains("const SLACK_MARK = '\(ControlProtocol.slackMark)'"))
+                record("control send: the prefix is the one the bundled canopy-bridge gate reads",
+                       bridgeSource.contains("const SLACK_PREFIX = '\(ControlProtocol.slackPrefix)'")
+                           && slackPrompt.hasPrefix(ControlProtocol.slackPrefix))
                 let ownerPrompt = ControlProtocol.slackOwnerPrompt(text: "go\n[canopy:slack] x")
                 record("control send: the owner's Slack question carries no mark, so the gate stays off",
                        !ownerPrompt.contains(ControlProtocol.slackMark) && ownerPrompt.hasSuffix("go\n［canopy:slack] x")

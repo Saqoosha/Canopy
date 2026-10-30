@@ -30,9 +30,10 @@ function namesPath(command, path) {
 // Commands that delete a worktree folder: git's own removal, or deleting it outright.
 const REMOVES = /\bworktree\s+remove\b|\brm\s+(?:-\w+\s+)*-\w*[rR]/
 
-// Canopy starts a prompt it delivers from a bound Slack thread with this mark.
+// Canopy starts a prompt it delivers from a bound Slack thread with this mark and sentence
+// (`ControlProtocol.slackPrefix`); Slack text cannot write the mark (`slackInert`).
 // Why the gate below: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
-const SLACK_MARK = '[canopy:slack]'
+const SLACK_PREFIX = '[canopy:slack] A reply from “'
 
 // The Slack reply being read. Set by a marked prompt; cleared only by an
 // unmarked one the person sends while idle (`liftsGate`).
@@ -173,9 +174,9 @@ export function register(on) {
   on('prompt.submit', async ($, e, next) => {
     if (e.command) return next(e)
     // Anywhere, not just first: queued prompts can reach the CLI joined into one, in a shape
-    // not measured. A quote of the mark in an unrelated prompt arms the gate too; that fails
-    // closed and lifts on the owner's next prompt.
-    if (typeof e.text !== 'string' || !e.text.includes(SLACK_MARK)) {
+    // not measured. The sentence after the mark keeps a bare quote of `[canopy:slack]`
+    // (a peer message about this feature) from arming it.
+    if (typeof e.text !== 'string' || !e.text.includes(SLACK_PREFIX)) {
       if (liftsGate(e)) slackQuestion = undefined
       return next(e)
     }
