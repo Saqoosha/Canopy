@@ -132,10 +132,11 @@ final class ControlSession {
         return ControlProtocol.replyWire(disposition, replyId: replyId)
     }
 
-    /// Binding a session to a Slack thread lets other people's replies reach it, so only a local
-    /// client may do it. The Worker holds the bindings; `SlackBridge` relays the request.
+    /// Binding a session to a Slack thread lets other people's replies reach it, read-only behind
+    /// the gate. A TCP peer may bind too (a mirror pane, the phone); its token already allows
+    /// `send_message` with every tool. A binding outlives a password reset until its TTL.
+    /// The Worker holds the bindings; `SlackBridge` relays the request.
     private func slackRequest(_ request: ControlProtocol.Request) {
-        guard isLocal else { return fail(request, "local clients only") }
         guard let bridge = SlackBridge.current else {
             return fail(request, "the Slack bridge is off on this Mac (set canopy.slackBridgeEnabled to true in settings.json)")
         }
