@@ -183,7 +183,7 @@ Params: `key` and/or `sessionId`, required `text` (trimmed; blank is
 (`"attachments are not supported"`). Omit attachments.
 
 Optional `slackAsker`: the name of someone who wrote `text` as a reply in a
-bound Slack thread. The daemon prefixes the text with `[canopy:slack]` and the asker, turns
+bound Slack thread. The daemon prefixes the text with `ControlProtocol.slackPrefix` and the asker, turns
 every `@` into `＠` (an `@path` would attach the file without a tool call), and
 the canopy-bridge mod then holds the session to read-only tools (see
 `docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md`). A blank
