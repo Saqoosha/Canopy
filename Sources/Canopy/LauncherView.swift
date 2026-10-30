@@ -18,8 +18,18 @@ private struct ChipLabel: View {
     /// Middle truncation rather than tail: the ends of a branch name carry more
     /// than its middle ("fix-…-counts" beats "fix-issue-one-hundred-…").
     var maxTextWidth: CGFloat = 150
+    @Environment(\.chipIsMenu) private var isMenu
 
     var body: some View {
+        if isMenu {
+            // Inside the label so the whole pill is the plain button's hit area.
+            content.chipStyle()
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
@@ -29,6 +39,12 @@ private struct ChipLabel: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: maxTextWidth, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+            if isMenu {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .padding(.leading, -2)
+                    .accessibilityHidden(true)
+            }
         }
         // ---------------------------------------------------------------- 5.
         // Pinned, because SF Symbols do not share an intrinsic height: the
@@ -38,6 +54,21 @@ private struct ChipLabel: View {
         // on every state change.
         .frame(height: 16)
         .foregroundStyle(muted ? Color.secondary : Color.primary)
+    }
+}
+
+/// A menu row that carries the system checkmark when `checked`.
+///
+/// A `Button` labelled `Label(_, systemImage: "checkmark")` draws no image in
+/// these menus, so every chip's current choice went unmarked. A `Toggle` is
+/// the item macOS renders with its own state mark.
+private struct CheckItem: View {
+    let title: String
+    let checked: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Toggle(title, isOn: Binding(get: { checked }, set: { _ in action() }))
     }
 }
 
@@ -111,21 +142,33 @@ private struct ChipFlowLayout: Layout {
     }
 }
 
+private extension EnvironmentValues {
+    @Entry var chipIsMenu = false
+}
+
 private extension View {
+    /// A chip that opens a menu.
+    ///
+    /// `.borderlessButton` hands the label to AppKit, which repaints it in the
+    /// primary color, so `ChipLabel`'s `muted` never showed. A plain button keeps SwiftUI
+    /// drawing the label, at the cost of the system menu indicator, which
+    /// `ChipLabel` draws itself instead, along with the pill.
+    func chipMenu() -> some View {
+        menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .environment(\.chipIsMenu, true)
+            .fixedSize()
+    }
+
     /// The pill every context chip and composer control wears.
     ///
-    /// Applied to the `Menu`, never to its label — see `ChipLabel`. Kept as
-    /// one modifier so the row cannot drift a point out of alignment between
+    /// Kept as one modifier so the row cannot drift a point out of alignment between
     /// chips, which is exactly what happened when each carried its own padding.
     func chipStyle() -> some View {
         // All three numbers are optical, and the asymmetry is the point: an SF
         // Symbol's ink sits inset inside its layout box, so the same metric
-        // padding reads as MORE space on the icon side than beside text, and
-        // macOS reserves its own trailing room for the menu indicator on top of
-        // whatever is set here. So the leading side comes in from 10, and the
-        // trailing side comes in further still when an indicator is present.
-        // A pill with no menu keeps the wider trailing value, because there
-        // its right edge is text — tight ink, and 5 would crowd it.
+        // padding reads as MORE space on the icon side than beside text.
         padding(.leading, 8)
             .padding(.trailing, 5)
             .padding(.vertical, 5)
@@ -641,9 +684,7 @@ struct LauncherView: View {
                 muted: isRemoteMode ? remoteDirectory.isEmpty : selectedDirectory == nil
             )
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
         .help(isRemoteMode ? remoteDirectory : (selectedDirectory?.abbreviatingWithTilde ?? "No folder chosen"))
         .sheet(isPresented: $showCloneSheet) {
             CloneRepoSheet { cloned in
@@ -682,27 +723,20 @@ struct LauncherView: View {
                 // marked — the picker offers the choice without asking a
                 // question it can answer itself.
                 ForEach(baseCandidates) { candidate in
-                    Button {
+                    // No "(recommended)" marker: the default IS the
+                    // recommendation, and it opens already checked, so the
+                    // word only annotated the row the checkmark was on.
+                    CheckItem(title: candidate.name, checked: isSelectedBase(candidate)) {
                         // Choosing the recommended entry clears the override
                         // rather than pinning it, so a later folder change
                         // still moves the default with it.
                         pickedBaseRef = (candidate.name == baseRefLabel) ? nil : candidate
-                    } label: {
-                        // No "(recommended)" marker: the default IS the
-                        // recommendation, and it opens already checked, so the
-                        // word only annotated the row the checkmark was on.
-                        Label(
-                            candidate.name,
-                            systemImage: isSelectedBase(candidate) ? "checkmark" : ""
-                        )
                     }
                 }
             } label: {
                 ChipLabel(icon: "arrow.triangle.branch", text: branchChipText)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .chipStyle()
+            .chipMenu()
             .help(branchChipHelp)
         } else {
             // Without one it is a fact, not a control: Canopy does not switch
@@ -830,26 +864,20 @@ struct LauncherView: View {
                 ChipLabel(icon: "square", text: "No worktree", muted: true)
             }
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
     }
 
     private var locationChip: some View {
         Menu {
-            Button {
+            CheckItem(title: "This Mac", checked: !isRemoteMode && selectedPeer == nil) {
                 isRemoteMode = false
                 peerMachineId = nil
-            } label: {
-                Label("This Mac", systemImage: isRemoteMode || selectedPeer != nil ? "" : "checkmark")
             }
             if !pairedPeers.isEmpty {
                 Section("Other Macs") {
                     ForEach(pairedPeers, id: \.machineId) { peer in
-                        Button {
+                        CheckItem(title: peer.title, checked: selectedPeer?.machineId == peer.machineId) {
                             selectPeer(peer)
-                        } label: {
-                            Label(peer.title, systemImage: selectedPeer?.machineId == peer.machineId ? "checkmark" : "")
                         }
                     }
                 }
@@ -857,12 +885,10 @@ struct LauncherView: View {
             if !savedHosts.isEmpty {
                 Section("SSH") {
                     ForEach(savedHosts, id: \.self) { host in
-                        Button {
+                        CheckItem(title: host, checked: isRemoteMode && selectedPeer == nil && remoteHost == host) {
                             remoteHost = host
                             isRemoteMode = true
                             peerMachineId = nil
-                        } label: {
-                            Label(host, systemImage: isRemoteMode && selectedPeer == nil && remoteHost == host ? "checkmark" : "")
                         }
                     }
                 }
@@ -872,6 +898,9 @@ struct LauncherView: View {
                 peerMachineId = nil
                 showRemoteSetup = true
             }
+            // Web sessions are this Mac's; the other Mac lists its own.
+            Button("Claude Code on the Web…") { Task { await toggleWebSessions() } }
+                .disabled(selectedPeer != nil)
         } label: {
             if let peer = selectedPeer {
                 ChipLabel(icon: "laptopcomputer", text: peer.title)
@@ -883,9 +912,7 @@ struct LauncherView: View {
                 )
             }
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
         .sheet(isPresented: $showRemoteSetup) { remoteSetupSheet }
     }
 
@@ -1011,9 +1038,7 @@ struct LauncherView: View {
                 muted: peerFolder == nil
             )
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
         .help(peerFolder ?? "No folder chosen")
         .sheet(isPresented: $showPeerBrowser) {
             RemoteDirectoryBrowser(source: .peer(machineId: peer.machineId, title: peer.title)) { path in
@@ -1033,7 +1058,7 @@ struct LauncherView: View {
         return Menu {
             // Without this row the chip offered only Resume, and a new session read as impossible.
             Section {
-                Label("New session", systemImage: "checkmark")
+                CheckItem(title: "New session", checked: true) {}.disabled(true)
             }
             if sessions.isEmpty {
                 Text(store.remoteRecentsError[peer.machineId]
@@ -1054,9 +1079,7 @@ struct LauncherView: View {
         } label: {
             ChipLabel(icon: "plus.bubble", text: "New session", muted: true)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
     }
 
     /// `MirrorRecents.Session.project` is "Project" or "Project · branch".
@@ -1117,20 +1140,14 @@ struct LauncherView: View {
 
     private var continueChip: some View {
         Menu {
-            Button {
+            CheckItem(title: "New session", checked: !willContinueSession) {
                 continueSession = false
-            } label: {
-                Label("New session", systemImage: willContinueSession ? "" : "checkmark")
             }
-            Button {
+            CheckItem(title: willCreateWorktree
+                          ? "Continue — not with a new worktree"
+                          : "Continue the latest session",
+                      checked: willContinueSession) {
                 continueSession = true
-            } label: {
-                Label(
-                    willCreateWorktree
-                        ? "Continue — not with a new worktree"
-                        : "Continue the latest session",
-                    systemImage: willContinueSession ? "checkmark" : ""
-                )
             }
             // Disabled rather than hidden: a row that vanishes reads as a bug,
             // and the point is to say WHY the two cannot combine.
@@ -1142,9 +1159,7 @@ struct LauncherView: View {
                 muted: !willContinueSession
             )
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
     }
 
     /// Whether this launch will actually resume something.
@@ -1246,12 +1261,14 @@ struct LauncherView: View {
                 }
                 .onDisappear { removePasteMonitor() }
 
-            HStack(spacing: 5) {
-                // Provider and account are this Mac's; the other Mac uses its own.
-                moreMenu.disabled(selectedPeer != nil)
-                modelChip
-                if isAnthropicProvider { effortChip }
-                permissionChip
+            HStack(alignment: .bottom, spacing: 5) {
+                ChipFlowLayout(spacing: 5, lineSpacing: 5) {
+                    // The provider is this Mac's; the other Mac uses its own.
+                    if !providers.isEmpty && selectedPeer == nil { providerChip }
+                    modelChip
+                    if isAnthropicProvider { effortChip }
+                    permissionChip
+                }
                 Spacer(minLength: 8)
                 sendButton
             }
@@ -1306,104 +1323,67 @@ struct LauncherView: View {
         .disabled(isCreatingWorktree || isResolvingRemoteSession)
     }
 
-    /// Everything that is neither context nor a model setting.
-    ///
-    /// Mirrors the `+` both reference apps put in the same corner: the drawer
-    /// for actions that would each otherwise want a chip of their own and are
-    /// reached once a week rather than once a session.
-    private var moreMenu: some View {
+    /// Only shown once a provider exists: with none, Anthropic is the only
+    /// answer and a chip for it would be a setting with nothing to set.
+    private var providerChip: some View {
         Menu {
-            if !providers.isEmpty {
-                Section("Provider") {
-                    Button {
-                        selectedProviderId = ""
-                    } label: {
-                        Label("Anthropic (default)",
-                              systemImage: selectedProviderId.isEmpty ? "checkmark" : "")
-                    }
-                    ForEach(providers) { provider in
-                        Button {
-                            selectedProviderId = provider.id
-                        } label: {
-                            Label(provider.name,
-                                  systemImage: selectedProviderId == provider.id ? "checkmark" : "")
-                        }
-                    }
-                }
-                Divider()
+            CheckItem(title: "Anthropic (default)", checked: isAnthropicProvider) { selectedProviderId = "" }
+            ForEach(providers) { provider in
+                CheckItem(title: provider.name, checked: selectedProviderId == provider.id) { selectedProviderId = provider.id }
             }
-            Button("Claude Code on the Web…") { Task { await toggleWebSessions() } }
         } label: {
-            Image(systemName: "plus")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
+            ChipLabel(icon: "server.rack",
+                      text: providers.first { $0.id == selectedProviderId }?.name ?? "Anthropic",
+                      muted: isAnthropicProvider)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .chipMenu()
     }
 
     private var modelChip: some View {
         Menu {
-            Button { model = "" } label: {
-                Label("Auto", systemImage: model.isEmpty ? "checkmark" : "")
-            }
+            CheckItem(title: "Auto", checked: model.isEmpty) { model = "" }
             ForEach(Self.modelOptions.dropFirst(), id: \.self) { alias in
-                Button { model = alias } label: {
-                    Label(Self.modelDisplayName(alias), systemImage: model == alias ? "checkmark" : "")
-                }
+                CheckItem(title: Self.modelDisplayName(alias), checked: model == alias) { model = alias }
             }
         } label: {
             ChipLabel(icon: "sparkle",
                       text: model.isEmpty ? "Auto" : Self.modelDisplayName(model),
                       muted: model.isEmpty)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
     }
 
     private var effortChip: some View {
         Menu {
-            Button { effortLevel = "" } label: {
-                Label("Auto", systemImage: effortLevel.isEmpty ? "checkmark" : "")
-            }
+            CheckItem(title: "Auto", checked: effortLevel.isEmpty) { effortLevel = "" }
             ForEach(Self.effortOptions.dropFirst(), id: \.self) { level in
-                Button { effortLevel = level } label: {
-                    Label(Self.effortDisplayName(level), systemImage: effortLevel == level ? "checkmark" : "")
-                }
+                CheckItem(title: Self.effortDisplayName(level), checked: effortLevel == level) { effortLevel = level }
             }
         } label: {
             ChipLabel(icon: "gauge.with.dots.needle.33percent",
                       text: effortLevel.isEmpty ? "Auto" : Self.effortDisplayName(effortLevel),
                       muted: effortLevel.isEmpty)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
     }
 
     private var permissionChip: some View {
         Menu {
             ForEach(visiblePermissionModes, id: \.rawValue) { mode in
-                Button { permissionModeRaw = mode.rawValue } label: {
-                    Label(mode.displayName, systemImage: permissionModeRaw == mode.rawValue ? "checkmark" : "")
+                CheckItem(title: mode.displayName, checked: permissionModeRaw == mode.rawValue) {
+                    permissionModeRaw = mode.rawValue
                 }
             }
             if CanopySettings.shared.allowDangerouslySkipPermissions {
-                Button { permissionModeRaw = PermissionMode.bypassPermissions.rawValue } label: {
-                    Label(PermissionMode.bypassPermissions.displayName,
-                          systemImage: permissionModeRaw == PermissionMode.bypassPermissions.rawValue ? "checkmark" : "")
+                CheckItem(title: PermissionMode.bypassPermissions.displayName,
+                          checked: permissionModeRaw == PermissionMode.bypassPermissions.rawValue) {
+                    permissionModeRaw = PermissionMode.bypassPermissions.rawValue
                 }
             }
         } label: {
             ChipLabel(icon: "lock.shield", text: resolvedPermission.displayName)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .chipStyle()
+        .chipMenu()
     }
 
     /// The one control that is a button rather than a menu.
@@ -2110,6 +2090,7 @@ struct LauncherView: View {
     private func loadData() {
         ModelProviderStore.migrateIfNeeded()
         providers = ModelProviderStore.load()
+        if !providers.contains(where: { $0.id == selectedProviderId }) { selectedProviderId = "" }
         recentDirectories = RecentDirectories.load()
         savedHosts = SSHHostStore.hosts()
         // No `loadAllSessions()` here any more. Its only consumer was the
