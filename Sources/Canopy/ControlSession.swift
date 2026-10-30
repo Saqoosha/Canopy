@@ -514,17 +514,44 @@ final class ControlSession {
             fail(request, error.message)
             return
         }
-        var directory = URL(fileURLWithPath: params.cwd, isDirectory: true)
-        if let branch = params.worktreeBranch {
-            do {
-                directory = try GitWorktree.createWorktree(repo: directory, branch: branch,
-                                                           baseRef: GitWorktree.defaultBaseRef(for: directory))
-            } catch {
+        let directory = URL(fileURLWithPath: params.cwd, isDirectory: true)
+        guard let branch = params.worktreeBranch else {
+            return startOpenedSession(request, params, directory: directory)
+        }
+        // Off main: the checkout and the seed both shell out or walk the repo, and the
+        // seed can take seconds on a cold clone. Seeded before the session starts, as
+        // the launcher does, so the first turn does not race the copy.
+        let seed = CanopySettings.shared.seedWorktreeArtifacts
+        // Strong self: once the worktree exists the session starts even if the client left,
+        // so it is reachable from the GUI rather than orphaned; `reply` is a no-op when stopped.
+        Task { @MainActor in
+            let outcome = await Task.detached(priority: .userInitiated) {
+                Result { try Self.prepareWorktree(repo: directory, branch: branch, seed: seed) }
+            }.value
+            switch outcome {
+            case .success(let (worktree, report)):
+                startOpenedSession(request, params, directory: worktree, seedWarning: report?.failureNotice)
+            case .failure(let error):
                 logger.error("control open_session: worktree failed: \(error.localizedDescription, privacy: .public)")
                 fail(request, "worktree failed: \(error.localizedDescription)")
-                return
             }
         }
+    }
+
+    /// Creates the worktree, then copies the repo's ignored files in when `seed` is on. Blocking.
+    nonisolated static func prepareWorktree(repo: URL, branch: String, seed: Bool,
+                                            root: URL = GitWorktree.worktreesRoot,
+                                            defaults: UserDefaults = .standard) throws -> (URL, GitWorktree.SeedReport?) {
+        let worktree = try GitWorktree.createWorktree(repo: repo, branch: branch,
+                                                      baseRef: GitWorktree.defaultBaseRef(for: repo),
+                                                      root: root, defaults: defaults)
+        guard seed else { return (worktree, nil) }
+        // From the checkout root: ls-files paths are relative to the dir it runs in, a subfolder `cwd` included.
+        return (worktree, GitWorktree.seedIgnoredFiles(repo: GitWorktree.topLevel(of: repo) ?? repo, worktree: worktree))
+    }
+
+    private func startOpenedSession(_ request: ControlProtocol.Request, _ params: ControlProtocol.OpenParams,
+                                    directory: URL, seedWarning: String? = nil) {
         // A placeholder the CLI's id replaces once a turn has run; follow-ups should use `key`.
         let sessionId = UUID().uuidString.lowercased()
         let options = SessionStore.HeadlessOptions(model: params.model, effort: params.effort,
@@ -540,6 +567,7 @@ final class ControlSession {
         // The prompt is stored on the session; nothing sends it until a
         // `launch_claude` assigns a channel. A control open has no webview.
         var result: [String: Any] = ["sessionId": sessionId, "key": session.id.uuidString, "cwd": directory.path]
+        if let seedWarning { result["seedWarning"] = seedWarning }
         if session.pendingInitialPrompt != nil {
             let replyId = UUID().uuidString.lowercased()
             session.pendingInitialPromptReplyId = replyId

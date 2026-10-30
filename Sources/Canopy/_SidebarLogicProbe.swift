@@ -6550,6 +6550,28 @@ enum SidebarLogicProbe {
                 try? FileManager.default.createDirectory(at: root.appendingPathComponent("Repo/taken"), withIntermediateDirectories: true)
                 record("worktree branch: a destination folder already taken gets a suffix",
                        GitWorktree.uniqueBranchName("taken", in: repo, root: root) == "taken-2")
+
+                // A control-socket open seeds the new worktree from the repo, and only when the setting is on.
+                let seeded = tmp.appendingPathComponent("Seeded", isDirectory: true)
+                try? FileManager.default.createDirectory(at: seeded, withIntermediateDirectories: true)
+                git(seeded, ["init", "-q"])
+                try? "deps/\n".write(to: seeded.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+                git(seeded, ["add", ".gitignore"])
+                git(seeded, ["-c", "user.name=p", "-c", "user.email=p@p", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "i"])
+                try? FileManager.default.createDirectory(at: seeded.appendingPathComponent("deps"), withIntermediateDirectories: true)
+                try? "x".write(to: seeded.appendingPathComponent("deps/lib.js"), atomically: true, encoding: .utf8)
+                let on = try? ControlSession.prepareWorktree(repo: seeded, branch: "on", seed: true, root: root, defaults: defaults)
+                let off = try? ControlSession.prepareWorktree(repo: seeded, branch: "off", seed: false, root: root, defaults: defaults)
+                let hasDeps = { (w: URL?) in w.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent("deps/lib.js").path) } }
+                record("control worktree: seeded with the repo's ignored files when on, untouched when off",
+                       hasDeps(on?.0) == true && on?.1?.cloned == 1 && on?.1?.failureNotice == nil
+                           && hasDeps(off?.0) == false && off?.1 == nil,
+                       "on=\(on?.1?.summary ?? "nil") off=\(off.map { $0.1?.summary ?? "no report" } ?? "nil")")
+                let pkg = seeded.appendingPathComponent("pkg", isDirectory: true)
+                try? FileManager.default.createDirectory(at: pkg, withIntermediateDirectories: true)
+                let fromSub = try? ControlSession.prepareWorktree(repo: pkg, branch: "sub", seed: true, root: root, defaults: defaults)
+                record("control worktree: a subfolder cwd still seeds from the checkout root",
+                       hasDeps(fromSub?.0) == true, "got=\(fromSub?.1?.summary ?? "nil")")
             }
 
             let porcelain = "worktree /r/Canopy\0HEAD abc\0branch refs/heads/main\0\0worktree /h/wt/fix\0HEAD def\0detached\0\0"
