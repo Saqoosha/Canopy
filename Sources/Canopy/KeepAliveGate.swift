@@ -113,7 +113,7 @@ struct KeepAliveGate: Equatable {
     /// `ShimProcess.noteApiActivity` and `ShimProcess.trackCacheWindow`.
     private(set) var lastActivityAt: Date?
 
-    /// Stamped only by what a person did: a submitted prompt or a remote
+    /// Stamped by a submitted prompt (a launch prompt included) or a remote
     /// permission decision. Never by a request inside a turn, so neither a
     /// refresh nor a `/loop` wakeup moves it. `maxUserIdle` runs from here.
     private(set) var lastUserActivityAt: Date?
@@ -124,16 +124,16 @@ struct KeepAliveGate: Equatable {
     /// probe.
     private(set) var sentCount = 0
 
-    /// Never moves the stamp backwards. Its callers read two different
-    /// clocks — `Date()` at the call site, or the coordinator's captured
-    /// tick time — so without this the stamp could regress by the skew
-    /// between them and grant an early refresh.
     /// A request started inside a turn (`message_start`): it re-arms the
     /// cache window but says nothing about the user being here.
     mutating func noteRequestStarted(at date: Date) {
         noteActivity(at: date, byUser: false)
     }
 
+    /// Never moves the stamp backwards. Its callers read two different
+    /// clocks — `Date()` at the call site, or the coordinator's captured
+    /// tick time — so without this the stamp could regress by the skew
+    /// between them and grant an early refresh.
     mutating func noteActivity(at date: Date, byUser: Bool = true) {
         lastActivityAt = max(lastActivityAt ?? date, date)
         if byUser { lastUserActivityAt = max(lastUserActivityAt ?? date, date) }

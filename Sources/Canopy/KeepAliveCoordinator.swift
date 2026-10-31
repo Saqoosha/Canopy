@@ -165,14 +165,9 @@ final class KeepAliveCoordinator {
 
         let now = Date()
         let interval = Self.interval
-        // **A blocking ceiling has to be able to unblock itself.** Quota
-        // percentages only move when a turn talks to the API, and this gate
-        // exists precisely for sessions that are not doing that — so once
-        // the quota percent crosses the ceiling while the user is away, nothing
-        // ever lowers it again and the feature stays off for the rest of the
-        // night even after its window resets. Reading an elapsed
-        // reset date as a fresh window (`keepAliveQuotaPct`) is what
-        // releases it.
+        // Quota percentages only move on API traffic, so an elapsed reset
+        // date reads as an empty window (`keepAliveQuotaPct`); otherwise a
+        // ceiling hit would outlive the window it was measured in.
         //
         // The state this is wrong in: the reset time has passed but the
         // server has not actually rolled the window over, so one refresh

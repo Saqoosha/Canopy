@@ -13593,6 +13593,9 @@ enum SidebarLogicProbe {
             quota.weeklyResetDate = quotaNow.addingTimeInterval(-1)
             record("keep-alive quota: an elapsed weekly window reads as empty",
                    quota.keepAliveQuotaPct(now: quotaNow) == 0)
+            quota.weeklyResetDate = nil
+            record("keep-alive quota: a weekly window with no reset date is still read (Ultra)",
+                   quota.keepAliveQuotaPct(now: quotaNow) == 95)
 
             // Roster wire: the no-5-hour flag is optional, sessionPct stays.
             let ultraRoster = RosterSnapshot(machineId: "M", displayName: "m", publishedAt: 0, sessionPct: 0, weeklyPct: 5,

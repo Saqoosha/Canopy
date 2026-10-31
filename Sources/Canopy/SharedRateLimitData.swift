@@ -435,7 +435,8 @@ final class RateLimitAccount {
     /// ceiling hit while nobody is talking to the API can release itself.
     func keepAliveQuotaPct(now: Date) -> Int {
         if hasNoSessionWindow {
-            return weeklyResetDate.map { $0 <= now } ?? true ? 0 : weeklyPct
+            let elapsed = weeklyResetDate.map { $0 <= now } ?? false
+            return elapsed ? 0 : weeklyPct
         }
         let elapsed = sessionResetDate.map { $0 <= now } ?? false
         return elapsed ? 0 : sessionPct
