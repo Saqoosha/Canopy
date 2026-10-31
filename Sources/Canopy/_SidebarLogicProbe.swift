@@ -8192,8 +8192,14 @@ enum SidebarLogicProbe {
                    gate.ineligibilityReason(now: t0.addingTimeInterval(interval - 1), interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
             record("KeepAliveGate permits exactly at the interval",
                    gate.ineligibilityReason(now: t0.addingTimeInterval(interval), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
-            record("KeepAliveGate permits past the interval",
-                   gate.ineligibilityReason(now: t0.addingTimeInterval(interval * 2), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+            let lifetime = KeepAliveGate.cacheLifetime
+            record("KeepAliveGate permits up to the cache lifetime",
+                   gate.ineligibilityReason(now: t0.addingTimeInterval(lifetime - 1), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+            record("KeepAliveGate declines once the cache has expired",
+                   gate.ineligibilityReason(now: t0.addingTimeInterval(lifetime), interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("expired") == true)
+            record("keep-alive interval lands before the CLI's idle compaction (0.9 of the 1h TTL)",
+                   KeepAliveGate.defaultInterval < lifetime * 0.9)
 
             // --- The rate-limit ceiling, both sides
             let due = t0.addingTimeInterval(interval)
@@ -8310,6 +8316,40 @@ enum SidebarLogicProbe {
                    sent.ineligibilityReason(now: due, interval: interval, rateLimitPct: 0, hasCustomApi: false) != nil)
             record("KeepAliveGate comes due again one interval after the refresh",
                    sent.ineligibilityReason(now: due.addingTimeInterval(interval), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+
+            // --- Refreshes stop maxUserIdle after the user's own last activity
+            var away = KeepAliveGate()
+            away.noteActivity(at: t0)
+            let cap = KeepAliveGate.maxUserIdle
+            var lastRefresh = t0
+            while lastRefresh.addingTimeInterval(interval) < t0.addingTimeInterval(cap) {
+                lastRefresh = lastRefresh.addingTimeInterval(interval)
+                away.noteKeepAliveSent(at: lastRefresh)
+            }
+            record("KeepAliveGate does not count its own refresh as the user's activity",
+                   away.lastUserActivityAt == t0 && away.lastActivityAt == lastRefresh)
+            let nextDue = lastRefresh.addingTimeInterval(interval)
+            record("KeepAliveGate declines once the user has been away for the cap",
+                   nextDue.timeIntervalSince(t0) >= cap
+                   && away.ineligibilityReason(now: nextDue, interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("away") == true)
+            away.noteRequestStarted(at: nextDue.addingTimeInterval(-60))
+            record("KeepAliveGate does not count a request inside a turn as the user's activity",
+                   away.lastUserActivityAt == t0)
+            record("KeepAliveGate keeps declining when only requests inside turns arrive",
+                   away.ineligibilityReason(now: nextDue.addingTimeInterval(interval), interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("away") == true)
+            var edge = KeepAliveGate()
+            edge.noteActivity(at: t0)
+            edge.noteRequestStarted(at: t0.addingTimeInterval(cap - interval - 1))
+            record("KeepAliveGate permits a refresh one second inside the cap",
+                   edge.ineligibilityReason(now: t0.addingTimeInterval(cap - 1), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+            record("KeepAliveGate declines exactly at the cap",
+                   edge.ineligibilityReason(now: t0.addingTimeInterval(cap), interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("away") == true)
+            record("KeepAliveGate reports an expired cache ahead of the user being away",
+                   edge.ineligibilityReason(now: t0.addingTimeInterval(cap * 3), interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("expired") == true)
 
             // --- isKeepAliveEcho: the swallow's only handle on "this turn
             // is ours". A keep-alive turn has an ordinary model id, so
@@ -13515,6 +13555,59 @@ enum SidebarLogicProbe {
             fiveHourOnly.updateFromRawUsage(["five_hour": ["utilization": 3, "resets_at": "2026-09-21T14:13:20Z"]])
             record("mirror usage: one window is enough to send",
                    fiveHourOnly.rawUsagePayload() != nil)
+            let ultra = RateLimitAccount(label: "probe-ultra")
+            ultra.updateFromRawUsage(["five_hour": ["utilization": 30, "resets_at": "2026-09-21T14:13:20Z"]])
+            ultra.updateFromRawUsage(["five_hour": NSNull()])
+            record("raw usage: a null 5-hour window alone keeps the previous one",
+                   ultra.sessionPct == 30 && ultra.sessionResetDate != nil && !ultra.hasNoSessionWindow)
+            ultra.updateFromRawUsage(["five_hour": NSNull(), "seven_day": ["utilization": 5, "resets_at": "2026-09-26T05:20:00Z"]])
+            record("raw usage: a null 5-hour window beside a weekly one clears it (Ultra)",
+                   ultra.sessionPct == 0 && ultra.sessionResetDate == nil && ultra.weeklyResetDate != nil
+                   && ultra.hasNoSessionWindow)
+            let ultraCopy = RateLimitAccount(label: "probe-ultra-copy")
+            ultra.rawUsagePayload().map(ultraCopy.updateFromRawUsage)
+            record("mirror usage: an account without a 5-hour window stays so on the copy",
+                   ultraCopy.hasNoSessionWindow && ultraCopy.sessionResetDate == nil)
+            let notStarted = RateLimitAccount(label: "probe-not-started")
+            notStarted.updateFromRawUsage(["five_hour": ["utilization": 0, "resets_at": NSNull()],
+                                           "seven_day": ["utilization": 95, "resets_at": "2026-09-26T05:20:00Z"]])
+            record("raw usage: a 5-hour window that has not started is not read as Ultra",
+                   !notStarted.hasNoSessionWindow)
+
+            // Keep-alive quota: the weekly window stands in when there is no 5-hour one.
+            let quotaNow = Date()
+            let quota = RateLimitAccount(label: "probe-quota")
+            quota.sessionPct = 30; quota.sessionResetDate = quotaNow.addingTimeInterval(3600)
+            quota.weeklyPct = 95; quota.weeklyResetDate = quotaNow.addingTimeInterval(86400)
+            record("keep-alive quota: the 5-hour window is read when present",
+                   quota.keepAliveQuotaPct(now: quotaNow) == 30)
+            quota.sessionResetDate = quotaNow.addingTimeInterval(-1)
+            record("keep-alive quota: an elapsed 5-hour window reads as empty",
+                   quota.keepAliveQuotaPct(now: quotaNow) == 0)
+            quota.sessionPct = 0; quota.sessionResetDate = nil
+            record("keep-alive quota: a 5-hour window with no reset date is still the one read",
+                   quota.keepAliveQuotaPct(now: quotaNow) == 0)
+            quota.hasNoSessionWindow = true
+            record("keep-alive quota: without a 5-hour window the weekly one is read (Ultra)",
+                   quota.keepAliveQuotaPct(now: quotaNow) == 95)
+            quota.weeklyResetDate = quotaNow.addingTimeInterval(-1)
+            record("keep-alive quota: an elapsed weekly window reads as empty",
+                   quota.keepAliveQuotaPct(now: quotaNow) == 0)
+            quota.weeklyResetDate = nil
+            record("keep-alive quota: a weekly window with no reset date is still read (Ultra)",
+                   quota.keepAliveQuotaPct(now: quotaNow) == 95)
+
+            // Roster wire: the no-5-hour flag is optional, sessionPct stays.
+            let ultraRoster = RosterSnapshot(machineId: "M", displayName: "m", publishedAt: 0, sessionPct: 0, weeklyPct: 5,
+                                             panes: [], hasSessionWindow: false)
+            let ultraJSON = (try? JSONEncoder().encode(ultraRoster))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            record("roster wire: an account without a 5-hour window says so, and still sends sessionPct",
+                   ultraJSON?["hasSessionWindow"] as? Bool == false && ultraJSON?["sessionPct"] as? Int == 0)
+            let olderRoster = try? JSONDecoder().decode(RosterSnapshot.self, from: Data(
+                #"{"machineId":"M","displayName":"m","publishedAt":0,"sessionPct":1,"weeklyPct":2,"panes":[]}"#.utf8))
+            record("roster wire: a snapshot without the flag still decodes",
+                   olderRoster != nil && olderRoster?.hasSessionWindow == nil)
             source.updateFromRawUsage(["model_scoped": NSNull()])
             source.rawUsagePayload().map(copy.updateFromRawUsage)
             record("mirror usage: an emptied per-model list clears the copy",

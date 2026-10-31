@@ -17,31 +17,16 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeepAlive")
 /// 5.1. Canopy sessions run whatever model the user picked, so 20x is the
 /// figure to reason with and 80x is the best case, not the rule.
 ///
-/// Either way one small turn every 55 minutes is far cheaper than letting
-/// the window lapse: the break-even is ~20 refreshes, so roughly a day of
-/// being kept warm costs what a single miss would have. Leaving a session
-/// overnight and returning to it is cheaper with this on, and the conclusion
-/// needs no tuning even though the exact multiple does.
+/// Either way one small turn every 50 minutes is far cheaper than letting
+/// the window lapse — for a few hours. The CLI's idle compaction (one
+/// summary, then a smaller context) is cheaper than an hourly refresh past
+/// about four, so refreshing stops at `KeepAliveGate.maxUserIdle` and the
+/// pane is left to it.
 ///
-/// **The multiple does not describe the FIRST refresh after a lapse.** The
-/// gate declines while the cache is fresh; it never declines because the
-/// cache is hopelessly stale, and `DispatchQueue.main.asyncAfter` does not
-/// fire while the Mac is asleep. So the first tick after a lid-close sees
-/// hours of elapsed time and sends a refresh into a window that lapsed long
-/// ago — a full cache WRITE, not a hit, once per sleep/wake cycle per pane.
-/// That write is not extra in the usual case: the user's own next turn would
-/// have paid it anyway, and paying it early leaves the prefix warm. It IS
-/// wasted on a wake where that pane is never used.
-///
-/// Declining past the TTL is the obvious guard and is deliberately not
-/// applied, because its wrong state is easy to name: `lastActivityAt` only
-/// advances while something is talking to the API — a real turn's requests,
-/// a sent refresh, a remote permission decision — so a pane declined for being
-/// too stale would be declined forever after a single long sleep, and the
-/// feature would switch itself off permanently for anyone who closes the
-/// lid. Fixing that needs a stamp-on-decline, which is the optimistic-stamp
-/// trap this feature has already been bitten by twice. Recorded rather than
-/// patched.
+/// A cache already past its lifetime is never refreshed: after a sleep the
+/// refresh would be a full write for a pane that may never be used. The pane
+/// stays declined until the user's next turn there, which pays that write
+/// anyway and restarts the clock.
 ///
 /// **There is a cheaper technique Canopy cannot reach.** Anthropic documents
 /// re-sending the previous request with `max_tokens: 0`, which re-arms the
@@ -52,17 +37,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeepAlive")
 /// turn and a few output tokens, rather than a preference.
 ///
 /// **Scope is the open panes (in the daemon, sessions with an attached
-/// client — `targets`), and that is the whole stopping rule.**
-/// There is deliberately no elapsed-time cap, because time is the wrong
-/// axis: a refresh only wastes money on a session the user never comes back
-/// to, and an hour count says nothing about that. A time cap would also
-/// misfire precisely where the feature pays best — set it at six hours and
-/// an overnight absence, the case worth the most, is abandoned four hours
-/// before the user returns, while every short absence never reaches the cap
-/// at all. "Is it on screen, in a running Canopy" is the user's own
-/// standing answer to "am I coming back to this", expressed by a gesture
-/// they already make: closing the pane stops the refreshes, and quitting
-/// stops all of them. Nothing new has to be learned or configured.
+/// client — `targets`).** Closing the pane stops its refreshes and quitting
+/// stops all of them; within that scope `maxUserIdle` is the time limit.
 ///
 /// **"Open", not "on screen" — a hidden window still counts, deliberately.**
 /// A reviewer read the earlier wording ("visible panes") as a contract this
@@ -91,13 +67,13 @@ final class KeepAliveCoordinator {
 
     /// How often eligibility is re-examined. Independent of the refresh
     /// interval: this is the granularity with which a session that just
-    /// came due is noticed, so it bounds how far past 55 minutes a refresh
-    /// can land. One minute against five minutes of margin.
+    /// came due is noticed, so it bounds how far past 50 minutes a refresh
+    /// can land. One minute against the four before the CLI's idle compaction.
     private static let tickInterval: TimeInterval = 60
 
     /// `CANOPY_KEEPALIVE_MINUTES` overrides the refresh interval so the
-    /// feature can be exercised without a 55-minute wait per attempt. It can
-    /// lengthen it as well as shorten it. Clamped to ≥1 minute — below that
+    /// feature can be exercised without a 50-minute wait per attempt. At or
+    /// past `KeepAliveGate.cacheLifetime` nothing is ever sent. Clamped to ≥1 minute — below that
     /// the tick cadence, not the setting, would decide when it fires, which
     /// makes the override look broken rather than fast; the clamp says so in
     /// the log rather than silently substituting a different number.
@@ -189,13 +165,9 @@ final class KeepAliveCoordinator {
 
         let now = Date()
         let interval = Self.interval
-        // **A blocking ceiling has to be able to unblock itself.** Quota
-        // percentages only move when a turn talks to the API, and this gate
-        // exists precisely for sessions that are not doing that — so once
-        // `sessionPct` crosses the ceiling while the user is away, nothing
-        // ever lowers it again and the feature stays off for the rest of the
-        // night even after the five-hour window resets. Reading an elapsed
-        // `sessionResetDate` as a fresh window is what releases it.
+        // Quota percentages only move on API traffic, so an elapsed reset
+        // date reads as an empty window (`keepAliveQuotaPct`); otherwise a
+        // ceiling hit would outlive the window it was measured in.
         //
         // The state this is wrong in: the reset time has passed but the
         // server has not actually rolled the window over, so one refresh
@@ -214,8 +186,7 @@ final class KeepAliveCoordinator {
             // 20 s after spawn, when `channelId` and `lastActivityAt` keep
             // the gate shut anyway.
             let limits = shim.rateLimitAccount ?? SharedRateLimitData.shared.local
-            let quotaWindowElapsed = limits.sessionResetDate.map { $0 <= now } ?? false
-            let rateLimitPct = quotaWindowElapsed ? 0 : limits.sessionPct
+            let rateLimitPct = limits.keepAliveQuotaPct(now: now)
             // Debug, not info: unlike the recap's once-per-return fan-out
             // this runs every minute per pane, so a per-pane info line
             // would be the loudest thing in the log by two orders of

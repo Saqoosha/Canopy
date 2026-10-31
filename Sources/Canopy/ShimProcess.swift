@@ -1106,12 +1106,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // turns' frames would be misattributed between the latch and the
         // trackers. A due keep-alive is
         // most likely exactly when this fires: a reply arrives after the
-        // 55-minute idle window that made the refresh due in the first place.
+        // 50-minute idle window that made the refresh due in the first place.
         if phoneReplyInFlight { return "phone reply in flight" }
         // **A raised hand is an IDLE state, and a refresh would answer it.**
         // `isWorking` is false while the model waits for a permission
         // decision or an AskUserQuestion reply, so without this the user
-        // walks away from a question and, 55 minutes later, Canopy submits
+        // walks away from a question and, 50 minutes later, Canopy submits
         // `[Canopy keep-alive] …` as the answer. The model replies, the
         // question is consumed, and both turns are hidden live and
         // stripped from replay — so the user returns to a transcript showing
@@ -1123,7 +1123,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if lastAssistantHadAskUserQuestion { return "session is awaiting a user answer" }
         // Both flags mean "awaiting a TRACKED answer", not "awaiting a
         // human" in general: a model that ends its turn with a plain-text
-        // question sets neither, and a refresh 55 minutes later is answered
+        // question sets neither, and a refresh 50 minutes later is answered
         // "OK" into a context the user cannot see. Nothing is destroyed
         // there — no pending request is consumed and their next message
         // still lands — so it is recorded rather than guarded against.
@@ -1263,7 +1263,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Without this stamp a 30-minute turn was declared stale 30 minutes
     /// before it was, costing one refresh per long turn. The frame arrives
     /// one time-to-first-token after the request started, which puts the
-    /// estimate late by seconds against a five-minute margin.
+    /// estimate late by seconds against a four-minute margin.
     private func trackCacheWindow(_ message: [String: Any]) {
         switch Self.cacheWindowReading(message) {
         case .requestStarted:
@@ -1276,7 +1276,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // it, so a contended turn loses its per-request stamps too —
             // the safe direction, costing at most one early refresh.
             guard !recapRequestInFlight else { return }
-            noteApiActivity()
+            keepAliveGate.noteRequestStarted(at: Date())
         case .usage(let reading):
             let before = keepAliveGate.observedTTL
             keepAliveGate.noteObservedTTL(reading)
@@ -4071,7 +4071,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // at a turn's END (`noteApiActivity` carries the reason why).
             // Stamping here also
             // keeps the gate honest while a long turn streams: without it
-            // that session would read as "no activity for 55 minutes" and be
+            // that session would read as "no activity for 50 minutes" and be
             // declined only by the `isWorking` check, one condition deep.
             noteApiActivity()
             if keepAliveInFlight {

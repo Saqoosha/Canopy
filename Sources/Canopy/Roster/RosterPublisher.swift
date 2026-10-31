@@ -604,7 +604,8 @@ final class RosterPublisher {
             publishedAt: now,
             sessionPct: limits.sessionPct,
             weeklyPct: limits.weeklyPct,
-            panes: rows.sorted { $0.paneIndex < $1.paneIndex })
+            panes: rows.sorted { $0.paneIndex < $1.paneIndex },
+            hasSessionWindow: !limits.hasNoSessionWindow)
     }
 
     private func publish() {

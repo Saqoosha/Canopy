@@ -143,6 +143,10 @@ final class RateLimitAccount {
     // 5hr session rate limit
     var sessionPct: Int = 0
     var sessionResetDate: Date?
+    /// The server said this account has no 5-hour window (`five_hour: null`
+    /// beside `seven_day`, verified Ultra). A nil `sessionResetDate` alone
+    /// does not mean that: a window that has not started has no reset either.
+    var hasNoSessionWindow = false
 
     // 7-day all-models rate limit
     var weeklyPct: Int = 0
@@ -255,6 +259,7 @@ final class RateLimitAccount {
 
     func update(from utilization: [String: Any]) {
         if let entry = utilization["fiveHour"] as? [String: Any] {
+            hasNoSessionWindow = false
             sessionPct = entry["utilization"].map { Self.parseUtilization($0) } ?? 0
             sessionResetDate = (entry["resetsAt"] as? String).flatMap { Self.parseISO8601($0) }
         }
@@ -284,13 +289,18 @@ final class RateLimitAccount {
     /// malformed raw payload must not zero a bar or blank the whole
     /// sidebar Usage section (whose visibility keys off the reset dates).
     func updateFromRawUsage(_ rateLimits: [String: Any]) {
-        // five_hour and seven_day: always-present windows for authenticated
-        // accounts. If the outer type ever drifts (server ships a null or
-        // wrong shape) the bars silently keep their last value forever with
-        // no discoverable signal — warn on wrong-type so the drift is
-        // findable via the RateLimit log category.
+        // A wrong-type window keeps its last value and warns, so schema drift
+        // is findable via the RateLimit log category. `five_hour: null`
+        // beside a `seven_day` window is not drift: the account has no
+        // 5-hour window (verified Ultra), the shape the extension's own
+        // `get_usage` transform also reads as "no window".
         if let entry = rateLimits["five_hour"] as? [String: Any] {
+            hasNoSessionWindow = false
             applyRawWindow(entry, label: "five_hour", pct: &sessionPct, reset: &sessionResetDate)
+        } else if rateLimits["five_hour"] is NSNull, rateLimits["seven_day"] is [String: Any] {
+            hasNoSessionWindow = true
+            sessionPct = 0
+            sessionResetDate = nil
         } else if let value = rateLimits["five_hour"], !(value is NSNull) {
             logger.warning("raw usage five_hour: unexpected type (\(String(describing: value), privacy: .public)); keeping previous")
         }
@@ -404,7 +414,7 @@ final class RateLimitAccount {
             return entry
         }
         var payload: [String: Any] = [
-            "five_hour": window(sessionPct, sessionResetDate),
+            "five_hour": hasNoSessionWindow ? NSNull() : window(sessionPct, sessionResetDate),
             "seven_day": window(weeklyPct, weeklyResetDate),
             "model_scoped": modelScoped.map { scoped -> [String: Any] in
                 var entry = window(scoped.pct, scoped.resetDate)
@@ -416,6 +426,20 @@ final class RateLimitAccount {
             payload["seven_day_sonnet"] = window(weeklyPctSonnet, weeklyResetDateSonnet)
         }
         return payload
+    }
+
+    /// The percent the keep-alive quota ceiling compares: the 5-hour window,
+    /// or the weekly one on an account that has no 5-hour window (verified
+    /// Ultra), where the 5-hour percent would stay 0 and the ceiling would
+    /// never apply. An elapsed reset date reads as an empty window, so a
+    /// ceiling hit while nobody is talking to the API can release itself.
+    func keepAliveQuotaPct(now: Date) -> Int {
+        if hasNoSessionWindow {
+            let elapsed = weeklyResetDate.map { $0 <= now } ?? false
+            return elapsed ? 0 : weeklyPct
+        }
+        let elapsed = sessionResetDate.map { $0 <= now } ?? false
+        return elapsed ? 0 : sessionPct
     }
 
     /// Whether a new session on this account would be refused, read off the

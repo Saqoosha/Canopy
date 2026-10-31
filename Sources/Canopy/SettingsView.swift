@@ -190,7 +190,7 @@ private struct GeneralSettingsTab: View {
                 Toggle("Keep idle sessions' cache warm", isOn: $settings.keepAliveEnabled)
                 Toggle("Copy ignored build files into new worktrees", isOn: $settings.seedWorktreeArtifacts)
             } footer: {
-                SettingsFooter(text: "Every 55 minutes, each open pane that has gone quiet sends a short message and gets a one-word reply, so its conversation stays cached. Rebuilding a lapsed cache costs about 20x more than keeping one warm, so returning to a session left overnight is cheaper with this on. Each refresh stays in that conversation's history. Close a pane to stop refreshing it."
+                SettingsFooter(text: "Every 50 minutes, each open pane that has gone quiet sends a short message and gets a one-word reply, so its conversation stays cached. Rebuilding a lapsed cache costs about 20x more than keeping one warm. Refreshing stops 4 hours after your last message in that pane; after that, Claude Code's idle compaction summarizes a long conversation instead. Each refresh stays in that conversation's history. Close a pane to stop refreshing it."
                     )
             }
 
