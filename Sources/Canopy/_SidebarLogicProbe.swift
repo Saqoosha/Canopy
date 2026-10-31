@@ -8333,14 +8333,23 @@ enum SidebarLogicProbe {
                    nextDue.timeIntervalSince(t0) >= cap
                    && away.ineligibilityReason(now: nextDue, interval: interval, rateLimitPct: 0, hasCustomApi: false)?
                        .contains("away") == true)
-            away.noteActivity(at: nextDue.addingTimeInterval(-60), byUser: false)
-            record("KeepAliveGate keeps declining when only non-user activity arrives",
+            away.noteRequestStarted(at: nextDue.addingTimeInterval(-60))
+            record("KeepAliveGate does not count a request inside a turn as the user's activity",
+                   away.lastUserActivityAt == t0)
+            record("KeepAliveGate keeps declining when only requests inside turns arrive",
                    away.ineligibilityReason(now: nextDue.addingTimeInterval(interval), interval: interval, rateLimitPct: 0, hasCustomApi: false)?
                        .contains("away") == true)
-            var back = KeepAliveGate()
-            back.noteActivity(at: t0.addingTimeInterval(cap - interval))
-            record("KeepAliveGate permits a refresh due just inside the cap",
-                   back.ineligibilityReason(now: t0.addingTimeInterval(cap), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+            var edge = KeepAliveGate()
+            edge.noteActivity(at: t0)
+            edge.noteRequestStarted(at: t0.addingTimeInterval(cap - interval - 1))
+            record("KeepAliveGate permits a refresh one second inside the cap",
+                   edge.ineligibilityReason(now: t0.addingTimeInterval(cap - 1), interval: interval, rateLimitPct: 0, hasCustomApi: false) == nil)
+            record("KeepAliveGate declines exactly at the cap",
+                   edge.ineligibilityReason(now: t0.addingTimeInterval(cap), interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("away") == true)
+            record("KeepAliveGate reports an expired cache ahead of the user being away",
+                   edge.ineligibilityReason(now: t0.addingTimeInterval(cap * 3), interval: interval, rateLimitPct: 0, hasCustomApi: false)?
+                       .contains("expired") == true)
 
             // --- isKeepAliveEcho: the swallow's only handle on "this turn
             // is ours". A keep-alive turn has an ordinary model id, so
@@ -13550,10 +13559,20 @@ enum SidebarLogicProbe {
             ultra.updateFromRawUsage(["five_hour": ["utilization": 30, "resets_at": "2026-09-21T14:13:20Z"]])
             ultra.updateFromRawUsage(["five_hour": NSNull()])
             record("raw usage: a null 5-hour window alone keeps the previous one",
-                   ultra.sessionPct == 30 && ultra.sessionResetDate != nil)
+                   ultra.sessionPct == 30 && ultra.sessionResetDate != nil && !ultra.hasNoSessionWindow)
             ultra.updateFromRawUsage(["five_hour": NSNull(), "seven_day": ["utilization": 5, "resets_at": "2026-09-26T05:20:00Z"]])
             record("raw usage: a null 5-hour window beside a weekly one clears it (Ultra)",
-                   ultra.sessionPct == 0 && ultra.sessionResetDate == nil && ultra.weeklyResetDate != nil)
+                   ultra.sessionPct == 0 && ultra.sessionResetDate == nil && ultra.weeklyResetDate != nil
+                   && ultra.hasNoSessionWindow)
+            let ultraCopy = RateLimitAccount(label: "probe-ultra-copy")
+            ultra.rawUsagePayload().map(ultraCopy.updateFromRawUsage)
+            record("mirror usage: an account without a 5-hour window stays so on the copy",
+                   ultraCopy.hasNoSessionWindow && ultraCopy.sessionResetDate == nil)
+            let notStarted = RateLimitAccount(label: "probe-not-started")
+            notStarted.updateFromRawUsage(["five_hour": ["utilization": 0, "resets_at": NSNull()],
+                                           "seven_day": ["utilization": 95, "resets_at": "2026-09-26T05:20:00Z"]])
+            record("raw usage: a 5-hour window that has not started is not read as Ultra",
+                   !notStarted.hasNoSessionWindow)
 
             // Keep-alive quota: the weekly window stands in when there is no 5-hour one.
             let quotaNow = Date()
@@ -13566,6 +13585,9 @@ enum SidebarLogicProbe {
             record("keep-alive quota: an elapsed 5-hour window reads as empty",
                    quota.keepAliveQuotaPct(now: quotaNow) == 0)
             quota.sessionPct = 0; quota.sessionResetDate = nil
+            record("keep-alive quota: a 5-hour window with no reset date is still the one read",
+                   quota.keepAliveQuotaPct(now: quotaNow) == 0)
+            quota.hasNoSessionWindow = true
             record("keep-alive quota: without a 5-hour window the weekly one is read (Ultra)",
                    quota.keepAliveQuotaPct(now: quotaNow) == 95)
             quota.weeklyResetDate = quotaNow.addingTimeInterval(-1)

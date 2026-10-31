@@ -76,7 +76,7 @@ struct RosterSnapshot: Codable, Equatable {
     let panes: [Pane]
     /// False when the account has a weekly window but no 5-hour one
     /// (verified Ultra), so the phone hides its 5h meter instead of showing
-    /// 0%. Optional and added after `sessionPct`, which stays required on
+    /// 0%. Optional and newer than `sessionPct`, which stays required on
     /// the wire: a phone that predates this field still decodes the roster.
     var hasSessionWindow: Bool? = nil
 

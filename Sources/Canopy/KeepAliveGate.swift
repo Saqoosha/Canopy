@@ -9,13 +9,13 @@ import Foundation
 /// the gate is written as "why not" rather than "may I" — declining too
 /// often costs one cache miss the user would have paid anyway, while
 /// permitting too often bills a model call per session per interval,
-/// forever, on a machine nobody is sitting at.
+/// until `maxUserIdle`, on a machine nobody is sitting at.
 struct KeepAliveGate: Equatable {
     /// How long after the last API activity a refresh is worth buying.
     ///
     /// The window being defended is the CLI's 1-hour prompt-cache TTL
     /// (`ttl:"1h", reason:"subscriber"`, read out of the bundled CLI
-    /// 2.1.258). Five minutes of margin covers what the stamp cannot see:
+    /// 2.1.258). The margin to it covers what the stamp cannot see:
     /// `lastActivityAt` is set at submission and at each request's
     /// `message_start`, which lands one time-to-first-token after the
     /// request actually started, plus one tick of the coordinator's own
@@ -27,11 +27,10 @@ struct KeepAliveGate: Equatable {
     /// stop refreshing, this feature becomes pure cost and should be
     /// deleted rather than retuned.
     ///
-    /// 50 rather than 55 minutes because the CLI's idle compaction (2.1.299+,
-    /// in VS Code hosts from 2.1.314) summarizes a 200K+ conversation at 0.9
-    /// of the TTL after its last request — 54 minutes on a 1-hour window. A
-    /// refresh that lands first re-arms that timer too, so compaction only
-    /// runs once this feature stops (`maxUserIdle`) and then takes over.
+    /// 50 minutes because the CLI's idle compaction (always on from 2.1.314)
+    /// summarizes a 200K+ conversation at 0.9 of the TTL — 54 minutes. A
+    /// refresh that lands first re-arms that timer, so compaction runs only
+    /// once refreshes stop.
     static let defaultInterval: TimeInterval = 50 * 60
 
     /// The prompt-cache lifetime the refresh defends. Past it the entry is
@@ -40,10 +39,9 @@ struct KeepAliveGate: Equatable {
     /// sleep 13.5 hours after its last refresh.
     static let cacheLifetime: TimeInterval = 60 * 60
 
-    /// Stop refreshing this long after the user's last own turn. Past about
-    /// four hours an hourly refresh costs more than the CLI's idle compaction
-    /// (one summary, then a smaller context to rewrite), so the session is
-    /// left to that instead.
+    /// Stop refreshing this long after the user's last submission. Measured
+    /// on a 620K-token session, four hours of refreshes cost about what one
+    /// idle compaction does (a summary plus the smaller context's rewrite).
     static let maxUserIdle: TimeInterval = 4 * 60 * 60
 
     /// Skip the refresh once the 5-hour window (the weekly one on an account
@@ -115,8 +113,9 @@ struct KeepAliveGate: Equatable {
     /// `ShimProcess.noteApiActivity` and `ShimProcess.trackCacheWindow`.
     private(set) var lastActivityAt: Date?
 
-    /// `lastActivityAt` minus the refreshes: the last activity a person
-    /// caused. `maxUserIdle` is measured from here.
+    /// Stamped only by what a person did: a submitted prompt or a remote
+    /// permission decision. Never by a request inside a turn, so neither a
+    /// refresh nor a `/loop` wakeup moves it. `maxUserIdle` runs from here.
     private(set) var lastUserActivityAt: Date?
 
     /// Refreshes ATTEMPTED on this shim — `requestKeepAlive` stamps it at
@@ -129,6 +128,12 @@ struct KeepAliveGate: Equatable {
     /// clocks — `Date()` at the call site, or the coordinator's captured
     /// tick time — so without this the stamp could regress by the skew
     /// between them and grant an early refresh.
+    /// A request started inside a turn (`message_start`): it re-arms the
+    /// cache window but says nothing about the user being here.
+    mutating func noteRequestStarted(at date: Date) {
+        noteActivity(at: date, byUser: false)
+    }
+
     mutating func noteActivity(at date: Date, byUser: Bool = true) {
         lastActivityAt = max(lastActivityAt ?? date, date)
         if byUser { lastUserActivityAt = max(lastUserActivityAt ?? date, date) }

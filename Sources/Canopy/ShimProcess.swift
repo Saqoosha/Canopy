@@ -1195,8 +1195,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// is one extra refresh; the cost of being late is the miss this exists
     /// to prevent. `trackCacheWindow` closes most of that gap by stamping
     /// again at each request's `message_start`.
-    private func noteApiActivity(byUser: Bool = true) {
-        keepAliveGate.noteActivity(at: Date(), byUser: byUser)
+    private func noteApiActivity() {
+        keepAliveGate.noteActivity(at: Date())
     }
 
     /// What one webview-bound frame says about the prompt-cache window.
@@ -1263,7 +1263,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Without this stamp a 30-minute turn was declared stale 30 minutes
     /// before it was, costing one refresh per long turn. The frame arrives
     /// one time-to-first-token after the request started, which puts the
-    /// estimate late by seconds against a five-minute margin.
+    /// estimate late by seconds against a four-minute margin.
     private func trackCacheWindow(_ message: [String: Any]) {
         switch Self.cacheWindowReading(message) {
         case .requestStarted:
@@ -1276,8 +1276,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // it, so a contended turn loses its per-request stamps too —
             // the safe direction, costing at most one early refresh.
             guard !recapRequestInFlight else { return }
-            // A refresh's own request keeps the cache, not the user, active.
-            noteApiActivity(byUser: !keepAliveInFlight)
+            keepAliveGate.noteRequestStarted(at: Date())
         case .usage(let reading):
             let before = keepAliveGate.observedTTL
             keepAliveGate.noteObservedTTL(reading)
