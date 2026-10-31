@@ -39,6 +39,11 @@ protocol MirrorSink: AnyObject {
     /// its first attach turns on the shim's `MirrorFrameRing` (#320).
     var resumesFromFrameCursor: Bool { get }
 
+    /// A phone that said at attach (`"authPages": true`) it opens the sign-in page itself
+    /// when sent one as an `open_url` frame. Its own sign-in's page then goes to it instead
+    /// of this Mac's browser, where nobody may be sitting.
+    var opensAuthPages: Bool { get }
+
     /// UI the daemon cannot show itself (`MirrorUIFrame`).
     func deliverUI(_ frame: MirrorUIFrame)
 }
@@ -51,6 +56,7 @@ extension MirrorSink {
     var isLocalClient: Bool { false }
     var reattachesAfterRestart: Bool { false }
     var resumesFromFrameCursor: Bool { false }
+    var opensAuthPages: Bool { false }
     func deliverUI(_ frame: MirrorUIFrame) {}
 }
 

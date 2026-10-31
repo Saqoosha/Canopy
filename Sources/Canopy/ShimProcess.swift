@@ -180,16 +180,25 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// request Canopy itself made — falls through to the broadcast.
     private var requestOwners: [String: RequestOwner] = [:]
 
-    /// In-flight `authenticate_mcp_server` requests from another Mac, by id.
-    /// The extension opens the OAuth page (`open_url` from the shim) before it
-    /// answers, so while one is outstanding that page belongs on the Mac that
-    /// asked, not on this screen (the daemon host nobody is sitting at).
-    private var remoteMcpAuthRequests: [String: ObjectIdentifier] = [:]
+    /// In-flight sign-ins started on a remote client, by request id: `authenticate_mcp_server`
+    /// from another Mac and `login` from a phone (`takesAuthPage`). The extension opens the
+    /// OAuth page (`open_url` from the shim) before it answers, so while one is outstanding
+    /// that page belongs on the client that asked, not on this screen (the daemon host
+    /// nobody is sitting at).
+    private var remoteAuthRequests: [String: ObjectIdentifier] = [:]
 
-    /// The other Mac an `open_url` from the shim should go to, if any.
-    private var mcpAuthURLTarget: (any MirrorSink)? {
-        remoteMcpAuthRequests.values.lazy.compactMap { self.mirrors[$0]?.sink }
-            .first { Self.takesRemoteMcpAuth($0) }
+    /// The client an `open_url` from the shim should go to, if any.
+    private var authURLTarget: (any MirrorSink)? {
+        remoteAuthRequests.values.lazy.compactMap { self.mirrors[$0]?.sink }.first
+    }
+
+    /// Whether the OAuth page `requestType` makes the extension open belongs on `sink`.
+    static func takesAuthPage(_ sink: any MirrorSink, requestType: String?) -> Bool {
+        switch requestType {
+        case "authenticate_mcp_server": takesRemoteMcpAuth(sink)
+        case "login": sink.opensAuthPages
+        default: false
+        }
     }
 
     /// A Mac on another machine that takes `open_url` frames. The phone is left
@@ -386,7 +395,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if case .mirror(let owner) = $0.value { return owner != key }
             return true
         }
-        remoteMcpAuthRequests = remoteMcpAuthRequests.filter { $0.value != key }
+        remoteAuthRequests = remoteAuthRequests.filter { $0.value != key }
         if mirrors.isEmpty {
             requestOwners.removeAll()
             quietSince = Date()
@@ -417,7 +426,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         mirrors.removeAll()
         requestOwners.removeAll()
-        remoteMcpAuthRequests.removeAll()
+        remoteAuthRequests.removeAll()
     }
 
     /// What a client is told when this daemon session's shim dies: the shim's own fatal error when
@@ -3988,9 +3997,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             if let requestId = dict["requestId"] as? String, msgType == "request", !mirrors.isEmpty {
                 requestOwners[requestId] = mirrorKey.map { .mirror($0) } ?? .primary
-                if let mirrorKey, let sender, Self.takesRemoteMcpAuth(sender),
-                   (dict["request"] as? [String: Any])?["type"] as? String == "authenticate_mcp_server" {
-                    remoteMcpAuthRequests[requestId] = mirrorKey
+                if let mirrorKey, let sender,
+                   Self.takesAuthPage(sender, requestType: (dict["request"] as? [String: Any])?["type"] as? String) {
+                    remoteAuthRequests[requestId] = mirrorKey
                 }
             }
             if let mirrorKey {
@@ -4742,8 +4751,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
         case "open_url":
             if let urlStr = msg["url"] as? String, let url = URL(string: urlStr) {
-                if ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let target = mcpAuthURLTarget {
-                    logger.notice("open_url: MCP auth page sent to the Mac that asked")
+                if ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let target = authURLTarget {
+                    logger.notice("open_url: sign-in page sent to the client that asked")
                     MirrorFileSender.sendURL(urlStr, to: target)
                 } else {
                     NSWorkspace.shared.open(url)
@@ -5264,7 +5273,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
            let requestId = inner["requestId"] as? String,
            let owner = requestOwners.removeValue(forKey: requestId)
         {
-            remoteMcpAuthRequests[requestId] = nil
+            remoteAuthRequests[requestId] = nil
             switch owner {
             case .primary:
                 if let webView { post(Self.retargeted(payload, from: channelId, to: primaryOwnChannel), to: webView) }
@@ -5326,7 +5335,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         for key in stale { mirrors[key] = nil }
         if !stale.isEmpty {
             if mirrors.isEmpty { requestOwners.removeAll() }
-            remoteMcpAuthRequests = remoteMcpAuthRequests.filter { mirrors[$0.value] != nil }
+            remoteAuthRequests = remoteAuthRequests.filter { mirrors[$0.value] != nil }
         }
     }
 

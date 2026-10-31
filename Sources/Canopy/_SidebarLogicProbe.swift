@@ -740,6 +740,40 @@ enum SidebarLogicProbe {
             record("remote MCP auth: other responses are left alone", other?["isWebUI"] == nil)
         }
 
+        // MARK: - Whose screen a sign-in page opens on
+
+        do {
+            final class Sink: MirrorSink {
+                let acceptsFileTransfers: Bool
+                let isLocalClient: Bool
+                let opensAuthPages: Bool
+                init(files: Bool = false, local: Bool = false, authPages: Bool = false) {
+                    acceptsFileTransfers = files
+                    isLocalClient = local
+                    opensAuthPages = authPages
+                }
+                func deliver(_ payload: [String: Any]) {}
+            }
+            let phone = Sink(authPages: true)
+            let oldPhone = Sink()
+            let remoteMac = Sink(files: true)
+            let localMac = Sink(files: true, local: true)
+            record("auth page: a phone that opens sign-in pages gets its own login's page",
+                   ShimProcess.takesAuthPage(phone, requestType: "login"))
+            record("auth page: a phone that did not say so leaves its login's page on this Mac",
+                   !ShimProcess.takesAuthPage(oldPhone, requestType: "login"))
+            record("auth page: a phone's MCP sign-in still opens here",
+                   !ShimProcess.takesAuthPage(phone, requestType: "authenticate_mcp_server"))
+            record("auth page: a remote Mac gets its MCP sign-in, not a login",
+                   ShimProcess.takesAuthPage(remoteMac, requestType: "authenticate_mcp_server")
+                       && !ShimProcess.takesAuthPage(remoteMac, requestType: "login"))
+            record("auth page: a Mac on this machine opens nothing remotely",
+                   !ShimProcess.takesAuthPage(localMac, requestType: "authenticate_mcp_server"))
+            record("auth page: other requests never move a page",
+                   !ShimProcess.takesAuthPage(phone, requestType: "submit_oauth_code")
+                       && !ShimProcess.takesAuthPage(phone, requestType: nil))
+        }
+
         // MARK: - Session selection budget (the sidebar's shrinking list)
         //
         // `loadAllSessions` used to `prefix(50)` the candidates and only then

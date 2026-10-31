@@ -398,6 +398,7 @@ final class MirrorConnection: MirrorSink {
     /// Set from the attach's `"resume": true`; see `MirrorSink.resumesFromFrameCursor`.
     private(set) var resumesFromFrameCursor = false
     var acceptsClickedFiles: Bool { filesRequested }
+    private(set) var opensAuthPages = false
 
     var openRedirectHost: String? {
         guard isMacClient, case .hostPort(let host, _) = connection.endpoint else { return nil }
@@ -710,6 +711,7 @@ final class MirrorConnection: MirrorSink {
         reattachesAfterRestart = Self.reattachesAfterRestart(attach: dict)
         acceptsUI = isMacClient && dict["ui"] as? Bool == true
         resumesFromFrameCursor = dict["resume"] as? Bool == true
+        opensAuthPages = !isMacClient && dict["authPages"] as? Bool == true
         // A page still showing this session re-attaches with a cursor; when the shim still
         // holds every frame after it, it gets those instead of a replay (#320).
         var resumeFrames: [MirrorFrameRing.Frame]?
