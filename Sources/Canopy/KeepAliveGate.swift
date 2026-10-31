@@ -26,9 +26,28 @@ struct KeepAliveGate: Equatable {
     /// buys another full window. That is the whole mechanism; if hits ever
     /// stop refreshing, this feature becomes pure cost and should be
     /// deleted rather than retuned.
-    static let defaultInterval: TimeInterval = 55 * 60
+    ///
+    /// 50 rather than 55 minutes because the CLI's idle compaction (2.1.299+,
+    /// in VS Code hosts from 2.1.314) summarizes a 200K+ conversation at 0.9
+    /// of the TTL after its last request — 54 minutes on a 1-hour window. A
+    /// refresh that lands first re-arms that timer too, so compaction only
+    /// runs once this feature stops (`maxUserIdle`) and then takes over.
+    static let defaultInterval: TimeInterval = 50 * 60
 
-    /// Skip the refresh once the 5-hour window is this full.
+    /// The prompt-cache lifetime the refresh defends. Past it the entry is
+    /// gone, and a refresh would pay a full cache write for a conversation
+    /// nobody is reading — measured on a 892K-token session that woke from
+    /// sleep 13.5 hours after its last refresh.
+    static let cacheLifetime: TimeInterval = 60 * 60
+
+    /// Stop refreshing this long after the user's last own turn. Past about
+    /// four hours an hourly refresh costs more than the CLI's idle compaction
+    /// (one summary, then a smaller context to rewrite), so the session is
+    /// left to that instead.
+    static let maxUserIdle: TimeInterval = 4 * 60 * 60
+
+    /// Skip the refresh once the 5-hour window (the weekly one on an account
+    /// without a 5-hour window) is this full.
     ///
     /// Not a cost gate — the money case is overwhelming (a refresh is a
     /// small fraction of the cache write it avoids; see
@@ -96,19 +115,23 @@ struct KeepAliveGate: Equatable {
     /// `ShimProcess.noteApiActivity` and `ShimProcess.trackCacheWindow`.
     private(set) var lastActivityAt: Date?
 
+    /// `lastActivityAt` minus the refreshes: the last activity a person
+    /// caused. `maxUserIdle` is measured from here.
+    private(set) var lastUserActivityAt: Date?
+
     /// Refreshes ATTEMPTED on this shim — `requestKeepAlive` stamps it at
     /// injection, and a send is fire-and-forget, so it counts tries rather
     /// than confirmed refreshes. Used in the log line and pinned by the
-    /// probe; a keep-alive that fires forever is the intended behaviour, so
-    /// there is deliberately no cap here for it to feed.
+    /// probe.
     private(set) var sentCount = 0
 
     /// Never moves the stamp backwards. Its callers read two different
     /// clocks — `Date()` at the call site, or the coordinator's captured
     /// tick time — so without this the stamp could regress by the skew
     /// between them and grant an early refresh.
-    mutating func noteActivity(at date: Date) {
+    mutating func noteActivity(at date: Date, byUser: Bool = true) {
         lastActivityAt = max(lastActivityAt ?? date, date)
+        if byUser { lastUserActivityAt = max(lastUserActivityAt ?? date, date) }
     }
 
     /// Stamp optimistically at injection, because that instant IS the start
@@ -119,7 +142,7 @@ struct KeepAliveGate: Equatable {
     /// shipped for one round, and removed. See the failure branch in
     /// `ShimProcess.consumeKeepAliveTraffic` for the retry storm it caused.
     mutating func noteKeepAliveSent(at date: Date) {
-        noteActivity(at: date)
+        noteActivity(at: date, byUser: false)
         sentCount += 1
     }
 
@@ -166,7 +189,9 @@ struct KeepAliveGate: Equatable {
     ///
     /// Ordered so the cheapest and most diagnostic reason wins: the window
     /// (measured, then guessed), then interval validity, then whether
-    /// anything is cached, then freshness, and only then the quota ceiling.
+    /// anything is cached, then freshness, then whether the cache already
+    /// lapsed and how long the user has been away, and only then the quota
+    /// ceiling.
     /// A fresh session at 100% quota therefore reports freshness rather than
     /// quota, which the probe pins — otherwise it would be an accident of
     /// how the guards happen to be written.
@@ -200,8 +225,15 @@ struct KeepAliveGate: Equatable {
         guard elapsed >= interval else {
             return "cache still fresh (\(Int(elapsed / 60))m of \(Int(interval / 60))m)"
         }
+        guard elapsed < Self.cacheLifetime else {
+            return "cache already expired (\(Int(elapsed / 60))m since last activity) — a refresh would be a full write"
+        }
+        let userIdle = now.timeIntervalSince(lastUserActivityAt ?? lastActivityAt)
+        guard userIdle < Self.maxUserIdle else {
+            return "user away \(Int(userIdle / 60))m (cap \(Int(Self.maxUserIdle / 60))m) — left to the CLI's idle compaction"
+        }
         guard rateLimitPct < Self.rateLimitCeiling else {
-            return "5h window at \(rateLimitPct)% (ceiling \(Self.rateLimitCeiling)%)"
+            return "quota window at \(rateLimitPct)% (ceiling \(Self.rateLimitCeiling)%)"
         }
         return nil
     }

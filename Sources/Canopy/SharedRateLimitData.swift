@@ -289,8 +289,16 @@ final class RateLimitAccount {
         // wrong shape) the bars silently keep their last value forever with
         // no discoverable signal — warn on wrong-type so the drift is
         // findable via the RateLimit log category.
+        //
+        // `five_hour: null` beside a `seven_day` window means the account has
+        // no 5-hour window (verified Ultra), so clear it — the extension's own
+        // `get_usage` transform reads it the same way. Null without a weekly
+        // window is the drift case and keeps the previous value.
         if let entry = rateLimits["five_hour"] as? [String: Any] {
             applyRawWindow(entry, label: "five_hour", pct: &sessionPct, reset: &sessionResetDate)
+        } else if rateLimits["five_hour"] is NSNull, rateLimits["seven_day"] is [String: Any] {
+            sessionPct = 0
+            sessionResetDate = nil
         } else if let value = rateLimits["five_hour"], !(value is NSNull) {
             logger.warning("raw usage five_hour: unexpected type (\(String(describing: value), privacy: .public)); keeping previous")
         }
@@ -422,6 +430,19 @@ final class RateLimitAccount {
     /// last numbers. A window at 100% counts only until its reset time, so
     /// stale numbers cannot keep an account marked out forever. The weekly
     /// window is named first because it is the longer wait.
+    /// The percent the keep-alive quota ceiling compares: the 5-hour window,
+    /// or the weekly one on an account that has no 5-hour window (verified
+    /// Ultra), where the 5-hour percent would stay 0 and the ceiling would
+    /// never apply. An elapsed reset date reads as an empty window, so a
+    /// ceiling hit while nobody is talking to the API can release itself.
+    func keepAliveQuotaPct(now: Date) -> Int {
+        if sessionResetDate == nil, let weekly = weeklyResetDate {
+            return weekly <= now ? 0 : weeklyPct
+        }
+        let elapsed = sessionResetDate.map { $0 <= now } ?? false
+        return elapsed ? 0 : sessionPct
+    }
+
     func availability(now: Date = Date()) -> AccountAvailability {
         guard sessionResetDate != nil || weeklyResetDate != nil else { return .unknown }
         if weeklyPct >= 100, let reset = weeklyResetDate, reset > now {

@@ -17,7 +17,7 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeepAlive")
 /// 5.1. Canopy sessions run whatever model the user picked, so 20x is the
 /// figure to reason with and 80x is the best case, not the rule.
 ///
-/// Either way one small turn every 55 minutes is far cheaper than letting
+/// Either way one small turn every 50 minutes is far cheaper than letting
 /// the window lapse: the break-even is ~20 refreshes, so roughly a day of
 /// being kept warm costs what a single miss would have. Leaving a session
 /// overnight and returning to it is cheaper with this on, and the conclusion
@@ -91,12 +91,12 @@ final class KeepAliveCoordinator {
 
     /// How often eligibility is re-examined. Independent of the refresh
     /// interval: this is the granularity with which a session that just
-    /// came due is noticed, so it bounds how far past 55 minutes a refresh
+    /// came due is noticed, so it bounds how far past 50 minutes a refresh
     /// can land. One minute against five minutes of margin.
     private static let tickInterval: TimeInterval = 60
 
     /// `CANOPY_KEEPALIVE_MINUTES` overrides the refresh interval so the
-    /// feature can be exercised without a 55-minute wait per attempt. It can
+    /// feature can be exercised without a 50-minute wait per attempt. It can
     /// lengthen it as well as shorten it. Clamped to ≥1 minute — below that
     /// the tick cadence, not the setting, would decide when it fires, which
     /// makes the override look broken rather than fast; the clamp says so in
@@ -195,7 +195,8 @@ final class KeepAliveCoordinator {
         // `sessionPct` crosses the ceiling while the user is away, nothing
         // ever lowers it again and the feature stays off for the rest of the
         // night even after the five-hour window resets. Reading an elapsed
-        // `sessionResetDate` as a fresh window is what releases it.
+        // reset date as a fresh window (`keepAliveQuotaPct`) is what
+        // releases it.
         //
         // The state this is wrong in: the reset time has passed but the
         // server has not actually rolled the window over, so one refresh
@@ -214,8 +215,7 @@ final class KeepAliveCoordinator {
             // 20 s after spawn, when `channelId` and `lastActivityAt` keep
             // the gate shut anyway.
             let limits = shim.rateLimitAccount ?? SharedRateLimitData.shared.local
-            let quotaWindowElapsed = limits.sessionResetDate.map { $0 <= now } ?? false
-            let rateLimitPct = quotaWindowElapsed ? 0 : limits.sessionPct
+            let rateLimitPct = limits.keepAliveQuotaPct(now: now)
             // Debug, not info: unlike the recap's once-per-return fan-out
             // this runs every minute per pane, so a per-pane info line
             // would be the loudest thing in the log by two orders of
