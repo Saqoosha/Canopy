@@ -4819,8 +4819,36 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ])
     }
 
+    /// Claude Code's temp root. `CLAUDE_CODE_TMPDIR` can move it; that override is not followed.
+    static let claudeTempRoot = "/tmp/claude-\(getuid())"
+
+    /// The folder Claude Code makes for a project under its temp root: the project path with
+    /// every character but an ASCII letter or digit turned into `-`.
+    static func claudeProjectFolderName(_ dir: String) -> String {
+        String(String.UnicodeScalarView(dir.unicodeScalars.map {
+            ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) ? $0 : "-"
+        }))
+    }
+
+    /// Whether a link may open `path` because Claude wrote it under its temp root — a screenshot
+    /// it saved in its scratchpad and then Read. Only a regular file, only in the folder of one
+    /// of `projectDirs`, and only when `root` is a real directory this user owns that no one else
+    /// can write: `/tmp` is world-writable, so another account could plant the name first.
+    static func isClaudeTempFileAllowed(path: String, projectDirs: [String], root: String = claudeTempRoot) -> Bool {
+        guard projectDirs.contains(where: { GitWorktree.isUnder(root + "/" + claudeProjectFolderName($0), path) })
+        else { return false }
+        var rootStat = stat()
+        guard lstat(root, &rootStat) == 0, rootStat.st_mode & S_IFMT == S_IFDIR,
+              rootStat.st_uid == getuid(), rootStat.st_mode & 0o022 == 0
+        else { return false }
+        var fileStat = stat()
+        return lstat(path, &fileStat) == 0 && fileStat.st_mode & S_IFMT == S_IFREG
+    }
+
     /// Whether `handleOpenFile` may open `resolved`; the rule is `GitWorktree.isOpenFileAllowed`
-    /// (git only on a miss, and only in the working directory).
+    /// (git only on a miss, and only in the working directory), then, for a local session,
+    /// `isClaudeTempFileAllowed` for the working directory and every checkout of its repository
+    /// (a session that moved into a worktree keeps writing under the folder it started in).
     private func isOpenFileAllowed(_ resolved: URL) -> Bool {
         let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
         func allowed(_ checkouts: GitWorktree.Checkouts) -> Bool {
@@ -4828,7 +4856,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         if allowed(.empty) { return true }
         guard remoteHost == nil else { return false }
-        return allowed(GitWorktree.checkouts(for: wd))
+        if Self.isClaudeTempFileAllowed(path: resolved.path, projectDirs: [wd.path]) { return true }
+        let checkouts = GitWorktree.checkouts(for: wd)
+        if allowed(checkouts) { return true }
+        return Self.isClaudeTempFileAllowed(path: resolved.path,
+                                            projectDirs: [checkouts.main].compactMap { $0 } + checkouts.linked)
     }
 
     /// Handle open_file request from webview. By default shows the file in ContentViewer

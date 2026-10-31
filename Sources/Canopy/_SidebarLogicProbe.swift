@@ -6596,6 +6596,43 @@ enum SidebarLogicProbe {
             record("open file: a name that only shares a root's prefix is blocked", !allowed("/h/wt/fix-evil/x", from: "/r/Canopy"))
             record("open file: a pruned worktree's path is blocked", !allowed("/h/wt/gone/x", from: "/r/Canopy"))
             record("open file: the cut-off half of a newline path is blocked", !allowed("/h/wt/a/x", from: "/r/Canopy"))
+            record("open file: Claude's project folder name",
+                   ShimProcess.claudeProjectFolderName("/Users/h/.claude/worktrees/a_b") == "-Users-h--claude-worktrees-a-b")
+            do {
+                let fm = FileManager.default
+                let tmpRoot = fm.temporaryDirectory.appendingPathComponent("canopy-probe-ct-\(UUID().uuidString)")
+                    .standardizedFileURL.resolvingSymlinksInPath().path
+                defer { try? fm.removeItem(atPath: tmpRoot) }
+                let pad = tmpRoot + "/-r-Canopy/s1/scratchpad"
+                try? fm.createDirectory(atPath: pad, withIntermediateDirectories: true)
+                try? fm.createDirectory(atPath: tmpRoot + "/-r-Other", withIntermediateDirectories: true)
+                try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tmpRoot)
+                try? fm.createDirectory(atPath: tmpRoot + "/-r-Canopy-evil", withIntermediateDirectories: true)
+                let made = fm.createFile(atPath: pad + "/list.png", contents: Data())
+                    && fm.createFile(atPath: tmpRoot + "/-r-Other/x.png", contents: Data())
+                    && fm.createFile(atPath: tmpRoot + "/-r-Canopy-evil/x.png", contents: Data())
+                    && mkfifo(pad + "/mount.env", 0o600) == 0
+                    && (try? fm.attributesOfItem(atPath: tmpRoot)[.posixPermissions] as? Int) == 0o700
+                record("open file: temp-root fixtures were made", made)
+                func tempAllowed(_ path: String, _ dirs: [String] = ["/r/Canopy"], root: String = tmpRoot) -> Bool {
+                    ShimProcess.isClaudeTempFileAllowed(path: path, projectDirs: dirs, root: root)
+                }
+                record("open file: a file in this project's temp folder is allowed", tempAllowed(pad + "/list.png"))
+                record("open file: a worktree session reaches the folder of the checkout it started in",
+                       tempAllowed(pad + "/list.png", ["/h/wt/fix", "/r/Canopy"]) && !tempAllowed(pad + "/list.png", ["/h/wt/fix"]))
+                record("open file: another project's temp folder is blocked", !tempAllowed(tmpRoot + "/-r-Other/x.png"))
+                record("open file: a folder that only shares the project's prefix is blocked",
+                       !tempAllowed(tmpRoot + "/-r-Canopy-evil/x.png"))
+                record("open file: a FIFO in the temp folder is blocked", !tempAllowed(pad + "/mount.env"))
+                let linkRoot = tmpRoot + "-link"
+                try? fm.createSymbolicLink(atPath: linkRoot, withDestinationPath: tmpRoot)
+                defer { try? fm.removeItem(atPath: linkRoot) }
+                record("open file: a temp root that is a symlink is not trusted",
+                       !tempAllowed(linkRoot + "/-r-Canopy/s1/scratchpad/list.png", root: linkRoot))
+                try? fm.setAttributes([.posixPermissions: 0o777], ofItemAtPath: tmpRoot)
+                record("open file: a temp root others can write is not trusted", !tempAllowed(pad + "/list.png"))
+            }
+            record("open file: Claude's temp root is /tmp/claude-<uid>", ShimProcess.claudeTempRoot == "/tmp/claude-\(getuid())")
 
             // The move itself (restart, re-attach) needs a live shim and a
             // daemon; measured against the Debug daemon, not the GUI pane.
