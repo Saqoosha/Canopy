@@ -4835,16 +4835,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// of `projectDirs`, and only when `root` is a real directory this user owns that no one else
     /// can write: `/tmp` is world-writable, so another account could plant the name first.
     static func isClaudeTempFileAllowed(path: String, projectDirs: [String], root: String = claudeTempRoot) -> Bool {
-        // A path that exists resolves with `/private` stripped; one that does not keeps it.
-        let p = path.hasPrefix("/private" + root + "/") ? String(path.dropFirst("/private".count)) : path
-        guard projectDirs.contains(where: { GitWorktree.isUnder(root + "/" + claudeProjectFolderName($0), p) })
+        guard projectDirs.contains(where: { GitWorktree.isUnder(root + "/" + claudeProjectFolderName($0), path) })
         else { return false }
         var rootStat = stat()
         guard lstat(root, &rootStat) == 0, rootStat.st_mode & S_IFMT == S_IFDIR,
               rootStat.st_uid == getuid(), rootStat.st_mode & 0o022 == 0
         else { return false }
         var fileStat = stat()
-        return lstat(p, &fileStat) == 0 && fileStat.st_mode & S_IFMT == S_IFREG
+        return lstat(path, &fileStat) == 0 && fileStat.st_mode & S_IFMT == S_IFREG
     }
 
     /// Whether `handleOpenFile` may open `resolved`; the rule is `GitWorktree.isOpenFileAllowed`
@@ -4858,10 +4856,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         if allowed(.empty) { return true }
         guard remoteHost == nil else { return false }
+        if Self.isClaudeTempFileAllowed(path: resolved.path, projectDirs: [wd.path]) { return true }
         let checkouts = GitWorktree.checkouts(for: wd)
         if allowed(checkouts) { return true }
         return Self.isClaudeTempFileAllowed(path: resolved.path,
-                                            projectDirs: [wd.path, checkouts.main].compactMap { $0 } + checkouts.linked)
+                                            projectDirs: [checkouts.main].compactMap { $0 } + checkouts.linked)
     }
 
     /// Handle open_file request from webview. By default shows the file in ContentViewer

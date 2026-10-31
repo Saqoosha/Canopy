@@ -6607,9 +6607,13 @@ enum SidebarLogicProbe {
                 try? fm.createDirectory(atPath: pad, withIntermediateDirectories: true)
                 try? fm.createDirectory(atPath: tmpRoot + "/-r-Other", withIntermediateDirectories: true)
                 try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tmpRoot)
-                fm.createFile(atPath: pad + "/list.png", contents: Data())
-                fm.createFile(atPath: tmpRoot + "/-r-Other/x.png", contents: Data())
-                mkfifo(pad + "/mount.env", 0o600)
+                try? fm.createDirectory(atPath: tmpRoot + "/-r-Canopy-evil", withIntermediateDirectories: true)
+                let made = fm.createFile(atPath: pad + "/list.png", contents: Data())
+                    && fm.createFile(atPath: tmpRoot + "/-r-Other/x.png", contents: Data())
+                    && fm.createFile(atPath: tmpRoot + "/-r-Canopy-evil/x.png", contents: Data())
+                    && mkfifo(pad + "/mount.env", 0o600) == 0
+                    && (try? fm.attributesOfItem(atPath: tmpRoot)[.posixPermissions] as? Int) == 0o700
+                record("open file: temp-root fixtures were made", made)
                 func tempAllowed(_ path: String, _ dirs: [String] = ["/r/Canopy"], root: String = tmpRoot) -> Bool {
                     ShimProcess.isClaudeTempFileAllowed(path: path, projectDirs: dirs, root: root)
                 }
@@ -6620,7 +6624,6 @@ enum SidebarLogicProbe {
                 record("open file: a folder that only shares the project's prefix is blocked",
                        !tempAllowed(tmpRoot + "/-r-Canopy-evil/x.png"))
                 record("open file: a FIFO in the temp folder is blocked", !tempAllowed(pad + "/mount.env"))
-                record("open file: the same file spelled with /private is allowed", tempAllowed("/private" + pad + "/list.png"))
                 let linkRoot = tmpRoot + "-link"
                 try? fm.createSymbolicLink(atPath: linkRoot, withDestinationPath: tmpRoot)
                 defer { try? fm.removeItem(atPath: linkRoot) }
