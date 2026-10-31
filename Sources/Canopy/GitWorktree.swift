@@ -845,11 +845,13 @@ enum GitWorktree {
         return entries
     }
 
+    /// Whether `p` is `root` or inside it; a name that only shares the prefix is not.
+    static func isUnder(_ root: String, _ p: String) -> Bool { p == root || p.hasPrefix(root + "/") }
+
     /// Whether a file link may open `path` from a session in `workingDirectory`: under the
     /// working directory, or — when the session sits at the main checkout's root or inside a
     /// linked worktree — under any checkout of the repository. All paths symlink-resolved.
     static func isOpenFileAllowed(path: String, workingDirectory wd: String, checkouts: Checkouts) -> Bool {
-        func isUnder(_ root: String, _ p: String) -> Bool { p == root || p.hasPrefix(root + "/") }
         if isUnder(wd, path) { return true }
         guard wd == checkouts.main || checkouts.linked.contains(where: { isUnder($0, wd) }) else { return false }
         return ([checkouts.main].compactMap { $0 } + checkouts.linked).contains { isUnder($0, path) }

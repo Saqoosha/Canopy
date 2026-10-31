@@ -4819,8 +4819,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         ])
     }
 
+    /// Claude Code's temp root, `/tmp/claude-<uid>` unless `CLAUDE_CODE_TMPDIR` moves it. Session
+    /// scratchpads live under it, so a screenshot Claude saved there and then Read is a file link
+    /// in the transcript. Resolved the same way as the clicked path, on every call:
+    /// `resolvingSymlinksInPath` strips `/private` only while the folder exists, and Claude Code
+    /// may create it after Canopy launches.
+    static var claudeTempRoot: String {
+        URL(fileURLWithPath: "/tmp/claude-\(getuid())").standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
     /// Whether `handleOpenFile` may open `resolved`; the rule is `GitWorktree.isOpenFileAllowed`
-    /// (git only on a miss, and only in the working directory).
+    /// (git only on a miss, and only in the working directory), plus Claude Code's temp root
+    /// for a local session.
     private func isOpenFileAllowed(_ resolved: URL) -> Bool {
         let wd = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
         func allowed(_ checkouts: GitWorktree.Checkouts) -> Bool {
@@ -4828,6 +4838,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         if allowed(.empty) { return true }
         guard remoteHost == nil else { return false }
+        if GitWorktree.isUnder(Self.claudeTempRoot, resolved.path) { return true }
         return allowed(GitWorktree.checkouts(for: wd))
     }
 

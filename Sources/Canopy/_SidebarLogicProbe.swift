@@ -6596,6 +6596,21 @@ enum SidebarLogicProbe {
             record("open file: a name that only shares a root's prefix is blocked", !allowed("/h/wt/fix-evil/x", from: "/r/Canopy"))
             record("open file: a pruned worktree's path is blocked", !allowed("/h/wt/gone/x", from: "/r/Canopy"))
             record("open file: the cut-off half of a newline path is blocked", !allowed("/h/wt/a/x", from: "/r/Canopy"))
+            // `resolvingSymlinksInPath` strips `/private` only from a path that exists, so the
+            // fixture is a real file and the root is read after it is made.
+            let scratchDir = URL(fileURLWithPath: "/private/tmp/claude-\(getuid())/canopy-probe-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true,
+                                                     attributes: [.posixPermissions: 0o700])
+            let scratchFile = scratchDir.appendingPathComponent("list.png")
+            FileManager.default.createFile(atPath: scratchFile.path, contents: Data())
+            defer { try? FileManager.default.removeItem(at: scratchDir) }
+            let scratchpad = scratchFile.standardizedFileURL.resolvingSymlinksInPath().path
+            let tempRoot = ShimProcess.claudeTempRoot
+            record("open file: Claude's temp root is /tmp/claude-<uid>", tempRoot == "/tmp/claude-\(getuid())", "got=\(tempRoot)")
+            record("open file: a scratchpad file under /private/tmp resolves into Claude's temp root",
+                   GitWorktree.isUnder(tempRoot, scratchpad), "got=\(scratchpad)")
+            record("open file: a name that only shares the temp root's prefix is not under it",
+                   !GitWorktree.isUnder(tempRoot, tempRoot + "0/x"))
 
             // The move itself (restart, re-attach) needs a live shim and a
             // daemon; measured against the Debug daemon, not the GUI pane.
