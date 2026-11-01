@@ -14581,6 +14581,7 @@ enum SidebarLogicProbe {
                 Task { @MainActor in await work(); done = true }
                 let deadline = Date().addingTimeInterval(5)
                 while !done && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+                if !done { record("extension updater: a faked update finishes within 5 s", false) }
             }
             let gone = { (calls: UpdaterCalls) in calls.downloads.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) } }
 
@@ -14610,7 +14611,7 @@ enum SidebarLogicProbe {
             settle { await unlistedUpdater.installAvailable() }
             record("extension updater: clicking Install with no digest says why, and still downloads nothing",
                    unlisted.downloads.isEmpty
-                       && { if case .failed(let message) = unlistedUpdater.state { message.contains("Open VSX has no digest") } else { false } }())
+                       && unlistedUpdater.state == .failed(message: ExtensionUpdater.UpdateError.noPublishedDigest(version: "2.1.20").localizedDescription))
 
             let manual = UpdaterCalls()
             let manualUpdater = fakeUpdater(digest: expected, auto: false, calls: manual)
@@ -14626,7 +14627,7 @@ enum SidebarLogicProbe {
                    manual.installs == ["2.1.20"] && manual.digestLookups == 1 && manualUpdater.state == .done(version: "2.1.20"))
 
             let idle: [ExtensionUpdater.State] = [.idle, .upToDate, .available(version: "1"), .done(version: "1"), .failed(message: "")]
-            let busy: [ExtensionUpdater.State] = [.checking, .downloading, .installing]
+            let busy: [ExtensionUpdater.State] = [.checking, .verifying, .downloading, .installing]
             record("extension updater: a check may start only when nothing is running",
                    idle.allSatisfy(\.allowsCheck) && !busy.contains(where: \.allowsCheck))
 

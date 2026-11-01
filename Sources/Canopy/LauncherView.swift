@@ -1464,6 +1464,12 @@ struct LauncherView: View {
                 .controlSize(.small)
             }
 
+        case .verifying:
+            updateBannerCard(tint: .secondary) {
+                ProgressView().controlSize(.small)
+                Text("Checking Open VSX…").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+
         case .downloading:
             updateBannerCard(tint: .secondary) {
                 ProgressView().controlSize(.small)

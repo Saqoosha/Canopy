@@ -10,8 +10,10 @@ final class ExtensionUpdater {
         case idle
         case checking
         case upToDate
-        /// Newer than what Canopy has installed, waiting for a click because auto-update is off.
+        /// Newer than what Canopy has installed and not being installed: auto-update is off, or Open VSX had no digest yet.
         case available(version: String)
+        /// Looking up Open VSX's digest for an install.
+        case verifying
         case downloading
         case installing
         case done(version: String)
@@ -163,14 +165,14 @@ final class ExtensionUpdater {
 
     private func installUpdate(version: String, automatic: Bool) async {
         // Busy before the first await, so a second click or another pane's check cannot start a second install.
-        state = .checking
+        state = .verifying
         // Looked up before the download: Open VSX can lag the VS Marketplace, and this is not a failure.
         guard let published = await environment.publishedDigest(version, Self.detectPlatform()) else {
             logger.notice("Extension v\(version, privacy: .public): no digest from Open VSX (not listed yet, or unreachable), update deferred")
             // Offered, not hidden, so a lasting outage shows. Not stored in `failure`: the next check tries again.
             state = automatic
                 ? .available(version: version)
-                : .failed(message: "Open VSX has no digest for v\(version) yet, or could not be reached, so it cannot be cross-checked. Try again later.")
+                : .failed(message: UpdateError.noPublishedDigest(version: version).localizedDescription)
             return
         }
         state = .downloading
@@ -347,7 +349,7 @@ final class ExtensionUpdater {
     private nonisolated static func detectPlatform() -> String {
         let searchDirs = [
             CCExtension.canopyExtensionsDir,
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vscode/extensions"),
+            CCExtension.vscodeExtensionsDir,
         ]
         for dir in searchDirs {
             if let contents = try? FileManager.default.contentsOfDirectory(atPath: dir.path),
@@ -395,6 +397,7 @@ final class ExtensionUpdater {
         case extractionFailed
         case canaryFailed(version: String, reason: String)
         case crossCheckMismatch(version: String)
+        case noPublishedDigest(version: String)
 
         var errorDescription: String? {
             switch self {
@@ -403,6 +406,8 @@ final class ExtensionUpdater {
             case .extractionFailed: return "Failed to extract extension package"
             case .canaryFailed(let version, let reason):
                 return "v\(version) did not start in Canopy, so it was not installed: \(reason)"
+            case .noPublishedDigest(let version):
+                return "Open VSX has no digest for v\(version) yet, or could not be reached, so it cannot be cross-checked. Try again later."
             case .crossCheckMismatch(let version):
                 return "v\(version) from the VS Marketplace differs from the copy on Open VSX, so it was not installed and Canopy keeps the version it has. One of them may have been tampered with."
             }
@@ -415,7 +420,7 @@ extension ExtensionUpdater.State {
     var allowsCheck: Bool {
         switch self {
         case .idle, .upToDate, .available, .done, .failed: return true
-        case .checking, .downloading, .installing: return false
+        case .checking, .verifying, .downloading, .installing: return false
         }
     }
 }
