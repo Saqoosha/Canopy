@@ -210,13 +210,23 @@ enum ExtensionCrossCheck {
     static func publishedSHA256(version: String, platform: String) async -> String? {
         guard let metaURL = URL(string: "https://open-vsx.org/api/anthropic/claude-code/\(platform)/\(version)"),
               let meta = await fetch(metaURL),
-              let json = try? JSONSerialization.jsonObject(with: meta) as? [String: Any],
-              let files = json["files"] as? [String: Any],
-              let shaString = files["sha256"] as? String,
-              let shaURL = URL(string: shaString),
+              let shaURL = sha256URL(metadata: meta, version: version, platform: platform),
               let body = await fetch(shaURL)
         else { return nil }
         return parsePublished(String(decoding: body, as: UTF8.self))
+    }
+
+    /// The `.sha256` link in Open VSX's metadata, nil unless it describes exactly this build.
+    /// Another build's digest would read as tampering rather than as "cannot check".
+    static func sha256URL(metadata: Data, version: String, platform: String) -> URL? {
+        guard let json = try? JSONSerialization.jsonObject(with: metadata) as? [String: Any],
+              json["version"] as? String == version,
+              json["targetPlatform"] as? String == platform,
+              let files = json["files"] as? [String: Any],
+              let link = (files["sha256"] as? String).flatMap(URL.init(string:)),
+              link.scheme == "https"
+        else { return nil }
+        return link
     }
 
     private static func fetch(_ url: URL) async -> Data? {

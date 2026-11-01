@@ -14,8 +14,8 @@ enum CCExtension {
     /// The newest extension in Canopy's folder, the only one `ExtensionUpdater` cross-checked.
     /// ~/.vscode/extensions is used only while Canopy's folder has none, so a newer copy there
     /// cannot take over from a checked one.
-    static func extensionPath() -> URL? {
-        guard let best = preferred(canopy: folders(in: canopyExtensionsDir), vscode: folders(in: vscodeExtensionsDir)) else {
+    static func extensionPath(canopyDir: URL = canopyExtensionsDir, vscodeDir: URL = vscodeExtensionsDir) -> URL? {
+        guard let best = newest(folders(in: canopyDir)) ?? newest(folders(in: vscodeDir)) else {
             logger.error("CC extension not found in any known location")
             return nil
         }
@@ -23,16 +23,12 @@ enum CCExtension {
     }
 
     /// The newest version in Canopy's own folder, nil when it holds none.
-    static func canopyInstalledVersion() -> String? {
-        newest(folders(in: canopyExtensionsDir)).flatMap(version(at:))
+    static func canopyInstalledVersion(in dir: URL = canopyExtensionsDir) -> String? {
+        newest(folders(in: dir)).flatMap(version(at:))
     }
 
-    private static var vscodeExtensionsDir: URL {
+    static var vscodeExtensionsDir: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vscode/extensions")
-    }
-
-    static func preferred(canopy: [URL], vscode: [URL]) -> URL? {
-        newest(canopy) ?? newest(vscode)
     }
 
     private static func newest(_ folders: [URL]) -> URL? {
