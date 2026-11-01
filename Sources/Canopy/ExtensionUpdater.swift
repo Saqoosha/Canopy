@@ -10,6 +10,8 @@ final class ExtensionUpdater {
         case idle
         case checking
         case upToDate
+        /// Newer than what Canopy has installed, waiting for a click because auto-update is off.
+        case available(version: String)
         case downloading
         case installing
         case done(version: String)
@@ -43,7 +45,7 @@ final class ExtensionUpdater {
 
     /// `retryingFailure` is the banner's Retry: a click is consent to try the failed version again.
     func checkForUpdate(retryingFailure: Bool = false) async {
-        guard state == .idle || state == .upToDate || state.isTerminal else { return }
+        guard state.allowsCheck else { return }
 
         state = .checking
         // A failed lookup keeps a stored failure, and its Retry, on screen.
@@ -58,12 +60,15 @@ final class ExtensionUpdater {
             state = fallback
             return
         }
-        let extVer = CCExtension.extensionVersion()
+        // Canopy's own folder only: a version in ~/.vscode/extensions was not cross-checked.
+        let extVer = CCExtension.canopyInstalledVersion()
         if let extVer, Self.compareVersions(extVer, latestVer) >= 0 {
             state = .upToDate
         } else if let failure, failure.version == latestVer, !retryingFailure {
             // Terminal, so a later mount still checks and picks up a fixed newer version.
             state = .failed(message: failure.message)
+        } else if !retryingFailure, !CanopySettings.shared.autoUpdateExtension {
+            state = .available(version: latestVer)
         } else {
             // New sessions pick the newest installed version at spawn, so installing is all an update takes.
             await installUpdate(version: latestVer, automatic: !retryingFailure)
@@ -117,10 +122,33 @@ final class ExtensionUpdater {
         }
     }
 
+    /// The banner's Install, for the version `checkForUpdate` offered with auto-update off.
+    func installAvailable() async {
+        guard case .available(let version) = state else { return }
+        await installUpdate(version: version, automatic: false)
+    }
+
     private func installUpdate(version: String, automatic: Bool) async {
+        // Looked up before the download: Open VSX can lag the VS Marketplace, and this is not a failure.
+        guard let published = await ExtensionCrossCheck.publishedSHA256(version: version, platform: Self.detectPlatform()) else {
+            logger.notice("Extension v\(version, privacy: .public): Open VSX has no digest for it yet, update deferred")
+            // Not stored in `failure`: the next check tries again by itself. A click gets told why nothing happened.
+            state = automatic
+                ? failure.map { .failed(message: $0.message) } ?? .idle
+                : .failed(message: "Open VSX does not list v\(version) yet, so it cannot be cross-checked. Try again later.")
+            return
+        }
         state = .downloading
         do {
             let vsixURL = try await downloadVSIX(version: version)
+            let downloaded = try await Task.detached(priority: .userInitiated) {
+                try ExtensionCrossCheck.sha256(of: vsixURL)
+            }.value
+            if case .mismatch = ExtensionCrossCheck.verdict(downloaded: downloaded, published: published) {
+                try? FileManager.default.removeItem(at: vsixURL)
+                logger.fault("Extension v\(version, privacy: .public): VS Marketplace VSIX \(downloaded, privacy: .public) does not match Open VSX \(published, privacy: .public)")
+                throw UpdateError.crossCheckMismatch(version: version)
+            }
             state = .installing
             try await installVSIX(at: vsixURL, version: version)
             await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }.value
@@ -335,6 +363,7 @@ final class ExtensionUpdater {
         case downloadFailed(statusCode: Int)
         case extractionFailed
         case canaryFailed(version: String, reason: String)
+        case crossCheckMismatch(version: String)
 
         var errorDescription: String? {
             switch self {
@@ -343,12 +372,22 @@ final class ExtensionUpdater {
             case .extractionFailed: return "Failed to extract extension package"
             case .canaryFailed(let version, let reason):
                 return "v\(version) did not start in Canopy, so it was not installed: \(reason)"
+            case .crossCheckMismatch(let version):
+                return "v\(version) from the VS Marketplace differs from the copy on Open VSX, so it was not installed. One of them may have been tampered with."
             }
         }
     }
 }
 
 extension ExtensionUpdater.State {
+    /// Not while a check or an install is running. `.available` rechecks, so a newer release replaces the offer.
+    var allowsCheck: Bool {
+        switch self {
+        case .idle, .upToDate, .available, .done, .failed: return true
+        case .checking, .downloading, .installing: return false
+        }
+    }
+
     var isTerminal: Bool {
         switch self {
         case .done, .failed: return true

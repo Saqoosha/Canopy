@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ImageIO
 import IOKit.ps
@@ -14496,6 +14497,35 @@ enum SidebarLogicProbe {
                    ExtensionCanary.resolvedNodePath(answering) == "/bin/sh")
             record("extension canary: a shim that cannot answer is used as given",
                    fakesWritten && ExtensionCanary.resolvedNodePath(failingShim) == failingShim)
+
+            let digest = "C1017EC0339E60B3EB762C4497D6448A9D0B3D6D0CBB09F86264BC219E73E6F4"
+            record("extension cross-check: Open VSX's .sha256 body parses to its lowercased digest",
+                   ExtensionCrossCheck.parsePublished(digest + "  Anthropic.claude-code-2.1.314@darwin-arm64.vsix\n") == digest.lowercased())
+            record("extension cross-check: an error page or a truncated digest is not a digest",
+                   ExtensionCrossCheck.parsePublished(#"{"error":"Not found"}"#) == nil
+                       && ExtensionCrossCheck.parsePublished(String(digest.dropLast())) == nil
+                       && ExtensionCrossCheck.parsePublished("") == nil)
+            record("extension cross-check: digests match regardless of case, and differ otherwise",
+                   ExtensionCrossCheck.verdict(downloaded: digest, published: digest.lowercased()) == .match
+                       && ExtensionCrossCheck.verdict(downloaded: String(repeating: "0", count: 64), published: digest.lowercased())
+                           == .mismatch(published: digest.lowercased()))
+            // Over the 1 MiB read size, so the streaming loop runs more than once.
+            let blob = Data((0..<(3 << 20) + 7).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+            let blobURL = shimDir.appendingPathComponent("blob.vsix")
+            let blobWritten = (try? blob.write(to: blobURL)) != nil
+            let expected = SHA256.hash(data: blob).map { String(format: "%02x", $0) }.joined()
+            record("extension cross-check: the streamed file digest equals a one-shot SHA-256",
+                   blobWritten && (try? ExtensionCrossCheck.sha256(of: blobURL)) == expected)
+
+            func ext(_ root: String, _ version: String) -> URL {
+                URL(fileURLWithPath: "\(root)/anthropic.claude-code-\(version)-darwin-arm64")
+            }
+            let canopyFolders = [ext("/c", "2.1.9"), ext("/c", "2.1.14")]
+            record("extension path: Canopy's newest wins over a newer copy in ~/.vscode/extensions",
+                   CCExtension.preferred(canopy: canopyFolders, vscode: [ext("/v", "2.1.99")]) == ext("/c", "2.1.14"))
+            record("extension path: ~/.vscode/extensions is used only while Canopy's folder is empty",
+                   CCExtension.preferred(canopy: [], vscode: [ext("/v", "2.1.3"), ext("/v", "2.1.10")]) == ext("/v", "2.1.10")
+                       && CCExtension.preferred(canopy: [], vscode: []) == nil)
 
             let dir = "/Users/u/Library/Application Support/Canopy/extensions"
             func folder(_ version: String) -> String { "anthropic.claude-code-\(version)-darwin-arm64" }

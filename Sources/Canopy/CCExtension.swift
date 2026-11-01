@@ -11,15 +11,32 @@ enum CCExtension {
             .appendingPathComponent("Canopy/extensions")
     }
 
-    /// Find the newest installed CC extension path across all known locations.
+    /// The newest extension in Canopy's folder, the only one `ExtensionUpdater` cross-checked.
+    /// ~/.vscode/extensions is used only while Canopy's folder has none, so a newer copy there
+    /// cannot take over from a checked one.
     static func extensionPath() -> URL? {
-        guard let best = installedFolders()
-            .max(by: { $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedAscending })
-        else {
+        guard let best = preferred(canopy: folders(in: canopyExtensionsDir), vscode: folders(in: vscodeExtensionsDir)) else {
             logger.error("CC extension not found in any known location")
             return nil
         }
         return best
+    }
+
+    /// The newest version in Canopy's own folder, nil when it holds none.
+    static func canopyInstalledVersion() -> String? {
+        newest(folders(in: canopyExtensionsDir)).flatMap(version(at:))
+    }
+
+    private static var vscodeExtensionsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vscode/extensions")
+    }
+
+    static func preferred(canopy: [URL], vscode: [URL]) -> URL? {
+        newest(canopy) ?? newest(vscode)
+    }
+
+    private static func newest(_ folders: [URL]) -> URL? {
+        folders.max(by: { $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedAscending })
     }
 
     /// The installed folder holding `version`, so a page can match the extension host a session runs.
@@ -28,20 +45,12 @@ enum CCExtension {
     }
 
     private static func installedFolders() -> [URL] {
-        let searchDirs = [
-            canopyExtensionsDir,
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vscode/extensions"),
-        ]
-        var allCandidates: [URL] = []
-        for dir in searchDirs {
-            guard let contents = try? FileManager.default.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: nil
-            ) else { continue }
-            allCandidates.append(contentsOf: contents.filter {
-                $0.lastPathComponent.hasPrefix("anthropic.claude-code-")
-            })
-        }
-        return allCandidates
+        folders(in: canopyExtensionsDir) + folders(in: vscodeExtensionsDir)
+    }
+
+    private static func folders(in dir: URL) -> [URL] {
+        let contents = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return contents.filter { $0.lastPathComponent.hasPrefix("anthropic.claude-code-") }
     }
 
     /// Read extension version from package.json (e.g., "2.1.87").

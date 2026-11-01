@@ -64,6 +64,11 @@ final class CanopySettings {
         didSet { save() }
     }
 
+    /// Off: a newer Claude Code extension is offered in the launcher instead of installed on its own.
+    var autoUpdateExtension: Bool = true {
+        didSet { save() }
+    }
+
     /// Hold an idle-sleep assertion while a session is working (`SleepGuard`).
     var preventSleepWhileWorking: Bool = true {
         didSet { save() }
@@ -233,6 +238,7 @@ final class CanopySettings {
         set(\.recapEnabled, dict["canopy.recapEnabled"] as? Bool)
         set(\.keepAliveEnabled, dict["canopy.keepAliveEnabled"] as? Bool)
         set(\.seedWorktreeArtifacts, dict["canopy.seedWorktreeArtifacts"] as? Bool)
+        set(\.autoUpdateExtension, dict["canopy.autoUpdateExtension"] as? Bool)
         set(\.preventSleepWhileWorking, dict["canopy.preventSleepWhileWorking"] as? Bool)
         set(\.stayReachableRemotely, dict["canopy.stayReachableRemotely"] as? Bool)
         set(\.sleepBatteryFloorPercent, Self.batteryFloor(dict["canopy.sleepBatteryFloorPercent"]))
@@ -273,6 +279,9 @@ final class CanopySettings {
         }
         if let keepAlive = dict["canopy.keepAliveEnabled"] as? Bool {
             keepAliveEnabled = keepAlive
+        }
+        if let autoUpdate = dict["canopy.autoUpdateExtension"] as? Bool {
+            autoUpdateExtension = autoUpdate
         }
         if let seed = dict["canopy.seedWorktreeArtifacts"] as? Bool {
             seedWorktreeArtifacts = seed
@@ -380,6 +389,7 @@ final class CanopySettings {
         dict["canopy.recapEnabled"] = recapEnabled
         dict["canopy.keepAliveEnabled"] = keepAliveEnabled
         dict["canopy.seedWorktreeArtifacts"] = seedWorktreeArtifacts
+        dict["canopy.autoUpdateExtension"] = autoUpdateExtension
         dict["canopy.preventSleepWhileWorking"] = preventSleepWhileWorking
         dict["canopy.stayReachableRemotely"] = stayReachableRemotely
         dict["canopy.sleepBatteryFloorPercent"] = sleepBatteryFloorPercent
