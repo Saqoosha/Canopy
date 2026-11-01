@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ImageIO
 import IOKit.ps
@@ -3416,23 +3417,24 @@ enum SidebarLogicProbe {
                 defer { try? FileManager.default.removeItem(at: dir) }
                 let file = dir.appendingPathComponent("settings.json")
                 func write(_ json: String) { try? Data(json.utf8).write(to: file) }
-                write(#"{"canopy.rosterEnabled":true,"canopy.rosterEndpoint":"https://a.example","canopy.keepAliveEnabled":false}"#)
+                write(#"{"canopy.rosterEnabled":true,"canopy.rosterEndpoint":"https://a.example","canopy.keepAliveEnabled":false,"canopy.autoUpdateExtension":false}"#)
                 let wasPersisting = CanopySettings.persistsChanges
                 CanopySettings.persistsChanges = false
                 defer { CanopySettings.persistsChanges = wasPersisting }
                 let before = try? Data(contentsOf: file)
                 let settings = CanopySettings(filePath: file)
                 record("settings (daemon): values are read from the file",
-                       settings.rosterEnabled && settings.rosterEndpoint == "https://a.example" && !settings.keepAliveEnabled)
+                       settings.rosterEnabled && settings.rosterEndpoint == "https://a.example" && !settings.keepAliveEnabled
+                           && !settings.autoUpdateExtension)
                 settings.recapEnabled.toggle()
                 record("settings (daemon): loading and changing a value writes nothing",
                        (try? Data(contentsOf: file)) == before)
-                write(#"{"canopy.rosterEnabled":false,"canopy.rosterEndpoint":"https://b.example","canopy.keepAliveEnabled":true,"canopy.machineDisplayName":"Studio"}"#)
+                write(#"{"canopy.rosterEnabled":false,"canopy.rosterEndpoint":"https://b.example","canopy.keepAliveEnabled":true,"canopy.machineDisplayName":"Studio","canopy.autoUpdateExtension":true}"#)
                 let rewritten = try? Data(contentsOf: file)
                 settings.reload(from: ((try? JSONSerialization.jsonObject(with: rewritten ?? Data())) as? [String: Any]) ?? [:])
                 record("settings (daemon): reload picks up the GUI's change",
                        !settings.rosterEnabled && settings.rosterEndpoint == "https://b.example"
-                           && settings.keepAliveEnabled && settings.machineDisplayName == "Studio")
+                           && settings.keepAliveEnabled && settings.machineDisplayName == "Studio" && settings.autoUpdateExtension)
                 record("settings (daemon): reload writes nothing", (try? Data(contentsOf: file)) == rewritten)
                 settings.reload(from: ["claudeCode.allowDangerouslySkipPermissions": false,
                                        "canopy.defaultPermissionMode": "bypassPermissions"])
@@ -14496,6 +14498,138 @@ enum SidebarLogicProbe {
                    ExtensionCanary.resolvedNodePath(answering) == "/bin/sh")
             record("extension canary: a shim that cannot answer is used as given",
                    fakesWritten && ExtensionCanary.resolvedNodePath(failingShim) == failingShim)
+
+            let digest = "C1017EC0339E60B3EB762C4497D6448A9D0B3D6D0CBB09F86264BC219E73E6F4"
+            record("extension cross-check: Open VSX's .sha256 body parses to its lowercased digest",
+                   ExtensionCrossCheck.parsePublished(digest + "  Anthropic.claude-code-2.1.314@darwin-arm64.vsix\n") == digest.lowercased())
+            record("extension cross-check: an error page or a truncated digest is not a digest",
+                   ExtensionCrossCheck.parsePublished(#"{"error":"Not found"}"#) == nil
+                       && ExtensionCrossCheck.parsePublished(String(digest.dropLast())) == nil
+                       && ExtensionCrossCheck.parsePublished("") == nil)
+            record("extension cross-check: digests match regardless of case, and differ otherwise",
+                   ExtensionCrossCheck.verdict(downloaded: digest, published: digest.lowercased()) == .match
+                       && ExtensionCrossCheck.verdict(downloaded: String(repeating: "0", count: 64), published: digest.lowercased())
+                           == .mismatch(published: digest.lowercased()))
+            // Over the 1 MiB read size, so the streaming loop runs more than once.
+            let blob = Data((0..<(3 << 20) + 7).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+            let blobURL = shimDir.appendingPathComponent("blob.vsix")
+            let blobWritten = (try? blob.write(to: blobURL)) != nil
+            let expected = SHA256.hash(data: blob).map { String(format: "%02x", $0) }.joined()
+            record("extension cross-check: the streamed file digest equals a one-shot SHA-256",
+                   blobWritten && (try? ExtensionCrossCheck.sha256(of: blobURL)) == expected)
+
+            let meta = { (version: String, platform: String, link: String) in
+                Data(#"{"version":"\#(version)","targetPlatform":"\#(platform)","files":{"sha256":"\#(link)"}}"#.utf8)
+            }
+            let link = "https://open-vsx.org/api/Anthropic/claude-code/darwin-arm64/2.1.314/file/x.sha256"
+            record("extension cross-check: the .sha256 link is taken from metadata for exactly this build",
+                   ExtensionCrossCheck.sha256URL(metadata: meta("2.1.314", "darwin-arm64", link), version: "2.1.314", platform: "darwin-arm64")?.absoluteString == link)
+            record("extension cross-check: another version's or platform's metadata, or an http link, gives no digest",
+                   ExtensionCrossCheck.sha256URL(metadata: meta("2.1.313", "darwin-arm64", link), version: "2.1.314", platform: "darwin-arm64") == nil
+                       && ExtensionCrossCheck.sha256URL(metadata: meta("2.1.314", "universal", link), version: "2.1.314", platform: "darwin-arm64") == nil
+                       && ExtensionCrossCheck.sha256URL(metadata: meta("2.1.314", "darwin-arm64", "http://open-vsx.org/x.sha256"), version: "2.1.314", platform: "darwin-arm64") == nil)
+
+            // Real folders, so the scan, the name filter and the package.json read all run.
+            let canopyDir = shimDir.appendingPathComponent("ext-canopy")
+            let vscodeDir = shimDir.appendingPathComponent("ext-vscode")
+            @discardableResult
+            func plant(_ dir: URL, _ version: String) -> String {
+                let name = "anthropic.claude-code-\(version)-darwin-arm64"
+                let folder = dir.appendingPathComponent(name)
+                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try? Data(#"{"version":"\#(version)"}"#.utf8).write(to: folder.appendingPathComponent("package.json"))
+                return name
+            }
+            plant(vscodeDir, "2.1.3")
+            let vscodeNewest = plant(vscodeDir, "2.1.10")
+            record("extension path: ~/.vscode/extensions is used only while Canopy's folder is empty",
+                   CCExtension.extensionPath(canopyDir: canopyDir, vscodeDir: vscodeDir)?.lastPathComponent == vscodeNewest
+                       && CCExtension.canopyInstalledVersion(in: canopyDir) == nil)
+            plant(canopyDir, "2.1.9")
+            let canopyNewest = plant(canopyDir, "2.1.14")
+            plant(vscodeDir, "2.1.99")
+            record("extension path: Canopy's newest wins over a newer copy in ~/.vscode/extensions",
+                   CCExtension.extensionPath(canopyDir: canopyDir, vscodeDir: vscodeDir)?.lastPathComponent == canopyNewest
+                       && CCExtension.canopyInstalledVersion(in: canopyDir) == "2.1.14")
+
+            // The updater itself, with every outside call faked. `blob` is the VSIX each download hands over.
+            final class UpdaterCalls {
+                var digestLookups = 0
+                var downloads: [URL] = []
+                var installs: [String] = []
+                var notes: [String] = []
+            }
+            func fakeUpdater(digest: String?, auto: Bool = true, calls: UpdaterCalls) -> ExtensionUpdater {
+                ExtensionUpdater(environment: .init(
+                    latestVersion: { _ in "2.1.20" },
+                    installedVersion: { "2.1.10" },
+                    autoUpdate: { auto },
+                    // Yields, as the real lookup does, so a second caller can run in between.
+                    publishedDigest: { _, _ in calls.digestLookups += 1; await Task.yield(); return digest },
+                    download: { _, _ in
+                        let file = shimDir.appendingPathComponent("dl-\(UUID().uuidString).vsix")
+                        try blob.write(to: file)
+                        calls.downloads.append(file)
+                        return file
+                    },
+                    install: { _, _, version in calls.installs.append(version) },
+                    notify: { title, _ in calls.notes.append(title) }
+                ))
+            }
+            func settle(_ work: @escaping @MainActor () async -> Void) {
+                var done = false
+                Task { @MainActor in await work(); done = true }
+                let deadline = Date().addingTimeInterval(5)
+                while !done && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+                if !done { record("extension updater: a faked update finishes within 5 s", false) }
+            }
+            let gone = { (calls: UpdaterCalls) in calls.downloads.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) } }
+
+            let tampered = UpdaterCalls()
+            let tamperedUpdater = fakeUpdater(digest: String(repeating: "0", count: 64), calls: tampered)
+            settle { await tamperedUpdater.checkForUpdate() }
+            let mismatchText = ExtensionUpdater.UpdateError.crossCheckMismatch(version: "2.1.20").localizedDescription
+            record("extension updater: a VSIX that differs from Open VSX's digest is not installed, and is deleted",
+                   tampered.installs.isEmpty && tampered.downloads.count == 1 && gone(tampered)
+                       && tamperedUpdater.state == .failed(message: mismatchText)
+                       && tampered.notes == ["Claude Code extension update failed"])
+            settle { await tamperedUpdater.checkForUpdate() }
+            record("extension updater: the next automatic check does not download a mismatched version again",
+                   tampered.downloads.count == 1 && tamperedUpdater.state == .failed(message: mismatchText))
+
+            let matching = UpdaterCalls()
+            let matchingUpdater = fakeUpdater(digest: expected, calls: matching)
+            settle { await matchingUpdater.checkForUpdate() }
+            record("extension updater: a VSIX matching Open VSX's digest is installed, and the download is deleted",
+                   matching.installs == ["2.1.20"] && gone(matching) && matchingUpdater.state == .done(version: "2.1.20"))
+
+            let unlisted = UpdaterCalls()
+            let unlistedUpdater = fakeUpdater(digest: nil, calls: unlisted)
+            settle { await unlistedUpdater.checkForUpdate() }
+            record("extension updater: with no Open VSX digest nothing is downloaded, and the version is offered",
+                   unlisted.downloads.isEmpty && unlistedUpdater.state == .available(version: "2.1.20") && unlisted.notes.isEmpty)
+            settle { await unlistedUpdater.installAvailable() }
+            record("extension updater: clicking Install with no digest says why, and still downloads nothing",
+                   unlisted.downloads.isEmpty
+                       && unlistedUpdater.state == .failed(message: ExtensionUpdater.UpdateError.noPublishedDigest(version: "2.1.20").localizedDescription))
+
+            let manual = UpdaterCalls()
+            let manualUpdater = fakeUpdater(digest: expected, auto: false, calls: manual)
+            settle { await manualUpdater.checkForUpdate() }
+            record("extension updater: with auto-update off a newer version is offered, not looked up or downloaded",
+                   manualUpdater.state == .available(version: "2.1.20") && manual.digestLookups == 0 && manual.downloads.isEmpty)
+            settle {
+                async let first: Void = manualUpdater.installAvailable()
+                async let second: Void = manualUpdater.installAvailable()
+                _ = await (first, second)
+            }
+            record("extension updater: two Install clicks install once",
+                   manual.installs == ["2.1.20"] && manual.digestLookups == 1 && manualUpdater.state == .done(version: "2.1.20"))
+
+            let idle: [ExtensionUpdater.State] = [.idle, .upToDate, .available(version: "1"), .done(version: "1"), .failed(message: "")]
+            let busy: [ExtensionUpdater.State] = [.checking, .verifying, .downloading, .installing]
+            record("extension updater: a check may start only when nothing is running",
+                   idle.allSatisfy(\.allowsCheck) && !busy.contains(where: \.allowsCheck))
 
             let dir = "/Users/u/Library/Application Support/Canopy/extensions"
             func folder(_ version: String) -> String { "anthropic.claude-code-\(version)-darwin-arm64" }

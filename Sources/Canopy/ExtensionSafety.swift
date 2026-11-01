@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os.log
 
@@ -182,6 +183,70 @@ enum ExtensionCanary {
             lock.lock(); defer { lock.unlock() }
             return String(decoding: data, as: UTF8.self)
         }
+    }
+}
+
+/// Compares the VS Marketplace VSIX with the SHA-256 Open VSX publishes for the same version, so a
+/// compromised marketplace alone cannot ship a modified extension (as Cursor's did on 2026-10-29).
+/// Measured 2026-11-01: both serve byte-identical darwin-arm64 VSIXes for 2.1.312 and 2.1.314.
+enum ExtensionCrossCheck {
+    enum Verdict: Equatable {
+        case match
+        case mismatch(published: String)
+    }
+
+    /// The hex digest in Open VSX's `.sha256` file, nil when the body is not one.
+    static func parsePublished(_ body: String) -> String? {
+        guard let token = body.split(whereSeparator: \.isWhitespace).first?.lowercased(),
+              token.count == 64, token.allSatisfy(\.isHexDigit) else { return nil }
+        return token
+    }
+
+    static func verdict(downloaded: String, published: String) -> Verdict {
+        downloaded.lowercased() == published ? .match : .mismatch(published: published)
+    }
+
+    /// The SHA-256 Open VSX publishes for `version`, nil when it has no such version yet or did not answer.
+    static func publishedSHA256(version: String, platform: String) async -> String? {
+        guard let metaURL = URL(string: "https://open-vsx.org/api/anthropic/claude-code/\(platform)/\(version)"),
+              let meta = await fetch(metaURL),
+              let shaURL = sha256URL(metadata: meta, version: version, platform: platform),
+              let body = await fetch(shaURL)
+        else { return nil }
+        return parsePublished(String(decoding: body, as: UTF8.self))
+    }
+
+    /// The `.sha256` link in Open VSX's metadata, nil unless it describes exactly this build.
+    /// Another build's digest would read as tampering rather than as "cannot check".
+    static func sha256URL(metadata: Data, version: String, platform: String) -> URL? {
+        guard let json = try? JSONSerialization.jsonObject(with: metadata) as? [String: Any],
+              json["version"] as? String == version,
+              json["targetPlatform"] as? String == platform,
+              let files = json["files"] as? [String: Any],
+              let link = (files["sha256"] as? String).flatMap(URL.init(string:)),
+              link.scheme == "https"
+        else { return nil }
+        return link
+    }
+
+    private static func fetch(_ url: URL) async -> Data? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode)
+        else { return nil }
+        return data
+    }
+
+    /// Streams the file, since a VSIX runs to tens of MB. Blocks; call off the main thread.
+    static func sha256(of file: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
 

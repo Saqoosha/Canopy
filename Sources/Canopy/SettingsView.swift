@@ -194,6 +194,12 @@ private struct GeneralSettingsTab: View {
                     )
             }
 
+            Section {
+                Toggle("Update the Claude Code extension automatically", isOn: $settings.autoUpdateExtension)
+            } footer: {
+                SettingsFooter(text: "Each update is installed only when the VS Marketplace copy matches the one on Open VSX. When this is off, the launcher offers a new version and installs it on click.")
+            }
+
 
         }
         .formStyle(.grouped)

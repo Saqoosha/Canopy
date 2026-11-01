@@ -1454,6 +1454,22 @@ struct LauncherView: View {
     @ViewBuilder
     private var extensionUpdateBanner: some View {
         switch updater.state {
+        case .available(let version):
+            updateBannerCard(icon: "arrow.down.circle.fill", iconColor: .accentColor, tint: .accentColor) {
+                Text("Claude Code extension v\(version) is available.")
+                    .font(.system(size: 12))
+                Button("Install") {
+                    Task { await updater.installAvailable() }
+                }
+                .controlSize(.small)
+            }
+
+        case .verifying:
+            updateBannerCard(tint: .secondary) {
+                ProgressView().controlSize(.small)
+                Text("Checking Open VSX…").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+
         case .downloading:
             updateBannerCard(tint: .secondary) {
                 ProgressView().controlSize(.small)

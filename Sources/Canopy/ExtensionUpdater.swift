@@ -10,6 +10,10 @@ final class ExtensionUpdater {
         case idle
         case checking
         case upToDate
+        /// Newer than what Canopy has installed and not being installed: auto-update is off, or Open VSX had no digest yet.
+        case available(version: String)
+        /// Looking up Open VSX's digest for an install.
+        case verifying
         case downloading
         case installing
         case done(version: String)
@@ -19,6 +23,40 @@ final class ExtensionUpdater {
     /// One per process: every launcher pane checks on appear, and an update now installs
     /// without a click, so per-pane instances would race two installs into one folder.
     static let shared = ExtensionUpdater()
+
+    /// Everything the updater reaches outside itself, so the probe can drive it with no network
+    /// and without touching the real extensions folder.
+    struct Environment {
+        var latestVersion: @MainActor (ExtensionUpdater) async -> String?
+        var installedVersion: @MainActor () -> String?
+        var autoUpdate: @MainActor () -> Bool
+        var publishedDigest: @MainActor (_ version: String, _ platform: String) async -> String?
+        var download: @MainActor (ExtensionUpdater, _ version: String) async throws -> URL
+        var install: @MainActor (ExtensionUpdater, _ vsix: URL, _ version: String) async throws -> Void
+        var notify: @MainActor (_ title: String, _ body: String) -> Void
+
+        static var live: Environment {
+            Environment(
+                latestVersion: { await $0.marketplaceLatestVersion() },
+                // Canopy's own folder only: a version in ~/.vscode/extensions was not cross-checked.
+                installedVersion: { CCExtension.canopyInstalledVersion() },
+                autoUpdate: { CanopySettings.shared.autoUpdateExtension },
+                publishedDigest: { await ExtensionCrossCheck.publishedSHA256(version: $0, platform: $1) },
+                download: { try await $0.downloadVSIX(version: $1) },
+                install: { updater, vsix, version in
+                    try await updater.installVSIX(at: vsix, version: version)
+                    await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }.value
+                },
+                notify: { SessionNotifier.post(title: $0, body: $1, showWhileFrontmost: true) }
+            )
+        }
+    }
+
+    private let environment: Environment
+
+    init(environment: Environment = .live) {
+        self.environment = environment
+    }
 
     /// The last failed install in this process. That version is not installed again without a click.
     private var failure: (version: String, message: String)?
@@ -43,12 +81,12 @@ final class ExtensionUpdater {
 
     /// `retryingFailure` is the banner's Retry: a click is consent to try the failed version again.
     func checkForUpdate(retryingFailure: Bool = false) async {
-        guard state == .idle || state == .upToDate || state.isTerminal else { return }
+        guard state.allowsCheck else { return }
 
         state = .checking
         // A failed lookup keeps a stored failure, and its Retry, on screen.
         let fallback: State = failure.map { .failed(message: $0.message) } ?? .idle
-        guard let latestVer = await marketplaceLatestVersion() else {
+        guard let latestVer = await environment.latestVersion(self) else {
             logger.warning("Could not determine marketplace latest version")
             state = fallback
             return
@@ -58,12 +96,14 @@ final class ExtensionUpdater {
             state = fallback
             return
         }
-        let extVer = CCExtension.extensionVersion()
+        let extVer = environment.installedVersion()
         if let extVer, Self.compareVersions(extVer, latestVer) >= 0 {
             state = .upToDate
         } else if let failure, failure.version == latestVer, !retryingFailure {
             // Terminal, so a later mount still checks and picks up a fixed newer version.
             state = .failed(message: failure.message)
+        } else if !retryingFailure, !environment.autoUpdate() {
+            state = .available(version: latestVer)
         } else {
             // New sessions pick the newest installed version at spawn, so installing is all an update takes.
             await installUpdate(version: latestVer, automatic: !retryingFailure)
@@ -117,27 +157,49 @@ final class ExtensionUpdater {
         }
     }
 
+    /// The banner's Install, for the version `checkForUpdate` offered with auto-update off.
+    func installAvailable() async {
+        guard case .available(let version) = state else { return }
+        await installUpdate(version: version, automatic: false)
+    }
+
     private func installUpdate(version: String, automatic: Bool) async {
+        // Busy before the first await, so a second click or another pane's check cannot start a second install.
+        state = .verifying
+        // Looked up before the download: Open VSX can lag the VS Marketplace, and this is not a failure.
+        guard let published = await environment.publishedDigest(version, Self.detectPlatform()) else {
+            logger.notice("Extension v\(version, privacy: .public): no digest from Open VSX (not listed yet, or unreachable), update deferred")
+            // Offered, not hidden, so a lasting outage shows. Not stored in `failure`: the next check tries again.
+            state = automatic
+                ? .available(version: version)
+                : .failed(message: UpdateError.noPublishedDigest(version: version).localizedDescription)
+            return
+        }
         state = .downloading
+        var vsixURL: URL?
+        defer { if let vsixURL { try? FileManager.default.removeItem(at: vsixURL) } }
         do {
-            let vsixURL = try await downloadVSIX(version: version)
+            let vsix = try await environment.download(self, version)
+            vsixURL = vsix
+            let downloaded = try await Task.detached(priority: .userInitiated) {
+                try ExtensionCrossCheck.sha256(of: vsix)
+            }.value
+            if case .mismatch = ExtensionCrossCheck.verdict(downloaded: downloaded, published: published) {
+                logger.fault("Extension v\(version, privacy: .public): VS Marketplace VSIX \(downloaded, privacy: .public) does not match Open VSX \(published, privacy: .public)")
+                throw UpdateError.crossCheckMismatch(version: version)
+            }
             state = .installing
-            try await installVSIX(at: vsixURL, version: version)
-            await Task.detached(priority: .utility) { ExtensionCleanup.removeUnused() }.value
+            try await environment.install(self, vsix, version)
             failure = nil
             state = .done(version: version)
             // The install needs no click now, so the launcher banner may never be on screen.
-            SessionNotifier.post(title: "Claude Code extension updated",
-                                 body: "v\(version) is installed. New sessions use it.",
-                                 showWhileFrontmost: true)
+            environment.notify("Claude Code extension updated", "v\(version) is installed. New sessions use it.")
         } catch {
             failure = (version, error.localizedDescription)
             state = .failed(message: error.localizedDescription)
             // A Retry click already has the banner in front of it.
             if automatic {
-                SessionNotifier.post(title: "Claude Code extension update failed",
-                                     body: "v\(version): \(error.localizedDescription)",
-                                     showWhileFrontmost: true)
+                environment.notify("Claude Code extension update failed", "v\(version): \(error.localizedDescription)")
             }
             logger.error("Extension update failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -276,7 +338,6 @@ final class ExtensionUpdater {
                 }
             }
             try FileManager.default.moveItem(at: extractedExt, to: targetDir)
-            try? FileManager.default.removeItem(at: vsixURL)
 
             logger.info("Extension v\(version, privacy: .public) installed at: \(targetDir.path, privacy: .public)")
         }
@@ -288,7 +349,7 @@ final class ExtensionUpdater {
     private nonisolated static func detectPlatform() -> String {
         let searchDirs = [
             CCExtension.canopyExtensionsDir,
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vscode/extensions"),
+            CCExtension.vscodeExtensionsDir,
         ]
         for dir in searchDirs {
             if let contents = try? FileManager.default.contentsOfDirectory(atPath: dir.path),
@@ -335,6 +396,8 @@ final class ExtensionUpdater {
         case downloadFailed(statusCode: Int)
         case extractionFailed
         case canaryFailed(version: String, reason: String)
+        case crossCheckMismatch(version: String)
+        case noPublishedDigest(version: String)
 
         var errorDescription: String? {
             switch self {
@@ -343,16 +406,21 @@ final class ExtensionUpdater {
             case .extractionFailed: return "Failed to extract extension package"
             case .canaryFailed(let version, let reason):
                 return "v\(version) did not start in Canopy, so it was not installed: \(reason)"
+            case .noPublishedDigest(let version):
+                return "Open VSX has no digest for v\(version) yet, or could not be reached, so it cannot be cross-checked. Try again later."
+            case .crossCheckMismatch(let version):
+                return "v\(version) from the VS Marketplace differs from the copy on Open VSX, so it was not installed and Canopy keeps the version it has. One of them may have been tampered with."
             }
         }
     }
 }
 
 extension ExtensionUpdater.State {
-    var isTerminal: Bool {
+    /// Not while a check or an install is running. `.available` rechecks, so a newer release replaces the offer.
+    var allowsCheck: Bool {
         switch self {
-        case .done, .failed: return true
-        default: return false
+        case .idle, .upToDate, .available, .done, .failed: return true
+        case .checking, .verifying, .downloading, .installing: return false
         }
     }
 }
