@@ -7,10 +7,9 @@ import UniformTypeIdentifiers
 /// only reads as a row while every pill shares its metrics, and the first draft
 /// of this screen had two of them a point taller than the rest.
 ///
-/// Chips that open a menu draw in the primary color, defaults included. A
-/// secondary-gray label was tried to mark "still the default", and it read as
-/// a disabled control, which is what that gray means on macOS. The color is
-/// left to the caller so the read-only branch label can stay secondary.
+/// Menu chips draw in the primary color, defaults included: a secondary-gray
+/// label on a clickable chip read as a disabled control. The non-menu branch
+/// label is not a control, so its caller sets `.secondary`.
 private struct ChipLabel: View {
     let icon: String
     let text: String
@@ -23,7 +22,7 @@ private struct ChipLabel: View {
     var body: some View {
         if isMenu {
             // Inside the label so the whole pill is the plain button's hit area.
-            content.chipStyle()
+            content.foregroundStyle(Color.primary).chipStyle()
         } else {
             content
         }
@@ -148,7 +147,8 @@ private extension EnvironmentValues {
 private extension View {
     /// A chip that opens a menu.
     ///
-    /// `.borderlessButton` hands the label to AppKit. A plain button keeps SwiftUI
+    /// `.borderlessButton` hands the label to an AppKit cell that drops its
+    /// background, border and chevron. A plain button keeps SwiftUI
     /// drawing the label, at the cost of the system menu indicator, which
     /// `ChipLabel` draws itself instead, along with the pill.
     func chipMenu() -> some View {
