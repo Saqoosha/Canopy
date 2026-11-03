@@ -7,13 +7,12 @@ import UniformTypeIdentifiers
 /// only reads as a row while every pill shares its metrics, and the first draft
 /// of this screen had two of them a point taller than the rest.
 ///
-/// `muted` means "this is the default, not a choice the user made" — it is what
-/// keeps a row of five chips from reading as five settings that all need
-/// attention.
+/// Menu chips draw in the primary color, defaults included: a secondary-gray
+/// label on a clickable chip read as a disabled control. The non-menu branch
+/// label is not a control, so its caller sets `.secondary`.
 private struct ChipLabel: View {
     let icon: String
     let text: String
-    var muted: Bool = false
     /// Ceiling for the label, so one long name cannot push the row off screen.
     /// Middle truncation rather than tail: the ends of a branch name carry more
     /// than its middle ("fix-…-counts" beats "fix-issue-one-hundred-…").
@@ -23,7 +22,7 @@ private struct ChipLabel: View {
     var body: some View {
         if isMenu {
             // Inside the label so the whole pill is the plain button's hit area.
-            content.chipStyle()
+            content.foregroundStyle(Color.primary).chipStyle()
         } else {
             content
         }
@@ -53,7 +52,6 @@ private struct ChipLabel: View {
         // A reported 1px jitter is the visible half of a layout that resizes
         // on every state change.
         .frame(height: 16)
-        .foregroundStyle(muted ? Color.secondary : Color.primary)
     }
 }
 
@@ -149,8 +147,8 @@ private extension EnvironmentValues {
 private extension View {
     /// A chip that opens a menu.
     ///
-    /// `.borderlessButton` hands the label to AppKit, which repaints it in the
-    /// primary color, so `ChipLabel`'s `muted` never showed. A plain button keeps SwiftUI
+    /// `.borderlessButton` hands the label to an AppKit cell that drops its
+    /// background, border and chevron. A plain button keeps SwiftUI
     /// drawing the label, at the cost of the system menu indicator, which
     /// `ChipLabel` draws itself instead, along with the pill.
     func chipMenu() -> some View {
@@ -680,8 +678,7 @@ struct LauncherView: View {
         } label: {
             ChipLabel(
                 icon: "folder",
-                text: directoryLabel,
-                muted: isRemoteMode ? remoteDirectory.isEmpty : selectedDirectory == nil
+                text: directoryLabel
             )
         }
         .chipMenu()
@@ -744,9 +741,11 @@ struct LauncherView: View {
             // would invite a click that cannot be honoured.
             ChipLabel(
                 icon: "arrow.triangle.branch",
-                text: branchChipText,
-                muted: true,
-                )
+                text: branchChipText
+            )
+            // Secondary because this is read-only information, not a control:
+            // the one chip HIG's secondary label color fits.
+            .foregroundStyle(.secondary)
             // Keeps the pills' vertical metric so the row still aligns, and
             // enough horizontal room not to crowd them — everything except the
             // fill and the border, which are what said "press me".
@@ -856,7 +855,7 @@ struct LauncherView: View {
             } else if isInLinkedWorktree {
                 ChipLabel(icon: "square.on.square", text: "Existing worktree")
             } else {
-                ChipLabel(icon: "square", text: "No worktree", muted: true)
+                ChipLabel(icon: "square", text: "No worktree")
             }
         }
         .chipMenu()
@@ -902,8 +901,7 @@ struct LauncherView: View {
             } else {
                 ChipLabel(
                     icon: isRemoteMode ? "network" : "desktopcomputer",
-                    text: isRemoteMode ? (remoteHost.isEmpty ? "SSH host…" : remoteHost) : "This Mac",
-                    muted: isRemoteMode && remoteHost.isEmpty
+                    text: isRemoteMode ? (remoteHost.isEmpty ? "SSH host…" : remoteHost) : "This Mac"
                 )
             }
         }
@@ -1029,8 +1027,7 @@ struct LauncherView: View {
         } label: {
             ChipLabel(
                 icon: "folder",
-                text: peerFolder.map { ($0 as NSString).lastPathComponent } ?? "Choose folder",
-                muted: peerFolder == nil
+                text: peerFolder.map { ($0 as NSString).lastPathComponent } ?? "Choose folder"
             )
         }
         .chipMenu()
@@ -1072,7 +1069,7 @@ struct LauncherView: View {
                 }
             }
         } label: {
-            ChipLabel(icon: "plus.bubble", text: "New session", muted: true)
+            ChipLabel(icon: "plus.bubble", text: "New session")
         }
         .chipMenu()
     }
@@ -1150,8 +1147,7 @@ struct LauncherView: View {
         } label: {
             ChipLabel(
                 icon: willContinueSession ? "arrow.uturn.backward" : "plus.bubble",
-                text: willContinueSession ? "Continue" : "New session",
-                muted: !willContinueSession
+                text: willContinueSession ? "Continue" : "New session"
             )
         }
         .chipMenu()
@@ -1328,8 +1324,7 @@ struct LauncherView: View {
             }
         } label: {
             ChipLabel(icon: "server.rack",
-                      text: providers.first { $0.id == selectedProviderId }?.name ?? "Anthropic",
-                      muted: isAnthropicProvider)
+                      text: providers.first { $0.id == selectedProviderId }?.name ?? "Anthropic")
         }
         .chipMenu()
     }
@@ -1342,8 +1337,7 @@ struct LauncherView: View {
             }
         } label: {
             ChipLabel(icon: "sparkle",
-                      text: model.isEmpty ? "Auto" : Self.modelDisplayName(model),
-                      muted: model.isEmpty)
+                      text: model.isEmpty ? "Auto" : Self.modelDisplayName(model))
         }
         .chipMenu()
     }
@@ -1356,8 +1350,7 @@ struct LauncherView: View {
             }
         } label: {
             ChipLabel(icon: "gauge.with.dots.needle.33percent",
-                      text: effortLevel.isEmpty ? "Auto" : Self.effortDisplayName(effortLevel),
-                      muted: effortLevel.isEmpty)
+                      text: effortLevel.isEmpty ? "Auto" : Self.effortDisplayName(effortLevel))
         }
         .chipMenu()
     }
