@@ -6392,6 +6392,9 @@ enum SidebarLogicProbe {
             record("bridge: a Slack denial is read",
                    ShimProcess.bridgeSlackNote(frame(
                        plugin: "canopy-bridge", text: #"{"v":1,"slack":{"denied":"Edit"}}"#)) == .denied("Edit"))
+            record("bridge: a failure to keep the gate's record is a Slack note",
+                   ShimProcess.bridgeSlackNote(frame(
+                       plugin: "canopy-bridge", text: #"{"v":1,"slack":{"failed":"write: x"}}"#)) == .failed("write: x"))
             record("bridge: a context frame is not a Slack note",
                    ShimProcess.bridgeSlackNote(frame(
                        plugin: "canopy-bridge", text: #"{"v":1,"context":{"window":5}}"#)) == nil)

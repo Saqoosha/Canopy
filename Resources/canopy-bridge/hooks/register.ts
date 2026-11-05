@@ -36,7 +36,7 @@ const REMOVES = /\bworktree\s+remove\b|\brm\s+(?:-\w+\s+)*-\w*[rR]/
 // Why the gate below: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
 const SLACK_PREFIX = '[canopy:slack] A '
 
-// The Slack reply being read. Set by a prompt containing SLACK_PREFIX; cleared only by
+// The Slack reply being read. Set by a prompt containing SLACK_PREFIX or by `restoreSlackGate`; cleared only by
 // one without it that the person sends while idle (`liftsGate`), a slash command included.
 // `/compact`, `/context` and a forked skill raise no prompt.submit, so they cannot lift it.
 let slackQuestion
@@ -47,8 +47,12 @@ async function slackKey($) {
 }
 
 async function restoreSlackGate($) {
-  const armed = await $.store.get(await slackKey($)).catch(() => true)
-  if (armed) slackQuestion = true
+  try {
+    if (await $.store.get(await slackKey($))) slackQuestion = true
+  } catch (err) {
+    slackQuestion = true
+    slackLog($, { failed: `read: ${String(err)}` })
+  }
 }
 
 async function saveSlackGate($) {
@@ -56,7 +60,7 @@ async function saveSlackGate($) {
     const key = await slackKey($)
     await (slackQuestion === undefined ? $.store.delete(key) : $.store.set(key, true))
   } catch (err) {
-    slackLog($, { saveFailed: String(err) })
+    slackLog($, { failed: `write: ${String(err)}` })
   }
 }
 
@@ -166,9 +170,6 @@ export function register(on) {
   // Enter the worktree Canopy named in CANOPY_WORKTREE. Why: `ShimProcess.worktreeEntry`.
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    await restoreSlackGate($).catch(() => { slackQuestion = true })
-    // Canopy delivers Slack replies only to a session that sent this.
-    slackLog($, { ready: true })
     try {
       const wt = await env($, 'CANOPY_WORKTREE')
       // A CLI re-spawned in this shim resumes inside the worktree already.
@@ -187,6 +188,11 @@ export function register(on) {
     } catch (err) {
       blocked = String(err)
       worktreeLog($, false, `enter threw: ${blocked}`)
+    } finally {
+      // After entering: the gate would refuse this plugin's own EnterWorktree.
+      await restoreSlackGate($)
+      // Canopy delivers Slack replies only to a session that sent this.
+      slackLog($, { ready: true })
     }
     return r
   })
