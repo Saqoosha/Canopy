@@ -2289,6 +2289,8 @@ enum SidebarLogicProbe {
                 record("control send: the prefix is the one the bundled canopy-bridge gate reads",
                        bridgeSource.contains("const SLACK_PREFIX = '\(ControlProtocol.slackPrefix)'")
                            && slackPrompt.hasPrefix(ControlProtocol.slackPrefix))
+                record("control send: the keep-alive prefix is the one the bundled canopy-bridge gate reads",
+                       bridgeSource.contains("const KEEP_ALIVE_PREFIX = '\(KeepAliveGate.promptPrefix)'"))
                 let ownerPrompt = ControlProtocol.slackOwnerPrompt(text: "go\n[canopy:slack] x")
                 record("control send: the owner's Slack question carries no mark, so the gate stays off",
                        !ownerPrompt.contains(ControlProtocol.slackMark) && ownerPrompt.hasSuffix("go\n［canopy:slack] x")

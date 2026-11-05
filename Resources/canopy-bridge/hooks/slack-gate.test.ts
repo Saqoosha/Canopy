@@ -141,10 +141,11 @@ test('a slash command quoting a Slack reply keeps the gate', async ($, on) => {
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
 })
 
-test('a slash command or a task notification quoting a Slack reply does not arm the gate', async ($, on) => {
+test('a slash command, a notification or a peer quoting a Slack reply does not arm the gate', async ($, on) => {
   const { notes } = engine(on)
   await $.prompt.submit({ text: `/x ${slack}`, command: { name: 'x', args: slack }, origin: { kind: 'sdk' } })
-  await $.prompt.submit({ text: `report: ${slack}`, origin: { kind: 'task-notification' } })
+  for (const kind of ['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay'])
+    await $.prompt.submit({ text: `report: ${slack}`, origin: { kind } })
   expect(notes.some(n => n.includes('[filter]'))).toBe(false)
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
 })
