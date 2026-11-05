@@ -41,6 +41,25 @@ const SLACK_PREFIX = '[canopy:slack] A '
 // `/compact`, `/context` and a forked skill raise no prompt.submit, so they cannot lift it.
 let slackQuestion
 
+// The store keeps the gate through a respawn: the resumed CLI has the Slack text in context.
+async function slackKey($) {
+  return `slack-gate:${await $.session.id()}`
+}
+
+async function restoreSlackGate($) {
+  const armed = await $.store.get(await slackKey($)).catch(() => true)
+  if (armed) slackQuestion = true
+}
+
+async function saveSlackGate($) {
+  try {
+    const key = await slackKey($)
+    await (slackQuestion === undefined ? $.store.delete(key) : $.store.set(key, true))
+  } catch (err) {
+    slackLog($, { saveFailed: String(err) })
+  }
+}
+
 // The person's own prompt: typed, from the phone or web, or from the SDK host (Canopy).
 // A task notification or a scheduled prompt does not lift the gate. `sdk` also covers `send_message`.
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
@@ -147,6 +166,7 @@ export function register(on) {
   // Enter the worktree Canopy named in CANOPY_WORKTREE. Why: `ShimProcess.worktreeEntry`.
   on('session.start', async ($, e, next) => {
     const r = await next(e)
+    await restoreSlackGate($).catch(() => { slackQuestion = true })
     // Canopy delivers Slack replies only to a session that sent this.
     slackLog($, { ready: true })
     try {
@@ -188,11 +208,15 @@ export function register(on) {
     // not measured. The sentence after the mark keeps a bare quote of `[canopy:slack]`
     // (a peer message about this feature) from arming it.
     if (typeof e.text !== 'string' || !e.text.includes(SLACK_PREFIX)) {
-      if (liftsGate(e)) slackQuestion = undefined
+      if (slackQuestion !== undefined && liftsGate(e)) {
+        slackQuestion = undefined
+        await saveSlackGate($)
+      }
       return next(e)
     }
     if (e.command || isQuote(e)) return next(e)
     slackQuestion = e.text
+    await saveSlackGate($)
     let kind = 'unknown'
     try {
       const r = await $.model.complete({
