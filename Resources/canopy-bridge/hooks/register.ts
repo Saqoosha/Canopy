@@ -37,16 +37,27 @@ const REMOVES = /\bworktree\s+remove\b|\brm\s+(?:-\w+\s+)*-\w*[rR]/
 const SLACK_PREFIX = '[canopy:slack] A '
 
 // The Slack reply being read. Set by a prompt containing SLACK_PREFIX; cleared only by
-// one without it that the person sends while idle (`liftsGate`).
+// one without it that the person sends while idle (`liftsGate`), a slash command included.
+// `/compact`, `/context` and a forked skill raise no prompt.submit, so they cannot lift it.
 let slackQuestion
 
 // The person's own prompt: typed, from the phone or web, or from the SDK host (Canopy).
-// A task notification, a scheduled prompt or another session's message does not lift the gate.
+// A task notification or a scheduled prompt does not lift the gate. `sdk` also covers `send_message`.
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
 
+// `KeepAliveGate.promptPrefix`: Canopy's own refresh reaches the CLI as `sdk`, like the person's prompts.
+const KEEP_ALIVE_PREFIX = '[Canopy keep-alive]'
+
+// These quote the sentence mid-line, as a subagent's report did. A delivered one starts a line, even joined.
+const QUOTING_ORIGINS = new Set(['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay'])
+
+function isQuote(e) {
+  return QUOTING_ORIGINS.has(e.origin?.kind) && !e.text.split('\n').some(line => line.startsWith(SLACK_PREFIX))
+}
+
 function liftsGate(e) {
-  if (e.isMeta || e.turnId) return false
-  // An unstamped origin keeps the gate. Every CLI Canopy bundles (2.1.301-2.1.307) stamps `sdk`.
+  if (e.isMeta || e.turnId || String(e.text).startsWith(KEEP_ALIVE_PREFIX)) return false
+  // An unstamped origin keeps the gate. CLIs 2.1.301-2.1.307 and 2.1.318 stamp `sdk`.
   return PERSON_ORIGINS.has(e.origin?.kind)
 }
 
@@ -173,7 +184,6 @@ export function register(on) {
 
   // Classify a Slack reply and hand the verdict to the model as a note only it reads.
   on('prompt.submit', async ($, e, next) => {
-    if (e.command) return next(e)
     // Anywhere, not just first: queued prompts can reach the CLI joined into one, in a shape
     // not measured. The sentence after the mark keeps a bare quote of `[canopy:slack]`
     // (a peer message about this feature) from arming it.
@@ -181,6 +191,7 @@ export function register(on) {
       if (liftsGate(e)) slackQuestion = undefined
       return next(e)
     }
+    if (e.command || isQuote(e)) return next(e)
     slackQuestion = e.text
     let kind = 'unknown'
     try {
@@ -220,7 +231,7 @@ export function register(on) {
     const why = await slackDenial($, e).catch(err => `the check failed (${String(err)})`)
     if (why) {
       slackLog($, { denied: e.tool })
-      return { deny: `Reading a Slack reply is read-only: ${why}. Leave it for Saqoosha.` }
+      return { deny: `Reading a Slack reply is read-only: ${why}. Leave it for Saqoosha: a prompt or skill he sends after this turn ends lifts this.` }
     }
     return next(e)
   })
