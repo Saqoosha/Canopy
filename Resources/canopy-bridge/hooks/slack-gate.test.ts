@@ -71,15 +71,17 @@ test('the gate stays through a folded-in prompt, a hidden one, a scheduled comma
   engine(on)
   const write = () => $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' })
   await $.prompt.submit({ text: slack })
-  await $.prompt.submit({ text: 'and also', turnId: 't1' })
+  await $.prompt.submit({ text: 'and also', turnId: 't1', origin: { kind: 'sdk' } })
   expect(denied(await write())).toBe(true)
-  await $.prompt.submit({ text: 'hidden', isMeta: true })
+  await $.prompt.submit({ text: 'hidden', isMeta: true, origin: { kind: 'sdk' } })
   expect(denied(await write())).toBe(true)
   await $.prompt.submit({ text: '/nightly', command: { name: 'nightly', args: '' }, origin: { kind: 'scheduled-trigger' } })
   expect(denied(await write())).toBe(true)
   await $.prompt.submit({ text: 'task done', origin: { kind: 'task-notification' } })
   expect(denied(await write())).toBe(true)
   await $.prompt.submit({ text: 'from nowhere' })
+  expect(denied(await write())).toBe(true)
+  await $.prompt.submit({ text: '/x', command: { name: 'x', args: '' } })
   expect(denied(await write())).toBe(true)
   await $.prompt.submit({ text: 'fix it', origin: { kind: 'sdk' } })
   expect(denied(await write())).toBe(false)
@@ -132,14 +134,35 @@ test("the person's own slash command lifts the gate", async ($, on) => {
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
 })
 
-test('a slash command typed over the running turn, or quoting a Slack reply, keeps the gate', async ($, on) => {
+test('a slash command quoting a Slack reply keeps the gate', async ($, on) => {
   engine(on)
-  const bash = () => $.tool.call({ tool: 'Bash', command: 'ls' })
   await $.prompt.submit({ text: slack })
-  await $.prompt.submit({ text: '/x', command: { name: 'x', args: '' }, turnId: 't1', origin: { kind: 'sdk' } })
-  expect(denied(await bash())).toBe(true)
   await $.prompt.submit({ text: `/x ${slack}`, command: { name: 'x', args: slack }, origin: { kind: 'sdk' } })
-  expect(denied(await bash())).toBe(true)
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
+})
+
+test('a slash command or a task notification quoting a Slack reply does not arm the gate', async ($, on) => {
+  const { notes } = engine(on)
+  await $.prompt.submit({ text: `/x ${slack}`, command: { name: 'x', args: slack }, origin: { kind: 'sdk' } })
+  await $.prompt.submit({ text: `report: ${slack}`, origin: { kind: 'task-notification' } })
+  expect(notes.some(n => n.includes('[filter]'))).toBe(false)
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
+})
+
+test('a prompt from the Mac composer or the phone bridge lifts the gate', async ($, on) => {
+  engine(on)
+  for (const kind of ['composer', 'bridge']) {
+    await $.prompt.submit({ text: slack })
+    await $.prompt.submit({ text: 'go', origin: { kind } })
+    expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
+  }
+})
+
+test("Canopy's keep-alive keeps the gate", async ($, on) => {
+  engine(on)
+  await $.prompt.submit({ text: slack })
+  await $.prompt.submit({ text: '[Canopy keep-alive] Prompt-cache refresh, no action needed.', origin: { kind: 'sdk' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
 })
 
 test('without a Slack question nothing is gated', async ($, on) => {

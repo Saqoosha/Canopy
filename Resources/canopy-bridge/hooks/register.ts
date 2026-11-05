@@ -42,12 +42,15 @@ const SLACK_PREFIX = '[canopy:slack] A '
 let slackQuestion
 
 // The person's own prompt: typed, from the phone or web, or from the SDK host (Canopy).
-// A task notification, a scheduled prompt or another session's message does not lift the gate.
+// A task notification or a scheduled prompt does not lift the gate. `sdk` also covers `send_message`.
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
 
+// `KeepAliveGate.promptPrefix`: Canopy's own refresh reaches the CLI as `sdk`, like the person's prompts.
+const KEEP_ALIVE_PREFIX = '[Canopy keep-alive]'
+
 function liftsGate(e) {
-  if (e.isMeta || e.turnId) return false
-  // An unstamped origin keeps the gate. Every CLI Canopy bundles (2.1.301-2.1.307) stamps `sdk`.
+  if (e.isMeta || e.turnId || e.text?.startsWith(KEEP_ALIVE_PREFIX)) return false
+  // An unstamped origin keeps the gate. CLIs 2.1.301-2.1.307 and 2.1.318 stamp `sdk`.
   return PERSON_ORIGINS.has(e.origin?.kind)
 }
 
@@ -181,7 +184,8 @@ export function register(on) {
       if (liftsGate(e)) slackQuestion = undefined
       return next(e)
     }
-    if (e.command) return next(e)
+    // A subagent's report that quotes the sentence is not a delivered reply.
+    if (e.command || e.origin?.kind === 'task-notification') return next(e)
     slackQuestion = e.text
     let kind = 'unknown'
     try {
@@ -221,7 +225,7 @@ export function register(on) {
     const why = await slackDenial($, e).catch(err => `the check failed (${String(err)})`)
     if (why) {
       slackLog($, { denied: e.tool })
-      return { deny: `Reading a Slack reply is read-only: ${why}. Leave it for Saqoosha: his next prompt, typed or a slash command that starts a turn, lifts this.` }
+      return { deny: `Reading a Slack reply is read-only: ${why}. Leave it for Saqoosha: a prompt or skill he sends after this turn ends lifts this.` }
     }
     return next(e)
   })
