@@ -37,7 +37,8 @@ const REMOVES = /\bworktree\s+remove\b|\brm\s+(?:-\w+\s+)*-\w*[rR]/
 const SLACK_PREFIX = '[canopy:slack] A '
 
 // The Slack reply being read. Set by a prompt containing SLACK_PREFIX; cleared only by
-// one without it that the person sends while idle (`liftsGate`).
+// one without it that the person sends while idle (`liftsGate`), a slash command included.
+// `/compact`, `/context` and a forked skill raise no prompt.submit, so they cannot lift it.
 let slackQuestion
 
 // The person's own prompt: typed, from the phone or web, or from the SDK host (Canopy).
@@ -173,7 +174,6 @@ export function register(on) {
 
   // Classify a Slack reply and hand the verdict to the model as a note only it reads.
   on('prompt.submit', async ($, e, next) => {
-    if (e.command) return next(e)
     // Anywhere, not just first: queued prompts can reach the CLI joined into one, in a shape
     // not measured. The sentence after the mark keeps a bare quote of `[canopy:slack]`
     // (a peer message about this feature) from arming it.
@@ -181,6 +181,7 @@ export function register(on) {
       if (liftsGate(e)) slackQuestion = undefined
       return next(e)
     }
+    if (e.command) return next(e)
     slackQuestion = e.text
     let kind = 'unknown'
     try {
@@ -220,7 +221,7 @@ export function register(on) {
     const why = await slackDenial($, e).catch(err => `the check failed (${String(err)})`)
     if (why) {
       slackLog($, { denied: e.tool })
-      return { deny: `Reading a Slack reply is read-only: ${why}. Leave it for Saqoosha.` }
+      return { deny: `Reading a Slack reply is read-only: ${why}. Leave it for Saqoosha: his next prompt, typed or a slash command that starts a turn, lifts this.` }
     }
     return next(e)
   })

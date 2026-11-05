@@ -67,7 +67,7 @@ test('credential names are refused wherever they sit, and a sibling folder is ou
   expect(denied(await $.tool.call({ tool: 'Read', file_path: `${CWD}-secrets/a.txt` }))).toBe(true)
 })
 
-test('the gate stays through a folded-in prompt, a hidden one, a slash command and a notification', async ($, on) => {
+test('the gate stays through a folded-in prompt, a hidden one, a scheduled command and a notification', async ($, on) => {
   engine(on)
   const write = () => $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' })
   await $.prompt.submit({ text: slack })
@@ -75,7 +75,7 @@ test('the gate stays through a folded-in prompt, a hidden one, a slash command a
   expect(denied(await write())).toBe(true)
   await $.prompt.submit({ text: 'hidden', isMeta: true })
   expect(denied(await write())).toBe(true)
-  await $.prompt.submit({ text: '/compact', command: { name: 'compact', args: '' } })
+  await $.prompt.submit({ text: '/nightly', command: { name: 'nightly', args: '' }, origin: { kind: 'scheduled-trigger' } })
   expect(denied(await write())).toBe(true)
   await $.prompt.submit({ text: 'task done', origin: { kind: 'task-notification' } })
   expect(denied(await write())).toBe(true)
@@ -123,6 +123,23 @@ test('a plain prompt from the person lifts the gate', async ($, on) => {
   expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' }))).toBe(true)
   await $.prompt.submit({ text: 'append ok to notes.txt', origin: { kind: 'sdk' } })
   expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/x`, content: 'b' }))).toBe(false)
+})
+
+test("the person's own slash command lifts the gate", async ($, on) => {
+  engine(on)
+  await $.prompt.submit({ text: slack })
+  await $.prompt.submit({ text: '/merge-cleanup', command: { name: 'merge-cleanup', args: '' }, origin: { kind: 'sdk' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
+})
+
+test('a slash command typed over the running turn, or quoting a Slack reply, keeps the gate', async ($, on) => {
+  engine(on)
+  const bash = () => $.tool.call({ tool: 'Bash', command: 'ls' })
+  await $.prompt.submit({ text: slack })
+  await $.prompt.submit({ text: '/x', command: { name: 'x', args: '' }, turnId: 't1', origin: { kind: 'sdk' } })
+  expect(denied(await bash())).toBe(true)
+  await $.prompt.submit({ text: `/x ${slack}`, command: { name: 'x', args: slack }, origin: { kind: 'sdk' } })
+  expect(denied(await bash())).toBe(true)
 })
 
 test('without a Slack question nothing is gated', async ($, on) => {
