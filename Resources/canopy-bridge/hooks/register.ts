@@ -48,8 +48,12 @@ const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
 // `KeepAliveGate.promptPrefix`: Canopy's own refresh reaches the CLI as `sdk`, like the person's prompts.
 const KEEP_ALIVE_PREFIX = '[Canopy keep-alive]'
 
-// These can quote the delivered sentence, as a subagent's report did, but never deliver a reply.
+// These quote the sentence mid-line, as a subagent's report did. A delivered one starts a line, even joined.
 const QUOTING_ORIGINS = new Set(['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay'])
+
+function isQuote(e) {
+  return QUOTING_ORIGINS.has(e.origin?.kind) && !e.text.split('\n').some(line => line.startsWith(SLACK_PREFIX))
+}
 
 function liftsGate(e) {
   if (e.isMeta || e.turnId || String(e.text).startsWith(KEEP_ALIVE_PREFIX)) return false
@@ -187,7 +191,7 @@ export function register(on) {
       if (liftsGate(e)) slackQuestion = undefined
       return next(e)
     }
-    if (e.command || QUOTING_ORIGINS.has(e.origin?.kind)) return next(e)
+    if (e.command || isQuote(e)) return next(e)
     slackQuestion = e.text
     let kind = 'unknown'
     try {

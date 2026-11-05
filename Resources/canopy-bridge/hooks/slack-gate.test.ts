@@ -150,6 +150,12 @@ test('a slash command, a notification or a peer quoting a Slack reply does not a
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
 })
 
+test('a Slack reply joined to a notification, on its own line, still arms the gate', async ($, on) => {
+  engine(on)
+  await $.prompt.submit({ text: `task done\n${slack}`, origin: { kind: 'task-notification' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
+})
+
 test('a prompt from the Mac composer or the phone bridge lifts the gate', async ($, on) => {
   engine(on)
   for (const kind of ['composer', 'bridge']) {
