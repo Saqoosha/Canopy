@@ -6,23 +6,29 @@ const CWD = `${HOME}/work/project`
 const denied = r => Boolean(r.deny || r.isError)
 
 // Stands for the engine. `seen` records what each tool call reached the engine with.
-function engine(on, { cwd = CWD } = {}) {
+function engine(on, { cwd = CWD, readWorks = true, writeWorks = true, env = {} } = {}) {
   const seen = []
   const logs = []
+  const store = new Map()
   on('ui.log', (_, e) => { logs.push(String(e.text ?? e)); return { value: undefined } })
   on('session.cwd', () => ({ value: cwd }))
+  on('session.id', () => ({ value: 'sid' }))
+  const fail = works => { if (!works) throw new Error('no store') }
+  on('store.get', (_, e) => { fail(readWorks); return { value: store.get(e.key) } })
+  on('store.set', (_, e) => { fail(writeWorks); store.set(e.key, e.value); return { value: undefined } })
+  on('store.delete', (_, e) => { fail(writeWorks); store.delete(e.key); return { value: undefined } })
   on('model.complete', () => ({ value: { isAnswered: true, text: 'QUESTION' } }))
   // printenv HOME, and realpath: `link` inside the folder points outside it.
   on('process.run', (_, e) => {
     const argv = e.argv ?? e.command ?? []
-    if (argv[0] === 'printenv') return { value: { exitCode: 0, stdout: `${argv[1] === 'HOME' ? HOME : ''}\n`, stderr: '' } }
+    if (argv[0] === 'printenv') return { value: { exitCode: 0, stdout: `${{ HOME, ...env }[argv[1]] ?? ''}\n`, stderr: '' } }
     const path = argv[1] ?? ''
     return { value: { exitCode: 0, stdout: path === `${CWD}/link` ? '/private/etc/hosts\n' : `${path}\n`, stderr: '' } }
   })
   const notes = []
   on('prompt.submit', (_, e) => { notes.push(...(e.context ?? [])); return { text: e.text } })
   on('tool.call', (_, e) => { seen.push(e); return { result: {} } })
-  return { seen, logs, notes }
+  return { seen, logs, notes, store }
 }
 
 // The shape `ControlProtocol.slackPrompt` builds.
@@ -170,6 +176,61 @@ test("Canopy's keep-alive keeps the gate", async ($, on) => {
   await $.prompt.submit({ text: slack })
   await $.prompt.submit({ text: '[Canopy keep-alive] Prompt-cache refresh, no action needed.', origin: { kind: 'sdk' } })
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
+})
+
+test('a gate armed before a respawn holds in the new CLI, for this session only', async ($, on) => {
+  const { store } = engine(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  store.set('slack-gate:other', true)
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: false })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
+  store.set('slack-gate:sid', true)
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: false })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
+})
+
+test('arming records the gate and lifting clears the record', async ($, on) => {
+  const { store } = engine(on)
+  await $.prompt.submit({ text: slack })
+  expect(store.get('slack-gate:sid')).toBe(true)
+  await $.prompt.submit({ text: 'go', origin: { kind: 'sdk' } })
+  expect(store.has('slack-gate:sid')).toBe(false)
+})
+
+test('a store that cannot be read arms the gate and says so', async ($, on) => {
+  const { logs } = engine(on, { readWorks: false })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: false })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
+  expect(logs.some(line => line.includes('"failed":"read:'))).toBe(true)
+})
+
+test('a store that cannot be written leaves the running gate up and says so', async ($, on) => {
+  const { logs, notes } = engine(on, { writeWorks: false })
+  await $.prompt.submit({ text: slack })
+  expect(notes.at(-1)).toContain('[filter]')
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
+  expect(logs.some(line => line.includes('"failed":"write:'))).toBe(true)
+})
+
+test('a restored gate is lifted like any other, and its record goes with it', async ($, on) => {
+  const { store } = engine(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  store.set('slack-gate:sid', true)
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: false })
+  await $.prompt.submit({ text: 'go', origin: { kind: 'sdk' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(false)
+  expect(store.has('slack-gate:sid')).toBe(false)
+})
+
+test('a restored gate does not stop the session entering its worktree', async ($, on) => {
+  const { store, seen } = engine(on, { env: { CANOPY_WORKTREE: '/wt', CANOPY_CLI_CWD: CWD } })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  store.set('slack-gate:sid', true)
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: false })
+  expect(seen.some(call => call.tool === 'EnterWorktree')).toBe(true)
+  const r = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(r.deny).toContain('Reading a Slack reply')
 })
 
 test('without a Slack question nothing is gated', async ($, on) => {

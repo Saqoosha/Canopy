@@ -4489,6 +4489,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case classified(String)
         /// A tool layer 2 refused.
         case denied(String)
+        /// The gate's record could not be read or written.
+        case failed(String)
     }
 
     nonisolated static func bridgeSlackNote(_ ioMsg: [String: Any]) -> SlackNote? {
@@ -4501,6 +4503,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if slack["ready"] as? Bool == true { return .ready }
         if let kind = slack["kind"] as? String { return .classified(kind) }
         if let tool = slack["denied"] as? String { return .denied(tool) }
+        if let why = slack["failed"] as? String { return .failed(why) }
         return nil
     }
 
@@ -4644,6 +4647,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                             logger.notice("[slack] \(self.keepAliveLogLabel, privacy: .public): reply classified \(kind, privacy: .public)")
                         case .denied(let tool):
                             logger.notice("[slack] \(self.keepAliveLogLabel, privacy: .public): denied \(tool, privacy: .public)")
+                        case .failed(let why):
+                            logger.error("[slack] \(self.keepAliveLogLabel, privacy: .public): gate record \(why, privacy: .public)")
                         }
                     } else {
                         logger.warning("[bridge] ui_log text failed to parse")

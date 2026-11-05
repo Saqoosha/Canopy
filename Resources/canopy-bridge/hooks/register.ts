@@ -36,10 +36,33 @@ const REMOVES = /\bworktree\s+remove\b|\brm\s+(?:-\w+\s+)*-\w*[rR]/
 // Why the gate below: docs/superpowers/specs/2026-10-22-slack-thread-binding-design.md.
 const SLACK_PREFIX = '[canopy:slack] A '
 
-// The Slack reply being read. Set by a prompt containing SLACK_PREFIX; cleared only by
+// The Slack reply being read. Set by a prompt containing SLACK_PREFIX or by `restoreSlackGate`; cleared only by
 // one without it that the person sends while idle (`liftsGate`), a slash command included.
 // `/compact`, `/context` and a forked skill raise no prompt.submit, so they cannot lift it.
 let slackQuestion
+
+// The store keeps the gate through a respawn: the resumed CLI has the Slack text in context.
+async function slackKey($) {
+  return `slack-gate:${await $.session.id()}`
+}
+
+async function restoreSlackGate($) {
+  try {
+    if (await $.store.get(await slackKey($))) slackQuestion = true
+  } catch (err) {
+    slackQuestion = true
+    slackLog($, { failed: `read: ${String(err)}` })
+  }
+}
+
+async function saveSlackGate($) {
+  try {
+    const key = await slackKey($)
+    await (slackQuestion === undefined ? $.store.delete(key) : $.store.set(key, true))
+  } catch (err) {
+    slackLog($, { failed: `write: ${String(err)}` })
+  }
+}
 
 // The person's own prompt: typed, from the phone or web, or from the SDK host (Canopy).
 // A task notification or a scheduled prompt does not lift the gate. `sdk` also covers `send_message`.
@@ -147,8 +170,6 @@ export function register(on) {
   // Enter the worktree Canopy named in CANOPY_WORKTREE. Why: `ShimProcess.worktreeEntry`.
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    // Canopy delivers Slack replies only to a session that sent this.
-    slackLog($, { ready: true })
     try {
       const wt = await env($, 'CANOPY_WORKTREE')
       // A CLI re-spawned in this shim resumes inside the worktree already.
@@ -167,6 +188,11 @@ export function register(on) {
     } catch (err) {
       blocked = String(err)
       worktreeLog($, false, `enter threw: ${blocked}`)
+    } finally {
+      // After entering: the gate would refuse this plugin's own EnterWorktree.
+      await restoreSlackGate($)
+      // Canopy delivers Slack replies only to a session that sent this.
+      slackLog($, { ready: true })
     }
     return r
   })
@@ -188,11 +214,15 @@ export function register(on) {
     // not measured. The sentence after the mark keeps a bare quote of `[canopy:slack]`
     // (a peer message about this feature) from arming it.
     if (typeof e.text !== 'string' || !e.text.includes(SLACK_PREFIX)) {
-      if (liftsGate(e)) slackQuestion = undefined
+      if (slackQuestion !== undefined && liftsGate(e)) {
+        slackQuestion = undefined
+        await saveSlackGate($)
+      }
       return next(e)
     }
     if (e.command || isQuote(e)) return next(e)
     slackQuestion = e.text
+    await saveSlackGate($)
     let kind = 'unknown'
     try {
       const r = await $.model.complete({
