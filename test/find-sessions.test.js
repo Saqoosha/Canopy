@@ -71,6 +71,7 @@ function writeFakeSsh(home, body) {
 // ssh joins everything after the host with spaces and gives that one string to the remote shell.
 const SSH_THAT_RUNS_A_SHELL = `
 while [ "$1" = "-o" ]; do shift 2; done
+[ "$1" = "--" ] && shift
 shift
 PATH="/usr/bin:$PATH" HOME="$FAKE_REMOTE_HOME" exec sh -c "$*"
 `;
@@ -250,6 +251,29 @@ describe("find_sessions.py search", () => {
     const peer = result.machines.find((machine) => machine.machine === "PEER-1");
     assert.equal(peer.ok, true, peer.error);
     assert.deepEqual(peer.sessions.map((session) => session.sessionId), ["cccc"]);
+  });
+
+  test("refuses a peer address that ssh could read as an option", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("zebra")]);
+    writePeers(home, { "PEER-1": "-oProxyCommand=touch /tmp/owned:8770" });
+    const called = path.join(home, "ssh-was-called");
+    const ssh = writeFakeSsh(home, `touch "${called}"`);
+    const result = run(home, ["search", "--all", "zebra"], { FIND_SESSIONS_SSH: ssh });
+    assert.equal(fs.existsSync(called), false);
+    const peer = result.machines.find((machine) => machine.machine === "PEER-1");
+    assert.equal(peer.ok, false);
+    assert.match(peer.error, /address/);
+  });
+
+  test("ends ssh options before the host", () => {
+    const home = makeHome();
+    writePeers(home, { "PEER-1": "100.1.2.3:8770" });
+    const argv = path.join(home, "ssh-argv");
+    const ssh = writeFakeSsh(home, `printf '%s\\n' "$@" > "${argv}"\nexit 255`);
+    run(home, ["search", "--all", "zebra"], { FIND_SESSIONS_SSH: ssh });
+    const words = fs.readFileSync(argv, "utf8").split("\n");
+    assert.equal(words[words.indexOf("100.1.2.3") - 1], "--");
   });
 
   test("searches only this Mac without --all", () => {

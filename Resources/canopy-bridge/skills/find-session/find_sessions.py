@@ -36,6 +36,8 @@ SSH_CONNECT_SECONDS = 6
 RG_LOCATIONS = ("/opt/homebrew/bin/rg", "/usr/local/bin/rg")
 REGEX_META = set("\\.+*?()|[]{}^$")
 NOT_PROMPTS = ("<", "[Request", "[Canopy keep-alive]")
+# A leading dash would reach ssh as an option, and -oProxyCommand runs a command here.
+SAFE_ADDRESS = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*\Z")
 
 
 def projects_root():
@@ -327,10 +329,12 @@ def ask_peer(address, request, timeout):
     Arguments cross a remote shell that may be fish or zsh, so they travel as one base64 word
     rather than being quoted for either.
     """
+    if not SAFE_ADDRESS.match(address):
+        return {"ok": False, "error": "refusing the peer address %r" % address}
     payload = base64.b64encode(json.dumps(request).encode("utf-8")).decode("ascii")
     ssh = os.environ.get("FIND_SESSIONS_SSH") or "ssh"
     args = [ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=%d" % SSH_CONNECT_SECONDS,
-            address, "python3", "-", "--b64", payload]
+            "--", address, "python3", "-", "--b64", payload]
     with open(os.path.abspath(__file__), "rb") as source:
         script = source.read()
     try:
