@@ -425,6 +425,16 @@ describe("find_sessions.py search", () => {
     assert.equal(machine.sessions.length, 1);
   });
 
+  test("keeps the row of a transcript it cannot read for its summary", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("zebra")]);
+    const file = path.join(home, ".claude", "projects", "-work-project", "aaaa.jsonl");
+    const rg = writeFakeSsh(home, `case " $* " in *" -l "*) exec "${REAL_RG}" "$@";; esac\n"${REAL_RG}" "$@"\nchmod 000 "${file}"`);
+    const machine = local(run(home, ["search", "zebra"], { FIND_SESSIONS_RG: rg }));
+    assert.equal(machine.truncated, true);
+    assert.deepEqual(machine.sessions.map((session) => session.sessionId), ["aaaa"]);
+  });
+
   test("reports a Mac with no transcripts", () => {
     const machine = local(run(makeHome(), ["search", "zebra"]));
     assert.equal(machine.ok, false);
@@ -813,7 +823,7 @@ describe("SKILL.md", () => {
     const args = command.trim().replace('python3 "${CLAUDE_SKILL_DIR}/../../bin/canopyctl" ', "").split(" ");
     const result = spawnSync(PYTHON, [canopyctl, "--socket", "/nonexistent.sock", ...args], { encoding: "utf8", timeout: 20000 });
     assert.equal(result.status, 1, result.stderr);
-    assert.match(result.stderr, /^canopyctl: cannot reach Canopy/);
+    assert.match(result.stderr, /^canopyctl: no answer from Canopy/);
   });
 });
 

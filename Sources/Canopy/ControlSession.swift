@@ -106,10 +106,16 @@ final class ControlSession {
         case .failure(let error):
             fail(request, error.message, code: "invalid_session_id")
         case .success(var show):
+            // First: resolving can scan every transcript and move one, for nobody.
+            guard ControlBroadcast.hasLocalSubscribers else { return failNoGUI(request) }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 // Resolved here so a skill hears why a session cannot open, instead of a GUI banner.
-                if show.machineId == nil, store.openSession(for: [.resumeId(show.sessionId)]) == nil {
+                if show.machineId == nil, let open = store.openSession(for: [.resumeId(show.sessionId)]) {
+                    // Its row may not have reached the GUI yet.
+                    show.directory = open.origin.workingDirectory.path
+                    show.title = open.title
+                } else if show.machineId == nil {
                     if store.recents.isEmpty { await Self.refreshRecents(store).value }
                     guard !stopped else { return }
                     var resolved = store.resolveClosedSession(sessionId: show.sessionId, localCwd: nil)
@@ -119,6 +125,7 @@ final class ControlSession {
                         let all = await Task.detached { ClaudeSessionHistory.loadAllSessions(keep: .max, scanLimit: .max) }.value
                         resolved = SessionStore.resolveClosedSession(sessionId: show.sessionId, localCwd: nil, recents: all,
                                                                      knownCheckouts: store.rescueCandidates)
+                        guard !stopped else { return }
                     }
                     switch resolved {
                     case .failure(let failure):
@@ -126,14 +133,19 @@ final class ControlSession {
                     case .success(let found):
                         show.directory = found.directory.path
                         show.title = found.title
+                            ?? ClaudeSessionHistory.scanForTranscript(sessionId: show.sessionId).map(ClaudeSessionHistory.title(atPath:))
                     }
                 }
                 guard ControlBroadcast.toLocalSubscribers(ControlProtocol.showSessionFrame(show)) > 0 else {
-                    return fail(request, "No Canopy window is connected on this Mac", code: "no_gui")
+                    return failNoGUI(request)
                 }
                 reply(request, ["shown": true])
             }
         }
+    }
+
+    private func failNoGUI(_ request: ControlProtocol.Request) {
+        fail(request, "No Canopy window is connected on this Mac", code: "no_gui")
     }
 
     /// A frame no request asked for, from `ControlBroadcast`.

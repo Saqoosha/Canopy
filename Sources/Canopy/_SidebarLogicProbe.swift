@@ -6548,6 +6548,44 @@ enum SidebarLogicProbe {
                    showStore.remoteAttachError != nil)
             showStore.showSession(ControlProtocol.ShowSession(sessionId: upper.lowercased(), machineId: nil, directory: nil, title: nil))
             record("show session: a session nothing resolved says so", showStore.lastSessionFailure != nil)
+            let mirrorTwin = OpenSession(origin: .mirror(machineId: "M1", host: "h", port: 1), resumeId: "twin-id",
+                                         title: "T", project: "p", status: .live)
+            let twinStore = SessionStore()
+            twinStore._probeSeedOpenSessions([mirrorTwin])
+            twinStore.showSession(ControlProtocol.ShowSession(sessionId: "twin-id", machineId: nil, directory: nil, title: nil))
+            record("show session: another Mac's copy does not answer for this Mac",
+                   twinStore.paneIndex(forSession: mirrorTwin.id) == nil)
+
+            var daemonFrames: [[String: Any]] = []
+            let daemonStore = SessionStore()
+            let daemon = ControlSession(store: daemonStore, isLocal: true, allowBypass: { false }) { daemonFrames.append($0) }
+            func showReply(_ id: String, sessionId: String) -> [String: Any]? {
+                daemon.handle(["type": "request", "id": id, "verb": "show_session", "params": ["sessionId": sessionId]])
+                let deadline = Date().addingTimeInterval(20)
+                while Date() < deadline {
+                    if let found = daemonFrames.first(where: { $0["id"] as? String == id }) { return found }
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+                }
+                return nil
+            }
+            let noSuchSession = "bbbbbbbb-0000-0000-0000-000000000000"
+            record("show session: with no GUI connected the daemon says so",
+                   showReply("n1", sessionId: noSuchSession)?["errorCode"] as? String == "no_gui")
+            daemon.handle(subscribeRequest)
+            record("show session: a session with no transcript is refused",
+                   showReply("n2", sessionId: noSuchSession)?["errorCode"] as? String == "not_found")
+            let daemonOpenId = UUID().uuidString.lowercased()
+            let daemonOpen = OpenSession(origin: .local(URL(fileURLWithPath: "/r/p")), resumeId: daemonOpenId,
+                                         title: "Open one", project: "p", status: .live)
+            daemonStore._probeSeedOpenSessions([daemonOpen])
+            let openReply = showReply("n3", sessionId: daemonOpenId)
+            record("show session: an open session reaches the GUI with its folder, in case its row has not",
+                   (openReply?["result"] as? [String: Any])?["shown"] as? Bool == true
+                       && daemonFrames.contains {
+                           $0["type"] as? String == ControlProtocol.showSessionFrameType
+                               && $0["directory"] as? String == "/r/p" && $0["title"] as? String == "Open one"
+                       })
+            daemon.stop()
             record("bridge dirs: the scrub keeps an inherited value",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
 

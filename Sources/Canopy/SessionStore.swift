@@ -391,9 +391,8 @@ final class SessionStore {
             openRemoteRecent(machineId: machineId, machineName: name, recent: recent, target: .newPane)
             return
         }
-        if let open = openSessions.first(where: { $0.resumeId == show.sessionId }) {
-            let inPane = panes.contains { if case .session(let id) = $0.content { return id == open.id }; return false }
-            if inPane { select(.session(open.id)) } else { focusOrPane(open.id, target: .newPane) }
+        if let open = openSessions.first(where: { $0.resumeId == show.sessionId && $0.origin.mirrorTarget == nil }) {
+            focusOrPane(open.id, target: .newPane)
             return
         }
         guard let directory = show.directory else {
@@ -409,10 +408,11 @@ final class SessionStore {
         switch target {
         case .focused: select(.session(id))
         case .newPane:
-            if !openInNewPane(id) {
-                if panes.count >= Self.paneAbsoluteCap { showCapReachedHintOnFocusedPane() }
-                openInFocusedPane(id)
+            // Already in a pane is not the cap, which `openInNewPane` answers the same way.
+            if paneIndex(forSession: id) == nil, !openInNewPane(id), panes.count >= Self.paneAbsoluteCap {
+                showCapReachedHintOnFocusedPane()
             }
+            openInFocusedPane(id)
         }
     }
 

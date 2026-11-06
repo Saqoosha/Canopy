@@ -350,12 +350,11 @@ def search_here(terms, match_any, exclude, limit, timeout):
         else:
             try:
                 summary, read_all = summarize(path, summary_deadline)
+                finished = finished and read_all
             except FileNotFoundError:
                 continue  # removed since rg read it, as when a worktree is cleaned up
             except OSError:
-                finished = False
-                continue
-            finished = finished and read_all
+                finished = False  # the hits are real, so the row stays with no summary
         sessions.append({"sessionId": session_id(path), **summary, "hits": hits[path], "snippets": snippets[path]})
     sessions.sort(key=lambda session: (sum(session["hits"].values()), session["lastActive"]), reverse=True)
     return {**row, "truncated": not (finished and every_file_read), "matched": len(matched), "sessions": sessions}

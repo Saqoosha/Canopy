@@ -20,6 +20,10 @@ enum ControlBroadcast {
         entries.removeAll { $0.session == nil || $0.session === session }
     }
 
+    static var hasLocalSubscribers: Bool {
+        entries.contains { $0.session != nil }
+    }
+
     /// Sends to every subscribed local connection, and returns how many there are. A frame can
     /// still be lost with a connection that is going down.
     static func toLocalSubscribers(_ frame: [String: Any]) -> Int {

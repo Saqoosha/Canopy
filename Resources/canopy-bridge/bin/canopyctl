@@ -170,7 +170,7 @@ def main(argv):
         print(f"canopyctl: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(f"canopyctl: cannot reach Canopy at {args.socket}: {exc}", file=sys.stderr)
+        print(f"canopyctl: no answer from Canopy at {args.socket}: {exc}", file=sys.stderr)
         # A listen loop retries this with its cursor; a daemon restart lands here.
         return 4 if args.cmd == "listen" else 1
     body = result["result"] if isinstance(result.get("result"), dict) else result
