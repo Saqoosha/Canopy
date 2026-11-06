@@ -348,6 +348,32 @@ enum ClaudeSessionHistory {
         return entries.sorted { $0.timestamp > $1.timestamp }
     }
 
+    /// The newest `keep` sessions of one working directory, newest first, without the ids in
+    /// `excluding`. Reads only the transcripts that takes, unlike `loadSessions(for:)`.
+    static func loadNewestSessions(for directory: URL, keep: Int, excluding: Set<String>) -> [SessionEntry] {
+        let fm = FileManager.default
+        var seen = excluding
+        var candidates: [(url: URL, sessionId: String, modDate: Date)] = []
+        for encoded in encodedFolderCandidates(for: directory.path) {
+            let files = (try? fm.contentsOfDirectory(at: claudeDir.appendingPathComponent(encoded),
+                                                     includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            for file in files where file.pathExtension == "jsonl" {
+                let sessionId = file.deletingPathExtension().lastPathComponent
+                guard UUID(uuidString: sessionId) != nil, seen.insert(sessionId).inserted else { continue }
+                let modDate = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                candidates.append((file, sessionId, modDate ?? .distantPast))
+            }
+        }
+        candidates.sort { $0.modDate > $1.modDate }
+        return selectNewest(candidates, keep: keep, scanLimit: maxSessionsToScan) { candidate -> SessionEntry? in
+            let metadata = cachedMetadata(path: candidate.url.path, modified: candidate.modDate)
+            guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { return nil }
+            return SessionEntry(id: candidate.sessionId,
+                                title: SessionTitleStore.title(forSessionId: candidate.sessionId) ?? metadata.title,
+                                timestamp: candidate.modDate, projectDirectory: directory)
+        }.kept
+    }
+
     /// Load sessions across all projects, sorted by most recent.
     /// Collects file metadata first (no file reads), sorts by date, then
     /// parses headers newest-first until `maxSessionsToKeep` sessions have

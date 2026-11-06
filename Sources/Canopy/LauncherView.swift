@@ -191,6 +191,10 @@ struct LauncherView: View {
     @State private var peerTitle = ""
     /// A folder on that Mac, from its Recents.
     @State private var peerFolder: String?
+    /// Nil until the selected folder's first reply.
+    @State private var peerFolderSessions: [MirrorRecents.Session]?
+    @State private var peerFolderSessionsError: String?
+    @State private var peerFolderSessionsSource: String?
     @State private var recentDirectories: [URL] = []
     @State private var isDropTargeted = false
     @State private var remoteHost: String = ""
@@ -452,6 +456,7 @@ struct LauncherView: View {
         .task(id: peerRecentsKey) {
             if let peerMachineId { store.refreshRemoteRecents(machineId: peerMachineId) }
         }
+        .task(id: peerRecentsKey + "\n" + (peerFolder ?? "")) { await refreshPeerFolderSessions() }
         .sheet(isPresented: $showWebSessions) {
             webSessionsSection
                 .padding(20)
@@ -607,12 +612,13 @@ struct LauncherView: View {
     }
 
     private var headlineText: String {
-        if let peer = selectedPeer {
-            return "What should we build in \(peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title)?"
+        let place: String? = if let peer = selectedPeer {
+            peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title
+        } else if isRemoteMode {
+            remoteHost.isEmpty ? nil : remoteHost
+        } else {
+            selectedDirectory?.lastPathComponent
         }
-        let place = isRemoteMode
-            ? (remoteHost.isEmpty ? nil : remoteHost)
-            : selectedDirectory?.lastPathComponent
         guard let place else {
             return willContinueSession ? "Where were we?" : "What should we build?"
         }
@@ -636,15 +642,14 @@ struct LauncherView: View {
             locationChip
             if let peer = selectedPeer {
                 peerFolderChip(peer)
-                peerResumeChip(peer)
             } else {
                 directoryChip
                 if !isRemoteMode, selectedDirectoryIsGitRepo {
                     worktreeChip
                     branchChip
                 }
-                continueChip
             }
+            continueChip
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1039,39 +1044,56 @@ struct LauncherView: View {
         }
     }
 
-    /// That Mac's closed sessions, one section per project — the selected
-    /// folder's project first, then the rest by most recent session. Picking
-    /// one opens it at once: it resumes over there, so nothing in the composer
-    /// below applies to it.
-    private func peerResumeChip(_ peer: Peer) -> some View {
+    private func refreshPeerFolderSessions() async {
+        let source = peerMachineId.flatMap { id in peerFolder.map { id + "\n" + $0 } }
+        // A refresh of the same folder keeps its rows until the reply lands.
+        if source != peerFolderSessionsSource {
+            peerFolderSessionsSource = source
+            peerFolderSessions = nil
+            peerFolderSessionsError = nil
+        }
+        guard let peerMachineId, let peerFolder else { return }
+        let result = await store.remoteFolderSessions(machineId: peerMachineId, path: peerFolder)
+        guard !Task.isCancelled else { return }
+        switch result {
+        case .success(let sessions):
+            peerFolderSessions = sessions
+            peerFolderSessionsError = nil
+        case .failure(let error):
+            peerFolderSessions = nil
+            peerFolderSessionsError = error.message
+        }
+    }
+
+    /// The selected folder's closed sessions on that Mac (`isOpen` rows are Continue's). The sidebar shows only
+    /// another Mac's live sessions, so this is the one way back to an older one.
+    /// Picking one opens it at once: it resumes over there, so nothing in the
+    /// composer below applies to it.
+    @ViewBuilder
+    private func peerSessionRows(_ peer: Peer) -> some View {
         let attached = Set(store.openSessions.filter { $0.origin.mirrorTarget?.machineId == peer.machineId }.map(\.resumeId))
-        let sessions = (store.remoteRecents[peer.machineId]?.sessions ?? []).filter { !attached.contains($0.id) }
-        let groups = Self.peerSessionGroups(sessions, preferring: peerFolder.map { ($0 as NSString).lastPathComponent })
-        return Menu {
-            // Without this row the chip offered only Resume, and a new session read as impossible.
-            Section {
-                CheckItem(title: "New session", checked: true) {}.disabled(true)
-            }
-            if sessions.isEmpty {
-                Text(store.remoteRecentsError[peer.machineId]
-                     ?? (store.remoteRecents[peer.machineId] == nil ? "Loading…" : "No closed sessions"))
-            }
-            ForEach(groups, id: \.project) { group in
-                Section(group.project.isEmpty ? "Other" : group.project) {
-                    ForEach(group.sessions) { recent in
-                        Button {
-                            store.openRemoteRecent(machineId: peer.machineId, machineName: peer.title, recent: recent,
-                                                   target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused)
-                        } label: {
-                            Text(Self.peerSessionLabel(recent))
-                        }
+        let sessions = peerFolderSessions?.filter { !$0.isOpen && !attached.contains($0.id) }
+        if let peerFolderSessionsError {
+            Section { Text(peerFolderSessionsError) }
+        } else if peerFolder != nil, sessions?.isEmpty != false {
+            Section { Text(sessions == nil ? "Loading…" : "No closed sessions") }
+        } else if let sessions {
+            Section(peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title) {
+                ForEach(sessions) { recent in
+                    Button {
+                        store.openRemoteRecent(machineId: peer.machineId, machineName: peer.title, recent: recent,
+                                               target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused)
+                    } label: {
+                        Text(Self.peerSessionLabel(recent))
                     }
                 }
             }
-        } label: {
-            ChipLabel(icon: "plus.bubble", text: "New session")
         }
-        .chipMenu()
+    }
+
+    /// What Continue takes from a folder's sessions on another Mac; open ones count, as they do here.
+    static func latestPeerSession(_ sessions: [MirrorRecents.Session]) -> MirrorRecents.Session? {
+        sessions.max { $0.timestamp < $1.timestamp }
     }
 
     /// `MirrorRecents.Session.project` is "Project" or "Project · branch".
@@ -1079,21 +1101,6 @@ struct LauncherView: View {
         let parts = project.components(separatedBy: " · ")
         guard parts.count > 1 else { return (project, nil) }
         return (parts[0], parts.dropFirst().joined(separator: " · "))
-    }
-
-    static func peerSessionGroups(_ sessions: [MirrorRecents.Session],
-                                  preferring preferred: String?) -> [(project: String, sessions: [MirrorRecents.Session])] {
-        var order: [String] = []
-        var byProject: [String: [MirrorRecents.Session]] = [:]
-        for session in sessions.sorted(by: { $0.timestamp > $1.timestamp }) {
-            let name = splitProject(session.project).name
-            if byProject[name] == nil { order.append(name) }
-            byProject[name, default: []].append(session)
-        }
-        if let preferred, let i = order.firstIndex(of: preferred) {
-            order.insert(order.remove(at: i), at: 0)
-        }
-        return order.map { ($0, byProject[$0] ?? []) }
     }
 
     /// Title (tag-cleaned and capped), branch when there is one, and age.
@@ -1144,6 +1151,7 @@ struct LauncherView: View {
             // Disabled rather than hidden: a row that vanishes reads as a bug,
             // and the point is to say WHY the two cannot combine.
             .disabled(willCreateWorktree)
+            if let peer = selectedPeer { peerSessionRows(peer) }
         } label: {
             ChipLabel(
                 icon: willContinueSession ? "arrow.uturn.backward" : "plus.bubble",
@@ -1166,7 +1174,7 @@ struct LauncherView: View {
     /// a persisted preference, and flipping it here would silently lose the
     /// user's setting the moment they turned the worktree off again.
     private var willContinueSession: Bool {
-        continueSession && !willCreateWorktree && selectedPeer == nil
+        continueSession && !willCreateWorktree
     }
 
     /// Whether this launch will actually cut a worktree.
@@ -1858,9 +1866,34 @@ struct LauncherView: View {
                 permissionMode: resolvedPermission,
                 promptText: prompt.flatMap { $0.text.isEmpty ? nil : $0.text },
                 promptImages: prompt?.images.map(\.wire) ?? [])
-            if store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder, options: options,
-                                      target: NSEvent.modifierFlags.contains(.command) ? .newPane : .focused) {
-                clearPendingPrompt()
+            let target: SessionStore.PaneTarget = NSEvent.modifierFlags.contains(.command) ? .newPane : .focused
+            guard willContinueSession else {
+                if store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder, options: options,
+                                          target: target) {
+                    clearPendingPrompt()
+                }
+                return
+            }
+            isResolvingRemoteSession = true
+            Task {
+                let result = await store.remoteFolderSessions(machineId: peer.machineId, path: peerFolder)
+                isResolvingRemoteSession = false
+                switch result {
+                case .success(let sessions):
+                    // No session in the folder is the ordinary first run: a fresh one, as on this Mac.
+                    let opened = if let latest = Self.latestPeerSession(sessions) {
+                        store.openRemoteRecent(machineId: peer.machineId, machineName: peer.title, recent: latest,
+                                               options: options, target: target)
+                    } else {
+                        store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder,
+                                               options: options, target: target)
+                    }
+                    if opened { clearPendingPrompt() }
+                case .failure(let error):
+                    // Unlike a miss, this says nothing about the folder, so a new session would hide it.
+                    store.remoteAttachError = SessionStore.RemoteNotice(message: "Could not continue on \(peer.title): \(error.message)",
+                                                                        offersSettings: error.offersSettings)
+                }
             }
             return
         }

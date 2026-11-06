@@ -337,17 +337,29 @@ final class SessionStore {
     }
 
     /// Another Mac's closed session, resumed over there with no pane on its
-    /// screen and attached here.
-    func openRemoteRecent(machineId: String, machineName: String, recent: MirrorRecents.Session, target: PaneTarget) {
+    /// screen and attached here. `options` carries what the launcher chose, the
+    /// first prompt included. A session open over there is only joined, so the prompt's text waits in the composer.
+    /// False when no new pane took them, so the caller keeps the prompt.
+    @discardableResult
+    func openRemoteRecent(machineId: String, machineName: String, recent: MirrorRecents.Session,
+                          options: NewSessionOptions? = nil, target: PaneTarget) -> Bool {
         if let existing = openSessions.first(where: {
             $0.origin.mirrorTarget?.machineId == machineId && $0.resumeId == recent.id
         }) {
             focusOrPane(existing.id, target: target)
-            return
+            return false
         }
-        guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return }
+        guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return false }
+        let plan = Self.remoteOpenPlan(recent: recent, options: options)
         attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: recent.id,
-                         title: recent.title, project: recent.project, open: .resume, target: target)
+                         title: recent.title, project: recent.project, open: plan.open, target: target,
+                         composerPrefill: plan.composerPrefill)
+        return true
+    }
+
+    static func remoteOpenPlan(recent: MirrorRecents.Session, options: NewSessionOptions?) -> (open: MirrorOpenRequest, composerPrefill: String?) {
+        guard let options else { return (.resume, nil) }
+        return recent.isOpen ? (.resume, options.promptText) : (.resumeWith(options: options), nil)
     }
 
     /// A new session in one of another Mac's recent folders, attached here.
@@ -418,7 +430,7 @@ final class SessionStore {
         guard let address = CanopySettings.shared.mirrorPeers[machineId],
               let hostPort = MirrorAccess.parseHostPort(address),
               let token = MirrorAccess.peerToken(machineId: machineId) else {
-            remoteRecentsError[machineId] = "Paste its connection in Settings › Remote first"
+            remoteRecentsError[machineId] = Self.remoteRecentsUnpaired
             return
         }
         remoteRecentsInFlight.insert(machineId)
@@ -429,16 +441,52 @@ final class SessionStore {
             case .success(let recents):
                 self.remoteRecents[machineId] = recents
                 self.remoteRecentsError[machineId] = nil
-            case .failure(.refused(let message)):
-                // "expected attach" is a server that predates `list_recents`.
-                self.remoteRecentsError[machineId] = switch message {
-                case "unauthorized": "Password rejected"
-                case "expected attach": "Update Canopy on that Mac to see them"
-                default: message
-                }
-            case .failure(.unreachable):
-                self.remoteRecentsError[machineId] = "Not reachable (is its live mirror on?)"
+            case .failure(let failure):
+                self.remoteRecentsError[machineId] = Self.remoteRecentsMessage(failure)
             }
+        }
+    }
+
+    /// The sessions in one folder on another Mac, newest first, or why they could not be read.
+    /// Not cached: Continue must see the session that closed a moment ago.
+    func remoteFolderSessions(machineId: String, path: String) async -> Result<[MirrorRecents.Session], RemoteFolderSessionsError> {
+        guard let address = CanopySettings.shared.mirrorPeers[machineId],
+              let hostPort = MirrorAccess.parseHostPort(address),
+              let token = MirrorAccess.peerToken(machineId: machineId) else {
+            return .failure(RemoteFolderSessionsError(message: Self.remoteRecentsUnpaired, offersSettings: true))
+        }
+        return await withCheckedContinuation { continuation in
+            MirrorRecentsClient.fetch(host: hostPort.host, port: hostPort.port, token: token, cwd: path) { result in
+                continuation.resume(returning: Self.folderSessions(from: result, path: path))
+            }
+        }
+    }
+
+    static func folderSessions(from result: Result<MirrorRecents, MirrorRecentsClient.Failure>,
+                               path: String) -> Result<[MirrorRecents.Session], RemoteFolderSessionsError> {
+        switch result {
+        case .success(let recents):
+            recents.sessions(in: path).map { .success($0) } ?? .failure(RemoteFolderSessionsError(message: remoteRecentsOutdated))
+        case .failure(let failure):
+            .failure(RemoteFolderSessionsError(message: remoteRecentsMessage(failure), offersSettings: failure == .refused("unauthorized")))
+        }
+    }
+
+    struct RemoteFolderSessionsError: Error, Equatable {
+        let message: String
+        var offersSettings = false
+    }
+
+    private static let remoteRecentsUnpaired = "Paste its connection in Settings › Remote first"
+    private static let remoteRecentsOutdated = "Update Canopy on that Mac first"
+
+    private static func remoteRecentsMessage(_ failure: MirrorRecentsClient.Failure) -> String {
+        switch failure {
+        case .refused("unauthorized"): "Password rejected"
+        // A server that predates `list_recents`.
+        case .refused("expected attach"): remoteRecentsOutdated
+        case .refused(let message): message
+        case .unreachable: "Not reachable (is its live mirror on?)"
         }
     }
 

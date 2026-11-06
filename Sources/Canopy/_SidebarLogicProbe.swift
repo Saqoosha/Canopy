@@ -1968,6 +1968,76 @@ enum SidebarLogicProbe {
             }
             record("mirror recents: the reply is capped at maxSessions",
                    MirrorRecents.parse(MirrorRecents.replyPayload(sessions: many, folders: []))?.sessions.count == MirrorRecents.maxSessions)
+            let scoped = MirrorRecents.parse(MirrorRecents.replyPayload(sessions: [entry], folders: [], cwd: "/tmp/ProbeProject"))
+            record("mirror recents: a reply limited to a folder gives its sessions for that folder only",
+                   scoped?.sessions(in: "/tmp/ProbeProject")?.map(\.id) == ["abc"] && scoped?.sessions(in: "/tmp/Other") == nil)
+            record("mirror recents: a server that ignored the folder is not read as that folder's sessions",
+                   parsed?.sessions(in: "/tmp/ProbeProject") == nil)
+            record("mirror recents: a folder with no sessions is an empty list, not a refused reply",
+                   MirrorRecents.parse(MirrorRecents.replyPayload(sessions: [], folders: [], cwd: "/x"))?.sessions(in: "/x") == [])
+            record("mirror recents: only the sessions open over there are marked open",
+                   MirrorRecents.parse(MirrorRecents.replyPayload(sessions: many.prefix(2).map { $0 }, folders: [], cwd: "/x",
+                                                                  openIds: ["s1"]))?.sessions.map(\.isOpen) == [false, true])
+            record("mirror recents: a request's folder survives the wire and its absence adds no key",
+                   MirrorRecents.requestedFolder(MirrorRecents.requestPayload(token: "t", cwd: "/x")) == "/x"
+                       && MirrorRecents.requestPayload(token: "t", cwd: nil)["cwd"] == nil)
+            record("mirror recents: a relative, non-string or over-long folder reads as none",
+                   MirrorRecents.requestedFolder(["cwd": "x"]) == nil && MirrorRecents.requestedFolder(["cwd": 1]) == nil
+                       && MirrorRecents.requestedFolder(["cwd": "/" + String(repeating: "a", count: Int(PATH_MAX))]) == nil)
+            let matching = MirrorRecents(sessions: [MirrorRecents.Session(id: "s", title: "t", project: "p", timestamp: Date())], folders: [], cwd: "/x")
+            record("remote folder sessions: a reply for the folder gives its sessions",
+                   (try? SessionStore.folderSessions(from: .success(matching), path: "/x").get().map(\.id)) == ["s"])
+            var unscoped = matching
+            unscoped.cwd = nil
+            record("remote folder sessions: an unscoped reply is an error, whatever it lists",
+                   SessionStore.folderSessions(from: .success(unscoped), path: "/x")
+                       == .failure(SessionStore.RemoteFolderSessionsError(message: "Update Canopy on that Mac first")))
+            record("remote folder sessions: a wrong password offers Settings and an unreachable Mac does not",
+                   SessionStore.folderSessions(from: .failure(.refused("unauthorized")), path: "/x")
+                       == .failure(SessionStore.RemoteFolderSessionsError(message: "Password rejected", offersSettings: true))
+                       && SessionStore.folderSessions(from: .failure(.unreachable), path: "/x")
+                       == .failure(SessionStore.RemoteFolderSessionsError(message: "Not reachable (is its live mirror on?)")))
+            let closed = MirrorRecents.Session(id: "c", title: "t", project: "p", timestamp: Date(timeIntervalSince1970: 1))
+            let live = MirrorRecents.Session(id: "o", title: "t", project: "p", timestamp: Date(timeIntervalSince1970: 2), isOpen: true)
+            record("peer continue: the newest session wins, open or not, whatever the order",
+                   LauncherView.latestPeerSession([closed, live])?.id == "o" && LauncherView.latestPeerSession([live, closed])?.id == "o"
+                       && LauncherView.latestPeerSession([]) == nil)
+            let launchOptions = NewSessionOptions(promptText: "hi")
+            let resumed = SessionStore.remoteOpenPlan(recent: closed, options: launchOptions)
+            record("peer continue: a closed session resumes with the launcher's options",
+                   resumed.open == .resumeWith(options: launchOptions) && resumed.composerPrefill == nil)
+            let joined = SessionStore.remoteOpenPlan(recent: live, options: launchOptions)
+            record("peer continue: an open session is joined and its prompt waits in the composer",
+                   joined.open == .resume && joined.composerPrefill == "hi")
+            let plainRow = SessionStore.remoteOpenPlan(recent: closed, options: nil)
+            record("peer continue: a menu row resumes with the server's defaults",
+                   plainRow.open == .resume && plainRow.composerPrefill == nil)
+            let rows = ["open", "hidden", "plain"].map {
+                SessionEntry(id: $0, title: "t", timestamp: Date(), projectDirectory: URL(fileURLWithPath: "/tmp"))
+            }
+            record("mirror recents: a folder's reply keeps open sessions and the every-folder list drops them",
+                   MirrorRecents.listed(rows, cwd: "/x", open: ["open"], hidden: ["hidden"]).map(\.id) == ["open", "plain"]
+                       && MirrorRecents.listed(rows, cwd: nil, open: ["open"], hidden: ["hidden"]).map(\.id) == ["plain"])
+            let folderFixture = URL(fileURLWithPath: "/tmp/canopy-probe-folder-\(UUID().uuidString)")
+            let folderTranscripts = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+                .appendingPathComponent(ClaudeSessionHistory.encodedFolderCandidates(for: folderFixture.path)[0])
+            try? FileManager.default.createDirectory(at: folderTranscripts, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: folderTranscripts) }
+            func plantSession(cwd: String, age: TimeInterval) -> String {
+                let id = UUID().uuidString.lowercased()
+                let file = folderTranscripts.appendingPathComponent("\(id).jsonl")
+                let line = #"{"type":"user","cwd":"\#(cwd)","sessionId":"\#(id)","message":{"role":"user","content":"hi"}}"#
+                try? Data((line + "\n").utf8).write(to: file)
+                try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: file.path)
+                return id
+            }
+            let newest = plantSession(cwd: folderFixture.path, age: 20)
+            let hiddenRow = plantSession(cwd: folderFixture.path, age: 30)
+            let older = plantSession(cwd: folderFixture.path, age: 40)
+            let oldest = plantSession(cwd: folderFixture.path, age: 50)
+            record("folder sessions: newest first, up to keep, without excluded ids",
+                   ClaudeSessionHistory.loadNewestSessions(for: folderFixture, keep: 2, excluding: [hiddenRow]).map(\.id) == [newest, older],
+                   "oldest \(oldest)")
             record("mirror recents: an attach_error is not a reply",
                    MirrorRecents.parse(["type": "attach_error", "message": "unauthorized"]) == nil)
             record("mirror recents: a relative folder and an id-less session are dropped",
@@ -3617,20 +3687,11 @@ enum SidebarLogicProbe {
                 unlink(livePath)
                 record("daemon socket: a missing path reads as stale", !DaemonPaths.socketIsLive(path: livePath))
             }
-            // The launcher's Resume menu over another Mac's closed sessions.
+            // The launcher's rows for a folder's closed sessions on another Mac.
             let t0 = Date(timeIntervalSince1970: 1_000_000)
             func peerSession(_ id: String, _ project: String, _ age: TimeInterval, title: String = "t") -> MirrorRecents.Session {
                 MirrorRecents.Session(id: id, title: title, project: project, timestamp: t0.addingTimeInterval(-age))
             }
-            let peerSessions = [peerSession("a1", "A", 300), peerSession("b1", "B · fix-x", 100),
-                                peerSession("b2", "B", 400), peerSession("c1", "C", 200)]
-            let groups = LauncherView.peerSessionGroups(peerSessions, preferring: nil)
-            record("peer resume: groups by project name, newest group first, branch folded in",
-                   groups.map(\.project) == ["B", "C", "A"] && groups[0].sessions.map(\.id) == ["b1", "b2"])
-            record("peer resume: the preferred project moves to the top, the rest keep their order",
-                   LauncherView.peerSessionGroups(peerSessions, preferring: "A").map(\.project) == ["A", "B", "C"])
-            record("peer resume: an unknown preferred project changes nothing",
-                   LauncherView.peerSessionGroups(peerSessions, preferring: "Z").map(\.project) == ["B", "C", "A"])
             record("peer title: a slash command's wrapper shows as the command",
                    LauncherView.cleanedSessionTitle("<command-message>ship-it</command-message> <command-name>/ship-it</command-name>") == "/ship-it")
             record("peer title: a prompt quoting the wrapper is not a command",

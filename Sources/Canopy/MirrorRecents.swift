@@ -19,29 +19,62 @@ struct MirrorRecents: Equatable {
         let title: String
         let project: String
         let timestamp: Date
+        /// Open on that Mac. Only a reply limited to a folder lists these.
+        var isOpen = false
     }
 
     var sessions: [Session]
     /// Absolute paths on the other Mac, most recent first.
     var folders: [String]
+    /// The folder `sessions` is limited to, echoed from the request. Nil means every folder.
+    var cwd: String? = nil
 
     static let listType = "list_recents"
     static let replyType = "recents"
     static let maxSessions = 20
     static let maxFolders = 10
 
-    /// The server's reply line. Sessions already open over there, hidden
-    /// rows and sessions whose folder is gone are the caller's to drop before
-    /// this — the wire only caps the counts.
-    static func replyPayload(sessions: [SessionEntry], folders: [URL]) -> [String: Any] {
-        [
+    /// The server's reply line; `listed` picks its sessions, the wire only caps the counts.
+    /// `cwd` is the folder the request named.
+    static func replyPayload(sessions: [SessionEntry], folders: [URL], cwd: String? = nil,
+                             openIds: Set<String> = []) -> [String: Any] {
+        var reply: [String: Any] = [
             "type": replyType,
             "sessions": sessions.prefix(maxSessions).map {
-                ["id": $0.id, "title": $0.title, "project": $0.projectName,
-                 "timestamp": $0.timestamp.timeIntervalSince1970] as [String: Any]
+                var row: [String: Any] = ["id": $0.id, "title": $0.title, "project": $0.projectName,
+                                          "timestamp": $0.timestamp.timeIntervalSince1970]
+                if openIds.contains($0.id) { row["open"] = true }
+                return row
             },
             "folders": folders.prefix(maxFolders).map(\.path),
         ]
+        if let cwd { reply["cwd"] = cwd }
+        return reply
+    }
+
+    /// What a reply may list. A folder's reply keeps open sessions, because Continue has to reach
+    /// the newest one; the every-folder list leaves them to the sidebar.
+    static func listed(_ candidates: [SessionEntry], cwd: String?, open: Set<String>, hidden: Set<String>) -> [SessionEntry] {
+        candidates.filter { $0.canOpen && (cwd != nil || !open.contains($0.id)) && !hidden.contains($0.id) }
+    }
+
+    static func requestPayload(token: String, cwd: String?) -> [String: Any] {
+        var request = ["type": listType, "token": token]
+        if let cwd { request["cwd"] = cwd }
+        return request
+    }
+
+    /// The folder a request limits its reply to. Anything no path could be reads as none.
+    static func requestedFolder(_ dict: [String: Any]) -> String? {
+        guard let cwd = dict["cwd"] as? String, cwd.hasPrefix("/"), cwd.utf8.count <= PATH_MAX else { return nil }
+        return cwd
+    }
+
+    /// `sessions` when this reply really is limited to `folder`, newest first. Nil for a server that
+    /// predates the request's `cwd`: it answers with every folder's sessions, and Continue would
+    /// resume the newest of those.
+    func sessions(in folder: String) -> [Session]? {
+        cwd == folder ? sessions : nil
     }
 
     /// Nil for anything that is not a `recents` reply. A malformed session
@@ -54,11 +87,12 @@ struct MirrorRecents: Equatable {
                 id: id,
                 title: raw["title"] as? String ?? "Untitled",
                 project: raw["project"] as? String ?? "",
-                timestamp: Date(timeIntervalSince1970: raw["timestamp"] as? Double ?? 0)
+                timestamp: Date(timeIntervalSince1970: raw["timestamp"] as? Double ?? 0),
+                isOpen: raw["open"] as? Bool ?? false
             )
         }
         let folders = (dict["folders"] as? [String] ?? []).filter { $0.hasPrefix("/") }
-        return MirrorRecents(sessions: sessions, folders: folders)
+        return MirrorRecents(sessions: sessions, folders: folders, cwd: dict["cwd"] as? String)
     }
 }
 
@@ -131,7 +165,7 @@ struct NewSessionOptions: Equatable {
 enum MirrorOpenRequest: Equatable {
     /// Resume a closed session; the server takes its folder from its own Recents.
     case resume
-    /// `resume` started with these options instead of the server's defaults (a fork).
+    /// `resume` started with these options instead of the server's defaults.
     /// Same `kind` on the wire, so a server that predates it resumes with its defaults.
     case resumeWith(options: NewSessionOptions)
     /// A new session in `cwd` on the other Mac, under the attach's session id
@@ -190,23 +224,26 @@ final class MirrorRecentsClient {
     private let connection: NWConnection
     private let buffer = NDJSONLineBuffer(acceptsCompressed: false)
     private let token: String
+    private let cwd: String?
     private var completion: ((Result<MirrorRecents, Failure>) -> Void)?
 
-    static func fetch(host: String, port: UInt16, token: String,
+    /// `cwd` limits the reply's sessions to that folder on the other Mac.
+    static func fetch(host: String, port: UInt16, token: String, cwd: String? = nil,
                       completion: @escaping (Result<MirrorRecents, Failure>) -> Void) {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             completion(.failure(.unreachable))
             return
         }
-        let client = MirrorRecentsClient(host: host, port: nwPort, token: token, completion: completion)
+        let client = MirrorRecentsClient(host: host, port: nwPort, token: token, cwd: cwd, completion: completion)
         inFlight[ObjectIdentifier(client)] = client
         client.start()
     }
 
-    private init(host: String, port: NWEndpoint.Port, token: String,
+    private init(host: String, port: NWEndpoint.Port, token: String, cwd: String?,
                  completion: @escaping (Result<MirrorRecents, Failure>) -> Void) {
         connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
         self.token = token
+        self.cwd = cwd
         self.completion = completion
     }
 
@@ -216,7 +253,8 @@ final class MirrorRecentsClient {
                 guard let self else { return }
                 switch state {
                 case .ready:
-                    var payload = (try? JSONSerialization.data(withJSONObject: ["type": MirrorRecents.listType, "token": self.token])) ?? Data()
+                    let request = MirrorRecents.requestPayload(token: self.token, cwd: self.cwd)
+                    var payload = (try? JSONSerialization.data(withJSONObject: request)) ?? Data()
                     payload.append(0x0A)
                     self.connection.send(content: payload, completion: .contentProcessed { _ in })
                     self.receive()
