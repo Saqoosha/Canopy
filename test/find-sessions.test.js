@@ -409,6 +409,18 @@ describe("find_sessions.py search", () => {
     assert.equal(local(run(home, ["search", "zebra"], { FIND_SESSIONS_RG: rg })).truncated, true);
   });
 
+  test("keeps reading after one batch of files fails", () => {
+    const home = makeHome();
+    for (let index = 0; index < 501; index += 1) {
+      writeSession(home, "-work-project", `s${index}`, [user("zebra")]);
+    }
+    const failed = path.join(home, "failed-once");
+    const rg = writeFakeSsh(home, `case " $* " in *" -l "*) exec "${REAL_RG}" "$@";; esac\nif [ ! -f "${failed}" ]; then touch "${failed}"; exit 2; fi\nexec "${REAL_RG}" "$@"`);
+    const machine = local(run(home, ["search", "--limit", "1000", "zebra"], { FIND_SESSIONS_RG: rg }));
+    assert.equal(machine.truncated, true);
+    assert.equal(machine.sessions.length, 1);
+  });
+
   test("reports a Mac with no transcripts", () => {
     const machine = local(run(makeHome(), ["search", "zebra"]));
     assert.equal(machine.ok, false);

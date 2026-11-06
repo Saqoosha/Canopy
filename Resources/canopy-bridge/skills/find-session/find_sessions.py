@@ -42,7 +42,8 @@ RG_LOCATIONS = ("/opt/homebrew/bin/rg", "/usr/local/bin/rg")
 REGEX_META = set("\\.+*?()|[]{}^$")
 # A line holding none of these cannot be conversation. Anywhere in the line: a key can sit
 # after a long message.
-CONVERSATION_MARKS = (b'"type":"user"', b'"type":"assistant"', b'"queued_command"')
+PROMPT_MARKS = (b'"type":"user"', b'"queued_command"')
+CONVERSATION_MARKS = PROMPT_MARKS + (b'"type":"assistant"',)
 KEEP_ALIVE = "[Canopy keep-alive]"
 NOT_PROMPTS = ("<", "[Request", KEEP_ALIVE)
 NOT_CONVERSATION = ("isSidechain", "isMeta", "isSynthetic", "isCompactSummary", "isVisibleInTranscriptOnly")
@@ -119,7 +120,7 @@ def is_real_prompt(text):
 
 
 def queued_prompt(record):
-    """A prompt typed during a turn, which is stored only as this attachment."""
+    """A prompt typed during a turn. Most are stored only as this attachment."""
     attachment = record.get("attachment") or {}
     origin = attachment.get("origin") or {}
     if (attachment.get("type") == "queued_command" and attachment.get("commandMode", "prompt") == "prompt"
@@ -201,20 +202,15 @@ def files_matching(rg, terms, root, deadline):
 
 
 def scan_lines(rg, terms, files, deadline, on_record):
-    """Feeds matching lines to on_record(path, record). False if it stopped early."""
+    """Feeds matching lines to on_record(path, record). False if it did not read everything."""
     patterns = [arg for term in terms for arg in ("-e", rg_pattern(term))]
+    complete = True
     for start in range(0, len(files), FILE_BATCH):
         args = [rg, "--no-config", "-L", "-a", "-i", "--no-line-number", "--with-filename", "--null",
                 *patterns, "--", *files[start:start + FILE_BATCH]]
         process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        expired = threading.Event()
-
-        def stop(process=process, expired=expired):
-            expired.set()
-            process.kill()
-
         # A timer, not a check in the loop: reading blocks while rg finds nothing.
-        watchdog = threading.Timer(max(0.0, deadline - time.monotonic()), stop)
+        watchdog = threading.Timer(max(0.0, deadline - time.monotonic()), process.kill)
         watchdog.start()
         try:
             for raw in process.stdout:
@@ -233,9 +229,10 @@ def scan_lines(rg, terms, files, deadline, on_record):
             watchdog.cancel()
             process.kill()
             process.wait()
-        if expired.is_set() or status not in (0, 1):
-            return False
-    return True
+        if status < 0:
+            return False  # killed: out of time, or rg died
+        complete = complete and status in (0, 1)
+    return complete
 
 
 SUMMARY_KEYS = ("title", "cwd", "firstPrompt", "lastPrompt", "lastActive")
@@ -249,7 +246,7 @@ def summarize(path):
         for raw in transcript:
             if len(raw) > MAX_LINE_BYTES:
                 continue
-            if b'Title"' not in raw and not any(mark in raw for mark in CONVERSATION_MARKS):
+            if b'Title"' not in raw and not any(mark in raw for mark in PROMPT_MARKS):
                 continue
             try:
                 record = json.loads(raw)
