@@ -5,6 +5,8 @@ struct ConnectionOverlayView: View {
     /// SSH remote panes keep the default; a mirror pane names the Mac it lost.
     var title: String = "SSH Connection Lost"
     var onBackToLauncher: () -> Void
+    /// Removes the pane outright, where "Back to Launcher" leaves a launcher in its slot.
+    var onClose: () -> Void
 
     var body: some View {
         if connectionState.isOverlayVisible {
@@ -29,6 +31,9 @@ struct ConnectionOverlayView: View {
                             .buttonStyle(.borderedProminent)
                             .disabled(connectionState.onRetry == nil)
                             Button("Back to Launcher") { onBackToLauncher() }
+                                .buttonStyle(.bordered)
+                                .tint(.white)
+                            Button("Close") { onClose() }
                                 .buttonStyle(.bordered)
                                 .tint(.white)
                         }

@@ -34,6 +34,9 @@ struct SessionContainer: View {
                                 : "Connection to \(session.statusBar.mirrorMachine ?? "the other Mac") Lost",
                             onBackToLauncher: {
                                 SessionStore.shared?.replaceSessionWithLauncher(session.id)
+                            },
+                            onClose: {
+                                SessionStore.shared?.closeSession(session.id, keepingFailure: false)
                             }
                         )
                     }
@@ -65,6 +68,9 @@ struct SessionContainer: View {
                             connectionState: session.connection,
                             onBackToLauncher: {
                                 SessionStore.shared?.replaceSessionWithLauncher(session.id)
+                            },
+                            onClose: {
+                                SessionStore.shared?.closeSession(session.id, keepingFailure: false)
                             }
                         )
                     }
