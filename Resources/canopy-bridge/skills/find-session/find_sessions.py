@@ -38,6 +38,7 @@ SHORT_TERM_LENGTH = 4
 SSH_CONNECT_SECONDS = 6
 # Past the deadline, reading titles still gets this long: a cut-off search owes what it found.
 SUMMARY_GRACE_SECONDS = 5
+DEADLINE_CHECK_LINES = 1024
 RG_LOCATIONS = ("/opt/homebrew/bin/rg", "/usr/local/bin/rg")
 REGEX_META = set("\\.+*?()|[]{}^$")
 # A line holding none of these cannot be conversation. Anywhere in the line: a key can sit
@@ -238,12 +239,16 @@ def scan_lines(rg, terms, files, deadline, on_record):
 SUMMARY_KEYS = ("title", "cwd", "firstPrompt", "lastPrompt", "lastActive")
 
 
-def summarize(path):
-    """`lastActive` is the date of the last prompt."""
+def summarize(path, deadline):
+    """(summary, whether the whole file was read). `lastActive` is the date of the last prompt."""
     summary = dict.fromkeys(SUMMARY_KEYS, "")
     custom_title = ai_title = ""
+    finished = True
     with open(path, "rb") as transcript:
-        for raw in transcript:
+        for count, raw in enumerate(transcript):
+            if count % DEADLINE_CHECK_LINES == 0 and time.monotonic() > deadline:
+                finished = False
+                break
             if len(raw) > MAX_LINE_BYTES:
                 continue
             if b'Title"' not in raw and not any(mark in raw for mark in PROMPT_MARKS):
@@ -268,7 +273,7 @@ def summarize(path):
             summary["cwd"] = record.get("cwd") or summary["cwd"]
             summary["lastActive"] = local_date(record.get("timestamp", "")) or summary["lastActive"]
     summary["title"] = custom_title or ai_title or summary["firstPrompt"]
-    return summary
+    return summary, finished
 
 
 def modified(path):
@@ -345,9 +350,10 @@ def search_here(terms, match_any, exclude, limit, timeout):
             finished = False
         else:
             try:
-                summary = summarize(path)
+                summary, read_all = summarize(path, summary_deadline)
             except OSError:
                 continue  # removed since rg read it, as when a worktree is cleaned up
+            finished = finished and read_all
         sessions.append({"sessionId": session_id(path), **summary, "hits": hits[path], "snippets": snippets[path]})
     sessions.sort(key=lambda session: (sum(session["hits"].values()), session["lastActive"]), reverse=True)
     return {**row, "truncated": not (finished and every_file_read), "matched": len(matched), "sessions": sessions}
@@ -412,6 +418,14 @@ def load_peers():
 
 
 def ask_peer(address, request, timeout):
+    """Never raises: a failure here must not take this Mac's answer with it."""
+    try:
+        return call_peer(address, request, timeout)
+    except Exception as error:
+        return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+
+
+def call_peer(address, request, timeout):
     """Runs this script on a peer, or returns {"ok": False, "error": ...}.
 
     Arguments cross a remote shell that may be fish or zsh, so they travel as one base64 word

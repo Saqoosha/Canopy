@@ -621,6 +621,16 @@ describe("find_sessions.py search", () => {
     assert.ok(words.some((word) => word.startsWith("ConnectTimeout=")));
   });
 
+  test("keeps the local rows when a peer's answer cannot be parsed", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("zebra")]);
+    writePeers(home, { "PEER-1": "100.1.2.3:8770" });
+    const ssh = writeFakeSsh(home, "printf '%0200000d' 0 | tr 0 '['");
+    const result = run(home, ["search", "--all", "zebra"], { FIND_SESSIONS_SSH: ssh });
+    assert.deepEqual(ids(result), ["aaaa"]);
+    assert.equal(result.machines.find((machine) => machine.machine === "PEER-1").ok, false);
+  });
+
   test("reports a missing ssh", () => {
     const home = makeHome();
     writeSession(home, "-work-project", "aaaa", [user("zebra")]);
@@ -635,6 +645,24 @@ describe("find_sessions.py search", () => {
     writePeers(home, { "PEER-1": "100.1.2.3:8770" });
     const ssh = writeFakeSsh(home, "exit 255");
     assert.deepEqual(run(home, ["search", "zebra"], { FIND_SESSIONS_SSH: ssh }).machines.map((machine) => machine.machine), ["local"]);
+  });
+});
+
+describe("find_sessions.py summarize", () => {
+  test("stops reading at its deadline", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("the prompt")]);
+    const file = path.join(home, ".claude", "projects", "-work-project", "aaaa.jsonl");
+    const code = `
+import json, sys, time
+sys.path.insert(0, ${JSON.stringify(path.dirname(SCRIPT))})
+import find_sessions
+summary, finished = find_sessions.summarize(${JSON.stringify(file)}, time.monotonic() - 1)
+print(json.dumps([summary["firstPrompt"], finished]))
+`;
+    const result = spawnSync(PYTHON, ["-B", "-c", code], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), ["", false]);
   });
 });
 
@@ -748,7 +776,10 @@ describe("SKILL.md", () => {
     for (const command of commands) {
       const args = command.replace("python3 ", "").replace('"${CLAUDE_SKILL_DIR}/find_sessions.py" ', "")
         .replace("TERM...", "zebra").replace("SESSION_ID", "aaaa").replace("MACHINE", "local").split(" ");
-      assert.notEqual(run(home, args).ok, false, command);
+      const result = run(home, args);
+      for (const row of result.machines ?? [result]) {
+        assert.equal(row.ok, true, `${command}: ${row.error}`);
+      }
     }
   });
 });
