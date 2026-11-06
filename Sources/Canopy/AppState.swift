@@ -36,7 +36,7 @@ final class AppState {
     /// the launch holds this object, so this closure still runs.
     @ObservationIgnored var onLaunch: ((AppState) -> Void)?
     /// Asked before a resume opens anything: true when that session was already
-    /// open and has been shown instead. See `SessionStore.showOpenSession`.
+    /// open, so nothing launches. See `SessionStore.showOpenSession`.
     @ObservationIgnored var showOpenSession: ((String, LaunchPrompt?) -> Bool)?
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     var permissionMode: PermissionMode = .acceptEdits

@@ -1174,30 +1174,30 @@ final class SessionStore {
     /// returns true. A second row would be a second client of the same shim, and Stop
     /// on either one ends the session under both. A prompt is not sent, since the
     /// session may be mid-turn: the launcher stays up holding it, so a session with no
-    /// pane opens beside it, and with no room for that the launcher's banner explains.
+    /// pane opens beside it, and with no room for that the sidebar banner explains.
     func showOpenSession(resumeId: String, prompt: LaunchPrompt?, launcherPane: PaneSlot.ID?) -> Bool {
         guard let existing = openSessions.first(where: { $0.resumeId == resumeId }) else { return false }
+        let placed: Bool
         if paneIndex(forSession: existing.id) != nil {
             select(.session(existing.id))
             makeFocusedPaneKeyResponder()
-        } else if prompt != nil {
-            guard openInNewPaneBesideLauncher(existing.id) else {
-                noteSessionFailure(title: existing.title, message: "Already open, so nothing started. Your prompt is still here, not sent.", status: -2)
-                return true
-            }
-        } else if let launcherPane, openInLauncherPane(existing.id, paneId: launcherPane) {
-            // Took the launcher's place, as a Start does.
+            placed = true
+        } else if prompt == nil, panes.isEmpty {
+            openInFocusedPane(existing.id)
+            placed = true
+        } else if prompt == nil, let launcherPane, openInLauncherPane(existing.id, paneId: launcherPane) {
+            placed = true
         } else {
-            focusOrPane(existing.id, target: .newPane)
+            // The empty strip's launcher goes with the first pane, so there is no "beside" it.
+            placed = !panes.isEmpty && openInNewPane(existing.id)
         }
-        let promptNote = prompt == nil ? "" : " Your prompt is still in the launcher, not sent."
+        let promptNote = prompt == nil ? "" : " Your prompt was not sent."
+        guard placed else {
+            remoteAttachError = RemoteNotice(message: "\(existing.title) is already open, so nothing started.\(promptNote)", offersSettings: false)
+            return true
+        }
         existing.statusBar.showHint("Already open, so Continue came here.\(promptNote)", forSeconds: 6)
         return true
-    }
-
-    /// False with no pane to stand beside (the empty strip's launcher goes with the first pane) or at the cap.
-    private func openInNewPaneBesideLauncher(_ id: OpenSession.ID) -> Bool {
-        !panes.isEmpty && openInNewPane(id)
     }
 
     /// Where a removed worktree's session may reopen: the openable rows' folders and the recent directories.

@@ -7171,7 +7171,7 @@ enum SidebarLogicProbe {
                        && dup.panes.map(\.content) == [.session(running.id), .launcher]
                        && dup.focusedPaneIndex == 0
                        && running.pendingInitialPrompt == nil
-                       && running.statusBar.transientHint?.contains("launcher") == true
+                       && running.statusBar.transientHint?.contains("not sent") == true
                        && dup.lastActiveResumeId == "launch-open",
                        "rows=\(dup.openSessions.count) panes=\(dup.panes.map(\.content)) focus=\(dup.focusedPaneIndex)")
 
@@ -7190,10 +7190,10 @@ enum SidebarLogicProbe {
                        && unpaned.panes.count == 2
                        && unpaned.panes.contains { $0.content == .launcher }
                        && unpaned.panes.contains { $0.content == .session(rowOnly.id) }
-                       && rowOnly.statusBar.transientHint?.contains("launcher") == true,
+                       && rowOnly.statusBar.transientHint?.contains("not sent") == true,
                        "panes=\(unpaned.panes.map(\.content))")
 
-                // The empty strip's launcher goes with the first pane, so it stays and says why.
+                // The empty strip's launcher goes with the first pane, so it stays and the sidebar says why.
                 let bare = SessionStore()
                 let bareRow = OpenSession(origin: .local(cwd), resumeId: "launch-bare", title: "R", project: "p", status: .live)
                 bare._probeSeedOpenSessions([bareRow])
@@ -7201,12 +7201,33 @@ enum SidebarLogicProbe {
                 bare.receiveLaunches(from: bareLaunch, launcherPane: nil)
                 let bareLaunched = bareLaunch.launchSession(directory: cwd, resumeSessionId: "launch-bare",
                                                             initialPrompt: .make(text: "go", images: []))
-                record("launcher continue: with no panes a prompt keeps the launcher, and its banner says why",
+                record("launcher continue: with no panes a prompt keeps the launcher, and the sidebar says why",
                        !bareLaunched
                        && bare.openSessions.count == 1
                        && bare.panes.isEmpty
-                       && bare.lastSessionFailure?.message.contains("Already open") == true,
-                       "panes=\(bare.panes.map(\.content)) banner=\(bare.lastSessionFailure?.message ?? "nil")")
+                       && bare.lastSessionFailure == nil
+                       && bare.remoteAttachError?.message.contains("already open") == true,
+                       "panes=\(bare.panes.map(\.content)) banner=\(bare.remoteAttachError?.message ?? "nil")")
+
+                // At the cap nothing is displaced, with or without a prompt.
+                let full = SessionStore()
+                let filling = (1..<SessionStore.paneAbsoluteCap).map {
+                    OpenSession(origin: .local(cwd), resumeId: "launch-full-\($0)", title: "F", project: "p", status: .live)
+                }
+                let overflow = OpenSession(origin: .local(cwd), resumeId: "launch-overflow", title: "O", project: "p", status: .live)
+                full._probeSeedOpenSessions(filling + [overflow])
+                filling.forEach { _ = full.openInNewPane($0.id) }
+                _ = full.openLauncherInNewPane()
+                let panesAtCap = full.panes.map(\.content)
+                let fullLaunch = AppState()
+                full.receiveLaunches(from: fullLaunch, launcherPane: full.panes.last?.id)
+                fullLaunch.launchSession(directory: cwd, resumeSessionId: "launch-overflow",
+                                         initialPrompt: .make(text: "go", images: []))
+                record("launcher continue: at the pane cap a prompt keeps every pane, and the sidebar says why",
+                       panesAtCap.count == SessionStore.paneAbsoluteCap
+                       && full.panes.map(\.content) == panesAtCap
+                       && full.remoteAttachError?.message.contains("not sent") == true,
+                       "panes=\(full.panes.count) banner=\(full.remoteAttachError?.message ?? "nil")")
 
                 // With no prompt to keep, it takes the launcher's place, as a Start does.
                 let noPrompt = SessionStore()
