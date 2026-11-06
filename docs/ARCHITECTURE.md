@@ -159,7 +159,7 @@ Closing a pane and stopping a session are different operations.
 
 - Canopy keeps its own copies of the extension under `~/Library/Application Support/Canopy/extensions/` and also finds `~/.vscode/extensions/anthropic.claude-code-*` (`CCExtension`). The newest one wins.
 - `ExtensionUpdater` asks the VS Marketplace for the latest version and installs it without a prompt. Before adopting a download, `ExtensionCanary` activates it in a throwaway shim; a version that throws during `activate` is not adopted. Versions still in use by a running session are kept on disk.
-- Running sessions stay on the extension they started with. The sidebar footer lists sessions on an older extension and one Restart All moves them.
+- Running sessions stay on the extension they started with. The sidebar footer lists sessions on an older extension and one Restart All moves them. While a Canopy update waits, that button is hidden: the service restart moves them too.
 
 ### Sleep
 

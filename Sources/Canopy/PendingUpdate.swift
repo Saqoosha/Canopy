@@ -44,6 +44,13 @@ final class PendingUpdate {
         return "Canopy \(new) is installed; the session service still runs \(old)."
     }
 
+    /// A service restart is coming or can be asked for, and every session comes back on the newest
+    /// extension, so the popover needs no second button for the extension. Outside launchd nothing
+    /// would start the new build, which leaves the per-session restart as the only way to move them.
+    nonisolated static func serviceRestartCoversExtension(_ state: UpgradeState) -> Bool {
+        state.pendingBuild != nil && !state.notUnderLaunchd
+    }
+
     nonisolated static func confirmation(_ holds: [UpgradeHold]) -> String {
         let n = holds.count
         let names = holds.map(\.title).joined(separator: ", ")
@@ -151,8 +158,13 @@ private struct PendingUpdateDetail: View {
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 }
-                Button(ext.stale.count == 1 ? "Restart" : "Restart All") { restartAll(ext.stale) }
-                    .disabled(ext.stale.allSatisfy { restarted.contains($0.key) })
+                if PendingUpdate.serviceRestartCoversExtension(state) {
+                    Text("Updated when the session service restarts.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                } else {
+                    Button(ext.stale.count == 1 ? "Restart" : "Restart All") { restartAll(ext.stale) }
+                        .disabled(ext.stale.allSatisfy { restarted.contains($0.key) })
+                }
             }
             if let error { Text(error).font(.system(size: 11)).foregroundStyle(.red) }
         }
