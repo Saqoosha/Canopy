@@ -521,11 +521,7 @@ private struct DetailLauncher: View {
     private var launcher: some View {
         LauncherView(appState: localAppState, store: store)
             .onAppear {
-                // Captures the store and this pane's id, never the view, so a
-                // launch that lands after this launcher is gone still opens.
-                localAppState.onLaunch = { [store, paneId] in
-                    store.openLaunched($0, fromLauncherPane: paneId)
-                }
+                store.receiveLaunches(from: localAppState, launcherPane: paneId)
             }
     }
 }

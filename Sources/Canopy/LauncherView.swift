@@ -2106,8 +2106,9 @@ struct LauncherView: View {
                 // and a directory with no resumable session is the ordinary
                 // first-run case. Both land on a fresh session, which is what
                 // this path did before the lookup existed.
-                appState.launchSession(directory: dir, resumeSessionId: latest?.id, sessionTitle: latest?.title, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: cmdHeld, initialPrompt: prompt)
-                clearPendingPrompt()
+                if appState.launchSession(directory: dir, resumeSessionId: latest?.id, sessionTitle: latest?.title, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: cmdHeld, initialPrompt: prompt) {
+                    clearPendingPrompt()
+                }
             }
             return
         }
@@ -2120,8 +2121,9 @@ struct LauncherView: View {
         }
         // A settled title names a NEW session's task. A resumed one already
         // has its own title, which it keeps.
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: openInNewPane, initialPrompt: prompt, settledTitle: resumeId == nil ? settledTitle : nil)
-        clearPendingPrompt()
+        if appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: model, effortLevel: effort, permissionMode: permission, remoteHost: remoteHost, customApi: buildCustomApiConfig(), openInNewPane: openInNewPane, initialPrompt: prompt, settledTitle: resumeId == nil ? settledTitle : nil) {
+            clearPendingPrompt()
+        }
     }
 
     private func loadData() {

@@ -1163,6 +1163,37 @@ final class SessionStore {
         launch.backToLauncher()
     }
 
+    /// Routes a launcher's launches here. Captures this pane's id, never the view,
+    /// so a launch that lands after the launcher is gone still opens.
+    func receiveLaunches(from launch: AppState, launcherPane paneId: PaneSlot.ID?) {
+        launch.onLaunch = { [self] in openLaunched($0, fromLauncherPane: paneId) }
+        launch.showOpenSession = { [self] in showOpenSession(resumeId: $0, prompt: $1) }
+    }
+
+    /// A launcher's Continue landed on a session that is already open: shows it and
+    /// returns true. A second row would be a second client of the same shim, and Stop
+    /// on either one ends the session under both. Its prompt is not sent, since the
+    /// session may be mid-turn and was not what the user was looking at: the launcher
+    /// stays up holding it. With no pane there is no launcher to stay, so the text
+    /// moves to the session's composer. Its status bar says which, since focus jumping
+    /// to an old pane does not explain itself.
+    func showOpenSession(resumeId: String, prompt: LaunchPrompt?) -> Bool {
+        guard let existing = openSessions.first(where: { $0.resumeId == resumeId }) else { return false }
+        let hint = switch (prompt, panes.isEmpty) {
+        case (nil, _): "Already open, so Continue came here"
+        case (_, true): "Already open. Your prompt is in the composer, not sent"
+        case (_, false): "Already open. Your prompt is still in the launcher, not sent"
+        }
+        if panes.isEmpty { existing.composerPrefill = prompt?.text }
+        if !openInNewPane(existing.id), paneIndex(forSession: existing.id) == nil {
+            showCapReachedHintOnFocusedPane()
+            return true
+        }
+        existing.statusBar.showHint(hint, forSeconds: 6)
+        makeFocusedPaneKeyResponder()
+        return true
+    }
+
     /// Where a removed worktree's session may reopen: the openable rows' folders and the recent directories.
     var rescueCandidates: [URL] { recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load() }
 
