@@ -15109,11 +15109,42 @@ enum SidebarLogicProbe {
                    !PendingUpdate.serviceRestartCoversExtension(
                        UpgradeState(runningBuild: "149", pendingBuild: "150", heldBy: [hold],
                                     notUnderLaunchd: true, extensionState: ext)))
-            record("pending update: the confirmation adds a pane that went busy after the last check, once",
-                   PendingUpdate.restartInterrupts(holds: [hold], busyPanes: [("k", "Fix CI"), ("n", "New turn")]).map(\.title)
-                       == ["Fix CI", "New turn"])
+            do {
+                let priorDaemon = OpenSession.localSessionsRunInDaemon
+                OpenSession.localSessionsRunInDaemon = true
+                defer { OpenSession.localSessionsRunInDaemon = priorDaemon }
+                let folder = FileManager.default.temporaryDirectory
+                func pane(_ title: String, status: OpenSession.Status = .live, key: String? = nil,
+                          origin: OpenSession.Origin? = nil) -> OpenSession {
+                    let session = OpenSession(origin: origin ?? .local(folder), resumeId: title, title: title,
+                                              project: "p", status: status)
+                    session.daemonKey = key
+                    return session
+                }
+                let thinking = pane("Thinking", key: "t")
+                thinking.isThinking = true
+                let asking = pane("Asking", key: "a")
+                asking.isAsking = true
+                let waiting = pane("Waiting", key: "w")
+                waiting.isWaiting = true
+                let held = pane("Held pane", key: hold.key)
+                held.isThinking = true
+                let crashed = pane("Crashed", status: .crashed(exitCode: 1), key: "c")
+                crashed.isThinking = true
+                let remote = pane("SSH", key: "r", origin: .remote(host: "studio", path: folder))
+                remote.isThinking = true
+                record("pending update: the confirmation adds what went busy after the last check",
+                       PendingUpdate.restartInterrupts(holds: [hold], sessions: [thinking, asking, waiting])
+                           == ["Fix CI", "Thinking", "Asking", "Waiting"])
+                record("pending update: a session the holds name is listed once",
+                       PendingUpdate.restartInterrupts(holds: [hold], sessions: [held]) == ["Fix CI"])
+                record("pending update: a pane still starting counts, before it has a key",
+                       PendingUpdate.restartInterrupts(holds: [], sessions: [pane("Starting", status: .spawning)]) == ["Starting"])
+                record("pending update: idle, crashed and SSH sessions are not interrupted",
+                       PendingUpdate.restartInterrupts(holds: [], sessions: [pane("Idle", key: "i"), crashed, remote]).isEmpty)
+            }
             record("pending update: confirmation names what is interrupted",
-                   PendingUpdate.confirmation([hold])
+                   PendingUpdate.confirmation([hold.title])
                        == "1 session is busy: Fix CI. Restarting stops its current work. Conversations are kept.")
         }
 

@@ -49,15 +49,18 @@ final class PendingUpdate {
         state.pendingBuild != nil && !state.notUnderLaunchd
     }
 
-    /// Holds are up to a minute old, so a pane that went busy since then is added.
-    nonisolated static func restartInterrupts(holds: [UpgradeHold], busyPanes: [(key: String, title: String)]) -> [UpgradeHold] {
-        holds + busyPanes.filter { pane in !holds.contains { $0.key == pane.key } }
-            .map { UpgradeHold(key: $0.key, title: $0.title, reason: "working") }
+    /// Holds are up to a minute old, so each session's current activity adds what went busy since.
+    static func restartInterrupts(holds: [UpgradeHold], sessions: [OpenSession]) -> [String] {
+        let busy = sessions.filter { session in
+            session.isDaemonHosted && !holds.contains { $0.key == session.daemonKey }
+                && [.working, .background, .asking].contains(SessionActivity.of(session, isUnread: false))
+        }
+        return holds.map(\.title) + busy.map(\.title)
     }
 
-    nonisolated static func confirmation(_ holds: [UpgradeHold]) -> String {
-        let n = holds.count
-        let names = holds.map(\.title).joined(separator: ", ")
+    nonisolated static func confirmation(_ titles: [String]) -> String {
+        let n = titles.count
+        let names = titles.joined(separator: ", ")
         return "\(n) session\(n == 1 ? " is" : "s are") busy: \(names). "
             + "Restarting stops \(n == 1 ? "its" : "their") current work. Conversations are kept."
     }
@@ -177,14 +180,10 @@ private struct PendingUpdateDetail: View {
     }
 
     private func confirmAndRestart() {
-        let busyPanes = (SessionStore.shared?.openSessions ?? []).compactMap { session -> (key: String, title: String)? in
-            guard session.isDaemonHosted, let key = session.daemonKey,
-                  session.isThinking || session.isAsking || session.isWaiting else { return nil }
-            return (key, session.title)
-        }
         let alert = NSAlert()
         alert.messageText = "Restart the session service now?"
-        alert.informativeText = PendingUpdate.confirmation(PendingUpdate.restartInterrupts(holds: state.heldBy, busyPanes: busyPanes))
+        alert.informativeText = PendingUpdate.confirmation(
+            PendingUpdate.restartInterrupts(holds: state.heldBy, sessions: SessionStore.shared?.openSessions ?? []))
         alert.addButton(withTitle: "Restart")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
         guard alert.runModal() == .alertFirstButtonReturn else { return }
