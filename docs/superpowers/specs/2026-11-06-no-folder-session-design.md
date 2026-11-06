@@ -109,7 +109,7 @@ CLI にはフォルダが必須なので、Canopy 専用の空フォルダ `~/Li
 - `search TERM...` は、単語を全部含むセッションを探す。`--any` は、どれか 1 つを含むセッションを探す。
 - `--all` のとき、`canopy.mirrorPeers` の各 Mac へ `ssh -o BatchMode=yes` で同じスクリプトを流す。結果には machine id を付ける。つながらない Mac は `error` 付きの行で返す。
 - `tail SESSION_ID` は、そのセッションの最後の数ターンを返す。別の Mac のものも同じ経路で読む。
-- 本文の条件：`type` が `user` か `assistant`、`isSidechain`、`isMeta`、`isSynthetic` でない、`entrypoint` が `sdk-` で始まらない。`user` はさらに、`<`、`[Request`、`[Canopy keep-alive]` で始まるものと `Caveat:` を除く。
+- 本文の条件：`type` が `user` か `assistant`、`isSidechain`、`isMeta`、`isSynthetic`、`isCompactSummary`、`isVisibleInTranscriptOnly` でない、`entrypoint` が `sdk-` で始まらない。`user` はさらに、`<`、`[Request`、`[Canopy keep-alive]` で始まるテキストブロックを除く。ターン中に打った発言は `queued_command` の attachment にだけ入るので、`origin` が人間のものを発言として数える。
 - `rg` には `-L` を付ける。プロジェクトフォルダのシンボリックリンクを追うためで、付けないと取りこぼす。同じファイルの二重計上は実パスで防ぐ。
 - 呼び出したセッション自身は `--exclude` で外す。
 - 1 行の結果は、machine、セッション ID、タイトル、cwd、最後の発言の日付、単語ごとの一致数、最初と最後の発言、本文の抜粋。

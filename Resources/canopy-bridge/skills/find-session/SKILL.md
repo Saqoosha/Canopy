@@ -5,8 +5,6 @@ description: Find which past Claude Code session a topic was discussed in, on th
 
 # Find a session
 
-Every search reads the transcripts fresh. Nothing is indexed, so a session from a minute ago is found too.
-
 ## Steps
 
 1. **Turn the question into keywords.** Use both English and Japanese: prompts are often English and replies Japanese, so a Japanese word may exist only in the replies. Prefer rare words (`業務委託`, `collision`) over short or common ones (`r6`, `release`), which match too much.
@@ -14,7 +12,7 @@ Every search reads the transcripts fresh. Nothing is indexed, so a session from 
 2. **Search every Mac from the start.** Do not finish this Mac first.
 
    ```
-   python3 "${CLAUDE_SKILL_DIR}/find_sessions.py" search --all --exclude "${CLAUDE_SESSION_ID}" TERM...
+   python3 "${CLAUDE_SKILL_DIR}/find_sessions.py" search --all TERM...
    ```
 
    Every term must appear in a session. Use `--any` for alternatives, such as the English and Japanese words for the same thing. Try a second search with other words before giving up.
@@ -29,8 +27,8 @@ Every search reads the transcripts fresh. Nothing is indexed, so a session from 
 
 4. **Answer** with which Mac, which project, when, and where it stopped, best match first. Keep it short.
 
-5. **If nothing fits, say so.** List near matches separately, and never present one as the answer. A row with `ok: false` means that Mac could not be searched, and `truncated: true` means the search ran out of time. Say which Macs were not fully searched: "could not reach studio" is not "not on studio".
+5. **If nothing fits, say so.** List near matches separately, and never present one as the answer. A row with `ok: false` means that Mac could not be searched, and `truncated: true` means its search did not finish. Say which Macs were not fully searched, by `host`: "could not reach studio" is not "not on studio". When `matched` is larger than the rows returned, more sessions matched, so narrow the words or raise `--limit` first.
 
 ## Slack links
 
-A link holds a message id (`p1793934540680779`) and sometimes `thread_ts=1793752895.604579`. Search them with `--any`, in both forms of each: `p1793752895604579` and `1793752895.604579`.
+A link holds a message id (`p1793934540680779`) and sometimes `thread_ts=1793752895.604579`. Search them with `--any`, each in both forms: `p1793752895604579` is `1793752895.604579`.

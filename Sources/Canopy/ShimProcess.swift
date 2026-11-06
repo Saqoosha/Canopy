@@ -4324,8 +4324,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Shim Path Discovery
 
-    /// What `installBridgeMod` copies, relative to the bundled mod. A listed file that is
-    /// missing makes it give up, which takes the whole mod with it.
+    /// What `installBridgeMod` copies, relative to the bundled mod. One missing from the bundle
+    /// disables the whole mod.
     nonisolated static let bridgeModFiles = [
         ".claude-plugin/plugin.json",
         "hooks/hooks.json",
@@ -4396,7 +4396,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return ([bridge] + rest).joined(separator: ":")
     }
 
-    nonisolated private static func bridgeModSourceURL() -> URL? {
+    nonisolated static func bridgeModSourceURL() -> URL? {
         guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("canopy-bridge", isDirectory: true),
               FileManager.default.fileExists(atPath: bundled.appendingPathComponent("hooks/register.ts").path)
         else { return nil }

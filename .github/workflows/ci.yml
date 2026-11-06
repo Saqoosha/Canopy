@@ -38,8 +38,9 @@ jobs:
     # is not a test at all goes in NON_TEST_FILES. Three visibly different
     # acts rather than one append that could mean any of them.
     env:
-      CI_TEST_FILES: "test/shim-unit.test.js test/shim-wiring.test.js test/cjk-emphasis.test.js test/cjk-emphasis-stream.test.js test/cjk-emphasis-wiring.test.js test/find-sessions.test.js"
-      EXCLUDED_TEST_FILES: "test/shim-integration.test.js"
+      CI_TEST_FILES: "test/shim-unit.test.js test/shim-wiring.test.js test/cjk-emphasis.test.js test/cjk-emphasis-stream.test.js test/cjk-emphasis-wiring.test.js"
+      # find-sessions runs in the macOS job below, on the system Python a Mac has.
+      EXCLUDED_TEST_FILES: "test/shim-integration.test.js test/find-sessions.test.js"
       # Not a test: a harness, imported only by the integration suite — so
       # nothing this job runs touches it. Node WOULD still discover it (see
       # the assert step), which is why it has to be listed rather than left
@@ -57,10 +58,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-
-      # find_sessions.py shells out to rg, and the runner image does not ship it.
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       # The "Run shim unit tests" step below runs exactly CI_TEST_FILES, so a
       # test file that reaches none of the three lists would never run, never
@@ -223,7 +220,7 @@ jobs:
       # raising it much further would start eating into what it detects.
       - name: Run shim unit tests
         env:
-          EXPECTED_TESTS: 224
+          EXPECTED_TESTS: 198
           MAX_DURATION_MS: 30000
         run: |
           # `set -f` here for the same reason the assert step has it, and
@@ -295,6 +292,25 @@ jobs:
 
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # find_sessions.py runs on the system Python of each Mac, so its tests run on one. The
+      # floor is here because node exits 0 over a file with no tests, as in the shim job.
+      - name: Run the session search tests
+        env:
+          EXPECTED_SEARCH_TESTS: 70
+        run: |
+          set -o pipefail
+          brew install ripgrep
+          node --test --test-reporter=tap test/find-sessions.test.js | tee "$RUNNER_TEMP/search.tap"
+          passed=$(awk '/^# pass [0-9]+$/ { v = $3 } END { if (v != "") print v }' "$RUNNER_TEMP/search.tap")
+          if [ -z "$passed" ] || [ "$passed" -lt "$EXPECTED_SEARCH_TESTS" ]; then
+            echo "::error::only ${passed:-0} session search tests passed, expected at least $EXPECTED_SEARCH_TESTS."
+            exit 1
+          fi
 
       # Sparkle is the only SPM dependency, and project.yml now pins it to
       # an exact version (issue #114), so this cache no longer decides
@@ -443,7 +459,7 @@ jobs:
       - name: Run logic probe
         timeout-minutes: 5
         env:
-          EXPECTED_ASSERTIONS: 2359
+          EXPECTED_ASSERTIONS: 2360
         run: |
           set -o pipefail
           status=0
