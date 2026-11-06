@@ -1519,7 +1519,7 @@ final class SessionStore {
         session.mirrorBridge = nil
         session.webView = nil
         session.status = .dormant
-        // Nothing else clears it, so the failure overlay would cover the next healthy attach.
+        // The attach path does not clear it, so the failure overlay would cover a healthy pane.
         if session.connection.status == .reconnectFailed { session.connection.status = .connected }
     }
 
@@ -1930,15 +1930,17 @@ final class SessionStore {
 
     /// The connection overlay's "Close". A daemon or mirror row stays in Open, as with the pane's X.
     func closeLostSession(_ id: OpenSession.ID) {
-        if let session = openSessions.first(where: { $0.id == id }),
-           session.isDaemonHosted || session.origin.mirrorTarget != nil,
-           let index = panes.firstIndex(where: { $0.content == .session(id) }) {
-            if panes.count == 1 { lastSessionFailure = nil }  // a launcher comes on screen; see `lastSessionFailure`
-            closePane(at: index)
+        guard let session = openSessions.first(where: { $0.id == id }) else { return }
+        guard session.isDaemonHosted || session.origin.mirrorTarget != nil else {
+            closeSession(id, keepingFailure: false)
+            makeFocusedPaneKeyResponder()
             return
         }
-        closeSession(id, keepingFailure: false)
-        makeFocusedPaneKeyResponder()
+        // Retry's rule, kept past the bridge: after an announced restart the other Mac holds no sessions.
+        if session.mirrorBridge?.expectsRestart == true { session.pendingMirrorOpen = .resume }
+        guard let index = paneIndex(forSession: id) else { return }
+        if panes.count == 1 { lastSessionFailure = nil }  // a launcher comes on screen; see `lastSessionFailure`
+        closePane(at: index)
     }
 
     /// `keepingFailure`: see `lastSessionFailure`. No default, so a caller that forgets it is a
