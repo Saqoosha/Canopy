@@ -7153,6 +7153,104 @@ enum SidebarLogicProbe {
                        && emptyOpened.map { empty.panes[1].content == .session($0.id) } == true
                        && emptyOpened?.pendingInitialPrompt?.text == "go",
                        "panes=\(empty.panes.map(\.content))")
+
+                // Continue landing on a session that is already open: a second row
+                // would share its shim, and Stop on either would end both.
+                let dup = SessionStore()
+                let running = OpenSession(origin: .local(cwd), resumeId: "launch-open", title: "R", project: "p", status: .live)
+                dup._probeSeedOpenSessions([running])
+                _ = dup.openInNewPane(running.id)
+                _ = dup.openLauncherInNewPane()
+                let dupLaunch = AppState()
+                dup.receiveLaunches(from: dupLaunch, launcherPane: dup.panes[1].id)
+                let dupLaunched = dupLaunch.launchSession(directory: cwd, resumeSessionId: "launch-open",
+                                                          initialPrompt: .make(text: "go", images: []))
+                record("launcher continue: an open session in a pane is focused, not opened twice",
+                       !dupLaunched
+                       && dup.openSessions.map(\.id) == [running.id]
+                       && dup.panes.map(\.content) == [.session(running.id), .launcher]
+                       && dup.focusedPaneIndex == 0
+                       && running.pendingInitialPrompt == nil
+                       && running.statusBar.transientHint?.contains("not sent") == true
+                       && dup.lastActiveResumeId == "launch-open",
+                       "rows=\(dup.openSessions.count) panes=\(dup.panes.map(\.content)) focus=\(dup.focusedPaneIndex)")
+
+                // No pane yet: it takes a new one, so the launcher and its prompt stay.
+                let unpaned = SessionStore()
+                let rowOnly = OpenSession(origin: .local(cwd), resumeId: "launch-row-only", title: "R", project: "p", status: .live)
+                unpaned._probeSeedOpenSessions([rowOnly])
+                _ = unpaned.openLauncherInNewPane()
+                let unpanedLaunch = AppState()
+                unpaned.receiveLaunches(from: unpanedLaunch, launcherPane: unpaned.panes[0].id)
+                let unpanedLaunched = unpanedLaunch.launchSession(directory: cwd, resumeSessionId: "launch-row-only",
+                                                                  initialPrompt: .make(text: "go", images: []))
+                record("launcher continue: an open row with no pane opens beside the launcher",
+                       !unpanedLaunched
+                       && unpaned.openSessions.count == 1
+                       && unpaned.panes.count == 2
+                       && unpaned.panes.contains { $0.content == .launcher }
+                       && unpaned.panes.contains { $0.content == .session(rowOnly.id) }
+                       && rowOnly.statusBar.transientHint?.contains("not sent") == true,
+                       "panes=\(unpaned.panes.map(\.content))")
+
+                // The empty strip's launcher goes with the first pane, so it stays and the sidebar says why.
+                let bare = SessionStore()
+                let bareRow = OpenSession(origin: .local(cwd), resumeId: "launch-bare", title: "R", project: "p", status: .live)
+                bare._probeSeedOpenSessions([bareRow])
+                let bareLaunch = AppState()
+                bare.receiveLaunches(from: bareLaunch, launcherPane: nil)
+                let bareLaunched = bareLaunch.launchSession(directory: cwd, resumeSessionId: "launch-bare",
+                                                            initialPrompt: .make(text: "go", images: []))
+                record("launcher continue: with no panes a prompt keeps the launcher, and the sidebar says why",
+                       !bareLaunched
+                       && bare.openSessions.count == 1
+                       && bare.panes.isEmpty
+                       && bare.lastSessionFailure == nil
+                       && bare.remoteAttachError?.message.contains("already open") == true,
+                       "panes=\(bare.panes.map(\.content)) banner=\(bare.remoteAttachError?.message ?? "nil")")
+
+                // At the cap nothing is displaced, with or without a prompt.
+                let full = SessionStore()
+                let filling = (1..<SessionStore.paneAbsoluteCap).map {
+                    OpenSession(origin: .local(cwd), resumeId: "launch-full-\($0)", title: "F", project: "p", status: .live)
+                }
+                let overflow = OpenSession(origin: .local(cwd), resumeId: "launch-overflow", title: "O", project: "p", status: .live)
+                full._probeSeedOpenSessions(filling + [overflow])
+                filling.forEach { _ = full.openInNewPane($0.id) }
+                _ = full.openLauncherInNewPane()
+                let panesAtCap = full.panes.map(\.content)
+                let fullLaunch = AppState()
+                full.receiveLaunches(from: fullLaunch, launcherPane: full.panes.last?.id)
+                fullLaunch.launchSession(directory: cwd, resumeSessionId: "launch-overflow",
+                                         initialPrompt: .make(text: "go", images: []))
+                record("launcher continue: at the pane cap a prompt keeps every pane, and the sidebar says why",
+                       panesAtCap.count == SessionStore.paneAbsoluteCap
+                       && full.panes.map(\.content) == panesAtCap
+                       && full.remoteAttachError?.message.contains("not sent") == true,
+                       "panes=\(full.panes.count) banner=\(full.remoteAttachError?.message ?? "nil")")
+
+                // With no prompt to keep, it takes the launcher's place, as a Start does.
+                let noPrompt = SessionStore()
+                let noPromptRow = OpenSession(origin: .local(cwd), resumeId: "launch-no-prompt", title: "R", project: "p", status: .live)
+                noPrompt._probeSeedOpenSessions([noPromptRow])
+                _ = noPrompt.openLauncherInNewPane()
+                let noPromptLaunch = AppState()
+                noPrompt.receiveLaunches(from: noPromptLaunch, launcherPane: noPrompt.panes[0].id)
+                noPromptLaunch.launchSession(directory: cwd, resumeSessionId: "launch-no-prompt")
+                record("launcher continue: with no prompt an open row replaces its launcher",
+                       noPrompt.openSessions.count == 1
+                       && noPrompt.panes.map(\.content) == [.session(noPromptRow.id)],
+                       "panes=\(noPrompt.panes.map(\.content))")
+
+                // A session that is not open resumes as before.
+                let notOpen = SessionStore()
+                _ = notOpen.openLauncherInNewPane()
+                let notOpenLaunch = AppState()
+                notOpen.receiveLaunches(from: notOpenLaunch, launcherPane: notOpen.panes[0].id)
+                let notOpenLaunched = notOpenLaunch.launchSession(directory: cwd, resumeSessionId: "launch-closed", remoteHost: "studio")
+                record("launcher continue: a session that is not open still resumes",
+                       notOpenLaunched && notOpen.openSessions.map(\.resumeId) == ["launch-closed"],
+                       "rows=\(notOpen.openSessions.map(\.resumeId))")
             }
 
             // MARK: Pane follows sidebar drag

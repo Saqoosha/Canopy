@@ -1163,6 +1163,43 @@ final class SessionStore {
         launch.backToLauncher()
     }
 
+    /// Routes a launcher's launches here. Captures this pane's id, never the view,
+    /// so a launch that lands after the launcher is gone still opens.
+    func receiveLaunches(from launch: AppState, launcherPane paneId: PaneSlot.ID?) {
+        launch.onLaunch = { [self] in openLaunched($0, fromLauncherPane: paneId) }
+        launch.showOpenSession = { [self] in showOpenSession(resumeId: $0, prompt: $1, launcherPane: paneId) }
+    }
+
+    /// A launcher's Continue landed on a session that is already open: shows it and
+    /// returns true. A second row would be a second client of the same shim, and Stop
+    /// on either one ends the session under both. A prompt is not sent, since the
+    /// session may be mid-turn: the launcher stays up holding it, so a session with no
+    /// pane opens beside it, and with no room for that the sidebar banner explains.
+    func showOpenSession(resumeId: String, prompt: LaunchPrompt?, launcherPane: PaneSlot.ID?) -> Bool {
+        guard let existing = openSessions.first(where: { $0.resumeId == resumeId }) else { return false }
+        let placed: Bool
+        if paneIndex(forSession: existing.id) != nil {
+            select(.session(existing.id))
+            makeFocusedPaneKeyResponder()
+            placed = true
+        } else if prompt == nil, panes.isEmpty {
+            openInFocusedPane(existing.id)
+            placed = true
+        } else if prompt == nil, let launcherPane, openInLauncherPane(existing.id, paneId: launcherPane) {
+            placed = true
+        } else {
+            // The empty strip's launcher goes with the first pane, so there is no "beside" it.
+            placed = !panes.isEmpty && openInNewPane(existing.id)
+        }
+        let promptNote = prompt == nil ? "" : " Your prompt was not sent."
+        guard placed else {
+            remoteAttachError = RemoteNotice(message: "\(existing.title) is already open, so nothing started.\(promptNote)", offersSettings: false)
+            return true
+        }
+        existing.statusBar.showHint("Already open, so Continue came here.\(promptNote)", forSeconds: 6)
+        return true
+    }
+
     /// Where a removed worktree's session may reopen: the openable rows' folders and the recent directories.
     var rescueCandidates: [URL] { recents.filter(\.canOpen).map(\.projectDirectory) + RecentDirectories.load() }
 

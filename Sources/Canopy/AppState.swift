@@ -35,6 +35,9 @@ final class AppState {
     /// `onChange` died with it and the session never opened; the task awaiting
     /// the launch holds this object, so this closure still runs.
     @ObservationIgnored var onLaunch: ((AppState) -> Void)?
+    /// Asked before a resume opens anything: true when that session was already
+    /// open, so nothing launches. See `SessionStore.showOpenSession`.
+    @ObservationIgnored var showOpenSession: ((String, LaunchPrompt?) -> Bool)?
     var workingDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     var permissionMode: PermissionMode = .acceptEdits
     var model: String?
@@ -71,7 +74,12 @@ final class AppState {
     /// `openInNewPane`: nil means "sample the modifier now", which is right for
     /// every caller that runs in the same turn as the click. A caller that
     /// awaits first must capture the value BEFORE awaiting and pass it.
-    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil, customApi: ModelProvider? = nil, openInNewPane: Bool? = nil, initialPrompt: LaunchPrompt? = nil, settledTitle: String? = nil) {
+    ///
+    /// False when the session to resume was already open: nothing launched, so
+    /// the caller keeps its prompt.
+    @discardableResult
+    func launchSession(directory: URL, resumeSessionId: String? = nil, sessionTitle: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, remoteHost: String? = nil, customApi: ModelProvider? = nil, openInNewPane: Bool? = nil, initialPrompt: LaunchPrompt? = nil, settledTitle: String? = nil) -> Bool {
+        if let resumeSessionId, showOpenSession?(resumeSessionId, initialPrompt) == true { return false }
         self.openInNewPane = openInNewPane ?? NSEvent.modifierFlags.contains(.command)
         // Don't add remote paths to local recent directories
         if remoteHost == nil {
@@ -90,6 +98,7 @@ final class AppState {
         webviewReloadToken += 1
         logger.info("Launching session: dir=\(directory.path, privacy: .public) resume=\(resumeSessionId ?? "new", privacy: .public) model=\(model ?? "auto", privacy: .public) effort=\(effortLevel ?? "auto", privacy: .public) mode=\(permissionMode.rawValue, privacy: .public) remote=\(remoteHost ?? "local", privacy: .public) customApi=\(customApi?.isEnabled == true ? "yes" : "no", privacy: .public)")
         onLaunch?(self)
+        return true
     }
 
     func backToLauncher() {
