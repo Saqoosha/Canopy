@@ -6471,6 +6471,15 @@ enum SidebarLogicProbe {
                    ShimProcess.pluginDirs(prepending: bridge, to: "/a:/b") == "\(bridge):/a:/b")
             record("bridge dirs: an inherited copy of the bridge is not repeated",
                    ShimProcess.pluginDirs(prepending: bridge, to: "/a:\(bridge)") == "\(bridge):/a")
+            // One missing file makes `installBridgeMod` give up, which takes the whole mod with it.
+            let bundledMod = Bundle.main.resourceURL?.appendingPathComponent("canopy-bridge", isDirectory: true)
+            record("bridge mod: every listed file is in the bundle",
+                   bundledMod != nil && ShimProcess.bridgeModFiles.allSatisfy {
+                       FileManager.default.fileExists(atPath: bundledMod!.appendingPathComponent($0).path)
+                   })
+            record("bridge mod: the find-session skill is listed",
+                   ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md")
+                       && ShimProcess.bridgeModFiles.contains("skills/find-session/find_sessions.py"))
             record("bridge dirs: the scrub keeps an inherited value",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
 
