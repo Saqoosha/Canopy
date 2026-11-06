@@ -1519,6 +1519,8 @@ final class SessionStore {
         session.mirrorBridge = nil
         session.webView = nil
         session.status = .dormant
+        // Nothing else clears it, so the failure overlay would cover the next healthy attach.
+        if session.connection.status == .reconnectFailed { session.connection.status = .connected }
     }
 
     /// Brings the open local sessions in line with the daemon's list.
@@ -1924,6 +1926,19 @@ final class SessionStore {
             }
         }
         closeSession(id, keepingFailure: true)
+    }
+
+    /// The connection overlay's "Close". A daemon or mirror row stays in Open, as with the pane's X.
+    func closeLostSession(_ id: OpenSession.ID) {
+        if let session = openSessions.first(where: { $0.id == id }),
+           session.isDaemonHosted || session.origin.mirrorTarget != nil,
+           let index = panes.firstIndex(where: { $0.content == .session(id) }) {
+            if panes.count == 1 { lastSessionFailure = nil }  // a launcher comes on screen; see `lastSessionFailure`
+            closePane(at: index)
+            return
+        }
+        closeSession(id, keepingFailure: false)
+        makeFocusedPaneKeyResponder()
     }
 
     /// `keepingFailure`: see `lastSessionFailure`. No default, so a caller that forgets it is a

@@ -36,7 +36,7 @@ struct SessionContainer: View {
                                 SessionStore.shared?.replaceSessionWithLauncher(session.id)
                             },
                             onClose: {
-                                SessionStore.shared?.closeSession(session.id, keepingFailure: false)
+                                SessionStore.shared?.closeLostSession(session.id)
                             }
                         )
                     }
@@ -70,7 +70,7 @@ struct SessionContainer: View {
                                 SessionStore.shared?.replaceSessionWithLauncher(session.id)
                             },
                             onClose: {
-                                SessionStore.shared?.closeSession(session.id, keepingFailure: false)
+                                SessionStore.shared?.closeLostSession(session.id)
                             }
                         )
                     }
