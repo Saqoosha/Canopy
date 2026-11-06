@@ -15100,7 +15100,7 @@ enum SidebarLogicProbe {
             let ext2 = ExtensionUpgradeState(installed: "2.1.290", stale: ext.stale + ext.stale)
             record("pending update: the stale-extension line counts in the plural",
                    PendingUpdate.headline(state(nil, [], ext2), restarting: false) == "2 sessions on an older extension")
-            record("pending update: a waiting build leaves one button, the service restart",
+            record("pending update: a waiting build hands the extension to the service restart",
                    PendingUpdate.serviceRestartCoversExtension(state("150", [hold], ext))
                        && PendingUpdate.serviceRestartCoversExtension(state("150", [], ext)))
             record("pending update: a stale extension alone keeps its own restart",
@@ -15109,6 +15109,9 @@ enum SidebarLogicProbe {
                    !PendingUpdate.serviceRestartCoversExtension(
                        UpgradeState(runningBuild: "149", pendingBuild: "150", heldBy: [hold],
                                     notUnderLaunchd: true, extensionState: ext)))
+            record("pending update: the confirmation adds a pane that went busy after the last check, once",
+                   PendingUpdate.restartInterrupts(holds: [hold], busyPanes: [("k", "Fix CI"), ("n", "New turn")]).map(\.title)
+                       == ["Fix CI", "New turn"])
             record("pending update: confirmation names what is interrupted",
                    PendingUpdate.confirmation([hold])
                        == "1 session is busy: Fix CI. Restarting stops its current work. Conversations are kept.")

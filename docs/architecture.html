@@ -515,7 +515,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <ul class="plain">
           <li>Canopy は拡張機能を <code>~/Library/Application Support/Canopy/extensions/</code> に自分で持つ。<code>~/.vscode/extensions/</code> のものも見つける。いちばん新しいものを使う。</li>
           <li><code>ExtensionUpdater</code> が VS Marketplace の最新版を確かめ、確認なしでインストールする。採用する前に <code>ExtensionCanary</code> が使い捨ての shim で activate し、例外を投げる版は採用しない。</li>
-          <li>走っているセッションは、起動したときの拡張機能のまま動く。サイドバーの下端に古い拡張機能のセッションが並び、Restart All でまとめて移す。Canopy の更新待ちのあいだはこのボタンを隠す。サービスの再起動で一緒に移るため。</li>
+          <li>走っているセッションは、起動したときの拡張機能のまま動く。サイドバーの下端に古い拡張機能のセッションが並び、Restart All でまとめて移す。Canopy の更新待ちのあいだはこのボタンを隠す（launchd の外を除く）。サービスの再起動でペインも一緒に移るため。</li>
         </ul>
       </div>
       <div class="stack">

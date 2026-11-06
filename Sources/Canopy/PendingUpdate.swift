@@ -44,11 +44,15 @@ final class PendingUpdate {
         return "Canopy \(new) is installed; the session service still runs \(old)."
     }
 
-    /// A service restart is coming or can be asked for, and every session comes back on the newest
-    /// extension, so the popover needs no second button for the extension. Outside launchd nothing
-    /// would start the new build, which leaves the per-session restart as the only way to move them.
+    /// Panes come back from a service restart on the newest extension; outside launchd no restart is coming.
     nonisolated static func serviceRestartCoversExtension(_ state: UpgradeState) -> Bool {
         state.pendingBuild != nil && !state.notUnderLaunchd
+    }
+
+    /// Holds are up to a minute old, so a pane that went busy since then is added.
+    nonisolated static func restartInterrupts(holds: [UpgradeHold], busyPanes: [(key: String, title: String)]) -> [UpgradeHold] {
+        holds + busyPanes.filter { pane in !holds.contains { $0.key == pane.key } }
+            .map { UpgradeHold(key: $0.key, title: $0.title, reason: "working") }
     }
 
     nonisolated static func confirmation(_ holds: [UpgradeHold]) -> String {
@@ -159,7 +163,7 @@ private struct PendingUpdateDetail: View {
                     }
                 }
                 if PendingUpdate.serviceRestartCoversExtension(state) {
-                    Text("Updated when the session service restarts.")
+                    Text("Panes move to the new extension when the session service restarts.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 } else {
                     Button(ext.stale.count == 1 ? "Restart" : "Restart All") { restartAll(ext.stale) }
@@ -173,9 +177,14 @@ private struct PendingUpdateDetail: View {
     }
 
     private func confirmAndRestart() {
+        let busyPanes = (SessionStore.shared?.openSessions ?? []).compactMap { session -> (key: String, title: String)? in
+            guard session.isDaemonHosted, let key = session.daemonKey,
+                  session.isThinking || session.isAsking || session.isWaiting else { return nil }
+            return (key, session.title)
+        }
         let alert = NSAlert()
         alert.messageText = "Restart the session service now?"
-        alert.informativeText = PendingUpdate.confirmation(state.heldBy)
+        alert.informativeText = PendingUpdate.confirmation(PendingUpdate.restartInterrupts(holds: state.heldBy, busyPanes: busyPanes))
         alert.addButton(withTitle: "Restart")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
         guard alert.runModal() == .alertFirstButtonReturn else { return }
