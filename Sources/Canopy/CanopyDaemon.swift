@@ -509,8 +509,9 @@ final class DaemonDelegate {
     }
 
     /// `carryingSessions`: this exit is a restart (launchd starts the next daemon at once), so the
-    /// phone's and the control API's sessions are saved for it. A deliberate stop saves none: a
-    /// daemon started within `DaemonHeldSessions.maxAge` would resume CLIs nobody is waiting for.
+    /// phone's and the control API's sessions are saved for it, and the others keep their Open rows.
+    /// A deliberate stop saves none: a daemon started within `DaemonHeldSessions.maxAge` would resume
+    /// CLIs nobody is waiting for.
     func shutDown(carryingSessions: Bool) {
         upgradeTimer?.invalidate()
         configTimer?.invalidate()
@@ -525,6 +526,9 @@ final class DaemonDelegate {
         held.save()
         // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
         if !carryingSessions { try? FileManager.default.removeItem(at: DaemonHeldSessions.fileURL) }
+        if carryingSessions {
+            ReapedSessions.shared.keepRows(of: store.openSessions, except: held, hasTranscript: ReapedSessions.hasTranscript)
+        }
         // Recorded before the shims stop; a listener may not receive them before the process exits,
         // so the log is saved after the shims stop and the next daemon serves them.
         ControlEventLog.shared.recordShutdown(resuming: Set(held.entries.map(\.key)))

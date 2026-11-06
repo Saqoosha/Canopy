@@ -1665,7 +1665,7 @@ final class SessionStore {
             guard let key = row.key else { continue }
             addDormant(row, key: key)
         }
-        // Stopped by the reaper to free memory: the row stays, with no key, and a click resumes it.
+        // Stopped by the reaper or a restart: the row stays, with no key, and a click resumes it.
         for update in plan.stopped {
             guard let session = openSessions.first(where: { $0.id == update.id }) else { continue }
             // Every push repeats the reaped rows; an assignment wakes observers even when equal.

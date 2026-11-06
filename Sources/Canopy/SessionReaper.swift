@@ -31,7 +31,7 @@ enum SessionReaper {
     }
 }
 
-/// The sessions the reaper stopped, as the rows they had. Sent to GUIs as
+/// The sessions the reaper or a restart stopped, as the rows they had. Sent to GUIs as
 /// `session_state`'s `reaped`, so each keeps (or rebuilds) a dormant Open row that
 /// resumes on click, instead of the session dropping into Recents. A Stop takes
 /// one out, and so does the session running again. Persisted, so a daemon restart
@@ -52,6 +52,29 @@ final class ReapedSessions {
         self.defaults = defaults
         let stored = defaults?.array(forKey: Self.defaultsKey) as? [[String: Any]] ?? []
         rows = stored.compactMap(ControlProtocol.SessionRow.init(wire:))
+    }
+
+    static func hasTranscript(_ session: OpenSession) -> Bool {
+        session.resumeIdIsExistingTranscript
+            || ClaudeSessionHistory.sessionFileExists(id: session.resumeId, directory: session.origin.workingDirectory)
+    }
+
+    static func row(for session: OpenSession) -> ControlProtocol.SessionRow {
+        ControlProtocol.SessionRow(
+            key: session.id.uuidString, resumeId: session.resumeId, title: session.title,
+            project: session.project, cwd: session.origin.workingDirectory.path, state: RosterSnapshot.wireState(for: .idle),
+            running: false, clients: 0, lastActiveAt: session.lastActiveAt.timeIntervalSince1970,
+            model: session.statusBar.model, messageCount: 0,
+            permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id)
+    }
+
+    /// The next daemon reopens only `held` and what a client asks for; anything else would leave Open.
+    /// A client that does reopen one takes its row out again (`DaemonReaper`).
+    func keepRows(of sessions: [OpenSession], except held: DaemonHeldSessions, hasTranscript: (OpenSession) -> Bool) {
+        let carried = Set(held.entries.map(\.key))
+        for session in sessions where !carried.contains(session.id.uuidString) && hasTranscript(session) {
+            insert(Self.row(for: session))
+        }
     }
 
     func insert(_ row: ControlProtocol.SessionRow) {

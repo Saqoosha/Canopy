@@ -2959,6 +2959,18 @@ enum SidebarLogicProbe {
                 DaemonHeldSessions(entries: [], savedAt: heldNow).save(to: heldFile)
                 record("held restore: nothing held writes no file",
                        !FileManager.default.fileExists(atPath: heldFile.path))
+                let kept = ReapedSessions(defaults: nil)
+                kept.keepRows(of: [heldA, notHeld, noTranscript, byControl], except: captured) { $0.resumeId != "fresh" }
+                record("restart: a session nothing reopens keeps a row; held ones and ones with no transcript do not",
+                       kept.rows.map(\.resumeId) == ["free"])
+                record("restart: the kept row is stopped and carries the session's key",
+                       kept.rows.first == ReapedSessions.row(for: notHeld) && kept.rows.first?.running == false
+                           && kept.rows.first?.key == notHeld.id.uuidString)
+                let unpaned = DaemonSessionSync.Local(id: notHeld.id, key: notHeld.id.uuidString, resumeId: "free", isPaned: false)
+                record("restart: the GUI keeps that row dormant, where it used to remove it",
+                       DaemonSessionSync.plan(rows: [], local: [unpaned], reaped: kept.rows).stopped.map(\.id) == [notHeld.id]
+                           && DaemonSessionSync.plan(rows: [], local: [unpaned], reaped: kept.rows).removes.isEmpty
+                           && DaemonSessionSync.plan(rows: [], local: [unpaned]).removes == [notHeld.id])
                 record("reaper: a quietSince in the future (clock change) is kept",
                        !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: -60), now: reapT0, limit: reapLimit))
             }
