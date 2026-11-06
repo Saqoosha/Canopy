@@ -24,6 +24,8 @@ struct MirrorRecents: Equatable {
     var sessions: [Session]
     /// Absolute paths on the other Mac, most recent first.
     var folders: [String]
+    /// The folder `sessions` is limited to, echoed from the request. Nil means every folder.
+    var cwd: String? = nil
 
     static let listType = "list_recents"
     static let replyType = "recents"
@@ -32,9 +34,9 @@ struct MirrorRecents: Equatable {
 
     /// The server's reply line. Sessions already open over there, hidden
     /// rows and sessions whose folder is gone are the caller's to drop before
-    /// this — the wire only caps the counts.
-    static func replyPayload(sessions: [SessionEntry], folders: [URL]) -> [String: Any] {
-        [
+    /// this — the wire only caps the counts. `cwd` is the folder the request named.
+    static func replyPayload(sessions: [SessionEntry], folders: [URL], cwd: String? = nil) -> [String: Any] {
+        var reply: [String: Any] = [
             "type": replyType,
             "sessions": sessions.prefix(maxSessions).map {
                 ["id": $0.id, "title": $0.title, "project": $0.projectName,
@@ -42,6 +44,15 @@ struct MirrorRecents: Equatable {
             },
             "folders": folders.prefix(maxFolders).map(\.path),
         ]
+        if let cwd { reply["cwd"] = cwd }
+        return reply
+    }
+
+    /// `sessions` when this reply really is limited to `folder`, newest first. Nil for a server that
+    /// predates the request's `cwd`: it answers with every folder's sessions, and Continue would
+    /// resume the newest of those.
+    func sessions(in folder: String) -> [Session]? {
+        cwd == folder ? sessions : nil
     }
 
     /// Nil for anything that is not a `recents` reply. A malformed session
@@ -58,7 +69,7 @@ struct MirrorRecents: Equatable {
             )
         }
         let folders = (dict["folders"] as? [String] ?? []).filter { $0.hasPrefix("/") }
-        return MirrorRecents(sessions: sessions, folders: folders)
+        return MirrorRecents(sessions: sessions, folders: folders, cwd: dict["cwd"] as? String)
     }
 }
 
@@ -190,23 +201,26 @@ final class MirrorRecentsClient {
     private let connection: NWConnection
     private let buffer = NDJSONLineBuffer(acceptsCompressed: false)
     private let token: String
+    private let cwd: String?
     private var completion: ((Result<MirrorRecents, Failure>) -> Void)?
 
-    static func fetch(host: String, port: UInt16, token: String,
+    /// `cwd` limits the reply's sessions to that folder on the other Mac.
+    static func fetch(host: String, port: UInt16, token: String, cwd: String? = nil,
                       completion: @escaping (Result<MirrorRecents, Failure>) -> Void) {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             completion(.failure(.unreachable))
             return
         }
-        let client = MirrorRecentsClient(host: host, port: nwPort, token: token, completion: completion)
+        let client = MirrorRecentsClient(host: host, port: nwPort, token: token, cwd: cwd, completion: completion)
         inFlight[ObjectIdentifier(client)] = client
         client.start()
     }
 
-    private init(host: String, port: NWEndpoint.Port, token: String,
+    private init(host: String, port: NWEndpoint.Port, token: String, cwd: String?,
                  completion: @escaping (Result<MirrorRecents, Failure>) -> Void) {
         connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
         self.token = token
+        self.cwd = cwd
         self.completion = completion
     }
 
@@ -216,7 +230,9 @@ final class MirrorRecentsClient {
                 guard let self else { return }
                 switch state {
                 case .ready:
-                    var payload = (try? JSONSerialization.data(withJSONObject: ["type": MirrorRecents.listType, "token": self.token])) ?? Data()
+                    var request = ["type": MirrorRecents.listType, "token": self.token]
+                    if let cwd = self.cwd { request["cwd"] = cwd }
+                    var payload = (try? JSONSerialization.data(withJSONObject: request)) ?? Data()
                     payload.append(0x0A)
                     self.connection.send(content: payload, completion: .contentProcessed { _ in })
                     self.receive()

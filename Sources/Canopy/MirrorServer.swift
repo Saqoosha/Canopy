@@ -575,10 +575,25 @@ final class MirrorConnection: MirrorSink {
             failAttach("unauthorized")
             return
         }
+        guard let cwd = (dict["cwd"] as? String).flatMap({ $0.hasPrefix("/") ? $0 : nil }) else {
+            sendRecents(candidates: store.recents, cwd: nil)
+            return
+        }
+        // Off the main actor: this reads every transcript in the folder, and the daemon's main actor
+        // carries every running session's traffic.
+        Task { [weak self] in
+            let entries = await Task.detached {
+                ClaudeSessionHistory.loadSessions(for: URL(fileURLWithPath: cwd))
+            }.value
+            self?.sendRecents(candidates: entries, cwd: cwd)
+        }
+    }
+
+    private func sendRecents(candidates: [SessionEntry], cwd: String?) {
         let open = Set(store.openSessions.map(\.resumeId))
-        let sessions = store.recents.filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
+        let sessions = candidates.filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
         let folders = RecentDirectories.load().filter { FileManager.default.fileExists(atPath: $0.path) }
-        let data = (try? JSONSerialization.data(withJSONObject: MirrorRecents.replyPayload(sessions: sessions, folders: folders))) ?? Data()
+        let data = (try? JSONSerialization.data(withJSONObject: MirrorRecents.replyPayload(sessions: sessions, folders: folders, cwd: cwd))) ?? Data()
         // Closed only once the line has left, for `failAttach`'s measured reason.
         connection.send(content: data + Data([0x0A]), completion: .contentProcessed { [connection] _ in
             connection.cancel()

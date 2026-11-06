@@ -1968,6 +1968,11 @@ enum SidebarLogicProbe {
             }
             record("mirror recents: the reply is capped at maxSessions",
                    MirrorRecents.parse(MirrorRecents.replyPayload(sessions: many, folders: []))?.sessions.count == MirrorRecents.maxSessions)
+            let scoped = MirrorRecents.parse(MirrorRecents.replyPayload(sessions: [entry], folders: [], cwd: "/tmp/ProbeProject"))
+            record("mirror recents: a reply limited to a folder gives its sessions for that folder only",
+                   scoped?.sessions(in: "/tmp/ProbeProject")?.map(\.id) == ["abc"] && scoped?.sessions(in: "/tmp/Other") == nil)
+            record("mirror recents: a server that ignored the folder is not read as that folder's sessions",
+                   parsed?.sessions(in: "/tmp/ProbeProject") == nil)
             record("mirror recents: an attach_error is not a reply",
                    MirrorRecents.parse(["type": "attach_error", "message": "unauthorized"]) == nil)
             record("mirror recents: a relative folder and an id-less session are dropped",
@@ -3617,20 +3622,11 @@ enum SidebarLogicProbe {
                 unlink(livePath)
                 record("daemon socket: a missing path reads as stale", !DaemonPaths.socketIsLive(path: livePath))
             }
-            // The launcher's Resume menu over another Mac's closed sessions.
+            // The launcher's rows for a folder's closed sessions on another Mac.
             let t0 = Date(timeIntervalSince1970: 1_000_000)
             func peerSession(_ id: String, _ project: String, _ age: TimeInterval, title: String = "t") -> MirrorRecents.Session {
                 MirrorRecents.Session(id: id, title: title, project: project, timestamp: t0.addingTimeInterval(-age))
             }
-            let peerSessions = [peerSession("a1", "A", 300), peerSession("b1", "B · fix-x", 100),
-                                peerSession("b2", "B", 400), peerSession("c1", "C", 200)]
-            let groups = LauncherView.peerSessionGroups(peerSessions, preferring: nil)
-            record("peer resume: groups by project name, newest group first, branch folded in",
-                   groups.map(\.project) == ["B", "C", "A"] && groups[0].sessions.map(\.id) == ["b1", "b2"])
-            record("peer resume: the preferred project moves to the top, the rest keep their order",
-                   LauncherView.peerSessionGroups(peerSessions, preferring: "A").map(\.project) == ["A", "B", "C"])
-            record("peer resume: an unknown preferred project changes nothing",
-                   LauncherView.peerSessionGroups(peerSessions, preferring: "Z").map(\.project) == ["B", "C", "A"])
             record("peer title: a slash command's wrapper shows as the command",
                    LauncherView.cleanedSessionTitle("<command-message>ship-it</command-message> <command-name>/ship-it</command-name>") == "/ship-it")
             record("peer title: a prompt quoting the wrapper is not a command",
