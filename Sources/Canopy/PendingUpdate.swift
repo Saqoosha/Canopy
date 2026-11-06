@@ -44,9 +44,23 @@ final class PendingUpdate {
         return "Canopy \(new) is installed; the session service still runs \(old)."
     }
 
-    nonisolated static func confirmation(_ holds: [UpgradeHold]) -> String {
-        let n = holds.count
-        let names = holds.map(\.title).joined(separator: ", ")
+    /// Panes come back from a service restart on the newest extension; outside launchd no restart is coming.
+    nonisolated static func serviceRestartCoversExtension(_ state: UpgradeState) -> Bool {
+        state.pendingBuild != nil && !state.notUnderLaunchd
+    }
+
+    /// Holds are up to a minute old, so each session's current activity adds what went busy since.
+    static func restartInterrupts(holds: [UpgradeHold], sessions: [OpenSession]) -> [String] {
+        let busy = sessions.filter { session in
+            session.isDaemonHosted && !holds.contains { $0.key == session.daemonKey }
+                && [.working, .background, .asking].contains(SessionActivity.of(session, isUnread: false))
+        }
+        return holds.map(\.title) + busy.map(\.title)
+    }
+
+    nonisolated static func confirmation(_ titles: [String]) -> String {
+        let n = titles.count
+        let names = titles.joined(separator: ", ")
         return "\(n) session\(n == 1 ? " is" : "s are") busy: \(names). "
             + "Restarting stops \(n == 1 ? "its" : "their") current work. Conversations are kept."
     }
@@ -151,8 +165,13 @@ private struct PendingUpdateDetail: View {
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 }
-                Button(ext.stale.count == 1 ? "Restart" : "Restart All") { restartAll(ext.stale) }
-                    .disabled(ext.stale.allSatisfy { restarted.contains($0.key) })
+                if PendingUpdate.serviceRestartCoversExtension(state) {
+                    Text("Panes move to the new extension when the session service restarts.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                } else {
+                    Button(ext.stale.count == 1 ? "Restart" : "Restart All") { restartAll(ext.stale) }
+                        .disabled(ext.stale.allSatisfy { restarted.contains($0.key) })
+                }
             }
             if let error { Text(error).font(.system(size: 11)).foregroundStyle(.red) }
         }
@@ -163,7 +182,8 @@ private struct PendingUpdateDetail: View {
     private func confirmAndRestart() {
         let alert = NSAlert()
         alert.messageText = "Restart the session service now?"
-        alert.informativeText = PendingUpdate.confirmation(state.heldBy)
+        alert.informativeText = PendingUpdate.confirmation(
+            PendingUpdate.restartInterrupts(holds: state.heldBy, sessions: SessionStore.shared?.openSessions ?? []))
         alert.addButton(withTitle: "Restart")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
         guard alert.runModal() == .alertFirstButtonReturn else { return }
