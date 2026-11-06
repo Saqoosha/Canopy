@@ -29,6 +29,14 @@ description: Find which past Claude Code session a topic was discussed in, on th
 
 5. **If nothing fits, say so.** List near matches separately, and never present one as the answer. A row with `ok: false` means that Mac could not be searched, and `truncated: true` means its search did not finish. Say which Macs were not fully searched, by `host`: "could not reach studio" is not "not on studio". When `matched` is larger than the rows returned, more sessions matched, so narrow the words or raise `--limit` first.
 
+## Opening a session
+
+When the user asks to open a result, use its `sessionId`, `machine`, `title` and project folder name. A session on another Mac opens as a mirror pane. Canopy has to be open on this Mac.
+
+```
+python3 "${CLAUDE_SKILL_DIR}/../../bin/canopyctl" show SESSION_ID --machine MACHINE --title TITLE --project PROJECT
+```
+
 ## Slack links
 
 A link holds a message id (`p1793934540680779`) and sometimes `thread_ts=1793752895.604579`. Search them with `--any`, each in both forms: `p1793752895604579` is `1793752895.604579`.

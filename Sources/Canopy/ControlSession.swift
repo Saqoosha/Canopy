@@ -41,6 +41,7 @@ final class ControlSession {
     }
 
     func stop() {
+        ControlBroadcast.unregister(self)
         stopped = true
         recheck?.invalidate()
         recheck = nil
@@ -68,6 +69,7 @@ final class ControlSession {
         case "switch_account": switchAccount(request)
         case "list_accounts": listAccounts(request)
         case "request_recap": requestRecap(request)
+        case "show_session": showSession(request)
         case "roster_secret_changed":
             // The GUI wrote a new relay secret to the Keychain; reconnect with it. Only this
             // Mac's GUI writes that Keychain item, so a TCP client has no business asking.
@@ -95,6 +97,27 @@ final class ControlSession {
     }
 
     // MARK: - Verbs
+
+    /// Asks this Mac's GUI to put a session in a pane. Only a local client may: it opens a pane
+    /// on the screen of whoever sits here.
+    private func showSession(_ request: ControlProtocol.Request) {
+        guard isLocal else { return fail(request, "local clients only") }
+        switch ControlProtocol.parseShowSession(request.params) {
+        case .failure(let error):
+            fail(request, error.message)
+        case .success(let show):
+            guard ControlBroadcast.toLocalClients(ControlProtocol.showSessionFrame(show)) > 0 else {
+                return fail(request, "Canopy is not open on this Mac", code: "no_gui")
+            }
+            reply(request, ["shown": true])
+        }
+    }
+
+    /// A frame no request asked for, from `ControlBroadcast`.
+    func push(_ frame: [String: Any]) {
+        guard !stopped else { return }
+        send(frame)
+    }
 
     private func sendMessage(_ request: ControlProtocol.Request) {
         switch ControlProtocol.parseSendMessage(request.params) {
@@ -776,7 +799,10 @@ final class ControlSession {
         guard !subscribed else { return }
         subscribed = true
         trackOpenSessions()
-        if isLocal { trackUpgradeState() }  // only this Mac's GUI shows it
+        if isLocal {  // only this Mac's GUI shows these
+            trackUpgradeState()
+            ControlBroadcast.register(self)
+        }
         recheck = Timer.scheduledTimer(withTimeInterval: Self.recheckInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { if let self { self.pushIfChanged(self.pushState()) } }
         }

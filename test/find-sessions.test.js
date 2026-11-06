@@ -769,7 +769,8 @@ describe("find_sessions.py tail", () => {
 describe("SKILL.md", () => {
   test("its commands run", () => {
     const skill = fs.readFileSync(path.join(path.dirname(SCRIPT), "SKILL.md"), "utf8");
-    const commands = skill.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("python3 "));
+    const lines = skill.split("\n").map((line) => line.trim());
+    const commands = lines.filter((line) => line.startsWith("python3 ") && line.includes("find_sessions.py"));
     assert.equal(commands.length, 2);
     const home = makeHome();
     writeSession(home, "-work-project", "aaaa", [user("zebra")]);
@@ -781,5 +782,15 @@ describe("SKILL.md", () => {
         assert.equal(row.ok, true, `${command}: ${row.error}`);
       }
     }
+  });
+
+  test("its canopyctl command parses", () => {
+    const skill = fs.readFileSync(path.join(path.dirname(SCRIPT), "SKILL.md"), "utf8");
+    const command = skill.split("\n").find((line) => line.includes("/bin/canopyctl"));
+    const canopyctl = path.join(path.dirname(SCRIPT), "..", "..", "bin", "canopyctl");
+    // A socket that does not exist: parsing has to get as far as trying to connect.
+    const args = command.replace('python3 "${CLAUDE_SKILL_DIR}/../../bin/canopyctl" ', "").split(" ");
+    const result = spawnSync(PYTHON, [canopyctl, "--socket", "/nonexistent.sock", ...args], { encoding: "utf8" });
+    assert.match(result.stderr, /No such file/);
   });
 });

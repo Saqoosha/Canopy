@@ -381,6 +381,30 @@ final class SessionStore {
         return false
     }
 
+    /// `show_session`: a session found by the find-session skill, in a pane of its own so the
+    /// answer stays readable. Another Mac's opens as a mirror pane, and one running there is joined.
+    func showSession(_ show: ControlProtocol.ShowSession) {
+        if let machineId = show.machineId {
+            let recent = MirrorRecents.Session(id: show.sessionId, title: show.title, project: show.project, timestamp: Date())
+            openRemoteRecent(machineId: machineId, machineName: remoteRosters[machineId]?.displayName ?? machineId,
+                             recent: recent, target: .newPane)
+            return
+        }
+        if let open = openSessions.first(where: { $0.resumeId == show.sessionId }) {
+            focusOrPane(open.id, target: .newPane)
+            return
+        }
+        switch resolveClosedSession(sessionId: show.sessionId, localCwd: nil) {
+        case .success(let found):
+            openNew(directory: found.directory, resumeId: show.sessionId,
+                    sessionTitle: found.title ?? (show.title.isEmpty ? nil : show.title),
+                    permissionMode: CanopySettings.shared.defaultPermissionMode,
+                    customApi: ModelProviderStore.selectedProvider(), target: .newPane)
+        case .failure(let failure):
+            noteSessionFailure(title: show.title, message: "Could not open this session (\(failure)).", status: -2)
+        }
+    }
+
     private func focusOrPane(_ id: OpenSession.ID, target: PaneTarget) {
         switch target {
         case .focused: select(.session(id))

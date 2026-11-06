@@ -464,6 +464,32 @@ enum ControlProtocol {
         return .success(SendMessage(text: text, slackAsker: asker))
     }
 
+    /// What `show_session` asks the GUI to put in a pane. `machineId` names another Mac, nil this one.
+    struct ShowSession: Equatable {
+        let sessionId: String
+        let machineId: String?
+        let title: String
+        let project: String
+    }
+
+    static let showSessionFrameType = "show_session"
+
+    static func parseShowSession(_ params: [String: Any]) -> Result<ShowSession, ControlError> {
+        guard let id = (params["sessionId"] as? String)?.lowercased(), !id.isEmpty else {
+            return .failure(ControlError("sessionId is required"))
+        }
+        let machine = (params["machineId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return .success(ShowSession(sessionId: id, machineId: machine, title: params["title"] as? String ?? "",
+                                    project: params["project"] as? String ?? ""))
+    }
+
+    static func showSessionFrame(_ show: ShowSession) -> [String: Any] {
+        var frame: [String: Any] = ["type": showSessionFrameType, "sessionId": show.sessionId,
+                                    "title": show.title, "project": show.project]
+        if let machineId = show.machineId { frame["machineId"] = machineId }
+        return frame
+    }
+
     static func replyWire(_ disposition: ShimProcess.PhoneReplyDisposition, replyId: String) -> [String: Any] {
         switch disposition {
         case .injected:

@@ -175,6 +175,17 @@ To wait for one event instead, use `listen` (below).
 
 `mkdir` creates a directory (`parent`, `name`) and returns `{path}`.
 
+### `show_session`
+
+Local clients only. Puts a session in a new pane of the GUI on this Mac. Params: `sessionId`,
+and `machineId` for a session on another Mac, which opens as a mirror pane. `title` and
+`project` label that pane until it attaches.
+
+A session already in a pane is brought forward. The reply is `{"shown": true}`, or a failure
+with code `no_gui` when no GUI is subscribed. The daemon passes the request on as a
+`show_session` frame on the GUI's subscribed connection, so `shown` means the GUI was told,
+not that the pane opened.
+
 ### `send_message`
 
 Puts text on a live session through the same queue the phone uses

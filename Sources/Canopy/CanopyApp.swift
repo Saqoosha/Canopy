@@ -465,6 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         client.onSessionState = { [weak store] rows, complete, reaped in
             store?.applyDaemonSessions(rows, complete: complete, reaped: reaped)
         }
+        client.onShowSession = { [weak store] show in store?.showSession(show) }
         client.onUpgradeState = { state in
             PendingUpdate.shared.state = state
             // A daemon running the build it was waiting for means the restart landed.

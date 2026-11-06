@@ -6483,9 +6483,36 @@ enum SidebarLogicProbe {
                    !bundledSkills.isEmpty && bundledSkills.allSatisfy { file in
                        ShimProcess.bridgeModFiles.contains { file.path.hasSuffix("/" + $0) }
                    })
+            record("bridge mod: canopyctl ships with it, so a skill can reach the daemon",
+                   ShimProcess.bridgeModFiles.contains("bin/canopyctl"))
+            record("bridge dirs: the control socket is Canopy's to assign",
+                   ShimProcess.canopyAssignedEnvKeys.contains("CANOPY_CONTROL_SOCK"))
             record("bridge mod: the find-session skill is listed",
                    ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md")
                        && ShimProcess.bridgeModFiles.contains("skills/find-session/find_sessions.py"))
+
+            let shown = ControlProtocol.parseShowSession(["sessionId": "ABC", "machineId": "M1", "title": "T", "project": "P"])
+            record("show session: an id is required",
+                   ControlProtocol.parseShowSession(["machineId": "M1"]) == .failure(ControlProtocol.ControlError("sessionId is required")))
+            record("show session: the id is lowercased, as the CLI writes it", (try? shown.get())?.sessionId == "abc")
+            record("show session: an empty machine means this Mac",
+                   (try? ControlProtocol.parseShowSession(["sessionId": "a", "machineId": ""]).get())?.machineId == nil)
+            record("show session: the frame parses back to the same request",
+                   (try? shown.get()).map { ControlProtocol.parseShowSession(ControlProtocol.showSessionFrame($0)) == .success($0) } == true)
+            record("show session: no subscribed client means nobody received it",
+                   ControlBroadcast.toLocalClients(["type": "probe"]) == 0)
+            let showStore = SessionStore()
+            let openOne = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "open-id",
+                                      title: "T", project: "p", status: .live)
+            showStore._probeSeedOpenSessions([openOne])
+            showStore.showSession(ControlProtocol.ShowSession(sessionId: "open-id", machineId: nil, title: "", project: ""))
+            record("show session: an open session gets a pane",
+                   showStore.panes.contains { if case .session(let id) = $0.content { return id == openOne.id }; return false })
+            showStore.showSession(ControlProtocol.ShowSession(sessionId: "x", machineId: "not-paired", title: "T", project: "P"))
+            record("show session: another Mac goes through the mirror route, which refuses an unpaired one",
+                   showStore.remoteAttachError != nil)
+            showStore.showSession(ControlProtocol.ShowSession(sessionId: "00000000-0000-0000-0000-000000000000", machineId: nil, title: "T", project: ""))
+            record("show session: an unknown session says so", showStore.lastSessionFailure != nil)
             record("bridge dirs: the scrub keeps an inherited value",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
 
