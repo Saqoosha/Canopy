@@ -1845,8 +1845,9 @@ struct LauncherView: View {
             resumeId = latest.id
             resumeTitle = latest.title
         }
-        appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: resolvedPermission, customApi: buildCustomApiConfig(), initialPrompt: pendingPromptForLaunch)
-        clearPendingPrompt()
+        if appState.launchSession(directory: dir, resumeSessionId: resumeId, sessionTitle: resumeTitle, model: selectedModel, effortLevel: selectedEffort, permissionMode: resolvedPermission, customApi: buildCustomApiConfig(), initialPrompt: pendingPromptForLaunch) {
+            clearPendingPrompt()
+        }
     }
 
     private func startSession() {
@@ -2252,7 +2253,7 @@ struct LauncherView: View {
             return
         }
 
-        appState.launchSession(
+        if appState.launchSession(
             directory: cwd,
             resumeSessionId: localId,
             sessionTitle: result.summary ?? session.summary,
@@ -2261,8 +2262,9 @@ struct LauncherView: View {
             permissionMode: resolvedPermission,
             customApi: buildCustomApiConfig(),
             initialPrompt: pendingPromptForLaunch
-        )
-        clearPendingPrompt()
+        ) {
+            clearPendingPrompt()
+        }
     }
 
     private func resolveTeleportCwd(for session: RemoteSession) -> URL? {

@@ -7171,7 +7171,8 @@ enum SidebarLogicProbe {
                        && dup.panes.map(\.content) == [.session(running.id), .launcher]
                        && dup.focusedPaneIndex == 0
                        && running.pendingInitialPrompt == nil
-                       && running.statusBar.transientHint?.contains("launcher") == true,
+                       && running.statusBar.transientHint?.contains("launcher") == true
+                       && dup.lastActiveResumeId == "launch-open",
                        "rows=\(dup.openSessions.count) panes=\(dup.panes.map(\.content)) focus=\(dup.focusedPaneIndex)")
 
                 // No pane yet: it takes a new one, so the launcher and its prompt stay.
@@ -7189,10 +7190,10 @@ enum SidebarLogicProbe {
                        && unpaned.panes.count == 2
                        && unpaned.panes.contains { $0.content == .launcher }
                        && unpaned.panes.contains { $0.content == .session(rowOnly.id) }
-                       && rowOnly.composerPrefill == nil,
+                       && rowOnly.statusBar.transientHint?.contains("launcher") == true,
                        "panes=\(unpaned.panes.map(\.content))")
 
-                // The empty strip's launcher goes with the first pane, so the text moves.
+                // The empty strip's launcher goes with the first pane, so it stays and says why.
                 let bare = SessionStore()
                 let bareRow = OpenSession(origin: .local(cwd), resumeId: "launch-bare", title: "R", project: "p", status: .live)
                 bare._probeSeedOpenSessions([bareRow])
@@ -7200,13 +7201,25 @@ enum SidebarLogicProbe {
                 bare.receiveLaunches(from: bareLaunch, launcherPane: nil)
                 let bareLaunched = bareLaunch.launchSession(directory: cwd, resumeSessionId: "launch-bare",
                                                             initialPrompt: .make(text: "go", images: []))
-                record("launcher continue: with no panes the prompt moves to the session's composer",
+                record("launcher continue: with no panes a prompt keeps the launcher, and its banner says why",
                        !bareLaunched
                        && bare.openSessions.count == 1
-                       && bare.panes.map(\.content) == [.session(bareRow.id)]
-                       && bareRow.composerPrefill == "go"
-                       && bareRow.statusBar.transientHint?.contains("composer") == true,
-                       "panes=\(bare.panes.map(\.content)) prefill=\(bareRow.composerPrefill ?? "nil")")
+                       && bare.panes.isEmpty
+                       && bare.lastSessionFailure?.message.contains("Already open") == true,
+                       "panes=\(bare.panes.map(\.content)) banner=\(bare.lastSessionFailure?.message ?? "nil")")
+
+                // With no prompt to keep, it takes the launcher's place, as a Start does.
+                let noPrompt = SessionStore()
+                let noPromptRow = OpenSession(origin: .local(cwd), resumeId: "launch-no-prompt", title: "R", project: "p", status: .live)
+                noPrompt._probeSeedOpenSessions([noPromptRow])
+                _ = noPrompt.openLauncherInNewPane()
+                let noPromptLaunch = AppState()
+                noPrompt.receiveLaunches(from: noPromptLaunch, launcherPane: noPrompt.panes[0].id)
+                noPromptLaunch.launchSession(directory: cwd, resumeSessionId: "launch-no-prompt")
+                record("launcher continue: with no prompt an open row replaces its launcher",
+                       noPrompt.openSessions.count == 1
+                       && noPrompt.panes.map(\.content) == [.session(noPromptRow.id)],
+                       "panes=\(noPrompt.panes.map(\.content))")
 
                 // A session that is not open resumes as before.
                 let notOpen = SessionStore()

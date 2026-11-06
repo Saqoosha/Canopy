@@ -1167,31 +1167,37 @@ final class SessionStore {
     /// so a launch that lands after the launcher is gone still opens.
     func receiveLaunches(from launch: AppState, launcherPane paneId: PaneSlot.ID?) {
         launch.onLaunch = { [self] in openLaunched($0, fromLauncherPane: paneId) }
-        launch.showOpenSession = { [self] in showOpenSession(resumeId: $0, prompt: $1) }
+        launch.showOpenSession = { [self] in showOpenSession(resumeId: $0, prompt: $1, launcherPane: paneId) }
     }
 
     /// A launcher's Continue landed on a session that is already open: shows it and
     /// returns true. A second row would be a second client of the same shim, and Stop
-    /// on either one ends the session under both. Its prompt is not sent, since the
-    /// session may be mid-turn and was not what the user was looking at: the launcher
-    /// stays up holding it. With no pane there is no launcher to stay, so the text
-    /// moves to the session's composer. Its status bar says which, since focus jumping
-    /// to an old pane does not explain itself.
-    func showOpenSession(resumeId: String, prompt: LaunchPrompt?) -> Bool {
+    /// on either one ends the session under both. A prompt is not sent, since the
+    /// session may be mid-turn: the launcher stays up holding it, so a session with no
+    /// pane opens beside it, and with no room for that the launcher's banner explains.
+    func showOpenSession(resumeId: String, prompt: LaunchPrompt?, launcherPane: PaneSlot.ID?) -> Bool {
         guard let existing = openSessions.first(where: { $0.resumeId == resumeId }) else { return false }
-        let hint = switch (prompt, panes.isEmpty) {
-        case (nil, _): "Already open, so Continue came here"
-        case (_, true): "Already open. Your prompt is in the composer, not sent"
-        case (_, false): "Already open. Your prompt is still in the launcher, not sent"
+        if paneIndex(forSession: existing.id) != nil {
+            select(.session(existing.id))
+            makeFocusedPaneKeyResponder()
+        } else if prompt != nil {
+            guard openInNewPaneBesideLauncher(existing.id) else {
+                noteSessionFailure(title: existing.title, message: "Already open, so nothing started. Your prompt is still here, not sent.", status: -2)
+                return true
+            }
+        } else if let launcherPane, openInLauncherPane(existing.id, paneId: launcherPane) {
+            // Took the launcher's place, as a Start does.
+        } else {
+            focusOrPane(existing.id, target: .newPane)
         }
-        if panes.isEmpty { existing.composerPrefill = prompt?.text }
-        if !openInNewPane(existing.id), paneIndex(forSession: existing.id) == nil {
-            showCapReachedHintOnFocusedPane()
-            return true
-        }
-        existing.statusBar.showHint(hint, forSeconds: 6)
-        makeFocusedPaneKeyResponder()
+        let promptNote = prompt == nil ? "" : " Your prompt is still in the launcher, not sent."
+        existing.statusBar.showHint("Already open, so Continue came here.\(promptNote)", forSeconds: 6)
         return true
+    }
+
+    /// False with no pane to stand beside (the empty strip's launcher goes with the first pane) or at the cap.
+    private func openInNewPaneBesideLauncher(_ id: OpenSession.ID) -> Bool {
+        !panes.isEmpty && openInNewPane(id)
     }
 
     /// Where a removed worktree's session may reopen: the openable rows' folders and the recent directories.
