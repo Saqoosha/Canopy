@@ -2977,12 +2977,12 @@ enum SidebarLogicProbe {
                 let savingStore = SessionStore()
                 savingStore._probeSeedOpenSessions([saved])
                 let saving = DaemonDelegate(store: savingStore)
-                let savedRows = ReapedSessions(defaults: nil)
-                _ = saving.saveSessions(carrying: false, heldFile: heldFile, reaped: savedRows)
-                let keptByStop = !savedRows.rows.isEmpty
-                _ = saving.saveSessions(carrying: true, heldFile: heldFile, reaped: savedRows)
-                record("restart: the daemon saves the row for the next one; a deliberate stop does not",
-                       !keptByStop && savedRows.rows.map(\.resumeId) == ["probe-save"])
+                let restartRows = ReapedSessions(defaults: nil)
+                let stopRows = ReapedSessions(defaults: nil)
+                _ = saving.saveSessions(carrying: true, heldFile: heldFile, reaped: restartRows)
+                _ = saving.saveSessions(carrying: false, heldFile: heldFile, reaped: stopRows)
+                record("restart: the daemon saves the row on a restart and on a deliberate stop alike",
+                       restartRows.rows.map(\.resumeId) == ["probe-save"] && stopRows.rows.map(\.resumeId) == ["probe-save"])
                 record("reaper: a quietSince in the future (clock change) is kept",
                        !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: -60), now: reapT0, limit: reapLimit))
             }

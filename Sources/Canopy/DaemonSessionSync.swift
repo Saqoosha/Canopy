@@ -21,7 +21,7 @@ enum DaemonSessionSync {
         var updates: [Update] = []
         var adds: [ControlProtocol.SessionRow] = []
         var removes: [UUID] = []
-        /// Unpaned local sessions the reaper or a restart stopped: kept as dormant rows that resume on click.
+        /// Unpaned local sessions the reaper or a daemon exit stopped: kept as dormant rows that resume on click.
         var stopped: [Update] = []
         /// Reaped sessions this GUI has no row for (it launched after the reap).
         var stoppedAdds: [ControlProtocol.SessionRow] = []

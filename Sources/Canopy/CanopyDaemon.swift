@@ -49,7 +49,7 @@ private nonisolated func installTerminationHandler(_ delegate: DaemonDelegate) {
     let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
     source.setEventHandler { [weak delegate] in
         MainActor.assumeIsolated {
-            // A SIGTERM is a stop someone asked for (bootout, logout): nothing is carried.
+            // A SIGTERM is a stop someone asked for (bootout, logout): nothing reopens by itself.
             delegate?.shutDown(carryingSessions: false)
             exit(0)
         }
@@ -512,9 +512,9 @@ final class DaemonDelegate {
         logger.notice("restored \(held.entries.count, privacy: .public) held session(s)")
     }
 
-    /// `carryingSessions`: this exit is a restart (launchd starts the next daemon at once), so its
-    /// sessions are saved for it (`saveSessions`). A deliberate stop saves none: a daemon started
-    /// within `DaemonHeldSessions.maxAge` would resume CLIs nobody is waiting for.
+    /// `carryingSessions`: this exit is a restart (launchd starts the next daemon at once), so that
+    /// daemon reopens the held sessions (`saveSessions`). A deliberate stop holds none: a daemon
+    /// started within `DaemonHeldSessions.maxAge` would resume CLIs nobody is waiting for.
     func shutDown(carryingSessions: Bool) {
         upgradeTimer?.invalidate()
         configTimer?.invalidate()
@@ -545,7 +545,7 @@ final class DaemonDelegate {
         held.save(to: heldFile)
         // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
         if !carrying { try? FileManager.default.removeItem(at: heldFile) }
-        if carrying { reaped.keepRows(of: store.openSessions, hasTranscript: ReapedSessions.hasTranscript) }
+        reaped.keepRows(of: store.openSessions, hasTranscript: ReapedSessions.hasTranscript)
         return held
     }
 }

@@ -31,7 +31,7 @@ enum SessionReaper {
     }
 }
 
-/// The sessions the reaper or a restart stopped, as the rows they had. Sent to GUIs as
+/// The sessions the reaper or a daemon exit stopped, as the rows they had. Sent to GUIs as
 /// `session_state`'s `reaped`, so each keeps (or rebuilds) a dormant Open row that
 /// resumes on click, instead of the session dropping into Recents. A Stop takes
 /// one out, and so does the session running again. Persisted, so a daemon restart
@@ -68,7 +68,7 @@ final class ReapedSessions {
             permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id)
     }
 
-    /// A restart stops every session, and nothing promises the next daemon reopens one.
+    /// A daemon exit stops every session, and nothing promises the next daemon reopens one.
     /// Whatever runs again takes its row out (`DaemonReaper`).
     func keepRows(of sessions: [OpenSession], hasTranscript: (OpenSession) -> Bool) {
         for session in sessions where hasTranscript(session) {
