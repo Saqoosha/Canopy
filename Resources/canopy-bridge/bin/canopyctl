@@ -91,8 +91,6 @@ def main(argv):
     )
     show_p.add_argument("session_id", metavar="SESSION_ID")
     show_p.add_argument("--machine", help="the Mac it is on; default: this Mac")
-    show_p.add_argument("--title")
-    show_p.add_argument("--project")
 
     send_p = sub.add_parser("send", help="send_message")
     add_session_flags(send_p, require=True)
@@ -172,7 +170,7 @@ def main(argv):
         print(f"canopyctl: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(f"canopyctl: {exc}", file=sys.stderr)
+        print(f"canopyctl: cannot reach Canopy at {args.socket}: {exc}", file=sys.stderr)
         # A listen loop retries this with its cursor; a daemon restart lands here.
         return 4 if args.cmd == "listen" else 1
     body = result["result"] if isinstance(result.get("result"), dict) else result
@@ -355,10 +353,8 @@ def build(args):
         return "open_session", params
     if args.cmd == "show":
         params = {"sessionId": args.session_id}
-        optional = {"title": args.title, "project": args.project}
-        if args.machine != "local":
-            optional["machineId"] = args.machine
-        params.update({key: value for key, value in optional.items() if value})
+        if args.machine and args.machine != "local":
+            params["machineId"] = args.machine
         return "show_session", params
     params = session_params(args)
     if args.cmd == "history":

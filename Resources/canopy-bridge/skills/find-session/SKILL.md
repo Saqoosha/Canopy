@@ -31,10 +31,10 @@ description: Find which past Claude Code session a topic was discussed in, on th
 
 ## Opening a session
 
-When the user asks to open a result, use its `sessionId`, `machine`, `title` and project folder name. A session on another Mac opens as a mirror pane. Canopy has to be open on this Mac.
+When the user asks to open a result, use its `sessionId` and `machine`. A session on another Mac opens as a mirror pane. Canopy has to be open on this Mac.
 
 ```
-python3 "${CLAUDE_SKILL_DIR}/../../bin/canopyctl" show SESSION_ID --machine MACHINE --title TITLE --project PROJECT
+python3 "${CLAUDE_SKILL_DIR}/../../bin/canopyctl" show SESSION_ID --machine MACHINE
 ```
 
 ## Slack links

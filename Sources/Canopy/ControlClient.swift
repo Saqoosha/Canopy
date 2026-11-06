@@ -228,7 +228,11 @@ final class ControlClient {
             }
             onUpgradeState?(state)
         case ControlProtocol.showSessionFrameType:
-            if case .success(let show) = ControlProtocol.parseShowSession(dict) { onShowSession?(show) }
+            guard case .success(let show) = ControlProtocol.parseShowSession(dict) else {
+                logger.error("unreadable show_session from the daemon")
+                return
+            }
+            onShowSession?(show)
         case "response":
             if let (id, result) = correlator.finish(dict) { waiters.removeValue(forKey: id)?.resume(returning: result) }
         default:

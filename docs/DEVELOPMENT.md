@@ -174,6 +174,7 @@ Uncaught errors and unhandled promise rejections are also captured.
 This Mac's sessions run in the daemon, so most session logs come from the daemon process, not the GUI.
 
 - A Release GUI registers the LaunchAgent on every launch. A Debug GUI registers its own agent only with `CANOPY_REGISTER_DAEMON=1`; otherwise it starts `Canopy --daemon` itself as a child process.
+- A session running inside Canopy has `CANOPY_CONTROL_SOCK` set, so `canopyctl` there reaches that session's own daemon, Debug or Release.
 - The Debug socket is `~/Library/Application Support/Canopy/daemon-sh.saqoo.Canopy.debug.sock`. Point the control client at it with `scripts/canopyctl --socket <path> ...`; the default is the Release socket.
 - The Mirror TCP port exists only while Mirror is on, and Debug uses the base port + 1.
 - The logic probe (`CANOPY_RUN_LOGIC_PROBE=1`) runs sessions in-process, without a daemon.

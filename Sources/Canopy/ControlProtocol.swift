@@ -464,29 +464,31 @@ enum ControlProtocol {
         return .success(SendMessage(text: text, slackAsker: asker))
     }
 
-    /// What `show_session` asks the GUI to put in a pane. `machineId` names another Mac, nil this one.
+    /// What `show_session` asks the GUI to put in a pane. `machineId` names another Mac, nil this
+    /// one. For a closed session here the daemon fills in the rest, so the GUI need not resolve it.
     struct ShowSession: Equatable {
         let sessionId: String
         let machineId: String?
-        let title: String
-        let project: String
+        var directory: String?
+        var title: String?
     }
 
     static let showSessionFrameType = "show_session"
 
     static func parseShowSession(_ params: [String: Any]) -> Result<ShowSession, ControlError> {
-        guard let id = (params["sessionId"] as? String)?.lowercased(), !id.isEmpty else {
-            return .failure(ControlError("sessionId is required"))
+        guard let id = (params["sessionId"] as? String)?.lowercased(), UUID(uuidString: id) != nil else {
+            return .failure(ControlError("sessionId is not a session id"))
         }
         let machine = (params["machineId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        return .success(ShowSession(sessionId: id, machineId: machine, title: params["title"] as? String ?? "",
-                                    project: params["project"] as? String ?? ""))
+        return .success(ShowSession(sessionId: id, machineId: machine, directory: params["directory"] as? String,
+                                    title: params["title"] as? String))
     }
 
     static func showSessionFrame(_ show: ShowSession) -> [String: Any] {
-        var frame: [String: Any] = ["type": showSessionFrameType, "sessionId": show.sessionId,
-                                    "title": show.title, "project": show.project]
+        var frame: [String: Any] = ["type": showSessionFrameType, "sessionId": show.sessionId]
         if let machineId = show.machineId { frame["machineId"] = machineId }
+        if let directory = show.directory { frame["directory"] = directory }
+        if let title = show.title { frame["title"] = title }
         return frame
     }
 

@@ -384,25 +384,25 @@ final class SessionStore {
     /// `show_session`: a session found by the find-session skill, in a pane of its own so the
     /// answer stays readable. Another Mac's opens as a mirror pane, and one running there is joined.
     func showSession(_ show: ControlProtocol.ShowSession) {
+        logger.notice("showSession \(show.sessionId, privacy: .public) on \(show.machineId ?? "this Mac", privacy: .public)")
         if let machineId = show.machineId {
-            let recent = MirrorRecents.Session(id: show.sessionId, title: show.title, project: show.project, timestamp: Date())
-            openRemoteRecent(machineId: machineId, machineName: remoteRosters[machineId]?.displayName ?? machineId,
-                             recent: recent, target: .newPane)
+            let name = remoteRosters[machineId]?.displayName ?? machineId
+            let recent = MirrorRecents.Session(id: show.sessionId, title: show.title ?? "Untitled", project: name, timestamp: Date())
+            openRemoteRecent(machineId: machineId, machineName: name, recent: recent, target: .newPane)
             return
         }
         if let open = openSessions.first(where: { $0.resumeId == show.sessionId }) {
-            focusOrPane(open.id, target: .newPane)
+            let inPane = panes.contains { if case .session(let id) = $0.content { return id == open.id }; return false }
+            if inPane { select(.session(open.id)) } else { focusOrPane(open.id, target: .newPane) }
             return
         }
-        switch resolveClosedSession(sessionId: show.sessionId, localCwd: nil) {
-        case .success(let found):
-            openNew(directory: found.directory, resumeId: show.sessionId,
-                    sessionTitle: found.title ?? (show.title.isEmpty ? nil : show.title),
-                    permissionMode: CanopySettings.shared.defaultPermissionMode,
-                    customApi: ModelProviderStore.selectedProvider(), target: .newPane)
-        case .failure(let failure):
-            noteSessionFailure(title: show.title, message: "Could not open this session (\(failure)).", status: -2)
+        guard let directory = show.directory else {
+            noteSessionFailure(title: show.title ?? "", message: "Could not find this session on this Mac.", status: -2)
+            return
         }
+        openNew(directory: URL(fileURLWithPath: directory, isDirectory: true), resumeId: show.sessionId,
+                sessionTitle: show.title, permissionMode: CanopySettings.shared.defaultPermissionMode,
+                customApi: ModelProviderStore.selectedProvider(), target: .newPane)
     }
 
     private func focusOrPane(_ id: OpenSession.ID, target: PaneTarget) {

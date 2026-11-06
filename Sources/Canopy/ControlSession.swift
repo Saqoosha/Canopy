@@ -104,12 +104,35 @@ final class ControlSession {
         guard isLocal else { return fail(request, "local clients only") }
         switch ControlProtocol.parseShowSession(request.params) {
         case .failure(let error):
-            fail(request, error.message)
-        case .success(let show):
-            guard ControlBroadcast.toLocalClients(ControlProtocol.showSessionFrame(show)) > 0 else {
-                return fail(request, "Canopy is not open on this Mac", code: "no_gui")
+            fail(request, error.message, code: "invalid_session_id")
+        case .success(var show):
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Resolved here so a skill hears why a session cannot open, instead of a GUI banner.
+                if show.machineId == nil, store.openSession(for: [.resumeId(show.sessionId)]) == nil {
+                    if store.recents.isEmpty { await Self.refreshRecents(store).value }
+                    guard !stopped else { return }
+                    var resolved = store.resolveClosedSession(sessionId: show.sessionId, localCwd: nil)
+                    if case .failure(.folderMissing) = resolved {
+                        // Recents holds the newest few, and an older session in a removed
+                        // worktree still reopens in its checkout.
+                        let all = await Task.detached { ClaudeSessionHistory.loadAllSessions(keep: .max, scanLimit: .max) }.value
+                        resolved = SessionStore.resolveClosedSession(sessionId: show.sessionId, localCwd: nil, recents: all,
+                                                                     knownCheckouts: store.rescueCandidates)
+                    }
+                    switch resolved {
+                    case .failure(let failure):
+                        return fail(request, Self.message(for: failure), code: "not_found")
+                    case .success(let found):
+                        show.directory = found.directory.path
+                        show.title = found.title
+                    }
+                }
+                guard ControlBroadcast.toLocalSubscribers(ControlProtocol.showSessionFrame(show)) > 0 else {
+                    return fail(request, "No Canopy window is connected on this Mac", code: "no_gui")
+                }
+                reply(request, ["shown": true])
             }
-            reply(request, ["shown": true])
         }
     }
 

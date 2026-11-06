@@ -6491,28 +6491,63 @@ enum SidebarLogicProbe {
                    ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md")
                        && ShimProcess.bridgeModFiles.contains("skills/find-session/find_sessions.py"))
 
-            let shown = ControlProtocol.parseShowSession(["sessionId": "ABC", "machineId": "M1", "title": "T", "project": "P"])
+            let upper = "AAAAAAAA-0000-0000-0000-000000000000"
+            let shown = ControlProtocol.parseShowSession(["sessionId": upper, "machineId": "M1"])
             record("show session: an id is required",
-                   ControlProtocol.parseShowSession(["machineId": "M1"]) == .failure(ControlProtocol.ControlError("sessionId is required")))
-            record("show session: the id is lowercased, as the CLI writes it", (try? shown.get())?.sessionId == "abc")
+                   ControlProtocol.parseShowSession(["machineId": "M1"]) == .failure(ControlProtocol.ControlError("sessionId is not a session id")))
+            record("show session: a path is not an id",
+                   ControlProtocol.parseShowSession(["sessionId": "../x"]) == .failure(ControlProtocol.ControlError("sessionId is not a session id")))
+            record("show session: the id is lowercased, as the CLI writes it", (try? shown.get())?.sessionId == upper.lowercased())
             record("show session: an empty machine means this Mac",
-                   (try? ControlProtocol.parseShowSession(["sessionId": "a", "machineId": ""]).get())?.machineId == nil)
+                   (try? ControlProtocol.parseShowSession(["sessionId": upper, "machineId": ""]).get())?.machineId == nil)
+            let resolvedShow = ControlProtocol.ShowSession(sessionId: upper.lowercased(), machineId: nil, directory: "/r/p", title: "T")
             record("show session: the frame parses back to the same request",
-                   (try? shown.get()).map { ControlProtocol.parseShowSession(ControlProtocol.showSessionFrame($0)) == .success($0) } == true)
+                   ControlProtocol.parseShowSession(ControlProtocol.showSessionFrame(resolvedShow)) == .success(resolvedShow))
+            record("show session: the frame names the type the GUI dispatches on",
+                   ControlProtocol.showSessionFrame(resolvedShow)["type"] as? String == ControlProtocol.showSessionFrameType)
             record("show session: no subscribed client means nobody received it",
-                   ControlBroadcast.toLocalClients(["type": "probe"]) == 0)
+                   ControlBroadcast.toLocalSubscribers(["type": "probe"]) == 0)
+            let subscribeRequest: [String: Any] = ["type": "request", "id": "sub", "verb": "subscribe", "params": [:] as [String: Any]]
+            var tcpFrames: [[String: Any]] = []
+            let tcpPeer = ControlSession(store: SessionStore(), isLocal: false, allowBypass: { false }) { tcpFrames.append($0) }
+            tcpPeer.handle(subscribeRequest)
+            record("show session: a subscribed TCP peer gets no frame",
+                   ControlBroadcast.toLocalSubscribers(["type": "probe"]) == 0)
+            tcpPeer.handle(["type": "request", "id": "show", "verb": "show_session", "params": ["sessionId": upper]])
+            record("show session: a TCP peer cannot ask",
+                   tcpFrames.first { $0["id"] as? String == "show" }?["error"] as? String == "local clients only")
+            tcpPeer.stop()
+            var localFrames: [[String: Any]] = []
+            let localClient = ControlSession(store: SessionStore(), isLocal: true, allowBypass: { false }) { localFrames.append($0) }
+            localClient.handle(subscribeRequest)
+            record("show session: a local subscriber receives the frame",
+                   ControlBroadcast.toLocalSubscribers(["type": "probe"]) == 1
+                       && localFrames.contains { $0["type"] as? String == "probe" })
+            localClient.stop()
+            record("show session: a stopped subscriber is gone",
+                   ControlBroadcast.toLocalSubscribers(["type": "probe"]) == 0)
             let showStore = SessionStore()
             let openOne = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "open-id",
                                       title: "T", project: "p", status: .live)
-            showStore._probeSeedOpenSessions([openOne])
-            showStore.showSession(ControlProtocol.ShowSession(sessionId: "open-id", machineId: nil, title: "", project: ""))
-            record("show session: an open session gets a pane",
-                   showStore.panes.contains { if case .session(let id) = $0.content { return id == openOne.id }; return false })
-            showStore.showSession(ControlProtocol.ShowSession(sessionId: "x", machineId: "not-paired", title: "T", project: "P"))
+            let asker = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "asker-id",
+                                    title: "A", project: "p", status: .live)
+            showStore._probeSeedOpenSessions([asker, openOne])
+            showStore.openInFocusedPane(asker.id)
+            func paneCount(_ id: OpenSession.ID) -> Int {
+                showStore.panes.filter { if case .session(let found) = $0.content { return found == id }; return false }.count
+            }
+            let openRequest = ControlProtocol.ShowSession(sessionId: "open-id", machineId: nil, directory: nil, title: nil)
+            showStore.showSession(openRequest)
+            record("show session: an open session gets a pane of its own, beside the one that asked",
+                   paneCount(openOne.id) == 1 && paneCount(asker.id) == 1)
+            showStore.showSession(openRequest)
+            record("show session: one already in a pane is only brought forward",
+                   paneCount(openOne.id) == 1 && showStore.selection == .session(openOne.id))
+            showStore.showSession(ControlProtocol.ShowSession(sessionId: "x", machineId: "not-paired", directory: nil, title: nil))
             record("show session: another Mac goes through the mirror route, which refuses an unpaired one",
                    showStore.remoteAttachError != nil)
-            showStore.showSession(ControlProtocol.ShowSession(sessionId: "00000000-0000-0000-0000-000000000000", machineId: nil, title: "T", project: ""))
-            record("show session: an unknown session says so", showStore.lastSessionFailure != nil)
+            showStore.showSession(ControlProtocol.ShowSession(sessionId: upper.lowercased(), machineId: nil, directory: nil, title: nil))
+            record("show session: a session nothing resolved says so", showStore.lastSessionFailure != nil)
             record("bridge dirs: the scrub keeps an inherited value",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
 

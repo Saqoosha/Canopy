@@ -38,7 +38,6 @@ SHORT_TERM_LENGTH = 4
 SSH_CONNECT_SECONDS = 6
 # Past the deadline, reading titles still gets this long: a cut-off search owes what it found.
 SUMMARY_GRACE_SECONDS = 5
-DEADLINE_CHECK_LINES = 1024
 RG_LOCATIONS = ("/opt/homebrew/bin/rg", "/usr/local/bin/rg")
 REGEX_META = set("\\.+*?()|[]{}^$")
 # A line holding none of these cannot be conversation. Anywhere in the line: a key can sit
@@ -48,7 +47,7 @@ CONVERSATION_MARKS = PROMPT_MARKS + (b'"type":"assistant"',)
 KEEP_ALIVE = "[Canopy keep-alive]"
 NOT_PROMPTS = ("<", "[Request", KEEP_ALIVE)
 NOT_CONVERSATION = ("isSidechain", "isMeta", "isSynthetic", "isCompactSummary", "isVisibleInTranscriptOnly")
-# Backs up the -- in ask_peer: -oProxyCommand would run a command here.
+# Backs up the -- in call_peer: -oProxyCommand would run a command here.
 SAFE_ADDRESS = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*\Z")
 # Goes into a path, so `../` must not get through.
 SAFE_SESSION_ID = re.compile(r"[0-9A-Za-z-]+\Z")
@@ -245,8 +244,8 @@ def summarize(path, deadline):
     custom_title = ai_title = ""
     finished = True
     with open(path, "rb") as transcript:
-        for count, raw in enumerate(transcript):
-            if count % DEADLINE_CHECK_LINES == 0 and time.monotonic() > deadline:
+        for raw in transcript:
+            if time.monotonic() > deadline:
                 finished = False
                 break
             if len(raw) > MAX_LINE_BYTES:
@@ -351,8 +350,11 @@ def search_here(terms, match_any, exclude, limit, timeout):
         else:
             try:
                 summary, read_all = summarize(path, summary_deadline)
-            except OSError:
+            except FileNotFoundError:
                 continue  # removed since rg read it, as when a worktree is cleaned up
+            except OSError:
+                finished = False
+                continue
             finished = finished and read_all
         sessions.append({"sessionId": session_id(path), **summary, "hits": hits[path], "snippets": snippets[path]})
     sessions.sort(key=lambda session: (sum(session["hits"].values()), session["lastActive"]), reverse=True)
