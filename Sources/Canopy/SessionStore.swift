@@ -338,7 +338,7 @@ final class SessionStore {
 
     /// Another Mac's closed session, resumed over there with no pane on its
     /// screen and attached here. `options` carries what the launcher chose, the
-    /// first prompt included. A session open over there is only joined, so its prompt waits in the composer.
+    /// first prompt included. A session open over there is only joined, so the prompt's text waits in the composer.
     /// False when no new pane took them, so the caller keeps the prompt.
     @discardableResult
     func openRemoteRecent(machineId: String, machineName: String, recent: MirrorRecents.Session,
@@ -447,7 +447,7 @@ final class SessionStore {
         }
     }
 
-    /// The closed sessions in one folder on another Mac, newest first, or why they could not be read.
+    /// The sessions in one folder on another Mac, newest first, or why they could not be read.
     /// Not cached: Continue must see the session that closed a moment ago.
     func remoteFolderSessions(machineId: String, path: String) async -> Result<[MirrorRecents.Session], RemoteFolderSessionsError> {
         guard let address = CanopySettings.shared.mirrorPeers[machineId],

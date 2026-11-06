@@ -34,9 +34,8 @@ struct MirrorRecents: Equatable {
     static let maxSessions = 20
     static let maxFolders = 10
 
-    /// The server's reply line. Sessions already open over there, hidden
-    /// rows and sessions whose folder is gone are the caller's to drop before
-    /// this — the wire only caps the counts. `cwd` is the folder the request named.
+    /// The server's reply line; `listed` picks its sessions, the wire only caps the counts.
+    /// `cwd` is the folder the request named.
     static func replyPayload(sessions: [SessionEntry], folders: [URL], cwd: String? = nil,
                              openIds: Set<String> = []) -> [String: Any] {
         var reply: [String: Any] = [
@@ -51,6 +50,12 @@ struct MirrorRecents: Equatable {
         ]
         if let cwd { reply["cwd"] = cwd }
         return reply
+    }
+
+    /// What a reply may list. A folder's reply keeps open sessions, because Continue has to reach
+    /// the newest one; the every-folder list leaves them to the sidebar.
+    static func listed(_ candidates: [SessionEntry], cwd: String?, open: Set<String>, hidden: Set<String>) -> [SessionEntry] {
+        candidates.filter { $0.canOpen && (cwd != nil || !open.contains($0.id)) && !hidden.contains($0.id) }
     }
 
     static func requestPayload(token: String, cwd: String?) -> [String: Any] {

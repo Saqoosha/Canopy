@@ -1065,7 +1065,7 @@ struct LauncherView: View {
         }
     }
 
-    /// The selected folder's closed sessions on that Mac. The sidebar shows only
+    /// The selected folder's closed sessions on that Mac (`isOpen` rows are Continue's). The sidebar shows only
     /// another Mac's live sessions, so this is the one way back to an older one.
     /// Picking one opens it at once: it resumes over there, so nothing in the
     /// composer below applies to it.

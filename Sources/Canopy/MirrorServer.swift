@@ -594,8 +594,7 @@ final class MirrorConnection: MirrorSink {
 
     private func sendRecents(candidates: [SessionEntry], cwd: String?) {
         let open = Set(store.openSessions.map(\.resumeId))
-        // A folder's reply keeps its open sessions, marked: Continue has to reach the newest one.
-        let sessions = candidates.filter { $0.canOpen && (cwd != nil || !open.contains($0.id)) && !store.hiddenIds.contains($0.id) }
+        let sessions = MirrorRecents.listed(candidates, cwd: cwd, open: open, hidden: store.hiddenIds)
         let folders = RecentDirectories.load().filter { FileManager.default.fileExists(atPath: $0.path) }
         let data = (try? JSONSerialization.data(withJSONObject: MirrorRecents.replyPayload(sessions: sessions, folders: folders, cwd: cwd, openIds: open))) ?? Data()
         // Closed only once the line has left, for `failAttach`'s measured reason.

@@ -367,21 +367,11 @@ enum ClaudeSessionHistory {
         candidates.sort { $0.modDate > $1.modDate }
         return selectNewest(candidates, keep: keep, scanLimit: maxSessionsToScan) { candidate -> SessionEntry? in
             let metadata = cachedMetadata(path: candidate.url.path, modified: candidate.modDate)
-            guard !metadata.isBackgroundScheduled, !metadata.isAutomated,
-                  transcriptCwd(metadata.cwd, isWithin: directory.path) else { return nil }
+            guard !metadata.isBackgroundScheduled, !metadata.isAutomated else { return nil }
             return SessionEntry(id: candidate.sessionId,
                                 title: SessionTitleStore.title(forSessionId: candidate.sessionId) ?? metadata.title,
                                 timestamp: candidate.modDate, projectDirectory: directory)
         }.kept
-    }
-
-    /// False for another folder's session filed here: `/a/b-c` and `/a/b/c` encode alike.
-    /// Under the folder counts, since a session's recorded cwd follows it into subfolders.
-    static func transcriptCwd(_ cwd: String?, isWithin directory: String) -> Bool {
-        guard let cwd else { return true }
-        let session = URL(fileURLWithPath: cwd).resolvingSymlinksInPath().path
-        let folder = URL(fileURLWithPath: directory).resolvingSymlinksInPath().path
-        return session == folder || session.hasPrefix(folder + "/")
     }
 
     /// Load sessions across all projects, sorted by most recent.

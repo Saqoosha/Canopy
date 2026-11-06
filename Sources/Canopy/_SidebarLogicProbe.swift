@@ -2012,12 +2012,12 @@ enum SidebarLogicProbe {
             let plainRow = SessionStore.remoteOpenPlan(recent: closed, options: nil)
             record("peer continue: a menu row resumes with the server's defaults",
                    plainRow.open == .resume && plainRow.composerPrefill == nil)
-            record("folder sessions: a cwd in the folder or under it belongs, an alias's does not",
-                   ClaudeSessionHistory.transcriptCwd("/a/b-c", isWithin: "/a/b-c")
-                       && ClaudeSessionHistory.transcriptCwd("/a/b-c/sub", isWithin: "/a/b-c")
-                       && !ClaudeSessionHistory.transcriptCwd("/a/b/c", isWithin: "/a/b-c")
-                       && !ClaudeSessionHistory.transcriptCwd("/a/b-cd", isWithin: "/a/b-c")
-                       && ClaudeSessionHistory.transcriptCwd(nil, isWithin: "/a/b-c"))
+            let rows = ["open", "hidden", "plain"].map {
+                SessionEntry(id: $0, title: "t", timestamp: Date(), projectDirectory: URL(fileURLWithPath: "/tmp"))
+            }
+            record("mirror recents: a folder's reply keeps open sessions and the every-folder list drops them",
+                   MirrorRecents.listed(rows, cwd: "/x", open: ["open"], hidden: ["hidden"]).map(\.id) == ["open", "plain"]
+                       && MirrorRecents.listed(rows, cwd: nil, open: ["open"], hidden: ["hidden"]).map(\.id) == ["plain"])
             let folderFixture = URL(fileURLWithPath: "/tmp/canopy-probe-folder-\(UUID().uuidString)")
             let folderTranscripts = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
                 .appendingPathComponent(ClaudeSessionHistory.encodedFolderCandidates(for: folderFixture.path)[0])
@@ -2031,14 +2031,13 @@ enum SidebarLogicProbe {
                 try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: file.path)
                 return id
             }
-            let foreign = plantSession(cwd: "/tmp/elsewhere", age: 10)
             let newest = plantSession(cwd: folderFixture.path, age: 20)
             let hiddenRow = plantSession(cwd: folderFixture.path, age: 30)
             let older = plantSession(cwd: folderFixture.path, age: 40)
             let oldest = plantSession(cwd: folderFixture.path, age: 50)
-            record("folder sessions: newest first, up to keep, without excluded ids or another folder's",
+            record("folder sessions: newest first, up to keep, without excluded ids",
                    ClaudeSessionHistory.loadNewestSessions(for: folderFixture, keep: 2, excluding: [hiddenRow]).map(\.id) == [newest, older],
-                   "foreign \(foreign), oldest \(oldest)")
+                   "oldest \(oldest)")
             record("mirror recents: an attach_error is not a reply",
                    MirrorRecents.parse(["type": "attach_error", "message": "unauthorized"]) == nil)
             record("mirror recents: a relative folder and an id-less session are dropped",
