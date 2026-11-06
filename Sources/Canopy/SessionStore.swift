@@ -338,7 +338,8 @@ final class SessionStore {
 
     /// Another Mac's closed session, resumed over there with no pane on its
     /// screen and attached here. `options` carries what the launcher chose, the
-    /// first prompt included. False when no new pane took them, so the caller keeps the prompt.
+    /// first prompt included. A session open over there is only joined, so its prompt waits in the composer.
+    /// False when no new pane took them, so the caller keeps the prompt.
     @discardableResult
     func openRemoteRecent(machineId: String, machineName: String, recent: MirrorRecents.Session,
                           options: NewSessionOptions? = nil, target: PaneTarget) -> Bool {
@@ -349,10 +350,16 @@ final class SessionStore {
             return false
         }
         guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return false }
+        let plan = Self.remoteOpenPlan(recent: recent, options: options)
         attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: recent.id,
-                         title: recent.title, project: recent.project,
-                         open: options.map { .resumeWith(options: $0) } ?? .resume, target: target)
+                         title: recent.title, project: recent.project, open: plan.open, target: target,
+                         composerPrefill: plan.composerPrefill)
         return true
+    }
+
+    static func remoteOpenPlan(recent: MirrorRecents.Session, options: NewSessionOptions?) -> (open: MirrorOpenRequest, composerPrefill: String?) {
+        guard let options else { return (.resume, nil) }
+        return recent.isOpen ? (.resume, options.promptText) : (.resumeWith(options: options), nil)
     }
 
     /// A new session in one of another Mac's recent folders, attached here.
@@ -446,25 +453,32 @@ final class SessionStore {
         guard let address = CanopySettings.shared.mirrorPeers[machineId],
               let hostPort = MirrorAccess.parseHostPort(address),
               let token = MirrorAccess.peerToken(machineId: machineId) else {
-            return .failure(RemoteFolderSessionsError(message: Self.remoteRecentsUnpaired))
+            return .failure(RemoteFolderSessionsError(message: Self.remoteRecentsUnpaired, offersSettings: true))
         }
         return await withCheckedContinuation { continuation in
             MirrorRecentsClient.fetch(host: hostPort.host, port: hostPort.port, token: token, cwd: path) { result in
-                switch result {
-                case .success(let recents):
-                    continuation.resume(returning: recents.sessions(in: path).map { .success($0) }
-                                        ?? .failure(RemoteFolderSessionsError(message: Self.remoteRecentsOutdated)))
-                case .failure(let failure):
-                    continuation.resume(returning: .failure(RemoteFolderSessionsError(message: Self.remoteRecentsMessage(failure))))
-                }
+                continuation.resume(returning: Self.folderSessions(from: result, path: path))
             }
         }
     }
 
-    struct RemoteFolderSessionsError: Error, Equatable { let message: String }
+    static func folderSessions(from result: Result<MirrorRecents, MirrorRecentsClient.Failure>,
+                               path: String) -> Result<[MirrorRecents.Session], RemoteFolderSessionsError> {
+        switch result {
+        case .success(let recents):
+            recents.sessions(in: path).map { .success($0) } ?? .failure(RemoteFolderSessionsError(message: remoteRecentsOutdated))
+        case .failure(let failure):
+            .failure(RemoteFolderSessionsError(message: remoteRecentsMessage(failure), offersSettings: failure == .refused("unauthorized")))
+        }
+    }
+
+    struct RemoteFolderSessionsError: Error, Equatable {
+        let message: String
+        var offersSettings = false
+    }
 
     private static let remoteRecentsUnpaired = "Paste its connection in Settings › Remote first"
-    private static let remoteRecentsOutdated = "Update Canopy on that Mac to see them"
+    private static let remoteRecentsOutdated = "Update Canopy on that Mac first"
 
     private static func remoteRecentsMessage(_ failure: MirrorRecentsClient.Failure) -> String {
         switch failure {

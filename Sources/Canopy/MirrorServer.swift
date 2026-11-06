@@ -536,7 +536,7 @@ final class MirrorConnection: MirrorSink {
     }
 
     private func handleLineData(_ data: Data) {
-        guard !data.isEmpty, !cleanedUp else { return }
+        guard !data.isEmpty, !cleanedUp, !answeringRecents else { return }
         let object: Any
         do {
             object = try JSONSerialization.jsonObject(with: data)
@@ -575,25 +575,29 @@ final class MirrorConnection: MirrorSink {
             failAttach("unauthorized")
             return
         }
-        guard let cwd = (dict["cwd"] as? String).flatMap({ $0.hasPrefix("/") ? $0 : nil }) else {
+        guard let cwd = MirrorRecents.requestedFolder(dict) else {
             sendRecents(candidates: store.recents, cwd: nil)
             return
         }
-        // Off the main actor: this reads every transcript in the folder, and the daemon's main actor
-        // carries every running session's traffic.
+        answeringRecents = true
+        let hidden = store.hiddenIds
+        // Off the main actor: it reads transcripts, and that actor carries every running session's traffic.
         Task { [weak self] in
             let entries = await Task.detached {
-                ClaudeSessionHistory.loadSessions(for: URL(fileURLWithPath: cwd))
+                ClaudeSessionHistory.loadNewestSessions(for: URL(fileURLWithPath: cwd), keep: MirrorRecents.maxSessions,
+                                                        excluding: hidden)
             }.value
-            self?.sendRecents(candidates: entries, cwd: cwd)
+            guard let self, !self.cleanedUp else { return }
+            self.sendRecents(candidates: entries, cwd: cwd)
         }
     }
 
     private func sendRecents(candidates: [SessionEntry], cwd: String?) {
         let open = Set(store.openSessions.map(\.resumeId))
-        let sessions = candidates.filter { $0.canOpen && !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
+        // A folder's reply keeps its open sessions, marked: Continue has to reach the newest one.
+        let sessions = candidates.filter { $0.canOpen && (cwd != nil || !open.contains($0.id)) && !store.hiddenIds.contains($0.id) }
         let folders = RecentDirectories.load().filter { FileManager.default.fileExists(atPath: $0.path) }
-        let data = (try? JSONSerialization.data(withJSONObject: MirrorRecents.replyPayload(sessions: sessions, folders: folders, cwd: cwd))) ?? Data()
+        let data = (try? JSONSerialization.data(withJSONObject: MirrorRecents.replyPayload(sessions: sessions, folders: folders, cwd: cwd, openIds: open))) ?? Data()
         // Closed only once the line has left, for `failAttach`'s measured reason.
         connection.send(content: data + Data([0x0A]), completion: .contentProcessed { [connection] _ in
             connection.cancel()
@@ -611,7 +615,7 @@ final class MirrorConnection: MirrorSink {
         case .resume, .resumeWith:
             var options = SessionStore.HeadlessOptions()
             if case .resumeWith(var given) = request {
-                // A plain resume has no such check, so a fork falls back to the default mode instead of failing.
+                // A plain resume has no such check, so this falls back to the default mode instead of failing.
                 if let refusal = given.refusal(allowBypass: server?.bypassAllowed() ?? false) {
                     logger.notice("[mirror-server] resume keeps its settings but not its mode: \(refusal, privacy: .public)")
                     given.permissionMode = nil
@@ -934,6 +938,9 @@ final class MirrorConnection: MirrorSink {
         connection.cancel()
         cleanup()
     }
+
+    /// A folder's `list_recents` is being read; the connection takes no other line meanwhile.
+    private var answeringRecents = false
 
     private func cleanup() {
         guard !cleanedUp else { return }

@@ -191,8 +191,10 @@ struct LauncherView: View {
     @State private var peerTitle = ""
     /// A folder on that Mac, from its Recents.
     @State private var peerFolder: String?
-    @State private var peerFolderSessions: [MirrorRecents.Session] = []
+    /// Nil until the selected folder's first reply.
+    @State private var peerFolderSessions: [MirrorRecents.Session]?
     @State private var peerFolderSessionsError: String?
+    @State private var peerFolderSessionsSource: String?
     @State private var recentDirectories: [URL] = []
     @State private var isDropTargeted = false
     @State private var remoteHost: String = ""
@@ -1043,14 +1045,23 @@ struct LauncherView: View {
     }
 
     private func refreshPeerFolderSessions() async {
-        peerFolderSessions = []
-        peerFolderSessionsError = nil
+        let source = peerMachineId.flatMap { id in peerFolder.map { id + "\n" + $0 } }
+        // A refresh of the same folder keeps its rows until the reply lands.
+        if source != peerFolderSessionsSource {
+            peerFolderSessionsSource = source
+            peerFolderSessions = nil
+            peerFolderSessionsError = nil
+        }
         guard let peerMachineId, let peerFolder else { return }
         let result = await store.remoteFolderSessions(machineId: peerMachineId, path: peerFolder)
         guard !Task.isCancelled else { return }
         switch result {
-        case .success(let sessions): peerFolderSessions = sessions
-        case .failure(let error): peerFolderSessionsError = error.message
+        case .success(let sessions):
+            peerFolderSessions = sessions
+            peerFolderSessionsError = nil
+        case .failure(let error):
+            peerFolderSessions = nil
+            peerFolderSessionsError = error.message
         }
     }
 
@@ -1061,10 +1072,12 @@ struct LauncherView: View {
     @ViewBuilder
     private func peerSessionRows(_ peer: Peer) -> some View {
         let attached = Set(store.openSessions.filter { $0.origin.mirrorTarget?.machineId == peer.machineId }.map(\.resumeId))
-        let sessions = peerFolderSessions.filter { !attached.contains($0.id) }
+        let sessions = peerFolderSessions?.filter { !$0.isOpen && !attached.contains($0.id) }
         if let peerFolderSessionsError {
             Section { Text(peerFolderSessionsError) }
-        } else if !sessions.isEmpty {
+        } else if peerFolder != nil, sessions?.isEmpty != false {
+            Section { Text(sessions == nil ? "Loading…" : "No closed sessions") }
+        } else if let sessions {
             Section(peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title) {
                 ForEach(sessions) { recent in
                     Button {
@@ -1076,6 +1089,11 @@ struct LauncherView: View {
                 }
             }
         }
+    }
+
+    /// What Continue takes from a folder's sessions on another Mac; open ones count, as they do here.
+    static func latestPeerSession(_ sessions: [MirrorRecents.Session]) -> MirrorRecents.Session? {
+        sessions.max { $0.timestamp < $1.timestamp }
     }
 
     /// `MirrorRecents.Session.project` is "Project" or "Project · branch".
@@ -1863,7 +1881,7 @@ struct LauncherView: View {
                 switch result {
                 case .success(let sessions):
                     // No session in the folder is the ordinary first run: a fresh one, as on this Mac.
-                    let opened = if let latest = sessions.first {
+                    let opened = if let latest = Self.latestPeerSession(sessions) {
                         store.openRemoteRecent(machineId: peer.machineId, machineName: peer.title, recent: latest,
                                                options: options, target: target)
                     } else {
@@ -1873,7 +1891,8 @@ struct LauncherView: View {
                     if opened { clearPendingPrompt() }
                 case .failure(let error):
                     // Unlike a miss, this says nothing about the folder, so a new session would hide it.
-                    store.remoteAttachError = SessionStore.RemoteNotice(message: "\(peer.title): \(error.message)")
+                    store.remoteAttachError = SessionStore.RemoteNotice(message: "Could not continue on \(peer.title): \(error.message)",
+                                                                        offersSettings: error.offersSettings)
                 }
             }
             return
