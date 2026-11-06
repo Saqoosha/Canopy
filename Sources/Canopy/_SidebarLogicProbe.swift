@@ -13318,6 +13318,40 @@ enum SidebarLogicProbe {
                    && r2.panes[0].content == .launcher
                    && r2.selection == .launcher
                    && r2.openSessions.first { $0.id == rd.id }?.status == .dormant)
+            // Connection overlay's "Close": a mirror row survives dormant and clean,
+            // and the next row is not pulled into the pane (it would fail to attach too).
+            let c1 = SessionStore()
+            let ca = OpenSession(origin: .mirror(machineId: "M", host: "100.64.0.9", port: 8770),
+                                 resumeId: "lost-a", title: "A", project: "p", status: .live)
+            let cb = OpenSession(origin: .mirror(machineId: "M", host: "100.64.0.9", port: 8770),
+                                 resumeId: "lost-b", title: "B", project: "p", status: .dormant)
+            c1._probeSeedOpenSessions([ca, cb])
+            _ = c1.openInNewPane(ca.id)
+            ca.connection.status = .reconnectFailed
+            c1.noteSessionFailure(title: "T", message: "boom", status: 1)
+            c1.closeLostSession(ca.id)
+            record("close lost session: the launcher it lands on starts clean", c1.lastSessionFailure == nil)
+            record("close lost session: a mirror pane goes, its row stays dormant, nothing is pulled in",
+                   c1.panes.isEmpty
+                   && c1.selection == .launcher
+                   && c1.openSessions.contains { $0.id == ca.id }
+                   && ca.status == .dormant
+                   && cb.status == .dormant)
+            record("close lost session: the detached row no longer carries the failure",
+                   ca.connection.status == .connected)
+
+            let c2 = SessionStore()
+            let cc = OpenSession(origin: .remote(host: "h", path: cwd), resumeId: "lost-c", title: "C", project: "p", status: .live)
+            let cd = OpenSession(origin: .local(cwd), resumeId: "lost-d", title: "D", project: "p", status: .live)
+            c2._probeSeedOpenSessions([cc, cd])
+            _ = c2.openInNewPane(cc.id)
+            _ = c2.openInNewPane(cd.id)
+            c2.closeLostSession(cc.id)
+            record("close lost session: an SSH session closes outright",
+                   c2.panes.count == 1
+                   && c2.panes[0].content == .session(cd.id)
+                   && !c2.openSessions.contains { $0.id == cc.id })
+
             record("back to launcher: a newly shown launcher starts clean",
                    r2.lastSessionFailure == nil)
 

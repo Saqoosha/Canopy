@@ -5,6 +5,7 @@ struct ConnectionOverlayView: View {
     /// SSH remote panes keep the default; a mirror pane names the Mac it lost.
     var title: String = "SSH Connection Lost"
     var onBackToLauncher: () -> Void
+    var onClose: () -> Void
 
     var body: some View {
         if connectionState.isOverlayVisible {
@@ -22,15 +23,9 @@ struct ConnectionOverlayView: View {
                         .foregroundStyle(.white.opacity(0.8))
 
                     if case .reconnectFailed = connectionState.status {
-                        HStack(spacing: 12) {
-                            Button("Retry") {
-                                connectionState.onRetry?()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(connectionState.onRetry == nil)
-                            Button("Back to Launcher") { onBackToLauncher() }
-                                .buttonStyle(.bordered)
-                                .tint(.white)
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 12) { actionButtons }
+                            VStack(spacing: 12) { actionButtons }
                         }
                         .padding(.top, 8)
                     }
@@ -40,6 +35,21 @@ struct ConnectionOverlayView: View {
             }
             .transition(.opacity)
         }
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        Button("Retry") {
+            connectionState.onRetry?()
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(connectionState.onRetry == nil)
+        Button("Back to Launcher") { onBackToLauncher() }
+            .buttonStyle(.bordered)
+            .tint(.white)
+        Button("Close") { onClose() }
+            .buttonStyle(.bordered)
+            .tint(.white)
     }
 
     @ViewBuilder
