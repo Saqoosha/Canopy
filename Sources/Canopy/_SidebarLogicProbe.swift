@@ -2972,17 +2972,17 @@ enum SidebarLogicProbe {
                        DaemonSessionSync.plan(rows: [], local: [unpaned], reaped: kept.rows).stopped.map(\.id) == [notHeld.id]
                            && DaemonSessionSync.plan(rows: [], local: [unpaned], reaped: kept.rows).removes.isEmpty
                            && DaemonSessionSync.plan(rows: [], local: [unpaned]).removes == [notHeld.id])
-                let saved = OpenSession(origin: .local(heldDir), resumeId: "probe-save-\(UUID().uuidString.lowercased())",
-                                        title: "S", project: "P", resumeIdIsExistingTranscript: true)
-                defer { ReapedSessions.shared.remove([.resumeId(saved.resumeId)]) }
+                let saved = OpenSession(origin: .local(heldDir), resumeId: "probe-save", title: "S", project: "P",
+                                        resumeIdIsExistingTranscript: true)
                 let savingStore = SessionStore()
                 savingStore._probeSeedOpenSessions([saved])
                 let saving = DaemonDelegate(store: savingStore)
-                _ = saving.saveSessions(carrying: false)
-                let keptByStop = ReapedSessions.shared.rows.contains { $0.resumeId == saved.resumeId }
-                _ = saving.saveSessions(carrying: true)
+                let savedRows = ReapedSessions(defaults: nil)
+                _ = saving.saveSessions(carrying: false, heldFile: heldFile, reaped: savedRows)
+                let keptByStop = !savedRows.rows.isEmpty
+                _ = saving.saveSessions(carrying: true, heldFile: heldFile, reaped: savedRows)
                 record("restart: the daemon saves the row for the next one; a deliberate stop does not",
-                       !keptByStop && ReapedSessions.shared.rows.contains { $0.resumeId == saved.resumeId })
+                       !keptByStop && savedRows.rows.map(\.resumeId) == ["probe-save"])
                 record("reaper: a quietSince in the future (clock change) is kept",
                        !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: -60), now: reapT0, limit: reapLimit))
             }

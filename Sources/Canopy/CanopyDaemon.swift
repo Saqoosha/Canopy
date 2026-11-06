@@ -512,10 +512,9 @@ final class DaemonDelegate {
         logger.notice("restored \(held.entries.count, privacy: .public) held session(s)")
     }
 
-    /// `carryingSessions`: this exit is a restart (launchd starts the next daemon at once), so the
-    /// phone's and the control API's sessions are saved for it, and the others keep their Open rows.
-    /// A deliberate stop saves none: a daemon started within `DaemonHeldSessions.maxAge` would resume
-    /// CLIs nobody is waiting for.
+    /// `carryingSessions`: this exit is a restart (launchd starts the next daemon at once), so its
+    /// sessions are saved for it (`saveSessions`). A deliberate stop saves none: a daemon started
+    /// within `DaemonHeldSessions.maxAge` would resume CLIs nobody is waiting for.
     func shutDown(carryingSessions: Bool) {
         upgradeTimer?.invalidate()
         configTimer?.invalidate()
@@ -538,14 +537,15 @@ final class DaemonDelegate {
     }
 
     /// What this exit leaves for the next daemon; the result is what it will reopen by itself.
-    func saveSessions(carrying: Bool) -> DaemonHeldSessions {
+    func saveSessions(carrying: Bool, heldFile: URL = DaemonHeldSessions.fileURL,
+                      reaped: ReapedSessions = .shared) -> DaemonHeldSessions {
         let held = DaemonHeldSessions.capture(carrying ? store.openSessions : []) { session, dir in
             ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
         }
-        held.save()
+        held.save(to: heldFile)
         // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
-        if !carrying { try? FileManager.default.removeItem(at: DaemonHeldSessions.fileURL) }
-        if carrying { ReapedSessions.shared.keepRows(of: store.openSessions, hasTranscript: ReapedSessions.hasTranscript) }
+        if !carrying { try? FileManager.default.removeItem(at: heldFile) }
+        if carrying { reaped.keepRows(of: store.openSessions, hasTranscript: ReapedSessions.hasTranscript) }
         return held
     }
 }
