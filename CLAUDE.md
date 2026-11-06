@@ -55,11 +55,12 @@ open build/Build/Products/Debug/Canopy.app
 ```bash
 node --test $(sed -n 's/.*CI_TEST_FILES: "\(.*\)"/\1/p' .github/workflows/ci.yml)   # shim unit
 node --test --test-timeout 120000 test/shim-integration.test.js                       # needs CC extension
+node --test test/find-sessions.test.js                                                # needs rg
 CANOPY_RUN_LOGIC_PROBE=1 ./build/Build/Products/Debug/Canopy.app/Contents/MacOS/Canopy  # Swift probe, ~3 s
 ```
 
-- CI asserts count floors (`EXPECTED_TESTS`, `EXPECTED_ASSERTIONS` in `ci.yml`). Removing tests costs an edit there. When a merge conflicts on a floor, build the merged tree and read the real count. Do not pick a side.
-- Every file under `test/` must appear in one of `CI_TEST_FILES` / `EXCLUDED_TEST_FILES` / `NON_TEST_FILES`.
+- CI asserts count floors (`EXPECTED_TESTS`, `EXPECTED_SEARCH_TESTS`, `EXPECTED_ASSERTIONS` in `ci.yml`). Removing tests costs an edit there. When a merge conflicts on a floor, build the merged tree and read the real count. Do not pick a side.
+- Every file under `test/` must appear in one of `CI_TEST_FILES` / `MACOS_TEST_FILES` / `EXCLUDED_TEST_FILES` / `NON_TEST_FILES`.
 - A probe fixture derives production constants instead of retyping their values. It forces any live setting it depends on, and restores it in a `defer`.
 - The probe writes real UserDefaults keys and `~/.claude` fixtures. See `testing.md`.
 - A test proves something only if reverting the fix, one fix at a time, turns it red.

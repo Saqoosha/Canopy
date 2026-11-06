@@ -19,6 +19,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Run by the macOS job, on the system Python a Mac has, rather than by the shim job.
+  MACOS_TEST_FILES: "test/find-sessions.test.js"
+
 jobs:
   shim-tests:
     name: vscode-shim unit tests
@@ -121,10 +125,10 @@ jobs:
             \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
             | LC_ALL=C sort | tr '\n' ' ')
           # shellcheck disable=SC2086  # splitting the lists into words is the point
-          expected=$(printf '%s\n' $CI_TEST_FILES $EXCLUDED_TEST_FILES $NON_TEST_FILES \
+          expected=$(printf '%s\n' $CI_TEST_FILES $EXCLUDED_TEST_FILES $NON_TEST_FILES $MACOS_TEST_FILES \
             | LC_ALL=C sort | tr '\n' ' ')
           if [ "$found" != "$expected" ]; then
-            echo "::error::JS files under test/ are [$found], but CI_TEST_FILES + EXCLUDED_TEST_FILES + NON_TEST_FILES is [$expected]. A new test file is NOT run by CI just by existing. Put it in CI_TEST_FILES (job-level env, near the top of this file) and it runs and is counted. EXCLUDED_TEST_FILES is only for a suite that genuinely cannot run on ubuntu without the CC extension, like shim-integration.test.js. NON_TEST_FILES is only for something that is not a test at all, like a shared harness. Each is a different claim; none of them is a shortcut to green."
+            echo "::error::JS files under test/ are [$found], but CI_TEST_FILES + EXCLUDED_TEST_FILES + NON_TEST_FILES + MACOS_TEST_FILES is [$expected]. A new test file is NOT run by CI just by existing. Put it in CI_TEST_FILES (job-level env, near the top of this file) and it runs and is counted. EXCLUDED_TEST_FILES is only for a suite that genuinely cannot run on ubuntu without the CC extension, like shim-integration.test.js. NON_TEST_FILES is only for something that is not a test at all, like a shared harness. Each is a different claim; none of them is a shortcut to green."
             exit 1
           fi
           echo "test file set matches: $found"
@@ -292,6 +296,26 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # find_sessions.py runs on the system Python of each Mac, so its tests run on one. The
+      # floor is here because node exits 0 over a file with no tests, as in the shim job.
+      - name: Run the session search tests
+        env:
+          EXPECTED_SEARCH_TESTS: 71
+        run: |
+          set -o pipefail
+          brew install ripgrep
+          # shellcheck disable=SC2086  # splitting the list into words is the point
+          node --test --test-reporter=tap $MACOS_TEST_FILES | tee "$RUNNER_TEMP/search.tap"
+          passed=$(awk '/^# pass [0-9]+$/ { v = $3 } END { if (v != "") print v }' "$RUNNER_TEMP/search.tap")
+          if [ -z "$passed" ] || [ "$passed" -lt "$EXPECTED_SEARCH_TESTS" ]; then
+            echo "::error::only ${passed:-0} session search tests passed, expected at least $EXPECTED_SEARCH_TESTS."
+            exit 1
+          fi
+
       # Sparkle is the only SPM dependency, and project.yml now pins it to
       # an exact version (issue #114), so this cache no longer decides
       # which Sparkle *version* resolves. It does still supply the bits:
@@ -439,7 +463,7 @@ jobs:
       - name: Run logic probe
         timeout-minutes: 5
         env:
-          EXPECTED_ASSERTIONS: 2357
+          EXPECTED_ASSERTIONS: 2360
         run: |
           set -o pipefail
           status=0

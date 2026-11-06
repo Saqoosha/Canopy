@@ -4324,6 +4324,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Shim Path Discovery
 
+    /// What `installBridgeMod` copies, relative to the bundled mod. One missing from the bundle
+    /// disables the whole mod.
+    nonisolated static let bridgeModFiles = [
+        ".claude-plugin/plugin.json",
+        "hooks/hooks.json",
+        "hooks/register.ts",
+        "skills/find-session/SKILL.md",
+        "skills/find-session/find_sessions.py",
+    ]
+
     /// Copies the bundled canopy-bridge mod into Application Support. The CLI
     /// writes type files into a plugin folder; doing that inside the signed
     /// bundle would break the signature, so the live copy lives outside it.
@@ -4335,14 +4345,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
         let destRoot = fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Canopy/mods/\(Bundle.main.bundleIdentifier ?? "Canopy")/canopy-bridge", isDirectory: true)
-        let relativeFiles = [
-            ".claude-plugin/plugin.json",
-            "hooks/hooks.json",
-            "hooks/register.ts",
-        ]
         do {
             try fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
-            for relative in relativeFiles {
+            for relative in bridgeModFiles {
                 let src = sourceRoot.appendingPathComponent(relative)
                 let dst = destRoot.appendingPathComponent(relative)
                 guard fm.fileExists(atPath: src.path) else {
@@ -4391,7 +4396,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return ([bridge] + rest).joined(separator: ":")
     }
 
-    nonisolated private static func bridgeModSourceURL() -> URL? {
+    nonisolated static func bridgeModSourceURL() -> URL? {
         guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("canopy-bridge", isDirectory: true),
               FileManager.default.fileExists(atPath: bundled.appendingPathComponent("hooks/register.ts").path)
         else { return nil }

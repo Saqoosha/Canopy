@@ -6460,8 +6460,8 @@ enum SidebarLogicProbe {
                    ShimProcess.bridgeSlackNote(frame(
                        plugin: "canopy-bridge", text: #"{"v":1,"context":{"window":5}}"#)) == nil)
 
-            // The swallow, the result-branch gate and the install are not
-            // probe-reachable (live shim / real bundle); measured on device only.
+            // The swallow and the result-branch gate are not probe-reachable
+            // (live shim); measured on device only.
             let bridge = "/m/canopy-bridge"
             record("bridge dirs: absent inherited value → bridge alone",
                    ShimProcess.pluginDirs(prepending: bridge, to: nil) == bridge)
@@ -6471,6 +6471,21 @@ enum SidebarLogicProbe {
                    ShimProcess.pluginDirs(prepending: bridge, to: "/a:/b") == "\(bridge):/a:/b")
             record("bridge dirs: an inherited copy of the bridge is not repeated",
                    ShimProcess.pluginDirs(prepending: bridge, to: "/a:\(bridge)") == "\(bridge):/a")
+            let bundledMod = ShimProcess.bridgeModSourceURL()
+            record("bridge mod: every listed file is in the bundle",
+                   bundledMod != nil && ShimProcess.bridgeModFiles.allSatisfy {
+                       FileManager.default.fileExists(atPath: bundledMod!.appendingPathComponent($0).path)
+                   })
+            let bundledSkills = bundledMod.flatMap {
+                FileManager.default.enumerator(at: $0.appendingPathComponent("skills"), includingPropertiesForKeys: [.isRegularFileKey])
+            }?.compactMap { $0 as? URL }.filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true } ?? []
+            record("bridge mod: every bundled skill file is listed",
+                   !bundledSkills.isEmpty && bundledSkills.allSatisfy { file in
+                       ShimProcess.bridgeModFiles.contains { file.path.hasSuffix("/" + $0) }
+                   })
+            record("bridge mod: the find-session skill is listed",
+                   ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md")
+                       && ShimProcess.bridgeModFiles.contains("skills/find-session/find_sessions.py"))
             record("bridge dirs: the scrub keeps an inherited value",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
 
