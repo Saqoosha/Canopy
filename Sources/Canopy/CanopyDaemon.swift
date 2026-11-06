@@ -60,7 +60,7 @@ private nonisolated func installTerminationHandler(_ delegate: DaemonDelegate) {
 
 @MainActor
 final class DaemonDelegate {
-    private let store = SessionStore()
+    private let store: SessionStore
     private var server: MirrorServer?
     private var reaper: DaemonReaper?
     private var sleepGuard: SleepGuard?
@@ -81,6 +81,10 @@ final class DaemonDelegate {
     private let relay = MirrorRelayProcess()
     private var lastRelayAttempt: Date?
     private var failedRelayStarts = 0
+
+    init(store: SessionStore = SessionStore()) {
+        self.store = store
+    }
 
     /// An app update replaced the binary under this process: tell attached panes, stop the
     /// sessions cleanly and exit non-zero so launchd starts the new build. Panes that got the
@@ -520,15 +524,7 @@ final class DaemonDelegate {
         sleepGuard?.stop()
         // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
-        let held = DaemonHeldSessions.capture(carryingSessions ? store.openSessions : []) { session, dir in
-            ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
-        }
-        held.save()
-        // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
-        if !carryingSessions { try? FileManager.default.removeItem(at: DaemonHeldSessions.fileURL) }
-        if carryingSessions {
-            ReapedSessions.shared.keepRows(of: store.openSessions, except: held, hasTranscript: ReapedSessions.hasTranscript)
-        }
+        let held = saveSessions(carrying: carryingSessions)
         // Recorded before the shims stop; a listener may not receive them before the process exits,
         // so the log is saved after the shims stop and the next daemon serves them.
         ControlEventLog.shared.recordShutdown(resuming: Set(held.entries.map(\.key)))
@@ -539,5 +535,17 @@ final class DaemonDelegate {
         stopRelay()
         server?.stopTCP()
         server?.stopLocal()
+    }
+
+    /// What this exit leaves for the next daemon; the result is what it will reopen by itself.
+    func saveSessions(carrying: Bool) -> DaemonHeldSessions {
+        let held = DaemonHeldSessions.capture(carrying ? store.openSessions : []) { session, dir in
+            ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
+        }
+        held.save()
+        // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
+        if !carrying { try? FileManager.default.removeItem(at: DaemonHeldSessions.fileURL) }
+        if carrying { ReapedSessions.shared.keepRows(of: store.openSessions, hasTranscript: ReapedSessions.hasTranscript) }
+        return held
     }
 }

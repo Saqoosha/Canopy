@@ -2960,17 +2960,29 @@ enum SidebarLogicProbe {
                 record("held restore: nothing held writes no file",
                        !FileManager.default.fileExists(atPath: heldFile.path))
                 let kept = ReapedSessions(defaults: nil)
-                kept.keepRows(of: [heldA, notHeld, noTranscript, byControl], except: captured) { $0.resumeId != "fresh" }
-                record("restart: a session nothing reopens keeps a row; held ones and ones with no transcript do not",
-                       kept.rows.map(\.resumeId) == ["free"])
+                kept.keepRows(of: [heldA, notHeld, noTranscript, byControl]) { $0.resumeId != "fresh" }
+                record("restart: every session with a transcript keeps a row, held ones too: a restore can fail",
+                       kept.rows.map(\.resumeId) == ["held-A", "free", "ctl"])
+                let keptRow = kept.rows.first { $0.resumeId == "free" }
                 record("restart: the kept row is stopped and carries the session's key",
-                       kept.rows.first == ReapedSessions.row(for: notHeld) && kept.rows.first?.running == false
-                           && kept.rows.first?.key == notHeld.id.uuidString)
+                       keptRow == ReapedSessions.row(for: notHeld) && keptRow?.running == false
+                           && keptRow?.key == notHeld.id.uuidString)
                 let unpaned = DaemonSessionSync.Local(id: notHeld.id, key: notHeld.id.uuidString, resumeId: "free", isPaned: false)
                 record("restart: the GUI keeps that row dormant, where it used to remove it",
                        DaemonSessionSync.plan(rows: [], local: [unpaned], reaped: kept.rows).stopped.map(\.id) == [notHeld.id]
                            && DaemonSessionSync.plan(rows: [], local: [unpaned], reaped: kept.rows).removes.isEmpty
                            && DaemonSessionSync.plan(rows: [], local: [unpaned]).removes == [notHeld.id])
+                let saved = OpenSession(origin: .local(heldDir), resumeId: "probe-save-\(UUID().uuidString.lowercased())",
+                                        title: "S", project: "P", resumeIdIsExistingTranscript: true)
+                defer { ReapedSessions.shared.remove([.resumeId(saved.resumeId)]) }
+                let savingStore = SessionStore()
+                savingStore._probeSeedOpenSessions([saved])
+                let saving = DaemonDelegate(store: savingStore)
+                _ = saving.saveSessions(carrying: false)
+                let keptByStop = ReapedSessions.shared.rows.contains { $0.resumeId == saved.resumeId }
+                _ = saving.saveSessions(carrying: true)
+                record("restart: the daemon saves the row for the next one; a deliberate stop does not",
+                       !keptByStop && ReapedSessions.shared.rows.contains { $0.resumeId == saved.resumeId })
                 record("reaper: a quietSince in the future (clock change) is kept",
                        !SessionReaper.shouldReap(reapInputs(clients: 0, busy: false, quietFor: -60), now: reapT0, limit: reapLimit))
             }

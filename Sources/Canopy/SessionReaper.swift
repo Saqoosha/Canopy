@@ -68,11 +68,10 @@ final class ReapedSessions {
             permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id)
     }
 
-    /// The next daemon reopens only `held` and what a client asks for; anything else would leave Open.
-    /// A client that does reopen one takes its row out again (`DaemonReaper`).
-    func keepRows(of sessions: [OpenSession], except held: DaemonHeldSessions, hasTranscript: (OpenSession) -> Bool) {
-        let carried = Set(held.entries.map(\.key))
-        for session in sessions where !carried.contains(session.id.uuidString) && hasTranscript(session) {
+    /// A restart stops every session, and nothing promises the next daemon reopens one.
+    /// Whatever runs again takes its row out (`DaemonReaper`).
+    func keepRows(of sessions: [OpenSession], hasTranscript: (OpenSession) -> Bool) {
+        for session in sessions where hasTranscript(session) {
             insert(Self.row(for: session))
         }
     }
