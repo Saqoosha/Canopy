@@ -181,6 +181,8 @@ struct LauncherView: View {
     /// Read for other Macs' Recents and used to attach a session started on
     /// one. Every other launch goes through `appState`.
     @Bindable var store: SessionStore
+    /// Nil for the launcher shown with no panes.
+    var paneId: PaneSlot.ID?
     @State private var selectedDirectory: URL?
     /// Another Mac (by machine id) chosen in the location chip. A session
     /// started there runs on that Mac and is attached here as a mirror pane,
@@ -440,6 +442,7 @@ struct LauncherView: View {
             let migrated = Self.migratingRetiredModel(model)
             if migrated != model { model = migrated }
             loadData()
+            takeNoFolderRequest()
             preselectMostRecentDirectory()
             Task { await updater.checkForUpdate() }
         }
@@ -452,6 +455,8 @@ struct LauncherView: View {
             }
         }
         .onChange(of: selectedDirectory) { refreshBranchName() }
+        // For a launcher already on screen, which `onAppear` does not reach.
+        .onChange(of: store.launcherWantsNoFolder) { takeNoFolderRequest() }
         .onChange(of: peerMachineId.flatMap { store.remoteRecents[$0] }) { preselectPeerFolder() }
         .task(id: peerRecentsKey) {
             if let peerMachineId { store.refreshRemoteRecents(machineId: peerMachineId) }
@@ -465,6 +470,17 @@ struct LauncherView: View {
         .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
         }
+    }
+
+    /// Back to This Mac as well: No folder is local, and an SSH host or another
+    /// Mac chosen here would otherwise keep the session. The focus is there so
+    /// the question can be typed at once; Cmd+N's launcher does not take it.
+    private func takeNoFolderRequest() {
+        guard store.takeNoFolderRequest(launcherPane: paneId) else { return }
+        isRemoteMode = false
+        peerMachineId = nil
+        selectedDirectory = NoFolder.directory
+        isPromptFocused = true
     }
 
     /// Open on the most recently used folder when nothing is chosen yet.
@@ -617,7 +633,7 @@ struct LauncherView: View {
         } else if isRemoteMode {
             remoteHost.isEmpty ? nil : remoteHost
         } else {
-            selectedDirectory?.lastPathComponent
+            selectedDirectory.flatMap { NoFolder.isNoFolder($0) ? nil : $0.lastPathComponent }
         }
         guard let place else {
             return willContinueSession ? "Where were we?" : "What should we build?"
@@ -658,7 +674,8 @@ struct LauncherView: View {
         if isRemoteMode {
             return remoteDirectory.isEmpty ? "Choose folder" : (remoteDirectory as NSString).lastPathComponent
         }
-        return selectedDirectory?.lastPathComponent ?? "Choose folder"
+        guard let selectedDirectory else { return "Choose folder" }
+        return NoFolder.isNoFolder(selectedDirectory) ? NoFolder.displayName : selectedDirectory.lastPathComponent
     }
 
     private var directoryChip: some View {
@@ -669,6 +686,7 @@ struct LauncherView: View {
                 // `showRemoteBrowser` is a state both would fight over.
                 Button("Browse remote…") { showRemoteSetup = true }
             } else {
+                Button(NoFolder.displayName) { selectedDirectory = NoFolder.prepare() }
                 if !recentDirectories.isEmpty {
                     Section("Recent") {
                         ForEach(recentDirectories.prefix(15), id: \.path) { dir in

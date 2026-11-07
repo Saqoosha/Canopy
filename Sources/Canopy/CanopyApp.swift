@@ -78,6 +78,11 @@ struct CanopyApp: App {
                     }
                 }
                 .keyboardShortcut("n")
+                Button("New Session Without Folder") {
+                    sidebarStore.openLauncherWithoutFolder()
+                    showMainWindow()
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Open Folder…") {
                     sidebarOpenFolder()
                 }

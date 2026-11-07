@@ -5256,6 +5256,46 @@ enum SidebarLogicProbe {
             UserDefaults.standard.set([NoFolder.directory.path, scratch.path], forKey: key)
             record("RecentDirectories.load: a persisted No folder is dropped",
                    RecentDirectories.load().map(\.path) == [scratch.path])
+
+            // Cmd+Shift+N. The view's half is `LauncherView.takeNoFolderRequest`.
+            let paneless = SessionStore()
+            try? fm.removeItem(at: claudeMd)
+            paneless.openLauncherWithoutFolder()
+            record("openLauncherWithoutFolder: prepares the folder", written() == NoFolder.instructions)
+            record("openLauncherWithoutFolder: with no pane, selects the launcher and asks for No folder",
+                   paneless.selection == .launcher && paneless.panes.isEmpty && paneless.launcherWantsNoFolder)
+            record("takeNoFolderRequest: the pane-less launcher takes it, once",
+                   paneless.takeNoFolderRequest(launcherPane: nil)
+                   && !paneless.launcherWantsNoFolder
+                   && !paneless.takeNoFolderRequest(launcherPane: nil))
+
+            let overSession = SessionStore()
+            let open = OpenSession(origin: .local(scratch), resumeId: "no-folder-open", title: "A", project: "p", status: .live)
+            overSession._probeSeedOpenSessions([open])
+            _ = overSession.openInNewPane(open.id)
+            overSession.openLauncherWithoutFolder()
+            record("openLauncherWithoutFolder: a session pane becomes the launcher, as with Cmd+N",
+                   overSession.panes.first?.content == .launcher
+                   && overSession.selection == .launcher
+                   && overSession.launcherWantsNoFolder)
+
+            // Every launcher on screen sees the flag, and only the focused one was asked.
+            let twoLaunchers = SessionStore()
+            _ = twoLaunchers.openLauncherInNewPane()
+            _ = twoLaunchers.openLauncherInNewPane()
+            twoLaunchers.setFocusedPaneIndex(0)
+            twoLaunchers.openLauncherWithoutFolder()
+            record("takeNoFolderRequest: a launcher in another pane leaves it",
+                   !twoLaunchers.takeNoFolderRequest(launcherPane: twoLaunchers.panes[1].id)
+                   && twoLaunchers.launcherWantsNoFolder)
+            record("takeNoFolderRequest: the focused launcher takes it",
+                   twoLaunchers.takeNoFolderRequest(launcherPane: twoLaunchers.panes[0].id))
+
+            let plainNew = SessionStore()
+            plainNew._probeSeedOpenSessions([open])
+            _ = plainNew.openInNewPane(open.id)
+            plainNew.openLauncherInFocusedPane()
+            record("Cmd+N does not ask for No folder", !plainNew.launcherWantsNoFolder)
         }
 
         // --- Open-session reorder (drag & drop) ---
