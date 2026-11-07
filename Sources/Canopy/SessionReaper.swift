@@ -65,7 +65,8 @@ final class ReapedSessions {
             project: session.project, cwd: session.origin.workingDirectory.path, state: RosterSnapshot.wireState(for: .idle),
             running: false, clients: 0, lastActiveAt: session.lastActiveAt.timeIntervalSince1970,
             model: session.statusBar.model, messageCount: 0,
-            permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id)
+            permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id,
+            moveCount: session.moveCount)
     }
 
     /// A daemon exit stops every session, and nothing promises the next daemon reopens one.

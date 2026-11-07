@@ -92,6 +92,12 @@ def main(argv):
     show_p.add_argument("session_id", metavar="SESSION_ID")
     show_p.add_argument("--machine", help="the Mac it is on; default: this Mac")
 
+    move_p = sub.add_parser(
+        "move", help="move_session: move a session to another folder when its turn ends"
+    )
+    move_p.add_argument("--session-id", required=True)
+    move_p.add_argument("--path", required=True, help="an existing folder, as an absolute path")
+
     send_p = sub.add_parser("send", help="send_message")
     add_session_flags(send_p, require=True)
     send_p.add_argument("--text", required=True)
@@ -356,6 +362,8 @@ def build(args):
         if args.machine and args.machine != "local":
             params["machineId"] = args.machine
         return "show_session", params
+    if args.cmd == "move":
+        return "move_session", {"sessionId": args.session_id, "path": args.path}
     params = session_params(args)
     if args.cmd == "history":
         if args.limit is not None:

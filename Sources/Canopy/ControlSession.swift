@@ -70,6 +70,7 @@ final class ControlSession {
         case "list_accounts": listAccounts(request)
         case "request_recap": requestRecap(request)
         case "show_session": showSession(request)
+        case "move_session": moveSession(request)
         case "roster_secret_changed":
             // The GUI wrote a new relay secret to the Keychain; reconnect with it. Only this
             // Mac's GUI writes that Keychain item, so a TCP client has no business asking.
@@ -745,6 +746,21 @@ final class ControlSession {
     }
 
     /// The open session a request names, or nil after answering the request with the reason.
+    /// Takes no trust argument: only a person answering `SessionMove.askTrust` can give it.
+    private func moveSession(_ request: ControlProtocol.Request) {
+        guard isLocal else { return fail(request, "local clients only") }
+        guard let session = requestedSession(request) else { return }
+        guard let path = request.params["path"] as? String, !path.isEmpty else { return fail(request, "path is required") }
+        guard let shim = session.shim else { return fail(request, "session is not running") }
+        Task { @MainActor [weak self] in
+            let refusal = await shim.moveRefusal(to: path)
+            guard let self, !stopped else { return }
+            if let refusal { return fail(request, refusal) }
+            shim.requestMove(to: path)
+            reply(request, ["status": "queued"])
+        }
+    }
+
     private func requestedSession(_ request: ControlProtocol.Request) -> OpenSession? {
         let refs = ControlProtocol.sessionRefs(request.params)
         guard !refs.isEmpty else {
@@ -864,7 +880,8 @@ final class ControlSession {
                 state: RosterSnapshot.wireState(for: activity), running: session.shim?.isLive == true,
                 clients: session.shim?.mirrorCount ?? 0, lastActiveAt: session.lastActiveAt.timeIntervalSince1970,
                 model: session.statusBar.model, messageCount: 0,
-                permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id)
+                permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id,
+                moveCount: session.moveCount)
         }
     }
 
