@@ -745,8 +745,8 @@ final class ControlSession {
         reply(request, ["ok": true])
     }
 
-    /// The open session a request names, or nil after answering the request with the reason.
-    /// Takes no trust argument: only a person answering `SessionMove.askTrust` can give it.
+    /// Takes no trust argument, so this socket cannot approve a folder (`SessionMove.askTrust`).
+    /// The CLI's own trust file is outside Canopy's reach.
     private func moveSession(_ request: ControlProtocol.Request) {
         guard isLocal else { return fail(request, "local clients only") }
         guard let session = requestedSession(request) else { return }
@@ -756,11 +756,13 @@ final class ControlSession {
             let refusal = await shim.moveRefusal(to: path)
             guard let self, !stopped else { return }
             if let refusal { return fail(request, refusal) }
-            shim.requestMove(to: path)
+            guard session.shim === shim, shim.isLive else { return fail(request, "The session restarted; ask again.") }
+            guard shim.requestMove(to: path) else { return fail(request, "A move is already under way.") }
             reply(request, ["status": "queued"])
         }
     }
 
+    /// The open session a request names, or nil after answering the request with the reason.
     private func requestedSession(_ request: ControlProtocol.Request) -> OpenSession? {
         let refs = ControlProtocol.sessionRefs(request.params)
         guard !refs.isEmpty else {

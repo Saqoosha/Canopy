@@ -134,6 +134,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// while an upgrade waits, since the transcript lookup can scan the store.
     var upgradeBlocker: String? {
         if let reason = restartLosesWork { return reason }
+        if pendingMove?.isUnderWay == true { return "a folder move is under way" }
         if boundSession?.pendingInitialPrompt != nil { return "the first prompt has not been sent" }
         if mirrors.values.contains(where: { client in
             client.sink.map { Self.remoteClientBlocksUpgrade(isLocal: $0.isLocalClient, reattaches: $0.reattachesAfterRestart) } ?? false
@@ -2666,19 +2667,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Set when the mod left the worktree ahead of a `git worktree remove`, or
     /// when the spawn folder is gone and the transcript is filed in a checkout.
     private var checkoutAfterRemoval: URL?
-    /// Asked for and not finished (`requestMove`).
-    private var pendingMove: PendingMove?
-
-    private struct PendingMove {
-        let id = UUID().uuidString
-        let path: String
-        var trustedDirectory: String?
-        var busyRetries = 0
-        /// `set_cwd` is out or the user is being asked, so nothing else may send it.
-        var waiting = false
-        /// The CLI has moved, and only the restart is left.
-        var movedTo: URL?
-    }
+    /// Asked for and not finished (`requestMove`). Its rules live in `SessionMove.Latch`.
+    private var pendingMove: SessionMove.Latch?
 
     @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, claudeAccount: ClaudeAccount? = nil, resumeIdIsExistingTranscript: Bool) {
@@ -4496,81 +4486,91 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Asked from inside a turn, so nothing happens until the turn ends.
-    func requestMove(to path: String) {
-        pendingMove = PendingMove(path: path)
+    /// Usually asked from inside a turn, so it waits for the turn to end. False while
+    /// another move is under way: replacing it could drop one the CLI has made.
+    func requestMove(to path: String) -> Bool {
+        if pendingMove?.isUnderWay == true { return false }
+        pendingMove = SessionMove.Latch(path: path)
         moveWhenQuiet()
+        return true
     }
 
     /// `set_cwd` and the restart both wait for a moment with nothing to lose, as
-    /// `moveToCheckoutWhenQuiet` does. Busy → the latch stays and the next `result` tries again.
+    /// `moveToCheckoutWhenQuiet` does. While `restartLosesWork` holds, the next `result`
+    /// or a cleared background task tries again.
     private func moveWhenQuiet(after delay: TimeInterval = 1) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, let move = self.pendingMove, !move.waiting else { return }
-            if let reason = self.restartLosesWork {
-                logger.notice("[move] waiting (\(reason, privacy: .public))")
+            guard let self, self.pendingMove != nil else { return }
+            let blocker = self.restartLosesWork
+            guard let action = self.pendingMove?.whenQuiet(blocker: blocker) else {
+                if let blocker { logger.notice("[move] waiting (\(blocker, privacy: .public))") }
                 return
             }
-            if let directory = move.movedTo {
-                self.pendingMove = nil
-                NotificationCenter.default.post(name: Self.sessionMovedNotification, object: self,
-                                                userInfo: [Self.movedToKey: directory])
-                return
-            }
-            self.pendingMove?.waiting = true
-            var message: [String: Any] = ["type": "set_cwd", "requestId": move.id, "path": move.path]
-            if let trusted = move.trustedDirectory { message["trustedDirectory"] = trusted }
-            self.sendToShim(message)
+            self.perform(action)
         }
     }
 
     private func handleMoveResult(_ msg: [String: Any]) {
-        guard let move = pendingMove, msg["requestId"] as? String == move.id else { return }
-        pendingMove?.waiting = false
-        if let error = msg["error"] as? String { return failMove(error) }
-        let reply = SessionMove.parseReply(msg["response"] as? [String: Any] ?? [:])
-        switch SessionMove.next(after: reply, retries: move.busyRetries) {
-        case .restart(let directory):
-            pendingMove?.movedTo = directory
+        guard let id = pendingMove?.id, msg["requestId"] as? String == id else {
+            logger.error("[move] dropped an answer for a move no longer pending: \(String(describing: msg["error"] ?? msg["response"] ?? ""), privacy: .public)")
+            return
+        }
+        let reply = (msg["error"] as? String).map { SessionMove.CLIReply.cliError("the request did not reach it (\($0))") }
+            ?? SessionMove.parseReply(msg["response"] as? [String: Any] ?? [:])
+        let here = GitWorktree.realPath(of: workingDirectory)
+        let isHere: (String) -> Bool = { GitWorktree.realPath(of: URL(fileURLWithPath: $0)) == here }
+        guard let action = pendingMove?.answered(reply, isCurrentFolder: isHere) else { return }
+        perform(action)
+    }
+
+    private func perform(_ action: SessionMove.Action) {
+        guard let move = pendingMove else { return }
+        switch action {
+        case .send(let requestId, let path, let trustedDirectory):
+            var message: [String: Any] = ["type": "set_cwd", "requestId": requestId, "path": path]
+            if let trustedDirectory { message["trustedDirectory"] = trustedDirectory }
+            sendToShim(message)
+        case .record(let directory):
+            // Recorded now, so a restart for any other reason also starts there.
+            NotificationCenter.default.post(name: Self.sessionMovedNotification, object: self,
+                                            userInfo: [Self.movedToKey: directory])
             moveWhenQuiet()
-        case .stay:
+        case .restart:
             pendingMove = nil
-            logger.notice("[move] already in that folder")
-        case .retry:
-            pendingMove?.busyRetries += 1
-            logger.notice("[move] the CLI is busy; retry \(move.busyRetries + 1, privacy: .public)")
-            moveWhenQuiet(after: SessionMove.busyRetryInterval)
+            NotificationCenter.default.post(name: Self.sessionMoveRestartNotification, object: self)
         case .askTrust(let directory, let trustRoot):
             askMoveTrust(moveId: move.id, directory: directory, trustRoot: trustRoot)
+        case .wait(let delay):
+            if move.busyRetries > 0, delay > 0 {
+                logger.notice("[move] the CLI is busy; retry \(move.busyRetries, privacy: .public)")
+            }
+            moveWhenQuiet(after: delay)
         case .fail(let reason):
             failMove(reason)
+        case .done:
+            pendingMove = nil
+            logger.notice("[move] nothing to move")
         }
     }
 
     private func askMoveTrust(moveId: String, directory: String, trustRoot: String?) {
-        pendingMove?.waiting = true
+        let title = boundSession?.title ?? "This session"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let answer = SessionMove.askTrust(directory: directory, trustRoot: trustRoot)
+            let answer = SessionMove.askTrust(directory: directory, trustRoot: trustRoot, sessionTitle: title)
             DispatchQueue.main.async {
-                guard let self, self.pendingMove?.id == moveId else { return }
-                self.pendingMove?.waiting = false
-                switch answer {
-                case .accepted:
-                    self.pendingMove?.trustedDirectory = directory
-                    self.moveWhenQuiet(after: 0)
-                case .declined:
-                    self.pendingMove = nil
-                    logger.notice("[move] declined")
-                case .unanswered:
-                    self.failMove("Nobody confirmed the folder in time.")
+                guard let self, self.pendingMove?.id == moveId else {
+                    logger.error("[move] a trust answer arrived for a move no longer pending")
+                    return
                 }
+                guard let action = self.pendingMove?.trustAnswered(answer) else { return }
+                self.perform(action)
             }
         }
     }
 
     private func failMove(_ reason: String) {
         pendingMove = nil
-        SessionMove.notifyFailure(reason)
+        SessionMove.notifyFailure(sessionTitle: boundSession?.title ?? "The session", reason: reason)
     }
 
     /// `upgradeBlocker`'s own-session half: what a restart now would drop.
@@ -4626,9 +4626,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// it or elsewhere. `SessionStore` moves the session there.
     static let worktreeRemovedNotification = Notification.Name("ShimProcess.worktreeRemoved")
     static let checkoutKey = "checkout"
-    /// Posted with the shim as `object` and the folder under `movedToKey` once the CLI
-    /// has moved and a restart would lose nothing. `SessionStore` runs the session on there.
+    /// Posted with the shim as `object` and the folder under `movedToKey` as soon as the CLI
+    /// has moved: `SessionStore` records it. `sessionMoveRestartNotification` follows once a
+    /// restart would lose nothing.
     static let sessionMovedNotification = Notification.Name("ShimProcess.sessionMoved")
+    static let sessionMoveRestartNotification = Notification.Name("ShimProcess.sessionMoveRestart")
     static let movedToKey = "movedTo"
 
     /// True for any canopy-bridge `ui_log`, including ones whose text is garbage.
@@ -7046,6 +7048,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let waiting = !isWorking && !pendingBackgroundTaskIds.isEmpty
         boundSession?.isWaiting = waiting
         syncBackgroundIdleBackstop(waiting: waiting)
+        // A background task can end with no `result` after it.
+        if pendingMove != nil, restartLosesWork == nil { moveWhenQuiet() }
     }
 
     /// Arm the idle backstop while a bg task is pending and Claude is idle,

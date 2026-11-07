@@ -205,8 +205,10 @@ test("a set_cwd message reaches the CLI, and its answer comes back", async () =>
             const cli = require("node:child_process").spawn(process.execPath, [${JSON.stringify(fakeCli)}, "--input-format", "stream-json"]);
             cli.stdout.on("data", () => {});
         };`);
+    // A shim started from inside Canopy would inherit its CANOPY_* settings.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("CANOPY_")));
     const shim = spawn(process.execPath, [SHIM, "--extension-path", ext, "--cwd", dir, "--settings-path", path.join(dir, "settings.json")],
-        { env: { ...process.env, HOME: dir }, stdio: ["pipe", "pipe", "inherit"] });
+        { env: { ...env, HOME: dir }, stdio: ["pipe", "pipe", "inherit"] });
     try {
         const result = await new Promise((resolve, reject) => {
             const timer = setTimeout(() => reject(new Error("no set_cwd_result")), 10000);
@@ -220,6 +222,7 @@ test("a set_cwd message reaches the CLI, and its answer comes back", async () =>
                 }
             });
         });
+        assert.equal(result.error, undefined);
         assert.equal(result.requestId, "r1");
         assert.deepEqual(result.response.response, { status: "ok", cwd: "/tmp/moved", changed: true });
     } finally {

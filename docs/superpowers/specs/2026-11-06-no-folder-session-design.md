@@ -155,7 +155,7 @@ verb の条件：
 
 信頼の確認は常に出す（判断）。Canopy で開いたことがあるフォルダを自動で承認する案は採らない。承認は「本人が承認した」という CLI への申告で、Canopy が代わりにしてはいけない。確認を出せないときと、時間切れになったときは移動しない。
 
-確認の答えはソケットを通らない（判断）。ローカルの接続は誰でも `subscribe` できるので、GUI へ送って verb で答える形だと、セッションが自分のフォルダを承認できてしまう。
+確認の答えはソケットを通らない（判断）。ローカルの接続は誰でも `subscribe` できるので、GUI へ送って verb で答える形だと、セッションが Canopy を通して自分のフォルダを承認できてしまう。CLI の信頼の記録そのものは Canopy の外にあり、Bash を使えるセッションなら書き換えられる。
 
 GUI の追従は、daemon のセッション行に足す移動回数で判定する（判断）。`followsCheckoutMove` は変えない。この関数は、別の場所へ追従しないことを既存のテストで守っているから。「同じパスの別表記でペインを再起動しない」という性質も、これで保たれる。
 
@@ -205,10 +205,6 @@ recap の削除は別の PR にする。過去の transcript には `/recap` が
 - 通知フレームと verb の細部、確認画面の見た目。
 - `CLAUDE.md` の文面。
 - テストの置き方。CI の下限（`EXPECTED_TESTS`、`EXPECTED_ASSERTIONS`）の更新は必要。
-
-## 試作の扱い
-
-worktree `session-history-search` に、コミットしていない試作がある。`set_cwd` を shim から CLI へ届ける部分は `Resources/vscode-shim/index.js` の `spikeSetCwd` が出発点になる。`SpikeDriver.swift` と、`followsCheckoutMove` への変更は捨てる。
 
 ## 範囲外（findings）
 

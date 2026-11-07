@@ -106,7 +106,7 @@ if (process.env.CANOPY_CLI_CWD) {
 const { writeStdout, startStdinReader } = require("./protocol.js");
 const { trackCliSpawn, sendSetCwd } = require("./cli-control.js");
 
-// After the spawn wrappers above, and before the extension loads.
+// Before the extension loads, so its CLI spawn is the one kept.
 trackCliSpawn(require("node:child_process"));
 
 const { createExtensionContext } = require("./context.js");

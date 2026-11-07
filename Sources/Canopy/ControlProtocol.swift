@@ -334,6 +334,7 @@ enum ControlProtocol {
         let messageCount: Int
         let permissionMode: String
         let accountId: String?
+        /// Moves since this daemon opened the session; absent on the wire while 0.
         let moveCount: Int
 
         var wire: [String: Any] {

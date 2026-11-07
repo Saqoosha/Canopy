@@ -17,6 +17,6 @@ description: Move this session, conversation included, to another folder on this
    python3 "${CLAUDE_SKILL_DIR}/../../bin/canopyctl" move --session-id "${CLAUDE_SESSION_ID}" --path /absolute/path
    ```
 
-4. **Tell the user and end the turn.** Say the session moves when this turn ends, and that a folder Claude Code has not trusted yet raises a confirmation first. Nothing moves while the turn runs, so do not keep working and do not check whether it moved.
+4. **Tell the user and end the turn.** Say the session moves after this turn, once nothing else runs in it, and that a folder Claude Code has not trusted yet first raises a confirmation on this Mac's screen. Nothing moves while the turn runs, so do not keep working and do not check whether it moved.
 
-If `canopyctl` reports an error, say so in plain words. A session in a worktree or on an SSH remote cannot move.
+If `canopyctl` reports an error, say so in plain words. A session in a worktree or on an SSH remote cannot move. A second request replaces one that has not started, and is refused while one is under way.

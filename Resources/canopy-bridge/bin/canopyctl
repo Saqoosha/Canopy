@@ -93,7 +93,7 @@ def main(argv):
     show_p.add_argument("--machine", help="the Mac it is on; default: this Mac")
 
     move_p = sub.add_parser(
-        "move", help="move_session: move a session to another folder when its turn ends"
+        "move", help="move_session: move a session to another folder once nothing runs in it"
     )
     move_p.add_argument("--session-id", required=True)
     move_p.add_argument("--path", required=True, help="an existing folder, as an absolute path")

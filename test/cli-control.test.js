@@ -15,8 +15,16 @@ function freshControl() {
 function fakeChild() {
   const child = new EventEmitter();
   child.exitCode = null;
+  child.signalCode = null;
   child.stdout = new EventEmitter();
-  child.stdin = { lines: [], write(line) { this.lines.push(line); } };
+  child.stdin = {
+    lines: [],
+    failWith: null,
+    write(line, callback) {
+      this.lines.push(line);
+      if (callback) callback(this.failWith);
+    },
+  };
   return child;
 }
 
@@ -68,6 +76,10 @@ test("returns the matching control_response", () => {
 
   child.stdout.emit("data", Buffer.from('{"type":"assistant"}\nnot json\n'));
   child.stdout.emit("data", Buffer.from(responseLine("someone-else", { status: "ok" })));
+  // These carry the id, so only the checks after the cheap filter can turn them away.
+  child.stdout.emit("data", Buffer.from(responseLine(`${requestId}-x`, { status: "ok" })));
+  child.stdout.emit("data", Buffer.from(`{"type":"assistant","text":"${requestId}"}\n`));
+  child.stdout.emit("data", Buffer.from(`not json ${requestId}\n`));
   assert.deepStrictEqual(results, []);
 
   child.stdout.emit("data", Buffer.from(responseLine(requestId, { status: "ok", changed: true })));
@@ -114,6 +126,41 @@ test("reports an error without a running CLI", () => {
   assert.deepStrictEqual(results.map((result) => result.requestId), ["none", "dead"]);
   assert.ok(results.every((result) => result.type === "set_cwd_result" && result.error));
   assert.deepStrictEqual(child.stdin.lines, []);
+});
+
+test("reports an error for a CLI killed by a signal", () => {
+  const control = freshControl();
+  const child = runningCli(control);
+  child.signalCode = "SIGKILL";
+  const results = [];
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, (result) => results.push(result));
+  assert.strictEqual(results.length, 1);
+  assert.ok(results[0].error);
+  assert.deepStrictEqual(child.stdin.lines, []);
+  assert.strictEqual(child.stdout.listenerCount("data"), 0);
+});
+
+test("gives up when the CLI never answers", async () => {
+  const control = freshControl();
+  const child = runningCli(control);
+  const results = [];
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, (result) => results.push(result), 10);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.strictEqual(results.length, 1);
+  assert.ok(results[0].error);
+  assert.strictEqual(child.stdout.listenerCount("data"), 0);
+  assert.strictEqual(child.listenerCount("exit"), 0);
+});
+
+test("reports a write that failed, once", () => {
+  const control = freshControl();
+  const child = runningCli(control);
+  child.stdin.failWith = new Error("EPIPE");
+  const results = [];
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, (result) => results.push(result));
+  child.emit("exit", 1);
+  assert.strictEqual(results.length, 1);
+  assert.match(results[0].error, /EPIPE/);
 });
 
 test("reports an error when the CLI exits before it answers", () => {
