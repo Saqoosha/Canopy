@@ -5320,10 +5320,7 @@ enum SidebarLogicProbe {
             }
             record("move: ok",
                    SessionMove.parseReply(cli(["status": "ok", "cwd": "/p", "changed": true, "transcript_relocated": true]))
-                       == .ok(cwd: "/p", changed: true, transcriptRelocated: true))
-            record("move: ok without the transcript",
-                   SessionMove.parseReply(cli(["status": "ok", "cwd": "/p", "changed": true, "transcript_relocated": false]))
-                       == .ok(cwd: "/p", changed: true, transcriptRelocated: false))
+                       == .ok(cwd: "/p", changed: true))
             record("move: needs trust",
                    SessionMove.parseReply(cli(["status": "needs_trust", "directory": "/p", "trust_root": "/r"]))
                        == .needsTrust(directory: "/p", trustRoot: "/r"))
@@ -5348,13 +5345,11 @@ enum SidebarLogicProbe {
             func next(_ reply: SessionMove.CLIReply, retries: Int = 0, isCurrentFolder: (String) -> Bool = { _ in true }) -> SessionMove.Next {
                 SessionMove.next(after: reply, retries: retries, isCurrentFolder: isCurrentFolder)
             }
-            record("move: a changed folder restarts", next(.ok(cwd: "/p", changed: true, transcriptRelocated: true)) == .restart(target))
+            record("move: a changed folder restarts", next(.ok(cwd: "/p", changed: true)) == .restart(target))
             record("move: the folder the shim is in does not restart",
-                   next(.ok(cwd: "/p", changed: false, transcriptRelocated: true), isCurrentFolder: here) == .stay)
+                   next(.ok(cwd: "/p", changed: false), isCurrentFolder: here) == .stay)
             record("move: unchanged for the CLI but not where the shim is restarts",
-                   next(.ok(cwd: "/p", changed: false, transcriptRelocated: true), isCurrentFolder: elsewhere) == .restart(target))
-            record("move: a transcript left behind fails",
-                   failed(next(.ok(cwd: "/p", changed: true, transcriptRelocated: false), isCurrentFolder: elsewhere)) != nil)
+                   next(.ok(cwd: "/p", changed: false), isCurrentFolder: elsewhere) == .restart(target))
             record("move: busy retries up to the limit", next(.busy, retries: SessionMove.busyRetryLimit - 1) == .retry)
             record("move: busy past the limit gives up", failed(next(.busy, retries: SessionMove.busyRetryLimit)) != nil)
             record("move: needing trust asks",
@@ -5387,11 +5382,12 @@ enum SidebarLogicProbe {
             record("latch: no answer fails the move", isFail(unanswered.trustAnswered(.unanswered)))
             var notShown = latch
             record("latch: an alert that never showed fails the move", isFail(notShown.trustAnswered(.couldNotAsk)))
+            record("latch: an approved move stays under way",
+                   latch.trustAnswered(.accepted) == .wait(0) && latch.isUnderWay)
             record("latch: only Move sends trust, for the folder the CLI asked about",
-                   latch.trustAnswered(.accepted) == .wait(0)
-                       && latch.whenQuiet(blocker: nil) == .send(requestId: "m1", path: "/p", trustedDirectory: "/p"))
+                   latch.whenQuiet(blocker: nil) == .send(requestId: "m1", path: "/p", trustedDirectory: "/p"))
             record("latch: a CLI that moved is recorded at once",
-                   latch.answered(.ok(cwd: "/p", changed: true, transcriptRelocated: true), isCurrentFolder: elsewhere) == .record(target))
+                   latch.answered(.ok(cwd: "/p", changed: true), isCurrentFolder: elsewhere) == .record(target))
             record("latch: the restart waits for quiet too", latch.whenQuiet(blocker: "a background task") == nil)
             record("latch: then restarts", latch.whenQuiet(blocker: nil) == .restart)
             record("latch: a moved latch is still under way", latch.isUnderWay)
@@ -5403,7 +5399,7 @@ enum SidebarLogicProbe {
                        && busy.whenQuiet(blocker: nil) == .send(requestId: "m2", path: "/p", trustedDirectory: nil))
             var early = SessionMove.Latch(path: "/p", id: "m3")
             record("latch: an answer before anything was sent is ignored",
-                   early.answered(.ok(cwd: "/p", changed: true, transcriptRelocated: true), isCurrentFolder: elsewhere) == nil)
+                   early.answered(.ok(cwd: "/p", changed: true), isCurrentFolder: elsewhere) == nil)
             record("latch: a trust answer nobody asked for is ignored", early.trustAnswered(.accepted) == nil)
 
             let isFolder: (String) -> Bool = { $0 == "/real" }
@@ -5434,7 +5430,7 @@ enum SidebarLogicProbe {
                    prompt.header.contains("Door") && prompt.header.contains("p")
                        && prompt.message.contains("/r/p") && prompt.message.contains("hooks"))
             record("trust: the alert names the repository the CLI will trust",
-                   rooted.message.contains("trust /r,") && !prompt.message.contains("trust /r,"))
+                   rooted.message.contains("repository at /r,") && !prompt.message.contains("repository"))
             let alert = SessionMove.trustAlert(prompt)
             record("trust: Move is the button trustAnswer accepts",
                    alert[kCFUserNotificationAlternateButtonTitleKey] as? String == "Move"

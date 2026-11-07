@@ -13,7 +13,7 @@ enum SessionMove {
     static let trustTimeout: TimeInterval = 60
 
     enum CLIReply: Equatable {
-        case ok(cwd: String, changed: Bool, transcriptRelocated: Bool)
+        case ok(cwd: String, changed: Bool)
         case needsTrust(directory: String, trustRoot: String?)
         case busy
         case rejected(reason: String, message: String?)
@@ -29,8 +29,7 @@ enum SessionMove {
         switch status {
         case "ok":
             guard let cwd = answer["cwd"] as? String else { return .malformed }
-            return .ok(cwd: cwd, changed: answer["changed"] as? Bool ?? true,
-                       transcriptRelocated: answer["transcript_relocated"] as? Bool ?? true)
+            return .ok(cwd: cwd, changed: answer["changed"] as? Bool ?? true)
         case "needs_trust":
             guard let directory = answer["directory"] as? String else { return .malformed }
             return .needsTrust(directory: directory, trustRoot: answer["trust_root"] as? String)
@@ -54,9 +53,7 @@ enum SessionMove {
     /// compares with the CLI's own folder, which can be ahead of the shim's.
     static func next(after reply: CLIReply, retries: Int, isCurrentFolder: (String) -> Bool) -> Next {
         switch reply {
-        case .ok(let cwd, let changed, let transcriptRelocated):
-            // The CLI documents this as moved without the transcript, so a resume there would miss it.
-            guard transcriptRelocated else { return .fail("Claude Code moved, but not the conversation with it.") }
+        case .ok(let cwd, let changed):
             return changed || !isCurrentFolder(cwd) ? .restart(URL(fileURLWithPath: cwd, isDirectory: true)) : .stay
         case .needsTrust(let directory, let trustRoot):
             return .askTrust(directory: directory, trustRoot: trustRoot)
@@ -105,8 +102,8 @@ enum SessionMove {
             self.id = id
         }
 
-        /// A second request must not replace one past `queued`: the CLI may have moved already.
-        var isUnderWay: Bool { phase != .queued }
+        /// A second request must not replace one past `queued`, or one a person approved.
+        var isUnderWay: Bool { phase != .queued || trustedDirectory != nil }
 
         /// Nil while `blocker` holds, or while the CLI or a person is being asked.
         mutating func whenQuiet(blocker: String?) -> Action? {
@@ -186,11 +183,12 @@ enum SessionMove {
         let message: String
     }
 
-    /// The CLI grants trust to the whole repository at `trustRoot`, worktrees included.
+    /// With a `trustRoot` the CLI grants the whole repository, worktrees included.
     static func trustPrompt(directory: String, trustRoot: String?, sessionTitle: String) -> TrustPrompt {
-        TrustPrompt(
+        let scope = trustRoot.map { "the repository at \($0), worktrees included," } ?? "\(directory) and everything in it,"
+        return TrustPrompt(
             header: "Move “\(sessionTitle)” to \((directory as NSString).lastPathComponent)?",
-            message: "Claude Code will trust \(trustRoot ?? directory), with its subfolders and worktrees, and may run their hooks and MCP servers.")
+            message: "Claude Code will trust \(scope) and may run its hooks and MCP servers.")
     }
 
     /// Only the Move button, pressed, is a yes. A failed read never is.

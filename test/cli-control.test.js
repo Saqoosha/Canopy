@@ -140,18 +140,6 @@ test("reports an error for a CLI killed by a signal", () => {
   assert.strictEqual(child.stdout.listenerCount("data"), 0);
 });
 
-test("gives up when the CLI never answers", async () => {
-  const control = freshControl();
-  const child = runningCli(control);
-  const results = [];
-  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, (result) => results.push(result), 10);
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.strictEqual(results.length, 1);
-  assert.ok(results[0].error);
-  assert.strictEqual(child.stdout.listenerCount("data"), 0);
-  assert.strictEqual(child.listenerCount("exit"), 0);
-});
-
 test("reports a write that failed, once", () => {
   const control = freshControl();
   const child = runningCli(control);

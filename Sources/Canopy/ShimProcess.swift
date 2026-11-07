@@ -134,7 +134,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// while an upgrade waits, since the transcript lookup can scan the store.
     var upgradeBlocker: String? {
         if let reason = restartLosesWork { return reason }
-        if pendingMove?.isUnderWay == true { return "a folder move is under way" }
         if boundSession?.pendingInitialPrompt != nil { return "the first prompt has not been sent" }
         if mirrors.values.contains(where: { client in
             client.sink.map { Self.remoteClientBlocksUpgrade(isLocal: $0.isLocalClient, reattaches: $0.reattachesAfterRestart) } ?? false
@@ -4515,7 +4514,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             logger.error("[move] dropped an answer for a move no longer pending: \(String(describing: msg["error"] ?? msg["response"] ?? ""), privacy: .public)")
             return
         }
-        let reply = (msg["error"] as? String).map { SessionMove.CLIReply.cliError("the request did not reach it (\($0))") }
+        let reply = (msg["error"] as? String).map { SessionMove.CLIReply.cliError($0) }
             ?? SessionMove.parseReply(msg["response"] as? [String: Any] ?? [:])
         let here = GitWorktree.realPath(of: workingDirectory)
         let isHere: (String) -> Bool = { GitWorktree.realPath(of: URL(fileURLWithPath: $0)) == here }
@@ -7045,11 +7044,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// a comment that says how many callers there are goes stale on the next
     /// one added, and this one already had.)
     private func refreshWaitingState() {
+        let wasWaiting = boundSession?.isWaiting == true
         let waiting = !isWorking && !pendingBackgroundTaskIds.isEmpty
         boundSession?.isWaiting = waiting
         syncBackgroundIdleBackstop(waiting: waiting)
         // A background task can end with no `result` after it.
-        if pendingMove != nil, restartLosesWork == nil { moveWhenQuiet() }
+        if wasWaiting, !waiting, pendingMove != nil { moveWhenQuiet() }
     }
 
     /// Arm the idle backstop while a bg task is pending and Claude is idle,

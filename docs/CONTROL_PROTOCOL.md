@@ -192,8 +192,8 @@ the GUI was told, not that the pane attached.
 
 Local clients only. Moves a running session to another folder on this Mac once nothing runs in
 it. Params: `key` or `sessionId`, and `path`, an existing folder as an absolute path. A session in
-a worktree is refused. A second move replaces one that has not started, and is refused while
-one is under way. The reply is
+a worktree or on an SSH remote is refused. A second move replaces one that has not started, and
+is refused while one is under way or approved. The reply is
 `{"status": "queued"}`: the move happens later. Once it has, the row's `cwd` is the folder as the
 CLI resolved it (`/private/tmp/x` for `/tmp/x`), and its `moveCount` has risen. `moveCount` counts
 moves since this daemon opened the session, and is absent while 0.

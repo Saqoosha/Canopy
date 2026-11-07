@@ -5,9 +5,6 @@
 
 const { StringDecoder } = require("node:string_decoder");
 
-// `set_cwd` answered in about 0.2 s (measured); this long means no answer is coming.
-const ANSWER_TIMEOUT_MS = 30000;
-
 let cliChild = null;
 
 // Only the CLI spawn carries `--input-format`; git, ripgrep and MCP do not.
@@ -26,7 +23,7 @@ function isRunning(child) {
     && child.stdin && !child.stdin.destroyed && child.stdout);
 }
 
-function sendSetCwd({ requestId, path, trustedDirectory }, write, timeoutMs = ANSWER_TIMEOUT_MS) {
+function sendSetCwd({ requestId, path, trustedDirectory }, write) {
   const child = cliChild;
   if (!isRunning(child)) {
     write({ type: "set_cwd_result", requestId, error: "no running CLI" });
@@ -38,11 +35,9 @@ function sendSetCwd({ requestId, path, trustedDirectory }, write, timeoutMs = AN
   // Where the last search for a newline stopped: one long line arrives in many chunks.
   let scanned = 0;
   let finished = false;
-  let timer = null;
   const finish = (fields) => {
     if (finished) return;
     finished = true;
-    clearTimeout(timer);
     child.stdout.off("data", onData);
     child.off("exit", onExit);
     write({ type: "set_cwd_result", requestId, ...fields });
@@ -69,8 +64,6 @@ function sendSetCwd({ requestId, path, trustedDirectory }, write, timeoutMs = AN
   // spawn the extension would not be reading yet.
   child.stdout.on("data", onData);
   child.on("exit", onExit);
-  timer = setTimeout(() => finish({ error: "no answer" }), timeoutMs);
-  timer.unref?.();
   const request = { subtype: "set_cwd", path };
   if (trustedDirectory) {
     request.trust_accepted = true;
