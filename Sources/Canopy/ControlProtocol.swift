@@ -334,6 +334,8 @@ enum ControlProtocol {
         let messageCount: Int
         let permissionMode: String
         let accountId: String?
+        /// Moves since this daemon opened the session; absent on the wire while 0.
+        let moveCount: Int
 
         var wire: [String: Any] {
             var dict: [String: Any] = [
@@ -343,12 +345,13 @@ enum ControlProtocol {
             ]
             if let key { dict["key"] = key }
             if let accountId { dict["accountId"] = accountId }
+            if moveCount > 0 { dict["moveCount"] = moveCount }
             return dict
         }
 
         init(key: String?, resumeId: String, title: String, project: String, cwd: String, state: String,
              running: Bool, clients: Int, lastActiveAt: Double, model: String, messageCount: Int,
-             permissionMode: String, accountId: String?) {
+             permissionMode: String, accountId: String?, moveCount: Int = 0) {
             self.key = key
             self.resumeId = resumeId
             self.title = title
@@ -362,6 +365,7 @@ enum ControlProtocol {
             self.messageCount = messageCount
             self.permissionMode = permissionMode
             self.accountId = accountId
+            self.moveCount = moveCount
         }
 
         init?(wire: [String: Any]) {
@@ -373,7 +377,7 @@ enum ControlProtocol {
                       lastActiveAt: (wire["lastActiveAt"] as? NSNumber)?.doubleValue ?? 0,
                       model: wire["model"] as? String ?? "", messageCount: wire["messageCount"] as? Int ?? 0,
                       permissionMode: wire["permissionMode"] as? String ?? "",
-                      accountId: wire["accountId"] as? String)
+                      accountId: wire["accountId"] as? String, moveCount: wire["moveCount"] as? Int ?? 0)
         }
     }
 

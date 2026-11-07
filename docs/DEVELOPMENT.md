@@ -311,6 +311,7 @@ Every file under `test/` must appear in one of `CI_TEST_FILES`, `EXCLUDED_TEST_F
 | `stubs.js` | Proxy-based unknown API detection, module assembly |
 | `cjk-emphasis.js`, `cjk-emphasis-stream.js` | Repair of CJK bold markup in the outgoing stream |
 | `keychain-login-guard.js` | Reports a damaged Keychain login as logged out |
+| `cli-control.js` | Writes `set_cwd` to the CLI's stdin, for moving a session |
 
 ### Debugging the shim
 

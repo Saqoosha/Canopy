@@ -2666,6 +2666,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Set when the mod left the worktree ahead of a `git worktree remove`, or
     /// when the spawn folder is gone and the transcript is filed in a checkout.
     private var checkoutAfterRemoval: URL?
+    /// Asked for and not finished (`requestMove`). Its rules live in `SessionMove.Latch`.
+    private var pendingMove: SessionMove.Latch?
 
     @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, claudeAccount: ClaudeAccount? = nil, resumeIdIsExistingTranscript: Bool) {
@@ -4336,6 +4338,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "hooks/register.ts",
         "skills/find-session/SKILL.md",
         "skills/find-session/find_sessions.py",
+        "skills/move-session/SKILL.md",
         "bin/canopyctl",
     ]
 
@@ -4469,6 +4472,106 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
+    /// Why this session cannot move to `path`, or nil.
+    func moveRefusal(to path: String) async -> String? {
+        let directory = workingDirectory
+        let logPath = sessionJSONLPath()
+        let inWorktree = remoteHost == nil ? await Task.detached {
+            SessionMove.isInWorktree(jsonlPath: logPath, workingDirectory: directory)
+        }.value : false
+        return SessionMove.refusal(isRemote: remoteHost != nil, isInWorktree: inWorktree, path: path) {
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: $0, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+    }
+
+    /// Usually asked from inside a turn, so it waits for the turn to end. False while
+    /// another move is under way: replacing it could drop one the CLI has made.
+    func requestMove(to path: String) -> Bool {
+        if pendingMove?.isUnderWay == true { return false }
+        pendingMove = SessionMove.Latch(path: path)
+        moveWhenQuiet()
+        return true
+    }
+
+    /// `set_cwd` and the restart both wait for a moment with nothing to lose, as
+    /// `moveToCheckoutWhenQuiet` does. While `restartLosesWork` holds, the next `result`
+    /// or a cleared background task tries again.
+    private func moveWhenQuiet(after delay: TimeInterval = 1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.pendingMove != nil else { return }
+            let blocker = self.restartLosesWork
+            guard let action = self.pendingMove?.whenQuiet(blocker: blocker) else {
+                if let blocker { logger.notice("[move] waiting (\(blocker, privacy: .public))") }
+                return
+            }
+            self.perform(action)
+        }
+    }
+
+    private func handleMoveResult(_ msg: [String: Any]) {
+        guard let id = pendingMove?.id, msg["requestId"] as? String == id else {
+            logger.error("[move] dropped an answer for a move no longer pending: \(String(describing: msg["error"] ?? msg["response"] ?? ""), privacy: .public)")
+            return
+        }
+        let reply = (msg["error"] as? String).map { SessionMove.CLIReply.cliError($0) }
+            ?? SessionMove.parseReply(msg["response"] as? [String: Any] ?? [:])
+        let here = GitWorktree.realPath(of: workingDirectory)
+        let isHere: (String) -> Bool = { GitWorktree.realPath(of: URL(fileURLWithPath: $0)) == here }
+        guard let action = pendingMove?.answered(reply, isCurrentFolder: isHere) else { return }
+        perform(action)
+    }
+
+    private func perform(_ action: SessionMove.Action) {
+        guard let move = pendingMove else { return }
+        switch action {
+        case .send(let requestId, let path, let trustedDirectory):
+            var message: [String: Any] = ["type": "set_cwd", "requestId": requestId, "path": path]
+            if let trustedDirectory { message["trustedDirectory"] = trustedDirectory }
+            sendToShim(message)
+        case .record(let directory):
+            // Recorded now, so a restart for any other reason also starts there.
+            NotificationCenter.default.post(name: Self.sessionMovedNotification, object: self,
+                                            userInfo: [Self.movedToKey: directory])
+            moveWhenQuiet()
+        case .restart:
+            pendingMove = nil
+            NotificationCenter.default.post(name: Self.sessionMoveRestartNotification, object: self)
+        case .askTrust(let directory, let trustRoot):
+            askMoveTrust(moveId: move.id, directory: directory, trustRoot: trustRoot)
+        case .wait(let delay):
+            if move.busyRetries > 0, delay > 0 {
+                logger.notice("[move] the CLI is busy; retry \(move.busyRetries, privacy: .public)")
+            }
+            moveWhenQuiet(after: delay)
+        case .fail(let reason):
+            failMove(reason)
+        case .done:
+            pendingMove = nil
+            logger.notice("[move] nothing to move")
+        }
+    }
+
+    private func askMoveTrust(moveId: String, directory: String, trustRoot: String?) {
+        let title = boundSession?.title ?? "This session"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let answer = SessionMove.askTrust(directory: directory, trustRoot: trustRoot, sessionTitle: title)
+            DispatchQueue.main.async {
+                guard let self, self.pendingMove?.id == moveId else {
+                    logger.error("[move] a trust answer arrived for a move no longer pending")
+                    return
+                }
+                guard let action = self.pendingMove?.trustAnswered(answer) else { return }
+                self.perform(action)
+            }
+        }
+    }
+
+    private func failMove(_ reason: String) {
+        pendingMove = nil
+        SessionMove.notifyFailure(sessionTitle: boundSession?.title ?? "The session", reason: reason)
+    }
+
     /// `upgradeBlocker`'s own-session half: what a restart now would drop.
     private var restartLosesWork: String? {
         if reaperInputs.isBusy { return "a turn, question or background task is running" }
@@ -4522,6 +4625,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// it or elsewhere. `SessionStore` moves the session there.
     static let worktreeRemovedNotification = Notification.Name("ShimProcess.worktreeRemoved")
     static let checkoutKey = "checkout"
+    /// Posted with the shim as `object` and the folder under `movedToKey` as soon as the CLI
+    /// has moved: `SessionStore` records it. `sessionMoveRestartNotification` follows once a
+    /// restart would lose nothing.
+    static let sessionMovedNotification = Notification.Name("ShimProcess.sessionMoved")
+    static let sessionMoveRestartNotification = Notification.Name("ShimProcess.sessionMoveRestart")
+    static let movedToKey = "movedTo"
 
     /// True for any canopy-bridge `ui_log`, including ones whose text is garbage.
     nonisolated static func isBridgeFrame(_ ioMsg: [String: Any]) -> Bool {
@@ -4610,6 +4719,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             pendingMessages.removeAll()
 
+        case "set_cwd_result":
+            handleMoveResult(msg)
+
         case "webview_message":
             guard var innerMessage = msg["message"] as? [String: Any] else {
                 logger.warning("webview_message with no 'message' field")
@@ -4676,6 +4788,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     } else {
                         moveToCheckoutWhenQuiet()
                     }
+                }
+                if pendingMove != nil,
+                   nested["type"] as? String == "io_message",
+                   (nested["message"] as? [String: Any])?["type"] as? String == "result"
+                {
+                    moveWhenQuiet()
                 }
             }
             // Must run ahead of every tracker below: the recap turn reports
@@ -6860,6 +6978,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         pendingBackgroundTaskIds.removeAll()
         bgTaskIdMap.removeAll()
         checkoutAfterRemoval = nil
+        pendingMove = nil
         // Benign today — the flag's only setter is always followed by an
         // apply that clears it first thing — but it is the one piece of this
         // subsystem's state the reset would otherwise skip, and "benign"
@@ -6925,9 +7044,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// a comment that says how many callers there are goes stale on the next
     /// one added, and this one already had.)
     private func refreshWaitingState() {
+        let wasWaiting = boundSession?.isWaiting == true
         let waiting = !isWorking && !pendingBackgroundTaskIds.isEmpty
         boundSession?.isWaiting = waiting
         syncBackgroundIdleBackstop(waiting: waiting)
+        // A background task can end with no `result` after it.
+        if wasWaiting, !waiting, pendingMove != nil { moveWhenQuiet() }
     }
 
     /// Arm the idle backstop while a bg task is pending and Claude is idle,

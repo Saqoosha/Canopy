@@ -42,7 +42,7 @@ jobs:
     # is not a test at all goes in NON_TEST_FILES. Three visibly different
     # acts rather than one append that could mean any of them.
     env:
-      CI_TEST_FILES: "test/shim-unit.test.js test/shim-wiring.test.js test/cjk-emphasis.test.js test/cjk-emphasis-stream.test.js test/cjk-emphasis-wiring.test.js"
+      CI_TEST_FILES: "test/shim-unit.test.js test/shim-wiring.test.js test/cli-control.test.js test/cjk-emphasis.test.js test/cjk-emphasis-stream.test.js test/cjk-emphasis-wiring.test.js"
       EXCLUDED_TEST_FILES: "test/shim-integration.test.js"
       # Not a test: a harness, imported only by the integration suite — so
       # nothing this job runs touches it. Node WOULD still discover it (see
@@ -223,7 +223,7 @@ jobs:
       # raising it much further would start eating into what it detects.
       - name: Run shim unit tests
         env:
-          EXPECTED_TESTS: 198
+          EXPECTED_TESTS: 209
           MAX_DURATION_MS: 30000
         run: |
           # `set -f` here for the same reason the assert step has it, and
@@ -304,7 +304,7 @@ jobs:
       # floor is here because node exits 0 over a file with no tests, as in the shim job.
       - name: Run the session search tests
         env:
-          EXPECTED_SEARCH_TESTS: 78
+          EXPECTED_SEARCH_TESTS: 80
         run: |
           set -o pipefail
           brew install ripgrep
@@ -463,7 +463,7 @@ jobs:
       - name: Run logic probe
         timeout-minutes: 5
         env:
-          EXPECTED_ASSERTIONS: 2409
+          EXPECTED_ASSERTIONS: 2472
         run: |
           set -o pipefail
           status=0

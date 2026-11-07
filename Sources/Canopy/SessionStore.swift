@@ -846,11 +846,26 @@ final class SessionStore {
                   let checkout = note.userInfo?[ShimProcess.checkoutKey] as? URL else { return }
             MainActor.assumeIsolated { self?.moveToCheckout(shim: shim, checkout: checkout) }
         }
+        sessionMoveObserver = NotificationCenter.default.addObserver(
+            forName: ShimProcess.sessionMovedNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let shim = note.object as? ShimProcess,
+                  let directory = note.userInfo?[ShimProcess.movedToKey] as? URL else { return }
+            MainActor.assumeIsolated { self?.noteMove(shim: shim, to: directory) }
+        }
+        sessionMoveRestartObserver = NotificationCenter.default.addObserver(
+            forName: ShimProcess.sessionMoveRestartNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let shim = note.object as? ShimProcess else { return }
+            MainActor.assumeIsolated { self?.restartAfterMove(shim: shim) }
+        }
     }
 
     @ObservationIgnored private var worktreeRemovalObserver: (any NSObjectProtocol)?
+    @ObservationIgnored private var sessionMoveObserver: (any NSObjectProtocol)?
+    @ObservationIgnored private var sessionMoveRestartObserver: (any NSObjectProtocol)?
 
-    /// Whether the GUI should take the daemon's new cwd for a session: only the
+    /// Whether the GUI should take the daemon's new cwd when no move was counted: only the
     /// `moveToCheckout` case, a folder that is gone replaced by one that exists.
     /// Any other difference — a path spelled two ways — must not restart a pane.
     nonisolated static func followsCheckoutMove(
@@ -884,11 +899,42 @@ final class SessionStore {
         logger.notice("moveToCheckout id=\(session.id.uuidString, privacy: .public)")
         session.origin = .local(checkout)
         session.project = GitWorktree.projectDisplayName(for: checkout)
+        restartHere(session, caller: "moveToCheckout")
+    }
+
+    /// The CLI has moved (`ShimProcess.requestMove`). Recorded before the restart, so a
+    /// restart for any reason starts in the new folder.
+    func noteMove(shim: ShimProcess, to directory: URL) {
+        guard let session = openSessions.first(where: { $0.shim === shim }), case .local = session.origin else {
+            logger.error("noteMove: the CLI moved to \(directory.path, privacy: .public), but no local session owns its shim")
+            return
+        }
+        logger.notice("noteMove id=\(session.id.uuidString, privacy: .public)")
+        session.origin = .local(directory)
+        session.project = GitWorktree.projectDisplayName(for: directory)
+        session.moveCount += 1
+    }
+
+    /// Without it a webview reload hung on `Loading...` after the CLI moved (measured).
+    func restartAfterMove(shim: ShimProcess) {
+        guard let session = openSessions.first(where: { $0.shim === shim }) else {
+            logger.error("restartAfterMove: no session owns this shim any more")
+            return
+        }
+        if !restartHere(session, caller: "restartAfterMove") {
+            SessionMove.notifyFailure(sessionTitle: session.title,
+                                      reason: "It moved, but did not start again in \(session.origin.workingDirectory.lastPathComponent).")
+        }
+    }
+
+    /// False when a session this process hosts did not start again.
+    @discardableResult
+    private func restartHere(_ session: OpenSession, caller: String) -> Bool {
         let headless = session.runsShimHere
         restartSession(session.id, notifyDaemon: false, mirrorsReattach: headless)
-        if headless, startHeadlessSession(resumeId: session.resumeId) == nil {
-            logger.error("moveToCheckout: the session did not restart")
-        }
+        guard headless, startHeadlessSession(resumeId: session.resumeId) == nil else { return true }
+        logger.error("\(caller, privacy: .public): session \(session.id.uuidString, privacy: .public) did not restart")
+        return false
     }
 
     // No deinit cleanup: SessionStore lives for the app's lifetime
@@ -1665,9 +1711,12 @@ final class SessionStore {
             if let mode = PermissionMode(rawValue: row.permissionMode), mode != session.permissionMode {
                 session.permissionMode = mode
             }
+            // A new daemon counts from 0 again, so only a rise is a move.
+            let moved = row.moveCount > session.moveCount
+            if row.moveCount != session.moveCount { session.moveCount = row.moveCount }
             if case .local(let dir) = session.origin,
-               Self.followsCheckoutMove(current: dir, rowCwd: row.cwd) {
-                logger.notice("applyDaemonSessions: following a removed worktree to its checkout")
+               moved ? !row.cwd.isEmpty && row.cwd != dir.path : Self.followsCheckoutMove(current: dir, rowCwd: row.cwd) {
+                logger.notice("applyDaemonSessions: following the session to \(moved ? "its new folder" : "its checkout", privacy: .public)")
                 session.origin = .local(URL(fileURLWithPath: row.cwd))
                 session.project = row.project
                 // An announcing daemon's `session_restarting` re-attaches a live pane; a dropped one has no bridge to hear it.
@@ -1686,6 +1735,7 @@ final class SessionStore {
                                       claudeAccount: row.accountId.flatMap { ClaudeAccountStore.account(id: $0) },
                                       resumeIdIsExistingTranscript: true)
             session.daemonKey = key
+            session.moveCount = row.moveCount
             openSessions.append(session)
         }
         for row in plan.adds {

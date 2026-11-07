@@ -114,6 +114,9 @@ final class OpenSession: Identifiable, Hashable {
     /// directory's `lastPathComponent`, but a teleport may set it to the
     /// remote repo name (e.g. "owner/name") if the local cwd is ambiguous.
     var project: String
+    /// Moves the daemon recorded (`SessionStore.noteMove`); the GUI copies the row's value.
+    /// The GUI follows a rise, not any difference in `cwd`, which can be one path spelled two ways.
+    var moveCount = 0
 
     /// The subtitle shown by the sidebar row and the pane header. Prefers the
     /// branch the VCS actually reports — `statusBar.gitBranch`, refreshed after

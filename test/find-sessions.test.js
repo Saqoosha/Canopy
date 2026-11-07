@@ -872,4 +872,19 @@ describe("canopyctl show", () => {
     const [request] = await askDaemon(["show", ID, "--machine", "PEER-1"]);
     assert.deepEqual(request.params, { sessionId: ID, machineId: "PEER-1" });
   });
+
+  test("move sends the session and the folder, and nothing about trust", async () => {
+    const [request] = await askDaemon(["move", "--session-id", ID, "--path", "/repos/project"]);
+    assert.equal(request.verb, "move_session");
+    assert.deepEqual(request.params, { sessionId: ID, path: "/repos/project" });
+  });
+
+  test("the move-session skill's command parses", () => {
+    const skillFile = path.join(path.dirname(SCRIPT), "..", "move-session", "SKILL.md");
+    const command = fs.readFileSync(skillFile, "utf8").split("\n").find((line) => line.includes("/bin/canopyctl"));
+    const args = command.trim().replace('python3 "${CLAUDE_SKILL_DIR}/../../bin/canopyctl" ', "").split(" ");
+    const result = spawnSync(PYTHON, [CANOPYCTL, "--socket", "/nonexistent.sock", ...args], { encoding: "utf8", timeout: 20000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /^canopyctl: no answer from Canopy/);
+  });
 });

@@ -5230,9 +5230,11 @@ enum SidebarLogicProbe {
             try? "older text".write(to: claudeMd, atomically: true, encoding: .utf8)
             NoFolder.prepare()
             record("NoFolder.prepare: replaces a CLAUDE.md from another version", written() == NoFolder.instructions)
-            record("NoFolder.instructions: names a skill that ships",
-                   NoFolder.instructions.contains("canopy-bridge:find-session")
-                   && ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md"))
+            for skill in ["find-session", "move-session"] {
+                record("NoFolder.instructions: names \(skill), which ships",
+                       NoFolder.instructions.contains("canopy-bridge:\(skill)")
+                       && ShimProcess.bridgeModFiles.contains("skills/\(skill)/SKILL.md"))
+            }
             // Past transcripts recorded this path as their cwd.
             record("NoFolder.directory: stays where past sessions ran",
                    NoFolder.directory.path.hasSuffix("/Library/Application Support/Canopy/no-folder"))
@@ -5308,6 +5310,209 @@ enum SidebarLogicProbe {
             _ = plainNew.openInNewPane(open.id)
             plainNew.openLauncherInFocusedPane()
             record("Cmd+N does not ask for No folder", !plainNew.launcherWantsNoFolder)
+        }
+
+        // --- Session move ---
+        do {
+            // The `response` field of the CLI's `control_response`, as it arrives.
+            func cli(_ answer: [String: Any]) -> [String: Any] {
+                ["subtype": "success", "request_id": "canopy-set-cwd-r", "response": answer]
+            }
+            record("move: ok",
+                   SessionMove.parseReply(cli(["status": "ok", "cwd": "/p", "changed": true, "transcript_relocated": true]))
+                       == .ok(cwd: "/p", changed: true))
+            record("move: needs trust",
+                   SessionMove.parseReply(cli(["status": "needs_trust", "directory": "/p", "trust_root": "/r"]))
+                       == .needsTrust(directory: "/p", trustRoot: "/r"))
+            record("move: needs trust with no root",
+                   SessionMove.parseReply(cli(["status": "needs_trust", "directory": "/p"])) == .needsTrust(directory: "/p", trustRoot: nil))
+            record("move: busy is its own answer",
+                   SessionMove.parseReply(cli(["status": "rejected", "reason": "busy"])) == .busy)
+            record("move: a rejection keeps its reason and message",
+                   SessionMove.parseReply(cli(["status": "rejected", "reason": "blocked_by_rule", "message": "Denied by a rule."]))
+                       == .rejected(reason: "blocked_by_rule", message: "Denied by a rule."))
+            record("move: no status", SessionMove.parseReply(cli([:])) == .malformed)
+            record("move: the CLI's error frame keeps its text",
+                   SessionMove.parseReply(["subtype": "error", "request_id": "r", "error": "relocation failed"]) == .cliError("relocation failed"))
+
+            let target = URL(fileURLWithPath: "/p", isDirectory: true)
+            let here: (String) -> Bool = { _ in true }
+            let elsewhere: (String) -> Bool = { _ in false }
+            func failed(_ next: SessionMove.Next) -> String? {
+                if case .fail(let message) = next { return message }
+                return nil
+            }
+            func next(_ reply: SessionMove.CLIReply, retries: Int = 0, isCurrentFolder: (String) -> Bool = { _ in true }) -> SessionMove.Next {
+                SessionMove.next(after: reply, retries: retries, isCurrentFolder: isCurrentFolder)
+            }
+            record("move: a changed folder restarts", next(.ok(cwd: "/p", changed: true)) == .restart(target))
+            record("move: the folder the shim is in does not restart",
+                   next(.ok(cwd: "/p", changed: false), isCurrentFolder: here) == .stay)
+            record("move: unchanged for the CLI but not where the shim is restarts",
+                   next(.ok(cwd: "/p", changed: false), isCurrentFolder: elsewhere) == .restart(target))
+            record("move: busy retries up to the limit", next(.busy, retries: SessionMove.busyRetryLimit - 1) == .retry)
+            record("move: busy past the limit gives up", failed(next(.busy, retries: SessionMove.busyRetryLimit)) != nil)
+            record("move: needing trust asks",
+                   next(.needsTrust(directory: "/p", trustRoot: "/r")) == .askTrust(directory: "/p", trustRoot: "/r"))
+            record("move: a rejection says the CLI's message",
+                   failed(next(.rejected(reason: "blocked_by_rule", message: "Denied by a rule."))) == "Denied by a rule.")
+            record("move: a rejection with no message names its reason",
+                   failed(next(.rejected(reason: "unsafe_path", message: nil)))?.contains("unsafe_path") == true)
+            record("move: the CLI's error reaches the notice",
+                   failed(next(.cliError("relocation failed")))?.contains("relocation failed") == true)
+            record("move: an unreadable answer fails", failed(next(.malformed)) != nil)
+
+            // The latch is what the shim sends, records and restarts.
+            func isFail(_ action: SessionMove.Action?) -> Bool {
+                if case .fail = action { return true }
+                return false
+            }
+            var latch = SessionMove.Latch(path: "/p", id: "m1")
+            record("latch: nothing goes out while work runs", latch.whenQuiet(blocker: "a turn") == nil)
+            record("latch: a quiet moment sends set_cwd with no trust",
+                   latch.whenQuiet(blocker: nil) == .send(requestId: "m1", path: "/p", trustedDirectory: nil))
+            record("latch: one request at a time", latch.whenQuiet(blocker: nil) == nil && latch.isUnderWay)
+            record("latch: asking for trust sends nothing by itself",
+                   latch.answered(.needsTrust(directory: "/p", trustRoot: "/"), isCurrentFolder: elsewhere)
+                       == .askTrust(directory: "/p", trustRoot: "/")
+                       && latch.whenQuiet(blocker: nil) == nil)
+            var declined = latch
+            record("latch: Cancel ends the move", declined.trustAnswered(.declined) == .done)
+            var unanswered = latch
+            record("latch: no answer fails the move", isFail(unanswered.trustAnswered(.unanswered)))
+            var notShown = latch
+            record("latch: an alert that never showed fails the move", isFail(notShown.trustAnswered(.couldNotAsk)))
+            record("latch: an approved move stays under way",
+                   latch.trustAnswered(.accepted) == .wait(0) && latch.isUnderWay)
+            record("latch: only Move sends trust, for the folder the CLI asked about",
+                   latch.whenQuiet(blocker: nil) == .send(requestId: "m1", path: "/p", trustedDirectory: "/p"))
+            record("latch: a CLI that moved is recorded at once",
+                   latch.answered(.ok(cwd: "/p", changed: true), isCurrentFolder: elsewhere) == .record(target))
+            record("latch: the restart waits for quiet too", latch.whenQuiet(blocker: "a background task") == nil)
+            record("latch: then restarts", latch.whenQuiet(blocker: nil) == .restart)
+            record("latch: a moved latch is still under way", latch.isUnderWay)
+            var busy = SessionMove.Latch(path: "/p", id: "m2")
+            _ = busy.whenQuiet(blocker: nil)
+            record("latch: busy waits, then sends again",
+                   busy.answered(.busy, isCurrentFolder: here) == .wait(SessionMove.busyRetryInterval)
+                       && !busy.isUnderWay
+                       && busy.whenQuiet(blocker: nil) == .send(requestId: "m2", path: "/p", trustedDirectory: nil))
+            var early = SessionMove.Latch(path: "/p", id: "m3")
+            record("latch: an answer before anything was sent is ignored",
+                   early.answered(.ok(cwd: "/p", changed: true), isCurrentFolder: elsewhere) == nil)
+            record("latch: a trust answer nobody asked for is ignored", early.trustAnswered(.accepted) == nil)
+
+            let isFolder: (String) -> Bool = { $0 == "/real" }
+            func refusal(remote: Bool = false, worktree: Bool = false, path: String = "/real") -> String? {
+                SessionMove.refusal(isRemote: remote, isInWorktree: worktree, path: path, isDirectory: isFolder)
+            }
+            record("move: a folder is fine", refusal() == nil)
+            record("move: an SSH remote session stays", refusal(remote: true) != nil)
+            record("move: a session in a worktree stays", refusal(worktree: true) != nil)
+            record("move: a relative path is refused, even one that names a folder",
+                   SessionMove.refusal(isRemote: false, isInWorktree: false, path: "real", isDirectory: { _ in true }) != nil)
+            record("move: a missing folder is refused", refusal(path: "/missing") != nil)
+
+            // Only the Move button, actually pressed, is a yes.
+            let moveButton = CFOptionFlags(kCFUserNotificationAlternateResponse)
+            let cancelButton = CFOptionFlags(kCFUserNotificationDefaultResponse)
+            let timedOut = CFOptionFlags(kCFUserNotificationCancelResponse)
+            let timeoutCode: Int32 = 268451843  // MACH_RCV_TIMED_OUT, measured
+            record("trust: Move accepts", SessionMove.trustAnswer(result: 0, flags: moveButton) == .accepted)
+            record("trust: Cancel declines", SessionMove.trustAnswer(result: 0, flags: cancelButton) == .declined)
+            record("trust: a timeout is no answer", SessionMove.trustAnswer(result: timeoutCode, flags: timedOut) == .unanswered)
+            record("trust: a timeout with no flags is no answer", SessionMove.trustAnswer(result: timeoutCode, flags: 0) == .unanswered)
+            record("trust: a failed read never accepts", SessionMove.trustAnswer(result: timeoutCode, flags: moveButton) == .unanswered)
+            record("trust: the cancel response is no answer", SessionMove.trustAnswer(result: 0, flags: timedOut) == .unanswered)
+            let prompt = SessionMove.trustPrompt(directory: "/r/p", trustRoot: nil, sessionTitle: "Door")
+            let rooted = SessionMove.trustPrompt(directory: "/r/p", trustRoot: "/r", sessionTitle: "Door")
+            record("trust: the alert names the session, the folder and what trusting it allows",
+                   prompt.header.contains("Door") && prompt.header.contains("p")
+                       && prompt.message.contains("/r/p") && prompt.message.contains("hooks"))
+            record("trust: the alert names the repository the CLI will trust",
+                   rooted.message.contains("repository at /r,") && !prompt.message.contains("repository"))
+            let alert = SessionMove.trustAlert(prompt)
+            record("trust: Move is the button trustAnswer accepts",
+                   alert[kCFUserNotificationAlternateButtonTitleKey] as? String == "Move"
+                       && SessionMove.trustAnswer(result: 0, flags: moveButton) == .accepted)
+            record("trust: Cancel is the default button",
+                   alert[kCFUserNotificationDefaultButtonTitleKey] as? String == "Cancel"
+                       && SessionMove.trustAnswer(result: 0, flags: cancelButton) == .declined)
+
+            func row(moveCount: Int) -> ControlProtocol.SessionRow {
+                .init(key: "K", resumeId: "r", title: "T", project: "p", cwd: "/p", state: "idle", running: true, clients: 1,
+                      lastActiveAt: 0, model: "", messageCount: 0, permissionMode: "default", accountId: nil, moveCount: moveCount)
+            }
+            record("move: the row carries the count", ControlProtocol.SessionRow(wire: row(moveCount: 2).wire)?.moveCount == 2)
+            var olderWire = row(moveCount: 2).wire
+            olderWire.removeValue(forKey: "moveCount")
+            record("move: a row from an older daemon counts 0", ControlProtocol.SessionRow(wire: olderWire)?.moveCount == 0)
+
+            var frames: [[String: Any]] = []
+            func refused(_ id: String) -> String? { frames.first { $0["id"] as? String == id }?["error"] as? String }
+            func moveRequest(_ id: String, _ params: [String: Any]) -> [String: Any] {
+                ["type": "request", "id": id, "verb": "move_session", "params": params]
+            }
+            let tcpPeer = ControlSession(store: SessionStore(), isLocal: false, allowBypass: { false }) { frames.append($0) }
+            tcpPeer.handle(moveRequest("tcp", ["sessionId": "x", "path": "/tmp"]))
+            tcpPeer.stop()
+            record("move: a TCP peer cannot ask", refused("tcp") == "local clients only")
+            let moveStore = SessionStore()
+            let idle = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "move-idle",
+                                   title: "T", project: "p", status: .live)
+            idle.moveCount = 2
+            moveStore._probeSeedOpenSessions([idle])
+            let localClient = ControlSession(store: moveStore, isLocal: true, allowBypass: { false }) { frames.append($0) }
+            localClient.handle(moveRequest("gone", ["sessionId": "nobody", "path": "/tmp"]))
+            record("move: an unknown session", refused("gone") == "no such session")
+            localClient.handle(moveRequest("nopath", ["sessionId": "move-idle"]))
+            record("move: a path is required", refused("nopath") == "path is required")
+            localClient.handle(moveRequest("noshim", ["sessionId": "move-idle", "path": "/tmp"]))
+            record("move: a session with no process cannot move", refused("noshim") == "session is not running")
+            localClient.handle(["type": "request", "id": "list", "verb": "list_sessions", "params": [:] as [String: Any]])
+            let listed = (frames.first { $0["id"] as? String == "list" }?["result"] as? [String: Any])?["sessions"] as? [[String: Any]]
+            record("move: the daemon's rows carry the count",
+                   listed?.first { $0["resumeId"] as? String == "move-idle" }?["moveCount"] as? Int == 2)
+            localClient.stop()
+
+            // The GUI's half: a rise in the count says a move happened, so a path spelled two ways restarts nothing.
+            OpenSession.localSessionsRunInDaemon = true
+            defer { OpenSession.localSessionsRunInDaemon = false }
+            func follow(rowCount: Int, rowCwd: String, announced: Bool = false, paned: Bool = true,
+                        startCount: Int = 0) -> (followed: Bool, restarted: Bool, count: Int) {
+                let store = SessionStore()
+                let s = OpenSession(origin: .local(URL(fileURLWithPath: "/from")), resumeId: "r", title: "T", project: "p",
+                                    resumeIdIsExistingTranscript: true)
+                s.daemonKey = "K"
+                s.hostAnnouncesSessionRestarts = announced
+                s.moveCount = startCount
+                store._probeSeedOpenSessions([s])
+                if paned { store.openInFocusedPane(s.id) }
+                let before = s.restartGeneration
+                store.applyDaemonSessions([.init(
+                    key: "K", resumeId: "r", title: "T", project: "moved", cwd: rowCwd, state: "idle", running: true, clients: 1,
+                    lastActiveAt: 0, model: "", messageCount: 0, permissionMode: "default", accountId: nil, moveCount: rowCount)])
+                return (s.origin.workingDirectory.path == rowCwd && s.project == "moved", s.restartGeneration != before, s.moveCount)
+            }
+            let moved = follow(rowCount: 1, rowCwd: "/to")
+            record("move: the GUI follows and re-attaches", moved.followed && moved.restarted && moved.count == 1)
+            let announcedMove = follow(rowCount: 1, rowCwd: "/to", announced: true)
+            record("move: an announcing daemon's pane leaves the re-attach to it", announcedMove.followed && !announcedMove.restarted)
+            let notPaned = follow(rowCount: 1, rowCwd: "/to", paned: false)
+            record("move: with no pane there is nothing to re-attach", notPaned.followed && !notPaned.restarted)
+            let spelled = follow(rowCount: 0, rowCwd: "/private/from")
+            record("move: another spelling with no move restarts nothing", !spelled.followed && !spelled.restarted)
+            let sameFolder = follow(rowCount: 1, rowCwd: "/from")
+            record("move: a count with the same folder only takes the count", !sameFolder.restarted && sameFolder.count == 1)
+            let newDaemon = follow(rowCount: 0, rowCwd: "/elsewhere", startCount: 2)
+            record("move: a lower count from a new daemon is taken without following",
+                   !newDaemon.followed && !newDaemon.restarted && newDaemon.count == 0)
+            let addStore = SessionStore()
+            addStore.applyDaemonSessions([.init(
+                key: "K9", resumeId: "r9", title: "T", project: "p", cwd: "/to", state: "idle", running: true, clients: 0,
+                lastActiveAt: 0, model: "", messageCount: 0, permissionMode: "default", accountId: nil, moveCount: 3)])
+            record("move: a session the GUI first hears of keeps its count",
+                   addStore.openSessions.first { $0.resumeId == "r9" }?.moveCount == 3)
         }
 
         // --- Open-session reorder (drag & drop) ---

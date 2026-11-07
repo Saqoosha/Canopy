@@ -104,6 +104,11 @@ if (process.env.CANOPY_CLI_CWD) {
 }
 
 const { writeStdout, startStdinReader } = require("./protocol.js");
+const { trackCliSpawn, sendSetCwd } = require("./cli-control.js");
+
+// Before the extension loads, so its CLI spawn is the one kept.
+trackCliSpawn(require("node:child_process"));
+
 const { createExtensionContext } = require("./context.js");
 const { createCommands } = require("./commands.js");
 const { createWorkspace, loadJson } = require("./workspace.js");
@@ -244,6 +249,8 @@ async function main() {
       webviewReady = true;
     } else if (msg.type === "notification_response") {
       window._handleNotificationResponse(msg.requestId, msg.buttonValue);
+    } else if (msg.type === "set_cwd") {
+      sendSetCwd(msg, writeStdout);
     }
   });
   stdinRl.on("close", () => {

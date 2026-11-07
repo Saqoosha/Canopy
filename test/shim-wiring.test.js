@@ -23,7 +23,7 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -186,6 +186,50 @@ function probeTelemetry({ canopySettings, workspaceSettings } = {}) {
         fs.rmSync(home, { recursive: true, force: true });
     }
 }
+
+test("a set_cwd message reaches the CLI, and its answer comes back", async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "canopy-setcwd-")));
+    const ext = path.join(dir, "ext");
+    fs.mkdirSync(ext);
+    const fakeCli = path.join(dir, "cli.js");
+    fs.writeFileSync(fakeCli, `
+        require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
+            const message = JSON.parse(line);
+            const inner = { status: "ok", cwd: message.request.path, changed: true };
+            const response = { subtype: "success", request_id: message.request_id, response: inner };
+            process.stdout.write(JSON.stringify({ type: "control_response", response }) + "\\n");
+        });`);
+    fs.writeFileSync(path.join(ext, "package.json"), JSON.stringify({ name: "p", version: "0.0.0", main: "./extension.js" }));
+    fs.writeFileSync(path.join(ext, "extension.js"), `
+        exports.activate = () => {
+            const cli = require("node:child_process").spawn(process.execPath, [${JSON.stringify(fakeCli)}, "--input-format", "stream-json"]);
+            cli.stdout.on("data", () => {});
+        };`);
+    // A shim started from inside Canopy would inherit its CANOPY_* settings.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("CANOPY_")));
+    const shim = spawn(process.execPath, [SHIM, "--extension-path", ext, "--cwd", dir, "--settings-path", path.join(dir, "settings.json")],
+        { env: { ...env, HOME: dir }, stdio: ["pipe", "pipe", "inherit"] });
+    try {
+        const result = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("no set_cwd_result")), 10000);
+            require("node:readline").createInterface({ input: shim.stdout }).on("line", (line) => {
+                const message = JSON.parse(line);
+                if (message.type === "ready") {
+                    shim.stdin.write(JSON.stringify({ type: "set_cwd", requestId: "r1", path: "/tmp/moved" }) + "\n");
+                } else if (message.type === "set_cwd_result") {
+                    clearTimeout(timer);
+                    resolve(message);
+                }
+            });
+        });
+        assert.equal(result.error, undefined);
+        assert.equal(result.requestId, "r1");
+        assert.deepEqual(result.response.response, { status: "ok", cwd: "/tmp/moved", changed: true });
+    } finally {
+        shim.kill();
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
 
 test("index.js leaves telemetry on when the setting is unset, and the change event is subscribable", () => {
     const probe = probeTelemetry();

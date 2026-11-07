@@ -188,6 +188,21 @@ Mac, or its folder is gone) or `no_gui` (no GUI is subscribed). The daemon passe
 as a `show_session` frame on the GUI's subscribed connection, so for another Mac `shown` means
 the GUI was told, not that the pane attached.
 
+### `move_session`
+
+Local clients only. Moves a running session to another folder on this Mac once nothing runs in
+it. Params: `key` or `sessionId`, and `path`, an existing folder as an absolute path. A session in
+a worktree or on an SSH remote is refused. A second move replaces one that has not started, and
+is refused while one is under way or approved. The reply is
+`{"status": "queued"}`: the move happens later. Once it has, the row's `cwd` is the folder as the
+CLI resolved it (`/private/tmp/x` for `/tmp/x`), and its `moveCount` has risen. `moveCount` counts
+moves since this daemon opened the session, and is absent while 0.
+
+It takes no trust argument. For a folder the CLI does not trust yet, the daemon raises a system
+alert itself, and only Move pressed there lets the move go on, so this socket cannot approve a
+folder. The CLI's own trust file is outside Canopy's reach. A failure after `queued` raises a
+system notice on this Mac.
+
 ### `send_message`
 
 Puts text on a live session through the same queue the phone uses
