@@ -437,7 +437,6 @@ struct WebViewContainer: NSViewRepresentable {
             (ImagePreviewScript.javascript, true),
             (InputWidthProbe.javascript, false),
             (ScrollPreserveScript.javascript, false),
-            (RecapScript.javascript, false),
         ]
     }
 

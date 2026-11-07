@@ -184,7 +184,7 @@ struct SessionEvent: Codable, Equatable, Sendable {
     ///   "sent" record and the streamed event are one thing and draw one.
     ///   Matched on text rather than on the injected frame's `uuid` because
     ///   whether the echo preserves that field is unmeasured; text is what
-    ///   `isKeepAliveEcho` and `isRecapEcho` already match on.
+    ///   `isKeepAliveEcho` already matches on.
     static func events(from message: [String: Any],
                        sessionId: String,
                        resumeId: String?,

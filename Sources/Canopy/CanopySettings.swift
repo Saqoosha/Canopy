@@ -29,13 +29,6 @@ final class CanopySettings {
     var respectGitIgnore: Bool = true {
         didSet { save() }
     }
-    /// Generate a "what were we doing" recap for idle sessions while Canopy
-    /// sits in the background (see `RecapCoordinator`). Mirrors the CLI's
-    /// `awaySummaryEnabled` / `/config` → `recap` preference. Costs one
-    /// small model call per session per return, so it's user-disableable.
-    var recapEnabled: Bool = true {
-        didSet { save() }
-    }
     /// Keep each open pane's prompt cache warm while the user is away
     /// (see `KeepAliveCoordinator`).
     ///
@@ -235,7 +228,6 @@ final class CanopySettings {
         }
         set(\.allowDangerouslySkipPermissions, dict["claudeCode.allowDangerouslySkipPermissions"] as? Bool)
         set(\.respectGitIgnore, dict["claudeCode.respectGitIgnore"] as? Bool)
-        set(\.recapEnabled, dict["canopy.recapEnabled"] as? Bool)
         set(\.keepAliveEnabled, dict["canopy.keepAliveEnabled"] as? Bool)
         set(\.seedWorktreeArtifacts, dict["canopy.seedWorktreeArtifacts"] as? Bool)
         set(\.autoUpdateExtension, dict["canopy.autoUpdateExtension"] as? Bool)
@@ -273,9 +265,6 @@ final class CanopySettings {
         }
         if let git = dict["claudeCode.respectGitIgnore"] as? Bool {
             respectGitIgnore = git
-        }
-        if let recap = dict["canopy.recapEnabled"] as? Bool {
-            recapEnabled = recap
         }
         if let keepAlive = dict["canopy.keepAliveEnabled"] as? Bool {
             keepAliveEnabled = keepAlive
@@ -386,7 +375,6 @@ final class CanopySettings {
         dict["claudeCode.allowDangerouslySkipPermissions"] = allowDangerouslySkipPermissions
         dict["claudeCode.useCtrlEnterToSend"] = useCtrlEnterToSend
         dict["claudeCode.respectGitIgnore"] = respectGitIgnore
-        dict["canopy.recapEnabled"] = recapEnabled
         dict["canopy.keepAliveEnabled"] = keepAliveEnabled
         dict["canopy.seedWorktreeArtifacts"] = seedWorktreeArtifacts
         dict["canopy.autoUpdateExtension"] = autoUpdateExtension

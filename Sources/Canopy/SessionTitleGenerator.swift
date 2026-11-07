@@ -291,7 +291,7 @@ enum SessionTitleGenerator {
     /// The guard ladder that decides whether a prompt triggers a generation,
     /// split out of `ShimProcess` so it can be exercised.
     ///
-    /// This is the `RecapGate` treatment, and it is here for the same reason:
+    /// This is the `KeepAliveGate` treatment, and it is here for the same reason:
     /// the rules live on six private fields of a class the probe cannot reach,
     /// so every one of them could be deleted with the whole suite still green.
     /// Two of those rules ARE the PR's headline claims — a manual rename is

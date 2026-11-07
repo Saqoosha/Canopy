@@ -144,12 +144,6 @@ private struct GeneralSettingsTab: View {
             }
 
             Section {
-                Toggle("Show session recap after being away", isOn: $settings.recapEnabled)
-            } footer: {
-                SettingsFooter(text: "After Canopy sits in the background for 3 minutes, each visible pane summarises where its session left off. Costs a small model call per pane.")
-            }
-
-            Section {
                 Toggle("Prevent sleep while a session is working", isOn: $settings.preventSleepWhileWorking)
                 Toggle("Stay reachable remotely", isOn: $settings.stayReachableRemotely)
                     .disabled(!settings.preventSleepWhileWorking)

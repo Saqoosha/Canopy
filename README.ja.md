@@ -32,7 +32,6 @@
 - **Claude Code on the Web** — クラウドのセッションをローカルにテレポート
 - **カスタムモデルプロバイダ** — Anthropic 互換のエンドポイントを指定し、ティアごとにモデルをマッピング
 - **新しいペインで fork** — 会話を fork する（メッセージの fork ボタン、または Rewind → fork）と、元のペインの隣に fork 先が開き、fork したメッセージが編集できる状態で入力欄に入る。他の Mac のセッションでも同じ
-- **セッションリキャップ** — 離席から戻ると、その間に何が起きたかの要約が入力欄の上に出る
 - **キャッシュ保温** — アイドルなセッションに 55 分ごとに小さなターンを 1 回投げ、プロンプトキャッシュを切らさない
 - **使用量メーター** — サイドバーにアカウントごとの 5 時間 / 週のレート制限バー（色は消費のペースで決まる）、ステータスバーにペインごとのコンテキストメーター
 - **作業中はスリープしない** — セッションが作業中の間、蓋を閉じていても Mac は idle sleep しない。設定で、セッションが開いている間ずっと起こしておき、スマホから届くようにもできる。バッテリーが下限を切ったら sleep する
@@ -143,7 +142,6 @@ Sources/Canopy/
   SessionStore.swift           セッションの registry（デーモン側）とサイドバー・ペインの状態（GUI 側）
   SessionRestoreSnapshot.swift 「保存して終了」のスナップショットと復元ルール
   KeepAliveCoordinator.swift   プロンプトキャッシュ保温のクロックと配信
-  RecapCoordinator.swift       離席から戻ったときのリキャップ生成
   SessionTitleGenerator.swift  セッション外でのタイトル生成
   AppState.swift               状態管理、PermissionMode enum、画面遷移
   ShimProcess.swift            セッション 1 つ分の Node.js サブプロセス、NDJSON ブリッジ、トラッカー、クライアントへの配信

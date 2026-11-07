@@ -188,7 +188,7 @@ enum ClaudeSessionHistory {
     /// silently: launch restore (`sessionFileExists`) dropped the session as
     /// unresumable; `ShimProcess.jsonlPath` starved the background-task
     /// reconcile of the file it scans for completion markers and the
-    /// init-time `historicToolUseIds` / recap seed of the file it snapshots;
+    /// init-time `historicToolUseIds` of the file it snapshots;
     /// and `loadUserPrompts` seeded title generation from an empty history.
     ///
     /// The population is every entry under `~/.claude/projects`, wider than
@@ -773,7 +773,7 @@ enum ClaudeSessionHistory {
     /// 1,049 lose their first prompt here, 24 of them among the 31 that
     /// escalate in `extractMetadata`; the `/security-review` file that prompted
     /// the rewrite is not one of them, at 240,633 bytes it is read whole. Left
-    /// alone deliberately: this feeds recap and title generation rather than
+    /// alone deliberately: this feeds title generation rather than
     /// the sidebar's automated-session filter, so it is a different symptom
     /// and deserves its own change rather than a widening of that one.
     static func loadUserPrompts(atPath path: String) -> [String] {
