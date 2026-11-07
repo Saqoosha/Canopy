@@ -3,7 +3,7 @@ import Foundation
 /// Eligibility accounting for the prompt-cache keep-alive (see
 /// `KeepAliveCoordinator`).
 ///
-/// A pure value type for the same two reasons `RecapGate` is one: it is
+/// A pure value type for two reasons: it is
 /// exercisable from `_SidebarLogicProbe` without spawning a shim, and a
 /// mistake here is billed. The failure modes are asymmetric, which is why
 /// the gate is written as "why not" rather than "may I" — declining too
@@ -73,8 +73,7 @@ struct KeepAliveGate: Equatable {
     /// runs in-session with the full toolset, and this project has already
     /// measured that a counter-instruction in a user turn cannot beat a
     /// persona in the system prompt (see the title-generation learnings).
-    /// And a future session reading the JSONL, since unlike the recap fork
-    /// this turn is a REAL one and stays in the conversation context
+    /// And a future session reading the JSONL, since this turn is a REAL one and stays in the conversation context
     /// permanently.
     ///
     /// It is NOT written for a human scrolling the transcript — an earlier

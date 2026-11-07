@@ -143,7 +143,7 @@ final class MacroPadStatus {
     /// will repeat.
     ///
     /// Not `#if DEBUG`, unlike `CANOPY_RUN_LOGIC_PROBE`, so the shipped build
-    /// can be checked too — the same reasoning as `CANOPY_RECAP_DELAY_SECONDS`.
+    /// can be checked too.
     /// The cost is that a Release binary launched with the variable set shows
     /// a fiction until it is relaunched.
     static let demoEnvironmentKey = "CANOPY_MACROPAD_STATUS_DEMO"

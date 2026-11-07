@@ -3417,7 +3417,7 @@ enum SidebarLogicProbe {
             }
             for frame in [MirrorUIFrame.showContent(title: "a.swift", content: "let x = 1", startLine: 3, endLine: 5),
                           .showContent(title: "out", content: "", startLine: nil, endLine: nil),
-                          .recap("Where we were"), .recap(nil), .errorBanner("it's\nbroken"),
+                          .errorBanner("it's\nbroken"),
                           .alert(requestId: "r1", message: "Sure?", severity: "warning", buttons: ["Yes", "No"]),
                           .notify(title: "Canopy", body: "done")] {
                 record("ui frame: \(frame) round-trips through JSON", MirrorUIFrame(wire: throughJSON(frame.wire)) == frame)
@@ -3522,7 +3522,7 @@ enum SidebarLogicProbe {
                 record("settings (daemon): values are read from the file",
                        settings.rosterEnabled && settings.rosterEndpoint == "https://a.example" && !settings.keepAliveEnabled
                            && !settings.autoUpdateExtension)
-                settings.recapEnabled.toggle()
+                settings.respectGitIgnore.toggle()
                 record("settings (daemon): loading and changing a value writes nothing",
                        (try? Data(contentsOf: file)) == before)
                 write(#"{"canopy.rosterEnabled":false,"canopy.rosterEndpoint":"https://b.example","canopy.keepAliveEnabled":true,"canopy.machineDisplayName":"Studio","canopy.autoUpdateExtension":true}"#)
@@ -8574,7 +8574,7 @@ enum SidebarLogicProbe {
                    !store.isFocusedPaneSession(liveA.id) && !store.isFocusedPaneSession(liveB.id))
         }
 
-        // MARK: - Recap (see RecapGate / ShimProcess recap filters)
+        // MARK: - Recap replay filters (transcripts from before the recap was removed)
         //
         // These pin the two failure modes review found in the recap filters:
         // a substring match that destroyed any message merely QUOTING the
@@ -8661,39 +8661,11 @@ enum SidebarLogicProbe {
             record("strippingRecapFromReplay leaves an unrelated message untouched",
                    (ShimProcess.strippingRecapFromReplay(unrelated)["type"] as? String) == "io_message")
 
-            // --- RecapGate: the eligibility rules
-            var gate = RecapGate()
-            record("RecapGate declines a session with no turns",
-                   gate.ineligibilityReason(hasHistoricConversation: false) != nil)
-            record("RecapGate names the remote carve-out",
-                   gate.ineligibilityReason(hasHistoricConversation: false, isRemote: true)?
-                       .contains("remote") == true)
-            record("RecapGate permits a resumed session with history and no new turns",
-                   gate.ineligibilityReason(hasHistoricConversation: true) == nil)
-            gate.noteUserTurn()
-            record("RecapGate permits after one genuine turn",
-                   gate.ineligibilityReason(hasHistoricConversation: false) == nil)
-            gate.recapLanded()
-            record("RecapGate declines a repeat with no new turn",
-                   gate.ineligibilityReason(hasHistoricConversation: false) != nil)
-            record("RecapGate stays declined even with history seeded",
-                   gate.ineligibilityReason(hasHistoricConversation: true) != nil)
-            gate.noteUserTurn()
-            record("RecapGate permits again after a new turn",
-                   gate.ineligibilityReason(hasHistoricConversation: false) == nil)
-
-            // --- synthetic-capture rule: the `/cost`-captured-as-recap fix
-            record("recap claims a synthetic reply when nothing else was submitted",
-                   ShimProcess.mayCaptureSyntheticReply(contended: false))
-            record("recap yields the synthetic reply once the user has submitted",
-                   !ShimProcess.mayCaptureSyntheticReply(contended: true))
-
-            // --- RecapScript escaping: model output is hostile by default
-            record("RecapScript escapes quotes and backslashes",
-                   RecapScript.setCall(text: "he said \"hi\"\\done")
-                       .contains("\\\"hi\\\"") )
-            record("RecapScript escapes newlines rather than breaking the literal",
-                   !RecapScript.setCall(text: "line1\nline2").contains("\n"))
+            // --- JS string literals: model output is hostile by default
+            record("JSStringLiteral escapes quotes and backslashes",
+                   JSStringLiteral.make("he said \"hi\"\\done").contains("\\\"hi\\\""))
+            record("JSStringLiteral escapes newlines rather than breaking the literal",
+                   !JSStringLiteral.make("line1\nline2").contains("\n"))
         }
 
         // MARK: - Sleep guard (see SleepGuardPolicy)
@@ -8940,9 +8912,8 @@ enum SidebarLogicProbe {
             // level up, dropping the main-conversation guard, dropping the
             // `message_start` case. What the block still cannot pin is the
             // tracker's position in the pipeline (ahead of the keep-alive
-            // split, behind the recap drop), the `recapRequestInFlight`
-            // guard on the stamp, and the wiring from each reading to
-            // `noteApiActivity` / `noteObservedTTL` — all need a live shim.
+            // split) and the wiring from each reading to
+            // `noteApiActivity` / `noteObservedTTL` — both need a live shim.
             func frame(_ ioMsg: [String: Any]) -> [String: Any] {
                 ["type": "from-extension", "message": ["type": "io_message", "message": ioMsg] as [String: Any]]
             }
@@ -8958,7 +8929,7 @@ enum SidebarLogicProbe {
                    ShimProcess.cacheWindowReading(frame(["type": "assistant", "message": ["model": "claude-opus-5", "usage": ["cache_read_input_tokens": 204712]]])) == .usage(nil))
             record("cacheWindowReading ignores a subagent's assistant frame",
                    ShimProcess.cacheWindowReading(frame(["type": "assistant", "parent_tool_use_id": "toolu_1", "message": ["model": "claude-opus-5", "usage": usage(oneHour: 630, fiveMin: 0)]])) == nil)
-            record("cacheWindowReading ignores the recap fork's synthetic reply",
+            record("cacheWindowReading ignores a synthetic local-command reply",
                    ShimProcess.cacheWindowReading(frame(["type": "assistant", "message": ["model": "<synthetic>", "usage": usage(oneHour: 630, fiveMin: 0)]])) == nil)
             record("cacheWindowReading reads usage from message, not from the frame",
                    ShimProcess.cacheWindowReading(frame(["type": "assistant", "usage": usage(oneHour: 630, fiveMin: 0), "message": ["model": "claude-opus-5"]])) == nil)
@@ -9012,8 +8983,7 @@ enum SidebarLogicProbe {
 
             // --- isKeepAliveEcho: the swallow's only handle on "this turn
             // is ours". A keep-alive turn has an ordinary model id, so
-            // unlike the recap there is no `<synthetic>` tag to fall back
-            // on, and a miss here means the trackers count our turn as the
+            // there is no `<synthetic>` tag to fall back on, and a miss here means the trackers count our turn as the
             // user's (`isWorking`, a notification, an unread mark).
             func echoBlocks(_ text: String) -> [String: Any] {
                 ["type": "user", "message": [

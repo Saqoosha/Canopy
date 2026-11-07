@@ -143,7 +143,6 @@ Sources/Canopy/
   SessionStore.swift           セッションの registry（デーモン側）とサイドバー・ペインの状態（GUI 側）
   SessionRestoreSnapshot.swift 「保存して終了」のスナップショットと復元ルール
   KeepAliveCoordinator.swift   プロンプトキャッシュ保温のクロックと配信
-  RecapCoordinator.swift       離席から戻ったときのリキャップ生成
   SessionTitleGenerator.swift  セッション外でのタイトル生成
   AppState.swift               状態管理、PermissionMode enum、画面遷移
   ShimProcess.swift            セッション 1 つ分の Node.js サブプロセス、NDJSON ブリッジ、トラッカー、クライアントへの配信

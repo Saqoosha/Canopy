@@ -289,7 +289,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
 
         <rect x="660" y="336" width="300" height="92" rx="10" fill="#FFFFFF" stroke="#D3DDD7"/>
         <text x="676" y="362" class="t-title">コーディネータ群</text>
-        <text x="676" y="382" class="t-sub">keep-alive、recap、タイトル生成、</text>
+        <text x="676" y="382" class="t-sub">keep-alive、タイトル生成、</text>
         <text x="676" y="397" class="t-sub">背景タスクの照合、reaper、</text>
         <text x="676" y="412" class="t-sub">アップグレード確認、sleep guard</text>
 
@@ -412,7 +412,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <table>
         <thead><tr><th>接続</th><th>本数</th><th>最初の行</th><th>運ぶもの</th></tr></thead>
         <tbody>
-          <tr><td>control</td><td data-label="本数">クライアントごと、デーモンごとに 1 本</td><td data-label="最初の行"><code>hello {token, protocolVersion}</code></td><td data-label="運ぶもの">id 付きのリクエストと、それぞれ 1 つの <code>response</code>：<code>list_sessions</code>、<code>list_folders</code>、<code>browse_dir</code>、<code>mkdir</code>、<code>open_session</code>、<code>stop_session</code>、<code>rename_session</code>、<code>restart_session</code>、<code>switch_account</code>、<code>list_accounts</code>、<code>request_recap</code>、<code>mirror_status</code>、<code>restart_now</code>、セッションを動かす <code>send_message</code>、<code>wait_turn</code>、<code>listen</code>、<code>history</code> など。<code>subscribe</code> の後は <code>session_state</code> と <code>upgrade_state</code> の push。</td></tr>
+          <tr><td>control</td><td data-label="本数">クライアントごと、デーモンごとに 1 本</td><td data-label="最初の行"><code>hello {token, protocolVersion}</code></td><td data-label="運ぶもの">id 付きのリクエストと、それぞれ 1 つの <code>response</code>：<code>list_sessions</code>、<code>list_folders</code>、<code>browse_dir</code>、<code>mkdir</code>、<code>open_session</code>、<code>stop_session</code>、<code>rename_session</code>、<code>restart_session</code>、<code>switch_account</code>、<code>list_accounts</code>、<code>mirror_status</code>、<code>restart_now</code>、セッションを動かす <code>send_message</code>、<code>wait_turn</code>、<code>listen</code>、<code>history</code> など。<code>subscribe</code> の後は <code>session_state</code> と <code>upgrade_state</code> の push。</td></tr>
           <tr><td>session</td><td data-label="本数">attach 中のペインごとに 1 本</td><td data-label="最初の行"><code>attach</code></td><td data-label="運ぶもの">webview 自身の NDJSON を双方向に。attach 時の transcript の replay、要求に応じた webview の asset、ファイル転送、<code>canopy_ui</code>、<code>open_url</code>、<code>notify</code> などサーバからクライアントへの指示。</td></tr>
         </tbody>
       </table>
@@ -422,7 +422,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <li><b>バージョン</b>：<code>ControlProtocol.version</code> は 1。合わなければ理由付きの <code>hello_error</code> を返して切る。</li>
       <li><b>attach の capability</b>：クライアントは <code>attach</code> 行のフラグで追加機能を選ぶ。<code>status</code>、<code>usage</code>、<code>images</code>、<code>ui</code>、<code>files</code>、<code>restart</code>、<code>compress: "br"</code>（4 KB 以上の行を Brotli で <code>Z &lt;n&gt; &lt;m&gt;</code> フレームにする）。どれも opt-in なので古いクライアントは影響を受けない。</li>
       <li><b>attach の再開</b>：<code>ShimProcess</code> は最近送ったフレームを <code>MirrorFrameRing</code> に残す。iOS に切断されたスマホは <code>since: {epoch, seq}</code> 付きで attach し直し、見逃した分だけを受け取る。ring より古い cursor は全体の replay に戻る。</li>
-      <li><b>UI の指示</b>：デーモンはペインを持たない。ファイルの表示、recap の行、エラーバナー、アラート、通知は <code>canopy_ui</code> フレームで Mac クライアントに頼む。フレームはデータだけで、JavaScript はクライアントが自分で組み立てる。</li>
+      <li><b>UI の指示</b>：デーモンはペインを持たない。ファイルの表示、エラーバナー、アラート、通知は <code>canopy_ui</code> フレームで Mac クライアントに頼む。フレームはデータだけで、JavaScript はクライアントが自分で組み立てる。</li>
       <li><b>socket のパス</b>：<code>~/Library/Application Support/Canopy/daemon-&lt;bundle id&gt;.sock</code>。Debug のデーモン（<code>sh.saqoo.Canopy.debug</code>）が Release の socket を奪わないため。103 バイトを超えたらユーザーごとの一時ディレクトリに置く。</li>
     </ul>
   </section>
@@ -477,7 +477,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
         <tbody>
           <tr><td>走っているセッション、shim、活動状態</td><td data-label="持ち主">デーモン</td><td data-label="補足">canopyd の中の <code>SessionStore.openSessions</code></td></tr>
           <tr><td>Recents、フォルダ、タイトル</td><td data-label="持ち主">デーモン（Mac ごと）</td><td data-label="補足">クライアントが <code>list_sessions</code> / <code>list_folders</code> で聞く。relay には載せない</td></tr>
-          <tr><td>セッションに効く設定</td><td data-label="持ち主">デーモン</td><td data-label="補足">既定の permission mode、keep-alive、recap、worktree の seed、アカウント、モデルプロバイダ</td></tr>
+          <tr><td>セッションに効く設定</td><td data-label="持ち主">デーモン</td><td data-label="補足">既定の permission mode、keep-alive、worktree の seed、アカウント、モデルプロバイダ</td></tr>
           <tr><td>レート制限</td><td data-label="持ち主">デーモン</td><td data-label="補足">アカウントごとに集めてクライアントに push</td></tr>
           <tr><td><code>listen</code> のイベントログ</td><td data-label="持ち主">デーモン</td><td data-label="補足">正常終了のときに保存し、次のデーモンが続ける</td></tr>
           <tr><td>ペインの並びと幅、ウィンドウ、フィルタ、MacroPad</td><td data-label="持ち主">クライアント</td><td data-label="補足">各 Mac の GUI が自分のレイアウトを持つ</td></tr>
@@ -502,7 +502,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <div class="stack">
         <h3>アップデート</h3>
         <ul class="plain">
-          <li>Sparkle がアプリを差し替える。デーモンはディスク上の新しいビルドに気づき、再起動を止めているものを数える。たとえば走っているターン、答え待ちの質問、背景タスク、未送信のプロンプト、進行中の keep-alive や recap、返信待ちのスマホ、フォルダが消されたセッション、自分で attach し直せないクライアント。</li>
+          <li>Sparkle がアプリを差し替える。デーモンはディスク上の新しいビルドに気づき、再起動を止めているものを数える。たとえば走っているターン、答え待ちの質問、背景タスク、未送信のプロンプト、進行中の keep-alive、返信待ちのスマホ、フォルダが消されたセッション、自分で attach し直せないクライアント。</li>
           <li>待っている間、Tailscale のポートは新しいビルドから起動した <code>Canopy --mirror-relay</code> が持ち、デーモンの relay ソケットへバイト列を中継する。差し替えられた古いデーモンには macOS のファイアウォールがパスを引けず、受信をすべて捨てるため。relay ソケットは TCP と同じくパスワードを要求する。</li>
           <li>止めるものがなくなったら、デーモンは <code>daemon_restarting</code> を送り、shim を止めて exit 1 する。launchd が新しいビルドを起動する。</li>
           <li>サイドバーの下端に、待っている更新（バージョン番号付き）と、それを止めているセッションと、Restart now ボタンが出る。別の Mac の mirror ペインは、listener が戻るのを待って attach し直す。</li>
@@ -547,7 +547,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
     <div class="col stack">
       <p><code>SessionStore</code> は GUI のモデルでもある。開いている行、Recents、ペイン、フォーカス中のペインを持つ。各ペインは <code>PaneSlot</code> で、幅は重みとして持つ。<code>WeightedPaneLayout</code>（SwiftUI の独自 <code>Layout</code>）が詳細カラムを重みで分け、親から提案された幅をそのまま返す。これがウィンドウが勝手に広がり続けるのを止めている。</p>
       <p>サイドバーの Open ブロックはペインの並びの地図になっている。強調された行を上から読むと、ペインを左から読んだ順になる。サイドバーのドットと MacroPad の LED は、どちらも <code>SessionActivity</code> という 1 つの分類を読む。</p>
-      <p>各ペインの webview はセッションごとの entry ファイルを読み込み、Canopy の注入スクリプトを受け取る。<code>acquireVsCodeApi</code> のスタブ、テーマ CSS、画像プレビュー、スクロール位置の保持、入力欄へのフォーカス、recap の行。</p>
+      <p>各ペインの webview はセッションごとの entry ファイルを読み込み、Canopy の注入スクリプトを受け取る。<code>acquireVsCodeApi</code> のスタブ、テーマ CSS、画像プレビュー、スクロール位置の保持、入力欄へのフォーカス。</p>
     </div>
   </section>
 
@@ -605,7 +605,7 @@ footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line);
       <div><h3>セッション</h3><ul>
         <li><code>ShimProcess</code> shim とトラッカー</li>
         <li><code>SessionStore</code>、<code>OpenSession</code></li>
-        <li><code>KeepAlive*</code>、<code>Recap*</code>、<code>SessionTitle*</code></li>
+        <li><code>KeepAlive*</code>、<code>SessionTitle*</code></li>
         <li><code>ClaudeSessionHistory</code> JSONL の読み取り</li>
         <li><code>SharedRateLimitData</code>、<code>ClaudeAccount</code></li>
         <li><code>CCExtension</code>、<code>ExtensionUpdater</code>、<code>ExtensionSafety</code></li>
