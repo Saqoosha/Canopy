@@ -463,7 +463,7 @@ jobs:
       - name: Run logic probe
         timeout-minutes: 5
         env:
-          EXPECTED_ASSERTIONS: 2364
+          EXPECTED_ASSERTIONS: 2378
         run: |
           set -o pipefail
           status=0

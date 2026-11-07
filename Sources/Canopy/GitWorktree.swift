@@ -29,6 +29,7 @@ enum GitWorktree {
     /// Worktrees outside the recognized layouts fall back to the plain folder
     /// name by design.
     static func projectDisplayName(for dir: URL, branch: String? = nil) -> String {
+        if NoFolder.isNoFolder(dir) { return NoFolder.displayName }
         if let branch {
             let name = branchNameOnly(branch)
             if !name.isEmpty { return "\(repoName(for: dir)) · \(name)" }
@@ -64,7 +65,8 @@ enum GitWorktree {
     /// owning repo for a recognized worktree layout, else the folder's own
     /// name. Path shape only, so it stays cheap enough for a per-row render.
     static func repoName(for dir: URL) -> String {
-        worktreeParts(for: dir)?.repo ?? dir.standardizedFileURL.lastPathComponent
+        if NoFolder.isNoFolder(dir) { return NoFolder.displayName }
+        return worktreeParts(for: dir)?.repo ?? dir.standardizedFileURL.lastPathComponent
     }
 
     /// True when `dir` is a Canopy-recognized worktree — the managed root

@@ -5198,6 +5198,66 @@ enum SidebarLogicProbe {
             try? FileManager.default.removeItem(at: worktreeParent)
         }
 
+        // --- No folder ---
+        do {
+            let fm = FileManager.default
+            let key = "recentDirectories"
+            let priorStored = UserDefaults.standard.stringArray(forKey: key)
+            let scratch = fm.temporaryDirectory
+                .appendingPathComponent("no-folder-probe-\(UUID().uuidString)", isDirectory: true)
+            defer {
+                if let priorStored {
+                    UserDefaults.standard.set(priorStored, forKey: key)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+                UserDefaults.standard.synchronize()
+                try? fm.removeItem(at: scratch)
+            }
+
+            // Removed first, so this is the create path, not a file an earlier run left.
+            let claudeMd = NoFolder.directory.appendingPathComponent("CLAUDE.md")
+            func written() -> String? { try? String(contentsOf: claudeMd, encoding: .utf8) }
+            try? fm.removeItem(at: claudeMd)
+            let prepared = NoFolder.prepare()
+            record("NoFolder.prepare: returns the folder", prepared.path == NoFolder.directory.path)
+            record("NoFolder.prepare: writes CLAUDE.md", written() == NoFolder.instructions)
+            let stamp = Date(timeIntervalSince1970: 1_000_000_000)
+            try? fm.setAttributes([.modificationDate: stamp], ofItemAtPath: claudeMd.path)
+            NoFolder.prepare()
+            record("NoFolder.prepare: leaves an unchanged CLAUDE.md alone",
+                   (try? fm.attributesOfItem(atPath: claudeMd.path))?[.modificationDate] as? Date == stamp)
+            try? "older text".write(to: claudeMd, atomically: true, encoding: .utf8)
+            NoFolder.prepare()
+            record("NoFolder.prepare: replaces a CLAUDE.md from another version", written() == NoFolder.instructions)
+
+            let sameName = scratch.appendingPathComponent(NoFolder.directory.lastPathComponent, isDirectory: true)
+            let parentLink = scratch.appendingPathComponent("parent-link", isDirectory: true)
+            try? fm.createDirectory(at: sameName, withIntermediateDirectories: true)
+            try? fm.createSymbolicLink(at: parentLink, withDestinationURL: NoFolder.directory.deletingLastPathComponent())
+            record("NoFolder.isNoFolder: the folder", NoFolder.isNoFolder(NoFolder.directory))
+            record("NoFolder.isNoFolder: a trailing slash",
+                   NoFolder.isNoFolder(URL(fileURLWithPath: NoFolder.directory.path + "/")))
+            record("NoFolder.isNoFolder: through a symlinked parent",
+                   NoFolder.isNoFolder(parentLink.appendingPathComponent(NoFolder.directory.lastPathComponent)))
+            record("NoFolder.isNoFolder: a folder of the same name elsewhere", !NoFolder.isNoFolder(sameName))
+            record("NoFolder.isNoFolder: another folder", !NoFolder.isNoFolder(scratch))
+
+            record("projectDisplayName: No folder", GitWorktree.projectDisplayName(for: NoFolder.directory) == NoFolder.displayName)
+            let closed = SidebarRow.closedLocal(SessionEntry(id: "no-folder", title: "t", timestamp: Date(), projectDirectory: NoFolder.directory))
+            record("SidebarRow.project: a closed No folder row groups with an open one", closed.project == NoFolder.displayName)
+            record("SidebarRow.displayProject: a closed No folder row", closed.displayProject == NoFolder.displayName)
+
+            // A leak here makes the next Cmd+N choose No folder.
+            UserDefaults.standard.set([scratch.path], forKey: key)
+            RecentDirectories.add(NoFolder.directory)
+            record("RecentDirectories.add: No folder is not persisted",
+                   UserDefaults.standard.stringArray(forKey: key) == [scratch.path])
+            UserDefaults.standard.set([NoFolder.directory.path, scratch.path], forKey: key)
+            record("RecentDirectories.load: a persisted No folder is dropped",
+                   RecentDirectories.load().map(\.path) == [scratch.path])
+        }
+
         // --- Open-session reorder (drag & drop) ---
         // Pure mapping: the visible (filtered) open rows after a move are
         // written back into the master array; hidden rows keep their slots.
