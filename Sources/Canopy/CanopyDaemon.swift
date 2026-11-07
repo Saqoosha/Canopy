@@ -49,7 +49,7 @@ private nonisolated func installTerminationHandler(_ delegate: DaemonDelegate) {
     let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
     source.setEventHandler { [weak delegate] in
         MainActor.assumeIsolated {
-            // A SIGTERM is a stop someone asked for (bootout, logout): nothing is carried.
+            // A SIGTERM is a stop someone asked for (bootout, logout): nothing reopens by itself.
             delegate?.shutDown(carryingSessions: false)
             exit(0)
         }
@@ -60,7 +60,7 @@ private nonisolated func installTerminationHandler(_ delegate: DaemonDelegate) {
 
 @MainActor
 final class DaemonDelegate {
-    private let store = SessionStore()
+    private let store: SessionStore
     private var server: MirrorServer?
     private var reaper: DaemonReaper?
     private var sleepGuard: SleepGuard?
@@ -81,6 +81,10 @@ final class DaemonDelegate {
     private let relay = MirrorRelayProcess()
     private var lastRelayAttempt: Date?
     private var failedRelayStarts = 0
+
+    init(store: SessionStore = SessionStore()) {
+        self.store = store
+    }
 
     /// An app update replaced the binary under this process: tell attached panes, stop the
     /// sessions cleanly and exit non-zero so launchd starts the new build. Panes that got the
@@ -508,9 +512,9 @@ final class DaemonDelegate {
         logger.notice("restored \(held.entries.count, privacy: .public) held session(s)")
     }
 
-    /// `carryingSessions`: this exit is a restart (launchd starts the next daemon at once), so the
-    /// phone's and the control API's sessions are saved for it. A deliberate stop saves none: a
-    /// daemon started within `DaemonHeldSessions.maxAge` would resume CLIs nobody is waiting for.
+    /// `carryingSessions`: this exit is a restart (launchd starts the next daemon at once), so that
+    /// daemon reopens the held sessions (`saveSessions`). A deliberate stop holds none: a daemon
+    /// started within `DaemonHeldSessions.maxAge` would resume CLIs nobody is waiting for.
     func shutDown(carryingSessions: Bool) {
         upgradeTimer?.invalidate()
         configTimer?.invalidate()
@@ -519,12 +523,7 @@ final class DaemonDelegate {
         sleepGuard?.stop()
         // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
-        let held = DaemonHeldSessions.capture(carryingSessions ? store.openSessions : []) { session, dir in
-            ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
-        }
-        held.save()
-        // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
-        if !carryingSessions { try? FileManager.default.removeItem(at: DaemonHeldSessions.fileURL) }
+        let held = saveSessions(carrying: carryingSessions)
         // Recorded before the shims stop; a listener may not receive them before the process exits,
         // so the log is saved after the shims stop and the next daemon serves them.
         ControlEventLog.shared.recordShutdown(resuming: Set(held.entries.map(\.key)))
@@ -535,5 +534,18 @@ final class DaemonDelegate {
         stopRelay()
         server?.stopTCP()
         server?.stopLocal()
+    }
+
+    /// What this exit leaves for the next daemon; the result is what it will reopen by itself.
+    func saveSessions(carrying: Bool, heldFile: URL = DaemonHeldSessions.fileURL,
+                      reaped: ReapedSessions = .shared) -> DaemonHeldSessions {
+        let held = DaemonHeldSessions.capture(carrying ? store.openSessions : []) { session, dir in
+            ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
+        }
+        held.save(to: heldFile)
+        // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
+        if !carrying { try? FileManager.default.removeItem(at: heldFile) }
+        reaped.keepRows(of: store.openSessions, hasTranscript: ReapedSessions.hasTranscript)
+        return held
     }
 }
