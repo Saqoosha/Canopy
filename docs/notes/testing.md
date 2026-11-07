@@ -2,7 +2,7 @@
 
 Condensed from CLAUDE.md. Full original text: `git show 3b6a198:CLAUDE.md`.
 
-- **The probe writes real UserDefaults, `settings.json` and `~/.claude` fixtures; a trap mid-run can leave them dirty.** It runs fine from a Bash tool; silence means the env var did not reach the process.
+- **The probe writes real UserDefaults, `settings.json`, `no-folder/CLAUDE.md` and `~/.claude` fixtures; a trap mid-run can leave them dirty.** It runs fine from a Bash tool; silence means the env var did not reach the process.
 - **The CI probe job must build Debug** (the probe is `#if DEBUG`; Release launches the app) and ad-hoc signed (no Developer ID in the runner).
 - **`connectIfConfigured()` returns silently when `rosterEnabled` is off**, a shared `settings.json` flag read once at launch; no `Roster` log lines means disabled or never fired.
 - **Extract CI counts with `awk`, last match.** `sed -n p` multi-line output makes `[ "$n" -lt … ]` exit 2, which `if` reads as false (floor silently passes); first match is forgeable because node's TAP reporter prefixes captured test output with `# `.

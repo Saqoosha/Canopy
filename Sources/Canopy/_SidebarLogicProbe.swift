@@ -5215,7 +5215,7 @@ enum SidebarLogicProbe {
                 try? fm.removeItem(at: scratch)
             }
 
-            // Removed first, so this is the create path, not a file an earlier run left.
+            // Removed first, so what is read below is this run's file, not an earlier run's.
             let claudeMd = NoFolder.directory.appendingPathComponent("CLAUDE.md")
             func written() -> String? { try? String(contentsOf: claudeMd, encoding: .utf8) }
             try? fm.removeItem(at: claudeMd)
@@ -5230,22 +5230,33 @@ enum SidebarLogicProbe {
             try? "older text".write(to: claudeMd, atomically: true, encoding: .utf8)
             NoFolder.prepare()
             record("NoFolder.prepare: replaces a CLAUDE.md from another version", written() == NoFolder.instructions)
+            record("NoFolder.instructions: names a skill that ships",
+                   NoFolder.instructions.contains("canopy-bridge:find-session")
+                   && ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md"))
+            // Past transcripts recorded this path as their cwd.
+            record("NoFolder.directory: stays where past sessions ran",
+                   NoFolder.directory.path.hasSuffix("/Library/Application Support/Canopy/no-folder"))
 
             let sameName = scratch.appendingPathComponent(NoFolder.directory.lastPathComponent, isDirectory: true)
             let parentLink = scratch.appendingPathComponent("parent-link", isDirectory: true)
             try? fm.createDirectory(at: sameName, withIntermediateDirectories: true)
             try? fm.createSymbolicLink(at: parentLink, withDestinationURL: NoFolder.directory.deletingLastPathComponent())
             record("NoFolder.isNoFolder: the folder", NoFolder.isNoFolder(NoFolder.directory))
-            record("NoFolder.isNoFolder: a trailing slash",
-                   NoFolder.isNoFolder(URL(fileURLWithPath: NoFolder.directory.path + "/")))
+            record("NoFolder.isNoFolder: a URL with no trailing slash",
+                   NoFolder.isNoFolder(URL(fileURLWithPath: NoFolder.directory.path, isDirectory: false)))
             record("NoFolder.isNoFolder: through a symlinked parent",
                    NoFolder.isNoFolder(parentLink.appendingPathComponent(NoFolder.directory.lastPathComponent)))
             record("NoFolder.isNoFolder: a folder of the same name elsewhere", !NoFolder.isNoFolder(sameName))
             record("NoFolder.isNoFolder: another folder", !NoFolder.isNoFolder(scratch))
 
             record("projectDisplayName: No folder", GitWorktree.projectDisplayName(for: NoFolder.directory) == NoFolder.displayName)
+            record("projectDisplayName: No folder, whatever the branch",
+                   GitWorktree.projectDisplayName(for: NoFolder.directory, branch: "main") == NoFolder.displayName)
             let closed = SidebarRow.closedLocal(SessionEntry(id: "no-folder", title: "t", timestamp: Date(), projectDirectory: NoFolder.directory))
-            record("SidebarRow.project: a closed No folder row groups with an open one", closed.project == NoFolder.displayName)
+            let openRow = SidebarRow.open(OpenSession(origin: .local(NoFolder.directory), resumeId: "no-folder-row", title: "t",
+                                                      project: GitWorktree.projectDisplayName(for: NoFolder.directory), status: .live))
+            record("SidebarRow.project: a closed No folder row groups with an open one",
+                   closed.project == openRow.project && closed.project == NoFolder.displayName)
             record("SidebarRow.displayProject: a closed No folder row", closed.displayProject == NoFolder.displayName)
 
             // A leak here makes the next Cmd+N choose No folder.
@@ -5259,6 +5270,7 @@ enum SidebarLogicProbe {
 
             // Cmd+Shift+N. The view's half is `LauncherView.takeNoFolderRequest`.
             let paneless = SessionStore()
+            paneless.selection = .session(UUID())
             try? fm.removeItem(at: claudeMd)
             paneless.openLauncherWithoutFolder()
             record("openLauncherWithoutFolder: prepares the folder", written() == NoFolder.instructions)

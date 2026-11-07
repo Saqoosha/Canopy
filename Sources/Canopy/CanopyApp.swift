@@ -80,6 +80,7 @@ struct CanopyApp: App {
                 .keyboardShortcut("n")
                 Button("New Session Without Folder") {
                     sidebarStore.openLauncherWithoutFolder()
+                    // With no window, nothing reads the request until the next launcher.
                     showMainWindow()
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])

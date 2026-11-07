@@ -3,8 +3,8 @@ import os.log
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "NoFolder")
 
-/// Where a session runs when no folder was chosen. The CLI cannot start without
-/// one, so Canopy keeps an empty folder of its own, shared by Debug and Release.
+/// Where a session runs when the user starts it without a folder. The CLI needs
+/// one, so Canopy keeps a folder of its own, shared by Debug and Release.
 enum NoFolder {
     static let displayName = "No folder"
 
@@ -15,17 +15,20 @@ enum NoFolder {
     static let instructions = """
         # No folder
 
-        This is not a project. Canopy starts a session here when no folder was chosen, so there is nothing in this folder to read or change.
+        This is not a project. A session runs here when the user starts without a folder, so there is nothing in this folder to read or change.
 
-        - For a question about earlier work, use the `find-session` skill. It searches past sessions on this Mac and the others.
+        - For a question about earlier work, use the `canopy-bridge:find-session` skill. It searches past sessions on this Mac and the paired ones.
         - When the conversation turns into work on a project, say which folder it belongs in and suggest moving there.
 
         """
 
-    /// The name first: `GitWorktree.repoName` runs per row and must stay path shape only.
+    /// By spelling first, because `GitWorktree.repoName` runs per row: only another
+    /// folder of this name pays for `realpath`. A symlink under another name is not No folder.
     static func isNoFolder(_ url: URL) -> Bool {
-        url.standardizedFileURL.lastPathComponent == directory.lastPathComponent
-            && GitWorktree.realPath(of: url) == GitWorktree.realPath(of: directory)
+        let standardized = url.standardizedFileURL
+        guard standardized.lastPathComponent == directory.lastPathComponent else { return false }
+        return standardized.path == directory.path
+            || GitWorktree.realPath(of: url) == GitWorktree.realPath(of: directory)
     }
 
     /// Creates the folder, and writes `CLAUDE.md` only when its text differs.

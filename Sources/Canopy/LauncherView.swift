@@ -182,7 +182,7 @@ struct LauncherView: View {
     /// one. Every other launch goes through `appState`.
     @Bindable var store: SessionStore
     /// Nil for the launcher shown with no panes.
-    var paneId: PaneSlot.ID?
+    let paneId: PaneSlot.ID?
     @State private var selectedDirectory: URL?
     /// Another Mac (by machine id) chosen in the location chip. A session
     /// started there runs on that Mac and is attached here as a mirror pane,
@@ -473,10 +473,10 @@ struct LauncherView: View {
     }
 
     /// Back to This Mac as well: No folder is local, and an SSH host or another
-    /// Mac chosen here would otherwise keep the session. The focus is there so
-    /// the question can be typed at once; Cmd+N's launcher does not take it.
+    /// Mac chosen here would otherwise start the session there. A launch already
+    /// under way reads this state as it goes, so the request is used up and dropped.
     private func takeNoFolderRequest() {
-        guard store.takeNoFolderRequest(launcherPane: paneId) else { return }
+        guard store.takeNoFolderRequest(launcherPane: paneId), preparingHeadline == nil else { return }
         isRemoteMode = false
         peerMachineId = nil
         selectedDirectory = NoFolder.directory
@@ -633,7 +633,7 @@ struct LauncherView: View {
         } else if isRemoteMode {
             remoteHost.isEmpty ? nil : remoteHost
         } else {
-            selectedDirectory.flatMap { NoFolder.isNoFolder($0) ? nil : $0.lastPathComponent }
+            isOnNoFolder ? nil : selectedDirectory?.lastPathComponent
         }
         guard let place else {
             return willContinueSession ? "Where were we?" : "What should we build?"
@@ -674,8 +674,8 @@ struct LauncherView: View {
         if isRemoteMode {
             return remoteDirectory.isEmpty ? "Choose folder" : (remoteDirectory as NSString).lastPathComponent
         }
-        guard let selectedDirectory else { return "Choose folder" }
-        return NoFolder.isNoFolder(selectedDirectory) ? NoFolder.displayName : selectedDirectory.lastPathComponent
+        if isOnNoFolder { return NoFolder.displayName }
+        return selectedDirectory?.lastPathComponent ?? "Choose folder"
     }
 
     private var directoryChip: some View {
@@ -705,7 +705,7 @@ struct LauncherView: View {
             )
         }
         .chipMenu()
-        .help(isRemoteMode ? remoteDirectory : (selectedDirectory?.abbreviatingWithTilde ?? "No folder chosen"))
+        .help(isRemoteMode ? remoteDirectory : (selectedDirectory?.abbreviatingWithTilde ?? "Choose a folder"))
         .sheet(isPresented: $showCloneSheet) {
             CloneRepoSheet { cloned in
                 selectedDirectory = cloned
@@ -1054,7 +1054,7 @@ struct LauncherView: View {
             )
         }
         .chipMenu()
-        .help(peerFolder ?? "No folder chosen")
+        .help(peerFolder ?? "Choose a folder")
         .sheet(isPresented: $showPeerBrowser) {
             RemoteDirectoryBrowser(source: .peer(machineId: peer.machineId, title: peer.title)) { path in
                 peerFolder = path
@@ -1162,13 +1162,13 @@ struct LauncherView: View {
             }
             CheckItem(title: willCreateWorktree
                           ? "Continue — not with a new worktree"
-                          : "Continue the latest session",
+                          : isOnNoFolder ? "Continue — not with No folder" : "Continue the latest session",
                       checked: willContinueSession) {
                 continueSession = true
             }
             // Disabled rather than hidden: a row that vanishes reads as a bug,
             // and the point is to say WHY the two cannot combine.
-            .disabled(willCreateWorktree)
+            .disabled(willCreateWorktree || isOnNoFolder)
             if let peer = selectedPeer { peerSessionRows(peer) }
         } label: {
             ChipLabel(
@@ -1191,8 +1191,15 @@ struct LauncherView: View {
     /// a checkout for. `continueSession` is deliberately NOT written to: it is
     /// a persisted preference, and flipping it here would silently lose the
     /// user's setting the moment they turned the worktree off again.
+    ///
+    /// No folder never continues either: its sessions are unrelated chats in one
+    /// folder, so the latest one is not where a new question belongs.
     private var willContinueSession: Bool {
-        continueSession && !willCreateWorktree
+        continueSession && !willCreateWorktree && !isOnNoFolder
+    }
+
+    private var isOnNoFolder: Bool {
+        !isRemoteMode && selectedPeer == nil && selectedDirectory.map(NoFolder.isNoFolder) == true
     }
 
     /// Whether this launch will actually cut a worktree.
@@ -2286,7 +2293,7 @@ struct LauncherView: View {
     }
 
     private func resolveTeleportCwd(for session: RemoteSession) -> URL? {
-        if let selected = selectedDirectory { return selected }
+        if let selected = selectedDirectory, !NoFolder.isNoFolder(selected) { return selected }
 
         // Find recents whose lastPathComponent matches the repo name. If
         // exactly one matches, auto-confirm. If multiple, prompt the

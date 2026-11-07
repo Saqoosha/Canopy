@@ -15,8 +15,8 @@ enum GitWorktree {
     /// `<repo>/.claude/worktrees/<branch>`) surface the repository the
     /// worktree belongs to ("Canopy · fix-foo").
     ///
-    /// **`branch` is the VCS's own answer and always wins when present**, and
-    /// passing it is what makes this function stop guessing. Without it the
+    /// **`branch` is the VCS's own answer and wins when present**, except on
+    /// No folder, and passing it is what makes this function stop guessing. Without it the
     /// second component is the worktree FOLDER name, which only *usually*
     /// equals the branch: `git worktree add -b feature/foo` flattens the `/`
     /// to `-` in the directory name, a later `git switch` inside the worktree
@@ -63,7 +63,8 @@ enum GitWorktree {
 
     /// The repository a directory belongs to, with no branch component: the
     /// owning repo for a recognized worktree layout, else the folder's own
-    /// name. Path shape only, so it stays cheap enough for a per-row render.
+    /// name, or No folder's label. Path shape alone settles every folder but
+    /// another one named like No folder's, so it stays cheap enough for a per-row render.
     static func repoName(for dir: URL) -> String {
         if NoFolder.isNoFolder(dir) { return NoFolder.displayName }
         return worktreeParts(for: dir)?.repo ?? dir.standardizedFileURL.lastPathComponent

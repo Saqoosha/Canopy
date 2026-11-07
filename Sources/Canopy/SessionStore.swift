@@ -3062,8 +3062,8 @@ final class SessionStore {
         openInFocusedPane(ctx.available[next])
     }
 
-    /// Replace focused pane's content with the launcher. Used by Cmd+N when
-    /// a pane exists; no-pane Cmd+N routes through select(.launcher).
+    /// Replace focused pane's content with the launcher. Used by Cmd+Shift+N, and
+    /// by Cmd+N when a pane exists; no-pane Cmd+N routes through select(.launcher).
     func openLauncherInFocusedPane() {
         if panes.isEmpty {
             selection = .launcher
@@ -3077,15 +3077,11 @@ final class SessionStore {
     /// Cmd+Shift+N: Cmd+N's launcher, on No folder.
     func openLauncherWithoutFolder() {
         NoFolder.prepare()
-        if panes.isEmpty {
-            select(.launcher)
-        } else {
-            openLauncherInFocusedPane()
-        }
+        openLauncherInFocusedPane()
         launcherWantsNoFolder = true
     }
 
-    /// True once, for the launcher that was asked: every launcher on screen sees the flag.
+    /// True once, for the focused launcher: every launcher on screen sees the flag.
     func takeNoFolderRequest(launcherPane paneId: PaneSlot.ID?) -> Bool {
         guard launcherWantsNoFolder, focusedPane?.id == paneId else { return false }
         launcherWantsNoFolder = false
