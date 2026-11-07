@@ -474,7 +474,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var stdoutLines = NDJSONLineAssembler()
     /// Descendant PIDs collected before termination, used for cleanup on unexpected exit.
     private var descendantPids: [pid_t] = []
-    /// Channel ID from launch_claude, needed for the keep-alive and usage requests.
+    /// Channel ID from launch_claude.
     /// NOT for titles any more — those no longer go through the extension.
     private var channelId: String?
     /// True after an AI-generated title (or fallback) has been applied.
@@ -854,13 +854,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// ack-wording drift, whose victims are exactly the TaskStop-killed
     /// launches that write no marker; only the parser can cover that.
     ///
-    /// A self-rescheduling `DispatchWorkItem` on the main queue, not a
-    /// `Timer` and not a `DispatchSourceTimer`: it is the shape the keep-alive
-    /// watchdog already uses in this file (the title fallback is the `asyncAfter` half
-    /// without the cancellable work item), it needs no new kind of object, and
-    /// unlike a runloop timer it still fires during the tracking modes (live
-    /// window resize, open menu) — exactly when someone is looking at the
-    /// sidebar.
+    /// A self-rescheduling `DispatchWorkItem` on the main queue, not a `Timer`
+    /// and not a `DispatchSourceTimer`: unlike a runloop timer it still fires
+    /// during the tracking modes (live window resize, open menu) — exactly when
+    /// someone is looking at the sidebar.
     private var bgIdleBackstop: DispatchWorkItem?
 
     /// True between an idle backstop dispatching its read and that read's
@@ -966,11 +963,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private var keepAliveInFlight = false
 
     /// Set once the CLI has echoed our injected prompt back. This is the
-    /// positive evidence that the turn now streaming is ours: a keep-alive
-    /// turn is an ordinary model turn
-    /// with an ordinary model id and no distinguishing mark at all. The
-    /// echo, whose text we chose, is the only thing that can be matched, so
-    /// nothing downstream of it may be swallowed until it has arrived.
+    /// positive evidence that the turn now streaming is ours: a keep-alive turn
+    /// is an ordinary model turn with an ordinary model id and no
+    /// distinguishing mark at all. The echo, whose text we chose, is the only
+    /// thing that can be matched, so nothing downstream of it may be swallowed
+    /// until it has arrived.
     private var keepAliveEchoSeen = false
 
     /// Watchdog for a refresh that never completes. Without it the latch
@@ -993,11 +990,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Why a refresh is declined right now, or nil when one is due.
     ///
-    /// A bare false across every gate is undiagnosable from a log that only
-    /// reports a count.
-    /// Ordered cheapest first, with the shim-state checks
-    /// ahead of `KeepAliveGate` so the pure type never has to be told about
-    /// process state.
+    /// Ordered cheapest first, with the shim-state checks ahead of
+    /// `KeepAliveGate` so the pure type never has to be told about process
+    /// state.
     func keepAliveIneligibilityReason(now: Date, interval: TimeInterval, rateLimitPct: Int) -> String? {
         if channelId == nil { return "no channelId (session not launched yet)" }
         if isWorking { return "session busy" }
@@ -1019,8 +1014,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // question is consumed, and both turns are hidden live and
         // stripped from replay — so the user returns to a transcript showing
         // their question followed by nothing, with no log line that would
-        // let anyone reconstruct it. Being a REAL turn is what makes this
-        // possible: it lands in the conversation.
+        // let anyone reconstruct it.
         if !pendingPermissionRequestIds.isEmpty { return "permission request outstanding" }
         if lastAssistantHadAskUserQuestion { return "session is awaiting a user answer" }
         // Both flags mean "awaiting a TRACKED answer", not "awaiting a
@@ -1135,7 +1129,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             else { return nil }
             return .requestStarted
         case "assistant":
-            // `<synthetic>` marks local-command output, which is not an API response.
+            // `<synthetic>` marks a reply the CLI wrote itself, not an API response.
             guard isMainConversationMessage(ioMsg),
                   let msg = ioMsg["message"] as? [String: Any],
                   msg["model"] as? String != "<synthetic>",
@@ -1185,12 +1179,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Submit the prompt the user typed on the launch screen, if there is one.
     ///
-    /// Unlike the keep-alive — the other turn Canopy injects — this one is
-    /// **not** synthetic and nothing downstream swallows it. The user typed it
-    /// and expects to see it; it is their first turn, merely submitted from a
-    /// different text field. So no echo tracking, no replay filter, and no
-    /// interlock against the keep-alive: those exist to
-    /// hide a turn, and hiding this one would be the bug.
+    /// Unlike the keep-alive, this one is **not** synthetic and nothing
+    /// downstream swallows it. The user typed it and expects to see it; it is
+    /// their first turn, merely submitted from a different text field. So no
+    /// echo tracking, no replay filter, and no interlock against the
+    /// keep-alive: those exist to hide a turn, and hiding this one would be
+    /// the bug.
     ///
     /// Clearing `pendingInitialPrompt` on the session is the whole idempotence
     /// guarantee, and it has to live there rather than in a flag on `self`:
@@ -1299,10 +1293,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// reader.
     func requestKeepAlive(at now: Date) {
         // The coordinator checks the full gate one line before calling, so
-        // this is not a live race — it is a self-guard, so the invariant
-        // "never injected into a busy shim or on top of another flight" is a
-        // property of the method rather than of its single current call site. The time-and-quota
-        // half stays with the caller, which owns the clock.
+        // this is not a live race — it is a self-guard, so "never injected
+        // into a busy shim or on top of another keep-alive" is a property of
+        // the method rather than of its single current call site. The
+        // time-and-quota half stays with the caller, which owns the clock.
         // The asking checks are here and not only in the gate on purpose:
         // every other interlock costs money when violated, and this one
         // destroys conversation state — it answers a question the user was
@@ -1395,8 +1389,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// 120s, matching `keepAliveTimeoutSeconds`: a reply is injected on the
     /// exact same wire path as a keep-alive (`sendToShim` writing a synthetic
-    /// `user` io_message) and waits on the same signal (`isWorking` flipping
-    /// true via `trackWorkingState`), so it can run cold for the same reason —
+    /// `user` io_message), so it can run cold for the same reason —
     /// a large cached context can take tens of seconds to produce a first token.
     private static let phoneReplyTimeoutSeconds: TimeInterval = 120
 
@@ -2265,13 +2258,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             return echoSeen ? .swallow : .passThrough
 
         case "result":
-            // Positive evidence only, because of this shape of failure: claiming the first `result` unconditionally
-            // eats the next REAL turn's when our injection was dropped. The
-            // webview still gets that `result` now, so its busy flag
-            // clears; what sticks is the trackers' view — `isWorking` never
-            // falls, so the dot and the pad breathe "working" forever, every
-            // gate reports "session busy", and no completion notification
-            // fires.
+            // Positive evidence only, because of this shape of failure:
+            // claiming the first `result` unconditionally eats the next REAL
+            // turn's when our injection was dropped. The webview still gets
+            // that `result` now, so its busy flag clears; what sticks is the
+            // trackers' view — `isWorking` never falls, so the dot and the pad
+            // breathe "working" forever, every gate reports "session busy", and
+            // no completion notification fires.
             guard echoSeen else { return .abandonFlightPassingThrough }
             return .completeFlight(refreshed: !Self.keepAliveResultFailed(ioMsg))
 
@@ -2324,22 +2317,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// the caller still forwards it to the webview.
     ///
     /// **Why the trackers never see it.** The pipeline has a later slot
-    /// (`isCanopyOwnedResponse`) that hides a message from the webview
-    /// while letting the trackers see it, and using it here looks strictly
-    /// better — the `result` carries real usage the context meter wants.
-    /// It is wrong for three separate
-    /// reasons, each of which fires overnight on a machine nobody is at.
-    /// `trackWorkingState` would flip `isWorking`, so every pane's sidebar
-    /// dot and MacroPad key would breathe "working" once an hour all night.
-    /// Its `result` branch calls `postTaskCompletedNotification()`, so each
-    /// refresh would raise a user notification. And a turn finishing is
-    /// what marks a session unread, so by morning the pad would be lit
-    /// green across every pane with nothing behind it. What that costs
-    /// instead is one tick of context-meter staleness — the meter misses
-    /// the ~40 tokens the refresh itself added, until the next real turn's
-    /// `result` supersedes it. `rate_limit_event` is a separate io_message
-    /// type and falls through the `default` branch, so quota data still
-    /// lands.
+    /// (`isCanopyOwnedResponse`) that hides a message from the webview while
+    /// letting the trackers see it, and using it here looks strictly better —
+    /// the `result` carries real usage the context meter wants. It is wrong for
+    /// three separate reasons, each of which fires overnight on a machine
+    /// nobody is at. `trackWorkingState` would flip `isWorking`, so every
+    /// pane's sidebar dot and MacroPad key would breathe "working" once an hour
+    /// all night. Its `result` branch calls `postTaskCompletedNotification()`,
+    /// so each refresh would raise a user notification. And a turn finishing is
+    /// what marks a session unread, so by morning the pad would be lit green
+    /// across every pane with nothing behind it. What that costs instead is one
+    /// tick of context-meter staleness — the meter misses the ~40 tokens the
+    /// refresh itself added, until the next real turn's `result` supersedes it.
+    /// `rate_limit_event` is a separate io_message type and falls through the
+    /// `default` branch, so quota data still lands.
     ///
     /// **Why the webview DOES see it** (since PR #216; before that the
     /// frames were dropped outright). Extension 2.1.268's composer shows a
@@ -2359,18 +2350,16 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private func consumeKeepAliveTraffic(_ message: [String: Any]) -> Bool {
         guard keepAliveInFlight else { return false }
 
-        // Every message crossing the wire during a refresh is worth a log
-        // line: the swallow list
-        // is derived from what the extension actually emits, and that set is
-        // documented nowhere. When it drifts, this is the only record of
-        // what reached the trackers. `notice`, not `info`: this
-        // subsystem's failure mode is silence at 3am, and `info` lives only
-        // in a ring buffer that has rolled over long before anyone asks.
-        // Bounded at a handful of lines per flight, once an interval.
-        // Unwrap exactly as `keepAliveDisposition` does. This log is the
-        // discovery signal for the extension's emissions drifting, so
-        // reading only the wrapped shape would leave it blind to the one
-        // case it was added for.
+        // Every message crossing the wire during a refresh is worth a log line:
+        // the swallow list is derived from what the extension actually emits,
+        // and that set is documented nowhere. When it drifts, this is the only
+        // record of what reached the trackers. `notice`, not `info`: this
+        // subsystem's failure mode is silence at 3am, and `info` lives only in
+        // a ring buffer that has rolled over long before anyone asks. Bounded
+        // at a handful of lines per flight, once an interval. Unwrap exactly as
+        // `keepAliveDisposition` does. This log is the discovery signal for the
+        // extension's emissions drifting, so reading only the wrapped shape
+        // would leave it blind to the one case it was added for.
         //
         // `stream_event` is skipped, and the earlier "bounded at a handful
         // of lines per flight" claim was wrong without it: deltas arrive one
@@ -3889,8 +3878,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // get_claude_state, get_asset_uris, list_sessions) don't, and the
         // !cid.isEmpty guard correctly skips them. Since extension 2.1.280 this
         // fires on every session, ahead of `launch_claude`. Title generation no longer depends on channelId at all
-        // (it runs the CLI directly); what breaks without this is the
-        // keep-alive's channelId check and `requestUsageUpdate`.
+        // (it runs the CLI directly); what breaks without this is everything
+        // gated on `channelId`.
         // Deleting the backstop and testing titles would therefore look fine.
         // First non-empty channelId wins; once set, only the launch_claude
         // handler above is allowed to replace it.
@@ -3926,13 +3915,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // declined only by the `isWorking` check, one condition deep.
             noteApiActivity()
             if keepAliveInFlight {
-                // Their turn may be queued behind ours, so the boundary
-                // between the two is no longer knowable from the wire.
-                // Ending the flight IS the disarm — a separate "contended"
-                // flag would only make `consumeKeepAliveTraffic` return
-                // false, which clearing the latch already does, while
-                // leaving a zombie latch to block the next refresh until the
-                // watchdog fires. The rest of our turn then reaches the
+                // Their turn may be queued behind ours, so the boundary between
+                // the two is no longer knowable from the wire. Ending the
+                // flight IS the disarm — a separate "contended" flag would only
+                // make `consumeKeepAliveTraffic` return false, which clearing
+                // the latch already does, while leaving a zombie latch until
+                // the watchdog fires. The rest of our turn then reaches the
                 // trackers and the screen: a visible miss, not data loss.
                 endKeepAliveFlight()
                 logger.info("keep-alive: user submitted mid-flight — swallow disarmed")
@@ -5783,12 +5771,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return result
     }
 
-    /// Drop the `/recap` invocations Canopy used to inject from a replayed
+    /// Drop every `/recap` command and the output after it from a replayed
     /// message list.
     ///
-    /// Canopy no longer sends `/recap`, but transcripts from before still hold
+    /// Canopy 3.22.0 and earlier injected `/recap`, and their transcripts hold
     /// it as an ordinary (non-meta) user entry plus a `system` / `local_command`
-    /// entry holding the output, and reopening such a session replays both
+    /// entry holding the output; reopening such a session would replay both
     /// through `get_session` as a bubble the user never typed.
     ///
     /// Order-aware rather than type-aware: a bare "drop every
@@ -5796,9 +5784,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// commands the user genuinely ran. Only the entry directly following a
     /// `/recap` command is removed.
     ///
-    /// KNOWN COLLATERAL: a `/recap` the *user* typed themselves is filtered
-    /// too. The CLI mints its own `uuid` and `promptId` for the entry
-    /// (measured), so nothing marks which ones Canopy sent.
+    /// KNOWN COLLATERAL: a `/recap` the user typed is filtered too.
     ///
     /// Consecutive `/recap` entries with no output between them each clear
     /// the pending flag, so a second command cannot orphan the first's
@@ -5843,7 +5829,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ///
     /// Matches ANY `/recap` — Canopy's old injection and a user-typed one are
     /// indistinguishable, so this cannot and does not claim to identify
-    /// provenance. Only the replay filter uses it now.
+    /// provenance. Only the replay filter uses it.
     ///
     /// Pure and static so `_SidebarLogicProbe` can exercise the shapes
     /// without a live shim. Accepts both the plain slash command and the
@@ -5865,10 +5851,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // Whole-text equality on both forms, never `contains`. A substring
         // match destroys any message that merely QUOTES the wrapper — pasting
         // a transcript excerpt, filing a bug about this feature, reviewing
-        // this very file — swallowing it live and deleting it from every
-        // later replay. The wrapper arrives with the CLI's own indentation
-        // between its tags, so compare on the collapsed form rather than
-        // trying to reproduce that whitespace exactly.
+        // this very file — deleting it from every later replay. The wrapper
+        // arrives with the CLI's own indentation between its tags, so compare
+        // on the collapsed form rather than trying to reproduce that
+        // whitespace exactly.
         if trimmed == Self.recapCommand { return true }
         let collapsed = trimmed
             .split(whereSeparator: \.isWhitespace)
@@ -6514,16 +6500,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         bgIdleBackstopReadInFlight = false
         subagentTracker = SubagentTracker()
         statusBarData?.subagents = []
-        // A keep-alive in flight when the process died will never be
-        // answered, and its latch is wide: it
-        // claims `command_lifecycle` and `system/init` on the strength of
-        // the latch alone, with no echo required. A latch that survived a
-        // reconnect would read the reconnected session's first real turn as
-        // ours — its `result` arriving with no echo logs a spurious
-        // `.error`, and had `echoSeen` survived too, the whole turn would be
-        // invisible to the trackers. The 120 s watchdog bounds that window
-        // but does not close it, and a reconnect inside it is the normal
-        // case for SSH remote.
+        // A keep-alive in flight when the process died will never be answered,
+        // and its latch is wide: it claims `command_lifecycle` and
+        // `system/init` on the strength of the latch alone, with no echo
+        // required. A latch that survived a reconnect would read the
+        // reconnected session's first real turn as ours — its `result` arriving
+        // with no echo logs a spurious `.error`, and had `echoSeen` survived
+        // too, the whole turn would be invisible to the trackers. The 120 s
+        // watchdog bounds that window but does not close it, and a reconnect
+        // inside it is the normal case for SSH remote.
         endKeepAliveFlight()
         // A latch that survived a reconnect would hold every later reply in
         // the queue until it filled — the shim that set it is gone, so nothing will ever
@@ -6857,9 +6842,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// the id check hands the reconcile a live file belonging to a different
     /// conversation after a `/resume` mints a new id.
     ///
-    /// Same shape as `KeepAliveGate`: a pure decision with the
-    /// filesystem injected, because both failures above are silent and
-    /// neither is reachable from an assertion while the logic lives inline.
+    /// A pure decision with the filesystem injected, because both failures
+    /// above are silent and neither is reachable from an assertion while the
+    /// logic lives inline.
     enum ResolvedJSONLCache {
         enum Decision: Equatable {
             /// The remembered path is still good; skip the lookup.

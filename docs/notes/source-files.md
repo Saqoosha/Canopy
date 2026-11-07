@@ -28,4 +28,4 @@ The per-file catalogue was dropped: open the file and read its doc comments. Onl
 
 ## Shim and wire
 
-- **Anything in `ShimProcess` that latches (keep-alive latch, phone-reply flight, a pending move) must be cleared in `resetActivityState()`** — a stale latch swallows the reconnected session's first real turn.
+- **Anything in `ShimProcess` that latches (keep-alive latch, phone-reply flight, a pending move) must be cleared in `resetActivityState()`**.

@@ -57,8 +57,6 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeepAlive")
 /// can only be injected into a live shim, so closed and `.dormant` rows are
 /// unreachable regardless. What the pane scope adds on top is excluding an
 /// open session that has no pane.
-///
-/// Here the panes are the set worth spending on.
 @MainActor
 final class KeepAliveCoordinator {
     static let shared = KeepAliveCoordinator()
@@ -185,11 +183,11 @@ final class KeepAliveCoordinator {
             // the gate shut anyway.
             let limits = shim.rateLimitAccount ?? SharedRateLimitData.shared.local
             let rateLimitPct = limits.keepAliveQuotaPct(now: now)
-            // Debug, not info: this runs every minute per pane, so a per-pane info line
-            // would be the loudest thing in the log by two orders of
-            // magnitude and would push `[bg]` notices out of the ring
-            // buffer. The decision that matters — an actual send — is
-            // logged at info by `requestKeepAlive`.
+            // Debug, not info: this runs every minute per pane, so a per-pane
+            // info line would be the loudest thing in the log by two orders of
+            // magnitude and would push `[bg]` notices out of the ring buffer.
+            // The decision that matters — an actual send — is logged at notice
+            // by `requestKeepAlive`.
             if let reason = shim.keepAliveIneligibilityReason(now: now, interval: interval, rateLimitPct: rateLimitPct) {
                 logger.debug("\(label, privacy: .public): keep-alive skipped — \(reason, privacy: .public)")
                 continue

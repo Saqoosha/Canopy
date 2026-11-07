@@ -3,13 +3,13 @@ import Foundation
 /// Eligibility accounting for the prompt-cache keep-alive (see
 /// `KeepAliveCoordinator`).
 ///
-/// A pure value type for two reasons: it is
-/// exercisable from `_SidebarLogicProbe` without spawning a shim, and a
-/// mistake here is billed. The failure modes are asymmetric, which is why
-/// the gate is written as "why not" rather than "may I" — declining too
-/// often costs one cache miss the user would have paid anyway, while
-/// permitting too often bills a model call per session per interval,
-/// until `maxUserIdle`, on a machine nobody is sitting at.
+/// A pure value type for two reasons: it is exercisable from
+/// `_SidebarLogicProbe` without spawning a shim, and a mistake here is
+/// billed. The failure modes are asymmetric, which is why the gate is written
+/// as "why not" rather than "may I" — declining too often costs one cache
+/// miss the user would have paid anyway, while permitting too often bills a
+/// model call per session per interval, until `maxUserIdle`, on a machine
+/// nobody is sitting at.
 struct KeepAliveGate: Equatable {
     /// How long after the last API activity a refresh is worth buying.
     ///
@@ -68,13 +68,13 @@ struct KeepAliveGate: Equatable {
     /// One constant because a drift does not fail loudly: the trackers and
     /// the screen would both treat our turn as the user's.
     ///
-    /// It is written to be legible to two readers. The model, so the reply
-    /// is one token and no tool runs — a request, not a constraint: the turn
-    /// runs in-session with the full toolset, and this project has already
-    /// measured that a counter-instruction in a user turn cannot beat a
-    /// persona in the system prompt (see the title-generation learnings).
-    /// And a future session reading the JSONL, since this turn is a REAL one and stays in the conversation context
-    /// permanently.
+    /// It is written to be legible to two readers. The model, so the reply is
+    /// one token and no tool runs — a request, not a constraint: the turn runs
+    /// in-session with the full toolset, and this project has already measured
+    /// that a counter-instruction in a user turn cannot beat a persona in the
+    /// system prompt (see the title-generation learnings). And a future session
+    /// reading the JSONL, since this turn is a REAL one and stays in the
+    /// conversation context permanently.
     ///
     /// It is NOT written for a human scrolling the transcript — an earlier
     /// revision claimed that, which contradicted the swallow and left the
