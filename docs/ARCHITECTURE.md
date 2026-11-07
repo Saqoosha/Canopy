@@ -152,7 +152,7 @@ Closing a pane and stopping a session are different operations.
 
 - Sparkle replaces the app. The daemon notices the new build on disk and counts what holds a restart back (`DaemonUpgrade`, `ShimProcess.upgradeBlocker`). That includes a running turn, a question waiting for an answer, a background task, an unsent prompt, an in-flight keep-alive or recap, a waiting phone reply, a session whose folder was removed, and a client that cannot re-attach on its own.
 - While it waits, `Canopy --mirror-relay`, started from the new build, holds the Tailscale port and copies bytes to the daemon's relay socket. macOS's Application Firewall cannot resolve the path of the replaced daemon and drops all its inbound traffic. The relay socket requires the password like TCP does.
-- When nothing holds it, the daemon sends `daemon_restarting`, stops its shims and exits 1; launchd starts the new build. Mirror panes on other Macs wait for the listener and re-attach (`RestartReattach`).
+- When nothing holds it, the daemon sends `daemon_restarting`, stops its shims and exits 1; launchd starts the new build. Mirror panes on other Macs wait for the listener and re-attach (`RestartReattach`). A session nothing reopens keeps a dormant Open row, as a reaped one does (`ReapedSessions.keepRows`). A SIGTERM (logout, bootout) keeps the rows too.
 - The sidebar footer shows the waiting update with marketing versions, the sessions holding it, and Restart now (`PendingUpdate`).
 
 ### Claude Code extension updates
