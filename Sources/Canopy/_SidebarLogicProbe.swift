@@ -6619,9 +6619,109 @@ enum SidebarLogicProbe {
                    !bundledSkills.isEmpty && bundledSkills.allSatisfy { file in
                        ShimProcess.bridgeModFiles.contains { file.path.hasSuffix("/" + $0) }
                    })
+            record("bridge mod: canopyctl ships with it, so a skill can reach the daemon",
+                   ShimProcess.bridgeModFiles.contains("bin/canopyctl"))
+            record("bridge dirs: the control socket is Canopy's to assign",
+                   ShimProcess.canopyAssignedEnvKeys.contains("CANOPY_CONTROL_SOCK"))
             record("bridge mod: the find-session skill is listed",
                    ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md")
                        && ShimProcess.bridgeModFiles.contains("skills/find-session/find_sessions.py"))
+
+            let upper = "AAAAAAAA-0000-0000-0000-000000000000"
+            let shown = ControlProtocol.parseShowSession(["sessionId": upper, "machineId": "M1"])
+            record("show session: an id is required",
+                   ControlProtocol.parseShowSession(["machineId": "M1"]) == .failure(ControlProtocol.ControlError("sessionId is not a session id")))
+            record("show session: a path is not an id",
+                   ControlProtocol.parseShowSession(["sessionId": "../x"]) == .failure(ControlProtocol.ControlError("sessionId is not a session id")))
+            record("show session: the id is lowercased, as the CLI writes it", (try? shown.get())?.sessionId == upper.lowercased())
+            record("show session: an empty machine means this Mac",
+                   (try? ControlProtocol.parseShowSession(["sessionId": upper, "machineId": ""]).get())?.machineId == nil)
+            let resolvedShow = ControlProtocol.ShowSession(sessionId: upper.lowercased(), machineId: nil, directory: "/r/p", title: "T")
+            record("show session: the frame parses back to the same request",
+                   ControlProtocol.parseShowSession(ControlProtocol.showSessionFrame(resolvedShow)) == .success(resolvedShow))
+            record("show session: the frame names the type the GUI dispatches on",
+                   ControlProtocol.showSessionFrame(resolvedShow)["type"] as? String == ControlProtocol.showSessionFrameType)
+            record("show session: no subscribed client means nobody received it",
+                   ControlBroadcast.toLocalSubscribers(["type": "probe"]) == 0)
+            let subscribeRequest: [String: Any] = ["type": "request", "id": "sub", "verb": "subscribe", "params": [:] as [String: Any]]
+            var tcpFrames: [[String: Any]] = []
+            let tcpPeer = ControlSession(store: SessionStore(), isLocal: false, allowBypass: { false }) { tcpFrames.append($0) }
+            tcpPeer.handle(subscribeRequest)
+            record("show session: a subscribed TCP peer gets no frame",
+                   ControlBroadcast.toLocalSubscribers(["type": "probe"]) == 0)
+            tcpPeer.handle(["type": "request", "id": "show", "verb": "show_session", "params": ["sessionId": upper]])
+            record("show session: a TCP peer cannot ask",
+                   tcpFrames.first { $0["id"] as? String == "show" }?["error"] as? String == "local clients only")
+            tcpPeer.stop()
+            var localFrames: [[String: Any]] = []
+            let localClient = ControlSession(store: SessionStore(), isLocal: true, allowBypass: { false }) { localFrames.append($0) }
+            localClient.handle(subscribeRequest)
+            record("show session: a local subscriber receives the frame",
+                   ControlBroadcast.toLocalSubscribers(["type": "probe"]) == 1
+                       && localFrames.contains { $0["type"] as? String == "probe" })
+            localClient.stop()
+            record("show session: a stopped subscriber is gone",
+                   ControlBroadcast.toLocalSubscribers(["type": "probe"]) == 0)
+            let showStore = SessionStore()
+            let openOne = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "open-id",
+                                      title: "T", project: "p", status: .live)
+            let asker = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "asker-id",
+                                    title: "A", project: "p", status: .live)
+            showStore._probeSeedOpenSessions([asker, openOne])
+            showStore.openInFocusedPane(asker.id)
+            func paneCount(_ id: OpenSession.ID) -> Int {
+                showStore.panes.filter { if case .session(let found) = $0.content { return found == id }; return false }.count
+            }
+            let openRequest = ControlProtocol.ShowSession(sessionId: "open-id", machineId: nil, directory: nil, title: nil)
+            showStore.showSession(openRequest)
+            record("show session: an open session gets a pane of its own, beside the one that asked",
+                   paneCount(openOne.id) == 1 && paneCount(asker.id) == 1)
+            showStore.showSession(openRequest)
+            record("show session: one already in a pane is only brought forward",
+                   paneCount(openOne.id) == 1 && showStore.selection == .session(openOne.id))
+            showStore.showSession(ControlProtocol.ShowSession(sessionId: "x", machineId: "not-paired", directory: nil, title: nil))
+            record("show session: another Mac goes through the mirror route, which refuses an unpaired one",
+                   showStore.remoteAttachError != nil)
+            showStore.showSession(ControlProtocol.ShowSession(sessionId: upper.lowercased(), machineId: nil, directory: nil, title: nil))
+            record("show session: a session nothing resolved says so", showStore.lastSessionFailure != nil)
+            let mirrorTwin = OpenSession(origin: .mirror(machineId: "M1", host: "h", port: 1), resumeId: "twin-id",
+                                         title: "T", project: "p", status: .live)
+            let twinStore = SessionStore()
+            twinStore._probeSeedOpenSessions([mirrorTwin])
+            twinStore.showSession(ControlProtocol.ShowSession(sessionId: "twin-id", machineId: nil, directory: nil, title: nil))
+            record("show session: another Mac's copy does not answer for this Mac",
+                   twinStore.paneIndex(forSession: mirrorTwin.id) == nil)
+
+            var daemonFrames: [[String: Any]] = []
+            let daemonStore = SessionStore()
+            let daemon = ControlSession(store: daemonStore, isLocal: true, allowBypass: { false }) { daemonFrames.append($0) }
+            func showReply(_ id: String, sessionId: String) -> [String: Any]? {
+                daemon.handle(["type": "request", "id": id, "verb": "show_session", "params": ["sessionId": sessionId]])
+                let deadline = Date().addingTimeInterval(20)
+                while Date() < deadline {
+                    if let found = daemonFrames.first(where: { $0["id"] as? String == id }) { return found }
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+                }
+                return nil
+            }
+            let noSuchSession = "bbbbbbbb-0000-0000-0000-000000000000"
+            record("show session: with no GUI connected the daemon says so",
+                   showReply("n1", sessionId: noSuchSession)?["errorCode"] as? String == "no_gui")
+            daemon.handle(subscribeRequest)
+            record("show session: a session with no transcript is refused",
+                   showReply("n2", sessionId: noSuchSession)?["errorCode"] as? String == "not_found")
+            let daemonOpenId = UUID().uuidString.lowercased()
+            let daemonOpen = OpenSession(origin: .local(URL(fileURLWithPath: "/r/p")), resumeId: daemonOpenId,
+                                         title: "Open one", project: "p", status: .live)
+            daemonStore._probeSeedOpenSessions([daemonOpen])
+            let openReply = showReply("n3", sessionId: daemonOpenId)
+            record("show session: an open session reaches the GUI with its folder, in case its row has not",
+                   (openReply?["result"] as? [String: Any])?["shown"] as? Bool == true
+                       && daemonFrames.contains {
+                           $0["type"] as? String == ControlProtocol.showSessionFrameType
+                               && $0["directory"] as? String == "/r/p" && $0["title"] as? String == "Open one"
+                       })
+            daemon.stop()
             record("bridge dirs: the scrub keeps an inherited value",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
 

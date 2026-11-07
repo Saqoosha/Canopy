@@ -130,7 +130,7 @@ detach_mount() {
 # matched on every release since at least 2.26.1 and rebuilt every DMG every
 # run, which is why the mismatch was structural rather than a one-off.
 sh_has_cs_xattrs() {
-  find "$1" -name "*.sh" -exec xattr {} \; 2>/dev/null | grep -q '^com\.apple\.cs\.'
+  find "$1" \( -name "*.sh" -o -name "canopyctl" \) -exec xattr {} \; 2>/dev/null | grep -q '^com\.apple\.cs\.'
 }
 
 strip_sh_xattrs() {
@@ -158,7 +158,7 @@ strip_sh_xattrs() {
     rm -rf "$MOUNT"
   fi
   if (( REBUILD )); then
-    find "$TMP_CONTENT" -name "*.sh" -exec xattr -c {} \;
+    find "$TMP_CONTENT" \( -name "*.sh" -o -name "canopyctl" \) -exec xattr -c {} \;
     local TEMP_DMG; TEMP_DMG=$(mktemp "${BUILD_DIR}/stripped-XXXXXX")
     rm -f "$TEMP_DMG"  # mktemp creates the file; hdiutil create needs it absent
     hdiutil create -srcfolder "$TMP_CONTENT" -format UDZO -volname "Canopy" -o "$TEMP_DMG" -quiet

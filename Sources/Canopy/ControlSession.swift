@@ -41,6 +41,7 @@ final class ControlSession {
     }
 
     func stop() {
+        ControlBroadcast.unregister(self)
         stopped = true
         recheck?.invalidate()
         recheck = nil
@@ -68,6 +69,7 @@ final class ControlSession {
         case "switch_account": switchAccount(request)
         case "list_accounts": listAccounts(request)
         case "request_recap": requestRecap(request)
+        case "show_session": showSession(request)
         case "roster_secret_changed":
             // The GUI wrote a new relay secret to the Keychain; reconnect with it. Only this
             // Mac's GUI writes that Keychain item, so a TCP client has no business asking.
@@ -95,6 +97,62 @@ final class ControlSession {
     }
 
     // MARK: - Verbs
+
+    /// Asks this Mac's GUI to put a session in a pane. Only a local client may: it opens a pane
+    /// on the screen of whoever sits here.
+    private func showSession(_ request: ControlProtocol.Request) {
+        guard isLocal else { return fail(request, "local clients only") }
+        switch ControlProtocol.parseShowSession(request.params) {
+        case .failure(let error):
+            fail(request, error.message, code: "invalid_session_id")
+        case .success(var show):
+            // First: resolving can scan every transcript and move one, for nobody.
+            guard ControlBroadcast.hasLocalSubscribers else { return failNoGUI(request) }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Resolved here so a skill hears why a session cannot open, instead of a GUI banner.
+                if show.machineId == nil, let open = store.openSession(for: [.resumeId(show.sessionId)]) {
+                    // Its row may not have reached the GUI yet.
+                    show.directory = open.origin.workingDirectory.path
+                    show.title = open.title
+                } else if show.machineId == nil {
+                    if store.recents.isEmpty { await Self.refreshRecents(store).value }
+                    guard !stopped else { return }
+                    var resolved = store.resolveClosedSession(sessionId: show.sessionId, localCwd: nil)
+                    if case .failure(.folderMissing) = resolved {
+                        // Recents holds the newest few, and an older session in a removed
+                        // worktree still reopens in its checkout.
+                        let all = await Task.detached { ClaudeSessionHistory.loadAllSessions(keep: .max, scanLimit: .max) }.value
+                        resolved = SessionStore.resolveClosedSession(sessionId: show.sessionId, localCwd: nil, recents: all,
+                                                                     knownCheckouts: store.rescueCandidates)
+                        guard !stopped else { return }
+                    }
+                    switch resolved {
+                    case .failure(let failure):
+                        return fail(request, Self.message(for: failure), code: "not_found")
+                    case .success(let found):
+                        show.directory = found.directory.path
+                        show.title = found.title
+                            ?? ClaudeSessionHistory.scanForTranscript(sessionId: show.sessionId).map(ClaudeSessionHistory.title(atPath:))
+                    }
+                }
+                guard ControlBroadcast.toLocalSubscribers(ControlProtocol.showSessionFrame(show)) > 0 else {
+                    return failNoGUI(request)
+                }
+                reply(request, ["shown": true])
+            }
+        }
+    }
+
+    private func failNoGUI(_ request: ControlProtocol.Request) {
+        fail(request, "No Canopy window is connected on this Mac", code: "no_gui")
+    }
+
+    /// A frame no request asked for, from `ControlBroadcast`.
+    func push(_ frame: [String: Any]) {
+        guard !stopped else { return }
+        send(frame)
+    }
 
     private func sendMessage(_ request: ControlProtocol.Request) {
         switch ControlProtocol.parseSendMessage(request.params) {
@@ -776,7 +834,10 @@ final class ControlSession {
         guard !subscribed else { return }
         subscribed = true
         trackOpenSessions()
-        if isLocal { trackUpgradeState() }  // only this Mac's GUI shows it
+        if isLocal {  // only this Mac's GUI shows these
+            trackUpgradeState()
+            ControlBroadcast.register(self)
+        }
         recheck = Timer.scheduledTimer(withTimeInterval: Self.recheckInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { if let self { self.pushIfChanged(self.pushState()) } }
         }

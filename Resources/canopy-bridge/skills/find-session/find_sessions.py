@@ -47,7 +47,7 @@ CONVERSATION_MARKS = PROMPT_MARKS + (b'"type":"assistant"',)
 KEEP_ALIVE = "[Canopy keep-alive]"
 NOT_PROMPTS = ("<", "[Request", KEEP_ALIVE)
 NOT_CONVERSATION = ("isSidechain", "isMeta", "isSynthetic", "isCompactSummary", "isVisibleInTranscriptOnly")
-# Backs up the -- in ask_peer: -oProxyCommand would run a command here.
+# Backs up the -- in call_peer: -oProxyCommand would run a command here.
 SAFE_ADDRESS = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*\Z")
 # Goes into a path, so `../` must not get through.
 SAFE_SESSION_ID = re.compile(r"[0-9A-Za-z-]+\Z")
@@ -238,12 +238,16 @@ def scan_lines(rg, terms, files, deadline, on_record):
 SUMMARY_KEYS = ("title", "cwd", "firstPrompt", "lastPrompt", "lastActive")
 
 
-def summarize(path):
-    """`lastActive` is the date of the last prompt."""
+def summarize(path, deadline):
+    """(summary, whether the whole file was read). `lastActive` is the date of the last prompt."""
     summary = dict.fromkeys(SUMMARY_KEYS, "")
     custom_title = ai_title = ""
+    finished = True
     with open(path, "rb") as transcript:
         for raw in transcript:
+            if time.monotonic() > deadline:
+                finished = False
+                break
             if len(raw) > MAX_LINE_BYTES:
                 continue
             if b'Title"' not in raw and not any(mark in raw for mark in PROMPT_MARKS):
@@ -268,7 +272,7 @@ def summarize(path):
             summary["cwd"] = record.get("cwd") or summary["cwd"]
             summary["lastActive"] = local_date(record.get("timestamp", "")) or summary["lastActive"]
     summary["title"] = custom_title or ai_title or summary["firstPrompt"]
-    return summary
+    return summary, finished
 
 
 def modified(path):
@@ -345,9 +349,12 @@ def search_here(terms, match_any, exclude, limit, timeout):
             finished = False
         else:
             try:
-                summary = summarize(path)
-            except OSError:
+                summary, read_all = summarize(path, summary_deadline)
+                finished = finished and read_all
+            except FileNotFoundError:
                 continue  # removed since rg read it, as when a worktree is cleaned up
+            except OSError:
+                finished = False  # the hits are real, so the row stays with no summary
         sessions.append({"sessionId": session_id(path), **summary, "hits": hits[path], "snippets": snippets[path]})
     sessions.sort(key=lambda session: (sum(session["hits"].values()), session["lastActive"]), reverse=True)
     return {**row, "truncated": not (finished and every_file_read), "matched": len(matched), "sessions": sessions}
@@ -412,6 +419,14 @@ def load_peers():
 
 
 def ask_peer(address, request, timeout):
+    """Never raises: a failure here must not take this Mac's answer with it."""
+    try:
+        return call_peer(address, request, timeout)
+    except Exception as error:
+        return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+
+
+def call_peer(address, request, timeout):
     """Runs this script on a peer, or returns {"ok": False, "error": ...}.
 
     Arguments cross a remote shell that may be fish or zsh, so they travel as one base64 word

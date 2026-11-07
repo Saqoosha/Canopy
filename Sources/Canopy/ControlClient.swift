@@ -43,6 +43,7 @@ final class ControlClient {
     /// sessions whose rows stay (empty from a daemon that predates `reaped`).
     var onSessionState: (([ControlProtocol.SessionRow], Bool, [ControlProtocol.SessionRow]) -> Void)?
     var onUpgradeState: ((UpgradeState) -> Void)?
+    var onShowSession: ((ControlProtocol.ShowSession) -> Void)?
 
     private let endpoint: MirrorEndpoint
     private let token: String?
@@ -226,6 +227,12 @@ final class ControlClient {
                 return
             }
             onUpgradeState?(state)
+        case ControlProtocol.showSessionFrameType:
+            guard case .success(let show) = ControlProtocol.parseShowSession(dict) else {
+                logger.error("unreadable show_session from the daemon")
+                return
+            }
+            onShowSession?(show)
         case "response":
             if let (id, result) = correlator.finish(dict) { waiters.removeValue(forKey: id)?.resume(returning: result) }
         default:
