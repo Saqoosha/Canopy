@@ -181,6 +181,8 @@ struct LauncherView: View {
     /// Read for other Macs' Recents and used to attach a session started on
     /// one. Every other launch goes through `appState`.
     @Bindable var store: SessionStore
+    /// Nil for the launcher shown with no panes.
+    let paneId: PaneSlot.ID?
     @State private var selectedDirectory: URL?
     /// Another Mac (by machine id) chosen in the location chip. A session
     /// started there runs on that Mac and is attached here as a mirror pane,
@@ -440,6 +442,7 @@ struct LauncherView: View {
             let migrated = Self.migratingRetiredModel(model)
             if migrated != model { model = migrated }
             loadData()
+            takeNoFolderRequest()
             preselectMostRecentDirectory()
             Task { await updater.checkForUpdate() }
         }
@@ -452,6 +455,8 @@ struct LauncherView: View {
             }
         }
         .onChange(of: selectedDirectory) { refreshBranchName() }
+        // For a launcher already on screen, which `onAppear` does not reach.
+        .onChange(of: store.launcherWantsNoFolder) { takeNoFolderRequest() }
         .onChange(of: peerMachineId.flatMap { store.remoteRecents[$0] }) { preselectPeerFolder() }
         .task(id: peerRecentsKey) {
             if let peerMachineId { store.refreshRemoteRecents(machineId: peerMachineId) }
@@ -465,6 +470,17 @@ struct LauncherView: View {
         .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
         }
+    }
+
+    /// Back to This Mac as well: No folder is local, and an SSH host or another
+    /// Mac chosen here would otherwise start the session there. A launch already
+    /// under way reads this state as it goes, so the request is used up and dropped.
+    private func takeNoFolderRequest() {
+        guard store.takeNoFolderRequest(launcherPane: paneId), preparingHeadline == nil else { return }
+        isRemoteMode = false
+        peerMachineId = nil
+        selectedDirectory = NoFolder.directory
+        isPromptFocused = true
     }
 
     /// Open on the most recently used folder when nothing is chosen yet.
@@ -617,7 +633,7 @@ struct LauncherView: View {
         } else if isRemoteMode {
             remoteHost.isEmpty ? nil : remoteHost
         } else {
-            selectedDirectory?.lastPathComponent
+            isOnNoFolder ? nil : selectedDirectory?.lastPathComponent
         }
         guard let place else {
             return willContinueSession ? "Where were we?" : "What should we build?"
@@ -658,6 +674,7 @@ struct LauncherView: View {
         if isRemoteMode {
             return remoteDirectory.isEmpty ? "Choose folder" : (remoteDirectory as NSString).lastPathComponent
         }
+        if isOnNoFolder { return NoFolder.displayName }
         return selectedDirectory?.lastPathComponent ?? "Choose folder"
     }
 
@@ -669,6 +686,7 @@ struct LauncherView: View {
                 // `showRemoteBrowser` is a state both would fight over.
                 Button("Browse remote…") { showRemoteSetup = true }
             } else {
+                Button(NoFolder.displayName) { selectedDirectory = NoFolder.prepare() }
                 if !recentDirectories.isEmpty {
                     Section("Recent") {
                         ForEach(recentDirectories.prefix(15), id: \.path) { dir in
@@ -687,7 +705,7 @@ struct LauncherView: View {
             )
         }
         .chipMenu()
-        .help(isRemoteMode ? remoteDirectory : (selectedDirectory?.abbreviatingWithTilde ?? "No folder chosen"))
+        .help(isRemoteMode ? remoteDirectory : (selectedDirectory?.abbreviatingWithTilde ?? "Choose a folder"))
         .sheet(isPresented: $showCloneSheet) {
             CloneRepoSheet { cloned in
                 selectedDirectory = cloned
@@ -1036,7 +1054,7 @@ struct LauncherView: View {
             )
         }
         .chipMenu()
-        .help(peerFolder ?? "No folder chosen")
+        .help(peerFolder ?? "Choose a folder")
         .sheet(isPresented: $showPeerBrowser) {
             RemoteDirectoryBrowser(source: .peer(machineId: peer.machineId, title: peer.title)) { path in
                 peerFolder = path
@@ -1144,13 +1162,13 @@ struct LauncherView: View {
             }
             CheckItem(title: willCreateWorktree
                           ? "Continue — not with a new worktree"
-                          : "Continue the latest session",
+                          : isOnNoFolder ? "Continue — not with No folder" : "Continue the latest session",
                       checked: willContinueSession) {
                 continueSession = true
             }
             // Disabled rather than hidden: a row that vanishes reads as a bug,
             // and the point is to say WHY the two cannot combine.
-            .disabled(willCreateWorktree)
+            .disabled(willCreateWorktree || isOnNoFolder)
             if let peer = selectedPeer { peerSessionRows(peer) }
         } label: {
             ChipLabel(
@@ -1173,8 +1191,15 @@ struct LauncherView: View {
     /// a checkout for. `continueSession` is deliberately NOT written to: it is
     /// a persisted preference, and flipping it here would silently lose the
     /// user's setting the moment they turned the worktree off again.
+    ///
+    /// No folder never continues either: its sessions are unrelated chats in one
+    /// folder, so the latest one is not where a new question belongs.
     private var willContinueSession: Bool {
-        continueSession && !willCreateWorktree
+        continueSession && !willCreateWorktree && !isOnNoFolder
+    }
+
+    private var isOnNoFolder: Bool {
+        !isRemoteMode && selectedPeer == nil && selectedDirectory.map(NoFolder.isNoFolder) == true
     }
 
     /// Whether this launch will actually cut a worktree.
@@ -2268,7 +2293,7 @@ struct LauncherView: View {
     }
 
     private func resolveTeleportCwd(for session: RemoteSession) -> URL? {
-        if let selected = selectedDirectory { return selected }
+        if let selected = selectedDirectory, !NoFolder.isNoFolder(selected) { return selected }
 
         // Find recents whose lastPathComponent matches the repo name. If
         // exactly one matches, auto-confirm. If multiple, prompt the

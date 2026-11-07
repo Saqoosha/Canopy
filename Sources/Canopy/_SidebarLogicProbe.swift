@@ -5198,6 +5198,118 @@ enum SidebarLogicProbe {
             try? FileManager.default.removeItem(at: worktreeParent)
         }
 
+        // --- No folder ---
+        do {
+            let fm = FileManager.default
+            let key = "recentDirectories"
+            let priorStored = UserDefaults.standard.stringArray(forKey: key)
+            let scratch = fm.temporaryDirectory
+                .appendingPathComponent("no-folder-probe-\(UUID().uuidString)", isDirectory: true)
+            defer {
+                if let priorStored {
+                    UserDefaults.standard.set(priorStored, forKey: key)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+                UserDefaults.standard.synchronize()
+                try? fm.removeItem(at: scratch)
+            }
+
+            // Removed first, so what is read below is this run's file, not an earlier run's.
+            let claudeMd = NoFolder.directory.appendingPathComponent("CLAUDE.md")
+            func written() -> String? { try? String(contentsOf: claudeMd, encoding: .utf8) }
+            try? fm.removeItem(at: claudeMd)
+            let prepared = NoFolder.prepare()
+            record("NoFolder.prepare: returns the folder", prepared.path == NoFolder.directory.path)
+            record("NoFolder.prepare: writes CLAUDE.md", written() == NoFolder.instructions)
+            let stamp = Date(timeIntervalSince1970: 1_000_000_000)
+            try? fm.setAttributes([.modificationDate: stamp], ofItemAtPath: claudeMd.path)
+            NoFolder.prepare()
+            record("NoFolder.prepare: leaves an unchanged CLAUDE.md alone",
+                   (try? fm.attributesOfItem(atPath: claudeMd.path))?[.modificationDate] as? Date == stamp)
+            try? "older text".write(to: claudeMd, atomically: true, encoding: .utf8)
+            NoFolder.prepare()
+            record("NoFolder.prepare: replaces a CLAUDE.md from another version", written() == NoFolder.instructions)
+            record("NoFolder.instructions: names a skill that ships",
+                   NoFolder.instructions.contains("canopy-bridge:find-session")
+                   && ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md"))
+            // Past transcripts recorded this path as their cwd.
+            record("NoFolder.directory: stays where past sessions ran",
+                   NoFolder.directory.path.hasSuffix("/Library/Application Support/Canopy/no-folder"))
+
+            let sameName = scratch.appendingPathComponent(NoFolder.directory.lastPathComponent, isDirectory: true)
+            let parentLink = scratch.appendingPathComponent("parent-link", isDirectory: true)
+            try? fm.createDirectory(at: sameName, withIntermediateDirectories: true)
+            try? fm.createSymbolicLink(at: parentLink, withDestinationURL: NoFolder.directory.deletingLastPathComponent())
+            record("NoFolder.isNoFolder: the folder", NoFolder.isNoFolder(NoFolder.directory))
+            record("NoFolder.isNoFolder: a URL with no trailing slash",
+                   NoFolder.isNoFolder(URL(fileURLWithPath: NoFolder.directory.path, isDirectory: false)))
+            record("NoFolder.isNoFolder: through a symlinked parent",
+                   NoFolder.isNoFolder(parentLink.appendingPathComponent(NoFolder.directory.lastPathComponent)))
+            record("NoFolder.isNoFolder: a folder of the same name elsewhere", !NoFolder.isNoFolder(sameName))
+            record("NoFolder.isNoFolder: another folder", !NoFolder.isNoFolder(scratch))
+
+            record("projectDisplayName: No folder", GitWorktree.projectDisplayName(for: NoFolder.directory) == NoFolder.displayName)
+            record("projectDisplayName: No folder, whatever the branch",
+                   GitWorktree.projectDisplayName(for: NoFolder.directory, branch: "main") == NoFolder.displayName)
+            let closed = SidebarRow.closedLocal(SessionEntry(id: "no-folder", title: "t", timestamp: Date(), projectDirectory: NoFolder.directory))
+            let openRow = SidebarRow.open(OpenSession(origin: .local(NoFolder.directory), resumeId: "no-folder-row", title: "t",
+                                                      project: GitWorktree.projectDisplayName(for: NoFolder.directory), status: .live))
+            record("SidebarRow.project: a closed No folder row groups with an open one",
+                   closed.project == openRow.project && closed.project == NoFolder.displayName)
+            record("SidebarRow.displayProject: a closed No folder row", closed.displayProject == NoFolder.displayName)
+
+            // A leak here makes the next Cmd+N choose No folder.
+            UserDefaults.standard.set([scratch.path], forKey: key)
+            RecentDirectories.add(NoFolder.directory)
+            record("RecentDirectories.add: No folder is not persisted",
+                   UserDefaults.standard.stringArray(forKey: key) == [scratch.path])
+            UserDefaults.standard.set([NoFolder.directory.path, scratch.path], forKey: key)
+            record("RecentDirectories.load: a persisted No folder is dropped",
+                   RecentDirectories.load().map(\.path) == [scratch.path])
+
+            // Cmd+Shift+N. The view's half is `LauncherView.takeNoFolderRequest`.
+            let paneless = SessionStore()
+            paneless.selection = .session(UUID())
+            try? fm.removeItem(at: claudeMd)
+            paneless.openLauncherWithoutFolder()
+            record("openLauncherWithoutFolder: prepares the folder", written() == NoFolder.instructions)
+            record("openLauncherWithoutFolder: with no pane, selects the launcher and asks for No folder",
+                   paneless.selection == .launcher && paneless.panes.isEmpty && paneless.launcherWantsNoFolder)
+            record("takeNoFolderRequest: the pane-less launcher takes it, once",
+                   paneless.takeNoFolderRequest(launcherPane: nil)
+                   && !paneless.launcherWantsNoFolder
+                   && !paneless.takeNoFolderRequest(launcherPane: nil))
+
+            let overSession = SessionStore()
+            let open = OpenSession(origin: .local(scratch), resumeId: "no-folder-open", title: "A", project: "p", status: .live)
+            overSession._probeSeedOpenSessions([open])
+            _ = overSession.openInNewPane(open.id)
+            overSession.openLauncherWithoutFolder()
+            record("openLauncherWithoutFolder: a session pane becomes the launcher, as with Cmd+N",
+                   overSession.panes.first?.content == .launcher
+                   && overSession.selection == .launcher
+                   && overSession.launcherWantsNoFolder)
+
+            // Every launcher on screen sees the flag, and only the focused one was asked.
+            let twoLaunchers = SessionStore()
+            _ = twoLaunchers.openLauncherInNewPane()
+            _ = twoLaunchers.openLauncherInNewPane()
+            twoLaunchers.setFocusedPaneIndex(0)
+            twoLaunchers.openLauncherWithoutFolder()
+            record("takeNoFolderRequest: a launcher in another pane leaves it",
+                   !twoLaunchers.takeNoFolderRequest(launcherPane: twoLaunchers.panes[1].id)
+                   && twoLaunchers.launcherWantsNoFolder)
+            record("takeNoFolderRequest: the focused launcher takes it",
+                   twoLaunchers.takeNoFolderRequest(launcherPane: twoLaunchers.panes[0].id))
+
+            let plainNew = SessionStore()
+            plainNew._probeSeedOpenSessions([open])
+            _ = plainNew.openInNewPane(open.id)
+            plainNew.openLauncherInFocusedPane()
+            record("Cmd+N does not ask for No folder", !plainNew.launcherWantsNoFolder)
+        }
+
         // --- Open-session reorder (drag & drop) ---
         // Pure mapping: the visible (filtered) open rows after a move are
         // written back into the master array; hidden rows keep their slots.

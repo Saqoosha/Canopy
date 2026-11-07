@@ -39,6 +39,9 @@ final class SessionStore {
     /// What the detail pane is showing right now. Defaults to launcher.
     var selection: SessionSelection = .launcher
 
+    /// Cmd+Shift+N asked for a launcher on No folder, and none has taken it yet.
+    private(set) var launcherWantsNoFolder = false
+
     /// Horizontal panes in the detail column. Left-to-right order. Every
     /// entry's sessionId must be present in openSessions; the store enforces
     /// this via closePane / auto-close on session drop.
@@ -3083,8 +3086,8 @@ final class SessionStore {
         openInFocusedPane(ctx.available[next])
     }
 
-    /// Replace focused pane's content with the launcher. Used by Cmd+N when
-    /// a pane exists; no-pane Cmd+N routes through select(.launcher).
+    /// Replace focused pane's content with the launcher. Used by Cmd+Shift+N, and
+    /// by Cmd+N when a pane exists; no-pane Cmd+N routes through select(.launcher).
     func openLauncherInFocusedPane() {
         if panes.isEmpty {
             selection = .launcher
@@ -3093,6 +3096,20 @@ final class SessionStore {
         if !launcherIsOnScreen { lastSessionFailure = nil }
         panes[focusedPaneIndex].content = .launcher
         syncSelectionToFocusedPane()
+    }
+
+    /// Cmd+Shift+N: Cmd+N's launcher, on No folder.
+    func openLauncherWithoutFolder() {
+        NoFolder.prepare()
+        openLauncherInFocusedPane()
+        launcherWantsNoFolder = true
+    }
+
+    /// True once, for the focused launcher: every launcher on screen sees the flag.
+    func takeNoFolderRequest(launcherPane paneId: PaneSlot.ID?) -> Bool {
+        guard launcherWantsNoFolder, focusedPane?.id == paneId else { return false }
+        launcherWantsNoFolder = false
+        return true
     }
 
     /// Append a new pane for `sessionId`. Returns false if bounced (already

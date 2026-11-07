@@ -519,7 +519,7 @@ private struct DetailLauncher: View {
     }
 
     private var launcher: some View {
-        LauncherView(appState: localAppState, store: store)
+        LauncherView(appState: localAppState, store: store, paneId: paneId)
             .onAppear {
                 store.receiveLaunches(from: localAppState, launcherPane: paneId)
             }

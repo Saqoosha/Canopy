@@ -11,7 +11,7 @@ enum RecentDirectories {
             // Also filter on read: worktree entries persisted by pre-guard
             // builds are masked (not physically scrubbed) here, and any
             // subsequent `add(_:)` rewrites the filtered list back to disk.
-            .filter { !GitWorktree.isManagedWorktree($0) }
+            .filter { !GitWorktree.isManagedWorktree($0) && !NoFolder.isNoFolder($0) }
             // Collapse duplicates persisted by builds that compared with
             // `URL ==` (see `add`); keep the first, i.e. most recent.
             .reduce(into: [URL]()) { kept, url in
@@ -24,8 +24,9 @@ enum RecentDirectories {
         // context, so the launcher dropdown would show meaningless entries.
         // Sessions inside a worktree remain reachable via the sidebar's
         // Recents/closed rows, so nothing is lost by skipping the write.
-        // Callers don't need to gate.
-        guard !GitWorktree.isManagedWorktree(url) else { return }
+        // Callers don't need to gate. No folder stays out too: Cmd+N opens on
+        // the head of this list.
+        guard !GitWorktree.isManagedWorktree(url), !NoFolder.isNoFolder(url) else { return }
         var dirs = load()
         // By path: `URL ==` treats a trailing slash as a difference.
         dirs.removeAll { $0.path == url.path }
