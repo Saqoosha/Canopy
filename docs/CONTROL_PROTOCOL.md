@@ -188,6 +188,17 @@ Mac, or its folder is gone) or `no_gui` (no GUI is subscribed). The daemon passe
 as a `show_session` frame on the GUI's subscribed connection, so for another Mac `shown` means
 the GUI was told, not that the pane attached.
 
+### `move_session`
+
+Local clients only. Moves a running session to another folder on this Mac when its turn ends.
+Params: `key` or `sessionId`, and `path`, an existing folder as an absolute path. A session in a
+worktree or on an SSH remote is refused. The reply is `{"status": "queued"}`: the move happens
+later, and `moveCount` on the session's row rises when it has.
+
+It takes no trust argument. For a folder the CLI does not trust yet, the daemon raises a system
+alert itself, and only a person pressing Move there lets the move go on. A failure raises a
+system notice, because the turn is already over.
+
 ### `send_message`
 
 Puts text on a live session through the same queue the phone uses

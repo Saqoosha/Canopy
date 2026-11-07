@@ -5230,9 +5230,11 @@ enum SidebarLogicProbe {
             try? "older text".write(to: claudeMd, atomically: true, encoding: .utf8)
             NoFolder.prepare()
             record("NoFolder.prepare: replaces a CLAUDE.md from another version", written() == NoFolder.instructions)
-            record("NoFolder.instructions: names a skill that ships",
-                   NoFolder.instructions.contains("canopy-bridge:find-session")
-                   && ShimProcess.bridgeModFiles.contains("skills/find-session/SKILL.md"))
+            for skill in ["find-session", "move-session"] {
+                record("NoFolder.instructions: names \(skill), which ships",
+                       NoFolder.instructions.contains("canopy-bridge:\(skill)")
+                       && ShimProcess.bridgeModFiles.contains("skills/\(skill)/SKILL.md"))
+            }
             // Past transcripts recorded this path as their cwd.
             record("NoFolder.directory: stays where past sessions ran",
                    NoFolder.directory.path.hasSuffix("/Library/Application Support/Canopy/no-folder"))

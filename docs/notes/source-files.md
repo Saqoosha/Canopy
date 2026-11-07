@@ -11,6 +11,8 @@ The per-file catalogue was dropped: open the file and read its doc comments. Onl
 - **`SessionStore.startIfDormant(_:)` must run on every route that hands a session to a pane** (`openInFocusedPane` seed and swap branches, `openInLauncherPane`, `openInNewPane`; not the already-paned focus-only branch) — otherwise a launch-restored `.dormant` session sits in a pane with no shim.
 - **The sidebar usage-bar colours (percent-of-quota or pace rule) are deliberately not shared with `StatusBarView`'s context meter** — the meter colours from the CLI's own levels; do not unify them.
 
+- **`SessionMove.askTrust`'s answer must not cross the control socket.** Any local connection can `subscribe`, so a frame and a verb would let a session approve its own folder (`learnings-session-move.md`).
+
 ## MacroPad
 
 - **`MacroPadDevice` must set `SO_NOSIGPIPE` on the TCP path and `TIOCEXCL` on the serial path** — a write to a closed socket raises SIGPIPE and kills Canopy; without `TIOCEXCL` two processes can drive the same pad.

@@ -18,7 +18,7 @@ enum NoFolder {
         This is not a project. A session runs here when the user starts without a folder, so there is nothing in this folder to read or change.
 
         - For a question about earlier work, use the `canopy-bridge:find-session` skill. It searches past sessions on this Mac and the paired ones.
-        - When the conversation turns into work on a project, say which folder it belongs in and suggest moving there.
+        - When the conversation turns into work on a project, say which folder it belongs in and offer to move there with the `canopy-bridge:move-session` skill.
 
         """
 

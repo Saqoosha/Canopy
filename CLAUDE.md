@@ -29,7 +29,7 @@ This file holds only what applies to every task. Everything else lives in `docs/
 | Tests, CI count floors, the logic probe, mutation testing | `testing.md` |
 | Release scripts, appcast, notarize hangs, codesign retry | `release.md` |
 | SSH remote | `ssh-remote.md` |
-| Topic learnings | `learnings-<topic>.md`: shim-specific, multi-pane-layout, macropad, first-render-races, prompt-cache-keep-alive, phone-reply-queue, background-task-reconcile, session-relocation, launch-composer, worktree-launch, session-titles, peer-names, rate-limits-per-account, general |
+| Topic learnings | `learnings-<topic>.md`: shim-specific, multi-pane-layout, macropad, first-render-races, prompt-cache-keep-alive, phone-reply-queue, background-task-reconcile, session-relocation, session-move, launch-composer, worktree-launch, session-titles, peer-names, rate-limits-per-account, general |
 
 Also: `docs/architecture.html` (walkthrough, mirrored to `gh-pages`), `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `docs/CONTROL_PROTOCOL.md`, design specs under `docs/superpowers/specs/`.
 
