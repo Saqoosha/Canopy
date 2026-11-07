@@ -55,8 +55,9 @@ After `hello_ok`, the client sends requests and gets one response per `id`.
 ```
 
 `id` and `verb` must be non-empty. Omitted `params` is `{}`. Some errors
-also carry a stable `errorCode` to branch on (so far only `open_session`
-with `resumeSessionId`); branch on it rather than on `error`'s wording.
+also carry a stable `errorCode` to branch on (`open_session` with
+`resumeSessionId`, and `show_session`); branch on it rather than on `error`'s
+wording.
 
 A session is named by `key` (the daemon's `OpenSession` id) and/or
 `sessionId` (the resume id). Both may be sent; `key` is tried first.
@@ -174,6 +175,18 @@ canopyctl wait --key <key> --reply-id <replyId>
 To wait for one event instead, use `listen` (below).
 
 `mkdir` creates a directory (`parent`, `name`) and returns `{path}`.
+
+### `show_session`
+
+Local clients only. Puts a session in a new pane of the GUI on this Mac. Params: `sessionId`,
+and `machineId` for a session on another Mac, which opens as a mirror pane.
+
+A closed session is resumed, here or on that Mac. A session already in a pane gets the focus. The
+app itself is not activated. The reply is
+`{"shown": true}`. Failures carry `errorCode` `invalid_session_id`, `not_found` (no transcript on this
+Mac, or its folder is gone) or `no_gui` (no GUI is subscribed). The daemon passes the request on
+as a `show_session` frame on the GUI's subscribed connection, so for another Mac `shown` means
+the GUI was told, not that the pane attached.
 
 ### `send_message`
 

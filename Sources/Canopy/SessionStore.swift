@@ -381,14 +381,38 @@ final class SessionStore {
         return false
     }
 
+    /// `show_session`: a session found by the find-session skill, in a pane of its own so the
+    /// answer stays readable. Another Mac's opens as a mirror pane, and one running there is joined.
+    func showSession(_ show: ControlProtocol.ShowSession) {
+        logger.notice("showSession \(show.sessionId, privacy: .public) on \(show.machineId ?? "this Mac", privacy: .public)")
+        if let machineId = show.machineId {
+            let name = remoteRosters[machineId]?.displayName ?? machineId
+            let recent = MirrorRecents.Session(id: show.sessionId, title: show.title ?? "Untitled", project: name, timestamp: Date())
+            openRemoteRecent(machineId: machineId, machineName: name, recent: recent, target: .newPane)
+            return
+        }
+        if let open = openSessions.first(where: { $0.resumeId == show.sessionId && $0.origin.mirrorTarget == nil }) {
+            focusOrPane(open.id, target: .newPane)
+            return
+        }
+        guard let directory = show.directory else {
+            noteSessionFailure(title: show.title ?? "", message: "Could not find this session on this Mac.", status: -2)
+            return
+        }
+        openNew(directory: URL(fileURLWithPath: directory, isDirectory: true), resumeId: show.sessionId,
+                sessionTitle: show.title, permissionMode: CanopySettings.shared.defaultPermissionMode,
+                customApi: ModelProviderStore.selectedProvider(), target: .newPane)
+    }
+
     private func focusOrPane(_ id: OpenSession.ID, target: PaneTarget) {
         switch target {
         case .focused: select(.session(id))
         case .newPane:
-            if !openInNewPane(id) {
-                if panes.count >= Self.paneAbsoluteCap { showCapReachedHintOnFocusedPane() }
-                openInFocusedPane(id)
+            // Already in a pane is not the cap, which `openInNewPane` answers the same way.
+            if paneIndex(forSession: id) == nil, !openInNewPane(id), panes.count >= Self.paneAbsoluteCap {
+                showCapReachedHintOnFocusedPane()
             }
+            openInFocusedPane(id)
         }
     }
 

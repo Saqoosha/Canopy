@@ -4,8 +4,9 @@
 
 const { test, describe, after } = require("node:test");
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -102,7 +103,10 @@ describe("find_sessions.py search", () => {
       assistant("業務委託の契約書を確認した"),
       user("thanks", { timestamp: "2026-11-06T09:00:00.000Z" }),
     ]);
-    const session = local(run(home, ["search", "契約"])).sessions[0];
+    const machine = local(run(home, ["search", "契約"]));
+    assert.equal(machine.truncated, false);
+    assert.equal(machine.matched, 1);
+    const session = machine.sessions[0];
     assert.equal(session.sessionId, "aaaa");
     assert.equal(session.title, "Contract review");
     assert.equal(session.cwd, "/work/project");
@@ -421,6 +425,16 @@ describe("find_sessions.py search", () => {
     assert.equal(machine.sessions.length, 1);
   });
 
+  test("keeps the row of a transcript it cannot read for its summary", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("zebra")]);
+    const file = path.join(home, ".claude", "projects", "-work-project", "aaaa.jsonl");
+    const rg = writeFakeSsh(home, `case " $* " in *" -l "*) exec "${REAL_RG}" "$@";; esac\n"${REAL_RG}" "$@"\nchmod 000 "${file}"`);
+    const machine = local(run(home, ["search", "zebra"], { FIND_SESSIONS_RG: rg }));
+    assert.equal(machine.truncated, true);
+    assert.deepEqual(machine.sessions.map((session) => session.sessionId), ["aaaa"]);
+  });
+
   test("reports a Mac with no transcripts", () => {
     const machine = local(run(makeHome(), ["search", "zebra"]));
     assert.equal(machine.ok, false);
@@ -621,6 +635,16 @@ describe("find_sessions.py search", () => {
     assert.ok(words.some((word) => word.startsWith("ConnectTimeout=")));
   });
 
+  test("keeps the local rows when a peer's answer cannot be parsed", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("zebra")]);
+    writePeers(home, { "PEER-1": "100.1.2.3:8770" });
+    const ssh = writeFakeSsh(home, "printf '%0200000d' 0 | tr 0 '['");
+    const result = run(home, ["search", "--all", "zebra"], { FIND_SESSIONS_SSH: ssh });
+    assert.deepEqual(ids(result), ["aaaa"]);
+    assert.equal(result.machines.find((machine) => machine.machine === "PEER-1").ok, false);
+  });
+
   test("reports a missing ssh", () => {
     const home = makeHome();
     writeSession(home, "-work-project", "aaaa", [user("zebra")]);
@@ -635,6 +659,41 @@ describe("find_sessions.py search", () => {
     writePeers(home, { "PEER-1": "100.1.2.3:8770" });
     const ssh = writeFakeSsh(home, "exit 255");
     assert.deepEqual(run(home, ["search", "zebra"], { FIND_SESSIONS_SSH: ssh }).machines.map((machine) => machine.machine), ["local"]);
+  });
+});
+
+describe("find_sessions.py summarize", () => {
+  test("stops reading at its deadline", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("the prompt")]);
+    const file = path.join(home, ".claude", "projects", "-work-project", "aaaa.jsonl");
+    const code = `
+import json, sys, time
+sys.path.insert(0, ${JSON.stringify(path.dirname(SCRIPT))})
+import find_sessions
+summary, finished = find_sessions.summarize(${JSON.stringify(file)}, time.monotonic() - 1)
+print(json.dumps([summary["firstPrompt"], finished]))
+`;
+    const result = spawnSync(PYTHON, ["-B", "-c", code], { encoding: "utf8", timeout: 20000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), ["", false]);
+  });
+
+  test("a summary cut short marks the search truncated", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("zebra")]);
+    const code = `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(path.dirname(SCRIPT))})
+import find_sessions
+real = find_sessions.summarize
+find_sessions.summarize = lambda path, deadline: (real(path, deadline)[0], False)
+row = find_sessions.search_here(["zebra"], False, [], 15, 20)
+print(json.dumps([row["truncated"], len(row["sessions"])]))
+`;
+    const result = spawnSync(PYTHON, ["-B", "-c", code], { encoding: "utf8", timeout: 20000, env: { ...process.env, HOME: home } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), [true, 1]);
   });
 });
 
@@ -741,14 +800,76 @@ describe("find_sessions.py tail", () => {
 describe("SKILL.md", () => {
   test("its commands run", () => {
     const skill = fs.readFileSync(path.join(path.dirname(SCRIPT), "SKILL.md"), "utf8");
-    const commands = skill.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("python3 "));
+    const lines = skill.split("\n").map((line) => line.trim());
+    const commands = lines.filter((line) => line.startsWith("python3 ") && line.includes("find_sessions.py"));
     assert.equal(commands.length, 2);
     const home = makeHome();
     writeSession(home, "-work-project", "aaaa", [user("zebra")]);
     for (const command of commands) {
       const args = command.replace("python3 ", "").replace('"${CLAUDE_SKILL_DIR}/find_sessions.py" ', "")
         .replace("TERM...", "zebra").replace("SESSION_ID", "aaaa").replace("MACHINE", "local").split(" ");
-      assert.notEqual(run(home, args).ok, false, command);
+      const result = run(home, args);
+      for (const row of result.machines ?? [result]) {
+        assert.equal(row.ok, true, `${command}: ${row.error}`);
+      }
     }
+  });
+
+  test("its canopyctl command parses", () => {
+    const skill = fs.readFileSync(path.join(path.dirname(SCRIPT), "SKILL.md"), "utf8");
+    const command = skill.split("\n").find((line) => line.includes("/bin/canopyctl"));
+    const canopyctl = path.join(path.dirname(SCRIPT), "..", "..", "bin", "canopyctl");
+    // A socket that does not exist: parsing has to get as far as trying to connect.
+    const args = command.trim().replace('python3 "${CLAUDE_SKILL_DIR}/../../bin/canopyctl" ', "").split(" ");
+    const result = spawnSync(PYTHON, [canopyctl, "--socket", "/nonexistent.sock", ...args], { encoding: "utf8", timeout: 20000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /^canopyctl: no answer from Canopy/);
+  });
+});
+
+describe("canopyctl show", () => {
+  const CANOPYCTL = path.join(path.dirname(SCRIPT), "..", "..", "bin", "canopyctl");
+  const ID = "aaaaaaaa-0000-0000-0000-000000000000";
+
+  // A socket path has a short limit, and the runner's temp folder can be long.
+  async function askDaemon(args) {
+    const folder = fs.mkdtempSync("/tmp/fs-");
+    homes.push(folder);
+    const socket = path.join(folder, "d.sock");
+    const requests = [];
+    const server = net.createServer((connection) => {
+      let buffer = "";
+      connection.on("data", (chunk) => {
+        buffer += chunk;
+        for (let end = buffer.indexOf("\n"); end !== -1; end = buffer.indexOf("\n")) {
+          const message = JSON.parse(buffer.slice(0, end));
+          buffer = buffer.slice(end + 1);
+          if (message.type === "hello") {
+            connection.write('{"type":"hello_ok"}\n');
+          } else {
+            requests.push(message);
+            connection.write(`${JSON.stringify({ type: "response", id: message.id, result: { shown: true } })}\n`);
+          }
+        }
+      });
+    });
+    await new Promise((resolve) => { server.listen(socket, resolve); });
+    // Through the environment, as a session has it: the skill's command names no socket.
+    const child = spawn(PYTHON, [CANOPYCTL, ...args], { env: { ...process.env, HOME: folder, CANOPY_CONTROL_SOCK: socket } });
+    const status = await new Promise((resolve) => { child.on("close", resolve); });
+    server.close();
+    assert.equal(status, 0);
+    return requests;
+  }
+
+  test("sends no machine for this Mac", async () => {
+    const [request] = await askDaemon(["show", ID, "--machine", "local"]);
+    assert.equal(request.verb, "show_session");
+    assert.deepEqual(request.params, { sessionId: ID });
+  });
+
+  test("names another Mac", async () => {
+    const [request] = await askDaemon(["show", ID, "--machine", "PEER-1"]);
+    assert.deepEqual(request.params, { sessionId: ID, machineId: "PEER-1" });
   });
 });

@@ -70,6 +70,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "CANOPY_OPEN_KEY",
         "CANOPY_CLI_CWD",
         "CANOPY_WORKTREE",
+        "CANOPY_CONTROL_SOCK",
     ]
 
     /// Drops `canopyAssignedEnvKeys` from an inherited environment. Both shim
@@ -3179,6 +3180,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         var env = Self.scrubbingCanopyAssignedKeys(ProcessInfo.processInfo.environment)
         env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
 
+        // So a skill's canopyctl reaches the daemon this session belongs to, Debug or Release.
+        if remoteHost == nil { env["CANOPY_CONTROL_SOCK"] = DaemonPaths.current }
+
         // Not in `canopyAssignedEnvKeys`: a user's own mod dirs must survive.
         if let bridgeMod = Self.installBridgeMod() {
             env["CLAUDE_CODE_PLUGIN_DIRS"] = Self.pluginDirs(prepending: bridgeMod, to: env["CLAUDE_CODE_PLUGIN_DIRS"])
@@ -4332,6 +4336,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "hooks/register.ts",
         "skills/find-session/SKILL.md",
         "skills/find-session/find_sessions.py",
+        "bin/canopyctl",
     ]
 
     /// Copies the bundled canopy-bridge mod into Application Support. The CLI
