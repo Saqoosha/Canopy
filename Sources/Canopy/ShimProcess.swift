@@ -5782,10 +5782,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard message["type"] as? String == "assistant",
               let inner = message["message"] as? [String: Any],
               inner["model"] as? String == "<synthetic>",
-              let blocks = inner["content"] as? [[String: Any]], blocks.count == 1,
-              let text = blocks[0]["text"] as? String
+              let blocks = inner["content"] as? [[String: Any]], blocks.count == 1
         else { return false }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines) == "No response requested."
+        return blocks[0]["text"] as? String == "No response requested."
     }
 
     /// Drop every `/recap` command and the output after it from a replayed
