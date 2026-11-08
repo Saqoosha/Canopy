@@ -281,8 +281,6 @@ struct MirrorPaneView: NSViewRepresentable {
             switch frame {
             case .showContent(let title, let content, let startLine, let endLine):
                 ContentViewer.show(content: content, title: title, in: webView, startLine: startLine, endLine: endLine)
-            case .recap(let text):
-                if let webView { ShimProcess.injectRecap(text, into: webView) }
             case .errorBanner(let message):
                 if let webView { ShimProcess.injectErrorBanner(message, into: webView) }
             case .alert(let requestId, let message, let severity, let buttons):

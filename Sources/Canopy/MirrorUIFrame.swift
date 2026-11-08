@@ -1,15 +1,13 @@
 import AppKit
 
 /// UI a daemon session asks its Mac client to show, because the daemon has no
-/// pane of its own: a file or output in `ContentViewer`, the recap row or an
-/// error banner in the pane's page, an alert, a notification. Data only: the
+/// pane of its own: a file or output in `ContentViewer`, an error banner in
+/// the pane's page, an alert, a notification. Data only: the
 /// client builds any JavaScript itself, so a host cannot run code in its page.
 /// Sent only to a client whose attach said `"ui": true`; an older Mac would
 /// post the frames into its page and never answer an alert.
 enum MirrorUIFrame: Equatable {
     case showContent(title: String, content: String, startLine: Int?, endLine: Int?)
-    /// Nil clears the row.
-    case recap(String?)
     case errorBanner(String)
     case alert(requestId: String, message: String, severity: String, buttons: [String])
     case notify(title: String, body: String)
@@ -41,9 +39,6 @@ enum MirrorUIFrame: Equatable {
             dict["content"] = content
             if let startLine { dict["startLine"] = startLine }
             if let endLine { dict["endLine"] = endLine }
-        case .recap(let text):
-            dict["action"] = "recap"
-            if let text { dict["text"] = text }
         case .errorBanner(let message):
             dict["action"] = "error_banner"
             dict["message"] = message
@@ -67,8 +62,6 @@ enum MirrorUIFrame: Equatable {
         case "show_content":
             self = .showContent(title: wire["title"] as? String ?? "", content: wire["content"] as? String ?? "",
                                 startLine: wire["startLine"] as? Int, endLine: wire["endLine"] as? Int)
-        case "recap":
-            self = .recap(wire["text"] as? String)
         case "error_banner":
             guard let message = wire["message"] as? String else { return nil }
             self = .errorBanner(message)

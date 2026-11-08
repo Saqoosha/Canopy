@@ -57,10 +57,6 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "KeepAlive")
 /// can only be injected into a live shim, so closed and `.dormant` rows are
 /// unreachable regardless. What the pane scope adds on top is excluding an
 /// open session that has no pane.
-///
-/// Note this is the opposite scoping argument from `RecapCoordinator`,
-/// which fans out over panes to *limit* spend. Here the panes are the set
-/// worth spending on.
 @MainActor
 final class KeepAliveCoordinator {
     static let shared = KeepAliveCoordinator()
@@ -135,8 +131,8 @@ final class KeepAliveCoordinator {
         scheduleTick()
     }
 
-    /// Self-rescheduling main-queue work item, the same shape `recapTimeout`
-    /// and the background-task idle backstop already use — no new object
+    /// Self-rescheduling main-queue work item, the same shape the
+    /// background-task idle backstop already uses — no new object
     /// kind, and cancellable.
     ///
     /// The isolation trap recorded in CLAUDE.md is NOT the reason: it fires
@@ -187,12 +183,11 @@ final class KeepAliveCoordinator {
             // the gate shut anyway.
             let limits = shim.rateLimitAccount ?? SharedRateLimitData.shared.local
             let rateLimitPct = limits.keepAliveQuotaPct(now: now)
-            // Debug, not info: unlike the recap's once-per-return fan-out
-            // this runs every minute per pane, so a per-pane info line
-            // would be the loudest thing in the log by two orders of
-            // magnitude and would push `[bg]` notices out of the ring
-            // buffer. The decision that matters — an actual send — is
-            // logged at info by `requestKeepAlive`.
+            // Debug, not info: this runs every minute per pane, so a per-pane
+            // info line would be the loudest thing in the log by two orders of
+            // magnitude and would push `[bg]` notices out of the ring buffer.
+            // The decision that matters — an actual send — is logged at notice
+            // by `requestKeepAlive`.
             if let reason = shim.keepAliveIneligibilityReason(now: now, interval: interval, rateLimitPct: rateLimitPct) {
                 logger.debug("\(label, privacy: .public): keep-alive skipped — \(reason, privacy: .public)")
                 continue

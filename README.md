@@ -32,7 +32,6 @@ English | [日本語](README.ja.md)
 - **Claude Code on the Web** — teleport a cloud session down into a local one
 - **Custom model providers** — point a session at any Anthropic-compatible endpoint, with per-tier model mapping
 - **Fork into a new pane** — forking a conversation (a message's fork action, or Rewind → fork) opens the fork beside the original, with the forked message ready to edit; works for sessions on another Mac too
-- **Session recap** — come back after being away and a summary of what happened sits above the composer
 - **Warm cache** — an idle session gets one small turn every 55 minutes so its prompt cache doesn't lapse
 - **Usage meters** — 5-hour and weekly rate-limit bars per account in the sidebar, colored by how fast the quota is being used; per-pane context meter in the status bar
 - **Stays awake while working** — the Mac does not idle-sleep while a session is busy, even with the lid closed; optionally it stays awake while any session is open so the phone can reach it, and it sleeps anyway below a battery floor
@@ -144,7 +143,6 @@ Sources/Canopy/
   SessionStore.swift           Session registry (in the daemon) and sidebar + pane state (in the GUI)
   SessionRestoreSnapshot.swift Save-and-Quit snapshot and its restore rules
   KeepAliveCoordinator.swift   Prompt-cache keep-alive clock and fan-out
-  RecapCoordinator.swift       Buys a session recap after you've been away
   SessionTitleGenerator.swift  Generates a title outside the session's own context
   ShimProcess.swift            One session's Node.js subprocess, NDJSON bridge, trackers, client fan-out
   NodeDiscovery.swift          Finds Node.js >= 18 (Homebrew, mise, nvm, login shell)

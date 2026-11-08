@@ -18,7 +18,7 @@ canopyd   (Canopy.app/Contents/MacOS/Canopy --daemon · one LaunchAgent per Mac 
   ├─ ControlSession    control connections: list, open, stop, send_message, listen, …
   ├─ MirrorServer      session connections: attach, transcript replay, assets, file transfer
   ├─ SessionStore      session registry: open sessions, Recents, titles, accounts, rate limits
-  ├─ coordinators      keep-alive, recap, title generation, reaper, upgrade check, sleep guard
+  ├─ coordinators      keep-alive, title generation, reaper, upgrade check, sleep guard
   ├─ RosterPublisher ──► Cloudflare relay (machine list, roster, phone events, push)
   └─ ShimProcess × N   one per running session; fans output out to every attached client
         │ stdin / stdout NDJSON
@@ -87,7 +87,7 @@ A client opens two kinds of connection to a daemon. Both are newline-delimited J
 - **Version.** `ControlProtocol.version` is 1. A mismatch gets `hello_error` with a reason and the socket closes.
 - **Attach capabilities.** A client opts into extras with flags on the `attach` line, among them `status`, `usage`, `images`, `ui`, `files`, `restart`, `compress: "br"` (lines of 4 KB or more become Brotli `Z <n> <m>` frames). Every option is opt-in, so older clients are unaffected. `usage`, `images`, `ui` and `files` are honored for Mac clients only.
 - **Attach resume.** `ShimProcess` keeps recent outbound frames in a `MirrorFrameRing`. A phone that iOS disconnected re-attaches with `since: {epoch, seq}` and receives only what it missed; a cursor older than the ring's floor falls back to a full replay.
-- **UI frames.** The daemon has no pane, so it asks its Mac client to show things with `canopy_ui` frames (`MirrorUIFrame`): file contents in `ContentViewer`, the recap row, an error banner, an alert, a notification. The frames are data only; the client builds any JavaScript itself.
+- **UI frames.** The daemon has no pane, so it asks its Mac client to show things with `canopy_ui` frames (`MirrorUIFrame`): file contents in `ContentViewer`, an error banner, an alert, a notification. The frames are data only; the client builds any JavaScript itself.
 
 ### Control verbs
 
@@ -95,7 +95,7 @@ The verbs a client uses; GUI-internal ones are left out.
 
 | Group | Verbs |
 |---|---|
-| Sessions | `list_sessions` (`scope: open` or `recent`, with search filters), `open_session` (new, or `resumeSessionId` to continue a closed one), `stop_session`, `rename_session`, `restart_session`, `request_recap` |
+| Sessions | `list_sessions` (`scope: open` or `recent`, with search filters), `open_session` (new, or `resumeSessionId` to continue a closed one), `stop_session`, `rename_session`, `restart_session` |
 | Driving a session | `send_message`, `wait_turn`, `latest_reply`, `session_status`, `pending_requests`, `history`, `listen` |
 | Folders | `list_folders`, `browse_dir`, `mkdir` |
 | Accounts | `list_accounts`, `switch_account` |
@@ -135,7 +135,7 @@ Closing a pane and stopping a session are different operations.
 |---|---|---|
 | Running sessions, shims, activity state | Daemon | `SessionStore.openSessions` inside canopyd |
 | Recents, folders, titles | Daemon, per Mac | Clients ask with `list_sessions` / `list_folders`. Never on the relay |
-| Settings that affect a session | Daemon | Default permission mode, keep-alive, recap, worktree seeding, accounts, model providers. Read from the shared `settings.json` |
+| Settings that affect a session | Daemon | Default permission mode, keep-alive, worktree seeding, accounts, model providers. Read from the shared `settings.json` |
 | Rate limits | Daemon | Collected per account and pushed to clients |
 | Event log for `listen` | Daemon | Saved on a clean exit |
 | Pane order and widths, window, filters, MacroPad | Client | Each Mac's GUI keeps its own layout |
@@ -150,7 +150,7 @@ Closing a pane and stopping a session are different operations.
 
 ### App updates
 
-- Sparkle replaces the app. The daemon notices the new build on disk and counts what holds a restart back (`DaemonUpgrade`, `ShimProcess.upgradeBlocker`). That includes a running turn, a question waiting for an answer, a background task, an unsent prompt, an in-flight keep-alive or recap, a waiting phone reply, a session whose folder was removed, and a client that cannot re-attach on its own.
+- Sparkle replaces the app. The daemon notices the new build on disk and counts what holds a restart back (`DaemonUpgrade`, `ShimProcess.upgradeBlocker`). That includes a running turn, a question waiting for an answer, a background task, an unsent prompt, an in-flight keep-alive, a waiting phone reply, a session whose folder was removed, and a client that cannot re-attach on its own.
 - While it waits, `Canopy --mirror-relay`, started from the new build, holds the Tailscale port and copies bytes to the daemon's relay socket. macOS's Application Firewall cannot resolve the path of the replaced daemon and drops all its inbound traffic. The relay socket requires the password like TCP does.
 - When nothing holds it, the daemon sends `daemon_restarting`, stops its shims and exits 1; launchd starts the new build. Mirror panes on other Macs wait for the listener and re-attach (`RestartReattach`). A session nothing reopens keeps a dormant Open row, as a reaped one does (`ReapedSessions.keepRows`). A SIGTERM (logout, bootout) keeps the rows too.
 - The sidebar footer shows the waiting update with marketing versions, the sessions holding it, and Restart now (`PendingUpdate`).
@@ -182,7 +182,7 @@ Closing a pane and stopping a session are different operations.
 - The sidebar's Open block is a map of the pane order: reading the highlighted rows top to bottom gives the panes left to right. Worktree sessions are grouped under their repository, and the sidebar has session search.
 - The sidebar dot and the MacroPad LED both read one classification, `SessionActivity`.
 - `DaemonSessionSync` reconciles the GUI's rows with the daemon's `session_state` pushes.
-- Each pane's webview loads a per-session entry file and receives Canopy's injected scripts: the `acquireVsCodeApi` stub, theme CSS, image previews, scroll preservation, composer focus, the recap row.
+- Each pane's webview loads a per-session entry file and receives Canopy's injected scripts: the `acquireVsCodeApi` stub, theme CSS, image previews, scroll preservation, composer focus.
 - `GPUProcessReaper` kills WebKit GPU processes that WebKit has abandoned, which otherwise leave a page that never paints again.
 - The launcher takes a first prompt with dropped or pasted images (`LaunchPrompt`), can clone from GitHub, and can start the session in a new worktree.
 
@@ -207,7 +207,7 @@ Under `Sources/Canopy/` unless noted. Open the file and read its doc comments fo
 | Entry and daemon | `CanopyMain`, `CanopyDaemon`, `DaemonSupervisor`, `DaemonRegistration`, `DaemonPaths`, `DaemonConfig`, `DaemonUpgrade`, `DaemonUpgradeCenter`, `DaemonHeldSessions`, `MirrorRelay`, `SessionReaper`, `DaemonReaper`, `SleepGuard` |
 | Control protocol | `ControlProtocol`, `ControlSession`, `ControlClient`, `ControlEvents`, `ControlHistory`, `PeerControl`, `scripts/canopyctl` |
 | Session connections | `MirrorServer`, `MirrorClient`, `MirrorWire`, `MirrorSink`, `MirrorAccess`, `MirrorEndpoint`, `MirrorFrameRing`, `MirrorStatusFrame`, `MirrorUIFrame`, `MirrorFileTransfer`, `MirrorRecents`, `RestartReattach`, `NDJSONLineAssembler` |
-| Sessions | `ShimProcess`, `SessionStore`, `OpenSession`, `DaemonSessionSync`, `SessionActivity`, `KeepAlive*`, `Recap*`, `SessionTitle*`, `ClaudeSessionHistory`, `SubagentTracker`, `GitWorktree`, `PeerNameStore` |
+| Sessions | `ShimProcess`, `SessionStore`, `OpenSession`, `DaemonSessionSync`, `SessionActivity`, `KeepAlive*`, `SessionTitle*`, `ClaudeSessionHistory`, `SubagentTracker`, `GitWorktree`, `PeerNameStore` |
 | Accounts and usage | `ClaudeAccount`, `ClaudeAccountInfo`, `KeychainAuth`, `SharedRateLimitData`, `ClaudeUsageDirect`, `AnthropicDirect`, `AccountLimitBanner`, `ModelProvider*` |
 | Extension | `CCExtension`, `ExtensionUpdater`, `ExtensionSafety`, `NodeDiscovery` |
 | Mac client UI | `CanopyApp`, `Sidebar*`, `Detail`, `SessionContainer`, `MirrorPaneView`, `WebViewContainer`, `WeightedPaneLayout`, `PaneSlot`, `PaneDivider`, `PaneHeader*`, `LauncherView`, `StatusBarView`, `SettingsView`, `PendingUpdate`, `AwakeIndicator`, `GPUProcessReaper`, `MacroPad/` |

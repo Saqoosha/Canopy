@@ -664,7 +664,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installPaneFocusClickMonitor()
         installPaneHeaderContextMenuMonitor()
         installKeyTypingMonitor()
-        RecapCoordinator.shared.start()
         KeepAliveCoordinator.shared.start()
         // Sessions this process still runs itself (SSH remote, Debug without a daemon).
         sleepGuard.start()
