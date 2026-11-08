@@ -336,8 +336,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         logger.notice("[mirror] resumed with \(frames.count) buffered frame(s); \(self.mirrors.count) mirror(s) on this shim")
     }
 
-    /// Whether `inner` answers a request that changes the session's applied settings:
-    /// `apply_settings` (the effort picker, the Ultracode toggle) or `set_model` (CC 2.1.319).
+    /// Whether `inner` is the answer to an `apply_settings` or `set_model` request (CC 2.1.319).
     nonisolated static func changesAppliedSettings(_ inner: [String: Any]) -> Bool {
         guard inner["type"] as? String == "response",
               let kind = (inner["response"] as? [String: Any])?["type"] as? String
@@ -346,8 +345,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Has every client but `writer` re-read the applied settings `writer` just changed. A page
-    /// does not re-read them when another client changes them, so it kept its old Ultracode
-    /// state, and its next effort pick sent that state back with the effort.
+    /// does not re-read them on another client's change, and a stale page sends its old
+    /// Ultracode state back with its next effort pick.
     private func announceSettingsChange(except writer: RequestOwner) {
         if case .mirror = writer, let webView, let own = primaryOwnChannel {
             post(Self.syntheticConnectSnapshot(channelId: own), to: webView)
@@ -359,6 +358,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             post(Self.syntheticConnectSnapshot(channelId: own), to: target)
         }
     }
+
+    #if DEBUG
+    /// Probe-only: one extension→webview frame, routed as if the extension had sent it.
+    func _probeFromExtension(_ message: [String: Any]) {
+        sendToWebView(message)
+    }
+    #endif
 
     /// Point this session's `open` at a Mac watching it, or back at this
     /// screen when none is. Called on every attach and detach, because that is
@@ -455,54 +461,39 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         : "the session process exited with status \(status)"
     }
 
-    /// The synthetic `system/status` Canopy injects at `launch_claude` so the
-    /// webview's permission-mode UI matches the app setting. Built per
-    /// channel because a mirror lives on its own channel id.
+    /// The synthetic `system/status` that sets a webview's permission-mode UI to the
+    /// session's current mode. Built per channel because a mirror lives on its own channel id.
     nonisolated static func syntheticPermissionStatus(channelId: String, permissionMode: String) -> [String: Any] {
-        [
+        syntheticStatus(channelId: channelId, ["permissionMode": permissionMode])
+    }
+
+    /// A `system/status` io_message on `channelId` carrying `fields`.
+    nonisolated private static func syntheticStatus(channelId: String, _ fields: [String: Any]) -> [String: Any] {
+        let status = fields.merging(["type": "system", "subtype": "status"]) { _, fixed in fixed }
+        return [
             "type": "from-extension",
             "message": [
                 "type": "io_message",
                 "channelId": channelId,
-                "message": [
-                    "type": "system",
-                    "subtype": "status",
-                    "permissionMode": permissionMode,
-                ] as [String: Any],
+                "message": status,
                 "done": false,
             ] as [String: Any],
         ]
     }
 
-    /// What a client joining the live channel late is sent on its own channel: the
+    /// What a client that joins late or resumes is sent on its own channel: the
     /// permission status, then the connect snapshot.
     nonisolated static func joinStatusFrames(channelId: String, permissionMode: String) -> [[String: Any]] {
         [syntheticPermissionStatus(channelId: channelId, permissionMode: permissionMode),
          syntheticConnectSnapshot(channelId: channelId)]
     }
 
-    /// A `system/status` with `connectSnapshot: true`, which the extension sends on the live
-    /// channel when the CLI connects and reports a permission mode (CC 2.1.319). On it the
-    /// webview reads `get_applied_settings`, which is where its Ultracode state comes from.
-    /// A client that joined a running channel never got one, so it showed no Ultracode in the
-    /// model pill and no Ultracode toggle.
-    ///
-    /// It carries no `permissionMode`, so the webview leaves the mode and its auto-mode hints
-    /// alone; `syntheticPermissionStatus` sets the mode.
+    /// A `system/status` with `connectSnapshot: true`, on which the webview reads
+    /// `get_applied_settings` (CC 2.1.319). The extension sends one only when the CLI connects;
+    /// a client that joins later shows no Ultracode in the model pill and no Ultracode toggle
+    /// until it gets one. No `permissionMode`: `syntheticPermissionStatus` sets the mode.
     nonisolated static func syntheticConnectSnapshot(channelId: String) -> [String: Any] {
-        [
-            "type": "from-extension",
-            "message": [
-                "type": "io_message",
-                "channelId": channelId,
-                "message": [
-                    "type": "system",
-                    "subtype": "status",
-                    "connectSnapshot": true,
-                ] as [String: Any],
-                "done": false,
-            ] as [String: Any],
-        ]
+        syntheticStatus(channelId: channelId, ["connectSnapshot": true])
     }
 
     /// Swaps the inner frame's top-level `channelId` from the live one to the target's own.
