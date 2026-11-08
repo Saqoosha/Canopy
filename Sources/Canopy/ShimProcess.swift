@@ -2145,7 +2145,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// wrong swallow — is decidable by a pure function the probe can reach.
     /// The earlier claim that it could not be was wrong: the decision reads
     /// the message and two Bools and nothing else, which is exactly the
-    /// shape `strippingRecapFromReplay` already has. Reverting the
+    /// shape `strippingReplayArtifacts` already has. Reverting the
     /// `system/init` swallow used to leave the whole suite green; it is now
     /// one red assertion.
     ///
@@ -4642,7 +4642,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
                 return
             }
-            innerMessage = Self.strippingRecapFromReplay(innerMessage)
+            innerMessage = Self.strippingReplayArtifacts(innerMessage)
             innerMessage = patchAuthIfNeeded(innerMessage)
             // Same `from-extension` unwrap as `patchAuthIfNeeded`.
             let frame = (innerMessage["type"] as? String == "from-extension"
@@ -5706,7 +5706,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// unchanged when nothing matches, and skips the rebuild entirely when
     /// no entry was dropped — session replays can be thousands of messages
     /// and this runs on every one of them.
-    static func strippingRecapFromReplay(_ message: [String: Any]) -> [String: Any] {
+    static func strippingReplayArtifacts(_ message: [String: Any]) -> [String: Any] {
         func strip(_ container: [String: Any]) -> [String: Any]? {
             guard var response = container["response"] as? [String: Any],
                   let messages = response["messages"] as? [[String: Any]]
@@ -5781,17 +5781,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     private static func isNoResponseFiller(_ message: [String: Any]) -> Bool {
         guard message["type"] as? String == "assistant",
               let inner = message["message"] as? [String: Any],
-              inner["model"] as? String == "<synthetic>"
+              inner["model"] as? String == "<synthetic>",
+              let blocks = inner["content"] as? [[String: Any]], blocks.count == 1,
+              let text = blocks[0]["text"] as? String
         else { return false }
-        let text: String
-        if let blocks = inner["content"] as? [[String: Any]] {
-            guard blocks.allSatisfy({ $0["type"] as? String == "text" }) else { return false }
-            text = blocks.compactMap { $0["text"] as? String }.joined()
-        } else if let string = inner["content"] as? String {
-            text = string
-        } else {
-            return false
-        }
         return text.trimmingCharacters(in: .whitespacesAndNewlines) == "No response requested."
     }
 
@@ -8489,7 +8482,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ///
     /// A bulk history replay does not reach the extractor: it arrives as ONE
     /// message holding a `response.messages` array (which is why
-    /// `strippingRecapFromReplay` exists at all), and `SessionEvent.events`
+    /// `strippingReplayArtifacts` exists at all), and `SessionEvent.events`
     /// only reads the top-level `type`. Measured on CLI 2.1.258 with Canopy's
     /// own flags — a `--resume` re-emits no historical `assistant` frames.
     private func publishSessionEvents(_ message: [String: Any]) {

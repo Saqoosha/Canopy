@@ -8648,23 +8648,23 @@ enum SidebarLogicProbe {
             record("strippingRecapArtifacts handles back-to-back recap commands",
                    consecutive.isEmpty, "got \(consecutive.count)")
 
-            // --- strippingRecapFromReplay: unwraps both envelope shapes
+            // --- strippingReplayArtifacts: unwraps both envelope shapes
             let bare: [String: Any] = ["type": "response",
                                        "response": ["messages": [userMsg(wrapper), localOut]] as [String: Any]]
-            let bareOut = ShimProcess.strippingRecapFromReplay(bare)
+            let bareOut = ShimProcess.strippingReplayArtifacts(bare)
             let bareCount = ((bareOut["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count
-            record("strippingRecapFromReplay strips a bare response", bareCount == 0,
+            record("strippingReplayArtifacts strips a bare response", bareCount == 0,
                    "got \(String(describing: bareCount))")
 
             let wrapped: [String: Any] = ["type": "from-extension", "message": bare]
-            let wrappedOut = ShimProcess.strippingRecapFromReplay(wrapped)
+            let wrappedOut = ShimProcess.strippingReplayArtifacts(wrapped)
             let wrappedCount = (((wrappedOut["message"] as? [String: Any])?["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count
-            record("strippingRecapFromReplay strips a from-extension response", wrappedCount == 0,
+            record("strippingReplayArtifacts strips a from-extension response", wrappedCount == 0,
                    "got \(String(describing: wrappedCount))")
 
             let unrelated: [String: Any] = ["type": "io_message", "message": ["type": "assistant"]]
-            record("strippingRecapFromReplay leaves an unrelated message untouched",
-                   (ShimProcess.strippingRecapFromReplay(unrelated)["type"] as? String) == "io_message")
+            record("strippingReplayArtifacts leaves an unrelated message untouched",
+                   (ShimProcess.strippingReplayArtifacts(unrelated)["type"] as? String) == "io_message")
         }
 
         // MARK: - No-response filler on replay
@@ -8686,8 +8686,8 @@ enum SidebarLogicProbe {
             record("strippingNoResponseFillers keeps another synthetic reply",
                    ShimProcess.strippingNoResponseFillers([assistant("API Error: 529 Overloaded", model: "<synthetic>")]).count == 1)
             let replay: [String: Any] = ["type": "response", "response": ["messages": [prompt, filler]] as [String: Any]]
-            let replayCount = ((ShimProcess.strippingRecapFromReplay(replay)["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count
-            record("strippingRecapFromReplay drops the filler from a get_session response", replayCount == 1,
+            let replayCount = ((ShimProcess.strippingReplayArtifacts(replay)["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count
+            record("strippingReplayArtifacts drops the filler from a get_session response", replayCount == 1,
                    "got \(String(describing: replayCount))")
         }
 
@@ -9243,7 +9243,7 @@ enum SidebarLogicProbe {
 
             // --- Through the REPLAY ENTRY POINT, not the filter directly.
             // The assertions above call `strippingKeepAliveArtifacts`, so
-            // unwiring it from `strippingRecapFromReplay` — the only thing
+            // unwiring it from `strippingReplayArtifacts` — the only thing
             // that actually runs on a `get_session` response — left them all
             // green. Same unprotected-wiring shape the disposition
             // extraction closed one level down.
@@ -9251,7 +9251,7 @@ enum SidebarLogicProbe {
                 "type": "from-extension",
                 "message": ["response": ["messages": replay] as [String: Any]] as [String: Any],
             ]
-            let out = ShimProcess.strippingRecapFromReplay(envelope)
+            let out = ShimProcess.strippingReplayArtifacts(envelope)
             let outMessages = ((out["message"] as? [String: Any])?["response"] as? [String: Any])?["messages"] as? [[String: Any]]
             record("the replay entry point strips keep-alive turns, not just the filter",
                    outMessages?.count == replay.count - 2)
