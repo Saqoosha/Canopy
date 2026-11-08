@@ -8667,6 +8667,30 @@ enum SidebarLogicProbe {
                    (ShimProcess.strippingRecapFromReplay(unrelated)["type"] as? String) == "io_message")
         }
 
+        // MARK: - No-response filler on replay
+        do {
+            func assistant(_ text: String, model: String) -> [String: Any] {
+                ["type": "assistant", "message": [
+                    "role": "assistant", "model": model,
+                    "content": [["type": "text", "text": text]],
+                ] as [String: Any]]
+            }
+            let prompt: [String: Any] = ["type": "user", "message": ["role": "user", "content": "next"] as [String: Any]]
+            // The CLI's own wording and model id, as written to a transcript by CLI 2.1.319.
+            let filler = assistant("No response requested.", model: "<synthetic>")
+            let kept = ShimProcess.strippingNoResponseFillers([prompt, filler, prompt])
+            record("strippingNoResponseFillers drops the CLI's synthetic filler",
+                   kept.count == 2 && kept.allSatisfy { $0["type"] as? String == "user" }, "got \(kept.count)")
+            record("strippingNoResponseFillers keeps a model reply with the same text",
+                   ShimProcess.strippingNoResponseFillers([assistant("No response requested.", model: "claude-opus-5")]).count == 1)
+            record("strippingNoResponseFillers keeps another synthetic reply",
+                   ShimProcess.strippingNoResponseFillers([assistant("API Error: 529 Overloaded", model: "<synthetic>")]).count == 1)
+            let replay: [String: Any] = ["type": "response", "response": ["messages": [prompt, filler]] as [String: Any]]
+            let replayCount = ((ShimProcess.strippingRecapFromReplay(replay)["response"] as? [String: Any])?["messages"] as? [[String: Any]])?.count
+            record("strippingRecapFromReplay drops the filler from a get_session response", replayCount == 1,
+                   "got \(String(describing: replayCount))")
+        }
+
         // MARK: - Sleep guard (see SleepGuardPolicy)
         do {
             let floor = SleepGuardPolicy.defaultBatteryFloorPercent

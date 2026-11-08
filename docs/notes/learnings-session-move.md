@@ -12,4 +12,4 @@ Moving a live session to another folder: the `move-session` skill, `canopyctl mo
 - **The GUI follows a rise in `moveCount`.** `followsCheckoutMove` stays as it is, because one path spelled two ways must not restart a pane. A new daemon counts from 0 again.
 - **Typed text in the composer:** the restart rebuilds the webview, so text typed between the end of the turn and the move is lost. Read from the code, not measured.
 - **Known gaps:** a `set_cwd` the CLI never answers keeps the move waiting, with no timeout, because a late answer after one would leave the CLI moved and Canopy not. `transcript_relocated: false` is not handled.
-- **After a move the history gains a line.** `set_cwd` writes a meta user record, and the resume answers it with a synthetic `No response requested.`
+- **The resume writes a filler line.** `set_cwd` writes a meta user record, and the resume answers it with a `<synthetic>` `No response requested.` The CLI never streams it (CLI 2.1.319, measured), so only a replay would show it, and `strippingNoResponseFillers` drops it there.

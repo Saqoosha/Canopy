@@ -5697,9 +5697,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return updated
     }
 
-    /// Apply `strippingRecapArtifacts` and `strippingKeepAliveArtifacts` to
-    /// a `get_session` response on its way
-    /// to the webview, leaving every other message untouched.
+    /// Apply `strippingRecapArtifacts`, `strippingKeepAliveArtifacts` and
+    /// `strippingNoResponseFillers` to a `get_session` response on its way to
+    /// the webview, leaving every other message untouched.
     ///
     /// Replay responses arrive both bare and wrapped in `from-extension`
     /// (see `sendToWebView`), so both shapes are handled. Returns the input
@@ -5711,9 +5711,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             guard var response = container["response"] as? [String: Any],
                   let messages = response["messages"] as? [[String: Any]]
             else { return nil }
-            let filtered = strippingKeepAliveArtifacts(strippingRecapArtifacts(messages))
+            let filtered = strippingNoResponseFillers(strippingKeepAliveArtifacts(strippingRecapArtifacts(messages)))
             guard filtered.count != messages.count else { return nil }
-            logger.notice("replay: dropped \(messages.count - filtered.count, privacy: .public) recap/keep-alive artifact(s)")
+            logger.notice("replay: dropped \(messages.count - filtered.count, privacy: .public) recap, keep-alive or filler entries")
             response["messages"] = filtered
             var updated = container
             updated["response"] = response
@@ -5769,6 +5769,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             result.append(message)
         }
         return result
+    }
+
+    /// Drop the `<synthetic>` "No response requested." reply the CLI writes when
+    /// it resumes a session whose last entry is an unanswered user entry, as
+    /// every move leaves one. The CLI never streams it, so only a replay shows it.
+    static func strippingNoResponseFillers(_ messages: [[String: Any]]) -> [[String: Any]] {
+        messages.filter { !isNoResponseFiller($0) }
+    }
+
+    private static func isNoResponseFiller(_ message: [String: Any]) -> Bool {
+        guard message["type"] as? String == "assistant",
+              let inner = message["message"] as? [String: Any],
+              inner["model"] as? String == "<synthetic>"
+        else { return false }
+        let text: String
+        if let blocks = inner["content"] as? [[String: Any]] {
+            guard blocks.allSatisfy({ $0["type"] as? String == "text" }) else { return false }
+            text = blocks.compactMap { $0["text"] as? String }.joined()
+        } else if let string = inner["content"] as? String {
+            text = string
+        } else {
+            return false
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines) == "No response requested."
     }
 
     /// Drop every `/recap` command and the output after it from a replayed
