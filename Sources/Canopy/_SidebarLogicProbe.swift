@@ -3480,6 +3480,24 @@ enum SidebarLogicProbe {
             record("launch state: a surface state from an earlier launch's channel is not re-sent",
                    ShimProcess.launchStateReplay(["engine_surface_state": launchState("engine_surface_state", channel: "old")],
                                                  live: "live", to: "mine").isEmpty)
+            let joinFrames = ShimProcess.joinStatusFrames(channelId: "mine", permissionMode: "acceptEdits")
+            func statusOf(_ frame: [String: Any]) -> [String: Any] { innerOf(frame)["message"] as? [String: Any] ?? [:] }
+            func isStatusIoMessage(_ frame: [String: Any]) -> Bool {
+                frame["type"] as? String == "from-extension" && innerOf(frame)["type"] as? String == "io_message"
+                    && statusOf(frame)["type"] as? String == "system" && statusOf(frame)["subtype"] as? String == "status"
+            }
+            record("join status: a late client gets the permission status, then connectSnapshot with no permissionMode, both on its own channel",
+                   joinFrames.count == 2 && joinFrames.allSatisfy(isStatusIoMessage) && joinFrames.compactMap(channelOf) == ["mine", "mine"]
+                       && statusOf(joinFrames[0])["permissionMode"] as? String == "acceptEdits" && statusOf(joinFrames[0])["connectSnapshot"] == nil
+                       && statusOf(joinFrames[1])["connectSnapshot"] as? Bool == true && statusOf(joinFrames[1])["permissionMode"] == nil)
+            func settingsResponse(_ type: String) -> [String: Any] {
+                ["type": "response", "requestId": "r1", "response": ["type": type] as [String: Any]]
+            }
+            record("settings change: apply_settings and set_model answers make the other clients re-read; a read does not",
+                   ShimProcess.changesAppliedSettings(settingsResponse("apply_settings_response"))
+                       && ShimProcess.changesAppliedSettings(settingsResponse("set_model_response"))
+                       && !ShimProcess.changesAppliedSettings(settingsResponse("get_applied_settings_response"))
+                       && !ShimProcess.changesAppliedSettings(["type": "request", "request": ["type": "apply_settings_response"] as [String: Any]]))
             var pending = PendingUIAlerts<Int>()
             pending.record(requestId: "a", client: 1, buttons: ["Yes"])
             pending.record(requestId: "b", client: 2, buttons: ["Yes"])
