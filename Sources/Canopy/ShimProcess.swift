@@ -2145,7 +2145,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// wrong swallow — is decidable by a pure function the probe can reach.
     /// The earlier claim that it could not be was wrong: the decision reads
     /// the message and two Bools and nothing else, which is exactly the
-    /// shape `strippingRecapFromReplay` already has. Reverting the
+    /// shape `strippingReplayArtifacts` already has. Reverting the
     /// `system/init` swallow used to leave the whole suite green; it is now
     /// one red assertion.
     ///
@@ -4642,7 +4642,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 }
                 return
             }
-            innerMessage = Self.strippingRecapFromReplay(innerMessage)
+            innerMessage = Self.strippingReplayArtifacts(innerMessage)
             innerMessage = patchAuthIfNeeded(innerMessage)
             // Same `from-extension` unwrap as `patchAuthIfNeeded`.
             let frame = (innerMessage["type"] as? String == "from-extension"
@@ -5697,23 +5697,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return updated
     }
 
-    /// Apply `strippingRecapArtifacts` and `strippingKeepAliveArtifacts` to
-    /// a `get_session` response on its way
-    /// to the webview, leaving every other message untouched.
+    /// Apply `strippingRecapArtifacts`, `strippingKeepAliveArtifacts` and
+    /// `strippingNoResponseFillers` to a `get_session` response on its way to
+    /// the webview, leaving every other message untouched.
     ///
     /// Replay responses arrive both bare and wrapped in `from-extension`
     /// (see `sendToWebView`), so both shapes are handled. Returns the input
     /// unchanged when nothing matches, and skips the rebuild entirely when
     /// no entry was dropped — session replays can be thousands of messages
     /// and this runs on every one of them.
-    static func strippingRecapFromReplay(_ message: [String: Any]) -> [String: Any] {
+    static func strippingReplayArtifacts(_ message: [String: Any]) -> [String: Any] {
         func strip(_ container: [String: Any]) -> [String: Any]? {
             guard var response = container["response"] as? [String: Any],
                   let messages = response["messages"] as? [[String: Any]]
             else { return nil }
-            let filtered = strippingKeepAliveArtifacts(strippingRecapArtifacts(messages))
+            let filtered = strippingNoResponseFillers(strippingKeepAliveArtifacts(strippingRecapArtifacts(messages)))
             guard filtered.count != messages.count else { return nil }
-            logger.notice("replay: dropped \(messages.count - filtered.count, privacy: .public) recap/keep-alive artifact(s)")
+            logger.notice("replay: dropped \(messages.count - filtered.count, privacy: .public) recap, keep-alive or filler entries")
             response["messages"] = filtered
             var updated = container
             updated["response"] = response
@@ -5769,6 +5769,22 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             result.append(message)
         }
         return result
+    }
+
+    /// Drop the `<synthetic>` "No response requested." reply the CLI writes when
+    /// it resumes a session whose last entry is an unanswered user entry, as
+    /// every move leaves one. The CLI never streams it, so only a replay shows it.
+    static func strippingNoResponseFillers(_ messages: [[String: Any]]) -> [[String: Any]] {
+        messages.filter { !isNoResponseFiller($0) }
+    }
+
+    private static func isNoResponseFiller(_ message: [String: Any]) -> Bool {
+        guard message["type"] as? String == "assistant",
+              let inner = message["message"] as? [String: Any],
+              inner["model"] as? String == "<synthetic>",
+              let blocks = inner["content"] as? [[String: Any]], blocks.count == 1
+        else { return false }
+        return blocks[0]["text"] as? String == "No response requested."
     }
 
     /// Drop every `/recap` command and the output after it from a replayed
@@ -8465,7 +8481,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ///
     /// A bulk history replay does not reach the extractor: it arrives as ONE
     /// message holding a `response.messages` array (which is why
-    /// `strippingRecapFromReplay` exists at all), and `SessionEvent.events`
+    /// `strippingReplayArtifacts` exists at all), and `SessionEvent.events`
     /// only reads the top-level `type`. Measured on CLI 2.1.258 with Canopy's
     /// own flags — a `--resume` re-emits no historical `assistant` frames.
     private func publishSessionEvents(_ message: [String: Any]) {
