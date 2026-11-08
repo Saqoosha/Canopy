@@ -469,7 +469,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// A `system/status` io_message on `channelId` carrying `fields`.
     nonisolated private static func syntheticStatus(channelId: String, _ fields: [String: Any]) -> [String: Any] {
-        let status = fields.merging(["type": "system", "subtype": "status"]) { _, fixed in fixed }
+        var status = fields
+        status["type"] = "system"
+        status["subtype"] = "status"
         return [
             "type": "from-extension",
             "message": [

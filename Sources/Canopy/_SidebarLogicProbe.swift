@@ -3504,7 +3504,7 @@ enum SidebarLogicProbe {
             weak var releasedShim: ShimProcess?
             do {
                 func snapshotChannels(_ sink: ProbeRecordingSink, from start: Int = 0) -> [String] {
-                    sink.frames.dropFirst(start).filter { statusOf($0)["connectSnapshot"] as? Bool == true }.compactMap(channelOf)
+                    sink.frames.dropFirst(start).filter { statusOf($0)["connectSnapshot"] as? Bool == true }.map { channelOf($0) ?? "<none>" }
                 }
                 let routingShim = ShimProcess(workingDirectory: FileManager.default.temporaryDirectory, resumeIdIsExistingTranscript: false)
                 let firstClient = ProbeRecordingSink(), lateClient = ProbeRecordingSink(), resumedClient = ProbeRecordingSink()
