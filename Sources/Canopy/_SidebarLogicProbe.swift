@@ -3480,6 +3480,60 @@ enum SidebarLogicProbe {
             record("launch state: a surface state from an earlier launch's channel is not re-sent",
                    ShimProcess.launchStateReplay(["engine_surface_state": launchState("engine_surface_state", channel: "old")],
                                                  live: "live", to: "mine").isEmpty)
+            let joinFrames = ShimProcess.joinStatusFrames(channelId: "mine", permissionMode: "acceptEdits")
+            func statusOf(_ frame: [String: Any]) -> [String: Any] { innerOf(frame)["message"] as? [String: Any] ?? [:] }
+            func isStatusIoMessage(_ frame: [String: Any]) -> Bool {
+                frame["type"] as? String == "from-extension" && innerOf(frame)["type"] as? String == "io_message"
+                    && statusOf(frame)["type"] as? String == "system" && statusOf(frame)["subtype"] as? String == "status"
+            }
+            record("joinStatusFrames: the permission status, then connectSnapshot with no permissionMode, both on the given channel",
+                   joinFrames.count == 2 && joinFrames.allSatisfy(isStatusIoMessage) && joinFrames.compactMap(channelOf) == ["mine", "mine"]
+                       && statusOf(joinFrames[0])["permissionMode"] as? String == "acceptEdits" && statusOf(joinFrames[0])["connectSnapshot"] == nil
+                       && statusOf(joinFrames[1])["connectSnapshot"] as? Bool == true && statusOf(joinFrames[1])["permissionMode"] == nil)
+            func settingsResponse(_ type: String) -> [String: Any] {
+                ["type": "response", "requestId": "r1", "response": ["type": type] as [String: Any]]
+            }
+            record("changesAppliedSettings: apply_settings and set_model responses count; a get_applied_settings response, an error, and a request do not",
+                   ShimProcess.changesAppliedSettings(settingsResponse("apply_settings_response"))
+                       && ShimProcess.changesAppliedSettings(settingsResponse("set_model_response"))
+                       && !ShimProcess.changesAppliedSettings(settingsResponse("get_applied_settings_response"))
+                       && !ShimProcess.changesAppliedSettings(settingsResponse("error"))
+                       && !ShimProcess.changesAppliedSettings(["type": "request", "response": ["type": "apply_settings_response"] as [String: Any]]))
+            // The call sites, on a shim that was never started: its frames to the extension only queue.
+            // Scoped, so the shim is gone before later tests spin the run loop.
+            weak var releasedShim: ShimProcess?
+            do {
+                func snapshotChannels(_ sink: ProbeRecordingSink, from start: Int = 0) -> [String] {
+                    sink.frames.dropFirst(start).filter { statusOf($0)["connectSnapshot"] as? Bool == true }.map { channelOf($0) ?? "<none>" }
+                }
+                let routingShim = ShimProcess(workingDirectory: FileManager.default.temporaryDirectory, resumeIdIsExistingTranscript: false)
+                let firstClient = ProbeRecordingSink(), lateClient = ProbeRecordingSink(), resumedClient = ProbeRecordingSink()
+                routingShim.attachMirror(firstClient)
+                routingShim.attachMirror(lateClient)
+                routingShim.receiveFromMirror(["type": "launch_claude", "channelId": "first"], from: firstClient)
+                let lateStart = lateClient.frames.count
+                routingShim.receiveFromMirror(["type": "launch_claude", "channelId": "late"], from: lateClient)
+                record("join: a launch_claude swallowed onto the live channel gets connectSnapshot on the client's own channel",
+                       snapshotChannels(lateClient, from: lateStart) == ["late"])
+                let (firstMark, lateMark) = (firstClient.frames.count, lateClient.frames.count)
+                routingShim.receiveFromMirror(["type": "request", "channelId": "late", "requestId": "probe-write",
+                                               "request": ["type": "apply_settings", "settings": ["ultracode": true],
+                                                           "flagsOnly": true] as [String: Any]], from: lateClient)
+                routingShim._probeFromExtension(["type": "response", "requestId": "probe-write",
+                                                 "response": ["type": "apply_settings_response"] as [String: Any]])
+                routingShim.receiveFromMirror(["type": "request", "channelId": "first", "requestId": "probe-read",
+                                               "request": ["type": "get_applied_settings"] as [String: Any]], from: firstClient)
+                routingShim._probeFromExtension(["type": "response", "requestId": "probe-read",
+                                                 "response": ["type": "get_applied_settings_response"] as [String: Any]])
+                record("settings change: one client's apply_settings answer sends connectSnapshot to the other client only; a read sends none",
+                       snapshotChannels(firstClient, from: firstMark) == ["first"] && snapshotChannels(lateClient, from: lateMark).isEmpty)
+                routingShim.resumeMirror(resumedClient, channelId: "resumed", frames: [])
+                record("join: a resumed client gets connectSnapshot on its own channel",
+                       snapshotChannels(resumedClient) == ["resumed"])
+                for client in [firstClient, lateClient, resumedClient] { routingShim.detachMirror(client) }
+                releasedShim = routingShim
+            }
+            record("join: the routing probe's shim is released", releasedShim == nil)
             var pending = PendingUIAlerts<Int>()
             pending.record(requestId: "a", client: 1, buttons: ["Yes"])
             pending.record(requestId: "b", client: 2, buttons: ["Yes"])
@@ -6907,7 +6961,8 @@ enum SidebarLogicProbe {
             let daemon = ControlSession(store: daemonStore, isLocal: true, allowBypass: { false }) { daemonFrames.append($0) }
             func showReply(_ id: String, sessionId: String) -> [String: Any]? {
                 daemon.handle(["type": "request", "id": id, "verb": "show_session", "params": ["sessionId": sessionId]])
-                let deadline = Date().addingTimeInterval(20)
+                // An unknown id scans every transcript: 14-20 s measured on a Mac with many sessions.
+                let deadline = Date().addingTimeInterval(60)
                 while Date() < deadline {
                     if let found = daemonFrames.first(where: { $0["id"] as? String == id }) { return found }
                     RunLoop.main.run(until: Date().addingTimeInterval(0.01))
@@ -15706,5 +15761,12 @@ enum SidebarLogicProbe {
             return nil
         }
     }
+}
+
+/// A mirror client that keeps what a shim posts to it.
+@MainActor
+private final class ProbeRecordingSink: MirrorSink {
+    var frames: [[String: Any]] = []
+    func deliver(_ payload: [String: Any]) { frames.append(payload) }
 }
 #endif

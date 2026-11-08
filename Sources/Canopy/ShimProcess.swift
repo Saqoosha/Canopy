@@ -319,7 +319,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Re-attaches a client whose page is still showing this session: binds its own
     /// channel at once (the kept page does not send `launch_claude` again), posts what
-    /// it missed, then the permission status the launch path would have sent. One
+    /// it missed, then the `joinStatusFrames` a late launch gets. One
     /// main-actor call, so no live frame can land between the buffered ones.
     ///
     /// Outstanding dialog requests are not re-posted: one sent before the cursor is
@@ -329,10 +329,42 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         for frame in frames {
             post(Self.retargeted(frame.payload, from: frame.liveChannel, to: ownChannel), to: mirror)
         }
-        post(syntheticPermissionStatus(channelId: ownChannel), to: mirror)
+        for frame in Self.joinStatusFrames(channelId: ownChannel, permissionMode: permissionMode.rawValue) {
+            post(frame, to: mirror)
+        }
         refreshOpenRedirect()
         logger.notice("[mirror] resumed with \(frames.count) buffered frame(s); \(self.mirrors.count) mirror(s) on this shim")
     }
+
+    /// Whether `inner` is the answer to an `apply_settings` or `set_model` request (CC 2.1.319).
+    nonisolated static func changesAppliedSettings(_ inner: [String: Any]) -> Bool {
+        guard inner["type"] as? String == "response",
+              let kind = (inner["response"] as? [String: Any])?["type"] as? String
+        else { return false }
+        return kind == "apply_settings_response" || kind == "set_model_response"
+    }
+
+    /// Has every client but `writer` re-read the applied settings `writer` just changed. A page
+    /// does not re-read them on another client's change, and a stale page sends its old
+    /// Ultracode state back with its next effort pick.
+    private func announceSettingsChange(except writer: RequestOwner) {
+        if case .mirror = writer, let webView, let own = primaryOwnChannel {
+            post(Self.syntheticConnectSnapshot(channelId: own), to: webView)
+        }
+        for (key, mirror) in mirrors {
+            if case .mirror(let writerKey) = writer, writerKey == key { continue }
+            // A client with no channel yet gets its own snapshot when it launches.
+            guard let target = mirror.sink, let own = mirror.channelId else { continue }
+            post(Self.syntheticConnectSnapshot(channelId: own), to: target)
+        }
+    }
+
+    #if DEBUG
+    /// Probe-only: one extension→webview frame, routed as if the extension had sent it.
+    func _probeFromExtension(_ message: [String: Any]) {
+        sendToWebView(message)
+    }
+    #endif
 
     /// Point this session's `open` at a Mac watching it, or back at this
     /// screen when none is. Called on every attach and detach, because that is
@@ -429,23 +461,41 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         : "the session process exited with status \(status)"
     }
 
-    /// The synthetic `system/status` Canopy injects at `launch_claude` so the
-    /// webview's permission-mode UI matches the app setting. Built per
-    /// channel because a mirror lives on its own channel id.
-    private func syntheticPermissionStatus(channelId: String) -> [String: Any] {
-        [
+    /// The synthetic `system/status` that sets a webview's permission-mode UI to the
+    /// session's current mode. Built per channel because a mirror lives on its own channel id.
+    nonisolated static func syntheticPermissionStatus(channelId: String, permissionMode: String) -> [String: Any] {
+        syntheticStatus(channelId: channelId, ["permissionMode": permissionMode])
+    }
+
+    /// A `system/status` io_message on `channelId` carrying `fields`.
+    nonisolated private static func syntheticStatus(channelId: String, _ fields: [String: Any]) -> [String: Any] {
+        var status = fields
+        status["type"] = "system"
+        status["subtype"] = "status"
+        return [
             "type": "from-extension",
             "message": [
                 "type": "io_message",
                 "channelId": channelId,
-                "message": [
-                    "type": "system",
-                    "subtype": "status",
-                    "permissionMode": permissionMode.rawValue,
-                ] as [String: Any],
+                "message": status,
                 "done": false,
             ] as [String: Any],
         ]
+    }
+
+    /// What a client that joins late or resumes is sent on its own channel: the
+    /// permission status, then the connect snapshot.
+    nonisolated static func joinStatusFrames(channelId: String, permissionMode: String) -> [[String: Any]] {
+        [syntheticPermissionStatus(channelId: channelId, permissionMode: permissionMode),
+         syntheticConnectSnapshot(channelId: channelId)]
+    }
+
+    /// A `system/status` with `connectSnapshot: true`, on which the webview reads
+    /// `get_applied_settings` (CC 2.1.319). The extension sends one only when the CLI connects;
+    /// a client that joins later shows no Ultracode in the model pill and no Ultracode toggle
+    /// until it gets one. No `permissionMode`: `syntheticPermissionStatus` sets the mode.
+    nonisolated static func syntheticConnectSnapshot(channelId: String) -> [String: Any] {
+        syntheticStatus(channelId: channelId, ["connectSnapshot": true])
     }
 
     /// Swaps the inner frame's top-level `channelId` from the live one to the target's own.
@@ -3782,7 +3832,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             if !mirrors.isEmpty, liveChannelOpen, let live = channelId, live != cid {
                 logger.notice("[mirror] launch_claude swallowed from \(mirrorKey == nil ? "primary" : "mirror", privacy: .public): channel \(cid, privacy: .public) ↔ live \(live, privacy: .public)")
                 if let sender {
-                    post(syntheticPermissionStatus(channelId: cid), to: sender)
+                    for frame in Self.joinStatusFrames(channelId: cid, permissionMode: permissionMode.rawValue) {
+                        post(frame, to: sender)
+                    }
                     for request in outstandingDialogRequests.values {
                         post(Self.retargeted(request, from: live, to: cid), to: sender)
                     }
@@ -3864,7 +3916,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
             let channelId = dict["channelId"] as? String ?? ""
             self.channelId = channelId.isEmpty ? nil : channelId
-            sendToWebView(syntheticPermissionStatus(channelId: channelId))
+            sendToWebView(Self.syntheticPermissionStatus(channelId: channelId, permissionMode: permissionMode.rawValue))
 
             // Request initial rate limit data after a short delay (extension needs time to activate)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
@@ -5281,6 +5333,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     logger.warning("[mirror] response \(requestId, privacy: .public) for a detached mirror dropped")
                 }
             }
+            if Self.changesAppliedSettings(inner) { announceSettingsChange(except: owner) }
             return
         }
 
