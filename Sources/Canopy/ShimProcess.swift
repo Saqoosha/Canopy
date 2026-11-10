@@ -4214,7 +4214,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Shim Path Discovery
 
-    /// What `installBridgeMod` copies, relative to the bundled mod. One missing from the bundle
+    /// What `copyBridgeMod` copies, relative to the bundled mod. One missing from the bundle
     /// disables the whole mod.
     nonisolated static let bridgeModFiles = [
         ".claude-plugin/plugin.json",
@@ -4230,13 +4230,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// writes type files into a plugin folder; doing that inside the signed
     /// bundle would break the signature, so the live copy lives outside it.
     nonisolated static func installBridgeMod() -> String? {
-        let fm = FileManager.default
         guard let sourceRoot = Self.bridgeModSourceURL() else {
             logger.error("[bridge] canopy-bridge missing from the app bundle")
             return nil
         }
-        let destRoot = fm.homeDirectoryForCurrentUser
+        let destRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Canopy/mods/\(Bundle.main.bundleIdentifier ?? "Canopy")/canopy-bridge", isDirectory: true)
+        return copyBridgeMod(from: sourceRoot, to: destRoot) ? destRoot.path : nil
+    }
+
+    /// Copies `bridgeModFiles` with their permission bits, so `bin/canopyctl`
+    /// stays executable. Bits that differ are set even when the content is
+    /// unchanged, since older copies are 0644. A failed chmod is only logged.
+    nonisolated static func copyBridgeMod(from sourceRoot: URL, to destRoot: URL) -> Bool {
+        let fm = FileManager.default
         do {
             try fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
             for relative in bridgeModFiles {
@@ -4244,19 +4251,26 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 let dst = destRoot.appendingPathComponent(relative)
                 guard fm.fileExists(atPath: src.path) else {
                     logger.error("[bridge] missing source file \(relative, privacy: .public)")
-                    return nil
+                    return false
                 }
                 let body = try Data(contentsOf: src)
                 try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if let existing = try? Data(contentsOf: dst), existing == body {
-                    continue
+                if (try? Data(contentsOf: dst)) != body {
+                    try body.write(to: dst, options: .atomic)
                 }
-                try body.write(to: dst, options: .atomic)
+                if let mode = try fm.attributesOfItem(atPath: src.path)[.posixPermissions] as? Int,
+                   ((try? fm.attributesOfItem(atPath: dst.path))?[.posixPermissions] as? Int) != mode {
+                    do {
+                        try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: dst.path)
+                    } catch {
+                        logger.error("[bridge] could not set mode \(String(mode, radix: 8), privacy: .public) on \(relative, privacy: .public): \(String(describing: error), privacy: .public)")
+                    }
+                }
             }
-            return destRoot.path
+            return true
         } catch {
             logger.error("[bridge] install failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+            return false
         }
     }
 

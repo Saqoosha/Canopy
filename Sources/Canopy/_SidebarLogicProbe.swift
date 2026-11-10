@@ -6885,6 +6885,49 @@ enum SidebarLogicProbe {
                    })
             record("bridge mod: canopyctl ships with it, so a skill can reach the daemon",
                    ShimProcess.bridgeModFiles.contains("bin/canopyctl"))
+            do {
+                let fm = FileManager.default
+                let mode: (URL) -> Int? = { (try? fm.attributesOfItem(atPath: $0.path))?[.posixPermissions] as? Int }
+                let bundledMode = bundledMod.flatMap { mode($0.appendingPathComponent("bin/canopyctl")) }
+                let root = fm.temporaryDirectory.appendingPathComponent("canopy-bridge-probe-\(UUID().uuidString)")
+                defer { try? fm.removeItem(at: root) }
+                let bundledExecutable = bundledMode.map { $0 & 0o111 != 0 } == true
+                let fresh = root.appendingPathComponent("fresh")
+                let freshCopied = bundledMod.map { ShimProcess.copyBridgeMod(from: $0, to: fresh) } ?? false
+                record("bridge mod: an installed canopyctl keeps the bundle's executable bits",
+                       freshCopied && bundledExecutable
+                           && mode(fresh.appendingPathComponent("bin/canopyctl")) == bundledMode)
+                // An unchanged file is not rewritten, so its bits must still be fixed.
+                let stale = root.appendingPathComponent("stale")
+                let staleTool = stale.appendingPathComponent("bin/canopyctl")
+                try? fm.createDirectory(at: staleTool.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if let bundledMod { try? fm.copyItem(at: bundledMod.appendingPathComponent("bin/canopyctl"), to: staleTool) }
+                try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: staleTool.path)
+                let staleWasPlain = mode(staleTool) == 0o644
+                let staleCopied = bundledMod.map { ShimProcess.copyBridgeMod(from: $0, to: stale) } ?? false
+                record("bridge mod: a same-content canopyctl installed at 0644 becomes executable",
+                       bundledExecutable && staleWasPlain && staleCopied && mode(staleTool) == bundledMode)
+                let ctime: (URL) -> Int? = { url in
+                    var st = stat()
+                    return stat(url.path, &st) == 0 ? st.st_ctimespec.tv_sec * 1_000_000_000 + st.st_ctimespec.tv_nsec : nil
+                }
+                let ctimeBefore = ctime(staleTool)
+                let againCopied = bundledMod.map { ShimProcess.copyBridgeMod(from: $0, to: stale) } ?? false
+                record("bridge mod: a copy that already matches is not touched again",
+                       ctimeBefore != nil && againCopied && ctime(staleTool) == ctimeBefore)
+                // A chmod that fails must not cost the session the whole mod.
+                let locked = root.appendingPathComponent("locked")
+                let lockedTool = locked.appendingPathComponent("bin/canopyctl")
+                try? fm.createDirectory(at: lockedTool.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if let bundledMod { try? fm.copyItem(at: bundledMod.appendingPathComponent("bin/canopyctl"), to: lockedTool) }
+                try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedTool.path)
+                try? fm.setAttributes([.immutable: true], ofItemAtPath: lockedTool.path)
+                defer { try? fm.setAttributes([.immutable: false], ofItemAtPath: lockedTool.path) }
+                let lockedSet = (try? fm.attributesOfItem(atPath: lockedTool.path))?[.immutable] as? Bool == true
+                let lockedCopied = bundledMod.map { ShimProcess.copyBridgeMod(from: $0, to: locked) } ?? false
+                record("bridge mod: a canopyctl whose bits cannot be set does not disable the mod",
+                       bundledExecutable && lockedSet && lockedCopied && mode(lockedTool) == 0o644)
+            }
             record("bridge dirs: the control socket is Canopy's to assign",
                    ShimProcess.canopyAssignedEnvKeys.contains("CANOPY_CONTROL_SOCK"))
             record("bridge mod: the find-session skill is listed",
