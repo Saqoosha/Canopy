@@ -4214,7 +4214,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Shim Path Discovery
 
-    /// What `installBridgeMod` copies, relative to the bundled mod. One missing from the bundle
+    /// What `copyBridgeMod` copies, relative to the bundled mod. One missing from the bundle
     /// disables the whole mod.
     nonisolated static let bridgeModFiles = [
         ".claude-plugin/plugin.json",
@@ -4240,8 +4240,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Copies `bridgeModFiles` with their permission bits, so `bin/canopyctl`
-    /// stays executable. The bits are set on every call, including for a file
-    /// whose content is unchanged: copies made before this wrote them are 0644.
+    /// stays executable. Bits that differ are set even when the content is
+    /// unchanged, since older copies are 0644. A failed chmod is only logged.
     nonisolated static func copyBridgeMod(from sourceRoot: URL, to destRoot: URL) -> Bool {
         let fm = FileManager.default
         do {
@@ -4258,8 +4258,13 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if (try? Data(contentsOf: dst)) != body {
                     try body.write(to: dst, options: .atomic)
                 }
-                if let mode = try fm.attributesOfItem(atPath: src.path)[.posixPermissions] {
-                    try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: dst.path)
+                if let mode = try fm.attributesOfItem(atPath: src.path)[.posixPermissions] as? Int,
+                   ((try? fm.attributesOfItem(atPath: dst.path))?[.posixPermissions] as? Int) != mode {
+                    do {
+                        try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: dst.path)
+                    } catch {
+                        logger.error("[bridge] could not set mode \(String(mode, radix: 8), privacy: .public) on \(relative, privacy: .public): \(String(describing: error), privacy: .public)")
+                    }
                 }
             }
             return true
