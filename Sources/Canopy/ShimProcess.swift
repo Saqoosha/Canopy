@@ -4230,13 +4230,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// writes type files into a plugin folder; doing that inside the signed
     /// bundle would break the signature, so the live copy lives outside it.
     nonisolated static func installBridgeMod() -> String? {
-        let fm = FileManager.default
         guard let sourceRoot = Self.bridgeModSourceURL() else {
             logger.error("[bridge] canopy-bridge missing from the app bundle")
             return nil
         }
-        let destRoot = fm.homeDirectoryForCurrentUser
+        let destRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Canopy/mods/\(Bundle.main.bundleIdentifier ?? "Canopy")/canopy-bridge", isDirectory: true)
+        return copyBridgeMod(from: sourceRoot, to: destRoot) ? destRoot.path : nil
+    }
+
+    /// Copies `bridgeModFiles` with their permission bits, so `bin/canopyctl`
+    /// stays executable. The bits are set on every call, including for a file
+    /// whose content is unchanged: copies made before this wrote them are 0644.
+    nonisolated static func copyBridgeMod(from sourceRoot: URL, to destRoot: URL) -> Bool {
+        let fm = FileManager.default
         do {
             try fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
             for relative in bridgeModFiles {
@@ -4244,19 +4251,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 let dst = destRoot.appendingPathComponent(relative)
                 guard fm.fileExists(atPath: src.path) else {
                     logger.error("[bridge] missing source file \(relative, privacy: .public)")
-                    return nil
+                    return false
                 }
                 let body = try Data(contentsOf: src)
                 try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if let existing = try? Data(contentsOf: dst), existing == body {
-                    continue
+                if (try? Data(contentsOf: dst)) != body {
+                    try body.write(to: dst, options: .atomic)
                 }
-                try body.write(to: dst, options: .atomic)
+                if let mode = try fm.attributesOfItem(atPath: src.path)[.posixPermissions] {
+                    try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: dst.path)
+                }
             }
-            return destRoot.path
+            return true
         } catch {
             logger.error("[bridge] install failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+            return false
         }
     }
 
