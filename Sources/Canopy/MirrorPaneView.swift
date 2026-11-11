@@ -307,6 +307,9 @@ struct MirrorPaneView: NSViewRepresentable {
             case .attached:
                 session.status = .live
                 session.pendingMirrorOpen = nil
+                // The daemon holds the prompt now. A resume's open is resent on every attach,
+                // so keeping it here would submit it again after a daemon restart.
+                if isDaemon { session.pendingInitialPrompt = nil }
                 if let hostId = bridge?.hostSessionId {
                     session.mirrorHostSessionId = hostId
                     if isDaemon { session.daemonKey = hostId }
