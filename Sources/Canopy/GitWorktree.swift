@@ -824,6 +824,34 @@ enum GitWorktree {
         }
     }
 
+    /// Every path git tracks in the checkout at `root`, submodules included; nil when the
+    /// read fails.
+    static func trackedPaths(in root: String, timeout: TimeInterval = 10) -> [String]? {
+        guard let result = try? runCommand("/usr/bin/git", ["-C", root, "ls-files", "-z", "--recurse-submodules"],
+                                           timeout: timeout, wantsStdout: true),
+              result.status == 0 else { return nil }
+        return String(decoding: result.stdout, as: UTF8.self).split(separator: "\0").map(String.init)
+    }
+
+    /// `origin`'s URL for the repository at `root`, or nil.
+    static func originURL(of root: String, timeout: TimeInterval = 5) -> String? {
+        guard let result = try? runCommand("/usr/bin/git", ["-C", root, "remote", "get-url", "origin"],
+                                           timeout: timeout, wantsStdout: true),
+              result.status == 0 else { return nil }
+        return String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Whether the checkout at `root` has its HEAD on a branch of `origin`, so it came from
+    /// that repository rather than a fork or a local merge. False when the read fails.
+    static func headIsOnOrigin(_ root: String, timeout: TimeInterval = 10) -> Bool {
+        guard let result = try? runCommand("/usr/bin/git", ["-C", root, "branch", "-r", "--contains", "HEAD",
+                                                            "--format=%(refname)"],
+                                           timeout: timeout, wantsStdout: true),
+              result.status == 0 else { return false }
+        return String(decoding: result.stdout, as: UTF8.self).split(separator: "\n")
+            .contains { $0.hasPrefix("refs/remotes/origin/") }
+    }
+
     /// The parsing half, given `git worktree list --porcelain -z` output: NUL-terminated
     /// fields, an empty field between entries. `-z` because without it a path is not quoted,
     /// so a newline in one cuts it short. Paths are symlink-resolved.
