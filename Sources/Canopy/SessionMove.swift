@@ -183,12 +183,130 @@ enum SessionMove {
         let message: String
     }
 
+    /// One thing the destination's own Claude Code files set. `stops` is true for what
+    /// runs by itself once trusted or widens what runs unasked; only those raise the alert.
+    struct FolderFinding: Equatable {
+        let text: String
+        let stops: Bool
+    }
+
     /// With a `trustRoot` the CLI grants the whole repository, worktrees included.
-    static func trustPrompt(directory: String, trustRoot: String?, sessionTitle: String) -> TrustPrompt {
+    static func trustPrompt(directory: String, trustRoot: String?, sessionTitle: String,
+                            findings: [FolderFinding]) -> TrustPrompt {
         let scope = trustRoot.map { "the repository at \($0), worktrees included," } ?? "\(directory) and everything in it,"
+        var lines = findings.map { "• \($0.text)" }
+        if lines.count > findingsLineLimit {
+            let rest = lines.count - (findingsLineLimit - 1)
+            lines = Array(lines.prefix(findingsLineLimit - 1)) + ["• and \(rest) more"]
+        }
         return TrustPrompt(
             header: "Move “\(sessionTitle)” to \((directory as NSString).lastPathComponent)?",
-            message: "Claude Code will trust \(scope) and may run its hooks and MCP servers.")
+            message: "Claude Code will trust \(scope) and run what this folder sets:\n"
+                + lines.joined(separator: "\n"))
+    }
+
+    static func shouldAsk(_ findings: [FolderFinding]) -> Bool { findings.contains(where: \.stops) }
+
+    static let findingsLineLimit = 12
+    static let findingsTextLimit = 100
+
+    /// Settings keys that do not stop. Anything else does, so a key this list does not know,
+    /// `env` or `enabledPlugins` say, fails closed. `enabledMcpjsonServers` and kin act only
+    /// through `.mcp.json`, which stops by itself.
+    static let quietSettingsKeys: Set<String> = [
+        "permissions", "enabledMcpjsonServers", "enableAllProjectMcpServers", "disabledMcpjsonServers",
+        "outputStyle", "plansDirectory",
+    ]
+    static let quietPermissionModes: Set<String> = ["default", "plan"]
+
+    /// Reads `directory`'s own `.claude/settings.json`, `.claude/settings.local.json`,
+    /// `.mcp.json` and `CLAUDE.md`, not its parents'. `read` returns a file's bytes or nil.
+    /// Fails closed: only `quietSettingsKeys`, `permissions.deny`/`ask`, a mode in
+    /// `quietPermissionModes`, and allow rules in `settings.local.json` do not stop. Those
+    /// allow rules are the file Claude Code writes when the user picks "always allow"
+    /// (measured: every allow rule in ~/repos on both Macs, 2026-11-11); `settings.json`
+    /// is the one a clone brings, so its allow rules stop. Any `.mcp.json` stops, and so
+    /// does a file that is not a JSON object.
+    static func folderFindings(directory: String, read: (String) -> Data?) -> [FolderFinding] {
+        var found: [FolderFinding] = []
+        func add(_ text: String, stops: Bool = true) {
+            // Folder text in a system alert: one line each, so it cannot fake the alert's own wording.
+            let flat = String(String.UnicodeScalarView(text.unicodeScalars.map {
+                CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) ? " " : $0
+            }))
+            found.append(FolderFinding(
+                text: flat.count > findingsTextLimit ? String(flat.prefix(findingsTextLimit - 1)) + "…" : flat,
+                stops: stops))
+        }
+        func json(_ name: String) -> [String: Any]? {
+            guard let data = read((directory as NSString).appendingPathComponent(name)) else { return nil }
+            guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                add("\(name) that is not a JSON object")
+                return nil
+            }
+            return object
+        }
+        for name in [".claude/settings.json", ".claude/settings.local.json"] {
+            guard let settings = json(name) else { continue }
+            for key in settings.keys.sorted() {
+                switch key {
+                case "hooks":
+                    let hooks = settings[key] as? [String: Any] ?? [:]
+                    var any = false
+                    for event in hooks.keys.sorted() {
+                        for group in hooks[event] as? [[String: Any]] ?? [] {
+                            for hook in group["hooks"] as? [[String: Any]] ?? [] {
+                                let what = hook["command"] as? String ?? hook["url"] as? String
+                                    ?? hook["prompt"] as? String ?? (hook["type"] as? String ?? "?")
+                                add("hook \(event): \(what)")
+                                any = true
+                            }
+                        }
+                    }
+                    if !any, !hooks.isEmpty { add("hooks") }
+                case "statusLine":
+                    add("status line: \((settings[key] as? [String: Any])?["command"] as? String ?? "?")")
+                case "apiKeyHelper":
+                    add("API key helper: \(settings[key] as? String ?? "?")")
+                case "permissions":
+                    let permissions = settings[key] as? [String: Any] ?? [:]
+                    for sub in permissions.keys.sorted() {
+                        switch sub {
+                        case "allow":
+                            let allow = permissions[sub] as? [String] ?? []
+                            if !allow.isEmpty {
+                                add("allows without asking: \(allow.joined(separator: ", "))",
+                                    stops: name == ".claude/settings.json")
+                            }
+                        case "deny", "ask":
+                            continue
+                        case "defaultMode":
+                            let mode = permissions[sub] as? String ?? "?"
+                            add("permission mode: \(mode)", stops: !quietPermissionModes.contains(mode))
+                        default:
+                            add("sets permissions.\(sub)")
+                        }
+                    }
+                case _ where quietSettingsKeys.contains(key):
+                    continue
+                default:
+                    add("sets \(key)")
+                }
+            }
+        }
+        if let mcp = json(".mcp.json") {
+            let servers = mcp["mcpServers"] as? [String: Any] ?? [:]
+            for name in servers.keys.sorted() {
+                let server = servers[name] as? [String: Any] ?? [:]
+                let what = server["command"].map { command in
+                    ([command] + (server["args"] as? [Any] ?? [])).map { "\($0)" }.joined(separator: " ")
+                } ?? server["url"] as? String ?? "?"
+                add("MCP server \(name): \(what)")
+            }
+            if servers.isEmpty { add(".mcp.json") }
+        }
+        if read((directory as NSString).appendingPathComponent("CLAUDE.md")) != nil { add("CLAUDE.md", stops: false) }
+        return found
     }
 
     /// Only the Move button, pressed, is a yes. A failed read never is.
@@ -212,10 +330,21 @@ enum SessionMove {
         ]
     }
 
-    /// A system alert raised by this process, so the answer never crosses the control
+    /// Accepts unasked when the folder sets nothing that stops (`folderFindings`): such a
+    /// folder lets a session do nothing it cannot already do where it is. Otherwise a
+    /// system alert raised by this process, so the answer never crosses the control
     /// socket. Blocks; call it off the main thread.
     static func askTrust(directory: String, trustRoot: String?, sessionTitle: String) -> TrustAnswer {
-        let alert = trustAlert(trustPrompt(directory: directory, trustRoot: trustRoot, sessionTitle: sessionTitle))
+        // The CLI trusts the repository root too, so a later session there runs its files unasked.
+        let findings = Array(Set([directory] + [trustRoot].compactMap { $0 })).sorted().flatMap {
+            folderFindings(directory: $0) { FileManager.default.contents(atPath: $0) }
+        }
+        guard shouldAsk(findings) else {
+            logger.notice("Trusting \(directory, privacy: .public) unasked: it sets nothing that runs by itself")
+            return .accepted
+        }
+        let alert = trustAlert(trustPrompt(directory: directory, trustRoot: trustRoot, sessionTitle: sessionTitle,
+                                           findings: findings))
         var error: Int32 = 0
         guard let note = CFUserNotificationCreate(nil, trustTimeout, CFOptionFlags(kCFUserNotificationCautionAlertLevel),
                                                   &error, alert as CFDictionary) else {
