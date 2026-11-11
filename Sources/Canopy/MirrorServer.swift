@@ -621,8 +621,11 @@ final class MirrorConnection: MirrorSink {
                 }
                 options = SessionStore.HeadlessOptions(given)
             }
-            if store.openSessions.contains(where: { $0.resumeId == sessionId }) {
-                // Open but dormant: it already knows its own folder.
+            if let row = store.openSessions.first(where: { $0.resumeId == sessionId }) {
+                // Open but dormant: it already knows its own folder. The launcher's prompt still has to reach it.
+                if row.shim == nil, options.initialPrompt != nil || !options.promptImages.isEmpty {
+                    row.pendingInitialPrompt = LaunchPrompt.make(text: options.initialPrompt ?? "", images: options.promptImages)
+                }
                 shim = store.startHeadlessSession(resumeId: sessionId)
             } else {
                 // This Mac's GUI names the folder it resolved (`localCwd`). The control API's

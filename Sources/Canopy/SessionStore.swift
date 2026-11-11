@@ -1117,7 +1117,8 @@ final class SessionStore {
         settledTitle: String? = nil,
         fromLauncherPane launcherPane: PaneSlot.ID? = nil,
         composerPrefill: String? = nil,
-        settingsOf accountSource: OpenSession? = nil
+        settingsOf accountSource: OpenSession? = nil,
+        fromLauncher: Bool = false
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -1166,7 +1167,7 @@ final class SessionStore {
         session.pendingSettledTitle = settledTitle
         session.accountAutoSwitch = accountSource?.accountAutoSwitch ?? accountChoice?.autoSwitch
         // A daemon resume otherwise starts with the daemon's defaults, not these.
-        session.resumeKeepsOwnSettings = accountSource != nil
+        session.resumeKeepsOwnSettings = accountSource != nil || fromLauncher
         // Before the pane below mounts: its page is built from it.
         session.composerPrefill = composerPrefill
         // The launcher's prompt has exactly one hop left after this — a shim
@@ -1228,7 +1229,9 @@ final class SessionStore {
             target: launch.openInNewPane || (paneId == nil && !panes.isEmpty) ? .newPane : .focused,
             initialPrompt: launch.initialPrompt,
             settledTitle: launch.settledTitle,
-            fromLauncherPane: paneId
+            fromLauncherPane: paneId,
+            // Continue resumes with what the launcher's chips chose, as a new session does.
+            fromLauncher: true
         )
         // A session started, so the previous failure is answered.
         lastSessionFailure = nil

@@ -306,7 +306,8 @@ final class OpenSession: Identifiable, Hashable {
             settledTitle: pendingSettledTitle, providerId: customApi?.id, accountId: claudeAccount?.id)
     }
 
-    /// Set for a fork: resume with this session's login, model and permissions, not the daemon's defaults.
+    /// Set for a fork and for the launcher's Continue: resume with this session's login, model,
+    /// permissions and first prompt, not the daemon's defaults. A plain `.resume` carries none of them.
     var resumeKeepsOwnSettings = false
 
     /// Bumped by `SessionStore.restartSession(_:)`, and read only through

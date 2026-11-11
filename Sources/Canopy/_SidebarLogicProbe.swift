@@ -3210,6 +3210,14 @@ enum SidebarLogicProbe {
                 let resumed = OpenSession(origin: .local(dir), resumeId: "old-id", title: "T", project: "p",
                                           resumeIdIsExistingTranscript: true)
                 record("daemon open: an existing transcript asks for .resume", resumed.daemonOpenRequest == .resume)
+                let continued = OpenSession(origin: .local(dir), resumeId: "old-id", title: "T", project: "p",
+                                            permissionMode: .plan, model: "opus", effortLevel: "high",
+                                            resumeIdIsExistingTranscript: true)
+                continued.resumeKeepsOwnSettings = true
+                continued.pendingInitialPrompt = LaunchPrompt.make(text: "go on", images: [])
+                record("daemon open: Continue from the launcher sends its settings and prompt",
+                       continued.daemonOpenRequest == .resumeWith(options: NewSessionOptions(
+                           model: "opus", effort: "high", permissionMode: .plan, promptText: "go on")))
                 record("daemon hosted: local is, remote is not",
                        fresh.isDaemonHosted
                            && !OpenSession(origin: .remote(host: "h", path: dir), resumeId: "r", title: "", project: "").isDaemonHosted)
@@ -7667,6 +7675,16 @@ enum SidebarLogicProbe {
                        && plain.focusedPaneIndex == 0
                        && plain.selection == .session(p.id),
                        "panes=\(plain.panes.map(\.content)) sel=\(String(describing: plain.selection))")
+
+                // Continue from the launcher keeps the chips' choices; a sidebar resume does not ask to.
+                let cont = SessionStore()
+                let contLaunch = AppState()
+                cont.receiveLaunches(from: contLaunch, launcherPane: nil)
+                contLaunch.launchSession(directory: cwd, resumeSessionId: "launch-continue", model: "opus",
+                                         remoteHost: "studio", openInNewPane: false)
+                record("launcher continue: resumes with the launcher's settings",
+                       cont.openSessions.first?.resumeKeepsOwnSettings == true
+                       && !cont.openNew(directory: cwd, resumeId: "sidebar-resume", remoteHost: "studio").resumeKeepsOwnSettings)
 
                 // Cmd+Start keeps the launcher and adds a pane.
                 let cmd = SessionStore()
