@@ -5591,6 +5591,12 @@ enum SidebarLogicProbe {
             record("trust scan: a .mcp.json in a folder above asks, even for the owner's repository",
                    trustScan(root: "/r", above: ["/.mcp.json"], vouched: ["/r"]) == .configs(["/"])
                        && trustScan(root: nil, above: ["/r/.mcp.json"]) == .configs(["/r"]))
+            record("trust scan: a .mcp.json above a worktree outside the root asks",
+                   trustScan(root: "/r", worktrees: "worktree /r\0\0worktree /dl/foreign/w\0\0",
+                             above: ["/dl/foreign/.mcp.json"], vouched: ["/r", "/dl/foreign/w"]) == .configs(["/dl/foreign"]))
+            record("trust scan: a folder above a nested worktree that is inside the root is left to the root's scan",
+                   trustScan(root: "/r", tracked: ["/r": [], "/r/.wt/a": []],
+                             worktrees: "worktree /r\0\0worktree /r/.wt/a\0\0", above: ["/r/.wt/.mcp.json"]) == .clean)
             record("trust scan: the folder's own .mcp.json is not taken for one above",
                    trustScan(root: "/r", above: ["/r/.mcp.json"], vouched: ["/r"]) == .clean)
             record("trust scan: outside a repository any .claude asks, tracked or not",

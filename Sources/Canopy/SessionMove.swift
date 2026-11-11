@@ -427,18 +427,23 @@ enum SessionMove {
                           exists: (String) -> Bool,
                           walkRepository: (String, (String) -> Bool) -> Bool,
                           walkFolder: (String, (String) -> Bool) -> Bool) -> ScopeScan {
-        var above = ((trustRoot ?? directory) as NSString).deletingLastPathComponent
-        var ancestors: [String] = []
-        while true {
-            if exists((above as NSString).appendingPathComponent(mcpFileName)) { ancestors.append(above) }
-            if above == "/" || above.isEmpty { break }
-            above = (above as NSString).deletingLastPathComponent
-        }
-        if !ancestors.isEmpty { return .configs(ancestors) }
         guard let roots = trustScope(directory: directory, trustRoot: trustRoot, worktreeList: worktreeList) else {
             return .unchecked("its worktrees could not be listed")
         }
-        guard let trustRoot else { return scanScope(roots: roots, walk: walkFolder) }
+        // Above every checkout, not just the root: a worktree elsewhere has its own ancestors.
+        var ancestors: [String] = []
+        for root in roots {
+            var above = (root as NSString).deletingLastPathComponent
+            while !roots.contains(where: { GitWorktree.isUnder($0, above) }) {
+                if exists((above as NSString).appendingPathComponent(mcpFileName)), !ancestors.contains(above) {
+                    ancestors.append(above)
+                }
+                if above == "/" || above.isEmpty { break }
+                above = (above as NSString).deletingLastPathComponent
+            }
+        }
+        if !ancestors.isEmpty { return .configs(ancestors) }
+        guard trustRoot != nil else { return scanScope(roots: roots, walk: walkFolder) }
         return scanScope(roots: roots.filter { !vouched($0) }, walk: walkRepository)
     }
 
