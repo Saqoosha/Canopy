@@ -5531,6 +5531,11 @@ enum SidebarLogicProbe {
                    scan(["/r": ["a"], "/w": [".mcp.json"]]) == .configs(["/w"]))
             record("scope: a walk that could not read everything asks",
                    scan(["/r": ["a"]], incomplete: ["/r"]) == .unchecked("part of /r could not be read"))
+            record("scope: the entry limit is per root",
+                   SessionMove.scanScope(roots: ["/a", "/b"]) { _, yield in
+                       for i in 0..<(SessionMove.scopeEntryLimit / 2 + 1) where !yield("f\(i)") { return false }
+                       return true
+                   } == .clean)
             record("scope: past the entry limit asks",
                    SessionMove.scanScope(roots: ["/r"]) { _, yield in
                        var i = 0
@@ -5547,31 +5552,35 @@ enum SidebarLogicProbe {
                 record("remote: \(url) is own", SessionMove.isOwnRemote(url, owners: ["saqoosha", "whatever-co"]))
             }
             for url in ["https://github.com/LouisHitchcock/x", "https://github.com.evil.com/Saqoosha/x",
+                        "https://evil.com#@github.com/saqoosha/x", "https://evil.com?@github.com/saqoosha/x",
                         "https://gitlab.com/Saqoosha/x", "https://evil.com/github.com/Saqoosha/x",
                         "git@github.com:Saqoosha-fork/x", "https://github.com/x/Saqoosha", ""] {
                 record("remote: \(url) is not own", !SessionMove.isOwnRemote(url, owners: ["saqoosha", "whatever-co"]))
             }
             record("remote: no owners set means nothing is own",
                    !SessionMove.isOwnRemote("https://github.com/Saqoosha/Canopy", owners: []))
-            func trustScan(root: String?, origin: String? = nil, tracked: [String: [String]] = [:],
+            func trustScan(root: String?, tracked: [String: [String]] = [:],
                            files: [String] = [], worktrees: String? = "worktree /r\0\0",
-                           above: Set<String> = []) -> SessionMove.ScopeScan {
+                           above: Set<String> = [], vouched: Set<String> = []) -> SessionMove.ScopeScan {
                 SessionMove.scanTrust(
-                    directory: "/r/p", trustRoot: root, owners: ["saqoosha"], worktreeList: { _ in worktrees },
-                    origin: { _ in origin }, exists: { above.contains($0) },
+                    directory: "/r/p", trustRoot: root, worktreeList: { _ in worktrees },
+                    vouched: { vouched.contains($0) }, exists: { above.contains($0) },
                     walkRepository: { root, yield in
                         SessionMove.walkTracked(root, yield, list: { tracked[$0] }) },
                     walkFolder: { _, yield in files.allSatisfy(yield) })
             }
             record("trust scan: a foreign repository with tracked .claude asks",
-                   trustScan(root: "/r", origin: "https://github.com/x/y", tracked: ["/r": ["a.txt", "sub/.claude/settings.json"]])
+                   trustScan(root: "/r", tracked: ["/r": ["a.txt", "sub/.claude/settings.json"]])
                        == .configs(["/r/sub"]))
             record("trust scan: a foreign repository with nothing tracked moves unasked",
-                   trustScan(root: "/r", origin: "https://github.com/x/y", tracked: ["/r": ["a.txt"]]) == .clean)
-            record("trust scan: the owner's own repository moves unasked even with tracked config",
-                   trustScan(root: "/r", origin: "git@github.com:Saqoosha/y.git", tracked: ["/r": [".mcp.json"]]) == .clean)
-            record("trust scan: a repository with no origin is foreign",
-                   trustScan(root: "/r", tracked: ["/r": [".mcp.json"]]) == .configs(["/r"]))
+                   trustScan(root: "/r", tracked: ["/r": ["a.txt"]]) == .clean)
+            record("trust scan: a vouched checkout moves unasked even with tracked config",
+                   trustScan(root: "/r", tracked: ["/r": [".mcp.json"]], vouched: ["/r"]) == .clean)
+            record("trust scan: an unvouched worktree of a vouched repository is still scanned",
+                   trustScan(root: "/r", tracked: ["/r": [".mcp.json"], "/w": [".claude/settings.json"]],
+                             worktrees: "worktree /r\0\0worktree /w\0\0", vouched: ["/r"]) == .configs(["/w"]))
+            record("trust scan: config names match case-insensitively",
+                   trustScan(root: "/r", tracked: ["/r": ["a/.Claude/settings.json", "b/.MCP.JSON"]]) == .configs(["/r/a", "/r/b"]))
             record("trust scan: tracked config in another worktree asks",
                    trustScan(root: "/r", tracked: ["/r": [], "/w": [".claude/agents/x.md"]],
                              worktrees: "worktree /r\0\0worktree /w\0\0") == .configs(["/w"]))
@@ -5580,10 +5589,10 @@ enum SidebarLogicProbe {
             record("trust scan: worktrees that could not be listed ask",
                    trustScan(root: "/r", worktrees: nil) == .unchecked("its worktrees could not be listed"))
             record("trust scan: a .mcp.json in a folder above asks, even for the owner's repository",
-                   trustScan(root: "/r", origin: "https://github.com/Saqoosha/y", above: ["/.mcp.json"]) == .configs(["/"])
+                   trustScan(root: "/r", above: ["/.mcp.json"], vouched: ["/r"]) == .configs(["/"])
                        && trustScan(root: nil, above: ["/r/.mcp.json"]) == .configs(["/r"]))
             record("trust scan: the folder's own .mcp.json is not taken for one above",
-                   trustScan(root: "/r", origin: "https://github.com/Saqoosha/y", above: ["/r/.mcp.json"]) == .clean)
+                   trustScan(root: "/r", above: ["/r/.mcp.json"], vouched: ["/r"]) == .clean)
             record("trust scan: outside a repository any .claude asks, tracked or not",
                    trustScan(root: nil, files: ["a", ".claude"]) == .configs(["/r/p"])
                        && trustScan(root: nil, files: ["a"]) == .clean)

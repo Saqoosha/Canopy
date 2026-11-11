@@ -206,9 +206,12 @@ enum SessionMove {
     /// The folder holding Claude Code config when `relative`, a path under a scan root,
     /// is or is inside a `.claude` folder, or is a `.mcp.json`; else nil.
     static func configFolder(_ relative: String) -> String? {
+        // Case-insensitive, as the default macOS volume opens `.Claude` for `.claude`.
         let parts = relative.split(separator: "/").map(String.init)
-        if let claude = parts.firstIndex(of: claudeFolderName) { return parts[..<claude].joined(separator: "/") }
-        if parts.last == mcpFileName { return parts.dropLast().joined(separator: "/") }
+        if let claude = parts.firstIndex(where: { $0.lowercased() == claudeFolderName }) {
+            return parts[..<claude].joined(separator: "/")
+        }
+        if parts.last?.lowercased() == mcpFileName { return parts.dropLast().joined(separator: "/") }
         return nil
     }
 
@@ -216,8 +219,8 @@ enum SessionMove {
     /// when it could not read everything; the walk stops once `yield` returns false.
     static func scanScope(roots: [String], walk: (String, (String) -> Bool) -> Bool) -> ScopeScan {
         var folders: [String] = []
-        var seen = 0
         for root in roots {
+            var seen = 0
             var tooMany = false
             let complete = walk(root) { relative in
                 seen += 1
@@ -259,6 +262,7 @@ enum SessionMove {
     /// scp-like or ssh form. Any other host, including one that only starts with
     /// github.com, is not.
     static func isOwnRemote(_ url: String, owners: Set<String>) -> Bool {
+        guard !url.contains(where: { "#?\\ ".contains($0) }) else { return false }
         var rest = Substring(url.lowercased())
         for scheme in ["https://", "ssh://", "git://"] where rest.hasPrefix(scheme) { rest = rest.dropFirst(scheme.count) }
         if let at = rest.firstIndex(of: "@"), !rest[..<at].contains("/") { rest = rest[rest.index(after: at)...] }
@@ -309,8 +313,9 @@ enum SessionMove {
         if !others.isEmpty { lines.append("\(name)/.claude: \(others.joined(separator: ", "))") }
         for file in [".claude/settings.json", ".claude/settings.local.json", mcpFileName] {
             let path = (folder as NSString).appendingPathComponent(file)
-            guard FileManager.default.fileExists(atPath: path) || read(path) != nil else { continue }
-            guard let data = read(path),
+            let data = read(path)
+            guard data != nil || FileManager.default.fileExists(atPath: path) else { continue }
+            guard let data,
                   let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
                 lines.append("\(name)/\(file): not shown")
                 continue
@@ -415,10 +420,10 @@ enum SessionMove {
     }
 
     /// What the trust covers, checked: a `.mcp.json` in any folder above (the CLI loads
-    /// those too); then in a repository, the config git tracks in every checkout, skipped
-    /// for an `isOwnRemote` origin; outside one, any config at all.
-    static func scanTrust(directory: String, trustRoot: String?, owners: Set<String>,
-                          worktreeList: (String) -> String?, origin: (String) -> String?,
+    /// those too); then in a repository, the config git tracks in every checkout `vouched`
+    /// does not cover; outside one, any config at all.
+    static func scanTrust(directory: String, trustRoot: String?,
+                          worktreeList: (String) -> String?, vouched: (String) -> Bool,
                           exists: (String) -> Bool,
                           walkRepository: (String, (String) -> Bool) -> Bool,
                           walkFolder: (String, (String) -> Bool) -> Bool) -> ScopeScan {
@@ -434,18 +439,23 @@ enum SessionMove {
             return .unchecked("its worktrees could not be listed")
         }
         guard let trustRoot else { return scanScope(roots: roots, walk: walkFolder) }
-        if let url = origin(trustRoot), isOwnRemote(url, owners: owners) { return .clean }
-        return scanScope(roots: roots, walk: walkRepository)
+        return scanScope(roots: roots.filter { !vouched($0) }, walk: walkRepository)
     }
 
-    /// Accepts unasked when `scanTrust` finds nothing: no config came from outside this
-    /// Mac, short of commits by `trustedRemoteOwners`. Otherwise a system alert raised by this process, so the answer never
-    /// crosses the control socket. Blocks; call it off the main thread.
+    /// Accepts unasked when `scanTrust` finds nothing. A checkout is vouched for when
+    /// `origin` belongs to `trustedRemoteOwners` and its HEAD is on an origin branch, so
+    /// a fork's PR checked out locally is still scanned. Otherwise a system alert raised
+    /// by this process, so the answer never crosses the control socket. Blocks; call it
+    /// off the main thread.
     static func askTrust(directory: String, trustRoot: String?, sessionTitle: String) -> TrustAnswer {
         let scan = scanTrust(
-            directory: directory, trustRoot: trustRoot, owners: trustedRemoteOwners,
+            directory: directory, trustRoot: trustRoot,
             worktreeList: { GitWorktree.worktreeListPorcelainZ(for: URL(fileURLWithPath: $0)) },
-            origin: { GitWorktree.originURL(of: $0) },
+            vouched: { root in
+                let owners = trustedRemoteOwners
+                return !owners.isEmpty && GitWorktree.originURL(of: root).map { isOwnRemote($0, owners: owners) } == true
+                    && GitWorktree.headIsOnOrigin(root)
+            },
             exists: { FileManager.default.fileExists(atPath: $0) },
             walkRepository: { walkTracked($0, $1) }, walkFolder: walkFiles)
         if scan == .clean {
