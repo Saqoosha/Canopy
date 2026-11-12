@@ -10,6 +10,8 @@ enum MirrorUIFrame: Equatable {
     case showContent(title: String, content: String, startLine: Int?, endLine: Int?)
     case errorBanner(String)
     case alert(requestId: String, message: String, severity: String, buttons: [String])
+    /// Closes an `alert` that was settled elsewhere. A Mac on an older build drops it, and its alert stays.
+    case dismissAlert(requestId: String)
     case notify(title: String, body: String)
 
     static let type = "canopy_ui"
@@ -48,6 +50,9 @@ enum MirrorUIFrame: Equatable {
             dict["message"] = message
             dict["severity"] = severity
             dict["buttons"] = buttons
+        case .dismissAlert(let requestId):
+            dict["action"] = "dismiss_alert"
+            dict["requestId"] = requestId
         case .notify(let title, let body):
             dict["action"] = "notify"
             dict["title"] = title
@@ -69,6 +74,9 @@ enum MirrorUIFrame: Equatable {
             guard let requestId = wire["requestId"] as? String else { return nil }
             self = .alert(requestId: requestId, message: wire["message"] as? String ?? "",
                           severity: wire["severity"] as? String ?? "info", buttons: wire["buttons"] as? [String] ?? [])
+        case "dismiss_alert":
+            guard let requestId = wire["requestId"] as? String else { return nil }
+            self = .dismissAlert(requestId: requestId)
         case "notify":
             self = .notify(title: wire["title"] as? String ?? "Canopy", body: wire["body"] as? String ?? "")
         default:
@@ -139,6 +147,10 @@ struct PendingUIAlerts<Client: Hashable> {
 }
 
 enum MirrorUIAlert {
+    /// The alerts a Mac pane is showing, by request id, so `dismissAlert` can close one.
+    @MainActor static var open: [String: NSAlert] = [:]
+    @MainActor static var dismissed: Set<String> = []
+
     /// The button an `NSAlert` response names: `buttons` were added first, then Dismiss.
     static func button(response: Int, buttons: [String]) -> String? {
         let index = response - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue

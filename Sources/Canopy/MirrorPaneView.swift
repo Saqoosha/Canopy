@@ -289,12 +289,26 @@ struct MirrorPaneView: NSViewRepresentable {
                 alert.alertStyle = severity == "error" ? .critical : severity == "warning" ? .warning : .informational
                 buttons.forEach { alert.addButton(withTitle: $0) }
                 alert.addButton(withTitle: "Dismiss")
-                let button = MirrorUIAlert.button(response: alert.runModal().rawValue, buttons: buttons)
-                guard let bridge else {
-                    logger.notice("alert \(requestId, privacy: .public) answered after its pane closed; the session's client left, so it was dismissed there")
-                    return
-                }
-                bridge.sendUIAnswer(MirrorUIAnswer(requestId: requestId, button: button))
+                MirrorUIAlert.open[requestId] = alert
+                // From the run loop, not this main-queue block: a modal run inside one stops the main queue,
+                // so no frame (a dismiss included) is handled until it closes (measured).
+                RunLoop.main.perform(inModes: [.default, .modalPanel]) { MainActor.assumeIsolated {
+                    let response = MirrorUIAlert.dismissed.contains(requestId) ? 0 : alert.runModal().rawValue
+                    MirrorUIAlert.open[requestId] = nil
+                    // Settled elsewhere: there is nothing left to answer.
+                    if MirrorUIAlert.dismissed.remove(requestId) != nil { return }
+                    let button = MirrorUIAlert.button(response: response, buttons: buttons)
+                    guard let bridge else {
+                        logger.notice("alert \(requestId, privacy: .public) answered after its pane closed; the session's client left, so it was dismissed there")
+                        return
+                    }
+                    bridge.sendUIAnswer(MirrorUIAnswer(requestId: requestId, button: button))
+                } }
+            case .dismissAlert(let requestId):
+                guard let alert = MirrorUIAlert.open[requestId] else { return }
+                MirrorUIAlert.dismissed.insert(requestId)
+                // Only the alert on top can be aborted; one under another sends no answer when it closes.
+                if NSApp.modalWindow === alert.window { NSApp.abortModal() }
             case .notify(let title, let body):
                 guard !NSApp.isActive else { return }
                 SessionNotifier.post(title: title, body: body)
