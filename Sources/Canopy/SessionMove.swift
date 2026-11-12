@@ -155,7 +155,7 @@ enum SessionMove {
             case .unanswered:
                 return .fail("Nobody confirmed the folder in time.")
             case .couldNotAsk:
-                return .fail("Canopy could not ask about the folder on this Mac's screen.")
+                return .fail("Canopy could not ask about the folder on any screen.")
             }
         }
     }
@@ -447,12 +447,17 @@ enum SessionMove {
         return scanScope(roots: roots.filter { !vouched($0) }, walk: walkRepository)
     }
 
-    /// Accepts unasked when `scanTrust` finds nothing. A checkout is vouched for when
-    /// `origin` belongs to `trustedRemoteOwners` and its HEAD is on an origin branch, so
-    /// a fork's PR checked out locally is still scanned. Otherwise a system alert raised
-    /// by this process, so the answer never crosses the control socket. Blocks; call it
-    /// off the main thread.
-    static func askTrust(directory: String, trustRoot: String?, sessionTitle: String) -> TrustAnswer {
+    enum TrustCheck: Equatable {
+        /// Nothing from outside in reach: trust without asking.
+        case clean
+        case ask(TrustPrompt)
+    }
+
+    /// `.clean` when `scanTrust` finds nothing. A checkout is vouched for when `origin`
+    /// belongs to `trustedRemoteOwners` and its HEAD is on an origin branch, so a fork's
+    /// PR checked out locally is still scanned. Runs git and walks folders; call it off
+    /// the main thread.
+    static func checkTrust(directory: String, trustRoot: String?, sessionTitle: String) -> TrustCheck {
         let scan = scanTrust(
             directory: directory, trustRoot: trustRoot,
             worktreeList: { GitWorktree.worktreeListPorcelainZ(for: URL(fileURLWithPath: $0)) },
@@ -465,25 +470,97 @@ enum SessionMove {
             walkRepository: { walkTracked($0, $1) }, walkFolder: walkFiles)
         if scan == .clean {
             logger.notice("Trusting \(trustRoot ?? directory, privacy: .public) unasked: no Claude Code config from outside")
-            return .accepted
+            return .clean
         }
         var summary: [String] = []
         if case .configs(let folders) = scan {
             summary = folders.flatMap { configSummary(folder: $0, read: readRegularFile) }
         }
-        let alert = trustAlert(trustPrompt(directory: directory, trustRoot: trustRoot, sessionTitle: sessionTitle,
-                                           scan: scan, summary: summary))
-        var error: Int32 = 0
-        guard let note = CFUserNotificationCreate(nil, trustTimeout, CFOptionFlags(kCFUserNotificationCautionAlertLevel),
-                                                  &error, alert as CFDictionary) else {
-            logger.error("Could not raise the trust alert: \(error, privacy: .public)")
-            return .couldNotAsk
+        return .ask(trustPrompt(directory: directory, trustRoot: trustRoot, sessionTitle: sessionTitle,
+                                scan: scan, summary: summary))
+    }
+
+    /// The trust question on the screen of the Mac that runs the session: a system alert
+    /// raised by this process, so the answer never crosses the local socket, which any
+    /// process of this user (the session's own Bash included) can open.
+    final class HostTrustAlert: @unchecked Sendable {
+        private let note: CFUserNotification
+
+        init?(_ prompt: TrustPrompt) {
+            var error: Int32 = 0
+            guard let note = CFUserNotificationCreate(nil, SessionMove.trustTimeout,
+                                                      CFOptionFlags(kCFUserNotificationCautionAlertLevel),
+                                                      &error, SessionMove.trustAlert(prompt) as CFDictionary) else {
+                logger.error("Could not raise the trust alert: \(error, privacy: .public)")
+                return nil
+            }
+            self.note = note
         }
-        var flags: CFOptionFlags = 0
-        let result = CFUserNotificationReceiveResponse(note, trustTimeout, &flags)
-        // Off the screen too, or a late Move press would answer nothing.
-        if result != 0 { CFUserNotificationCancel(note) }
-        return trustAnswer(result: result, flags: flags)
+
+        /// Blocks until a button, the timeout, or `cancel`; call it off the main thread.
+        func wait() -> TrustAnswer {
+            var flags: CFOptionFlags = 0
+            let result = CFUserNotificationReceiveResponse(note, SessionMove.trustTimeout, &flags)
+            // Off the screen too, or a late Move press would answer nothing.
+            if result != 0 { CFUserNotificationCancel(note) }
+            return SessionMove.trustAnswer(result: result, flags: flags)
+        }
+
+        /// Takes the alert off the screen once a viewer has answered.
+        func cancel() { CFUserNotificationCancel(note) }
+    }
+
+    /// The same question, asked of every other Mac showing the session (`MirrorUIFrame.alert`).
+    /// Cancel comes first, so it is the default button and a stray Return is not a yes.
+    static let viewerTrustButtons = ["Cancel", "Move"]
+
+    static func viewerTrustMessage(_ prompt: TrustPrompt) -> String {
+        prompt.header + "\n\n" + prompt.message
+    }
+
+    /// One trust question raced between the host's alert and the viewers it was sent to.
+    /// The first yes or no settles it. Only clients that attached over TCP with the mirror
+    /// password are viewers: an answer from the local socket would let the session approve
+    /// its own move.
+    struct TrustRace<Client: Hashable>: Equatable {
+        let requestId: String
+        private(set) var viewers: Set<Client>
+        /// The host could not raise its alert, so only the viewers are left to answer.
+        private(set) var hostCouldNotAsk = false
+
+        init(requestId: String, viewers: Set<Client>) {
+            self.requestId = requestId
+            self.viewers = viewers
+        }
+
+        /// Nil while a viewer can still answer. A timeout settles it: the viewers were
+        /// asked at the same moment and have had the same `trustTimeout`.
+        mutating func hostAnswered(_ answer: TrustAnswer) -> TrustAnswer? {
+            guard answer == .couldNotAsk else { return answer }
+            hostCouldNotAsk = true
+            return viewers.isEmpty ? .couldNotAsk : nil
+        }
+
+        enum ViewerOutcome: Equatable {
+            case settle(TrustAnswer)
+            /// Another question's answer, or one already settled.
+            case notThisRace
+            /// From a client this question did not go to.
+            case wrongClient
+        }
+
+        /// Only the Move button is a yes; Cancel, Dismiss or a button never offered is a no.
+        func viewerAnswered(requestId: String, button: String?, from client: Client) -> ViewerOutcome {
+            guard requestId == self.requestId else { return .notThisRace }
+            guard viewers.contains(client) else { return .wrongClient }
+            return .settle(button == SessionMove.viewerTrustButtons[1] ? .accepted : .declined)
+        }
+
+        /// `.couldNotAsk` once the host could not ask and the last viewer has gone.
+        mutating func viewerLeft(_ client: Client) -> TrustAnswer? {
+            guard viewers.remove(client) != nil else { return nil }
+            return hostCouldNotAsk && viewers.isEmpty ? .couldNotAsk : nil
+        }
     }
 
     /// A system alert too: the failure banner lives on the launcher, and the pane shows the session.

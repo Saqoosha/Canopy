@@ -4009,7 +4009,7 @@ enum SidebarLogicProbe {
             store._probeSeedOpenSessions([existing, other, m3, started, unmatched])
             store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(
                 machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
-                panes: [RosterSnapshot.Pane(sessionId: "H1", resumeId: "cli-id", paneIndex: 0, title: "Named there", project: "P",
+                panes: [RosterSnapshot.Pane(sessionId: "H1", resumeId: "cli-id", paneIndex: 0, title: "Named there", project: "Moved",
                                             state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true),
                         RosterSnapshot.Pane(sessionId: "", resumeId: "zzz", paneIndex: 1, title: "", project: "P",
                                             state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true)]))
@@ -4019,8 +4019,11 @@ enum SidebarLogicProbe {
                    started.resumeId == "cli-id")
             record("attach: it takes the origin's title",
                    started.title == "Named there")
+            record("attach: it takes the origin's project, which a move there changes",
+                   started.project == "Moved")
             record("attach: a mirror with no origin session id is not matched by an empty one",
-                   !unmatched.isThinking && unmatched.resumeId == "other" && unmatched.title == "Keep")
+                   !unmatched.isThinking && unmatched.resumeId == "other" && unmatched.title == "Keep"
+                       && unmatched.project == "P")
             record("mirror server: a mac client is not a phone",
                    !MirrorConnection.appliesPhoneReplayRewrites(client: "mac"))
             record("mirror server: a client with no client field is a phone",
@@ -5640,6 +5643,47 @@ enum SidebarLogicProbe {
             record("trust: Cancel is the default button",
                    alert[kCFUserNotificationDefaultButtonTitleKey] as? String == "Cancel"
                        && SessionMove.trustAnswer(result: 0, flags: cancelButton) == .declined)
+
+            // A move asked for from a mirror pane is approved on the viewer's Mac too; the first answer settles it.
+            typealias Race = SessionMove.TrustRace<Int>
+            let viewerMove = SessionMove.viewerTrustButtons.last!
+            let viewerCancel = SessionMove.viewerTrustButtons.first!
+            let race = Race(requestId: "q", viewers: [1, 2])
+            record("viewer trust: Cancel is the viewer's default button, Move the other",
+                   SessionMove.viewerTrustButtons == ["Cancel", "Move"])
+            record("viewer trust: Move from a viewer accepts",
+                   race.viewerAnswered(requestId: "q", button: viewerMove, from: 1) == .settle(.accepted))
+            record("viewer trust: Cancel, Dismiss or an unoffered button declines",
+                   race.viewerAnswered(requestId: "q", button: viewerCancel, from: 2) == .settle(.declined)
+                       && race.viewerAnswered(requestId: "q", button: nil, from: 1) == .settle(.declined)
+                       && race.viewerAnswered(requestId: "q", button: "move", from: 1) == .settle(.declined))
+            record("viewer trust: a client it did not go to cannot answer",
+                   race.viewerAnswered(requestId: "q", button: viewerMove, from: 3) == .wrongClient)
+            record("viewer trust: another alert's answer is not this question's",
+                   race.viewerAnswered(requestId: "other", button: viewerMove, from: 1) == .notThisRace)
+            var hostRace = race
+            record("viewer trust: the host's yes, no or timeout settles it at once",
+                   hostRace.hostAnswered(.accepted) == .accepted && hostRace.hostAnswered(.declined) == .declined
+                       && hostRace.hostAnswered(.unanswered) == .unanswered)
+            record("viewer trust: a host that could not ask waits for the viewers",
+                   hostRace.hostAnswered(.couldNotAsk) == nil
+                       && hostRace.viewerAnswered(requestId: "q", button: viewerMove, from: 2) == .settle(.accepted))
+            record("viewer trust: ... and gives up once the last viewer leaves",
+                   hostRace.viewerLeft(1) == nil && hostRace.viewerLeft(2) == .couldNotAsk && hostRace.viewerLeft(2) == nil)
+            var hostless = Race(requestId: "q", viewers: [])
+            record("viewer trust: with no viewers, a host that could not ask fails it",
+                   hostless.hostAnswered(.couldNotAsk) == .couldNotAsk)
+            var leaving = race
+            record("viewer trust: a viewer leaving while the host can still answer settles nothing",
+                   leaving.viewerLeft(1) == nil && leaving.viewerLeft(2) == nil
+                       && leaving.viewerAnswered(requestId: "q", button: viewerMove, from: 1) == .wrongClient)
+            record("viewer trust: only a Mac over TCP is asked, never one on the local socket",
+                   ShimProcess.asksTrust(acceptsUI: true, isLocal: false)
+                       && !ShimProcess.asksTrust(acceptsUI: true, isLocal: true)
+                       && !ShimProcess.asksTrust(acceptsUI: false, isLocal: false))
+            record("viewer trust: the viewer's alert carries the host's header and message",
+                   SessionMove.viewerTrustMessage(prompt).hasPrefix(prompt.header)
+                       && SessionMove.viewerTrustMessage(prompt).hasSuffix(prompt.message))
 
             func row(moveCount: Int) -> ControlProtocol.SessionRow {
                 .init(key: "K", resumeId: "r", title: "T", project: "p", cwd: "/p", state: "idle", running: true, clients: 1,

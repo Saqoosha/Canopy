@@ -744,7 +744,7 @@ final class ControlSession {
         reply(request, ["ok": true])
     }
 
-    /// Takes no trust argument, so this socket cannot approve a folder (`SessionMove.askTrust`).
+    /// Takes no trust argument, so this socket cannot approve a folder (`SessionMove.TrustRace`).
     /// The CLI's own trust file is outside Canopy's reach.
     private func moveSession(_ request: ControlProtocol.Request) {
         guard isLocal else { return fail(request, "local clients only") }
