@@ -2581,7 +2581,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// when the spawn folder is gone and the transcript is filed in a checkout.
     private var checkoutAfterRemoval: URL?
     /// Asked for and not finished (`requestMove`). Its rules live in `SessionMove.Latch`.
-    private var pendingMove: SessionMove.Latch?
+    private var pendingMove: SessionMove.Latch? {
+        // A move ended by a reset or stop leaves no trust alert behind.
+        didSet { if let trust = moveTrust, pendingMove?.id != trust.moveId { endMoveTrust() } }
+    }
     /// The trust question `pendingMove` is waiting on, and the host alert to take down when a viewer answers first.
     private var moveTrust: (moveId: String, race: SessionMove.TrustRace<ObjectIdentifier>,
                             hostAlert: SessionMove.HostTrustAlert?)?
@@ -4455,11 +4458,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    /// Asked on this Mac's screen and of every Mac viewing the session over TCP
-    /// (`viewerTrustClients`), so a move asked for from a mirror pane can be approved
-    /// where that person is sitting. The first answer settles it (`SessionMove.TrustRace`).
+    /// Asked on this Mac's screen and of every Mac viewing the session over TCP when it is
+    /// asked (`trustViewers`), so a move asked for from a mirror pane can be approved where
+    /// that person is sitting. The first answer settles it (`SessionMove.TrustRace`).
     private func askMoveTrust(moveId: String, directory: String, trustRoot: String?) {
         let title = boundSession?.title ?? "This session"
+        let requestId = "canopy-move-trust-\(UUID().uuidString.lowercased())"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard case .ask(let prompt) = SessionMove.checkTrust(directory: directory, trustRoot: trustRoot,
                                                                  sessionTitle: title) else {
@@ -4468,27 +4472,30 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             }
             let hostAlert = SessionMove.HostTrustAlert(prompt)
             // Queued before the host's answer below, so the race exists when that answer lands.
-            DispatchQueue.main.async { self?.offerMoveTrust(moveId: moveId, prompt: prompt, hostAlert: hostAlert) }
+            DispatchQueue.main.async {
+                self?.offerMoveTrust(moveId: moveId, requestId: requestId, prompt: prompt, hostAlert: hostAlert)
+            }
             let answer = hostAlert?.wait() ?? .couldNotAsk
-            DispatchQueue.main.async { self?.hostAnsweredMoveTrust(moveId: moveId, answer) }
+            DispatchQueue.main.async { self?.hostAnsweredMoveTrust(requestId: requestId, answer) }
         }
     }
 
     /// Mac clients that attached over TCP with the mirror password. Never the local socket:
     /// any process of this user can open it, the session's own Bash included.
-    private var viewerTrustClients: [any MirrorSink] {
-        mirrors.values.compactMap(\.sink).filter { Self.asksTrust(acceptsUI: $0.acceptsUI, isLocal: $0.isLocalClient) }
+    static func trustViewers(_ sinks: [any MirrorSink]) -> [any MirrorSink] {
+        sinks.filter { $0.acceptsUI && !$0.isLocalClient }
     }
 
-    nonisolated static func asksTrust(acceptsUI: Bool, isLocal: Bool) -> Bool { acceptsUI && !isLocal }
+    private var viewerTrustClients: [any MirrorSink] { Self.trustViewers(mirrors.values.compactMap(\.sink)) }
 
-    private func offerMoveTrust(moveId: String, prompt: SessionMove.TrustPrompt, hostAlert: SessionMove.HostTrustAlert?) {
+    private func offerMoveTrust(moveId: String, requestId: String, prompt: SessionMove.TrustPrompt,
+                                hostAlert: SessionMove.HostTrustAlert?) {
         guard pendingMove?.id == moveId else {
             hostAlert?.cancel()
             return
         }
+        endMoveTrust()
         let viewers = viewerTrustClients
-        let requestId = "canopy-move-trust-\(UUID().uuidString.lowercased())"
         moveTrust = (moveId, SessionMove.TrustRace(requestId: requestId, viewers: Set(viewers.map(ObjectIdentifier.init))),
                      hostAlert)
         let message = SessionMove.viewerTrustMessage(prompt)
@@ -4497,15 +4504,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                 buttons: SessionMove.viewerTrustButtons))
         }
         logger.notice("[move] asking about the folder here and on \(viewers.count, privacy: .public) viewing Mac(s)")
-        // The host alert's own timeout ends the race; this covers a host that could not raise one.
+        // Ends the race when no host alert does.
         DispatchQueue.main.asyncAfter(deadline: .now() + SessionMove.trustTimeout) { [weak self] in
             guard let self, self.moveTrust?.race.requestId == requestId else { return }
             self.settleMoveTrust(moveId: moveId, .unanswered)
         }
     }
 
-    private func hostAnsweredMoveTrust(moveId: String, _ answer: SessionMove.TrustAnswer) {
-        guard moveTrust?.moveId == moveId else { return }
+    private func hostAnsweredMoveTrust(requestId: String, _ answer: SessionMove.TrustAnswer) {
+        guard let moveId = moveTrust?.moveId, moveTrust?.race.requestId == requestId else { return }
         guard let settled = moveTrust?.race.hostAnswered(answer) else {
             logger.notice("[move] no alert on this Mac; waiting for a viewing Mac")
             return
@@ -4513,7 +4520,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         settleMoveTrust(moveId: moveId, settled)
     }
 
-    /// A viewing Mac's answer, when `answer` is for the move's trust question.
+    /// True when `answer` was for the move's trust question, settled or not.
     private func receiveMoveTrustAnswer(_ answer: MirrorUIAnswer, from sink: any MirrorSink) -> Bool {
         guard let trust = moveTrust else { return false }
         switch trust.race.viewerAnswered(requestId: answer.requestId, button: answer.button, from: ObjectIdentifier(sink)) {
@@ -4533,11 +4540,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         settleMoveTrust(moveId: moveId, settled)
     }
 
-    private func settleMoveTrust(moveId: String, _ answer: SessionMove.TrustAnswer) {
-        if moveTrust?.moveId == moveId {
-            moveTrust?.hostAlert?.cancel()
-            moveTrust = nil
+    /// Takes every alert of the trust question off its screen.
+    private func endMoveTrust() {
+        guard let trust = moveTrust else { return }
+        moveTrust = nil
+        trust.hostAlert?.cancel()
+        for key in trust.race.viewers {
+            mirrors[key]?.sink?.deliverUI(.dismissAlert(requestId: trust.race.requestId))
         }
+    }
+
+    private func settleMoveTrust(moveId: String, _ answer: SessionMove.TrustAnswer) {
+        if moveTrust?.moveId == moveId { endMoveTrust() }
         guard pendingMove?.id == moveId else {
             logger.error("[move] a trust answer arrived for a move no longer pending")
             return

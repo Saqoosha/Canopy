@@ -3427,6 +3427,7 @@ enum SidebarLogicProbe {
                           .showContent(title: "out", content: "", startLine: nil, endLine: nil),
                           .errorBanner("it's\nbroken"),
                           .alert(requestId: "r1", message: "Sure?", severity: "warning", buttons: ["Yes", "No"]),
+                          .dismissAlert(requestId: "r1"),
                           .notify(title: "Canopy", body: "done")] {
                 record("ui frame: \(frame) round-trips through JSON", MirrorUIFrame(wire: throughJSON(frame.wire)) == frame)
             }
@@ -5677,10 +5678,12 @@ enum SidebarLogicProbe {
             record("viewer trust: a viewer leaving while the host can still answer settles nothing",
                    leaving.viewerLeft(1) == nil && leaving.viewerLeft(2) == nil
                        && leaving.viewerAnswered(requestId: "q", button: viewerMove, from: 1) == .wrongClient)
+            let tcpViewer = ProbeUISink(acceptsUI: true, isLocalClient: false)
+            let localViewer = ProbeUISink(acceptsUI: true, isLocalClient: true)
+            let phone = ProbeUISink(acceptsUI: false, isLocalClient: false)
+            let asked = ShimProcess.trustViewers([localViewer, tcpViewer, phone])
             record("viewer trust: only a Mac over TCP is asked, never one on the local socket",
-                   ShimProcess.asksTrust(acceptsUI: true, isLocal: false)
-                       && !ShimProcess.asksTrust(acceptsUI: true, isLocal: true)
-                       && !ShimProcess.asksTrust(acceptsUI: false, isLocal: false))
+                   asked.count == 1 && asked.first.map { $0 === tcpViewer } == true)
             record("viewer trust: the viewer's alert carries the host's header and message",
                    SessionMove.viewerTrustMessage(prompt).hasPrefix(prompt.header)
                        && SessionMove.viewerTrustMessage(prompt).hasSuffix(prompt.message))
@@ -16005,6 +16008,16 @@ enum SidebarLogicProbe {
 
 /// A mirror client that keeps what a shim posts to it.
 @MainActor
+private final class ProbeUISink: MirrorSink {
+    let acceptsUI: Bool
+    let isLocalClient: Bool
+    init(acceptsUI: Bool, isLocalClient: Bool) {
+        self.acceptsUI = acceptsUI
+        self.isLocalClient = isLocalClient
+    }
+    func deliver(_ payload: [String: Any]) {}
+}
+
 private final class ProbeRecordingSink: MirrorSink {
     var frames: [[String: Any]] = []
     func deliver(_ payload: [String: Any]) { frames.append(payload) }

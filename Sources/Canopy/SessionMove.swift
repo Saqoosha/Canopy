@@ -483,6 +483,7 @@ enum SessionMove {
     /// The trust question on the screen of the Mac that runs the session: a system alert
     /// raised by this process, so the answer never crosses the local socket, which any
     /// process of this user (the session's own Bash included) can open.
+    /// `@unchecked`: its one property is immutable, and CF allows `cancel` while `wait` blocks.
     final class HostTrustAlert: @unchecked Sendable {
         private let note: CFUserNotification
 
@@ -506,22 +507,21 @@ enum SessionMove {
             return SessionMove.trustAnswer(result: result, flags: flags)
         }
 
-        /// Takes the alert off the screen once a viewer has answered.
+        /// Takes the alert off the screen.
         func cancel() { CFUserNotificationCancel(note) }
     }
 
     /// The same question, asked of every other Mac showing the session (`MirrorUIFrame.alert`).
     /// Cancel comes first, so it is the default button and a stray Return is not a yes.
-    static let viewerTrustButtons = ["Cancel", "Move"]
+    static let viewerMoveButton = "Move"
+    static let viewerTrustButtons = ["Cancel", viewerMoveButton]
 
     static func viewerTrustMessage(_ prompt: TrustPrompt) -> String {
         prompt.header + "\n\n" + prompt.message
     }
 
     /// One trust question raced between the host's alert and the viewers it was sent to.
-    /// The first yes or no settles it. Only clients that attached over TCP with the mirror
-    /// password are viewers: an answer from the local socket would let the session approve
-    /// its own move.
+    /// The first yes or no settles it.
     struct TrustRace<Client: Hashable>: Equatable {
         let requestId: String
         private(set) var viewers: Set<Client>
@@ -533,8 +533,7 @@ enum SessionMove {
             self.viewers = viewers
         }
 
-        /// Nil while a viewer can still answer. A timeout settles it: the viewers were
-        /// asked at the same moment and have had the same `trustTimeout`.
+        /// Nil while a viewer can still answer. A timeout settles it for everyone.
         mutating func hostAnswered(_ answer: TrustAnswer) -> TrustAnswer? {
             guard answer == .couldNotAsk else { return answer }
             hostCouldNotAsk = true
@@ -543,7 +542,7 @@ enum SessionMove {
 
         enum ViewerOutcome: Equatable {
             case settle(TrustAnswer)
-            /// Another question's answer, or one already settled.
+            /// Another question's answer.
             case notThisRace
             /// From a client this question did not go to.
             case wrongClient
@@ -553,7 +552,7 @@ enum SessionMove {
         func viewerAnswered(requestId: String, button: String?, from client: Client) -> ViewerOutcome {
             guard requestId == self.requestId else { return .notThisRace }
             guard viewers.contains(client) else { return .wrongClient }
-            return .settle(button == SessionMove.viewerTrustButtons[1] ? .accepted : .declined)
+            return .settle(button == SessionMove.viewerMoveButton ? .accepted : .declined)
         }
 
         /// `.couldNotAsk` once the host could not ask and the last viewer has gone.

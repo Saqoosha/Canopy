@@ -541,7 +541,7 @@ final class SessionStore {
                 session.resumeId = resumeId
             }
             if !pane.title.isEmpty, pane.title != session.title { session.title = pane.title }
-            // A move on that Mac changes it; the value from attach would stay forever.
+            // Follows the origin's label, which a move or a branch switch there changes.
             if !pane.project.isEmpty, pane.project != session.project { session.project = pane.project }
         }
     }

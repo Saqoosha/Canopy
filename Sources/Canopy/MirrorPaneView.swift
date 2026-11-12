@@ -289,12 +289,22 @@ struct MirrorPaneView: NSViewRepresentable {
                 alert.alertStyle = severity == "error" ? .critical : severity == "warning" ? .warning : .informational
                 buttons.forEach { alert.addButton(withTitle: $0) }
                 alert.addButton(withTitle: "Dismiss")
-                let button = MirrorUIAlert.button(response: alert.runModal().rawValue, buttons: buttons)
+                MirrorUIAlert.open[requestId] = alert
+                let response = alert.runModal().rawValue
+                MirrorUIAlert.open[requestId] = nil
+                // Settled elsewhere: there is nothing left to answer.
+                if MirrorUIAlert.dismissed.remove(requestId) != nil { return }
+                let button = MirrorUIAlert.button(response: response, buttons: buttons)
                 guard let bridge else {
                     logger.notice("alert \(requestId, privacy: .public) answered after its pane closed; the session's client left, so it was dismissed there")
                     return
                 }
                 bridge.sendUIAnswer(MirrorUIAnswer(requestId: requestId, button: button))
+            case .dismissAlert(let requestId):
+                // Only the alert on top: a modal under another one returns when that one does.
+                guard let alert = MirrorUIAlert.open[requestId], NSApp.modalWindow === alert.window else { return }
+                MirrorUIAlert.dismissed.insert(requestId)
+                NSApp.abortModal()
             case .notify(let title, let body):
                 guard !NSApp.isActive else { return }
                 SessionNotifier.post(title: title, body: body)
