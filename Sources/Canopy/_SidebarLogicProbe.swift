@@ -16006,7 +16006,6 @@ enum SidebarLogicProbe {
     }
 }
 
-/// A mirror client that keeps what a shim posts to it.
 @MainActor
 private final class ProbeUISink: MirrorSink {
     let acceptsUI: Bool
@@ -16018,6 +16017,8 @@ private final class ProbeUISink: MirrorSink {
     func deliver(_ payload: [String: Any]) {}
 }
 
+/// A mirror client that keeps what a shim posts to it.
+@MainActor
 private final class ProbeRecordingSink: MirrorSink {
     var frames: [[String: Any]] = []
     func deliver(_ payload: [String: Any]) { frames.append(payload) }
