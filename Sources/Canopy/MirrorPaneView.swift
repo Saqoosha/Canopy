@@ -290,8 +290,9 @@ struct MirrorPaneView: NSViewRepresentable {
                 buttons.forEach { alert.addButton(withTitle: $0) }
                 alert.addButton(withTitle: "Dismiss")
                 MirrorUIAlert.open[requestId] = alert
-                // Later on the main queue, so the rest of this read, a dismiss included, is not held behind the modal.
-                DispatchQueue.main.async {
+                // From the run loop, not this main-queue block: a modal run inside one stops the main queue,
+                // so no frame (a dismiss included) is handled until it closes (measured).
+                RunLoop.main.perform(inModes: [.default, .modalPanel]) { MainActor.assumeIsolated {
                     let response = MirrorUIAlert.dismissed.contains(requestId) ? 0 : alert.runModal().rawValue
                     MirrorUIAlert.open[requestId] = nil
                     // Settled elsewhere: there is nothing left to answer.
@@ -302,7 +303,7 @@ struct MirrorPaneView: NSViewRepresentable {
                         return
                     }
                     bridge.sendUIAnswer(MirrorUIAnswer(requestId: requestId, button: button))
-                }
+                } }
             case .dismissAlert(let requestId):
                 guard let alert = MirrorUIAlert.open[requestId] else { return }
                 MirrorUIAlert.dismissed.insert(requestId)
