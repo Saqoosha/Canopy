@@ -3426,7 +3426,8 @@ enum SidebarLogicProbe {
             for frame in [MirrorUIFrame.showContent(title: "a.swift", content: "let x = 1", startLine: 3, endLine: 5),
                           .showContent(title: "out", content: "", startLine: nil, endLine: nil),
                           .errorBanner("it's\nbroken"),
-                          .alert(requestId: "r1", message: "Sure?", severity: "warning", buttons: ["Yes", "No"]),
+                          .alert(requestId: "r1", message: "Sure?", detail: "", severity: "warning", buttons: ["Yes", "No"]),
+                          .alert(requestId: "r2", message: "Trust?", detail: "/Users/me/p", severity: "warning", buttons: ["No"]),
                           .dismissAlert(requestId: "r1"),
                           .notify(title: "Canopy", body: "done")] {
                 record("ui frame: \(frame) round-trips through JSON", MirrorUIFrame(wire: throughJSON(frame.wire)) == frame)

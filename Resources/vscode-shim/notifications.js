@@ -12,6 +12,10 @@ function createNotificationHandler() {
 
   function show(severity, message, ...rest) {
     const buttons = rest.filter((r) => typeof r === "string");
+    // MessageOptions `{ modal, detail }` comes right after the message; a `{ title }` is a MessageItem.
+    // The workspace-trust prompt names its folder only in the detail.
+    const options = rest[0] && typeof rest[0] === "object" && !("title" in rest[0]) ? rest[0] : undefined;
+    const detail = typeof options?.detail === "string" ? options.detail : undefined;
     const requestId = crypto.randomUUID();
 
     return new Promise((resolve) => {
@@ -34,6 +38,7 @@ function createNotificationHandler() {
         type: "show_notification",
         severity,
         message: String(message),
+        ...(detail !== undefined && { detail }),
         buttons,
         requestId,
       });
