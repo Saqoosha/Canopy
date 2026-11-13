@@ -4500,7 +4500,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                      hostAlert)
         let message = SessionMove.viewerTrustMessage(prompt)
         viewers.forEach {
-            $0.deliverUI(.alert(requestId: requestId, message: message, severity: "warning",
+            $0.deliverUI(.alert(requestId: requestId, message: message, detail: "", severity: "warning",
                                 buttons: SessionMove.viewerTrustButtons))
         }
         logger.notice("[move] asking about the folder here and on \(viewers.count, privacy: .public) viewing Mac(s)")
@@ -4905,6 +4905,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         let severity = msg["severity"] as? String ?? "info"
+        let detail = msg["detail"] as? String ?? ""
         let buttons = msg["buttons"] as? [String] ?? []
 
         if webView == nil {
@@ -4915,12 +4916,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 return
             }
             pendingAlerts.record(requestId: requestId, client: ObjectIdentifier(client), buttons: buttons)
-            client.deliverUI(.alert(requestId: requestId, message: message, severity: severity, buttons: buttons))
+            client.deliverUI(.alert(requestId: requestId, message: message, detail: detail,
+                                    severity: severity, buttons: buttons))
             return
         }
 
         let alert = NSAlert()
         alert.messageText = message
+        alert.informativeText = detail
         switch severity {
         case "error": alert.alertStyle = .critical
         case "warning": alert.alertStyle = .warning

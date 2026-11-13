@@ -1373,6 +1373,28 @@ describe("notifications", () => {
     assert.ok(parsed.requestId);
   });
 
+  it("show carries MessageOptions.detail and keeps option objects out of buttons", () => {
+    handler.show("warning", "Trust this folder?", { modal: true, detail: "/Users/me/project" }, "No", "Yes");
+
+    const parsed = JSON.parse(stdout[0].replace(/\n$/, ""));
+    assert.equal(parsed.detail, "/Users/me/project");
+    assert.deepEqual(parsed.buttons, ["No", "Yes"]);
+  });
+
+  it("show does not read a MessageItem as MessageOptions", () => {
+    handler.show("info", "Reload?", { title: "Reload", detail: "item, not options" });
+
+    const parsed = JSON.parse(stdout[0].replace(/\n$/, ""));
+    assert.equal("detail" in parsed, false);
+  });
+
+  it("show omits detail when no options carry one", () => {
+    handler.show("info", "Hello", { modal: true }, "OK");
+
+    const parsed = JSON.parse(stdout[0].replace(/\n$/, ""));
+    assert.equal("detail" in parsed, false);
+  });
+
   it("handleResponse resolves the promise", async () => {
     // Grab the requestId from stdout
     const promise = handler.show("error", "Fail?", "Retry", "Abort");

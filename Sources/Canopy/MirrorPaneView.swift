@@ -283,9 +283,10 @@ struct MirrorPaneView: NSViewRepresentable {
                 ContentViewer.show(content: content, title: title, in: webView, startLine: startLine, endLine: endLine)
             case .errorBanner(let message):
                 if let webView { ShimProcess.injectErrorBanner(message, into: webView) }
-            case .alert(let requestId, let message, let severity, let buttons):
+            case .alert(let requestId, let message, let detail, let severity, let buttons):
                 let alert = NSAlert()
                 alert.messageText = message
+                alert.informativeText = detail
                 alert.alertStyle = severity == "error" ? .critical : severity == "warning" ? .warning : .informational
                 buttons.forEach { alert.addButton(withTitle: $0) }
                 alert.addButton(withTitle: "Dismiss")

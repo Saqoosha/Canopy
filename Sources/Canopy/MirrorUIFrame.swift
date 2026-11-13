@@ -9,7 +9,8 @@ import AppKit
 enum MirrorUIFrame: Equatable {
     case showContent(title: String, content: String, startLine: Int?, endLine: Int?)
     case errorBanner(String)
-    case alert(requestId: String, message: String, severity: String, buttons: [String])
+    /// `detail` is the dialog's second paragraph (VS Code's `MessageOptions.detail`); an older Mac drops it.
+    case alert(requestId: String, message: String, detail: String, severity: String, buttons: [String])
     /// Closes an `alert` that was settled elsewhere. A Mac on an older build drops it, and its alert stays.
     case dismissAlert(requestId: String)
     case notify(title: String, body: String)
@@ -44,10 +45,11 @@ enum MirrorUIFrame: Equatable {
         case .errorBanner(let message):
             dict["action"] = "error_banner"
             dict["message"] = message
-        case .alert(let requestId, let message, let severity, let buttons):
+        case .alert(let requestId, let message, let detail, let severity, let buttons):
             dict["action"] = "alert"
             dict["requestId"] = requestId
             dict["message"] = message
+            if !detail.isEmpty { dict["detail"] = detail }
             dict["severity"] = severity
             dict["buttons"] = buttons
         case .dismissAlert(let requestId):
@@ -73,6 +75,7 @@ enum MirrorUIFrame: Equatable {
         case "alert":
             guard let requestId = wire["requestId"] as? String else { return nil }
             self = .alert(requestId: requestId, message: wire["message"] as? String ?? "",
+                          detail: wire["detail"] as? String ?? "",
                           severity: wire["severity"] as? String ?? "info", buttons: wire["buttons"] as? [String] ?? [])
         case "dismiss_alert":
             guard let requestId = wire["requestId"] as? String else { return nil }
