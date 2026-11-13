@@ -645,6 +645,8 @@ final class MirrorConnection: MirrorSink {
                 logger.error("[mirror-server] open refused: \(refusal, privacy: .public)")
                 return .failure(OpenFailure(refusal))
             }
+            // No folder may not exist yet on this Mac; the launcher here creates it the same way.
+            if NoFolder.isNoFolder(URL(fileURLWithPath: cwd)) { NoFolder.prepare() }
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 logger.error("[mirror-server] open refused: no folder at \(cwd, privacy: .private)")

@@ -370,10 +370,16 @@ final class SessionStore {
     @discardableResult
     func openRemoteFolder(machineId: String, machineName: String, path: String, options: NewSessionOptions, target: PaneTarget) -> Bool {
         guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return false }
-        let name = (path as NSString).lastPathComponent
+        let name = isRemoteNoFolder(machineId: machineId, path: path) ? NoFolder.displayName : (path as NSString).lastPathComponent
         attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: UUID().uuidString,
                          title: "Untitled", project: name, open: .new(cwd: path, options: options), target: target)
         return true
+    }
+
+    /// Whether `path` is that Mac's No folder, as its Recents named it.
+    func isRemoteNoFolder(machineId: String, path: String) -> Bool {
+        guard let noFolder = remoteRecents[machineId]?.noFolder else { return false }
+        return (path as NSString).standardizingPath == (noFolder as NSString).standardizingPath
     }
 
     /// True when the attach may go ahead; otherwise records why for the sidebar banner.
