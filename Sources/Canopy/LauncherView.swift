@@ -472,7 +472,7 @@ struct LauncherView: View {
         }
     }
 
-    /// Back to This Mac as well: No folder is local, and an SSH host or another
+    /// Back to This Mac as well: Cmd+Shift+N asks for this Mac's No folder, and an SSH host or another
     /// Mac chosen here would otherwise start the session there. A launch already
     /// under way reads this state as it goes, so the request is used up and dropped.
     private func takeNoFolderRequest() {
@@ -1068,7 +1068,7 @@ struct LauncherView: View {
 
     private var isPeerOnNoFolder: Bool {
         guard let peerMachineId, let peerFolder else { return false }
-        return peerFolder == store.remoteRecents[peerMachineId]?.noFolder
+        return store.isRemoteNoFolder(machineId: peerMachineId, path: peerFolder)
     }
 
     private func refreshPeerFolderSessions() async {
@@ -1105,7 +1105,7 @@ struct LauncherView: View {
         } else if peerFolder != nil, sessions?.isEmpty != false {
             Section { Text(sessions == nil ? "Loading…" : "No closed sessions") }
         } else if let sessions {
-            Section(peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title) {
+            Section(isPeerOnNoFolder ? NoFolder.displayName : peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title) {
                 ForEach(sessions) { recent in
                     Button {
                         store.openRemoteRecent(machineId: peer.machineId, machineName: peer.title, recent: recent,

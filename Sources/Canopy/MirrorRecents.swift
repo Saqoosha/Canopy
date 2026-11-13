@@ -28,8 +28,7 @@ struct MirrorRecents: Equatable {
     var folders: [String]
     /// The folder `sessions` is limited to, echoed from the request. Nil means every folder.
     var cwd: String? = nil
-    /// That Mac's No folder (`NoFolder.directory`), which `folders` never lists.
-    /// Nil from a server that predates it, which also could not start a session there.
+    /// That Mac's No folder (`NoFolder.directory`), which `folders` never lists. Nil from an older server.
     var noFolder: String? = nil
 
     static let listType = "list_recents"

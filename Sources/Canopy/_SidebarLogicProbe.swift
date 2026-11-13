@@ -1968,6 +1968,12 @@ enum SidebarLogicProbe {
             record("mirror recents: a server without No folder, or a relative one, offers none",
                    MirrorRecents.parse(["type": MirrorRecents.replyType])?.noFolder == nil
                        && MirrorRecents.parse(["type": MirrorRecents.replyType, "noFolder": "x"])?.noFolder == nil)
+            let peerStore = SessionStore()
+            peerStore.remoteRecents["m"] = MirrorRecents(sessions: [], folders: [], noFolder: "/Users/x/no-folder")
+            record("isRemoteNoFolder: that Mac's No folder, spelled with a trailing slash too",
+                   peerStore.isRemoteNoFolder(machineId: "m", path: "/Users/x/no-folder/")
+                       && !peerStore.isRemoteNoFolder(machineId: "m", path: "/Users/x/other")
+                       && !peerStore.isRemoteNoFolder(machineId: "other", path: "/Users/x/no-folder"))
             let many = (0..<(MirrorRecents.maxSessions + 5)).map {
                 SessionEntry(id: "s\($0)", title: "t", timestamp: Date(), projectDirectory: URL(fileURLWithPath: "/tmp"))
             }
