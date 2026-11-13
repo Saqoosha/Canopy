@@ -28,6 +28,9 @@ struct MirrorRecents: Equatable {
     var folders: [String]
     /// The folder `sessions` is limited to, echoed from the request. Nil means every folder.
     var cwd: String? = nil
+    /// That Mac's No folder (`NoFolder.directory`), which `folders` never lists.
+    /// Nil from a server that predates it, which also could not start a session there.
+    var noFolder: String? = nil
 
     static let listType = "list_recents"
     static let replyType = "recents"
@@ -47,6 +50,7 @@ struct MirrorRecents: Equatable {
                 return row
             },
             "folders": folders.prefix(maxFolders).map(\.path),
+            "noFolder": NoFolder.directory.path,
         ]
         if let cwd { reply["cwd"] = cwd }
         return reply
@@ -92,7 +96,8 @@ struct MirrorRecents: Equatable {
             )
         }
         let folders = (dict["folders"] as? [String] ?? []).filter { $0.hasPrefix("/") }
-        return MirrorRecents(sessions: sessions, folders: folders, cwd: dict["cwd"] as? String)
+        let noFolder = (dict["noFolder"] as? String).flatMap { $0.hasPrefix("/") ? $0 : nil }
+        return MirrorRecents(sessions: sessions, folders: folders, cwd: dict["cwd"] as? String, noFolder: noFolder)
     }
 }
 

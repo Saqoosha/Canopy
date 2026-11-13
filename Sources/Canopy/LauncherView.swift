@@ -629,7 +629,7 @@ struct LauncherView: View {
 
     private var headlineText: String {
         let place: String? = if let peer = selectedPeer {
-            peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title
+            isPeerOnNoFolder ? peer.title : peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title
         } else if isRemoteMode {
             remoteHost.isEmpty ? nil : remoteHost
         } else {
@@ -1034,6 +1034,9 @@ struct LauncherView: View {
     private func peerFolderChip(_ peer: Peer) -> some View {
         let recents = store.remoteRecents[peer.machineId]
         return Menu {
+            if let noFolder = recents?.noFolder {
+                Button(NoFolder.displayName) { peerFolder = noFolder }
+            }
             if let recents, !recents.folders.isEmpty {
                 Section("Recent on \(peer.title)") {
                     ForEach(recents.folders, id: \.self) { path in
@@ -1050,7 +1053,8 @@ struct LauncherView: View {
         } label: {
             ChipLabel(
                 icon: "folder",
-                text: peerFolder.map { ($0 as NSString).lastPathComponent } ?? "Choose folder"
+                text: isPeerOnNoFolder ? NoFolder.displayName
+                    : peerFolder.map { ($0 as NSString).lastPathComponent } ?? "Choose folder"
             )
         }
         .chipMenu()
@@ -1060,6 +1064,11 @@ struct LauncherView: View {
                 peerFolder = path
             }
         }
+    }
+
+    private var isPeerOnNoFolder: Bool {
+        guard let peerMachineId, let peerFolder else { return false }
+        return peerFolder == store.remoteRecents[peerMachineId]?.noFolder
     }
 
     private func refreshPeerFolderSessions() async {
@@ -1199,7 +1208,8 @@ struct LauncherView: View {
     }
 
     private var isOnNoFolder: Bool {
-        !isRemoteMode && selectedPeer == nil && selectedDirectory.map(NoFolder.isNoFolder) == true
+        if selectedPeer != nil { return isPeerOnNoFolder }
+        return !isRemoteMode && selectedDirectory.map(NoFolder.isNoFolder) == true
     }
 
     /// Whether this launch will actually cut a worktree.

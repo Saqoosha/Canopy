@@ -370,7 +370,7 @@ final class SessionStore {
     @discardableResult
     func openRemoteFolder(machineId: String, machineName: String, path: String, options: NewSessionOptions, target: PaneTarget) -> Bool {
         guard refuseRemoteAttachIfUnpaired(machineId: machineId, machineName: machineName) else { return false }
-        let name = (path as NSString).lastPathComponent
+        let name = path == remoteRecents[machineId]?.noFolder ? NoFolder.displayName : (path as NSString).lastPathComponent
         attachMirrorPane(machineId: machineId, machineName: machineName, resumeId: UUID().uuidString,
                          title: "Untitled", project: name, open: .new(cwd: path, options: options), target: target)
         return true
