@@ -1302,6 +1302,9 @@ struct LauncherView: View {
                     modelChip
                     if isAnthropicProvider { effortChip }
                     permissionChip
+                    // `ShimProcess` sets the variable only for a CLI on its own Mac; an SSH session's runs on the host.
+                    // A Continue resumes, and a resume keeps the mode its transcript recorded.
+                    if !isRemoteMode && !willContinueSession { coordinatorChip }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 sendButton
@@ -1383,6 +1386,18 @@ struct LauncherView: View {
                       text: model.isEmpty ? "Auto" : Self.modelDisplayName(model))
         }
         .chipMenu()
+    }
+
+    private var coordinatorChip: some View {
+        Menu {
+            CheckItem(title: "Normal", checked: !appState.coordinatorMode) { appState.coordinatorMode = false }
+            CheckItem(title: "Coordinator", checked: appState.coordinatorMode) { appState.coordinatorMode = true }
+        } label: {
+            ChipLabel(icon: appState.coordinatorMode ? "person.3.fill" : "person",
+                      text: appState.coordinatorMode ? "Coordinator" : "Normal")
+        }
+        .chipMenu()
+        .help("Coordinator: Claude delegates every task to parallel workers and reports as they finish. Applies to this launch only.")
     }
 
     private var effortChip: some View {
@@ -1901,12 +1916,15 @@ struct LauncherView: View {
                 model: model.isEmpty ? nil : model, effort: effortLevel.isEmpty ? nil : effortLevel,
                 permissionMode: resolvedPermission,
                 promptText: prompt.flatMap { $0.text.isEmpty ? nil : $0.text },
-                promptImages: prompt?.images.map(\.wire) ?? [])
+                promptImages: prompt?.images.map(\.wire) ?? [],
+                coordinator: appState.coordinatorMode)
             let target: SessionStore.PaneTarget = NSEvent.modifierFlags.contains(.command) ? .newPane : .focused
             guard willContinueSession else {
                 if store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder, options: options,
                                           target: target) {
                     clearPendingPrompt()
+                    // A peer launch never reaches `backToLauncher`, which clears it for this Mac.
+                    appState.coordinatorMode = false
                 }
                 return
             }
@@ -1924,7 +1942,10 @@ struct LauncherView: View {
                         store.openRemoteFolder(machineId: peer.machineId, machineName: peer.title, path: peerFolder,
                                                options: options, target: target)
                     }
-                    if opened { clearPendingPrompt() }
+                    if opened {
+                        clearPendingPrompt()
+                        appState.coordinatorMode = false
+                    }
                 case .failure(let error):
                     // Unlike a miss, this says nothing about the folder, so a new session would hide it.
                     store.remoteAttachError = SessionStore.RemoteNotice(message: "Could not continue on \(peer.title): \(error.message)",

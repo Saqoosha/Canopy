@@ -2135,10 +2135,12 @@ enum SidebarLogicProbe {
                        denied == .failure(ControlProtocol.ControlError("permission denied"))
                            && !FileManager.default.fileExists(atPath: locked.appendingPathComponent("nope").path))
                 let openOK = ControlProtocol.parseOpenParams(["cwd": controlDir.path, "model": "opus", "permissionMode": "plan",
-                                                              "initialPrompt": "hi", "worktreeBranch": "fix-x"], allowBypass: false)
+                                                              "initialPrompt": "hi", "worktreeBranch": "fix-x",
+                                                              "coordinator": true], allowBypass: false)
                 record("control open: all fields parse",
                        (try? openOK.get()) == ControlProtocol.OpenParams(cwd: controlDir.path, model: "opus", effort: nil,
-                                                                         permissionMode: .plan, worktreeBranch: "fix-x", initialPrompt: "hi"))
+                                                                         permissionMode: .plan, worktreeBranch: "fix-x", initialPrompt: "hi",
+                                                                         coordinator: true))
                 record("control open: a missing folder is refused before anything starts",
                        ControlProtocol.parseOpenParams(["cwd": controlDir.appendingPathComponent("nope").path], allowBypass: false)
                            == .failure(ControlProtocol.ControlError("not a folder")))
@@ -3137,7 +3139,8 @@ enum SidebarLogicProbe {
                 let png = Data([0x89, 0x50, 0x4E, 0x47]).base64EncodedString()
                 let options = NewSessionOptions(model: "opus", effort: "high", permissionMode: .plan, promptText: "fix it",
                                                 promptImages: [WireImage(mediaType: "image/png", base64: png)],
-                                                settledTitle: "Fix it", providerId: "prov", accountId: "acct")
+                                                settledTitle: "Fix it", providerId: "prov", accountId: "acct",
+                                                coordinator: true)
                 record("open request: a new session's options round-trip",
                        MirrorOpenRequest(wire: MirrorOpenRequest.new(cwd: "/tmp/p", options: options).wire)
                            == .new(cwd: "/tmp/p", options: options))
@@ -7234,6 +7237,17 @@ enum SidebarLogicProbe {
             daemon.stop()
             record("bridge dirs: the scrub keeps an inherited value",
                    ShimProcess.scrubbingCanopyAssignedKeys(["CLAUDE_CODE_PLUGIN_DIRS": "/a"])["CLAUDE_CODE_PLUGIN_DIRS"] == "/a")
+            record("coordinator: an inherited coordinator mode is scrubbed",
+                   ShimProcess.scrubbingCanopyAssignedKeys([ShimProcess.coordinatorModeEnvKey: "1"])[ShimProcess.coordinatorModeEnvKey] == nil)
+            record("coordinator: a new local session gets the variable",
+                   ShimProcess.setsCoordinatorEnv(local: true, coordinator: true, resumesTranscript: false))
+            record("coordinator: a resume does not, so a transcript with no recorded mode stays normal",
+                   !ShimProcess.setsCoordinatorEnv(local: true, coordinator: true, resumesTranscript: true))
+            record("coordinator: an SSH session does not",
+                   !ShimProcess.setsCoordinatorEnv(local: false, coordinator: true, resumesTranscript: false))
+            record("coordinator: the flag reaches the daemon's options",
+                   SessionStore.HeadlessOptions(NewSessionOptions(coordinator: true)).coordinator
+                       && !SessionStore.HeadlessOptions(NewSessionOptions()).coordinator)
 
             let entered = ShimProcess.bridgeWorktreeNote(frame(
                 plugin: "canopy-bridge", text: #"{"v":1,"ok":true,"worktree":"entered"}"#))

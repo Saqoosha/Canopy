@@ -42,6 +42,10 @@ final class AppState {
     var permissionMode: PermissionMode = .acceptEdits
     var model: String?
     var effortLevel: String?
+    /// The launcher's Coordinator chip. Cleared after each launch, unlike the
+    /// other chips: a coordinator has no file tools, which is a surprise to
+    /// inherit from the previous Start.
+    var coordinatorMode = false
     /// Whether Cmd was held when the launch was asked for.
     ///
     /// Stamped rather than read at hand-off: a launch can land after an SSH
@@ -108,5 +112,6 @@ final class AppState {
         initialPrompt = nil
         settledTitle = nil
         remoteHost = nil
+        coordinatorMode = false
     }
 }
