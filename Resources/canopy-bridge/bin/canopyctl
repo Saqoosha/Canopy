@@ -78,6 +78,11 @@ def main(argv):
     )
     add_open_flags(open_p)
     open_p.add_argument("--worktree-branch", dest="worktree_branch")
+    open_p.add_argument(
+        "--coordinator",
+        action="store_true",
+        help="start in coordinator mode (new sessions; a resume keeps its own mode)",
+    )
 
     resume_p = sub.add_parser(
         "resume", help="open_session with resumeSessionId: continue a session"
@@ -352,6 +357,7 @@ def build(args):
             "permissionMode": args.permission_mode,
             "worktreeBranch": getattr(args, "worktree_branch", None),
             "initialPrompt": args.initial_prompt,
+            "coordinator": getattr(args, "coordinator", False),
         }
         for key, value in optional.items():
             if value:

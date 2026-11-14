@@ -112,6 +112,11 @@ as the session's first turn. When no pane is attached the daemon synthesizes
 `init` then `launch_claude` on channel `canopy-headless`, so the turn runs
 without a webview and a later attach still has a cached init.
 
+`coordinator: true` starts the CLI in coordinator mode
+(`CLAUDE_CODE_COORDINATOR_MODE=1`): it has only the worker tools (`Agent`,
+`SendMessage`, `TaskStop`) and delegates the work. A resumed session takes
+the mode its transcript recorded, so the flag is not read on resume.
+
 `worktreeBranch` creates a worktree of `cwd` on that branch and opens the
 session there. The repo's ignored files (build artifacts, `node_modules`) are
 copied in first, as the launcher does, unless Settings turns that off.

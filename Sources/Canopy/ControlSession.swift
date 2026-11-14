@@ -614,7 +614,8 @@ final class ControlSession {
         let sessionId = UUID().uuidString.lowercased()
         let options = SessionStore.HeadlessOptions(model: params.model, effort: params.effort,
                                                    permissionMode: params.permissionMode,
-                                                   initialPrompt: params.initialPrompt)
+                                                   initialPrompt: params.initialPrompt,
+                                                   coordinator: params.coordinator)
         guard let shim = store.startHeadlessSession(directory: directory, resumeId: sessionId, isExistingTranscript: false,
                                                     title: nil, options: options),
               let session = shim.boundSession else {

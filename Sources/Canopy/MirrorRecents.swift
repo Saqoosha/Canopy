@@ -117,9 +117,12 @@ struct NewSessionOptions: Equatable {
     var settledTitle: String? = nil
     var providerId: String? = nil
     var accountId: String? = nil
+    /// `OpenSession.coordinatorMode`. Absent on the wire means false, so an older Mac starts a normal session.
+    var coordinator = false
 
     init(model: String? = nil, effort: String? = nil, permissionMode: PermissionMode? = nil, promptText: String? = nil,
-         promptImages: [WireImage] = [], settledTitle: String? = nil, providerId: String? = nil, accountId: String? = nil) {
+         promptImages: [WireImage] = [], settledTitle: String? = nil, providerId: String? = nil, accountId: String? = nil,
+         coordinator: Bool = false) {
         self.model = model
         self.effort = effort
         self.permissionMode = permissionMode
@@ -128,6 +131,7 @@ struct NewSessionOptions: Equatable {
         self.settledTitle = settledTitle
         self.providerId = providerId
         self.accountId = accountId
+        self.coordinator = coordinator
     }
 
     /// Missing or empty keys read as unset; an unknown permission mode is dropped, not guessed.
@@ -141,7 +145,8 @@ struct NewSessionOptions: Equatable {
                       guard let type = $0["mediaType"] as? String, let data = $0["base64"] as? String else { return nil }
                       return WireImage(mediaType: type, base64: data)
                   },
-                  settledTitle: text("settledTitle"), providerId: text("providerId"), accountId: text("accountId"))
+                  settledTitle: text("settledTitle"), providerId: text("providerId"), accountId: text("accountId"),
+                  coordinator: wire["coordinator"] as? Bool ?? false)
     }
 
     /// Why this Mac refuses to start a session with these options, or nil. The
@@ -160,6 +165,7 @@ struct NewSessionOptions: Equatable {
         if let settledTitle { dict["settledTitle"] = settledTitle }
         if let providerId { dict["providerId"] = providerId }
         if let accountId { dict["accountId"] = accountId }
+        if coordinator { dict["coordinator"] = true }
         return dict
     }
 }

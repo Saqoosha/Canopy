@@ -152,6 +152,9 @@ final class OpenSession: Identifiable, Hashable {
     var permissionMode: PermissionMode
     var model: String?
     var effortLevel: String?
+    /// Start the CLI in coordinator mode (`ShimProcess.coordinatorModeEnvKey`).
+    /// Read only when a new session's shim starts.
+    var coordinatorMode = false
     var customApi: ModelProvider?
     /// Second Claude login for this session (`CLAUDE_CONFIG_DIR`). Nil is the
     /// default login — same meaning as everywhere else a `ClaudeAccount?`
@@ -303,7 +306,8 @@ final class OpenSession: Identifiable, Hashable {
             model: model, effort: effortLevel, permissionMode: permissionMode,
             promptText: pendingInitialPrompt.flatMap { $0.text.isEmpty ? nil : $0.text },
             promptImages: pendingInitialPrompt?.images.map(\.wire) ?? [],
-            settledTitle: pendingSettledTitle, providerId: customApi?.id, accountId: claudeAccount?.id)
+            settledTitle: pendingSettledTitle, providerId: customApi?.id, accountId: claudeAccount?.id,
+            coordinator: coordinatorMode)
     }
 
     /// Set for a fork and for the launcher's Continue: resume with this session's login, model,

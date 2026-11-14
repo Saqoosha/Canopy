@@ -71,7 +71,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "CANOPY_CLI_CWD",
         "CANOPY_WORKTREE",
         "CANOPY_CONTROL_SOCK",
+        // Not Canopy's namespace, but Canopy assigns it per session: an
+        // inherited one would put every session into coordinator mode.
+        coordinatorModeEnvKey,
+        coordinatorExtraToolsEnvKey,
     ]
+
+    /// The CLI's own switch for coordinator mode: the session gets only the
+    /// worker tools (Agent, SendMessage, TaskStop) and delegates everything.
+    static let coordinatorModeEnvKey = "CLAUDE_CODE_COORDINATOR_MODE"
+    /// Comma-separated tools added to a coordinator's set.
+    static let coordinatorExtraToolsEnvKey = "CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS"
+
+    /// New local sessions only. A resume gets the mode its transcript recorded
+    /// from the CLI, and a transcript with none would otherwise be switched.
+    nonisolated static func setsCoordinatorEnv(local: Bool, coordinator: Bool, resumesTranscript: Bool) -> Bool {
+        local && coordinator && !resumesTranscript
+    }
 
     /// Drops `canopyAssignedEnvKeys` from an inherited environment. Both shim
     /// spawners call this — `ShimProcess` and `RemoteSessionsBridge` — because a
@@ -649,8 +665,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// a first-time open of an existing remote session that dies before
     /// connecting — that must keep going straight to the crash/error path.
     var isReconnect: Bool = false
-    /// See `OpenSession.resumeIdIsExistingTranscript`. Read only on the SSH
-    /// remote path, where it gates `CANOPY_REMOTE_RESUME`.
+    /// See `OpenSession.resumeIdIsExistingTranscript`. Gates `CANOPY_REMOTE_RESUME`
+    /// on the SSH path and `setsCoordinatorEnv` locally.
     ///
     /// The initializer parameter deliberately has NO default. The first
     /// revision had one, and `doReconnect` — which builds a shim on a real,
@@ -3091,6 +3107,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // So a skill's canopyctl reaches the daemon this session belongs to, Debug or Release.
         if remoteHost == nil { env["CANOPY_CONTROL_SOCK"] = DaemonPaths.current }
 
+        if Self.setsCoordinatorEnv(local: remoteHost == nil, coordinator: boundSession?.coordinatorMode == true,
+                                   resumesTranscript: resumeIdIsExistingTranscript) {
+            env[Self.coordinatorModeEnvKey] = "1"
+        }
+
         // Not in `canopyAssignedEnvKeys`: a user's own mod dirs must survive.
         if let bridgeMod = Self.installBridgeMod() {
             env["CLAUDE_CODE_PLUGIN_DIRS"] = Self.pluginDirs(prepending: bridgeMod, to: env["CLAUDE_CODE_PLUGIN_DIRS"])
@@ -3106,6 +3127,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 ) {
                     env["CANOPY_CLI_CWD"] = entry.cliDirectory.path
                     env["CANOPY_WORKTREE"] = entry.worktree.path
+                    // A coordinator has no EnterWorktree, so the bridge's call fails and it blocks every tool.
+                    if env[Self.coordinatorModeEnvKey] != nil { env[Self.coordinatorExtraToolsEnvKey] = "EnterWorktree" }
                     logger.notice("[worktree] CLI starts in the main checkout and enters the worktree")
                 }
             }

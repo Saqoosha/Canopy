@@ -1126,7 +1126,8 @@ final class SessionStore {
         fromLauncherPane launcherPane: PaneSlot.ID? = nil,
         composerPrefill: String? = nil,
         settingsOf accountSource: OpenSession? = nil,
-        fromLauncher: Bool = false
+        fromLauncher: Bool = false,
+        coordinatorMode: Bool = false
     ) -> OpenSession {
         let origin: OpenSession.Origin = remoteHost.map { .remote(host: $0, path: directory) }
             ?? .local(directory)
@@ -1173,6 +1174,7 @@ final class SessionStore {
         // announces itself.
         session.pendingInitialPrompt = initialPrompt
         session.pendingSettledTitle = settledTitle
+        session.coordinatorMode = coordinatorMode
         session.accountAutoSwitch = accountSource?.accountAutoSwitch ?? accountChoice?.autoSwitch
         // A daemon resume otherwise starts with the daemon's defaults, not these.
         session.resumeKeepsOwnSettings = accountSource != nil || fromLauncher
@@ -1239,7 +1241,8 @@ final class SessionStore {
             settledTitle: launch.settledTitle,
             fromLauncherPane: paneId,
             // Continue resumes with what the launcher's chips chose, as a new session does.
-            fromLauncher: true
+            fromLauncher: true,
+            coordinatorMode: launch.coordinatorMode
         )
         // A session started, so the previous failure is answered.
         lastSessionFailure = nil
@@ -1405,6 +1408,7 @@ final class SessionStore {
         /// Nil: this Mac's own choice (`ModelProviderStore.selectedProvider`, `launchAccountChoice`).
         var provider: ModelProvider? = nil
         var account: ClaudeAccount? = nil
+        var coordinator = false
         /// The row's `OpenSession.id`; nil mints one.
         var id: UUID? = nil
     }
@@ -1447,6 +1451,7 @@ final class SessionStore {
             session.pendingInitialPrompt = LaunchPrompt.make(text: options.initialPrompt ?? "", images: options.promptImages)
         }
         session.pendingSettledTitle = options.settledTitle
+        session.coordinatorMode = options.coordinator
         session.runsShimHere = true
         if options.account == nil { session.accountAutoSwitch = accountChoice.autoSwitch }
         openSessions.append(session)
@@ -3738,6 +3743,7 @@ extension SessionStore.HeadlessOptions {
                   initialPrompt: wire.promptText, promptImages: wire.promptImages.compactMap(LaunchImage.fromWire),
                   settledTitle: wire.settledTitle,
                   provider: wire.providerId.flatMap { id in ModelProviderStore.load().first { $0.id == id } },
-                  account: wire.accountId.flatMap { ClaudeAccountStore.account(id: $0) })
+                  account: wire.accountId.flatMap { ClaudeAccountStore.account(id: $0) },
+                  coordinator: wire.coordinator)
     }
 }

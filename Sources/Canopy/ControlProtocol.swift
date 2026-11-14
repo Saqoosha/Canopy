@@ -136,6 +136,8 @@ enum ControlProtocol {
         let permissionMode: PermissionMode?
         let worktreeBranch: String?
         let initialPrompt: String?
+        /// `OpenSession.coordinatorMode`.
+        var coordinator = false
     }
 
     /// `allowBypass` is this Mac's `allowDangerouslySkipPermissions` opt-in:
@@ -161,7 +163,8 @@ enum ControlProtocol {
         }
         return .success(OpenParams(cwd: cwd, model: nonEmpty("model"), effort: nonEmpty("effort"),
                                    permissionMode: mode, worktreeBranch: nonEmpty("worktreeBranch"),
-                                   initialPrompt: nonEmpty("initialPrompt")))
+                                   initialPrompt: nonEmpty("initialPrompt"),
+                                   coordinator: params["coordinator"] as? Bool ?? false))
     }
 
     /// `open_session` with `resumeSessionId`: continue a session that is not open, or name the
